@@ -9,7 +9,7 @@ block_cipher = None
 
 # Data files to include in the bundle (extracted to sys._MEIPASS at runtime)
 def _datas():
-    root = os.path.dirname(os.path.abspath(SPEC)) if 'SPEC' in dir() else os.getcwd()
+    root = os.path.dirname(os.path.abspath(SPEC)) if 'SPEC' in globals() else os.getcwd()
     datas = [
         (os.path.join(root, 'team_config.json'), '.'),
         (os.path.join(root, 'templates'), 'templates'),

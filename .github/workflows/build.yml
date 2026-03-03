@@ -1,0 +1,146 @@
+name: Build AdoptIQ
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (e.g. 1.0.2)"
+        required: false
+        default: "1.0.2"
+      build_number:
+        description: "Build number"
+        required: false
+        default: "1"
+  push:
+    tags:
+      - "v*"
+
+env:
+  ADOPTIQ_VERSION: ${{ github.event.inputs.version || '1.0.2' }}
+  ADOPTIQ_BUILD: ${{ github.event.inputs.build_number || '1' }}
+
+jobs:
+  build-mac:
+    name: Build macOS DMG
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Create secrets.env from GitHub Secrets
+        run: |
+          cat > secrets.env <<'EOF'
+          KEEPER_URL=${{ secrets.KEEPER_URL }}
+          KEEPER_NAMESPACE=${{ secrets.KEEPER_NAMESPACE }}
+          KEEPER_ROLE_ID=${{ secrets.KEEPER_ROLE_ID }}
+          KEEPER_SECRET_ID=${{ secrets.KEEPER_SECRET_ID }}
+          KEEPER_SECRET_PATH=${{ secrets.KEEPER_SECRET_PATH }}
+          SNOWFLAKE_ACCOUNT=${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER=${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_ROLE=${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE=${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          CIRCUIT_CLIENT_ID=${{ secrets.CIRCUIT_CLIENT_ID }}
+          CIRCUIT_CLIENT_SECRET=${{ secrets.CIRCUIT_CLIENT_SECRET }}
+          CIRCUIT_APP_KEY=${{ secrets.CIRCUIT_APP_KEY }}
+          CIRCUIT_MODEL_NAME=${{ secrets.CIRCUIT_MODEL_NAME }}
+          PSIRT_API_KEY=${{ secrets.PSIRT_API_KEY }}
+          PSIRT_CLIENT_SECRET=${{ secrets.PSIRT_CLIENT_SECRET }}
+          ADOPTIQ_SECRET_KEY=${{ secrets.ADOPTIQ_SECRET_KEY }}
+          ADOPTIQ_ADMIN_SECRET_KEY=${{ secrets.ADOPTIQ_ADMIN_SECRET_KEY }}
+          EOF
+          sed -i '' 's/^[[:space:]]*//' secrets.env
+
+      - name: Embed credentials
+        run: python embed_credentials.py
+
+      - name: Build app bundle and DMG
+        run: |
+          chmod +x build_mac.sh build_mac_dmg.sh
+          bash build_mac_dmg.sh
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: AdoptIQ-macOS-v${{ env.ADOPTIQ_VERSION }}-build${{ env.ADOPTIQ_BUILD }}
+          path: OUTBOX/*.dmg
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows EXE
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Create secrets.env from GitHub Secrets
+        shell: pwsh
+        run: |
+          @"
+          KEEPER_URL=${{ secrets.KEEPER_URL }}
+          KEEPER_NAMESPACE=${{ secrets.KEEPER_NAMESPACE }}
+          KEEPER_ROLE_ID=${{ secrets.KEEPER_ROLE_ID }}
+          KEEPER_SECRET_ID=${{ secrets.KEEPER_SECRET_ID }}
+          KEEPER_SECRET_PATH=${{ secrets.KEEPER_SECRET_PATH }}
+          SNOWFLAKE_ACCOUNT=${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER=${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_ROLE=${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE=${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          CIRCUIT_CLIENT_ID=${{ secrets.CIRCUIT_CLIENT_ID }}
+          CIRCUIT_CLIENT_SECRET=${{ secrets.CIRCUIT_CLIENT_SECRET }}
+          CIRCUIT_APP_KEY=${{ secrets.CIRCUIT_APP_KEY }}
+          CIRCUIT_MODEL_NAME=${{ secrets.CIRCUIT_MODEL_NAME }}
+          PSIRT_API_KEY=${{ secrets.PSIRT_API_KEY }}
+          PSIRT_CLIENT_SECRET=${{ secrets.PSIRT_CLIENT_SECRET }}
+          ADOPTIQ_SECRET_KEY=${{ secrets.ADOPTIQ_SECRET_KEY }}
+          ADOPTIQ_ADMIN_SECRET_KEY=${{ secrets.ADOPTIQ_ADMIN_SECRET_KEY }}
+          "@ | Set-Content -Path secrets.env -Encoding UTF8
+
+      - name: Embed credentials
+        run: python embed_credentials.py
+
+      - name: Update version metadata
+        run: python update_version_pc.py
+        env:
+          ADOPTIQ_VERSION: ${{ env.ADOPTIQ_VERSION }}
+          ADOPTIQ_BUILD: ${{ env.ADOPTIQ_BUILD }}
+
+      - name: Build EXE with PyInstaller
+        run: python -m PyInstaller --clean --noconfirm adoptiq_pc.spec
+
+      - name: Package OUTBOX
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path OUTBOX | Out-Null
+          Copy-Item dist\AdoptIQ.exe OUTBOX\
+          Copy-Item README.md OUTBOX\
+          "AdoptIQ v${{ env.ADOPTIQ_VERSION }} build ${{ env.ADOPTIQ_BUILD }}" | Set-Content OUTBOX\build_info.txt
+          "Built: $(Get-Date)" | Add-Content OUTBOX\build_info.txt
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: AdoptIQ-Windows-v${{ env.ADOPTIQ_VERSION }}-build${{ env.ADOPTIQ_BUILD }}
+          path: OUTBOX/AdoptIQ.exe
+          if-no-files-found: error

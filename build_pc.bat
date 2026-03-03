@@ -35,14 +35,15 @@ if not exist secrets.env (
         echo   -^> Created secrets.env from template. Add credentials for full build.
     )
 )
-"%PYTHON%" embed_credentials.py 1>nul 2>nul
-if %ERRORLEVEL% equ 0 (
-    echo   -^> Configuration embedded from secrets.env
-) else (
-    echo def get_secrets^(^): return {} > _bundled_secrets.py
-    echo   -^> No configuration; created empty stub
-    echo   -^> IMPORTANT: Add SNOWFLAKE/Keeper credentials in secrets.env and re-run embed_credentials.py before building.
+"%PYTHON%" embed_credentials.py
+if %ERRORLEVEL% neq 0 (
+    echo.
+    echo ERROR: embed_credentials.py failed. Cannot build without credentials.
+    echo        Ensure secrets.env exists and contains required values, then re-run.
+    pause
+    exit /b 1
 )
+echo   -^> Configuration embedded from secrets.env
 
 echo.
 echo Updating version/build in config.py...
