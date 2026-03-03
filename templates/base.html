@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}AdoptIQ Portfolio Analyzer{% endblock %}</title>
+    
+    <!-- Cache busting for development -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Font Awesome -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <!-- Custom CSS -->
+    <style>
+        :root {
+            /* Cisco Official Color Palette */
+            --cisco-blue: #00bceb;
+            --cisco-dark-blue: #003da5;
+            --cisco-navy: #1a365d;
+            --cisco-light-blue: #e6f7ff;
+            --cisco-accent-blue: #0073e6;
+            --cisco-success: #00a651;
+            --cisco-warning: #ff8c00;
+            --cisco-danger: #e31c3d;
+            --cisco-gray-100: #f8f9fa;
+            --cisco-gray-200: #e9ecef;
+            --cisco-gray-300: #dee2e6;
+            --cisco-gray-400: #ced4da;
+            --cisco-gray-500: #adb5bd;
+            --cisco-gray-600: #6c757d;
+            --cisco-gray-700: #495057;
+            --cisco-gray-800: #343a40;
+            --cisco-gray-900: #212529;
+            
+            /* Enhanced Spacing */
+            --section-spacing: 4rem;
+            --card-spacing: 1.5rem;
+            --element-spacing: 1rem;
+        }
+        
+        body {
+            background-color: var(--cisco-gray-100);
+            font-family: 'CiscoSans', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            scroll-behavior: smooth;
+        }
+        
+        /* Enhanced Typography */
+        .display-1, .display-2, .display-3, .display-4, .display-5, .display-6 {
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+        
+        .lead {
+            font-size: 1.125rem;
+            font-weight: 400;
+            line-height: 1.7;
+        }
+        
+        /* Enhanced Navigation */
+        .navbar {
+            background: linear-gradient(135deg, var(--cisco-navy) 0%, var(--cisco-dark-blue) 100%) !important;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+            padding: 1rem 0;
+            backdrop-filter: blur(10px);
+        }
+        
+        .navbar-brand {
+            font-weight: 800;
+            font-size: 1.6rem;
+            color: var(--cisco-blue) !important;
+            text-shadow: 0 0 15px rgba(0, 188, 235, 0.4);
+            transition: all 0.3s ease;
+        }
+        
+        .navbar-brand:hover {
+            text-shadow: 0 0 20px rgba(0, 188, 235, 0.6);
+            transform: scale(1.05);
+        }
+        
+        .navbar-nav .nav-link {
+            color: rgba(255, 255, 255, 0.9) !important;
+            font-weight: 500;
+            padding: 0.75rem 1.25rem !important;
+            border-radius: 0.5rem;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .navbar-nav .nav-link::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+            transition: left 0.5s ease;
+        }
+        
+        .navbar-nav .nav-link:hover::before {
+            left: 100%;
+        }
+        
+        .navbar-nav .nav-link:hover {
+            color: var(--cisco-blue) !important;
+            background-color: rgba(255, 255, 255, 0.15);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(0, 188, 235, 0.2);
+        }
+        
+        .navbar-nav .nav-link.active {
+            color: var(--cisco-blue) !important;
+            background-color: rgba(0, 188, 235, 0.15);
+            box-shadow: 0 0 0 2px rgba(0, 188, 235, 0.3);
+        }
+        
+        /* Enhanced Buttons */
+        .btn {
+            font-weight: 600;
+            border-radius: 0.625rem;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .btn::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+            transition: left 0.5s ease;
+        }
+        
+        .btn:hover::before {
+            left: 100%;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, var(--cisco-blue) 0%, var(--cisco-accent-blue) 100%);
+            border: none;
+            padding: 0.875rem 2rem;
+            box-shadow: 0 6px 20px rgba(0, 188, 235, 0.3);
+        }
+        
+        .btn-primary:hover {
+            background: linear-gradient(135deg, var(--cisco-accent-blue) 0%, var(--cisco-dark-blue) 100%);
+            transform: translateY(-3px);
+            box-shadow: 0 8px 25px rgba(0, 188, 235, 0.4);
+        }
+        
+        .btn-outline-primary {
+            color: var(--cisco-blue);
+            border: 2px solid var(--cisco-blue);
+            background: transparent;
+            padding: 0.875rem 2rem;
+        }
+        
+        .btn-outline-primary:hover {
+            background: var(--cisco-blue);
+            color: white;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 188, 235, 0.3);
+        }
+        
+        .btn-lg {
+            padding: 1rem 2.5rem;
+            font-size: 1.125rem;
+        }
+        
+        /* Enhanced Cards */
+        .card {
+            border: none;
+            border-radius: 1.25rem;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            overflow: hidden;
+            background: white;
+        }
+        
+        .card:hover {
+            transform: translateY(-8px);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.12);
+        }
+        
+        .card-header {
+            background: linear-gradient(135deg, var(--cisco-light-blue) 0%, #f0f9ff 100%);
+            border-bottom: 1px solid var(--cisco-gray-200);
+            font-weight: 700;
+            color: var(--cisco-navy);
+            padding: 1.5rem 2rem;
+            font-size: 1.125rem;
+        }
+        
+        .card-body {
+            padding: 2rem;
+        }
+        
+        /* Enhanced Progress Bars */
+        .progress {
+            height: 0.875rem;
+            border-radius: 0.625rem;
+            background-color: var(--cisco-gray-200);
+            overflow: hidden;
+            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        
+        .progress-bar {
+            background: linear-gradient(90deg, var(--cisco-blue) 0%, var(--cisco-accent-blue) 100%);
+            border-radius: 0.625rem;
+            transition: width 0.6s ease;
+        }
+        
+        /* Enhanced Alerts */
+        .alert {
+            border-radius: 1rem;
+            border: none;
+            padding: 1.25rem 1.5rem;
+            font-weight: 500;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+        }
+        
+        .alert-success {
+            background: linear-gradient(135deg, var(--cisco-success) 0%, #00c853 100%);
+            color: white;
+        }
+        
+        .alert-danger {
+            background: linear-gradient(135deg, var(--cisco-danger) 0%, #f44336 100%);
+            color: white;
+        }
+        
+        .alert-warning {
+            background: linear-gradient(135deg, var(--cisco-warning) 0%, #ff9800 100%);
+            color: white;
+        }
+        
+        .alert-info {
+            background: linear-gradient(135deg, var(--cisco-blue) 0%, var(--cisco-accent-blue) 100%);
+            color: white;
+        }
+        
+        /* Enhanced Form Controls */
+        .form-control, .form-select {
+            border: 2px solid var(--cisco-gray-300);
+            border-radius: 0.75rem;
+            padding: 1rem 1.25rem;
+            font-size: 1rem;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            background-color: white;
+        }
+        
+        .form-control:focus, .form-select:focus {
+            border-color: var(--cisco-blue);
+            box-shadow: 0 0 0 0.25rem rgba(0, 188, 235, 0.2);
+            transform: translateY(-2px);
+            background-color: white;
+        }
+        
+        .form-control.is-valid {
+            border-color: var(--cisco-success);
+            box-shadow: 0 0 0 0.25rem rgba(0, 166, 81, 0.2);
+        }
+        
+        .form-control.is-invalid {
+            border-color: var(--cisco-danger);
+            box-shadow: 0 0 0 0.25rem rgba(227, 28, 61, 0.2);
+        }
+        
+        .form-label {
+            font-weight: 600;
+            color: var(--cisco-navy);
+            margin-bottom: 0.75rem;
+            font-size: 1rem;
+        }
+        
+        .form-text {
+            color: var(--cisco-gray-600);
+            font-size: 0.875rem;
+            margin-top: 0.5rem;
+        }
+        
+        /* Enhanced Footer */
+        .footer {
+            background: linear-gradient(135deg, var(--cisco-gray-800) 0%, var(--cisco-gray-900) 100%);
+            color: white;
+            padding: 4rem 0 2.5rem;
+            margin-top: 5rem;
+            position: relative;
+        }
+        
+        .footer::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--cisco-blue), transparent);
+        }
+        
+        /* Enhanced Hero Section */
+        .hero-section {
+            background: linear-gradient(135deg, var(--cisco-blue) 0%, var(--cisco-dark-blue) 50%, var(--cisco-navy) 100%);
+            color: white;
+            padding: 6rem 0;
+            margin-bottom: 5rem;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .hero-section::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><defs><pattern id="grain" width="100" height="100" patternUnits="userSpaceOnUse"><circle cx="50" cy="50" r="1" fill="white" opacity="0.1"/></pattern></defs><rect width="100" height="100" fill="url(%23grain)"/></svg>');
+            opacity: 0.3;
+        }
+        
+        .hero-section .container {
+            position: relative;
+            z-index: 2;
+        }
+        
+        /* Enhanced Feature Cards */
+        .feature-card {
+            text-align: center;
+            padding: 3rem 2.5rem;
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            height: 100%;
+            position: relative;
+        }
+        
+        .feature-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(135deg, rgba(0, 188, 235, 0.05) 0%, rgba(0, 115, 230, 0.05) 100%);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            border-radius: 1.25rem;
+        }
+        
+        .feature-card:hover::before {
+            opacity: 1;
+        }
+        
+        .feature-card:hover {
+            transform: translateY(-12px);
+        }
+        
+        .feature-icon {
+            font-size: 4rem;
+            color: var(--cisco-blue);
+            margin-bottom: 2rem;
+            transition: all 0.4s ease;
+            position: relative;
+        }
+        
+        .feature-card:hover .feature-icon {
+            transform: scale(1.15) rotate(5deg);
+            color: var(--cisco-accent-blue);
+        }
+        
+        /* Enhanced Stats */
+        .stats-section .border-end {
+            border-right: 2px solid var(--cisco-gray-200) !important;
+        }
+        
+        .stats-section h3 {
+            font-size: 3rem;
+            font-weight: 800;
+            margin-bottom: 0.75rem;
+            background: linear-gradient(135deg, var(--cisco-blue), var(--cisco-accent-blue));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        /* Enhanced Technology Cards */
+        .tech-card {
+            border: 2px solid var(--cisco-gray-200);
+            border-radius: 1rem;
+            padding: 2rem;
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            background: white;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .tech-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(0, 188, 235, 0.05), transparent);
+            transition: left 0.6s ease;
+        }
+        
+        .tech-card:hover::before {
+            left: 100%;
+        }
+        
+        .tech-card:hover {
+            border-color: var(--cisco-blue);
+            transform: translateY(-6px);
+            box-shadow: 0 12px 30px rgba(0, 188, 235, 0.15);
+        }
+        
+        /* Enhanced Modal */
+        .modal-content {
+            border-radius: 1.25rem;
+            border: none;
+            box-shadow: 0 25px 70px rgba(0, 0, 0, 0.25);
+        }
+        
+        .modal-header {
+            background: linear-gradient(135deg, var(--cisco-light-blue) 0%, #f0f9ff 100%);
+            border-bottom: 1px solid var(--cisco-gray-200);
+            border-radius: 1.25rem 1.25rem 0 0;
+            padding: 1.5rem 2rem;
+        }
+        
+        /* Enhanced Spinner */
+        .spinner-border {
+            color: var(--cisco-blue);
+        }
+        
+        /* Enhanced Badges */
+        .badge {
+            font-weight: 600;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+        }
+        
+        /* Enhanced Tables */
+        .table {
+            border-radius: 1rem;
+            overflow: hidden;
+        }
+        
+        .table thead th {
+            background: linear-gradient(135deg, var(--cisco-light-blue) 0%, #f0f9ff 100%);
+            border: none;
+            font-weight: 700;
+            color: var(--cisco-navy);
+            padding: 1.25rem 1rem;
+        }
+        
+        .table tbody tr {
+            transition: all 0.3s ease;
+        }
+        
+        .table tbody tr:hover {
+            background-color: var(--cisco-light-blue);
+            transform: scale(1.01);
+        }
+        
+        /* Responsive Design Enhancements */
+        @media (max-width: 768px) {
+            .hero-section {
+                padding: 4rem 0;
+            }
+            
+            .feature-card {
+                padding: 2.5rem 2rem;
+            }
+            
+            .stats-section h3 {
+                font-size: 2.5rem;
+            }
+            
+            .card-body {
+                padding: 1.5rem;
+            }
+            
+            .btn-lg {
+                padding: 0.875rem 2rem;
+                font-size: 1rem;
+            }
+        }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 10px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: var(--cisco-gray-200);
+            border-radius: 5px;
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: var(--cisco-blue);
+            border-radius: 5px;
+            transition: background 0.3s ease;
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--cisco-accent-blue);
+        }
+        
+        /* Animation Classes */
+        .fade-in {
+            animation: fadeIn 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        @keyframes fadeIn {
+            from { 
+                opacity: 0; 
+                transform: translateY(30px); 
+            }
+            to { 
+                opacity: 1; 
+                transform: translateY(0); 
+            }
+        }
+        
+        .slide-in-left {
+            animation: slideInLeft 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        @keyframes slideInLeft {
+            from { 
+                opacity: 0; 
+                transform: translateX(-40px); 
+            }
+            to { 
+                opacity: 1; 
+                transform: translateX(0); 
+            }
+        }
+        
+        .slide-in-right {
+            animation: slideInRight 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        @keyframes slideInRight {
+            from { 
+                opacity: 0; 
+                transform: translateX(40px); 
+            }
+            to { 
+                opacity: 1; 
+                transform: translateX(0); 
+            }
+        }
+        
+        .bounce-in {
+            animation: bounceIn 0.8s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+        }
+        
+        @keyframes bounceIn {
+            0% { 
+                opacity: 0; 
+                transform: scale(0.3); 
+            }
+            50% { 
+                opacity: 1; 
+                transform: scale(1.05); 
+            }
+            70% { 
+                transform: scale(0.9); 
+            }
+            100% { 
+                opacity: 1; 
+                transform: scale(1); 
+            }
+        }
+        
+        /* Enhanced Focus States */
+        .btn:focus, .form-control:focus, .form-select:focus {
+            outline: none;
+            box-shadow: 0 0 0 4px rgba(0, 188, 235, 0.25);
+        }
+        
+        /* Loading States */
+        .loading {
+            opacity: 0.7;
+            pointer-events: none;
+            position: relative;
+        }
+        
+        .loading::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 24px;
+            height: 24px;
+            margin: -12px 0 0 -12px;
+            border: 3px solid var(--cisco-gray-300);
+            border-top: 3px solid var(--cisco-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        /* Utility Classes */
+        .text-gradient {
+            background: linear-gradient(135deg, var(--cisco-blue), var(--cisco-accent-blue));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .bg-gradient-cisco {
+            background: linear-gradient(135deg, var(--cisco-blue) 0%, var(--cisco-dark-blue) 100%);
+        }
+        
+        .shadow-cisco {
+            box-shadow: 0 10px 30px rgba(0, 188, 235, 0.15);
+        }
+        
+        .border-cisco {
+            border-color: var(--cisco-blue) !important;
+        }
+        
+        /* Enhanced Hover Effects */
+        .hover-lift {
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .hover-lift:hover {
+            transform: translateY(-5px);
+        }
+        
+        .hover-scale {
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .hover-scale:hover {
+            transform: scale(1.05);
+        }
+        
+        /* Enhanced Input Groups */
+        .input-group-text {
+            background: var(--cisco-gray-100);
+            border: 2px solid var(--cisco-gray-300);
+            border-left: none;
+            color: var(--cisco-gray-600);
+            font-weight: 500;
+        }
+        
+        .input-group .form-control {
+            border-right: none;
+        }
+        
+        .input-group .form-control:focus + .input-group-text {
+            border-color: var(--cisco-blue);
+            background: var(--cisco-light-blue);
+            color: var(--cisco-blue);
+        }
+        
+        /* Enhanced File Upload */
+        .form-control[type="file"] {
+            padding: 0.75rem;
+            line-height: 1.5;
+        }
+        
+        .form-control[type="file"]::-webkit-file-upload-button {
+            background: var(--cisco-blue);
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            margin-right: 1rem;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+        
+        .form-control[type="file"]::-webkit-file-upload-button:hover {
+            background: var(--cisco-accent-blue);
+            transform: translateY(-1px);
+        }
+    </style>
+    
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark">
+        <div class="container">
+            <a class="navbar-brand" href="{{ url_for('index') }}">
+                <i class="fas fa-chart-line me-2"></i>AdoptIQ
+            </a>
+            
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item">
+                        <a class="nav-link {{ 'active' if request.endpoint == 'index' }}" href="{{ url_for('index') }}">
+                            <i class="fas fa-home me-1"></i>Dashboard
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {{ 'active' if request.endpoint == 'index' }}" href="{{ url_for('index') }}">
+                            <i class="fas fa-play me-1"></i>Run Analysis
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {{ 'active' if request.endpoint == 'history' }}" href="{{ url_for('history') }}">
+                            <i class="fas fa-history me-1"></i>History
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {{ 'active' if request.endpoint == 'help' }}" href="{{ url_for('help') }}">
+                            <i class="fas fa-question-circle me-1"></i>Help
+                        </a>
+                    </li>
+                    {% if admin_console_url %}
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ admin_console_url }}" target="_blank" rel="noopener noreferrer" title="Admin Console (monitoring, report history, logs)">
+                            <i class="fas fa-cog me-1"></i>Admin
+                        </a>
+                    </li>
+                    {% endif %}
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Flash Messages -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <div class="container mt-4">
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show fade-in" role="alert">
+                        <i class="fas fa-{{ 'exclamation-triangle' if category == 'error' else 'info-circle' }} me-2"></i>
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    </div>
+                {% endfor %}
+            </div>
+        {% endif %}
+    {% endwith %}
+
+    <!-- Main Content -->
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <div class="row">
+                <div class="col-md-6">
+                    <h5 class="mb-3">
+                        <i class="fas fa-chart-line me-2"></i>AdoptIQ Portfolio Analyzer
+                    </h5>
+                    <p class="mb-3">Advanced customer experience and adoption barrier analysis for Cisco technologies.</p>
+                    <div class="d-flex gap-3">
+                        <a href="#" class="text-white text-decoration-none hover-scale">
+                            <i class="fab fa-linkedin fa-lg"></i>
+                        </a>
+                        <a href="#" class="text-white text-decoration-none hover-scale">
+                            <i class="fab fa-twitter fa-lg"></i>
+                        </a>
+                        <a href="#" class="text-white text-decoration-none hover-scale">
+                            <i class="fas fa-envelope fa-lg"></i>
+                        </a>
+                    </div>
+                </div>
+                <div class="col-md-6 text-md-end">
+                    <p class="mb-2">&copy; 2025 Cisco Systems, Inc. All rights reserved.</p>
+                    <p class="mb-0 text-muted">Built with ❤️ by the Cisco AdoptIQ Team · {{ adoptiq_version_string }}</p>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Custom JS -->
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

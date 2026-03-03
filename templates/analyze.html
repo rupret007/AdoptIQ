@@ -1,0 +1,1665 @@
+{% extends "base.html" %}
+
+{% block title %}Run Analysis - AdoptIQ{% endblock %}
+
+{% block head %}
+<!-- Content Security Policy for enhanced security -->
+<meta http-equiv="Content-Security-Policy" 
+      content="default-src 'self'; 
+               script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; 
+               style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; 
+               img-src 'self' data: https:; 
+               font-src 'self' https://cdn.jsdelivr.net;">
+<!-- Subscription Search Script -->
+<script src="{{ url_for('static', filename='js/subscription-search.js') }}"></script>
+{% endblock %}
+
+{% block content %}
+<!-- Skip to main content link for screen readers -->
+<a class="visually-hidden-focusable btn btn-primary position-absolute top-0 start-0 m-2" 
+   href="#main-content" style="z-index: 10000;">
+    Skip to main content
+</a>
+
+<!-- Error Message Display -->
+{% if error_message %}
+<div class="container py-3">
+    <div class="alert alert-danger alert-dismissible fade show" role="alert">
+        <i class="fas fa-exclamation-triangle me-2" aria-hidden="true"></i>
+        <strong>Error:</strong> {{ error_message }}
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+    </div>
+</div>
+{% endif %}
+
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-9">
+            <!-- Header -->
+            <header class="text-center mb-5">
+                <div class="mb-4">
+                    <div class="bg-primary bg-opacity-10 d-inline-flex p-4 rounded-circle mb-3 hover-scale">
+                        <i class="fas fa-play-circle fa-3x text-primary" aria-hidden="true"></i>
+                    </div>
+                </div>
+                <h1 id="main-content" class="display-4 fw-bold text-primary mb-3 fade-in">
+                    Run Portfolio Analysis
+                </h1>
+                <p class="lead text-muted fade-in" style="animation-delay: 0.2s; font-size: 1.125rem;">
+                    Configure your analysis parameters and generate comprehensive insights for your team's portfolio.
+                </p>
+            </header>
+
+            <!-- VPN Requirement Alert -->
+            <div class="alert alert-warning alert-dismissible fade show fade-in mb-4" role="alert" style="animation-delay: 0.25s;">
+                <div class="d-flex align-items-start">
+                    <i class="fas fa-shield-alt fa-2x me-3 text-warning" aria-hidden="true"></i>
+                    <div>
+                        <h5 class="alert-heading mb-2">
+                            <i class="fas fa-exclamation-triangle me-2"></i>Cisco VPN Required
+                        </h5>
+                        <p class="mb-2">
+                            Portfolio Analysis reports require access to <strong>Snowflake database</strong> for complete and accurate reporting:
+                        </p>
+                        <ul class="mb-2">
+                            <li><strong>DSM Data</strong> (Snowflake): Team subscriptions, customer assignments, account information - <strong class="text-danger">Requires VPN</strong></li>
+                            <li><strong>Adoption Barriers</strong> (Snowflake): Customer adoption barriers and blockers - <strong class="text-danger">Requires VPN</strong></li>
+                            <li><strong>CSConsole Data</strong> (Snowflake): Action Plans, Customer Pulse, Success Priorities - <strong class="text-danger">Requires VPN</strong></li>
+                            <li><strong>CSOne Data</strong>: Access latest AdoptIQ Export from CSOne via link, or run your own report and browse to select</li>
+                        </ul>
+                        <p class="mb-0">
+                            <i class="fas fa-info-circle me-1"></i>
+                            <strong>Before generating a report</strong>, please ensure you are connected to the Cisco VPN to access Snowflake database. 
+                            Without VPN, report generation will fail.
+                        </p>
+                    </div>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+
+            <!-- Analysis Form -->
+            <div class="card shadow-cisco fade-in" style="animation-delay: 0.3s;" role="main">
+                <div class="card-header">
+                    <h2 class="h5 mb-0">
+                        <i class="fas fa-cog me-2" aria-hidden="true"></i>Analysis Configuration
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <!-- Report Type Selection -->
+                    <div class="mb-4">
+                        <label class="form-label fw-semibold">
+                            <i class="fas fa-chart-line me-2" aria-hidden="true"></i>Report Type
+                        </label>
+                        <div class="row g-3">
+                            <div class="col-md-3">
+                                <div class="card h-100 border-2" id="comprehensive-card">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-file-alt fa-2x text-primary mb-3" aria-hidden="true"></i>
+                                        <h5 class="card-title">Comprehensive</h5>
+                                        <p class="card-text small text-muted">Full 20k-30k word analysis with all data sources</p>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="report_type" id="comprehensive" value="comprehensive" checked>
+                                            <label class="form-check-label" for="comprehensive">
+                                                Standard Analysis
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="card h-100 border-2" id="compact-card">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-compress-alt fa-2x text-warning mb-3" aria-hidden="true"></i>
+                                        <h5 class="card-title">Compact</h5>
+                                        <p class="card-text small text-muted">Focused on high-risk customers and renewal concerns</p>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="report_type" id="compact" value="compact">
+                                            <label class="form-check-label" for="compact">
+                                                Executive Summary
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="card h-100 border-2" id="renewal-card">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-user-check fa-2x text-danger mb-3" aria-hidden="true"></i>
+                                        <h5 class="card-title">Customer Renewal</h5>
+                                        <p class="card-text small text-muted">Renewal risk analysis for customer(s)</p>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="report_type" id="renewal" value="renewal">
+                                            <label class="form-check-label" for="renewal">
+                                                Single Customer
+                                            </label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="report_type" id="renewal_portfolio" value="renewal_portfolio">
+                                            <label class="form-check-label" for="renewal_portfolio">
+                                                Portfolio Renewal
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="card h-100 border-2" id="leader-card">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-users-cog fa-2x text-success mb-3" aria-hidden="true"></i>
+                                        <h5 class="card-title">Leader Report</h5>
+                                        <p class="card-text small text-muted">Team activity report for all direct reports</p>
+                                        <a href="{{ url_for('leader_report_form') }}" class="btn btn-sm btn-outline-success mt-2">
+                                            <i class="fas fa-external-link-alt me-1"></i>Configure
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <form method="POST" action="/start_analysis" enctype="multipart/form-data" id="analysisForm" novalidate>
+                        {{ form.hidden_tag() }}
+                        
+                        <!-- Manager Selection -->
+                        <div class="mb-4" id="manager-section">
+                            <label for="{{ form.manager.id }}" class="form-label">
+                                <i class="fas fa-users me-2 text-primary" aria-hidden="true"></i>Select Manager
+                            </label>
+                            {{ form.manager(class="form-select form-select-lg", **{"aria-describedby": "manager-help manager-error", "required": "required"}) }}
+                            <div id="manager-help" class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                Choose the manager whose team portfolio you want to analyze.
+                            </div>
+                            <div class="invalid-feedback" role="alert" id="manager-error">
+                                Please select a manager to continue with the analysis.
+                            </div>
+                        </div>
+
+                        <!-- Technology Selection -->
+                        <div class="mb-4">
+                            <label for="{{ form.technology.id }}" class="form-label">
+                                <i class="fas fa-microchip me-2 text-success" aria-hidden="true"></i>Technology Focus
+                            </label>
+                            {{ form.technology(class="form-select form-select-lg", **{"aria-describedby": "technology-help technology-error", "required": "required"}) }}
+                            <div id="technology-help" class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                Focus on specific technology areas or analyze all technologies.
+                            </div>
+                            <div class="invalid-feedback" role="alert" id="technology-error">
+                                Please select a technology focus to continue with the analysis.
+                            </div>
+                        </div>
+
+                        <!-- Hidden field for subscription ID -->
+                        <input type="hidden" id="subscription_id" name="subscription_id" value="">
+                        
+                        <!-- Subscription ID or Customer Name: optional filter for single-customer reports (Comprehensive, Compact, Customer Renewal) -->
+                        <div class="mb-4" id="subscription-search-section">
+                            <label class="form-label fw-semibold">
+                                <i class="fas fa-search me-2" aria-hidden="true"></i>Subscription ID or Customer Name <span class="text-muted fw-normal">(optional)</span>
+                            </label>
+                            <div class="row g-3">
+                                <div class="col-md-8">
+                                    <div class="input-group position-relative">
+                                        <input type="text" class="form-control" id="subscription-search" 
+                                               placeholder="e.g. Sub12345 or type customer name to filter to one customer" 
+                                               aria-label="Subscription ID or customer name"
+                                               autocomplete="off" aria-autocomplete="list" aria-controls="subscription-search-list" aria-expanded="false">
+                                        <button class="btn btn-outline-primary" type="button" id="search-subscriptions-btn">
+                                            <i class="fas fa-search me-1" aria-hidden="true"></i>Search
+                                        </button>
+                                        <ul class="list-group position-absolute top-100 start-0 w-100 mt-1 shadow-sm border rounded overflow-auto d-none" 
+                                            id="subscription-search-list" role="listbox" style="max-height: 220px; z-index: 1050;"></ul>
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <button class="btn btn-outline-secondary w-100" type="button" id="use-subscription-btn" disabled>
+                                        <i class="fas fa-check me-1" aria-hidden="true"></i>Use Selected Subscription
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                Subscription IDs start with <kbd>Sub</kbd> then numbers. Otherwise type a customer name and select from the list for an exact match.
+                            </div>
+                            
+                            <!-- Search Results -->
+                            <div id="subscription-results" class="mt-3" style="display: none;">
+                                <div class="card">
+                                    <div class="card-header">
+                                        <h6 class="mb-0">Search Results</h6>
+                                    </div>
+                                    <div class="card-body">
+                                        <div id="subscription-list" class="list-group">
+                                            <!-- Results will be populated here -->
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Selected Subscription Info -->
+                            <div id="selected-subscription" class="mt-3" style="display: none;">
+                                <div class="alert alert-info">
+                                    <h6 class="alert-heading">
+                                        <i class="fas fa-check-circle me-2" aria-hidden="true"></i>Selected Subscription
+                                    </h6>
+                                    <div id="selected-subscription-details">
+                                        <!-- Selected subscription details will be populated here -->
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Customer Name (for renewal analysis) -->
+                        <div class="mb-4" id="customer-name-section" style="display: none;">
+                            <label for="customer_name" class="form-label">
+                                <i class="fas fa-building me-2 text-danger" aria-hidden="true"></i>Customer Name
+                            </label>
+                            <div class="input-group input-group-lg position-relative" id="customer-name-wrap">
+                                <input type="text" class="form-control" id="customer_name" name="customer_name" 
+                                       placeholder="Type to search (min 2 characters) — then select from list" 
+                                       aria-describedby="customer-help" autocomplete="off"
+                                       aria-autocomplete="list" aria-controls="customer-name-list" aria-expanded="false">
+                                <span class="input-group-text bg-light">
+                                    <i class="fas fa-building text-muted" aria-hidden="true"></i>
+                                </span>
+                                <ul class="list-group position-absolute top-100 start-0 w-100 mt-1 shadow-sm border rounded overflow-auto d-none" 
+                                    id="customer-name-list" role="listbox" style="max-height: 220px; z-index: 1050;"></ul>
+                            </div>
+                            <div id="customer-help" class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                Type to search Snowflake for matching customers; select one so the report uses the exact name (matches CSOne data).
+                            </div>
+                            <div class="invalid-feedback" role="alert" id="customer-error">
+                                Please enter a valid customer name for renewal analysis.
+                            </div>
+                        </div>
+
+                        <!-- Time Range -->
+                        <div class="mb-4">
+                            <label for="{{ form.days.id }}" class="form-label">
+                                <i class="fas fa-calendar-alt me-2 text-info" aria-hidden="true"></i>Analysis Time Range
+                            </label>
+                            <div class="input-group input-group-lg">
+                                {{ form.days(class="form-control", placeholder="90", min="1", max="365", **{"aria-describedby": "days-help days-error", "required": "required"}) }}
+                                <span class="input-group-text bg-light">
+                                    <i class="fas fa-clock text-muted" aria-hidden="true"></i>
+                                    days
+                                </span>
+                            </div>
+                            <div id="days-help" class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                How many days back should we analyze? (1-365 days)
+                            </div>
+                            <div class="invalid-feedback" role="alert" id="days-error">
+                                Please enter a valid number of days between 1 and 365 for the analysis timeframe.
+                            </div>
+                        </div>
+
+                        <!-- CSOne File Upload -->
+                        <div class="mb-4">
+                            <label for="{{ form.csone_file.id }}" class="form-label">
+                                <i class="fas fa-file-excel me-2 text-warning" aria-hidden="true"></i>CSOne Excel File (Optional)
+                            </label>
+                            {% if csone_shared_folder_url %}
+                            <div class="alert alert-light border mb-3 py-2">
+                                <strong class="text-primary">Get your report:</strong>
+                                <a href="{{ csone_shared_folder_url }}" target="_blank" rel="noopener noreferrer" 
+                                   class="btn btn-outline-primary btn-sm fw-semibold ms-2">
+                                    <i class="fas fa-external-link-alt me-1" aria-hidden="true"></i>Access latest AdoptIQ Export from CSOne
+                                </a>
+                                <span class="text-muted small ms-2">— or run your own report in CSOne</span>
+                            </div>
+                            {% endif %}
+                            <div class="input-group input-group-lg">
+                                {{ form.csone_file(class="form-control", accept=".xlsx,.xls", **{"aria-describedby": "file-help"}) }}
+                                <span class="input-group-text bg-light">
+                                    <i class="fas fa-upload text-muted" aria-hidden="true"></i>
+                                </span>
+                            </div>
+                            <div id="file-help" class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                {% if csone_shared_folder_url %}
+                                Browse to select the file you downloaded from the link above, or one you ran yourself.
+                                {% else %}
+                                Run your own CSOne report and browse above to select your file.
+                                {% endif %}
+                            </div>
+                            <div class="file-upload-preview mt-2" style="display: none;" role="status" aria-live="polite">
+                                <div class="alert alert-info d-flex align-items-center">
+                                    <i class="fas fa-file-excel me-2" aria-hidden="true"></i>
+                                    <span class="file-name"></span>
+                                    <button type="button" class="btn-close ms-auto" 
+                                            onclick="removeFile()"
+                                            aria-label="Remove selected file"></button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Submit Button -->
+                        <div class="d-grid gap-2 mt-5">
+                            {{ form.submit_btn(class="btn btn-primary btn-lg py-3", id="submitBtn", **{"aria-describedby": "submit-help"}) }}
+                            <div id="submit-help" class="form-text text-center">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                Analysis typically takes 2-5 minutes to complete
+                            </div>
+                        </div>
+                        
+                        <!-- Test Button for Debugging -->
+                        <div class="text-center mt-3">
+                            <button type="button" class="btn btn-outline-secondary btn-sm" 
+                                    onclick="testJavaScript()"
+                                    aria-label="Test JavaScript functionality for debugging purposes"
+                                    aria-describedby="test-help">
+                                <i class="fas fa-bug me-1" aria-hidden="true"></i>
+                                Test JavaScript
+                            </button>
+                            <div id="test-help" class="visually-hidden">
+                                This button tests if JavaScript is working properly on the page
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Analysis Process Info -->
+            <section class="card mt-4 fade-in shadow-cisco" style="animation-delay: 0.4s;" aria-labelledby="process-heading">
+                <div class="card-header">
+                    <h2 id="process-heading" class="h6 mb-0">
+                        <i class="fas fa-info-circle me-2" aria-hidden="true"></i>What Happens During Analysis?
+                    </h2>
+                </div>
+                <div class="card-body">
+                    <div class="row g-4">
+                        <div class="col-lg-6">
+                            <div class="d-flex align-items-start hover-lift">
+                                <div class="flex-shrink-0 me-3">
+                                    <div class="bg-primary bg-opacity-10 p-3 rounded-circle">
+                                        <i class="fas fa-database text-primary fa-lg" aria-hidden="true"></i>
+                                    </div>
+                                </div>
+                                <div class="flex-grow-1">
+                                    <h6 class="fw-bold mb-2">Data Collection</h6>
+                                    <p class="text-muted small mb-0">
+                                        Connect to Snowflake and fetch team subscription data, 
+                                        adoption barriers, and customer information.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-lg-6">
+                            <div class="d-flex align-items-start hover-lift">
+                                <div class="flex-shrink-0 me-3">
+                                    <div class="bg-success bg-opacity-10 p-3 rounded-circle">
+                                        <i class="fas fa-brain text-success fa-lg" aria-hidden="true"></i>
+                                    </div>
+                                </div>
+                                <div class="flex-grow-1">
+                                    <h6 class="fw-bold mb-2">AI Analysis</h6>
+                                    <p class="text-muted small mb-0">
+                                        CircuIT AI processes the data to identify patterns, 
+                                        trends, and generate actionable insights.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-lg-6">
+                            <div class="d-flex align-items-start hover-lift">
+                                <div class="flex-shrink-0 me-3">
+                                    <div class="bg-info bg-opacity-10 p-3 rounded-circle">
+                                        <i class="fas fa-chart-line text-info fa-lg" aria-hidden="true"></i>
+                                    </div>
+                                </div>
+                                <div class="flex-grow-1">
+                                    <h6 class="fw-bold mb-2">Pattern Recognition</h6>
+                                    <p class="text-muted small mb-0">
+                                        Identify recurring issues, customer sentiment trends, 
+                                        and adoption barrier patterns across your portfolio.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-lg-6">
+                            <div class="d-flex align-items-start hover-lift">
+                                <div class="flex-shrink-0 me-3">
+                                    <div class="bg-warning bg-opacity-10 p-3 rounded-circle">
+                                        <i class="fas fa-file-alt text-warning fa-lg" aria-hidden="true"></i>
+                                    </div>
+                                </div>
+                                <div class="flex-grow-1">
+                                    <h6 class="fw-bold mb-2">Report Generation</h6>
+                                    <p class="text-muted small mb-0">
+                                        Create professional Word documents and detailed 
+                                        Excel spreadsheets with all findings and recommendations.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Tips Section -->
+            <section class="card mt-4 fade-in shadow-cisco" style="animation-delay: 0.5s;" aria-labelledby="tips-heading">
+                <div class="card-header">
+                    <h6 id="tips-heading" class="mb-0">
+                        <i class="fas fa-lightbulb me-2" aria-hidden="true"></i>Pro Tips for Optimal Results
+                    </h6>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="d-flex mb-3 hover-lift">
+                                <div class="flex-shrink-0 me-3">
+                                    <i class="fas fa-check-circle text-success fa-lg"></i>
+                                </div>
+                                <div>
+                                    <strong>For detailed analysis:</strong> Use 90-180 days to capture meaningful trends
+                                </div>
+                            </div>
+                            <div class="d-flex mb-3 hover-lift">
+                                <div class="flex-shrink-0 me-3">
+                                    <i class="fas fa-check-circle text-success fa-lg"></i>
+                                </div>
+                                <div>
+                                    <strong>For quick insights:</strong> Use 30-60 days for recent activity review
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="d-flex mb-3 hover-lift">
+                                <div class="flex-shrink-0 me-3">
+                                    <i class="fas fa-check-circle text-success fa-lg"></i>
+                                </div>
+                                <div>
+                                    <strong>Technology focus:</strong> Start with "All" to see the big picture, then drill down
+                                </div>
+                            </div>
+                            <div class="d-flex mb-3 hover-lift">
+                                <div class="flex-shrink-0 me-3">
+                                    <i class="fas fa-check-circle text-success fa-lg"></i>
+                                </div>
+                                <div>
+                                    <strong>CSOne data:</strong> Access latest AdoptIQ Export from CSOne via link, or run your own report and browse to select
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Quick Start Guide -->
+            <section class="card mt-4 fade-in shadow-cisco" style="animation-delay: 0.6s;" aria-labelledby="guide-heading">
+                <div class="card-header">
+                    <h6 id="guide-heading" class="mb-0">
+                        <i class="fas fa-rocket me-2" aria-hidden="true"></i>Quick Start Guide
+                    </h6>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-4 text-center">
+                            <div class="bg-primary bg-opacity-10 p-3 rounded-circle d-inline-flex mb-3 hover-scale">
+                                <span class="text-primary fw-bold fs-4">1</span>
+                            </div>
+                            <h6 class="fw-bold">Configure</h6>
+                            <p class="text-muted small">Select your team and analysis parameters</p>
+                        </div>
+                        <div class="col-md-4 text-center">
+                            <div class="bg-success bg-opacity-10 p-3 rounded-circle d-inline-flex mb-3 hover-scale">
+                                <span class="text-success fw-bold fs-4">2</span>
+                            </div>
+                            <h6 class="fw-bold">Analyze</h6>
+                            <p class="text-muted small">Let AI process your portfolio data</p>
+                        </div>
+                        <div class="col-md-4 text-center">
+                            <div class="bg-info bg-opacity-10 p-3 rounded-circle d-inline-flex mb-3 hover-scale">
+                                <span class="text-info fw-bold fs-4">3</span>
+                            </div>
+                            <h6 class="fw-bold">Review</h6>
+                            <p class="text-muted small">Download professional reports and insights</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<!-- Enhanced CSS for animations and interactions -->
+<style>
+.hover-lift {
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+.hover-lift:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+}
+.focus-scale {
+    transition: transform 0.2s ease;
+}
+.focus-scale:focus-within {
+    transform: scale(1.02);
+}
+.form-floating-animation {
+    animation: float 3s ease-in-out infinite;
+}
+@keyframes float {
+    0%, 100% { transform: translateY(0px); }
+    50% { transform: translateY(-5px); }
+}
+.btn-interactive {
+    transition: transform 0.1s ease;
+}
+.btn-interactive:active {
+    transform: scale(0.95);
+}
+</style>
+
+<!-- ARIA live region for announcements -->
+<div id="notification-area" aria-live="polite" aria-atomic="true" class="sr-only"></div>
+
+<script>
+/**
+ * AdoptIQ Analysis Form Manager
+ * Modular, secure, and accessible form handling
+ */
+const AnalysisFormManager = (() => {
+    'use strict';
+    
+    // Private variables - cached DOM elements
+    let elements = {
+        form: null,
+        submitBtn: null,
+        formControls: null,
+        fileInput: null,
+        filePreview: null,
+        notificationArea: null
+    };
+    
+    // Store reference to checkFields function for external access
+    let checkSubscriptionFieldsFunc = null;
+    
+    // Configuration
+    const CONFIG = {
+        maxFileSize: 50 * 1024 * 1024, // 50MB
+        allowedFileTypes: ['.xlsx', '.xls'],
+        notificationTimeout: 5000,
+        apiEndpoint: '/start_analysis'
+    };
+    
+    /**
+     * Secure notification system with XSS protection
+     * @param {string} message - The message to display
+     * @param {'info'|'success'|'error'|'warning'} type - The notification type
+     */
+    const showNotification = (message, type = 'info') => {
+    console.log('Showing notification:', message, type);
+    
+        // Create notification element with XSS protection
+    const notification = document.createElement('div');
+    notification.className = `alert alert-${type === 'error' ? 'danger' : type} alert-dismissible fade show position-fixed`;
+    notification.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
+        
+        // Secure message insertion - prevents XSS
+        const messageSpan = document.createElement('span');
+        messageSpan.textContent = message;
+        notification.appendChild(messageSpan);
+        
+        // Add close button
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.className = 'btn-close';
+        closeBtn.setAttribute('data-bs-dismiss', 'alert');
+        closeBtn.setAttribute('aria-label', 'Close notification');
+        notification.appendChild(closeBtn);
+    
+    // Add to page
+    document.body.appendChild(notification);
+    
+        // Announce to screen readers
+        if (elements.notificationArea) {
+            elements.notificationArea.textContent = message;
+        }
+        
+        // Auto-remove after timeout
+    setTimeout(() => {
+        if (notification.parentNode) {
+            notification.remove();
+        }
+        }, CONFIG.notificationTimeout);
+    };
+
+    /**
+     * Initialize DOM elements with error handling
+     */
+    const initializeElements = () => {
+        try {
+            elements.form = document.getElementById('analysisForm');
+            elements.submitBtn = document.getElementById('submitBtn');
+            elements.fileInput = document.querySelector('input[type="file"]');
+            elements.filePreview = document.querySelector('.file-upload-preview');
+            elements.notificationArea = document.getElementById('notification-area');
+            
+            if (!elements.form) {
+                throw new Error('Analysis form not found!');
+            }
+            
+            if (!elements.submitBtn) {
+                throw new Error('Submit button not found!');
+            }
+            
+            elements.formControls = elements.form.querySelectorAll('.form-control, .form-select');
+            
+            console.log('DOM elements initialized successfully');
+            return true;
+        } catch (error) {
+            console.error('Failed to initialize DOM elements:', error);
+            showNotification('Failed to initialize form. Please refresh the page.', 'error');
+            return false;
+        }
+    };
+    
+    /**
+     * Enhanced field validation with accessibility
+     * @param {HTMLElement} field - The form field to validate
+     * @returns {boolean} - Whether the field is valid
+     */
+    const validateField = (field) => {
+        if (!field) return false;
+        
+        const isValid = field.checkValidity();
+        
+        // Update visual state
+        if (isValid) {
+            field.classList.add('is-valid');
+            field.classList.remove('is-invalid');
+            field.removeAttribute('aria-invalid');
+        } else {
+            field.classList.add('is-invalid');
+            field.classList.remove('is-valid');
+            field.setAttribute('aria-invalid', 'true');
+        }
+        
+        return isValid;
+    };
+    
+    /**
+     * Comprehensive form validation
+     * @returns {boolean} - Whether the entire form is valid
+     */
+    const validateForm = () => {
+        if (!elements.formControls) return false;
+        
+        let isValid = true;
+        let firstInvalidField = null;
+        
+        elements.formControls.forEach(control => {
+            if (!validateField(control)) {
+                isValid = false;
+                if (!firstInvalidField) {
+                    firstInvalidField = control;
+                }
+            }
+        });
+        
+        // Focus first invalid field for accessibility
+        if (!isValid && firstInvalidField) {
+            firstInvalidField.focus();
+            firstInvalidField.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        
+        return isValid;
+    };
+    
+    /**
+     * File upload handling with validation
+     */
+    const handleFileUpload = () => {
+        if (!elements.fileInput) return;
+        
+        elements.fileInput.addEventListener('change', function() {
+            const file = this.files[0];
+            
+            if (!file) {
+                hideFilePreview();
+                return;
+            }
+            
+            // File size validation
+            if (file.size > CONFIG.maxFileSize) {
+                const maxSizeMB = (CONFIG.maxFileSize / (1024*1024)).toFixed(0);
+                const fileSizeMB = (file.size / (1024*1024)).toFixed(1);
+                showNotification(`File size (${fileSizeMB}MB) exceeds the ${maxSizeMB}MB limit. Please choose a smaller file or compress the existing one.`, 'error');
+                this.value = '';
+                hideFilePreview();
+                return;
+            }
+    
+            // Enhanced file validation (extension + MIME type)
+            const fileExtension = '.' + file.name.split('.').pop().toLowerCase();
+            const allowedMimeTypes = [
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                'application/vnd.ms-excel'
+            ];
+            
+            if (!CONFIG.allowedFileTypes.includes(fileExtension)) {
+                showNotification(`Invalid file type "${fileExtension}". Please upload an Excel file with one of these extensions: ${CONFIG.allowedFileTypes.join(', ')}`, 'error');
+                this.value = '';
+                hideFilePreview();
+                return;
+            }
+    
+            if (!allowedMimeTypes.includes(file.type)) {
+                showNotification('Invalid file type. Please upload a valid Excel file.', 'error');
+                this.value = '';
+                hideFilePreview();
+                return;
+            }
+            
+            showFilePreview(file.name, file.size);
+        });
+    };
+    
+    /**
+     * Show file preview with enhanced information
+     * @param {string} fileName - Name of the selected file
+     * @param {number} fileSize - Size of the file in bytes
+     */
+    const showFilePreview = (fileName, fileSize) => {
+        if (!elements.filePreview) return;
+        
+        const fileNameSpan = elements.filePreview.querySelector('.file-name');
+        if (!fileNameSpan) return;
+        
+        const sizeInMB = (fileSize / (1024 * 1024)).toFixed(2);
+        fileNameSpan.textContent = `${fileName} (${sizeInMB} MB)`;
+        elements.filePreview.style.display = 'block';
+        
+        // Announce to screen readers
+        if (elements.notificationArea) {
+            elements.notificationArea.textContent = `File selected: ${fileName}`;
+        }
+    };
+    
+    /**
+     * Hide file preview
+     */
+    const hideFilePreview = () => {
+        if (!elements.filePreview) return;
+        elements.filePreview.style.display = 'none';
+        if (elements.fileInput) {
+            elements.fileInput.value = '';
+        }
+    };
+    
+    /**
+     * Setup real-time validation feedback with memory leak prevention
+     */
+    const setupValidation = () => {
+        if (!elements.formControls) return;
+        
+        elements.formControls.forEach(control => {
+            // Store handlers for cleanup
+            const blurHandler = function() {
+                validateField(this);
+            };
+            
+            const inputHandler = function() {
+                if (this.classList.contains('is-invalid')) {
+                    validateField(this);
+                }
+            };
+            
+            // Enhanced keyboard navigation
+            const keyHandler = function(e) {
+                // Allow Escape key to clear validation state
+                if (e.key === 'Escape' && this.classList.contains('is-invalid')) {
+                    this.classList.remove('is-invalid', 'is-valid');
+                    this.removeAttribute('aria-invalid');
+                }
+                
+                // Enhanced Tab navigation with validation feedback
+                if (e.key === 'Tab' && this.classList.contains('is-invalid')) {
+                    // Announce validation error when tabbing away from invalid field
+                    if (elements.notificationArea) {
+                        const errorElement = document.getElementById(this.getAttribute('aria-describedby')?.split(' ').find(id => id.includes('error')));
+                        if (errorElement) {
+                            elements.notificationArea.textContent = errorElement.textContent;
+                        }
+                    }
+                }
+            };
+            
+            // Store handlers on element for cleanup
+            control._blurHandler = blurHandler;
+            control._inputHandler = inputHandler;
+            control._keyHandler = keyHandler;
+            
+            control.addEventListener('blur', blurHandler);
+            control.addEventListener('input', inputHandler);
+            control.addEventListener('keydown', keyHandler);
+        });
+    };
+    
+    // Double submission prevention
+    let isSubmitting = false;
+    
+    /**
+     * Enhanced form submission with error handling and accessibility
+     * @param {Event} e - The form submission event
+     */
+    const handleFormSubmission = async (e) => {
+        console.log('Form submission event triggered');
+        e.preventDefault();
+        
+        // Prevent double submission
+        if (isSubmitting) {
+            console.log('Submission already in progress, ignoring duplicate request');
+            return;
+        }
+        
+        // Validate form
+        const isValid = validateForm();
+        if (!isValid) {
+            showNotification('Please fix the errors above before submitting.', 'error');
+            return;
+        }
+        
+        isSubmitting = true;
+        
+        // Show loading state
+        const originalButtonText = elements.submitBtn.innerHTML;
+        elements.submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2" aria-hidden="true"></i>Starting Analysis...';
+        elements.submitBtn.disabled = true;
+        elements.submitBtn.setAttribute('aria-busy', 'true');
+        
+        try {
+            // Get report type
+            const reportType = document.querySelector('input[name="report_type"]:checked').value;
+            // Normalize Subscription ID vs Customer Name from search field into form fields (for all report types)
+            normalizeSubscriptionAndCustomerFields();
+            
+            // Create FormData object
+            const formData = new FormData(elements.form);
+            
+            // Determine endpoint and data format based on report type
+            let endpoint = '/start_analysis';
+            let requestBody;
+            let contentType = 'multipart/form-data';
+            
+            if (reportType === 'compact') {
+                endpoint = '/start_compact_analysis';
+                // Check if file is uploaded - if so, use FormData, otherwise use JSON
+                const csoneFile = formData.get('csone_file');
+                if (csoneFile && csoneFile.size > 0) {
+                    // File uploaded - use FormData (subscription_id and customer_name already in form)
+                    requestBody = formData;
+                    contentType = 'multipart/form-data';
+                } else {
+                    // No file - use JSON (include subscription_id/customer_name for single-customer filter)
+                    const jsonData = {
+                        manager: formData.get('manager'),
+                        technology: formData.get('technology'),
+                        days: parseInt(formData.get('days')),
+                        csone_file: '',
+                        subscription_id: formData.get('subscription_id') || '',
+                        customer_name: formData.get('customer_name') || ''
+                    };
+                    requestBody = JSON.stringify(jsonData);
+                    contentType = 'application/json';
+                }
+            } else if (reportType === 'renewal' || reportType === 'renewal_portfolio') {
+                // Use start_analysis with FormData so CSOne file is included (renewal report needs case data)
+                endpoint = '/start_analysis';
+                
+                const managerSelect = document.querySelector('select[name="manager"]');
+                const technologySelect = document.querySelector('select[name="technology"]');
+                const managerValue = managerSelect?.value || formData.get('manager') || '';
+                const technologyValue = technologySelect?.value || formData.get('technology') || '';
+                
+                let subscriptionId = '';
+                let customerName = '';
+                
+                if (reportType === 'renewal') {
+                    // Use normalized values only (subscription_id vs customer_name set by normalizeSubscriptionAndCustomerFields)
+                    subscriptionId = formData.get('subscription_id') || '';
+                    customerName = formData.get('customer_name') || '';
+                    if (!subscriptionId && !customerName) {
+                        showNotification('Either Subscription ID or Customer Name is required for single customer renewal analysis.', 'error');
+                        elements.submitBtn.innerHTML = originalButtonText;
+                        elements.submitBtn.disabled = false;
+                        isSubmitting = false;
+                        return;
+                    }
+                } else if (reportType === 'renewal_portfolio') {
+                    if (!managerValue) {
+                        showNotification('Manager selection is required for portfolio renewal analysis.', 'error');
+                        elements.submitBtn.innerHTML = originalButtonText;
+                        elements.submitBtn.disabled = false;
+                        isSubmitting = false;
+                        return;
+                    }
+                }
+                
+                // Build FormData so CSOne file is included (fix: renewal report was always getting 0 cases)
+                const renewalFormData = new FormData();
+                renewalFormData.append('report_type', reportType);
+                renewalFormData.append('renewal_type', reportType);
+                renewalFormData.append('manager', managerValue);
+                renewalFormData.append('technology', technologyValue);
+                renewalFormData.append('days', formData.get('days') || '90');
+                renewalFormData.append('subscription_id', subscriptionId);
+                renewalFormData.append('customer_name', customerName);
+                const csoneFile = formData.get('csone_file');
+                if (csoneFile && csoneFile.size > 0) {
+                    renewalFormData.append('csone_file', csoneFile);
+                }
+                requestBody = renewalFormData;
+                contentType = 'multipart/form-data';
+            } else {
+                // Comprehensive: always send subscription_id and customer_name (set by normalizeSubscriptionAndCustomerFields) so single-customer works
+                requestBody = new FormData(elements.form);
+                requestBody.set('subscription_id', formData.get('subscription_id') || '');
+                requestBody.set('customer_name', formData.get('customer_name') || '');
+            }
+            
+            // Enhanced fetch with timeout and better error handling
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout for analysis startup
+            
+            const fetchOptions = {
+                method: 'POST',
+                body: requestBody,
+                signal: controller.signal,
+                redirect: 'follow'  // Follow redirects normally
+            };
+            
+            // Set headers
+            fetchOptions.headers = {
+                'X-Requested-With': 'XMLHttpRequest'  // Identify as AJAX request
+            };
+            
+            // Only set Content-Type header for JSON requests (FormData sets it automatically)
+            if (contentType === 'application/json') {
+                fetchOptions.headers['Content-Type'] = 'application/json';
+            }
+            
+            console.log(`📤 Sending request to: ${endpoint}`);
+            console.log(`📤 Content type: ${contentType}`);
+            console.log(`📤 Request body type: ${typeof requestBody}`);
+            
+            const response = await fetch(endpoint, fetchOptions);
+            
+            clearTimeout(timeoutId);
+            
+            console.log(`📋 Response status: ${response.status}`);
+            console.log(`📋 Response headers:`, Object.fromEntries(response.headers.entries()));
+            
+            // Check if response is OK
+            if (!response.ok && response.status !== 200) {
+                const errorText = await response.text();
+                console.error(`❌ HTTP ${response.status}: ${response.statusText}`);
+                console.error(`❌ Error response: ${errorText}`);
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            
+            // Server always returns JSON now - try to parse it
+            let data;
+            const responseText = await response.text();
+            console.log(`📋 Response text (first 500 chars): ${responseText.substring(0, 500)}`);
+            console.log(`📋 Content-Type: ${response.headers.get('content-type')}`);
+            
+            try {
+                data = JSON.parse(responseText);
+                console.log(`📋 Successfully parsed JSON response:`, data);
+            } catch (e) {
+                console.error(`❌ Failed to parse JSON. Response text:`, responseText.substring(0, 500));
+                throw new Error(`Server returned non-JSON response. Expected JSON but got: ${response.headers.get('content-type') || 'unknown'}. Error: ${e.message}`);
+            }
+            
+            // Validate the response data
+            if (!data || typeof data !== 'object') {
+                throw new Error('Invalid response format');
+            }
+            
+            if (!data.success) {
+                throw new Error(data.error || 'Analysis failed to start');
+            }
+            
+            if (!data.analysis_id && !data.redirect_url) {
+                throw new Error('Response missing analysis_id and redirect_url');
+            }
+            
+            // Ensure we have a valid redirect_url
+            if (!data.redirect_url && data.analysis_id) {
+                data.redirect_url = `/progress/${data.analysis_id}`;
+            } else if (data.redirect_url && !data.analysis_id) {
+                // Extract analysis_id from redirect_url if missing
+                const match = data.redirect_url.match(/\/progress\/([^\/\?#]+)/);
+                if (match && match[1]) {
+                    data.analysis_id = match[1];
+                }
+            }
+            
+            // Final validation
+            if (!data.redirect_url || !data.redirect_url.startsWith('/progress/')) {
+                throw new Error(`Invalid redirect_url: ${data.redirect_url}`);
+            }
+            
+            // Extract and validate analysis_id from redirect_url
+            const finalMatch = data.redirect_url.match(/\/progress\/([^\/\?#]+)/);
+            if (!finalMatch || !finalMatch[1]) {
+                throw new Error(`Could not extract valid analysis_id from redirect_url: ${data.redirect_url}`);
+            }
+            
+            const finalAnalysisId = finalMatch[1];
+            
+            // Safety check - reject if it looks like code
+            if (finalAnalysisId.includes('split') || finalAnalysisId.includes('(') || finalAnalysisId.includes(')') || 
+                finalAnalysisId.includes('redirectUrl') || finalAnalysisId.length < 5) {
+                throw new Error(`Invalid analysis_id detected: ${finalAnalysisId}`);
+            }
+            
+            // Use the validated values
+            data.analysis_id = finalAnalysisId;
+            const finalRedirectUrl = `/progress/${finalAnalysisId}`;
+            
+            // One final regex validation to ensure it's a valid URL format
+            if (!/^\/progress\/[a-zA-Z0-9_]+$/.test(finalRedirectUrl)) {
+                throw new Error(`Final validation failed for redirect URL: ${finalRedirectUrl}`);
+            }
+            
+            console.log(`✅ Final validated redirect URL: ${finalRedirectUrl}`);
+            console.log(`✅ Final validated analysis ID: ${finalAnalysisId}`);
+            
+            if (data.success) {
+                showNotification('Analysis started successfully! Redirecting to progress page...', 'success');
+                // Redirect to progress page using ONLY the validated URL
+                setTimeout(() => {
+                    window.location.href = finalRedirectUrl;
+                }, 1000);
+            } else {
+                throw new Error(data.error || 'Unknown error occurred');
+            }
+            
+        } catch (error) {
+            console.error('Form submission error:', error);
+            
+            // Enhanced error messages with user-friendly suggestions
+            let errorMessage = 'Error submitting form: ';
+            let suggestion = '';
+            
+            if (error.name === 'AbortError') {
+                errorMessage += 'Request timed out.';
+                suggestion = 'Please check your internet connection and try again.';
+            } else if (!navigator.onLine) {
+                errorMessage += 'No internet connection detected.';
+                suggestion = 'Please check your network connection and retry.';
+            } else if (error.message.includes('500')) {
+                errorMessage += 'Server error occurred.';
+                suggestion = 'Please wait a moment and try again, or contact support if the issue persists.';
+            } else if (error.message.includes('403') || error.message.includes('401')) {
+                errorMessage += 'Access denied.';
+                suggestion = 'Please refresh the page and try again.';
+            } else {
+                errorMessage += error.message;
+                suggestion = 'Please verify your input and try again.';
+            }
+            
+            showNotification(`${errorMessage} ${suggestion}`, 'error');
+            
+            // Reset button state
+            elements.submitBtn.innerHTML = originalButtonText;
+            elements.submitBtn.disabled = false;
+            elements.submitBtn.removeAttribute('aria-busy');
+        } finally {
+            // Always reset submission flag
+            isSubmitting = false;
+        }
+    };
+    
+    /**
+     * Setup enhanced UI interactions with performance optimization
+     */
+    const setupUIEnhancements = () => {
+        // Use more efficient batch DOM operations
+        const cards = document.querySelectorAll('.card');
+        const icons = document.querySelectorAll('.fa-lg');
+        
+        // Apply classes in batches to reduce reflows
+        requestAnimationFrame(() => {
+            cards.forEach(card => card.classList.add('hover-lift'));
+            icons.forEach(icon => icon.classList.add('form-floating-animation'));
+            
+            // Add focus effects to form controls
+            if (elements.formControls) {
+                elements.formControls.forEach(control => {
+                    const parent = control.closest('.input-group, .form-floating') || control.parentElement;
+                    if (parent) {
+                        parent.classList.add('focus-scale');
+                    }
+                });
+            }
+            
+            // Add interactive button effects
+            if (elements.submitBtn) {
+                elements.submitBtn.classList.add('btn-interactive');
+            }
+        });
+    };
+    
+    /**
+     * Cleanup function to prevent memory leaks
+     */
+    const cleanup = () => {
+        if (elements.formControls) {
+            elements.formControls.forEach(control => {
+                // Remove event listeners
+                const blurHandler = control._blurHandler;
+                const inputHandler = control._inputHandler;
+                const keyHandler = control._keyHandler;
+                
+                if (blurHandler) {
+                    control.removeEventListener('blur', blurHandler);
+                }
+                if (inputHandler) {
+                    control.removeEventListener('input', inputHandler);
+                }
+                if (keyHandler) {
+                    control.removeEventListener('keydown', keyHandler);
+                }
+                
+                // Clean up handler references
+                delete control._blurHandler;
+                delete control._inputHandler;
+                delete control._keyHandler;
+            });
+        }
+        
+        // Clear element references
+        for (const key in elements) {
+            elements[key] = null;
+        }
+    };
+    
+    /**
+     * Debug/testing function - accessible globally for onclick
+     * @returns {void}
+     */
+    const testJavaScript = () => {
+        console.log('Test button clicked!');
+        alert('JavaScript is working! This is a basic test.');
+        
+        console.log('Form element:', elements.form);
+        console.log('Submit button element:', elements.submitBtn);
+        
+        if (elements.form) {
+            console.log('Form action:', elements.form.action);
+            console.log('Form method:', elements.form.method);
+        }
+        
+        if (elements.submitBtn) {
+            console.log('Submit button type:', elements.submitBtn.type);
+            console.log('Submit button disabled:', elements.submitBtn.disabled);
+        }
+    };
+    
+    /**
+     * Remove uploaded file - accessible globally for onclick
+     * @returns {void}
+     */
+    const removeFile = () => {
+        hideFilePreview();
+        if (elements.notificationArea) {
+            elements.notificationArea.textContent = 'File removed';
+        }
+    };
+    
+    /**
+     * Handle report type selection changes
+     * @returns {void}
+     */
+    const setupReportTypeHandling = () => {
+        const reportTypeRadios = document.querySelectorAll('input[name="report_type"]');
+        const customerNameSection = document.getElementById('customer-name-section');
+        const customerNameInput = document.getElementById('customer_name');
+        const managerSection = document.getElementById('manager-section');
+        const managerSelect = document.querySelector('select[name="manager"]');
+        
+        const updateFieldsForRenewalType = (renewalType) => {
+            if (renewalType === 'renewal') {
+                // Single customer renewal: show customer name, hide manager
+                customerNameSection.style.display = 'block';
+                customerNameInput.required = true;
+                managerSection.style.display = 'none';
+                if (managerSelect) {
+                    managerSelect.required = false;
+                    managerSelect.value = '';
+                }
+            } else if (renewalType === 'renewal_portfolio') {
+                // Portfolio renewal: show manager, hide customer name
+                customerNameSection.style.display = 'none';
+                customerNameInput.required = false;
+                customerNameInput.value = '';
+                managerSection.style.display = 'block';
+                if (managerSelect) {
+                    managerSelect.required = true;
+                }
+            } else {
+                // Other report types: show manager, hide customer name
+                customerNameSection.style.display = 'none';
+                customerNameInput.required = false;
+                customerNameInput.value = '';
+                managerSection.style.display = 'block';
+                if (managerSelect) {
+                    managerSelect.required = true;
+                }
+            }
+        };
+        
+        reportTypeRadios.forEach(radio => {
+            radio.addEventListener('change', function() {
+                updateFieldsForRenewalType(this.value);
+            });
+        });
+        
+        // Initialize on page load
+        const selectedType = document.querySelector('input[name="report_type"]:checked');
+        if (selectedType) {
+            updateFieldsForRenewalType(selectedType.value);
+        }
+    };
+    
+    /**
+     * Check if manager/technology fields should be disabled based on subscription/customer name
+     * @returns {void}
+     */
+    const checkSubscriptionFieldStates = () => {
+        const subscriptionIdField = document.getElementById('subscription_id');
+        const customerNameInput = document.getElementById('customer_name');
+        const subscriptionSearchInput = document.getElementById('subscription-search');
+        const managerSection = document.getElementById('manager-section');
+        const managerSelect = document.querySelector('select[name="manager"]');
+        const technologySection = document.querySelector('div.mb-4:has(label[for*="technology"])');
+        const technologySelect = document.querySelector('select[name="technology"]');
+        
+        // Single customer/subscription: manager is not used (report is for that customer only). Technology still applies.
+        const hasSubscriptionId = subscriptionIdField && subscriptionIdField.value.trim().length > 0;
+        const hasCustomerName = customerNameInput && customerNameInput.value.trim().length > 0;
+        const hasSearchValue = subscriptionSearchInput && subscriptionSearchInput.value.trim().length > 0;
+        const singleCustomerOrSub = hasSubscriptionId || hasCustomerName || hasSearchValue;
+        
+        // Disable manager when filtering to one customer/subscription (manager not used)
+        if (managerSelect) {
+            managerSelect.disabled = singleCustomerOrSub;
+            if (singleCustomerOrSub) {
+                managerSection.style.opacity = '0.5';
+                managerSection.style.pointerEvents = 'none';
+            } else {
+                managerSection.style.opacity = '1';
+                managerSection.style.pointerEvents = 'auto';
+            }
+        }
+        
+        // Technology always stays enabled (user said technology makes sense for single-customer reports)
+        if (technologySelect && technologySection) {
+            technologySelect.disabled = false;
+            technologySection.style.opacity = '1';
+            technologySection.style.pointerEvents = 'auto';
+        }
+    };
+    
+    /**
+     * Handle field interaction when subscription/customer is selected
+     * Disables manager and technology fields when a specific subscription is being used
+     * @returns {void}
+     */
+    const setupSubscriptionFieldInteraction = () => {
+        const subscriptionIdField = document.getElementById('subscription_id');
+        const customerNameInput = document.getElementById('customer_name');
+        
+        // Check on input changes - monitor both hidden subscription_id and customer_name fields
+        if (subscriptionIdField) {
+            subscriptionIdField.addEventListener('change', checkSubscriptionFieldStates);
+        }
+        
+        if (customerNameInput) {
+            customerNameInput.addEventListener('input', checkSubscriptionFieldStates);
+        }
+        
+        // Also use MutationObserver to detect programmatic value changes to hidden field
+        if (subscriptionIdField) {
+            const observer = new MutationObserver(() => {
+                checkSubscriptionFieldStates();
+            });
+            observer.observe(subscriptionIdField, { attributes: true, attributeFilter: ['value'] });
+        }
+        
+        // Initial check
+        checkSubscriptionFieldStates();
+        
+        // Store reference for external access
+        checkSubscriptionFieldsFunc = checkSubscriptionFieldStates;
+    };
+
+    /**
+     * Customer name typeahead: search Snowflake, show list of matching customers for selection.
+     * User selects exact BU_NAME so report matches CSOne data.
+     */
+    const setupCustomerNameTypeahead = () => {
+        const input = document.getElementById('customer_name');
+        const listEl = document.getElementById('customer-name-list');
+        if (!input || !listEl) return;
+        let debounceTimer = null;
+        const DEBOUNCE_MS = 320;
+        const MIN_CHARS = 2;
+
+        const hideList = () => {
+            listEl.classList.add('d-none');
+            listEl.innerHTML = '';
+            input.setAttribute('aria-expanded', 'false');
+        };
+
+        const showList = (customers) => {
+            listEl.innerHTML = '';
+            if (!customers || customers.length === 0) {
+                hideList();
+                return;
+            }
+            customers.forEach(name => {
+                const li = document.createElement('li');
+                li.className = 'list-group-item list-group-item-action';
+                li.textContent = name;
+                li.setAttribute('role', 'option');
+                li.tabIndex = -1;
+                li.addEventListener('click', () => {
+                    input.value = name;
+                    hideList();
+                    input.focus();
+                    if (typeof checkSubscriptionFieldStates === 'function') checkSubscriptionFieldStates();
+                });
+                listEl.appendChild(li);
+            });
+            listEl.classList.remove('d-none');
+            input.setAttribute('aria-expanded', 'true');
+        };
+
+        input.addEventListener('input', () => {
+            clearTimeout(debounceTimer);
+            const q = (input.value || '').trim();
+            if (q.length < MIN_CHARS) {
+                hideList();
+                return;
+            }
+            debounceTimer = setTimeout(() => {
+                fetch('/search_subscriptions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                    body: JSON.stringify({ customer_name: q, limit: 50 })
+                })
+                    .then(r => r.json())
+                    .then(data => {
+                        var customers = data.success && data.customers && data.customers.length
+                            ? data.customers
+                            : (function() {
+                                if (!data.success || !data.subscriptions || !data.subscriptions.length) return [];
+                                var seen = {};
+                                var out = [];
+                                data.subscriptions.forEach(function (sub) {
+                                    var name = (sub.BU_NAME || sub.bu_name || '').trim();
+                                    if (name && !seen[name]) { seen[name] = true; out.push(name); }
+                                });
+                                return out;
+                            })();
+                        if (customers.length) showList(customers);
+                        else hideList();
+                    })
+                    .catch(() => hideList());
+            }, DEBOUNCE_MS);
+        });
+
+        input.addEventListener('blur', () => { setTimeout(hideList, 180); });
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') { hideList(); return; }
+            var opts = listEl.querySelectorAll('[role="option"]');
+            if (opts.length === 0) return;
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                var current = listEl.querySelector('.active');
+                var idx = current ? Array.prototype.indexOf.call(opts, current) : -1;
+                idx += (e.key === 'ArrowDown' ? 1 : -1);
+                idx = Math.max(0, Math.min(idx, opts.length - 1));
+                opts.forEach(function (o) { o.classList.remove('active'); });
+                opts[idx].classList.add('active');
+                opts[idx].scrollIntoView({ block: 'nearest' });
+            }
+            if (e.key === 'Enter') {
+                var active = listEl.querySelector('.active');
+                if (active) {
+                    e.preventDefault();
+                    input.value = active.textContent;
+                    hideList();
+                    if (typeof checkSubscriptionFieldStates === 'function') checkSubscriptionFieldStates();
+                }
+            }
+        });
+        document.addEventListener('click', (e) => {
+            if (!input.contains(e.target) && !listEl.contains(e.target)) hideList();
+        });
+    };
+
+    /**
+     * Subscription ID pattern: starts with "Sub" then digits/dash/underscore (e.g. Sub12345).
+     * Used to distinguish subscription ID from customer name (e.g. "Farmers").
+     */
+    const isSubscriptionId = (value) => /^Sub[0-9\-_]+$/i.test((value || '').trim());
+
+    /**
+     * Typeahead for subscription-search: when user types a customer name (not Sub...), show matches.
+     */
+    const setupSubscriptionSearchTypeahead = () => {
+        const input = document.getElementById('subscription-search');
+        const listEl = document.getElementById('subscription-search-list');
+        if (!input || !listEl) return;
+        let debounceTimer = null;
+        const DEBOUNCE_MS = 320;
+        const MIN_CHARS = 2;
+
+        const hideList = () => {
+            listEl.classList.add('d-none');
+            listEl.innerHTML = '';
+            input.setAttribute('aria-expanded', 'false');
+        };
+
+        const showList = (customers) => {
+            listEl.innerHTML = '';
+            if (!customers || customers.length === 0) { hideList(); return; }
+            customers.forEach(name => {
+                const li = document.createElement('li');
+                li.className = 'list-group-item list-group-item-action';
+                li.textContent = name;
+                li.setAttribute('role', 'option');
+                li.tabIndex = -1;
+                li.addEventListener('click', () => {
+                    input.value = name;
+                    hideList();
+                    input.focus();
+                    if (typeof checkSubscriptionFieldStates === 'function') checkSubscriptionFieldStates();
+                });
+                listEl.appendChild(li);
+            });
+            listEl.classList.remove('d-none');
+            input.setAttribute('aria-expanded', 'true');
+        };
+
+        input.addEventListener('input', () => {
+            if (typeof checkSubscriptionFieldStates === 'function') checkSubscriptionFieldStates();
+            clearTimeout(debounceTimer);
+            const q = (input.value || '').trim();
+            if (q.length < MIN_CHARS || isSubscriptionId(q)) { hideList(); return; }
+            debounceTimer = setTimeout(() => {
+                fetch('/search_subscriptions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                    body: JSON.stringify({ customer_name: q, limit: 50 })
+                })
+                    .then(r => r.json())
+                    .then(data => {
+                        var customers = data.success && data.customers && data.customers.length
+                            ? data.customers
+                            : (function() {
+                                if (!data.success || !data.subscriptions || !data.subscriptions.length) return [];
+                                var seen = {};
+                                var out = [];
+                                data.subscriptions.forEach(function (sub) {
+                                    var name = (sub.BU_NAME || sub.bu_name || '').trim();
+                                    if (name && !seen[name]) { seen[name] = true; out.push(name); }
+                                });
+                                return out;
+                            })();
+                        if (customers.length) showList(customers);
+                        else hideList();
+                    })
+                    .catch(() => hideList());
+            }, DEBOUNCE_MS);
+        });
+
+        input.addEventListener('blur', () => { setTimeout(hideList, 180); });
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') { hideList(); return; }
+            var opts = listEl.querySelectorAll('[role="option"]');
+            if (opts.length === 0) return;
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                var current = listEl.querySelector('.active');
+                var idx = current ? Array.prototype.indexOf.call(opts, current) : -1;
+                idx += (e.key === 'ArrowDown' ? 1 : -1);
+                idx = Math.max(0, Math.min(idx, opts.length - 1));
+                opts.forEach(function (o) { o.classList.remove('active'); });
+                opts[idx].classList.add('active');
+                opts[idx].scrollIntoView({ block: 'nearest' });
+            }
+            if (e.key === 'Enter') {
+                var active = listEl.querySelector('.active');
+                if (active) {
+                    e.preventDefault();
+                    input.value = active.textContent;
+                    hideList();
+                    if (typeof checkSubscriptionFieldStates === 'function') checkSubscriptionFieldStates();
+                }
+            }
+        });
+        document.addEventListener('click', (e) => {
+            if (!input.contains(e.target) && !listEl.contains(e.target)) hideList();
+        });
+    };
+
+    /**
+     * Normalize "Subscription ID or Customer Name" into form fields before submit.
+     * Subscription IDs start with Sub then numbers; otherwise treat as customer name.
+     * Ensures subscription_id and customer_name are set correctly for Comprehensive, Compact, and Renewal.
+     */
+    const normalizeSubscriptionAndCustomerFields = () => {
+        const subIdEl = document.getElementById('subscription_id');
+        const customerNameEl = document.getElementById('customer_name');
+        const searchEl = document.getElementById('subscription-search');
+        if (!subIdEl || !customerNameEl || !searchEl) return;
+        const fromSearch = (searchEl.value || '').trim();
+        const fromHidden = (subIdEl.value || '').trim();
+        const val = fromHidden || fromSearch;
+        if (!val) return;
+        if (isSubscriptionId(val)) {
+            subIdEl.value = val;
+            customerNameEl.value = '';
+        } else {
+            customerNameEl.value = val;
+            subIdEl.value = '';
+        }
+    };
+
+    /**
+     * Initialize the entire form system
+     * @returns {void}
+     */
+    const init = () => {
+        console.log('Initializing AdoptIQ Analysis Form...');
+        
+        if (!initializeElements()) {
+            return; // Initialization failed
+        }
+        
+        // Setup all functionality
+        setupValidation();
+        handleFileUpload();
+        setupUIEnhancements();
+        setupReportTypeHandling();
+        setupSubscriptionFieldInteraction();
+        setupCustomerNameTypeahead();
+        setupSubscriptionSearchTypeahead();
+        
+        // Add form submission handler
+        elements.form.addEventListener('submit', handleFormSubmission);
+        
+        // Add cleanup on page unload
+        window.addEventListener('beforeunload', cleanup);
+        
+        // Ensure submit button starts enabled
+        elements.submitBtn.disabled = false;
+        
+        console.log('AdoptIQ Analysis Form initialized successfully!');
+    };
+    
+    // Public API
+    return {
+        init,
+        showNotification,
+        testJavaScript,
+        removeFile,
+        checkSubscriptionFields: checkSubscriptionFieldStates
+    };
+})();
+
+// Initialize when DOM is ready
+// Handle manager field visibility based on report type
+document.addEventListener('DOMContentLoaded', function() {
+    AnalysisFormManager.init();
+    
+    // Get form elements
+    const reportTypeRadios = document.querySelectorAll('input[name="report_type"]');
+    const managerSection = document.getElementById('manager-section');
+    const managerSelect = document.querySelector('select[name="manager"]');
+    
+    // Function to toggle manager field visibility
+    function toggleManagerField() {
+        const selectedReportType = document.querySelector('input[name="report_type"]:checked')?.value;
+        
+        if (selectedReportType === 'customer_renewal') {
+            // Hide manager section for customer renewal reports
+            managerSection.style.display = 'none';
+            managerSelect.removeAttribute('required');
+        } else {
+            // Show manager section for other report types
+            managerSection.style.display = 'block';
+            managerSelect.setAttribute('required', 'required');
+        }
+    }
+    
+    // Add event listeners to report type radio buttons
+    reportTypeRadios.forEach(radio => {
+        radio.addEventListener('change', toggleManagerField);
+    });
+    
+    // Initialize visibility on page load
+    toggleManagerField();
+});
+
+// Expose global functions for onclick handlers
+window.testJavaScript = AnalysisFormManager.testJavaScript;
+window.removeFile = AnalysisFormManager.removeFile;
+window.showNotification = AnalysisFormManager.showNotification;
+window.AnalysisFormManager = AnalysisFormManager;
+</script>
+{% endblock %}

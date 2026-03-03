@@ -1,0 +1,487 @@
+{% extends "base.html" %}
+
+{% block title %}AdoptIQ Dashboard - Portfolio Analyzer{% endblock %}
+
+{% block content %}
+<!-- Hero Section -->
+<section class="hero-section">
+    <div class="container text-center">
+        <div class="row justify-content-center">
+            <div class="col-lg-10">
+                <h1 class="display-2 fw-bold mb-4 fade-in">
+                    <i class="fas fa-chart-line me-3 text-gradient"></i>AdoptIQ Portfolio Analyzer
+                </h1>
+                <p class="lead mb-5 fade-in" style="animation-delay: 0.2s; font-size: 1.25rem;">
+                    Advanced customer experience and adoption barrier analysis for Cisco technologies.<br>
+                    Transform raw data into actionable insights with AI-powered analysis.
+                </p>
+                <div class="d-flex justify-content-center gap-4 fade-in flex-wrap" style="animation-delay: 0.4s;">
+                    <a href="{{ url_for('index') }}" class="btn btn-light btn-lg px-5 py-3 hover-lift">
+                        <i class="fas fa-play me-2"></i>Start Analysis
+                    </a>
+                    <a href="{{ url_for('bst_psirt_search') }}" class="btn btn-outline-light btn-lg px-5 py-3 hover-lift">
+                        <i class="fas fa-search me-2"></i>BST/PSIRT Search
+                    </a>
+                    <a href="{{ url_for('help') }}" class="btn btn-outline-light btn-lg px-5 py-3 hover-lift">
+                        <i class="fas fa-question-circle me-2"></i>Learn More
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Quick Stats Section -->
+<section class="container mb-5">
+    <div class="row">
+        <div class="col-12">
+            <div class="card stats-section shadow-cisco">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-tachometer-alt me-2"></i>Portfolio Overview
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <div class="row text-center">
+                        <div class="col-md-3 mb-4">
+                            <div class="border-end h-100">
+                                <div class="p-4">
+                                    <div class="bg-primary bg-opacity-10 p-4 rounded-circle d-inline-flex mb-3 hover-scale">
+                                        <i class="fas fa-users fa-2x text-primary"></i>
+                                    </div>
+                                    <h3 class="text-gradient mb-2">3</h3>
+                                    <p class="text-muted mb-0 fw-semibold">Manager Teams</p>
+                                    <small class="text-muted">Dee, Brian & Josh</small>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3 mb-4">
+                            <div class="border-end h-100">
+                                <div class="p-4">
+                                    <div class="bg-success bg-opacity-10 p-4 rounded-circle d-inline-flex mb-3 hover-scale">
+                                        <i class="fas fa-microchip fa-2x text-success"></i>
+                                    </div>
+                                    <h3 class="text-gradient mb-2">6</h3>
+                                    <p class="text-muted mb-0 fw-semibold">Technology Areas</p>
+                                    <small class="text-muted">Webex & Cisco UCC</small>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3 mb-4">
+                            <div class="border-end h-100">
+                                <div class="p-4">
+                                    <div class="bg-info bg-opacity-10 p-4 rounded-circle d-inline-flex mb-3 hover-scale">
+                                        <i class="fas fa-user-tie fa-2x text-info"></i>
+                                    </div>
+                                    <h3 class="text-gradient mb-2">30+</h3>
+                                    <p class="text-muted mb-0 fw-semibold">CSSM Analysts</p>
+                                    <small class="text-muted">Dedicated Support</small>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3 mb-4">
+                            <div class="p-4">
+                                <div class="bg-warning bg-opacity-10 p-4 rounded-circle d-inline-flex mb-3 hover-scale">
+                                    <i class="fas fa-infinity fa-2x text-warning"></i>
+                                </div>
+                                <h3 class="text-gradient mb-2">∞</h3>
+                                <p class="text-muted mb-0 fw-semibold">Analysis Possibilities</p>
+                                <small class="text-muted">Unlimited Insights</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Features Section -->
+<section class="container mb-5">
+    <div class="row text-center mb-5">
+        <div class="col-12">
+            <h2 class="h1 mb-4 slide-in-left">Why Choose AdoptIQ?</h2>
+            <p class="lead text-muted slide-in-left" style="animation-delay: 0.2s; font-size: 1.125rem;">
+                Comprehensive portfolio analysis with cutting-edge AI insights and professional reporting
+            </p>
+        </div>
+    </div>
+    
+    <div class="row g-4">
+        <div class="col-lg-4 col-md-6">
+            <div class="card h-100 feature-card fade-in shadow-cisco" style="animation-delay: 0.1s;">
+                <div class="card-body">
+                    <div class="feature-icon">
+                        <i class="fas fa-brain"></i>
+                    </div>
+                    <h4 class="card-title mb-3">AI-Powered Insights</h4>
+                    <p class="card-text text-muted">
+                        Leverage CircuIT AI to automatically identify patterns, trends, and actionable recommendations 
+                        from your customer data. Get intelligent insights that drive strategic decisions.
+                    </p>
+                    <div class="mt-4">
+                        <span class="badge bg-primary me-2 mb-2">Pattern Recognition</span>
+                        <span class="badge bg-info me-2 mb-2">Trend Analysis</span>
+                        <span class="badge bg-success mb-2">Smart Recommendations</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-lg-4 col-md-6">
+            <div class="card h-100 feature-card fade-in shadow-cisco" style="animation-delay: 0.2s;">
+                <div class="card-body">
+                    <div class="feature-icon">
+                        <i class="fas fa-chart-bar"></i>
+                    </div>
+                    <h4 class="card-title mb-3">Comprehensive Analysis</h4>
+                    <p class="card-text text-muted">
+                        Analyze adoption barriers, CSOne cases, and external intelligence to get a complete 
+                        picture of your portfolio health. Connect the dots across multiple data sources.
+                    </p>
+                    <div class="mt-4">
+                        <span class="badge bg-primary me-2 mb-2">Multi-Source Data</span>
+                        <span class="badge bg-info me-2 mb-2">Cross-Reference</span>
+                        <span class="badge bg-success mb-2">Holistic View</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-lg-4 col-md-6">
+            <div class="card h-100 feature-card fade-in shadow-cisco" style="animation-delay: 0.3s;">
+                <div class="card-body">
+                    <div class="feature-icon">
+                        <i class="fas fa-file-alt"></i>
+                    </div>
+                    <h4 class="card-title mb-3">Professional Reports</h4>
+                    <p class="card-text text-muted">
+                        Generate executive-ready Word documents and detailed Excel spreadsheets with 
+                        one-click reporting. Present findings professionally to stakeholders.
+                    </p>
+                    <div class="mt-4">
+                        <span class="badge bg-primary me-2 mb-2">Executive Ready</span>
+                        <span class="badge bg-info me-2 mb-2">Multiple Formats</span>
+                        <span class="badge bg-success mb-2">One-Click Export</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Technology Coverage Section -->
+<section class="container mb-5">
+    <div class="row">
+        <div class="col-12">
+            <div class="card shadow-cisco">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-microchip me-2"></i>Technology Coverage
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <div class="row g-4">
+                        <div class="col-lg-6 col-md-6">
+                            <div class="tech-card hover-lift">
+                                <div class="d-flex align-items-center">
+                                    <div class="flex-shrink-0 me-4">
+                                        <div class="bg-primary bg-opacity-10 p-4 rounded-circle">
+                                            <i class="fas fa-video text-primary fa-2x"></i>
+                                        </div>
+                                    </div>
+                                    <div class="flex-grow-1">
+                                        <h6 class="mb-2 fw-bold">Webex Meetings & Messaging</h6>
+                                        <p class="text-muted mb-2 small">Collaboration & productivity tools</p>
+                                        <div class="mb-2">
+                                            <span class="badge bg-light text-dark me-1 mb-1">Meetings</span>
+                                            <span class="badge bg-light text-dark me-1 mb-1">Messaging</span>
+                                            <span class="badge bg-light text-dark mb-1">Events</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-lg-6 col-md-6">
+                            <div class="tech-card hover-lift">
+                                <div class="d-flex align-items-center">
+                                    <div class="flex-shrink-0 me-4">
+                                        <div class="bg-success bg-opacity-10 p-4 rounded-circle">
+                                            <i class="fas fa-phone text-success fa-2x"></i>
+                                        </div>
+                                    </div>
+                                    <div class="flex-grow-1">
+                                        <h6 class="mb-2 fw-bold">Webex Calling</h6>
+                                        <p class="text-muted mb-2 small">Cloud calling & telephony</p>
+                                        <div class="mb-2">
+                                            <span class="badge bg-light text-dark me-1 mb-1">Voice</span>
+                                            <span class="badge bg-light text-dark me-1 mb-1">Video</span>
+                                            <span class="badge bg-light text-dark mb-1">DI</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-lg-6 col-md-6">
+                            <div class="tech-card hover-lift">
+                                <div class="d-flex align-items-center">
+                                    <div class="flex-shrink-0 me-4">
+                                        <div class="bg-info bg-opacity-10 p-4 rounded-circle">
+                                            <i class="fas fa-headset text-info fa-2x"></i>
+                                        </div>
+                                    </div>
+                                    <div class="flex-grow-1">
+                                        <h6 class="mb-2 fw-bold">Webex Contact Center</h6>
+                                        <p class="text-muted mb-2 small">Customer service & support</p>
+                                        <div class="mb-2">
+                                            <span class="badge bg-light text-dark me-1 mb-1">WxCC</span>
+                                            <span class="badge bg-light text-dark me-1 mb-1">Omnichannel</span>
+                                            <span class="badge bg-light text-dark mb-1">Analytics</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-lg-6 col-md-6">
+                            <div class="tech-card hover-lift">
+                                <div class="d-flex align-items-center">
+                                    <div class="flex-shrink-0 me-4">
+                                        <div class="bg-warning bg-opacity-10 p-4 rounded-circle">
+                                            <i class="fas fa-server text-warning fa-2x"></i>
+                                        </div>
+                                    </div>
+                                    <div class="flex-grow-1">
+                                        <h6 class="mb-2 fw-bold">Cisco UCCE/UCCX</h6>
+                                        <p class="text-muted mb-2 small">Enterprise contact center</p>
+                                        <div class="mb-2">
+                                            <span class="badge bg-light text-dark me-1 mb-1">UCCE</span>
+                                            <span class="badge bg-light text-dark me-1 mb-1">UCCX</span>
+                                            <span class="badge bg-light text-dark mb-1">On-Prem</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Recent Activity Section -->
+<section class="container mb-5">
+    <div class="row">
+        <div class="col-12">
+            <div class="card shadow-cisco">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">
+                        <i class="fas fa-history me-2"></i>Recent Activity
+                    </h5>
+                    <a href="{{ url_for('history') }}" class="btn btn-outline-primary btn-sm hover-lift">
+                        <i class="fas fa-external-link-alt me-1"></i>View All
+                    </a>
+                </div>
+                <div class="card-body">
+                    <div class="text-center text-muted py-5">
+                        <div class="mb-4">
+                            <i class="fas fa-chart-line fa-4x text-primary opacity-25"></i>
+                        </div>
+                        <h6 class="mb-3">No Recent Analyses Found</h6>
+                        <p class="mb-4">Start your first analysis to see results and track your portfolio insights here!</p>
+                        <a href="{{ url_for('index') }}" class="btn btn-primary hover-lift">
+                            <i class="fas fa-play me-2"></i>Run Your First Analysis
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Call to Action -->
+<section class="container mb-5">
+    <div class="card bg-gradient-cisco text-white shadow-cisco">
+        <div class="card-body text-center py-5">
+            <div class="row justify-content-center">
+                <div class="col-lg-8">
+                    <h3 class="mb-4 fw-bold">Ready to Transform Your Portfolio Analysis?</h3>
+                    <p class="lead mb-4 opacity-90" style="font-size: 1.125rem;">
+                        Join the teams already using AdoptIQ to gain deeper insights into customer adoption barriers 
+                        and drive better business outcomes. Start your journey today!
+                    </p>
+                    <div class="d-flex justify-content-center gap-3 flex-wrap">
+                        <a href="{{ url_for('index') }}" class="btn btn-light btn-lg px-5 hover-lift">
+                            <i class="fas fa-rocket me-2"></i>Get Started Now
+                        </a>
+                        <a href="{{ url_for('help') }}" class="btn btn-outline-light btn-lg px-5 hover-lift">
+                            <i class="fas fa-play-circle me-2"></i>Watch Demo
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Trust Indicators -->
+<section class="container mb-5">
+    <div class="row">
+        <div class="col-12">
+            <div class="card shadow-cisco">
+                <div class="card-body text-center py-5">
+                    <h6 class="text-muted mb-4">Trusted by Cisco Teams Worldwide</h6>
+                    <div class="row justify-content-center align-items-center">
+                        <div class="col-md-3 col-6 mb-4">
+                            <div class="d-flex align-items-center justify-content-center hover-lift">
+                                <i class="fas fa-shield-alt text-success fa-2x me-3"></i>
+                                <span class="fw-semibold">Enterprise Grade</span>
+                            </div>
+                        </div>
+                        <div class="col-md-3 col-6 mb-4">
+                            <div class="d-flex align-items-center justify-content-center hover-lift">
+                                <i class="fas fa-lock text-primary fa-2x me-3"></i>
+                                <span class="fw-semibold">Secure & Private</span>
+                            </div>
+                        </div>
+                        <div class="col-md-3 col-6 mb-4">
+                            <div class="d-flex align-items-center justify-content-center hover-lift">
+                                <i class="fas fa-clock text-warning fa-2x me-3"></i>
+                                <span class="fw-semibold">24/7 Support</span>
+                            </div>
+                        </div>
+                        <div class="col-md-3 col-6 mb-4">
+                            <div class="d-flex align-items-center justify-content-center hover-lift">
+                                <i class="fas fa-sync text-info fa-2x me-3"></i>
+                                <span class="fw-semibold">Always Updated</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Enhanced intersection observer for scroll animations
+    const observerOptions = {
+        threshold: 0.1,
+        rootMargin: '0px 0px -100px 0px'
+    };
+    
+    const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) {
+                entry.target.style.opacity = '1';
+                entry.target.style.transform = 'translateY(0)';
+                
+                // Add staggered animation for child elements
+                const children = entry.target.querySelectorAll('.feature-card, .tech-card, .col-md-3, .col-md-6');
+                children.forEach((child, index) => {
+                    setTimeout(() => {
+                        child.style.opacity = '1';
+                        child.style.transform = 'translateY(0)';
+                    }, index * 100);
+                });
+            }
+        });
+    }, observerOptions);
+    
+    // Observe all cards for animation
+    document.querySelectorAll('.card').forEach(card => {
+        card.style.opacity = '0';
+        card.style.transform = 'translateY(30px)';
+        card.style.transition = 'all 0.8s cubic-bezier(0.4, 0, 0.2, 1)';
+        observer.observe(card);
+    });
+    
+    // Enhanced hover effects for tech cards
+    document.querySelectorAll('.tech-card').forEach(card => {
+        card.addEventListener('mouseenter', function() {
+            this.style.transform = 'translateY(-8px) scale(1.02)';
+            this.style.boxShadow = '0 20px 40px rgba(0, 188, 235, 0.2)';
+        });
+        
+        card.addEventListener('mouseleave', function() {
+            this.style.transform = 'translateY(0) scale(1)';
+            this.style.boxShadow = '';
+        });
+    });
+    
+    // Enhanced click effects for feature cards
+    document.querySelectorAll('.feature-card').forEach(card => {
+        card.addEventListener('click', function() {
+            this.style.transform = 'translateY(-4px) scale(1.02)';
+            setTimeout(() => {
+                this.style.transform = 'translateY(-12px) scale(1)';
+            }, 150);
+        });
+    });
+    
+    // Enhanced stats animation
+    document.querySelectorAll('.stats-section h3').forEach(stat => {
+        const finalValue = stat.textContent;
+        const isNumber = !isNaN(finalValue);
+        
+        if (isNumber) {
+            stat.textContent = '0';
+            const targetValue = parseInt(finalValue);
+            const increment = targetValue / 50;
+            let currentValue = 0;
+            
+            const timer = setInterval(() => {
+                currentValue += increment;
+                if (currentValue >= targetValue) {
+                    currentValue = targetValue;
+                    clearInterval(timer);
+                }
+                stat.textContent = Math.floor(currentValue);
+            }, 50);
+        }
+    });
+    
+    // Add parallax effect to hero section
+    window.addEventListener('scroll', () => {
+        const scrolled = window.pageYOffset;
+        const hero = document.querySelector('.hero-section');
+        if (hero) {
+            hero.style.transform = `translateY(${scrolled * 0.5}px)`;
+        }
+    });
+    
+    // Enhanced button interactions
+    document.querySelectorAll('.btn').forEach(btn => {
+        btn.addEventListener('mousedown', function() {
+            this.style.transform = 'scale(0.95)';
+        });
+        
+        btn.addEventListener('mouseup', function() {
+            this.style.transform = '';
+        });
+        
+        btn.addEventListener('mouseleave', function() {
+            this.style.transform = '';
+        });
+    });
+    
+    // Add floating animation to feature icons
+    document.querySelectorAll('.feature-icon').forEach(icon => {
+        icon.style.animation = 'float 3s ease-in-out infinite';
+    });
+    
+    // Add CSS for floating animation
+    const style = document.createElement('style');
+    style.textContent = `
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-10px); }
+        }
+    `;
+    document.head.appendChild(style);
+});
+</script>
+{% endblock %}

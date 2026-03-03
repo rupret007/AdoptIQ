@@ -1,0 +1,448 @@
+{% extends "base.html" %}
+
+{% block title %}Analysis History - AdoptIQ{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-10">
+            <!-- Header -->
+            <div class="text-center mb-5">
+                <div class="mb-4">
+                    <div class="bg-info bg-opacity-10 d-inline-flex p-4 rounded-circle mb-3 hover-scale">
+                        <i class="fas fa-history fa-3x text-info"></i>
+                    </div>
+                </div>
+                <h1 class="display-4 fw-bold text-info mb-3 bounce-in">Analysis History</h1>
+                <p class="lead text-muted slide-in-left" style="animation-delay: 0.2s; font-size: 1.125rem;">
+                    Review your previous portfolio analyses and track your team's progress over time.
+                </p>
+            </div>
+
+            {% if analyses %}
+                <!-- Analysis List -->
+                <div class="card fade-in shadow-cisco">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">
+                            <i class="fas fa-list me-2"></i>Previous Analyses
+                        </h5>
+                        <span class="badge bg-primary fs-6">{{ analyses|length }} total</span>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-hover mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th class="border-0">
+                                            <i class="fas fa-calendar me-2"></i>Date
+                                        </th>
+                                        <th class="border-0">
+                                            <i class="fas fa-user-tie me-2"></i>Manager
+                                        </th>
+                                        <th class="border-0">
+                                            <i class="fas fa-microchip me-2"></i>Technology
+                                        </th>
+                                        <th class="border-0">
+                                            <i class="fas fa-clock me-2"></i>Period
+                                        </th>
+                                        <th class="border-0">
+                                            <i class="fas fa-cog me-2"></i>Actions
+                                        </th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for analysis in analyses %}
+                                    <tr class="analysis-row hover-lift" data-analysis-id="{{ analysis.id }}">
+                                        <td class="align-middle">
+                                            <div class="d-flex align-items-center">
+                                                <div class="bg-primary bg-opacity-10 p-3 rounded-circle me-3 hover-scale">
+                                                    <i class="fas fa-chart-line text-primary"></i>
+                                                </div>
+                                                <div>
+                                                    {% set st = analysis.start_time or 'Unknown' %}
+                                                    <div class="fw-semibold">
+                                                        {{ st[:10] if st != 'Unknown' else 'Unknown' }}
+                                                    </div>
+                                                    <small class="text-muted">
+                                                        {{ st[11:16] if st != 'Unknown' and 'T' in st else '' }}
+                                                    </small>
+                                                </div>
+                                            </div>
+                                        </td>
+                                        <td class="align-middle">
+                                            <span class="badge bg-primary bg-opacity-10 text-primary px-3 py-2">
+                                                {{ analysis.manager }}
+                                            </span>
+                                        </td>
+                                        <td class="align-middle">
+                                            <span class="badge bg-success bg-opacity-10 text-success px-3 py-2">
+                                                {{ analysis.technology }}
+                                            </span>
+                                        </td>
+                                        <td class="align-middle">
+                                            <span class="badge bg-info bg-opacity-10 text-info px-3 py-2">
+                                                {% if analysis.days is not none and analysis.days != '' %}{{ analysis.days }} days{% else %}—{% endif %}
+                                            </span>
+                                        </td>
+                                        <td class="align-middle">
+                                            <div class="btn-group" role="group">
+                                                <button type="button" class="btn btn-sm btn-outline-primary view-results-btn hover-lift" 
+                                                        data-analysis-id="{{ analysis.id }}">
+                                                    <i class="fas fa-eye me-1"></i>View
+                                                </button>
+                                                <button type="button" class="btn btn-sm btn-outline-success download-btn hover-lift" 
+                                                        data-analysis-id="{{ analysis.id }}">
+                                                    <i class="fas fa-download me-1"></i>Download
+                                                </button>
+                                                <button type="button" class="btn btn-sm btn-outline-danger delete-btn hover-lift" 
+                                                        data-analysis-id="{{ analysis.id }}">
+                                                    <i class="fas fa-trash me-1"></i>Delete
+                                                </button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Statistics Summary -->
+                <div class="row mt-4 g-4">
+                    <div class="col-md-4">
+                        <div class="card text-center h-100 fade-in shadow-cisco" style="animation-delay: 0.1s;">
+                            <div class="card-body">
+                                <div class="bg-primary bg-opacity-10 p-4 rounded-circle d-inline-flex mb-3 hover-scale">
+                                    <i class="fas fa-chart-line text-primary fa-2x"></i>
+                                </div>
+                                <h4 class="text-gradient mb-2" data-value="{{ analyses|length }}">0</h4>
+                                <p class="text-muted mb-0">Total Analyses</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card text-center h-100 fade-in shadow-cisco" style="animation-delay: 0.2s;">
+                            <div class="card-body">
+                                <div class="bg-success bg-opacity-10 p-4 rounded-circle d-inline-flex mb-3 hover-scale">
+                                    <i class="fas fa-calendar-alt text-success fa-2x"></i>
+                                </div>
+                                <h4 class="text-gradient mb-2" data-value="{{ analyses[:7]|length }}">
+                                    0
+                                </h4>
+                                <p class="text-muted mb-0">Last 7 Reports</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card text-center h-100 fade-in shadow-cisco" style="animation-delay: 0.3s;">
+                            <div class="card-body">
+                                <div class="bg-info bg-opacity-10 p-4 rounded-circle d-inline-flex mb-3 hover-scale">
+                                    <i class="fas fa-users text-info fa-2x"></i>
+                                </div>
+                                <h4 class="text-gradient mb-2" data-value="{{ analyses|map(attribute='manager')|unique|list|length }}">
+                                    0
+                                </h4>
+                                <p class="text-muted mb-0">Active Managers</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            {% else %}
+                <!-- Empty State -->
+                <div class="card text-center py-5 fade-in shadow-cisco">
+                    <div class="card-body">
+                        <div class="mb-4">
+                            <i class="fas fa-chart-line fa-4x text-muted opacity-25"></i>
+                        </div>
+                        <h4 class="mb-3">No Analysis History Found</h4>
+                        <p class="text-muted mb-4">
+                            You haven't run any portfolio analyses yet. Start your first analysis to see results here!
+                        </p>
+                        <a href="{{ url_for('index') }}" class="btn btn-primary btn-lg hover-lift">
+                            <i class="fas fa-play me-2"></i>Run Your First Analysis
+                        </a>
+                    </div>
+                </div>
+            {% endif %}
+
+            <!-- Action Buttons -->
+            <div class="text-center mt-5 fade-in" style="animation-delay: 0.4s;">
+                <div class="d-flex justify-content-center gap-3 flex-wrap">
+                    <a href="{{ url_for('index') }}" class="btn btn-primary btn-lg hover-lift">
+                        <i class="fas fa-play me-2"></i>Run New Analysis
+                    </a>
+                    <a href="{{ url_for('index') }}" class="btn btn-outline-primary btn-lg hover-lift">
+                        <i class="fas fa-home me-2"></i>Dashboard
+                    </a>
+                    <a href="{{ url_for('help') }}" class="btn btn-outline-secondary btn-lg hover-lift">
+                        <i class="fas fa-question-circle me-2"></i>Help
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Delete Confirmation Modal -->
+<div class="modal fade" id="deleteModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-exclamation-triangle text-danger me-2"></i>Confirm Deletion
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>Are you sure you want to delete this analysis? This action cannot be undone.</p>
+                <p class="text-muted small mb-0">
+                    <strong>Note:</strong> This will remove the analysis from your history but won't affect any downloaded reports.
+                </p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger" id="confirmDeleteBtn">
+                    <i class="fas fa-trash me-2"></i>Delete Analysis
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Success Notification -->
+<div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 9999;">
+    <div id="successToast" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
+        <div class="toast-header bg-success text-white">
+            <i class="fas fa-check-circle me-2"></i>
+            <strong class="me-auto">Success</strong>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="toast"></button>
+        </div>
+        <div class="toast-body">
+            Analysis deleted successfully.
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Animate statistics on page load
+    animateStatistics();
+    
+    // View results button — progress page shows status and download links
+    document.querySelectorAll('.view-results-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const analysisId = this.dataset.analysisId;
+            window.location.href = `/progress/${encodeURIComponent(analysisId)}`;
+        });
+    });
+    
+    // Download button — progress page has Word/Excel download links
+    document.querySelectorAll('.download-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const analysisId = this.dataset.analysisId;
+            window.location.href = `/progress/${encodeURIComponent(analysisId)}`;
+        });
+    });
+    
+    // Delete button
+    document.querySelectorAll('.delete-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const analysisId = this.dataset.analysisId;
+            const modal = new bootstrap.Modal(document.getElementById('deleteModal'));
+            
+            // Store the analysis ID for deletion
+            document.getElementById('confirmDeleteBtn').dataset.analysisId = analysisId;
+            modal.show();
+        });
+    });
+    
+    // Confirm delete
+    document.getElementById('confirmDeleteBtn').addEventListener('click', function() {
+        const analysisId = this.dataset.analysisId;
+        
+        // Add loading state
+        this.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Deleting...';
+        this.disabled = true;
+        
+        // Here you would make an API call to delete the analysis
+        // For now, we'll just hide the modal and show a message
+        setTimeout(() => {
+            const modal = bootstrap.Modal.getInstance(document.getElementById('deleteModal'));
+            modal.hide();
+            
+            // Remove the row from the table
+            const row = document.querySelector(`[data-analysis-id="${analysisId}"]`);
+            if (row) {
+                row.style.opacity = '0.5';
+                row.style.pointerEvents = 'none';
+                row.innerHTML = '<td colspan="5" class="text-center text-muted">Analysis deleted</td>';
+            }
+            
+            // Show success toast
+            const toast = new bootstrap.Toast(document.getElementById('successToast'));
+            toast.show();
+            
+            // Update statistics
+            updateStatistics();
+        }, 1000);
+    });
+    
+    // Statistics animation
+    function animateStatistics() {
+        const stats = document.querySelectorAll('[data-value]');
+        
+        stats.forEach(stat => {
+            const finalValue = parseInt(stat.dataset.value);
+            const duration = 1500; // 1.5 seconds
+            const steps = 50;
+            const increment = finalValue / steps;
+            let currentValue = 0;
+            let step = 0;
+            
+            const timer = setInterval(() => {
+                step++;
+                currentValue += increment;
+                
+                if (step >= steps) {
+                    currentValue = finalValue;
+                    clearInterval(timer);
+                }
+                
+                stat.textContent = Math.floor(currentValue);
+            }, duration / steps);
+        });
+    }
+    
+    // Update statistics after deletion
+    function updateStatistics() {
+        const totalAnalyses = document.querySelector('[data-value]');
+        if (totalAnalyses) {
+            const currentValue = parseInt(totalAnalyses.textContent);
+            totalAnalyses.textContent = currentValue - 1;
+            totalAnalyses.dataset.value = currentValue - 1;
+        }
+    }
+    
+    // Enhanced hover effects for table rows
+    document.querySelectorAll('.analysis-row').forEach(row => {
+        row.addEventListener('mouseenter', function() {
+            this.style.backgroundColor = 'var(--cisco-light-blue)';
+            this.style.transform = 'translateY(-2px)';
+        });
+        
+        row.addEventListener('mouseleave', function() {
+            this.style.backgroundColor = '';
+            this.style.transform = 'translateY(0)';
+        });
+    });
+    
+    // Enhanced click effects for action buttons
+    document.querySelectorAll('.btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            this.style.transform = 'scale(0.95)';
+            setTimeout(() => {
+                this.style.transform = 'scale(1)';
+            }, 150);
+        });
+    });
+    
+    // Enhanced card animations
+    const cards = document.querySelectorAll('.card');
+    cards.forEach((card, index) => {
+        card.style.animationDelay = `${index * 0.1}s`;
+        
+        // Add hover effects
+        card.addEventListener('mouseenter', function() {
+            this.style.transform = 'translateY(-5px)';
+        });
+        
+        card.addEventListener('mouseleave', function() {
+            this.style.transform = 'translateY(0)';
+        });
+    });
+    
+    // Add floating animation to icons
+    document.querySelectorAll('.fa-2x').forEach(icon => {
+        icon.style.animation = 'float 3s ease-in-out infinite';
+    });
+    
+    // Add CSS for floating animation
+    const style = document.createElement('style');
+    style.textContent = `
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-5px); }
+        }
+    `;
+    document.head.appendChild(style);
+    
+    // Enhanced table interactions
+    document.querySelectorAll('tbody tr').forEach(row => {
+        row.addEventListener('click', function(e) {
+            // Don't trigger if clicking on action buttons
+            if (!e.target.closest('.btn-group')) {
+                const analysisId = this.dataset.analysisId;
+                if (analysisId) {
+                    window.location.href = `/progress/${encodeURIComponent(analysisId)}`;
+                }
+            }
+        });
+        
+        // Add cursor pointer to indicate clickable
+        row.style.cursor = 'pointer';
+    });
+    
+    // Add loading states to buttons
+    document.querySelectorAll('.btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            if (!this.disabled) {
+                const originalText = this.innerHTML;
+                this.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Loading...';
+                this.disabled = true;
+                
+                // Reset after a delay (in real implementation, this would be after the action completes)
+                setTimeout(() => {
+                    this.innerHTML = originalText;
+                    this.disabled = false;
+                }, 2000);
+            }
+        });
+    });
+    
+    // Add search functionality (if needed)
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.className = 'form-control mb-3';
+    searchInput.placeholder = 'Search analyses...';
+    searchInput.style.maxWidth = '300px';
+    
+    const searchContainer = document.createElement('div');
+    searchContainer.className = 'text-end mb-3';
+    searchContainer.appendChild(searchInput);
+    
+    const tableCard = document.querySelector('.card');
+    if (tableCard) {
+        tableCard.parentNode.insertBefore(searchContainer, tableCard);
+        
+        // Add search functionality
+        searchInput.addEventListener('input', function() {
+            const searchTerm = this.value.toLowerCase();
+            const rows = document.querySelectorAll('.analysis-row');
+            
+            rows.forEach(row => {
+                const text = row.textContent.toLowerCase();
+                if (text.includes(searchTerm)) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        });
+    }
+});
+</script>
+{% endblock %}

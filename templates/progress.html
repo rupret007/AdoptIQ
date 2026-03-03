@@ -1,0 +1,501 @@
+{% extends "base.html" %}
+
+{% block title %}Analysis Progress - AdoptIQ{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row justify-content-center">
+        <div class="col-lg-8">
+            <!-- Progress Header -->
+            <div class="text-center mb-4 fade-in">
+                <h2 class="fw-bold text-primary mb-3">
+                    <i class="fas fa-cog fa-spin me-2"></i>Analysis in Progress
+                </h2>
+                <p class="text-muted">Your portfolio analysis is running. This typically takes 2-5 minutes.</p>
+            </div>
+
+            <!-- Progress Card -->
+            <div class="card shadow-cisco fade-in" style="animation-delay: 0.1s;">
+                <div class="card-body p-4">
+                    <!-- Progress Bar -->
+                    <div class="mb-4">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <span class="fw-semibold">Overall Progress</span>
+                            <span class="text-primary fw-bold" id="progressPercent">0%</span>
+                        </div>
+                        <div class="progress" style="height: 1rem;">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                                 role="progressbar" style="width: 0%" id="progressBar">
+                                0%
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Current Status -->
+                    <div class="text-center mb-4">
+                        <div class="bg-primary bg-opacity-10 p-3 rounded">
+                            <h6 class="fw-bold mb-2" id="currentMessage">Initializing analysis...</h6>
+                            <p class="text-muted mb-0 small" id="currentDetails">Preparing analysis environment</p>
+                            <div class="mt-2" id="etaInfo" style="display: none;">
+                                <small class="text-info">
+                                    <i class="fas fa-clock me-1"></i>
+                                    <span id="etaText">Estimated time remaining: 3-5 minutes</span>
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Progress Steps -->
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-2">
+                            <div class="progress-step text-center" data-step="initializing">
+                                <div class="bg-secondary bg-opacity-10 p-2 rounded-circle d-inline-flex mb-2">
+                                    <i class="fas fa-play text-secondary"></i>
+                                </div>
+                                <small class="d-block text-muted">Initialize</small>
+                                <div class="sub-progress mt-1" style="display: none;">
+                                    <div class="progress" style="height: 0.5rem;">
+                                        <div class="progress-bar bg-info" style="width: 0%"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-2">
+                            <div class="progress-step text-center" data-step="connecting">
+                                <div class="bg-secondary bg-opacity-10 p-2 rounded-circle d-inline-flex mb-2">
+                                    <i class="fas fa-database text-secondary"></i>
+                                </div>
+                                <small class="d-block text-muted">Connect</small>
+                                <div class="sub-progress mt-1" style="display: none;">
+                                    <div class="progress" style="height: 0.5rem;">
+                                        <div class="progress-bar bg-info" style="width: 0%"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-2">
+                            <div class="progress-step text-center" data-step="fetching">
+                                <div class="bg-secondary bg-opacity-10 p-2 rounded-circle d-inline-flex mb-2">
+                                    <i class="fas fa-download text-secondary"></i>
+                                </div>
+                                <small class="d-block text-muted">Fetch Data</small>
+                                <div class="sub-progress mt-1" style="display: none;">
+                                    <div class="progress" style="height: 0.5rem;">
+                                        <div class="progress-bar bg-info" style="width: 0%"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-2">
+                            <div class="progress-step text-center" data-step="processing">
+                                <div class="bg-secondary bg-opacity-10 p-2 rounded-circle d-inline-flex mb-2">
+                                    <i class="fas fa-cogs text-secondary"></i>
+                                </div>
+                                <small class="d-block text-muted">Process</small>
+                                <div class="sub-progress mt-1" style="display: none;">
+                                    <div class="progress" style="height: 0.5rem;">
+                                        <div class="progress-bar bg-info" style="width: 0%"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-2">
+                            <div class="progress-step text-center" data-step="ai_insights">
+                                <div class="bg-secondary bg-opacity-10 p-2 rounded-circle d-inline-flex mb-2">
+                                    <i class="fas fa-brain text-secondary"></i>
+                                </div>
+                                <small class="d-block text-muted">AI Insights</small>
+                                <div class="sub-progress mt-1" style="display: none;">
+                                    <div class="progress" style="height: 0.5rem;">
+                                        <div class="progress-bar bg-info" style="width: 0%"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-2">
+                            <div class="progress-step text-center" data-step="reports">
+                                <div class="bg-secondary bg-opacity-10 p-2 rounded-circle d-inline-flex mb-2">
+                                    <i class="fas fa-file-alt text-secondary"></i>
+                                </div>
+                                <small class="d-block text-muted">Reports</small>
+                                <div class="sub-progress mt-1" style="display: none;">
+                                    <div class="progress" style="height: 0.5rem;">
+                                        <div class="progress-bar bg-info" style="width: 0%"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Status Log -->
+                    <div class="bg-light p-3 rounded">
+                        <h6 class="fw-bold mb-3">
+                            <i class="fas fa-list me-2"></i>Status Log
+                        </h6>
+                        <div id="statusLog" class="small">
+                            <div class="text-muted">Waiting for status updates...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="text-center mt-4 fade-in" style="animation-delay: 0.3s;">
+                <button id="cancelBtn" class="btn btn-outline-danger me-2" style="display: none;">
+                    <i class="fas fa-stop me-2"></i>Cancel Analysis
+                </button>
+                <a href="{{ url_for('index') }}" class="btn btn-outline-secondary me-2">
+                    <i class="fas fa-arrow-left me-2"></i>Back to Analysis
+                </a>
+                <a href="{{ url_for('index') }}" class="btn btn-outline-primary">
+                    <i class="fas fa-home me-2"></i>Dashboard
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Success Modal -->
+<div class="modal fade" id="successModal" tabindex="-1" data-bs-backdrop="static">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-body text-center py-4">
+                <div class="bg-success bg-opacity-10 p-3 rounded-circle d-inline-flex mb-3">
+                    <i class="fas fa-check-circle text-success fa-2x"></i>
+                </div>
+                <h5 class="fw-bold">Analysis Complete!</h5>
+                <p class="text-muted">Your portfolio analysis has finished successfully.</p>
+                <div class="d-grid">
+                    <a href="#" class="btn btn-success" id="viewResultsBtn">
+                        <i class="fas fa-chart-bar me-2"></i>View Results
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Error Modal -->
+<div class="modal fade" id="errorModal" tabindex="-1" data-bs-backdrop="static">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title text-danger">
+                    <i class="fas fa-exclamation-triangle me-2"></i>Analysis Failed
+                </h5>
+            </div>
+            <div class="modal-body">
+                <div class="text-center mb-3">
+                    <div class="bg-danger bg-opacity-10 p-3 rounded-circle d-inline-flex mb-3">
+                        <i class="fas fa-exclamation-triangle text-danger fa-2x"></i>
+                    </div>
+                </div>
+                
+                <div class="mb-3">
+                    <h6 class="fw-bold" id="errorTitle">Analysis Error</h6>
+                    <p class="text-muted" id="errorMessage">An error occurred during analysis.</p>
+                </div>
+                
+                <div class="bg-light p-3 rounded mb-3" id="errorDetails" style="display: none;">
+                    <h6 class="fw-bold mb-2">Error Details:</h6>
+                    <div id="errorDetailsContent" class="small text-muted"></div>
+                </div>
+                
+                <div class="bg-info bg-opacity-10 p-3 rounded">
+                    <h6 class="fw-bold text-info mb-2">
+                        <i class="fas fa-lightbulb me-2"></i>What to do next?
+                    </h6>
+                    <ul class="mb-0 small">
+                        <li>Check your internet connection and try again</li>
+                        <li>Verify your analysis parameters are correct</li>
+                        <li>If the problem persists, contact support</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div class="d-grid gap-2 w-100">
+                    <a href="{{ url_for('index') }}" class="btn btn-primary">
+                        <i class="fas fa-redo me-2"></i>Try Again
+                    </a>
+                    <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">
+                        <i class="fas fa-home me-2"></i>Dashboard
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const analysisId = '{{ analysis_id }}';
+    let statusPolling;
+    let statusLog = [];
+    
+    // Start status polling
+    startStatusPolling();
+    
+    // Setup cancel button
+    setupCancelButton();
+    
+    function startStatusPolling() {
+        // Poll every 2 seconds
+        statusPolling = setInterval(checkStatus, 2000);
+        
+        // Initial check
+        checkStatus();
+    }
+    
+    function setupCancelButton() {
+        const cancelBtn = document.getElementById('cancelBtn');
+        cancelBtn.addEventListener('click', function() {
+            if (confirm('Are you sure you want to cancel this analysis? This action cannot be undone.')) {
+                cancelAnalysis();
+            }
+        });
+    }
+    
+    function cancelAnalysis() {
+        const cancelBtn = document.getElementById('cancelBtn');
+        cancelBtn.disabled = true;
+        cancelBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Cancelling...';
+        
+        fetch(`/api/cancel/${analysisId}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'cancelled') {
+                showNotification('Analysis cancelled successfully', 'success');
+                setTimeout(() => {
+                    window.location.href = '/';
+                }, 2000);
+            } else {
+                showNotification(data.error || 'Failed to cancel analysis', 'error');
+                cancelBtn.disabled = false;
+                cancelBtn.innerHTML = '<i class="fas fa-stop me-2"></i>Cancel Analysis';
+            }
+        })
+        .catch(error => {
+            console.error('Error cancelling analysis:', error);
+            showNotification('Error cancelling analysis', 'error');
+            cancelBtn.disabled = false;
+            cancelBtn.innerHTML = '<i class="fas fa-stop me-2"></i>Cancel Analysis';
+        });
+    }
+    
+    function checkStatus() {
+        fetch(`/api/status/${analysisId}`)
+            .then(response => response.json())
+            .then(data => {
+                updateProgress(data);
+                
+                // Check if analysis is complete
+                if (data.status === 'completed') {
+                    clearInterval(statusPolling);
+                    showSuccessModal(data);
+                } else if (data.status === 'failed') {
+                    clearInterval(statusPolling);
+                    showErrorModal(data);
+                }
+            })
+            .catch(error => {
+                console.error('Error checking status:', error);
+                addStatusLog('Error checking status', 'error');
+            });
+    }
+    
+    function updateProgress(data) {
+        // Update progress bar
+        const progressBar = document.getElementById('progressBar');
+        const progressPercent = document.getElementById('progressPercent');
+        const currentMessage = document.getElementById('currentMessage');
+        const currentDetails = document.getElementById('currentDetails');
+        const etaInfo = document.getElementById('etaInfo');
+        const etaText = document.getElementById('etaText');
+        
+        if (data.progress !== undefined) {
+            progressBar.style.width = data.progress + '%';
+            progressBar.textContent = data.progress + '%';
+            progressPercent.textContent = data.progress + '%';
+            
+            // Show ETA for running analysis
+            if (data.status === 'running' && data.progress > 0 && data.progress < 100) {
+                etaInfo.style.display = 'block';
+                const remainingProgress = 100 - data.progress;
+                const estimatedMinutes = Math.max(1, Math.ceil(remainingProgress / 20)); // Rough estimate
+                etaText.textContent = `Estimated time remaining: ${estimatedMinutes} minute${estimatedMinutes > 1 ? 's' : ''}`;
+            } else {
+                etaInfo.style.display = 'none';
+            }
+        }
+        
+        if (data.message) {
+            currentMessage.textContent = data.message;
+        }
+        
+        if (data.details) {
+            currentDetails.textContent = data.details;
+        }
+        
+        // Update progress steps
+        if (data.step) {
+            updateProgressStep(data.step, true);
+        }
+        
+        // Show/hide cancel button based on status
+        const cancelBtn = document.getElementById('cancelBtn');
+        if (data.status === 'running' && data.progress < 100) {
+            cancelBtn.style.display = 'inline-block';
+        } else {
+            cancelBtn.style.display = 'none';
+        }
+        
+        // Add to status log
+        if (data.message && data.timestamp) {
+            addStatusLog(data.message, 'info', data.details);
+        }
+    }
+    
+    function updateProgressStep(stepName, active) {
+        const step = document.querySelector(`[data-step="${stepName}"]`);
+        if (step) {
+            const icon = step.querySelector('i');
+            const circle = step.querySelector('.bg-secondary, .bg-primary, .bg-success');
+            const subProgress = step.querySelector('.sub-progress');
+            
+            if (active) {
+                circle.className = 'bg-success bg-opacity-10 p-2 rounded-circle d-inline-flex mb-2';
+                icon.className = icon.className.replace('text-secondary text-primary', 'text-success');
+                
+                // Show sub-progress for active step
+                if (subProgress) {
+                    subProgress.style.display = 'block';
+                    // Animate sub-progress bar
+                    const progressBar = subProgress.querySelector('.progress-bar');
+                    progressBar.style.width = '0%';
+                    setTimeout(() => {
+                        progressBar.style.width = '100%';
+                    }, 100);
+                }
+            } else {
+                // Hide sub-progress for inactive steps
+                if (subProgress) {
+                    subProgress.style.display = 'none';
+                }
+            }
+        }
+    }
+    
+    function addStatusLog(message, type = 'info', details = null) {
+        const timestamp = new Date().toLocaleTimeString();
+        const logEntry = {
+            timestamp: timestamp,
+            message: message,
+            type: type,
+            details: details
+        };
+        
+        // Add to log array (keep last 10 entries)
+        statusLog.push(logEntry);
+        if (statusLog.length > 10) {
+            statusLog.shift();
+        }
+        
+        // Update display
+        updateStatusLogDisplay();
+    }
+    
+    function updateStatusLogDisplay() {
+        const logContainer = document.getElementById('statusLog');
+        logContainer.innerHTML = '';
+        
+        statusLog.forEach(entry => {
+            const logItem = document.createElement('div');
+            logItem.className = 'mb-2';
+            
+            const iconClass = entry.type === 'error' ? 'text-danger' : 'text-primary';
+            const icon = entry.type === 'error' ? 'exclamation-circle' : 'info-circle';
+            
+            logItem.innerHTML = `
+                <div class="d-flex align-items-start">
+                    <i class="fas fa-${icon} ${iconClass} me-2 mt-1"></i>
+                    <div class="flex-grow-1">
+                        <div class="fw-semibold">${entry.message}</div>
+                        ${entry.details ? `<small class="text-muted">${entry.details}</small>` : ''}
+                        <small class="text-muted d-block">${entry.timestamp}</small>
+                    </div>
+                </div>
+            `;
+            
+            logContainer.appendChild(logItem);
+        });
+        
+        // Scroll to bottom
+        logContainer.scrollTop = logContainer.scrollHeight;
+    }
+    
+    function showSuccessModal(data) {
+        const modal = new bootstrap.Modal(document.getElementById('successModal'));
+        const viewResultsBtn = document.getElementById('viewResultsBtn');
+        viewResultsBtn.href = `/progress/${encodeURIComponent(analysisId)}`;
+        modal.show();
+    }
+    
+    function showErrorModal(data) {
+        const modal = new bootstrap.Modal(document.getElementById('errorModal'));
+        const errorTitle = document.getElementById('errorTitle');
+        const errorMessage = document.getElementById('errorMessage');
+        const errorDetailsContent = document.getElementById('errorDetailsContent');
+        const errorDetails = document.getElementById('errorDetails');
+
+        if (data.message) {
+            errorTitle.textContent = data.message;
+            errorMessage.textContent = data.message;
+        }
+
+        if (data.details) {
+            errorDetailsContent.textContent = data.details;
+            errorDetails.style.display = 'block';
+        } else {
+            errorDetails.style.display = 'none';
+        }
+        modal.show();
+    }
+    
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', function() {
+        if (statusPolling) {
+            clearInterval(statusPolling);
+        }
+    });
+    
+    // Notification system
+    function showNotification(message, type = 'info') {
+        // Create notification element
+        const notification = document.createElement('div');
+        notification.className = `alert alert-${type === 'error' ? 'danger' : type} alert-dismissible fade show position-fixed`;
+        notification.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
+        notification.innerHTML = `
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        `;
+        
+        // Add to page
+        document.body.appendChild(notification);
+        
+        // Auto-remove after 5 seconds
+        setTimeout(() => {
+            if (notification.parentNode) {
+                notification.remove();
+            }
+        }, 5000);
+    }
+});
+</script>
+{% endblock %}

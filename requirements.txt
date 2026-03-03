@@ -1,0 +1,50 @@
+# AdoptIQ Executive Analyzer - Production Dependencies
+# Core data processing and analysis
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Database and data warehouse connectivity
+snowflake-connector-python>=3.0.0
+snowflake-sqlalchemy>=1.4.0
+sqlalchemy>=2.0.0
+
+# Excel file processing
+openpyxl>=3.1.0
+xlsxwriter>=3.1.0
+
+# Word document generation
+python-docx>=0.8.11
+
+# Web framework
+Flask>=2.3.0
+Flask-WTF>=1.1.0
+WTForms>=3.0.0
+
+# Authentication and security
+hvac>=1.0.0
+cryptography>=41.0.0
+
+# AI and machine learning
+openai>=1.0.0
+
+# HTTP requests and web scraping
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+feedparser>=6.0.0
+
+# Data visualization and reporting
+rich>=13.0.0
+
+# Command line interface
+typer>=0.9.0
+
+# Development and packaging
+pyinstaller>=5.13.0
+
+# Environment variables (.env)
+python-dotenv>=1.0.0
+
+# Additional utilities
+python-dateutil>=2.8.0
+pytz>=2023.3
+psutil>=5.9.0

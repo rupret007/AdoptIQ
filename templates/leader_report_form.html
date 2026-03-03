@@ -1,0 +1,304 @@
+{% extends "base.html" %}
+
+{% block title %}Leader Report - AdoptIQ{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-8">
+            <!-- Header -->
+            <header class="text-center mb-5">
+                <div class="mb-4">
+                    <div class="bg-primary bg-opacity-10 d-inline-flex p-4 rounded-circle mb-3 hover-scale">
+                        <i class="fas fa-users-cog fa-3x text-primary" aria-hidden="true"></i>
+                    </div>
+                </div>
+                <h1 class="display-4 fw-bold text-primary mb-3 fade-in">
+                    Leader Report Generator
+                </h1>
+                <p class="lead text-muted fade-in" style="animation-delay: 0.2s; font-size: 1.125rem;">
+                    Generate comprehensive team activity reports showing Action Plans, Adoption Barriers,<br>
+                    Customer Pulse, and TAC cases for all your direct reports.
+                </p>
+            </header>
+
+            <!-- VPN Requirement Alert -->
+            <div class="alert alert-warning alert-dismissible fade show fade-in mb-4" role="alert" style="animation-delay: 0.25s;">
+                <div class="d-flex align-items-start">
+                    <i class="fas fa-shield-alt fa-2x me-3 text-warning" aria-hidden="true"></i>
+                    <div>
+                        <h5 class="alert-heading mb-2">
+                            <i class="fas fa-exclamation-triangle me-2"></i>Cisco VPN Required
+                        </h5>
+                        <p class="mb-2">
+                            Leader Reports require access to <strong>two data sources</strong> for complete and accurate reporting:
+                        </p>
+                        <ul class="mb-2">
+                            <li><strong>CSConsole Data</strong> (Snowflake): Action Plans, Adoption Barriers, Customer Pulse, Subscriptions - <strong class="text-danger">Requires VPN</strong></li>
+                            <li><strong>CSOne Data</strong>: Access latest AdoptIQ Export from CSOne via link, or run your own report and browse to select</li>
+                        </ul>
+                        <p class="mb-0">
+                            <i class="fas fa-info-circle me-1"></i>
+                            <strong>Before generating a report</strong>, please ensure you are connected to the Cisco VPN to access Snowflake database. 
+                            Without VPN, report generation will fail.
+                        </p>
+                    </div>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+
+            <!-- Form Card -->
+            <div class="card shadow-cisco fade-in" style="animation-delay: 0.3s;">
+                <div class="card-header">
+                    <h2 class="h5 mb-0">
+                        <i class="fas fa-cog me-2" aria-hidden="true"></i>Report Configuration
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <form id="leaderReportForm" method="POST" enctype="multipart/form-data">
+                        
+                        <!-- Manager Selection -->
+                        <div class="mb-4">
+                            <label for="manager" class="form-label fw-semibold">
+                                <i class="fas fa-user-tie me-2 text-primary" aria-hidden="true"></i>Select Manager
+                            </label>
+                            <select class="form-select form-select-lg" id="manager" name="manager" required>
+                                <option value="">Choose manager...</option>
+                                {% for manager in managers %}
+                                <option value="{{ manager }}">{{ manager }}</option>
+                                {% endfor %}
+                            </select>
+                            <div class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                Select the manager to generate a team activity report for all their direct reports.
+                            </div>
+                        </div>
+
+                        <!-- Time Period -->
+                        <div class="mb-4">
+                            <label for="days" class="form-label fw-semibold">
+                                <i class="fas fa-calendar-alt me-2 text-success" aria-hidden="true"></i>Analysis Period (Days)
+                            </label>
+                            <input type="number" class="form-control form-control-lg" id="days" name="days" 
+                                   value="90" min="1" max="365" required>
+                            <div class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                Number of days to look back for team activities (1-365 days).
+                            </div>
+                        </div>
+
+                        <!-- CSOne File Upload -->
+                        <div class="mb-4">
+                            <label for="csone_file" class="form-label fw-semibold">
+                                <i class="fas fa-file-excel me-2 text-warning" aria-hidden="true"></i>CSOne TAC Cases File (Optional)
+                            </label>
+                            {% if csone_shared_folder_url %}
+                            <div class="alert alert-light border mb-3 py-2">
+                                <strong class="text-primary">Get your report:</strong>
+                                <a href="{{ csone_shared_folder_url }}" target="_blank" rel="noopener noreferrer" 
+                                   class="btn btn-outline-primary btn-sm fw-semibold ms-2">
+                                    <i class="fas fa-external-link-alt me-1" aria-hidden="true"></i>Access latest AdoptIQ Export from CSOne
+                                </a>
+                                <span class="text-muted small ms-2">— or run your own report in CSOne</span>
+                            </div>
+                            {% endif %}
+                            <input class="form-control form-control-lg" type="file" id="csone_file" name="csone_file"
+                                   accept=".xlsx,.xls">
+                            <div class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                {% if csone_shared_folder_url %}
+                                Browse to select the file you downloaded from the link above, or one you ran yourself.
+                                {% else %}
+                                Run your own CSOne report and browse above to select your file.
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        <!-- Report Sections Info -->
+                        <div class="alert alert-info">
+                            <h6 class="alert-heading">
+                                <i class="fas fa-info-circle me-2"></i>Report Sections
+                            </h6>
+                            <p class="mb-2">This leader report will include:</p>
+                            <ul class="mb-0">
+                                <li><strong>Page 1:</strong> Summary table with counts of APs, ABs, and CPs per team member</li>
+                                <li><strong>Subsequent pages:</strong> Detailed AdoptIQ summaries for each direct report including:
+                                    <ul>
+                                        <li>Customer accounts and subscriptions</li>
+                                        <li>Products and technologies</li>
+                                        <li>Top challenges and adoption barriers</li>
+                                        <li>Recent action plans (up to 5)</li>
+                                        <li><strong>TAC Cases</strong> (up to 20 with priority, status, and dates)</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Final section:</strong> Detailed list of all adoption barriers with product, category, 
+                                    severity, and last updated information</li>
+                            </ul>
+                        </div>
+
+                        <!-- Submit Button -->
+                        <div class="d-grid gap-2">
+                            <button type="submit" class="btn btn-primary btn-lg" id="submitBtn">
+                                <i class="fas fa-rocket me-2"></i>Generate Leader Report
+                            </button>
+                            <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-lg">
+                                <i class="fas fa-arrow-left me-2"></i>Back to Dashboard
+                            </a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Feature Highlights -->
+            <div class="row mt-5">
+                <div class="col-md-4 mb-3">
+                    <div class="card h-100 border-0 shadow-sm">
+                        <div class="card-body text-center">
+                            <div class="bg-primary bg-opacity-10 p-3 rounded-circle d-inline-flex mb-3">
+                                <i class="fas fa-chart-bar fa-2x text-primary"></i>
+                            </div>
+                            <h6 class="card-title">Comprehensive Metrics</h6>
+                            <p class="card-text small text-muted">
+                                Track APs, ABs, CPs, and TAC cases across your entire team
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4 mb-3">
+                    <div class="card h-100 border-0 shadow-sm">
+                        <div class="card-body text-center">
+                            <div class="bg-success bg-opacity-10 p-3 rounded-circle d-inline-flex mb-3">
+                                <i class="fas fa-users fa-2x text-success"></i>
+                            </div>
+                            <h6 class="card-title">Per-Person Analysis</h6>
+                            <p class="card-text small text-muted">
+                                Detailed breakdown for each direct report with customer insights
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4 mb-3">
+                    <div class="card h-100 border-0 shadow-sm">
+                        <div class="card-body text-center">
+                            <div class="bg-warning bg-opacity-10 p-3 rounded-circle d-inline-flex mb-3">
+                                <i class="fas fa-file-word fa-2x text-warning"></i>
+                            </div>
+                            <h6 class="card-title">Executive Ready</h6>
+                            <p class="card-text small text-muted">
+                                Professional Word document perfect for leadership reviews
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.fade-in {
+    animation: fadeIn 0.8s ease-in;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.hover-scale {
+    transition: transform 0.3s ease;
+}
+
+.hover-scale:hover {
+    transform: scale(1.1);
+}
+
+.shadow-cisco {
+    box-shadow: 0 4px 6px rgba(0, 123, 199, 0.1);
+}
+
+.card {
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 8px 12px rgba(0, 123, 199, 0.15);
+}
+</style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const form = document.getElementById('leaderReportForm');
+    const submitBtn = document.getElementById('submitBtn');
+    
+    form.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        
+        // Disable submit button
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Generating Report...';
+        
+        try {
+            // Create FormData from the form
+            const formData = new FormData(form);
+            
+            // Submit the form
+            const response = await fetch('/start_leader_report', {
+                method: 'POST',
+                body: formData
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                // Redirect to progress page
+                window.location.href = result.redirect_url;
+            } else {
+                // Show error
+                alert('Error: ' + (result.error || 'Unknown error occurred'));
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<i class="fas fa-rocket me-2"></i>Generate Leader Report';
+            }
+        } catch (error) {
+            console.error('Error:', error);
+            alert('Error submitting form: ' + error.message);
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<i class="fas fa-rocket me-2"></i>Generate Leader Report';
+        }
+    });
+    
+    // File input validation
+    const fileInput = document.getElementById('csone_file');
+    fileInput.addEventListener('change', function() {
+        const file = this.files[0];
+        if (file) {
+            // Check file size (50MB max)
+            if (file.size > 50 * 1024 * 1024) {
+                alert('File too large. Maximum size is 50MB.');
+                this.value = '';
+                return;
+            }
+            
+            // Check file extension
+            const validExtensions = ['.xlsx', '.xls'];
+            const fileName = file.name.toLowerCase();
+            const isValid = validExtensions.some(ext => fileName.endsWith(ext));
+            
+            if (!isValid) {
+                alert('Invalid file type. Please upload an Excel file (.xlsx or .xls).');
+                this.value = '';
+                return;
+            }
+        }
+    });
+});
+</script>
+{% endblock %}
+

@@ -1,0 +1,150 @@
+{
+  "managers": [
+    "Dee Kindrick",
+    "Brian Frazier",
+    "Shams",
+    "All Managers"
+  ],
+  "team_roster": [
+    {
+      "manager": "Dee Kindrick",
+      "name": "Anthony Ortiz",
+      "email": "antortiz@cisco.com"
+    },
+    {
+      "manager": "Dee Kindrick",
+      "name": "Brice Mercer",
+      "email": "brimerce@cisco.com"
+    },
+    {
+      "manager": "Dee Kindrick",
+      "name": "Cesar Ozuna",
+      "email": "ceozuna@cisco.com"
+    },
+    {
+      "manager": "Dee Kindrick",
+      "name": "Chris Clark",
+      "email": "christc3@cisco.com"
+    },
+    {
+      "manager": "Dee Kindrick",
+      "name": "Christine Simrell",
+      "email": "chrsimre@cisco.com"
+    },
+    {
+      "manager": "Dee Kindrick",
+      "name": "Eli Walsh",
+      "email": "elwalsh@cisco.com"
+    },
+    {
+      "manager": "Dee Kindrick",
+      "name": "Michael Ramsey",
+      "email": "michrams@cisco.com"
+    },
+    {
+      "manager": "Dee Kindrick",
+      "name": "Michael Thompson",
+      "email": "mithomp2@cisco.com"
+    },
+    {
+      "manager": "Dee Kindrick",
+      "name": "Nate Hardy",
+      "email": "nahardy@cisco.com"
+    },
+    {
+      "manager": "Dee Kindrick",
+      "name": "Prabhakar Dakinedi",
+      "email": "pdakined@cisco.com"
+    },
+    {
+      "manager": "Dee Kindrick",
+      "name": "Stephen Williams",
+      "email": "stepwil3@cisco.com"
+    },
+    {
+      "manager": "Dee Kindrick",
+      "name": "Xavier Pena",
+      "email": "xpena@cisco.com"
+    },
+    {
+      "manager": "Brian Frazier",
+      "name": "Angelica Hernandez Becerra",
+      "email": "angelihe@cisco.com"
+    },
+    {
+      "manager": "Brian Frazier",
+      "name": "Arpit Patel",
+      "email": "arpitpat@cisco.com"
+    },
+    {
+      "manager": "Brian Frazier",
+      "name": "Brandon Doan",
+      "email": "brdoan@cisco.com"
+    },
+    {
+      "manager": "Brian Frazier",
+      "name": "Greg Dolberry",
+      "email": "gdolberr@cisco.com"
+    },
+    {
+      "manager": "Brian Frazier",
+      "name": "Haydee Hernandez Ceja",
+      "email": "hayherna@cisco.com"
+    },
+    {
+      "manager": "Brian Frazier",
+      "name": "Jeffrey Story",
+      "email": "jestory@cisco.com"
+    },
+    {
+      "manager": "Brian Frazier",
+      "name": "Jose Nerio Chavarri Espinosa",
+      "email": "josencha@cisco.com"
+    },
+    {
+      "manager": "Brian Frazier",
+      "name": "Mario Pena",
+      "email": "marpena2@cisco.com"
+    },
+    {
+      "manager": "Brian Frazier",
+      "name": "Nitish Sinha",
+      "email": "nitsinh2@cisco.com"
+    },
+    {
+      "manager": "Brian Frazier",
+      "name": "Samuel Tamayo",
+      "email": "samtamay@cisco.com"
+    },
+    {
+      "manager": "Brian Frazier",
+      "name": "William Phillips",
+      "email": "willphil@cisco.com"
+    },
+    {
+      "manager": "Shams",
+      "name": "Daniel O'Flaherty",
+      "email": "doflaher@cisco.com"
+    },
+    {
+      "manager": "Shams",
+      "name": "Hector Gonzalez",
+      "email": "hectgon2@cisco.com"
+    },
+    {
+      "manager": "Shams",
+      "name": "Ron Estillore",
+      "email": "restillo@cisco.com"
+    },
+    {
+      "manager": "Shams",
+      "name": "Tim Tyler",
+      "email": "tityler@cisco.com"
+    },
+    {
+      "manager": "Shams",
+      "name": "Ujjwal Aneja",
+      "email": "uaneja@cisco.com"
+    }
+  ]
+}
