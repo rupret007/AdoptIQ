@@ -38,28 +38,10 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Create secrets.env from GitHub Secrets
-        run: |
-          cat > secrets.env <<'EOF'
-          KEEPER_URL=${{ secrets.KEEPER_URL }}
-          KEEPER_NAMESPACE=${{ secrets.KEEPER_NAMESPACE }}
-          KEEPER_ROLE_ID=${{ secrets.KEEPER_ROLE_ID }}
-          KEEPER_SECRET_ID=${{ secrets.KEEPER_SECRET_ID }}
-          KEEPER_SECRET_PATH=${{ secrets.KEEPER_SECRET_PATH }}
-          SNOWFLAKE_ACCOUNT=${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USER=${{ secrets.SNOWFLAKE_USER }}
-          SNOWFLAKE_ROLE=${{ secrets.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_WAREHOUSE=${{ secrets.SNOWFLAKE_WAREHOUSE }}
-          CIRCUIT_CLIENT_ID=${{ secrets.CIRCUIT_CLIENT_ID }}
-          CIRCUIT_CLIENT_SECRET=${{ secrets.CIRCUIT_CLIENT_SECRET }}
-          CIRCUIT_APP_KEY=${{ secrets.CIRCUIT_APP_KEY }}
-          CIRCUIT_MODEL_NAME=${{ secrets.CIRCUIT_MODEL_NAME }}
-          PSIRT_API_KEY=${{ secrets.PSIRT_API_KEY }}
-          PSIRT_CLIENT_SECRET=${{ secrets.PSIRT_CLIENT_SECRET }}
-          ADOPTIQ_SECRET_KEY=${{ secrets.ADOPTIQ_SECRET_KEY }}
-          ADOPTIQ_ADMIN_SECRET_KEY=${{ secrets.ADOPTIQ_ADMIN_SECRET_KEY }}
-          EOF
-          sed -i '' 's/^[[:space:]]*//' secrets.env
+      - name: Create secrets.env
+        run: printenv SECRETS_ENV_FILE > secrets.env
+        env:
+          SECRETS_ENV_FILE: ${{ secrets.SECRETS_ENV_FILE }}
 
       - name: Embed credentials
         run: python embed_credentials.py
@@ -94,28 +76,11 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Create secrets.env from GitHub Secrets
+      - name: Create secrets.env
         shell: pwsh
-        run: |
-          @"
-          KEEPER_URL=${{ secrets.KEEPER_URL }}
-          KEEPER_NAMESPACE=${{ secrets.KEEPER_NAMESPACE }}
-          KEEPER_ROLE_ID=${{ secrets.KEEPER_ROLE_ID }}
-          KEEPER_SECRET_ID=${{ secrets.KEEPER_SECRET_ID }}
-          KEEPER_SECRET_PATH=${{ secrets.KEEPER_SECRET_PATH }}
-          SNOWFLAKE_ACCOUNT=${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USER=${{ secrets.SNOWFLAKE_USER }}
-          SNOWFLAKE_ROLE=${{ secrets.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_WAREHOUSE=${{ secrets.SNOWFLAKE_WAREHOUSE }}
-          CIRCUIT_CLIENT_ID=${{ secrets.CIRCUIT_CLIENT_ID }}
-          CIRCUIT_CLIENT_SECRET=${{ secrets.CIRCUIT_CLIENT_SECRET }}
-          CIRCUIT_APP_KEY=${{ secrets.CIRCUIT_APP_KEY }}
-          CIRCUIT_MODEL_NAME=${{ secrets.CIRCUIT_MODEL_NAME }}
-          PSIRT_API_KEY=${{ secrets.PSIRT_API_KEY }}
-          PSIRT_CLIENT_SECRET=${{ secrets.PSIRT_CLIENT_SECRET }}
-          ADOPTIQ_SECRET_KEY=${{ secrets.ADOPTIQ_SECRET_KEY }}
-          ADOPTIQ_ADMIN_SECRET_KEY=${{ secrets.ADOPTIQ_ADMIN_SECRET_KEY }}
-          "@ | Set-Content -Path secrets.env -Encoding UTF8
+        run: $env:SECRETS_ENV_FILE | Set-Content -Path secrets.env -Encoding UTF8
+        env:
+          SECRETS_ENV_FILE: ${{ secrets.SECRETS_ENV_FILE }}
 
       - name: Embed credentials
         run: python embed_credentials.py
