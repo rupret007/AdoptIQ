@@ -1177,3 +1177,81 @@ class TestRound20Fixes:
         assert isinstance(format_date(12345), str)
         assert isinstance(format_date("not-a-date"), str)
         assert format_date(None) == "N/A"
+
+
+class TestRound21Fixes:
+    """Round 21 audit fixes."""
+
+    def test_leader_progress_callback_logs_errors(self):
+        """Progress callback exceptions should be logged, not silently swallowed."""
+        with open(os.path.join(_PROJECT_ROOT, 'leader_report_generator.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'Progress callback error' in src
+        assert src.count('Progress callback error') >= 2
+
+    def test_leader_tac_column_guard(self):
+        """TAC cases should check column existence before access."""
+        with open(os.path.join(_PROJECT_ROOT, 'leader_report_generator.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "_tac_col in _tac_df.columns" in src
+
+    def test_leader_safe_len_for_data_get(self):
+        """Data source counts should use safe_len instead of raw len()."""
+        with open(os.path.join(_PROJECT_ROOT, 'leader_report_generator.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "self.safe_len(data.get('action_plans'))" in src
+        assert "self.safe_len(data.get('adoption_barriers'))" in src
+
+    def test_leader_paragraphs_guard(self):
+        """Cell paragraph access should check .paragraphs before [0]."""
+        with open(os.path.join(_PROJECT_ROOT, 'leader_report_generator.py'), encoding='utf-8') as f:
+            src = f.read()
+        count = src.count('if cell.paragraphs:') + src.count('if row_cells[') + src.count('if totals_cells[')
+        assert count >= 3, f"Expected at least 3 paragraph guards, found {count}"
+
+    def test_renewal_account_id_none_guard(self):
+        """advanced_renewal_analyzer should return early if account_id is None."""
+        with open(os.path.join(_PROJECT_ROOT, 'advanced_renewal_analyzer.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "if account_id is None:" in src
+        assert "Account ID not found" in src
+
+    def test_safe_num_helper_exists(self):
+        """_safe_num helper should exist in advanced_renewal_analyzer."""
+        from advanced_renewal_analyzer import _safe_num
+        assert _safe_num(None) == 0
+        assert _safe_num(float('nan')) == 0
+        assert _safe_num(0.5) == 0.5
+        assert _safe_num(42, default=10) == 42
+
+    def test_safe_num_with_format_specifier(self):
+        """_safe_num output should be formattable without ValueError."""
+        from advanced_renewal_analyzer import _safe_num
+        val = _safe_num(float('nan'))
+        result = f"{val:.1%}"
+        assert result == "0.0%"
+
+    def test_ask_ai_single_quote_escaping(self):
+        """ask_ai.html should escape single quotes in formatAnswer."""
+        with open(os.path.join(_PROJECT_ROOT, 'templates', 'ask_ai.html'), encoding='utf-8') as f:
+            src = f.read()
+        assert "&#x27;" in src
+
+    def test_leader_form_csrf_token(self):
+        """leader_report_form.html should include CSRF token."""
+        with open(os.path.join(_PROJECT_ROOT, 'templates', 'leader_report_form.html'), encoding='utf-8') as f:
+            src = f.read()
+        assert "csrf_token()" in src
+        assert "X-CSRFToken" in src
+
+    def test_schema_version_type_safety(self):
+        """import_all_data should handle non-integer schema_version."""
+        from incident_storage import import_all_data
+        result = import_all_data({'schema_version': '1.0', 'incidents': [], 'bugs': [], 'maintenances': []})
+        assert isinstance(result, dict)
+
+    def test_schema_version_string_float(self):
+        """import_all_data should not crash on string float schema_version."""
+        from incident_storage import import_all_data
+        result = import_all_data({'schema_version': 'abc', 'incidents': [], 'bugs': []})
+        assert isinstance(result, dict)

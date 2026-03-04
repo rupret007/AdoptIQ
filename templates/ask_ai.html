@@ -138,7 +138,8 @@ document.addEventListener('DOMContentLoaded', function() {
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#x27;');
         return escaped
             .replace(/^#### (.+)$/gm, '<h6 class="mb-1 mt-3 text-muted">$1</h6>')
             .replace(/^### (.+)$/gm, '<h6 class="mb-2 mt-3">$1</h6>')

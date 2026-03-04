@@ -144,8 +144,8 @@ class LeaderReportGenerator:
             if progress_callback:
                 try:
                     progress_callback(progress, message, step)
-                except Exception:
-                    pass
+                except Exception as _cb_err:
+                    logger.debug(f"Progress callback error: {_cb_err}")
 
         logger.info(f"Generating leader report for {manager_name} covering last {days} days")
         
@@ -285,8 +285,8 @@ class LeaderReportGenerator:
             if progress_callback:
                 try:
                     progress_callback(member_pct, f'Fetching data for {cssm_name} ({idx + 1}/{n_total})...', 'Team Data Collection')
-                except Exception:
-                    pass
+                except Exception as _cb_err:
+                    logger.debug(f"Progress callback error: {_cb_err}")
             
             logger.info(f"Collecting data for {cssm_name} ({idx + 1}/{n_total})...")
             
@@ -844,7 +844,8 @@ class LeaderReportGenerator:
                 cell.paragraphs[0].runs[0].font.bold = True
                 cell.paragraphs[0].runs[0].font.size = Pt(10)
                 cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
-            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            if cell.paragraphs:
+                cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             # Background color
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '007BC7')
@@ -871,9 +872,9 @@ class LeaderReportGenerator:
             row_cells[2].text = str(num_css)
             row_cells[3].text = ratio
             
-            # Center align
             for i in range(1, 4):
-                row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                if row_cells[i].paragraphs:
+                    row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             
             row_idx += 1
         
@@ -895,9 +896,9 @@ class LeaderReportGenerator:
         if totals_cells[3].paragraphs and totals_cells[3].paragraphs[0].runs:
             totals_cells[3].paragraphs[0].runs[0].font.bold = True
         
-        # Center align totals
         for i in range(1, 4):
-            totals_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            if totals_cells[i].paragraphs:
+                totals_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), 'E8E8E8')
             totals_cells[i]._element.get_or_add_tcPr().append(shading_elm)
@@ -1461,10 +1462,10 @@ class LeaderReportGenerator:
             stats_para = self.doc.add_paragraph()
             stats_para.add_run(f'Total Assigned Accounts: {len(customers)}\n').font.bold = True
             
-            total_abs = len(data.get('adoption_barriers', pd.DataFrame()))
-            total_aps = len(data.get('action_plans', pd.DataFrame()))
-            total_cps = len(data.get('customer_pulse', pd.DataFrame()))
-            total_tacs = len(data.get('tac_cases', pd.DataFrame()))
+            total_abs = self.safe_len(data.get('adoption_barriers'))
+            total_aps = self.safe_len(data.get('action_plans'))
+            total_cps = self.safe_len(data.get('customer_pulse'))
+            total_tacs = self.safe_len(data.get('tac_cases'))
             
             stats_para.add_run(f'Total Activities: {total_abs + total_aps + total_cps + total_tacs}\n')
             stats_para.add_run(f'  • Adoption Barriers: {total_abs}\n')
@@ -2551,9 +2552,11 @@ class LeaderReportGenerator:
                 })
         
         # Collect TAC Cases
-        if not data.get('tac_cases', pd.DataFrame()).empty:
-            customer_tacs = data['tac_cases'][
-                data['tac_cases']['Customer Name: Customer Name'].astype(str).str.contains(customer, case=False, na=False)
+        _tac_df = data.get('tac_cases', pd.DataFrame())
+        _tac_col = 'Customer Name: Customer Name'
+        if _tac_df is not None and not _tac_df.empty and _tac_col in _tac_df.columns:
+            customer_tacs = _tac_df[
+                _tac_df[_tac_col].astype(str).str.contains(customer, case=False, na=False)
             ]
             for _, tac in customer_tacs.iterrows():
                 # Enhanced data extraction with fallbacks
@@ -3385,11 +3388,11 @@ class LeaderReportGenerator:
         
         # Add data rows for each data source
         data_sources = [
-            ('Action Plans', len(data.get('action_plans', [])), 'CSConsole (Snowflake)', 'Record ID in CSConsole'),
-            ('Adoption Barriers', len(data.get('adoption_barriers', [])), 'CSConsole (Snowflake)', 'Record ID in CSConsole'),
-            ('Customer Pulse', len(data.get('customer_pulse', [])), 'CSConsole (Snowflake)', 'Record ID in CSConsole'),
-            ('TAC Cases', len(data.get('tac_cases', [])), 'CSOne (Excel)', 'Case # in CSOne'),
-            ('Subscriptions', len(data.get('subscriptions', [])), 'DSM Assignment (Snowflake)', 'Subscription ID in DSM Table')
+            ('Action Plans', self.safe_len(data.get('action_plans')), 'CSConsole (Snowflake)', 'Record ID in CSConsole'),
+            ('Adoption Barriers', self.safe_len(data.get('adoption_barriers')), 'CSConsole (Snowflake)', 'Record ID in CSConsole'),
+            ('Customer Pulse', self.safe_len(data.get('customer_pulse')), 'CSConsole (Snowflake)', 'Record ID in CSConsole'),
+            ('TAC Cases', self.safe_len(data.get('tac_cases')), 'CSOne (Excel)', 'Case # in CSOne'),
+            ('Subscriptions', self.safe_len(data.get('subscriptions')), 'DSM Assignment (Snowflake)', 'Subscription ID in DSM Table')
         ]
         
         for source_name, count, system, verification in data_sources:
@@ -3399,8 +3402,8 @@ class LeaderReportGenerator:
             row_cells[2].text = system
             row_cells[3].text = verification
             
-            # Center align count
-            row_cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            if row_cells[1].paragraphs:
+                row_cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         
         # Add verification instructions
         self.doc.add_paragraph()

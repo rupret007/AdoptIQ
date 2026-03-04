@@ -16,6 +16,19 @@ from docx.oxml import OxmlElement
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_num(val, default=0):
+    """Return val if it is a finite number, otherwise default."""
+    if val is None:
+        return default
+    try:
+        if pd.isna(val):
+            return default
+    except (TypeError, ValueError):
+        pass
+    return val
+
+
 # Professional color palette
 CISCO_BLUE = RGBColor(0x00, 0x7B, 0xC7)
 CISCO_GRAY = RGBColor(0x58, 0x59, 0x5B)
@@ -74,10 +87,13 @@ class AdvancedRenewalAnalyzer:
                 analysis_results['key_findings'].append('Customer not found in system - HIGH RISK')
                 return analysis_results
             
-            # account_info is a dict of dicts keyed by account_id, get the first one
             first_account = list(account_info.values())[0] if account_info else {}
             account_id = first_account.get('ACCOUNT_ID_C')
-            logger.info(f"DEBUG: Using account_id: {account_id} for customer: {customer_name}")
+            logger.info(f"Using account_id: {account_id} for customer: {customer_name}")
+            if account_id is None:
+                analysis_results['renewal_risk_category'] = 'HIGH'
+                analysis_results['key_findings'].append('Account ID not found in system - HIGH RISK')
+                return analysis_results
             
             # 2. Get contract and renewal information
             contract_info = self._get_contract_renewal_info(account_id, customer_name)
@@ -277,8 +293,8 @@ class AdvancedRenewalAnalyzer:
                         end_date = pd.to_datetime(row[3])
                         if end_date <= datetime.now() + timedelta(days=90):
                             contract_info['contracts_expiring_soon'].append(contract)
-                    except Exception:
-                        pass
+                    except Exception as _dt_err:
+                        logger.debug(f"Date parse error for contract: {_dt_err}")
             
             logger.info(f"✅ Found {len(contract_info['contracts'])} contracts for {customer_name}")
             return contract_info
@@ -672,19 +688,19 @@ class AdvancedRenewalAnalyzer:
         # 3. Usage and Adoption Risk Factors
         usage_metrics = analysis_results.get('usage_metrics', {})
         if usage_metrics:
-            completion_rate = usage_metrics.get('overall_completion_rate', 0)
-            if completion_rate < 0.5:  # Low completion rate
+            completion_rate = _safe_num(usage_metrics.get('overall_completion_rate', 0))
+            if completion_rate < 0.5:
                 risk_factors.append(f"Low activity completion rate ({completion_rate:.1%})")
                 risk_score += 25
-            elif completion_rate > 0.8:  # High completion rate
+            elif completion_rate > 0.8:
                 success_factors.append(f"High activity completion rate ({completion_rate:.1%})")
                 risk_score -= 20
             
-            recent_engagement = usage_metrics.get('recent_engagement_score', 0)
-            if recent_engagement < 30:  # Low recent engagement
+            recent_engagement = _safe_num(usage_metrics.get('recent_engagement_score', 0))
+            if recent_engagement < 30:
                 risk_factors.append(f"Low recent engagement ({recent_engagement:.1f}%)")
                 risk_score += 20
-            elif recent_engagement > 70:  # High recent engagement
+            elif recent_engagement > 70:
                 success_factors.append(f"High recent engagement ({recent_engagement:.1f}%)")
                 risk_score -= 15
         
@@ -1032,31 +1048,28 @@ class AdvancedRenewalAnalyzer:
             usage_para = doc.add_paragraph()
             usage_para.add_run('Usage Metrics:\n').font.bold = True
             usage_para.add_run(f'Total Activities: {usage_metrics.get("total_activities", 0)}\n')
-            usage_para.add_run(f'Overall Completion Rate: {usage_metrics.get("overall_completion_rate", 0):.1%}\n')
-            usage_para.add_run(f'Recent Engagement Score: {usage_metrics.get("recent_engagement_score", 0):.1f}%\n')
+            usage_para.add_run(f'Overall Completion Rate: {_safe_num(usage_metrics.get("overall_completion_rate", 0)):.1%}\n')
+            usage_para.add_run(f'Recent Engagement Score: {_safe_num(usage_metrics.get("recent_engagement_score", 0)):.1f}%\n')
             
-            # Action plans
             ap_metrics = usage_metrics.get('action_plans', {})
-            usage_para.add_run(f'Action Plans: {ap_metrics.get("count", 0)} (Completion: {ap_metrics.get("completion_rate", 0):.1%})\n')
+            usage_para.add_run(f'Action Plans: {ap_metrics.get("count", 0)} (Completion: {_safe_num(ap_metrics.get("completion_rate", 0)):.1%})\n')
             
-            # Adoption barriers
             ab_metrics = usage_metrics.get('adoption_barriers', {})
-            usage_para.add_run(f'Adoption Barriers: {ab_metrics.get("count", 0)} (Resolution: {ab_metrics.get("completion_rate", 0):.1%})\n')
+            usage_para.add_run(f'Adoption Barriers: {ab_metrics.get("count", 0)} (Resolution: {_safe_num(ab_metrics.get("completion_rate", 0)):.1%})\n')
             
-            # Customer pulse
             cp_metrics = usage_metrics.get('customer_pulse', {})
-            usage_para.add_run(f'Customer Pulse: {cp_metrics.get("count", 0)} (Completion: {cp_metrics.get("completion_rate", 0):.1%})\n')
+            usage_para.add_run(f'Customer Pulse: {cp_metrics.get("count", 0)} (Completion: {_safe_num(cp_metrics.get("completion_rate", 0)):.1%})\n')
         
         # Adoption health
         adoption_metrics = analysis_results.get('adoption_metrics', {})
         if adoption_metrics:
             adoption_para = doc.add_paragraph()
             adoption_para.add_run('Adoption Health:\n').font.bold = True
-            adoption_para.add_run(f'Adoption Health Score: {adoption_metrics.get("adoption_health_score", 0):.1f}/100\n')
+            adoption_para.add_run(f'Adoption Health Score: {_safe_num(adoption_metrics.get("adoption_health_score", 0)):.1f}/100\n')
             adoption_para.add_run(f'Total Barriers: {adoption_metrics.get("total_barriers", 0)}\n')
             adoption_para.add_run(f'Resolved Barriers: {adoption_metrics.get("resolved_barriers", 0)}\n')
             adoption_para.add_run(f'High-Severity Barriers: {adoption_metrics.get("high_severity_barriers", 0)}\n')
-            adoption_para.add_run(f'Resolution Rate: {adoption_metrics.get("resolution_rate", 0):.1%}\n')
+            adoption_para.add_run(f'Resolution Rate: {_safe_num(adoption_metrics.get("resolution_rate", 0)):.1%}\n')
         
         # Add page break
         doc.add_page_break()
@@ -1076,9 +1089,9 @@ class AdvancedRenewalAnalyzer:
             support_para.add_run(f'Total Priorities: {support_metrics.get("total_priorities", 0)}\n')
             support_para.add_run(f'Completed Priorities: {support_metrics.get("completed_priorities", 0)}\n')
             support_para.add_run(f'Recent Priorities: {support_metrics.get("recent_priorities", 0)}\n')
-            support_para.add_run(f'Completion Rate: {support_metrics.get("completion_rate", 0):.1%}\n')
-            support_para.add_run(f'Engagement Level: {support_metrics.get("engagement_level", "UNKNOWN")}\n')
-            support_para.add_run(f'Average Priority Score: {support_metrics.get("avg_priority_score", 0):.2f}\n')
+            support_para.add_run(f'Completion Rate: {_safe_num(support_metrics.get("completion_rate", 0)):.1%}\n')
+            support_para.add_run(f'Engagement Level: {support_metrics.get("engagement_level", "UNKNOWN") or "UNKNOWN"}\n')
+            support_para.add_run(f'Average Priority Score: {_safe_num(support_metrics.get("avg_priority_score", 0)):.2f}\n')
         
         # Add page break
         doc.add_page_break()

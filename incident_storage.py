@@ -382,7 +382,10 @@ def import_all_data(data: Dict) -> Dict:
     """Merge imported data into existing storage. Returns counts per table."""
     if not data or not isinstance(data, dict):
         return {'incidents': 0, 'bugs': 0, 'maintenances': 0}
-    version = data.get('schema_version', 1)
+    try:
+        version = int(data.get('schema_version', 1))
+    except (TypeError, ValueError):
+        version = 1
     if version > _SCHEMA_VERSION:
         logger.warning(f"Import file schema v{version} is newer than supported v{_SCHEMA_VERSION}; proceeding anyway")
 

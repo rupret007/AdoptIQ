@@ -7,7 +7,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 ### What's New in v1.0.3
 
 #### New Features
-- **Ask AI (Enhanced):** Ask natural-language questions about your portfolio with dramatically richer context. The AI now receives 12 data sections including live Snowflake data, period-over-period trend analysis, barrier creation/resolution velocity, ARR at risk calculations, historical report baselines, and active service incidents — producing insights that combine financial, operational, and external data in ways never seen before.
+- **Ask AI (Enhanced):** Ask natural-language questions about your portfolio with dramatically richer context. The AI now receives 16 data sections including live Snowflake data, period-over-period trend analysis, barrier creation/resolution velocity, ARR at risk calculations, historical report baselines, portfolio intelligence, barrier aging analysis, pulse-revenue correlation, and active service incidents — producing insights that combine financial, operational, and external data in ways never seen before.
 - **External Intelligence:** Live incidents, bugs, and maintenances from status.webex.com and help.webex.com are fetched, stored historically in a local database, and displayed with search, export, and import capabilities. Ask the AI questions about any tracked intelligence.
 - **Admin Console:** The Admin tab opens the Admin Console (localhost:5002) in a new tab for monitoring, report history, and logs.
 - **Graceful shutdown:** Analysis status is automatically saved when the app exits, preventing data loss.
@@ -49,7 +49,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **XSS prevention:** All dynamic content in the progress page and subscription search is properly escaped.
 
 #### Testing
-- **Test suite:** 410 pytest tests covering validation, data processing, downloads, formatting, status management, error paths, NaN/Inf handling, security guards, advanced analytics, error-response sanitization, XSS hardening, cursor safety, LLM call correctness, cancellation logic, path traversal prevention, input validation, external intel API safety, URL encoding, formula injection defense, upload collision prevention, TOCTOU download guards, and report insights eviction.
+- **Test suite:** 421 pytest tests covering validation, data processing, downloads, formatting, status management, error paths, NaN/Inf handling, security guards, advanced analytics, error-response sanitization, XSS hardening, cursor safety, LLM call correctness, cancellation logic, path traversal prevention, input validation, external intel API safety, URL encoding, formula injection defense, upload collision prevention, TOCTOU download guards, report insights eviction, leader report None guards, renewal NaN safety, CSRF tokens, and schema version handling.
 - **Debug log cleanup:** Removed noisy DEBUG-prefixed log statements; downgraded to debug level for cleaner production logs.
 
 ### What's New in v1.0.2
@@ -102,7 +102,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **Dashboard / Run Analysis** — Start here; run new analyses from the dashboard buttons.
 - **History** — Lists previous portfolio analyses. Use **View** to open the progress page for an analysis and download Word/Excel reports when completed.
 - **Intel** — View tracked incidents, bugs, and maintenances from Webex status and help pages. Search, export/import historical data, and ask AI questions about intelligence.
-- **Ask AI** — Ask natural-language questions powered by 18 data dimensions: subscriptions, ARR, barriers, cases, pulse, priorities, action plans, trend analysis, barrier velocity, ARR at risk, account health/renewal risk, contract expirations, renewal probability, portfolio intelligence, barrier aging, pulse-revenue correlation, cross-report trends, and external intelligence.
+- **Ask AI** — Ask natural-language questions powered by 16 live data sections: portfolio overview, ARR and financials, adoption barriers, support cases, customer pulse, success priorities, action plans, trend analysis, barrier velocity, ARR at risk, external intelligence, historical context, account insights, portfolio intelligence, barrier aging, and pulse-revenue correlation.
 - **Admin** — Opens the Admin Console (localhost:5002) in a new tab for system monitoring, report history, and logs.
 - **Help** — Links and usage notes.
 
