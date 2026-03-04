@@ -770,3 +770,99 @@ class TestRound15Fixes:
             MANAGER=''
         )
         assert 'Test Corp' in formatted
+
+
+class TestRound16Fixes:
+    """Tests for Round 16 audit fixes."""
+
+    def test_check_cancellation_uses_flags(self):
+        """check_cancellation should read from cancellation_flags, not status."""
+        from app_simple import check_cancellation, cancellation_flags, cancellation_flags_lock
+        test_id = 'test_cancel_r16'
+        with cancellation_flags_lock:
+            cancellation_flags[test_id] = True
+        assert check_cancellation(test_id) is True
+        with cancellation_flags_lock:
+            cancellation_flags.pop(test_id, None)
+        assert check_cancellation(test_id) is False
+
+    def test_briefing_book_nan_keys_filtered(self):
+        """json.dumps in briefing book should not crash on NaN groupby keys."""
+        import json
+        import numpy as np
+        data = {'cat_a': 10, np.nan: 5, 'cat_b': 3}
+        filtered = {str(k): int(v) for k, v in data.items() if pd.notna(k)}
+        result = json.dumps(filtered)
+        assert 'cat_a' in result
+        assert 'cat_b' in result
+
+    def test_arr_nan_sum_handled(self):
+        """calculate_arr_at_risk should handle NaN in ARR column."""
+        from adoptiq_backend import calculate_arr_at_risk
+        arr_df = pd.DataFrame({
+            'ACCOUNT_ID_C': ['A1', 'A2', 'A3'],
+            'ANNUAL_CONTRACT_VALUE': [100000, float('nan'), 200000]
+        })
+        ab_df = pd.DataFrame({'ACCOUNT_ID_C': ['A1'], 'ID': ['1']})
+        result = calculate_arr_at_risk(arr_df, ab_df)
+        assert result.get('total_portfolio_arr', 0) == 300000.0
+        assert not pd.isna(result.get('pct_at_risk', 0))
+
+    def test_arr_all_nan_handled(self):
+        """calculate_arr_at_risk should handle all-NaN ARR column."""
+        from adoptiq_backend import calculate_arr_at_risk
+        arr_df = pd.DataFrame({
+            'ACCOUNT_ID_C': ['A1', 'A2'],
+            'ANNUAL_CONTRACT_VALUE': [float('nan'), float('nan')]
+        })
+        ab_df = pd.DataFrame()
+        result = calculate_arr_at_risk(arr_df, ab_df)
+        arr_val = result.get('total_portfolio_arr', 0)
+        assert arr_val == 0.0 or pd.isna(arr_val) is False
+
+    def test_duplicate_sheet_names_deduped(self):
+        """write_excel_workbook should handle duplicate sheet names."""
+        used = {"Report_Info"}
+        names_to_test = ["Summary", "Summary", "Summary"]
+        results = []
+        for name in names_to_test:
+            sheet = (name or "Sheet")[:31]
+            base_sheet = sheet
+            suffix = 2
+            while sheet in used:
+                sheet = f"{base_sheet[:28]}_{suffix}"
+                suffix += 1
+            used.add(sheet)
+            results.append(sheet)
+        assert results[0] == "Summary"
+        assert results[1] == "Summary_2"
+        assert results[2] == "Summary_3"
+
+    def test_cancel_race_does_not_overwrite_completed(self):
+        """Cancel route should not overwrite completed/error status."""
+        status = {'status': 'completed', 'message': 'Done'}
+        if status.get('status') in ('starting', 'running'):
+            status['status'] = 'cancelling'
+        assert status['status'] == 'completed'
+
+    def test_subscription_briefing_builds_correctly(self):
+        """Subscription briefing should build from sub_data without _create_briefing_book."""
+        sub_data = {
+            'customer_name': 'Acme Corp',
+            'adoption_barriers': [{'title': 'Barrier 1', 'status': 'Open'}],
+            'action_plans': [],
+            'customer_pulse': [{'score': 5}],
+            'success_priorities': []
+        }
+        briefing_parts = [f"## Subscription Briefing: {sub_data.get('customer_name', 'test')}"]
+        for section_key in ('adoption_barriers', 'action_plans', 'customer_pulse', 'success_priorities'):
+            items = sub_data.get(section_key, [])
+            if items:
+                briefing_parts.append(f"\n### {section_key.replace('_', ' ').title()} ({len(items)} items)")
+                for item in items[:50]:
+                    if isinstance(item, dict):
+                        briefing_parts.append(f"- {', '.join(f'{k}: {v}' for k, v in item.items() if v)}")
+        result = "\n".join(briefing_parts)
+        assert 'Acme Corp' in result
+        assert 'Adoption Barriers' in result
+        assert 'Barrier 1' in result

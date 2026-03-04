@@ -1660,7 +1660,9 @@ def calculate_arr_at_risk(arr_df, ab_df, cases_df=None):
         if not arr_col or not acct_col:
             return {}
 
-        total_arr = arr_df[arr_col].sum()
+        total_arr = arr_df[arr_col].sum(skipna=True)
+        if pd.isna(total_arr):
+            total_arr = 0.0
         result['total_portfolio_arr'] = float(total_arr)
 
         troubled_accounts = set()
@@ -3671,6 +3673,7 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                 ["Note", "This report was generated using the standard Excel export. The enhanced formatter was not available; all data is present and accurate."],
             ], columns=["Item", "Value"])
             report_info.to_excel(xw, sheet_name="Report_Info", index=False)
+            _used_sheet_names = {"Report_Info"}
             for name, df in sheets.items():
                 if df is None: continue
                 if not isinstance(df, pd.DataFrame):
@@ -3685,6 +3688,12 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                 df_copy = df_copy.replace([_np.inf, -_np.inf], _np.nan)
 
                 sheet = (name or "Sheet")[:31]
+                base_sheet = sheet
+                suffix = 2
+                while sheet in _used_sheet_names:
+                    sheet = f"{base_sheet[:28]}_{suffix}"
+                    suffix += 1
+                _used_sheet_names.add(sheet)
                 if hasattr(df_copy, "to_excel"):
                     df_copy.to_excel(xw, sheet_name=sheet, index=False)
                 else:
@@ -3844,10 +3853,10 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
     if ab_df is not None and not ab_df.empty:
         by_cat = ab_df.groupby("ab_category_final")["ID"].count().sort_values(ascending=False)
         briefing.append("### Adoption Barrier Category Summary:")
-        briefing.append(json.dumps({k:int(v) for k,v in by_cat.items()}, indent=2))
+        briefing.append(json.dumps({str(k):int(v) for k,v in by_cat.items() if pd.notna(k)}, indent=2))
         by_sub = ab_df.groupby("sub_technology")["ID"].count().sort_values(ascending=False)
         briefing.append("\n### Adoption Barrier Sub-Technology Summary:")
-        briefing.append(json.dumps({k:int(v) for k,v in by_sub.items()}, indent=2))
+        briefing.append(json.dumps({str(k):int(v) for k,v in by_sub.items() if pd.notna(k)}, indent=2))
         briefing.append("\n### All Adoption Barrier Titles for Thematic Analysis:")
         briefing.append("\n".join("- " + str(title) for title in ab_df['title'].dropna()))
         
@@ -3985,7 +3994,7 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
         briefing.append("No CSOne (TAC) data found in scope.")
 
     # CSConsole Data Details
-    if csconsole_data and any(not df.empty for df in csconsole_data.values()):
+    if csconsole_data and any(hasattr(df, 'empty') and not df.empty for df in csconsole_data.values() if df is not None):
         def _first_present(row, keys, default=""):
             for key in keys:
                 value = row.get(key)

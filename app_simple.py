@@ -4096,10 +4096,9 @@ def run_compact_analysis(analysis_id):
         # Generate AI insights with timeout and cancellation support
         try:
             # Check for cancellation before starting AI analysis
-            with analysis_status_lock:
-                if analysis_status[analysis_id]['status'] == 'cancelled':
-                    logger.info(f" Analysis cancelled before AI insights generation")
-                    return
+            if check_cancellation(analysis_id):
+                update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
+                return
             
             with analysis_status_lock:
                 _update_progress(status, 63, '[AI] Sending to CircuIT (this may take up to 60 seconds)...', 'AI Analysis - CircuIT')
@@ -4110,10 +4109,9 @@ def run_compact_analysis(analysis_id):
             logger.info(f"[[AI]] AI insights content: {str(ai_insights_raw)[:500]}...")
             
             # Check for cancellation after AI call
-            with analysis_status_lock:
-                if analysis_status[analysis_id]['status'] == 'cancelled':
-                    logger.info(f" Analysis cancelled after AI insights generation")
-                    return
+            if check_cancellation(analysis_id):
+                update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
+                return
             
             # Convert string response to expected format for compact report formatter
             if isinstance(ai_insights_raw, str) and ai_insights_raw and not ai_insights_raw.startswith("ERROR:") and len(ai_insights_raw.strip()) > 50:
@@ -4142,10 +4140,9 @@ def run_compact_analysis(analysis_id):
             logger.error(f"[[ERROR]] AI analysis failed: {ai_error}")
             
             # Check for cancellation after error
-            with analysis_status_lock:
-                if analysis_status[analysis_id]['status'] == 'cancelled':
-                    logger.info(f" Analysis cancelled after AI error")
-                    return
+            if check_cancellation(analysis_id):
+                update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
+                return
             
             # Generate comprehensive fallback insights based on actual data
             fallback_insights = _generate_comprehensive_fallback_insights(ab_norm, csone_df, manager, technology)
@@ -4219,10 +4216,9 @@ def run_compact_analysis(analysis_id):
             return
         
         # Check for cancellation before report generation
-        with analysis_status_lock:
-            if analysis_status[analysis_id]['status'] == 'cancelled':
-                logger.info(f" Analysis cancelled before report generation")
-                return
+        if check_cancellation(analysis_id):
+            update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
+            return
         
         # CRITICAL FIX: Calculate customer count BEFORE nested function to ensure we use UNFILTERED data
         # This ensures the customer count is calculated correctly regardless of nested function scope issues
@@ -4399,10 +4395,9 @@ def run_compact_analysis(analysis_id):
         logger.info(f"[[DATA]] Creating Excel file: {excel_path}")
         
         # Check for cancellation before Excel generation
-        with analysis_status_lock:
-            if analysis_status[analysis_id]['status'] == 'cancelled':
-                logger.info(f" Analysis cancelled before Excel generation")
-                return
+        if check_cancellation(analysis_id):
+            update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
+            return
         
         # Generate Excel with timeout protection
         try:
@@ -7442,9 +7437,10 @@ def run_comprehensive_analysis(analysis_id):
         out_dir = _ensure_outputs()
         base = str(out_dir / f"AdoptIQ_Report_{tag}")
         
-        status['progress'] = 70
-        status['message'] = '[AI] Generating AI-powered portfolio analysis with CircuIT...'
-        status['current_step'] = 'AI Portfolio Analysis'
+        with analysis_status_lock:
+            status['progress'] = 70
+            status['message'] = '[AI] Generating AI-powered portfolio analysis with CircuIT...'
+            status['current_step'] = 'AI Portfolio Analysis'
         
         # === USE CLEAN EXECUTIVE REPORT BUILDER (NO MARKDOWN ISSUES) ===
         from executive_report_builder import ExecutiveReportBuilder
@@ -9483,11 +9479,12 @@ def cancel_analysis(analysis_id):
     with cancellation_flags_lock:
         cancellation_flags[analysis_id] = True
     
-    # Update status (thread-safe)
+    # Update status (thread-safe) — re-check in case analysis finished between flag and lock
     with analysis_status_lock:
-        status['status'] = 'cancelling'
-        status['message'] = ' Cancellation requested...'
-        status['progress'] = 0
+        if status.get('status') in ('starting', 'running'):
+            status['status'] = 'cancelling'
+            status['message'] = ' Cancellation requested...'
+            status['progress'] = 0
     save_analysis_status()
     
     return jsonify({'success': True, 'message': 'Cancellation requested'})
@@ -9935,8 +9932,19 @@ def run_subscription_analysis(analysis_id):
             _update_progress(status, 50, 'Preparing AI briefing book...', 'AI Analysis')
         
         try:
-            all_records = sub_data['adoption_barriers'] + sub_data['action_plans'] + sub_data['customer_pulse'] + sub_data['success_priorities']
-            briefing_book, metrics = _create_briefing_book(all_records, [], [])
+            briefing_parts = [f"## Subscription Briefing: {sub_data.get('customer_name', subscription_id)}"]
+            briefing_parts.append(f"Subscription ID: {subscription_id}")
+            briefing_parts.append(f"Analysis window: {days} days")
+            for section_key in ('adoption_barriers', 'action_plans', 'customer_pulse', 'success_priorities'):
+                items = sub_data.get(section_key, [])
+                if items:
+                    briefing_parts.append(f"\n### {section_key.replace('_', ' ').title()} ({len(items)} items)")
+                    for item in items[:50]:
+                        if isinstance(item, dict):
+                            briefing_parts.append(f"- {', '.join(f'{k}: {v}' for k, v in item.items() if v)}")
+                        else:
+                            briefing_parts.append(f"- {item}")
+            briefing_book = "\n".join(briefing_parts)
             
             with analysis_status_lock:
                 _update_progress(status, 55, '[AI] Sending to CircuIT (this may take up to 60 seconds)...', 'AI Analysis - CircuIT')
