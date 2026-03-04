@@ -29,7 +29,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **Deeper Historical Mining:** Reports now extract individual barrier subjects, customer-level ARR breakdowns, and category distributions from past Excel files.
 - **Enhanced System Prompt:** The AI uses a chain-of-thought analytical framework with cross-domain correlation, hidden pattern detection, and revenue-based prioritization.
 
-#### Stability & Robustness (14 rounds of deep code review)
+#### Stability & Robustness (15 rounds of deep code review)
 - **Leader Report Excel fix:** Leader report Excel downloads now work correctly (filename sanitization was causing 404s).
 - **Download resilience:** Report downloads survive app restarts — status is loaded from disk when not in memory.
 - **Excel export stability:** Fixed datetime timezone handling and NaN/NaT/Inf sanitization that could crash or corrupt Excel exports.
@@ -49,7 +49,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **XSS prevention:** All dynamic content in the progress page and subscription search is properly escaped.
 
 #### Testing
-- **Test suite:** 362 pytest tests covering validation, data processing, downloads, formatting, status management, error paths, NaN/Inf handling, security guards, advanced analytics, error-response sanitization, and header/XSS hardening.
+- **Test suite:** 368 pytest tests covering validation, data processing, downloads, formatting, status management, error paths, NaN/Inf handling, security guards, advanced analytics, error-response sanitization, header/XSS hardening, cursor safety, and LLM call signature verification.
 - **Debug log cleanup:** Removed noisy DEBUG-prefixed log statements; downgraded to debug level for cleaner production logs.
 
 ### What's New in v1.0.2

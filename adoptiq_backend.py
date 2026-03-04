@@ -715,10 +715,11 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
             'error': str(e)
         }
     finally:
-        try:
-            cur.close()
-        except Exception:
-            pass
+        if 'cur' in locals() and cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
         if ctx is not None:
             try:
                 ctx.close()
@@ -1341,10 +1342,11 @@ def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_
         logging.error(f"Error in load_and_merge_data_for_subscription: {e}")
         return "Error", csone_data
     finally:
-        try:
-            cur.close()
-        except Exception:
-            pass
+        if 'cur' in locals() and cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
         try:
             ctx.close()
         except Exception:

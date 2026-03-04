@@ -454,9 +454,12 @@ def save_analysis_status():
     try:
         with analysis_status_lock:
             if len(analysis_status) > 50:
+                def _trim_sort_key(k):
+                    st = analysis_status[k].get('start_time', '')
+                    return st.isoformat() if isinstance(st, datetime) else str(st)
                 sorted_ids = sorted(
                     analysis_status.keys(),
-                    key=lambda k: analysis_status[k].get('start_time', ''),
+                    key=_trim_sort_key,
                     reverse=True
                 )
                 for old_id in sorted_ids[50:]:
@@ -8276,7 +8279,8 @@ def progress(analysis_id):
                         const cpEl = document.getElementById('customer-progress-text');
                         if (cpEl) {{
                             if (cp.current) {{
-                                cpEl.innerHTML = '<strong>Current:</strong> ' + cp.current + '<br><strong>Progress:</strong> ' + cp.completed + '/' + cp.total + ' customers<br><strong>Remaining:</strong> ' + (cp.total - cp.completed);
+                                function _esc(s) {{ var d=document.createElement('div'); d.textContent=String(s); return d.innerHTML; }}
+                                cpEl.innerHTML = '<strong>Current:</strong> ' + _esc(cp.current) + '<br><strong>Progress:</strong> ' + _esc(cp.completed) + '/' + _esc(cp.total) + ' customers<br><strong>Remaining:</strong> ' + _esc(cp.total - cp.completed);
                             }} else {{
                                 cpEl.textContent = 'Processing ' + cp.total + ' customers...';
                             }}
@@ -9937,13 +9941,13 @@ def run_subscription_analysis(analysis_id):
             with analysis_status_lock:
                 _update_progress(status, 55, '[AI] Sending to CircuIT (this may take up to 60 seconds)...', 'AI Analysis - CircuIT')
             
-            ai_response = generate_llm_response(
-                briefing_book, 
-                sub_data['customer_name'], 
-                subscription_id, 
-                days,
-                PROMPT_CUSTOMER_TEMPLATE
+            sub_prompt = PROMPT_CUSTOMER_TEMPLATE.format(
+                CUSTOMER_NAME=sub_data.get('customer_name', subscription_id),
+                CSSM_NAME='',
+                TECHNOLOGY='',
+                MANAGER=''
             )
+            ai_response = generate_llm_response(sub_prompt, briefing_book)
             
             with analysis_status_lock:
                 _update_progress(status, 70, '[AI] Processing AI response...', 'AI Analysis - Processing')
