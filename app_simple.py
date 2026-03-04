@@ -9257,9 +9257,9 @@ def ask_ai_portfolio():
 def external_intelligence():
     """Browsable page showing historical service incidents, bugs, and maintenances."""
     from incident_storage import get_all_external_intel, get_incident_statistics, get_maintenance_statistics
-    days_back = request.args.get('days', 90, type=int)
+    days_back = request.args.get('days', 365, type=int)
     if days_back not in (30, 90, 180, 365):
-        days_back = 90
+        days_back = 365
 
     inc_stats = get_incident_statistics()
     maint_stats = get_maintenance_statistics()

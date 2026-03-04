@@ -2549,7 +2549,7 @@ def fetch_status_incidents(timeout=25) -> List[Dict[str,str]]:
     # First, try to get incidents from storage
     if storage_available:
         try:
-            stored_incidents = get_historical_incidents(days_back=90, limit=50)
+            stored_incidents = get_historical_incidents(days_back=365, limit=500)
             if stored_incidents:
                 for si in stored_incidents:
                     si['_from_storage'] = True
@@ -2640,70 +2640,77 @@ def fetch_status_incidents(timeout=25) -> List[Dict[str,str]]:
     except Exception as e:
         logger.warning(f"Error fetching JSON API: {e}")
     
-    # Fallback: RSS feed (only if JSON API failed)
-    if not json_api_succeeded:
-        try:
-            logger.info("JSON API failed, falling back to RSS feed...")
-            rss_url = "https://status.webex.com/incidents.rss"
-            rss_headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'application/rss+xml, application/xml, text/xml, */*',
-            }
-            
-            r = requests.get(rss_url, headers=rss_headers, timeout=timeout)
-            r.raise_for_status()
-            
-            import feedparser
-            feed = feedparser.parse(r.text)
-            
-            for item in feed.entries[:50]:
-                try:
-                    title = item.get("title", "").strip()
-                    link = item.get("link", "").strip()
-                    pub_date_elem = item.get("published", "")
-                    
-                    if not title or not link:
-                        continue
-                    
-                    published_date = time.strftime('%Y-%m-%d %H:%M:%S')
-                    if pub_date_elem:
-                        try:
-                            pub_date_text = pub_date_elem.strip() if isinstance(pub_date_elem, str) else pub_date_elem.get_text().strip()
-                            published_date = pub_date_text
-                        except Exception as _pub_err:
-                            logger.debug(f"Skipping unparsable published date: {_pub_err}")
-                    
-                    content_to_check = title.lower()
-                    description_elem = item.get("description", "")
-                    if description_elem:
-                        content_to_check += " " + str(description_elem).lower()
-                    
-                    impact_level = "Low"
-                    if any(w in content_to_check for w in ["outage", "down", "unavailable", "critical", "major", "severe"]):
-                        impact_level = "High"
-                    elif any(w in content_to_check for w in ["degraded", "slow", "intermittent", "partial", "minor"]):
-                        impact_level = "Medium"
-                    
-                    inc_status = "resolved"
-                    if any(w in content_to_check for w in ["ongoing", "active", "investigating", "monitoring", "identified"]):
-                        inc_status = "active"
-                    
-                    data.append({
-                        "id": link,
-                        "title": title,
-                        "link": link,
-                        "published": published_date,
-                        "status": inc_status,
-                        "impact_level": impact_level,
-                        "source": "status.webex.com/rss"
-                    })
-                except Exception as e:
-                    logger.warning(f"Error processing RSS item: {e}")
+    # Supplement: incidents.rss (always runs to catch items the JSON API may not include)
+    try:
+        logger.info("Supplementing incidents from incidents.rss...")
+        rss_url = "https://status.webex.com/incidents.rss"
+        rss_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+        }
+
+        r = requests.get(rss_url, headers=rss_headers, timeout=timeout)
+        r.raise_for_status()
+
+        import feedparser
+        feed = feedparser.parse(r.text)
+        rss_added = 0
+
+        for item in feed.entries[:50]:
+            try:
+                title = item.get("title", "").strip()
+                link = item.get("link", "").strip()
+                if not title or not link:
                     continue
-            
-            logger.info(f"RSS feed fallback processed: {len(data)} total incidents")
-        except Exception as e:
-            logger.warning(f"RSS feed fallback also failed: {e}")
+
+                rss_id = link
+                if '#' in link:
+                    fragment = link.split('#', 1)[1]
+                    if fragment:
+                        rss_id = fragment
+
+                published_date = ''
+                if hasattr(item, 'published_parsed') and item.published_parsed:
+                    try:
+                        published_date = datetime(*item.published_parsed[:6]).strftime('%Y-%m-%dT%H:%M:%SZ')
+                    except Exception:
+                        published_date = item.get('published', '')
+                else:
+                    published_date = item.get('published', '')
+
+                content_to_check = title.lower()
+                description_elem = item.get("description", "")
+                if description_elem:
+                    content_to_check += " " + str(description_elem).lower()
+
+                impact_level = "Medium"
+                if any(w in content_to_check for w in ["outage", "down", "unavailable", "critical", "major", "severe"]):
+                    impact_level = "High"
+                elif any(w in content_to_check for w in ["low", "minor", "informational"]):
+                    impact_level = "Low"
+
+                inc_status = "resolved"
+                if any(w in content_to_check for w in ["ongoing", "active", "investigating", "monitoring", "identified"]):
+                    inc_status = "active"
+
+                data.append({
+                    "id": rss_id,
+                    "title": title,
+                    "link": link,
+                    "published": published_date,
+                    "status": inc_status,
+                    "impact_level": impact_level,
+                    "source": "status.webex.com/rss",
+                    "description": str(description_elem)[:500] if description_elem else '',
+                })
+                rss_added += 1
+            except Exception as e:
+                logger.warning(f"Error processing RSS item: {e}")
+                continue
+
+        logger.info(f"Supplemented {rss_added} incidents from incidents.rss")
+    except Exception as e:
+        logger.warning(f"Error supplementing from incidents.rss: {e}")
 
     # Supplement: parse non-maintenance incidents from history.rss
     try:

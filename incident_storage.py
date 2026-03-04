@@ -344,12 +344,12 @@ def get_maintenance_statistics() -> Dict:
 # Combined view (for the UI)
 # ---------------------------------------------------------------------------
 
-def get_all_external_intel(days_back: int = 90) -> Dict:
+def get_all_external_intel(days_back: int = 365) -> Dict:
     """Return incidents, bugs, maintenances, and statistics for the external intelligence page."""
     return {
-        'incidents': get_historical_incidents(days_back=days_back, limit=200),
-        'bugs': get_historical_bugs(days_back=days_back, limit=200),
-        'maintenances': get_historical_maintenances(days_back=days_back, limit=200),
+        'incidents': get_historical_incidents(days_back=days_back, limit=500),
+        'bugs': get_historical_bugs(days_back=days_back, limit=500),
+        'maintenances': get_historical_maintenances(days_back=days_back, limit=500),
         'incident_stats': get_incident_statistics(),
         'bug_stats': get_bug_statistics(),
         'maintenance_stats': get_maintenance_statistics(),
