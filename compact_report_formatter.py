@@ -134,13 +134,12 @@ class CompactReportFormatter:
             title.alignment = WD_ALIGN_PARAGRAPH.CENTER
             
             # Subtitle
-            subtitle = self.doc.add_heading(f'Renewal Risk Analysis - {manager}', level=1)
+            subtitle = self.doc.add_heading(f'Renewal Risk Analysis - {manager or "N/A"}', level=1)
             subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
             
-            # Analysis details
             details = self.doc.add_paragraph()
-            details.add_run(f'Technology: {technology}\n').bold = True
-            details.add_run(f'Analysis Period: {days} days\n').bold = True
+            details.add_run(f'Technology: {technology or "N/A"}\n').bold = True
+            details.add_run(f'Analysis Period: {days or "N/A"} days\n').bold = True
             details.add_run(f'Generated: {datetime.now().strftime("%B %d, %Y at %I:%M %p")}\n').bold = True
             details.add_run(f'Analysis ID: {analysis_id}').bold = True
             details.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -291,11 +290,13 @@ class CompactReportFormatter:
     def add_executive_summary(self, risk_summary: Dict, ai_insights: Dict):
         """Add enhanced executive summary section with comprehensive analysis"""
         try:
-            # Section header with enhanced styling
+            if risk_summary is None:
+                risk_summary = {}
+            if ai_insights is None:
+                ai_insights = {}
             summary_heading = self.doc.add_heading('📊 Executive Summary', level=1)
             summary_heading.style = 'CompactHeader'
             
-            # Overall risk assessment with enhanced formatting
             risk_section = self.doc.add_paragraph()
             risk_section.add_run('🎯 Overall Portfolio Risk Assessment: ').bold = True
             risk_section.add_run('\n')
@@ -454,9 +455,12 @@ class CompactReportFormatter:
             # Customer header with risk level (matches example: "### 1. NATIONAL GRID PLC US – Risk: CRITICAL")
             customer_heading = self.doc.add_heading(f'{customer_name} – Risk: {risk_info["category"].upper()}', level=3)
             
-            # Get customer data
-            customer_ab = ab_data[ab_data['customer_name'] == customer_name] if not ab_data.empty else pd.DataFrame()
-            customer_csone = csone_data[csone_data['customer_name'] == customer_name] if not csone_data.empty else pd.DataFrame()
+            if ab_data is None:
+                ab_data = pd.DataFrame()
+            if csone_data is None:
+                csone_data = pd.DataFrame()
+            customer_ab = ab_data[ab_data['customer_name'] == customer_name] if not ab_data.empty and 'customer_name' in ab_data.columns else pd.DataFrame()
+            customer_csone = csone_data[csone_data['customer_name'] == customer_name] if not csone_data.empty and 'customer_name' in csone_data.columns else pd.DataFrame()
             
             # Extract BEMS IDs and count from customer cases
             bems_ids = set()
@@ -837,6 +841,8 @@ class CompactReportFormatter:
     def add_bems_escalation_section(self, csone_data: pd.DataFrame):
         """Add comprehensive BEMS escalation analysis section"""
         try:
+            if csone_data is None:
+                csone_data = pd.DataFrame()
             self.doc.add_heading('🚨 BEMS Escalations & TAC Case Analysis', level=1)
             
             if csone_data.empty:
@@ -1048,6 +1054,10 @@ class CompactReportFormatter:
     def add_early_warning_section(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame, risk_data: Dict):
         """Add early warning indicators section for proactive risk identification"""
         try:
+            if ab_data is None:
+                ab_data = pd.DataFrame()
+            if csone_data is None:
+                csone_data = pd.DataFrame()
             self.doc.add_heading('🚨 Early Warning Indicators - Proactive Risk Identification', level=1)
             
             intro_p = self.doc.add_paragraph()
@@ -1096,8 +1106,8 @@ class CompactReportFormatter:
                                 'action': 'Schedule proactive customer success review and identify root causes before escalation',
                                 'confidence': '85%'
                             })
-                except Exception:
-                    pass
+                except Exception as _ew_err:
+                    logger.debug(f"Early warning date parse error: {_ew_err}")
             
             # Check for unresolved adoption barriers
             if not ab_data.empty and 'customer_name' in ab_data.columns:
@@ -1267,13 +1277,15 @@ class CompactReportFormatter:
         """Add Predictive Risk section - MATCHES EXAMPLE FORMAT"""
         import re
         try:
+            if ab_data is None:
+                ab_data = pd.DataFrame()
+            if csone_data is None:
+                csone_data = pd.DataFrame()
             self.doc.add_heading('Predictive Risk', level=2)
             
-            # Count metrics
             total_customers = len(risk_data) if risk_data else 0
             red_customers = sum(1 for v in risk_data.values() if v.get('color') == 'Red') if risk_data else 0
             
-            # Count BEMS
             bems_count = 0
             if not csone_data.empty:
                 for col in ['Transaction ID', 'bemscsc_refs']:
@@ -1301,9 +1313,10 @@ class CompactReportFormatter:
     def add_executive_takeaway_section(self, risk_summary: Dict):
         """Add Executive Takeaway section - MATCHES EXAMPLE FORMAT"""
         try:
+            if risk_summary is None:
+                risk_summary = {}
             self.doc.add_heading('Executive Takeaway', level=1)
             
-            # Determine overall health
             overall_score = risk_summary.get('overall_risk_score', 5)
             
             takeaway_p = self.doc.add_paragraph()
@@ -1374,11 +1387,10 @@ def calculate_renewal_risk_scores(ab_data: pd.DataFrame, csone_data: pd.DataFram
         csone_data = csone_data if csone_data is not None else pd.DataFrame()
         risk_data = {}
         
-        # Get unique customers
         customers = set()
-        if not ab_data.empty:
+        if not ab_data.empty and 'customer_name' in ab_data.columns:
             customers.update(ab_data['customer_name'].dropna().unique())
-        if not csone_data.empty:
+        if not csone_data.empty and 'customer_name' in csone_data.columns:
             customers.update(csone_data['customer_name'].dropna().unique())
         
         for customer in customers:
@@ -1426,8 +1438,8 @@ def calculate_renewal_risk_scores(ab_data: pd.DataFrame, csone_data: pd.DataFram
                                 if aging_count > 0:
                                     score += min(float(aging_count) * 0.5, 2.0)  # Cap aging penalty at 2
                                     risk_factors.append(f"{int(aging_count)} barrier(s) open 60+ days")
-                            except Exception:
-                                pass
+                            except Exception as _ag_err:
+                                logger.debug(f"Aging barrier calc error: {_ag_err}")
             
             # Support cases scoring
             if not csone_data.empty:
@@ -1474,8 +1486,8 @@ def calculate_renewal_risk_scores(ab_data: pd.DataFrame, csone_data: pd.DataFram
                             score += recent_cases * 0.2
                             if recent_cases > 0:
                                 risk_factors.append(f"{recent_cases} recent cases (30 days)")
-                        except Exception:
-                            pass
+                        except Exception as _rc_err:
+                            logger.debug(f"Recent cases calc error: {_rc_err}")
             
             # Cap the score at 10
             final_score = min(score, 10.0)
@@ -1540,7 +1552,10 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
                 bems_mask |= csone_data['bemscsc_refs'].astype(str).str.contains('BEMS', case=False, na=False)
             total_bems = bems_mask.sum()
         
-        overall_risk_score = np.mean([v['score'] for v in risk_data.values()]) if risk_data else 0
+        _scores = [v['score'] for v in risk_data.values() if isinstance(v.get('score'), (int, float)) and not np.isnan(v['score'])] if risk_data else []
+        overall_risk_score = float(np.mean(_scores)) if _scores else 0.0
+        if np.isnan(overall_risk_score) or np.isinf(overall_risk_score):
+            overall_risk_score = 0.0
         
         risk_summary = {
             'overall_risk_score': round(overall_risk_score, 1),
@@ -1639,8 +1654,10 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
                 row = focus_table.rows[idx].cells
                 row[0].text = str(idx)
                 row[1].text = str(cust)
-                row[2].text = f"{info['score']:.1f}/10"
-                row[3].text = str(info.get('category', 'N/A'))
+                _s = info.get('score', 0)
+                _s = 0 if _s is None or (isinstance(_s, float) and np.isnan(_s)) else _s
+                row[2].text = f"{_s:.1f}/10"
+                row[3].text = str(info.get('category') or 'N/A')
             formatter._add_section_separator()
         
         # Add data citations (NEW - matches example report)

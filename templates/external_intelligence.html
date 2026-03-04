@@ -446,7 +446,7 @@ document.addEventListener('DOMContentLoaded', function() {
         refreshBtn.innerHTML = '<i class="fas fa-sync-alt refresh-spin me-1"></i>Fetching\u2026';
 
         fetch('/api/refresh-external-intel', { method: 'POST' })
-            .then(function(r) { return r.json(); })
+            .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
             .then(function(data) {
                 if (data.ok) {
                     window.location.reload();
@@ -530,7 +530,7 @@ document.addEventListener('DOMContentLoaded', function() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ question: question.trim() })
         })
-        .then(function(r) { return r.json(); })
+        .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(function(data) {
             aiLoading.style.display = 'none';
             askBtn.disabled = false;
@@ -577,7 +577,7 @@ document.addEventListener('DOMContentLoaded', function() {
         importBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Importing\u2026';
 
         fetch('/api/import-intel', { method: 'POST', body: formData })
-            .then(function(r) { return r.json(); })
+            .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
             .then(function(data) {
                 if (data.ok) {
                     var c = data.imported;
