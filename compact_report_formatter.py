@@ -569,8 +569,10 @@ class CompactReportFormatter:
                 no_critical_p.add_run('✅ No critical severity adoption barriers found.').bold = True
                 return
             
-            # FIXED: Show ALL customers with critical barriers
-            customer_groups = critical_ab.groupby('customer_name')
+            cust_col = 'customer_name' if 'customer_name' in critical_ab.columns else ('BU_NAME' if 'BU_NAME' in critical_ab.columns else None)
+            if not cust_col:
+                return
+            customer_groups = critical_ab.groupby(cust_col)
             
             for customer_name, group in customer_groups:
                 customer_p = self.doc.add_paragraph()

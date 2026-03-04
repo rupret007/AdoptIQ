@@ -2000,12 +2000,13 @@ def derive_portfolio_intelligence(arr_df, ab_df, cases_df=None, team_subs_df=Non
             cust_arr = arr_df.groupby('BU_NAME')[arr_col].sum().sort_values(ascending=False)
             top5_arr = float(cust_arr.head(5).sum())
             top10_arr = float(cust_arr.head(10).sum())
-            insights['concentration'] = {
-                'top5_pct': round(top5_arr / total_arr * 100, 1),
-                'top10_pct': round(top10_arr / total_arr * 100, 1),
-                'top5_customers': {str(k): float(v) for k, v in cust_arr.head(5).items()},
-                'hhi_index': round(float((cust_arr / total_arr * 100).pow(2).sum()), 1),
-            }
+            if total_arr > 0:
+                insights['concentration'] = {
+                    'top5_pct': round(top5_arr / total_arr * 100, 1),
+                    'top10_pct': round(top10_arr / total_arr * 100, 1),
+                    'top5_customers': {str(k): float(v) for k, v in cust_arr.head(5).items()},
+                    'hhi_index': round(float((cust_arr / total_arr * 100).pow(2).sum()), 1),
+                }
 
         # 2. CSSM workload imbalance
         if ab_df is not None and not ab_df.empty and team_subs_df is not None:
@@ -3128,7 +3129,8 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             
             # Add dashboard heading
             dashboard_heading = doc.add_heading("Portfolio Dashboard - At-A-Glance", level=2)
-            dashboard_heading.runs[0].font.color.rgb = RGBColor(0, 123, 199)
+            if dashboard_heading.runs:
+                dashboard_heading.runs[0].font.color.rgb = RGBColor(0, 123, 199)
             
             # Create figure with subplots for multiple charts
             fig = plt.figure(figsize=(12, 8))
@@ -3287,21 +3289,17 @@ def create_executive_title_page(doc, manager: str, technology: str, days: int, p
         # Main title
         title = doc.add_heading(f"{manager}'s Portfolio", level=1)
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        try:
+        if title.runs:
             title.runs[0].font.size = Pt(28)
             title.runs[0].font.bold = True
-            title.runs[0].font.color.rgb = RGBColor(0, 123, 199)  # Cisco blue
-        except Exception:
-            pass
+            title.runs[0].font.color.rgb = RGBColor(0, 123, 199)
         
         # Subtitle
         subtitle = doc.add_paragraph(f"{technology} Executive Analysis")
         subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        try:
+        if subtitle.runs:
             subtitle.runs[0].font.size = Pt(18)
             subtitle.runs[0].font.color.rgb = RGBColor(100, 100, 100)
-        except Exception:
-            pass
         
         doc.add_paragraph()
         
@@ -3322,33 +3320,25 @@ Report Date: {datetime.now().strftime("%B %d, %Y")}
                 metrics_text += f"\nSupport Cases: {portfolio_metrics['total_cases']}"
             
             metrics_para.add_run(metrics_text.strip())
-            try:
+            if metrics_para.runs:
                 metrics_para.runs[0].font.size = Pt(12)
                 metrics_para.runs[0].font.color.rgb = RGBColor(60, 60, 60)
-            except Exception:
-                pass
         else:
-            # Simple metadata if no metrics
             meta = doc.add_paragraph(f"Analysis Period: {days} Days\nReport Generated: {datetime.now().strftime('%B %d, %Y')}")
             meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            try:
+            if meta.runs:
                 meta.runs[0].font.size = Pt(12)
                 meta.runs[0].font.color.rgb = RGBColor(100, 100, 100)
-            except Exception:
-                pass
         
         doc.add_paragraph()
         doc.add_paragraph()
         
-        # Confidentiality notice
         notice = doc.add_paragraph("CONFIDENTIAL - Executive Leadership Review")
         notice.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        try:
+        if notice.runs:
             notice.runs[0].font.size = Pt(10)
             notice.runs[0].font.italic = True
             notice.runs[0].font.color.rgb = RGBColor(150, 150, 150)
-        except Exception:
-            pass
         
         # Page break after title
         doc.add_page_break()
@@ -3525,21 +3515,17 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
         if line.startswith('#####'):
             heading_text = line.lstrip('#').strip().replace('**', '')
             h = doc.add_heading(heading_text, level=4)
-            try:
+            if h.runs:
                 h.runs[0].font.size = Pt(11)
                 h.runs[0].font.bold = True
                 h.runs[0].font.color.rgb = RGBColor(0, 123, 199)
-            except Exception:
-                pass
         elif line.startswith('####'):
             heading_text = line.lstrip('#').strip().replace('**', '')
             h = doc.add_heading(heading_text, level=4)
-            try:
+            if h.runs:
                 h.runs[0].font.size = Pt(11)
                 h.runs[0].font.bold = True
                 h.runs[0].font.color.rgb = RGBColor(0, 123, 199)
-            except Exception:
-                pass
         elif line.startswith('###'):
             heading_text = line.lstrip('#').strip().replace('**', '')
             h = doc.add_heading(heading_text, level=3)

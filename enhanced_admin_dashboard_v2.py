@@ -58,7 +58,7 @@ def _safe_json_load(s, default=None):
 
 
 # Main app URL (for container: set ADOPTIQ_MAIN_URL=http://adoptiq-main:5000)
-MAIN_APP_URL = os.environ.get('ADOPTIQ_MAIN_URL', 'http://localhost:5000')
+MAIN_APP_URL = os.environ.get('ADOPTIQ_MAIN_URL', 'http://localhost:5001')
 
 def _main_app_host_port():
     """Parse MAIN_APP_URL into (host, port) for socket check."""
@@ -1416,8 +1416,8 @@ def enhanced_admin_dashboard():
         if response.status_code == 200:
             all_reports = response.json()
             running_reports = [r for r in all_reports if r.get('status') in ['running', 'starting']]
-    except Exception:
-        pass  # Main app might not be running
+    except Exception as _fetch_err:
+        logger.debug(f"Could not fetch running reports from main app: {_fetch_err}")
     
     return render_template_string(ENHANCED_ADMIN_TEMPLATE_V2, 
                                 server_status=server_status,
@@ -1960,8 +1960,8 @@ if __name__ == '__main__':
                 pass  # Keep default encoding if this fails
         init_database()
         print("Starting AdoptIQ Admin Dashboard v2.0...")
-        print("Access the dashboard at: http://localhost:5001")
-        admin_app.run(host='0.0.0.0', port=5001, debug=False)
+        print("Access the dashboard at: http://localhost:5002")
+        admin_app.run(host='0.0.0.0', port=5002, debug=False)
     except Exception as e:
         print("Admin Console failed to start:", e)
         import traceback

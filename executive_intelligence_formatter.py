@@ -368,7 +368,10 @@ class ExecutiveIntelligenceFormatter:
                 for customer, data in sorted(high_risk.items(), key=lambda x: x[1].get('score', 0), reverse=True):
                     row = table.add_row().cells
                     row[0].text = str(customer)  # Full customer name
-                    row[1].text = f"{data.get('score', 'N/A')}/10"
+                    _score = data.get('score', 0)
+                    if _score is None or (isinstance(_score, float) and (_score != _score)):
+                        _score = 0
+                    row[1].text = f"{_score}/10"
                     
                     # Key issues
                     issues = []

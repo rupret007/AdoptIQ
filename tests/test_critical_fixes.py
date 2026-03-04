@@ -1406,3 +1406,85 @@ class TestRound23Fixes:
             src = f.read()
         assert 'cannot convert to DataFrame' in src, \
             "Sheet conversion exception should log debug message"
+
+
+class TestRound24Fixes:
+    """Round 24: Ask-AI error sanitization, admin ports, runs[0] guards, CSRF, division-by-zero, groupby column, NaN score."""
+
+    def test_ask_ai_error_not_exposed(self):
+        """Ask-AI endpoints should not return raw ERROR: strings to clients."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        import re
+        raw_returns = re.findall(r"return jsonify\(\{.*'error':\s*answer", src)
+        assert len(raw_returns) == 0, "Raw LLM error should not be returned to client"
+        assert src.count("'Unable to generate a response.") >= 2, \
+            "Both Ask-AI endpoints need generic error message"
+
+    def test_admin_main_app_url_port(self):
+        """Admin dashboard MAIN_APP_URL should default to port 5001."""
+        with open(os.path.join(_PROJECT_ROOT, 'enhanced_admin_dashboard_v2.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "http://localhost:5001" in src, "MAIN_APP_URL should default to port 5001"
+
+    def test_admin_standalone_port(self):
+        """Admin dashboard standalone should run on port 5002."""
+        with open(os.path.join(_PROJECT_ROOT, 'enhanced_admin_dashboard_v2.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "port=5002" in src, "Standalone admin should run on port 5002"
+
+    def test_backend_runs_guarded(self):
+        """adoptiq_backend.py title page .runs[0] should use 'if obj.runs:' guard, not try/except."""
+        with open(os.path.join(_PROJECT_ROOT, 'adoptiq_backend.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find("def create_executive_title_page")
+        title_section = src[idx:idx + 3000] if idx >= 0 else ''
+        assert 'if title.runs:' in title_section, "title.runs[0] should be guarded"
+        assert 'if subtitle.runs:' in title_section, "subtitle.runs[0] should be guarded"
+        assert 'if notice.runs:' in title_section, "notice.runs[0] should be guarded"
+
+    def test_bst_psirt_csrf_token(self):
+        """bst_psirt_search.html should include CSRF token in POST requests."""
+        with open(os.path.join(_PROJECT_ROOT, 'templates', 'bst_psirt_search.html'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'csrf-token' in src, "CSRF meta tag should be present"
+        assert src.count('X-CSRFToken') >= 2, "Both BST and PSIRT fetches need CSRF header"
+
+    def test_arr_division_by_zero_guard(self):
+        """adoptiq_backend.py ARR concentration should guard against division by zero."""
+        with open(os.path.join(_PROJECT_ROOT, 'adoptiq_backend.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find("top5_pct")
+        assert idx > 0
+        guard_section = src[max(0, idx - 200):idx]
+        assert "if total_arr > 0:" in guard_section, "Division by zero guard needed"
+
+    def test_compact_groupby_column_check(self):
+        """compact_report_formatter.py groupby should check column existence."""
+        with open(os.path.join(_PROJECT_ROOT, 'compact_report_formatter.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "'customer_name' in critical_ab.columns" in src
+        assert "'BU_NAME' if 'BU_NAME' in critical_ab.columns" in src
+
+    def test_exec_intel_nan_score_guard(self):
+        """executive_intelligence_formatter.py should guard NaN in score display."""
+        with open(os.path.join(_PROJECT_ROOT, 'executive_intelligence_formatter.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert '_score != _score' in src or 'isnan(_score)' in src, \
+            "Score display should check for NaN"
+
+    def test_admin_silent_exception_fixed(self):
+        """Admin dashboard should not silently pass when fetching running reports."""
+        with open(os.path.join(_PROJECT_ROOT, 'enhanced_admin_dashboard_v2.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'Could not fetch running reports' in src, \
+            "Exception should be logged, not silently passed"
+
+    def test_duplicate_logger_removed(self):
+        """Progress route should not have duplicate logger.error calls."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('Error loading analysis status from file:')
+        assert idx > 0
+        next_100 = src[idx:idx + 200]
+        assert next_100.count('logger.error') <= 1, "Duplicate logger.error should be removed"

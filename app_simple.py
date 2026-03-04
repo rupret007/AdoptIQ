@@ -8177,7 +8177,6 @@ def progress(analysis_id):
                         return f"<h1>Analysis not found</h1><p>Analysis ID: {analysis_id_safe}</p><a href='/'>Start New Analysis</a>", 404
         except Exception as e:
             logger.error(f"Error loading analysis status from file: {e}", exc_info=True)
-            logger.error(f"Error loading analysis status: {e}", exc_info=True)
             return f"<h1>Analysis not found</h1><p>The analysis could not be loaded.</p><a href='/'>Start New Analysis</a>", 404
     else:
         with analysis_status_lock:
@@ -8276,7 +8275,6 @@ def progress(analysis_id):
                         const cpEl = document.getElementById('customer-progress-text');
                         if (cpEl) {{
                             if (cp.current) {{
-                                function _esc(s) {{ var d=document.createElement('div'); d.textContent=String(s); return d.innerHTML; }}
                                 cpEl.innerHTML = '<strong>Current:</strong> ' + _esc(cp.current) + '<br><strong>Progress:</strong> ' + _esc(cp.completed) + '/' + _esc(cp.total) + ' customers<br><strong>Remaining:</strong> ' + _esc(cp.total - cp.completed);
                             }} else {{
                                 cpEl.textContent = 'Processing ' + cp.total + ' customers...';
@@ -9239,7 +9237,8 @@ def ask_ai_portfolio():
         answer = generate_llm_response(system_prompt, full_prompt)
 
         if answer and answer.startswith("ERROR:"):
-            return jsonify({'ok': False, 'error': answer})
+            logger.error(f"Ask-AI portfolio LLM failure: {answer}")
+            return jsonify({'ok': False, 'error': 'Unable to generate a response. Please try again later.'})
 
         return jsonify({
             'ok': True,
@@ -9384,7 +9383,8 @@ def ask_intel():
         answer = generate_llm_response(system_prompt, full_prompt)
 
         if answer and answer.startswith("ERROR:"):
-            return jsonify({'ok': False, 'error': answer})
+            logger.error(f"Ask-Intel LLM failure: {answer}")
+            return jsonify({'ok': False, 'error': 'Unable to generate a response. Please try again later.'})
 
         return jsonify({'ok': True, 'answer': answer or 'No response generated.'})
     except Exception as e:
