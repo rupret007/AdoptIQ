@@ -8896,8 +8896,8 @@ def ask_ai_portfolio():
                                 cat_dist = ab_df['AB_CATEGORY_C'].value_counts().head(8)
                                 sections.append("Top categories:\n" + "\n".join(f"  - {c}: {n}" for c, n in cat_dist.items()))
 
-                            sections.append("Barrier details (up to 30):")
-                            for _, row in ab_df.head(30).iterrows():
+                            sections.append("Barrier details (up to 50):")
+                            for _, row in ab_df.head(50).iterrows():
                                 cust = row.get('BU_NAME', row.get('ACCOUNT_NAME_C', 'Unknown'))
                                 subj = row.get('SUBJECT_C', 'No subject')
                                 sev = row.get('SEVERITY_C', '')
@@ -8920,12 +8920,84 @@ def ask_ai_portfolio():
                             if sev_col:
                                 sev_counts = cases_df[sev_col].value_counts()
                                 sections.append("By severity: " + ", ".join(f"{s}: {c}" for s, c in sev_counts.items()))
-                            for _, row in cases_df.head(15).iterrows():
+                            for _, row in cases_df.head(25).iterrows():
                                 subj = row.get('SUBJECT', 'N/A')
                                 sev = row.get(sev_col, '') if sev_col else ''
-                                sections.append(f"  - [{sev}] {subj}")
+                                status = row.get('STATUS', '')
+                                case_id = row.get('CASE_ID', '')
+                                sections.append(f"  - [{sev}] {subj} (Status: {status}, Case: {case_id})")
                     except Exception as e:
                         logger.debug(f"Ask AI: Cases fetch skipped: {e}")
+
+                    # --- Section 4b: SOFTWARE DEFECTS (BST/CSC IDs from cases & barriers) ---
+                    try:
+                        import re as _re
+                        defect_ids = set()
+                        defect_by_customer = {}
+                        bems_ids = set()
+                        bems_by_customer = {}
+                        csc_pattern = r'\bCSC[a-zA-Z0-9]{6,10}\b'
+                        bems_pattern = r'\bBEMS\d{5,12}\b'
+                        for src_label, src_df, subj_col, cust_col in [
+                            ('case', cases_df, 'SUBJECT', 'ACCOUNT_ID'),
+                            ('barrier', ab_df, 'SUBJECT_C', 'BU_NAME'),
+                        ]:
+                            if src_df is None or src_df.empty:
+                                continue
+                            for _, row in src_df.iterrows():
+                                text = str(row.get(subj_col, ''))
+                                cust = str(row.get(cust_col, row.get('ACCOUNT_NAME_C', 'Unknown')))
+                                csc_matches = _re.findall(csc_pattern, text, _re.IGNORECASE)
+                                for m in csc_matches:
+                                    defect_ids.add(m.upper())
+                                    defect_by_customer.setdefault(cust, set()).add(m.upper())
+                                bems_matches = _re.findall(bems_pattern, text, _re.IGNORECASE)
+                                for m in bems_matches:
+                                    bems_ids.add(m.upper())
+                                    bems_by_customer.setdefault(cust, set()).add(m.upper())
+                        if defect_ids:
+                            sections.append(f"\n=== SOFTWARE DEFECTS REFERENCED ({len(defect_ids)} unique) ===")
+                            sections.append("Defect IDs: " + ", ".join(sorted(defect_ids)))
+                            if defect_by_customer:
+                                sections.append("By customer:")
+                                for cust, ids in sorted(defect_by_customer.items(), key=lambda x: len(x[1]), reverse=True)[:15]:
+                                    sections.append(f"  - {cust}: {', '.join(sorted(ids))}")
+                            context_summary_parts.append(f"{len(defect_ids)} defects")
+                        if bems_ids:
+                            sections.append(f"\n=== BEMS ESCALATIONS REFERENCED ({len(bems_ids)} unique) ===")
+                            sections.append("BEMS IDs: " + ", ".join(sorted(bems_ids)))
+                            if bems_by_customer:
+                                sections.append("By customer:")
+                                for cust, ids in sorted(bems_by_customer.items(), key=lambda x: len(x[1]), reverse=True)[:15]:
+                                    sections.append(f"  - {cust}: {', '.join(sorted(ids))}")
+                            context_summary_parts.append(f"{len(bems_ids)} BEMS")
+                    except Exception as e:
+                        logger.debug(f"Ask AI: Defect/BEMS extraction skipped: {e}")
+
+                    # --- Section 4c: FEATURE REQUESTS (from barrier categories) ---
+                    try:
+                        if ab_df is not None and not ab_df.empty:
+                            fr_keywords = ['feature request', 'enhancement', 'new feature', 'rfe', 'product feedback']
+                            fr_mask = pd.Series([False] * len(ab_df), index=ab_df.index)
+                            for col in ['AB_CATEGORY_C', 'SUBJECT_C']:
+                                if col in ab_df.columns:
+                                    col_lower = ab_df[col].fillna('').astype(str).str.lower()
+                                    for kw in fr_keywords:
+                                        fr_mask |= col_lower.str.contains(kw, na=False)
+                            fr_df = ab_df[fr_mask]
+                            if not fr_df.empty:
+                                sections.append(f"\n=== FEATURE REQUESTS / ENHANCEMENTS ({len(fr_df)} total) ===")
+                                cust_col = 'BU_NAME' if 'BU_NAME' in fr_df.columns else 'ACCOUNT_NAME_C'
+                                if cust_col in fr_df.columns:
+                                    fr_by_cust = fr_df[cust_col].value_counts().head(10)
+                                    sections.append("By customer:\n" + "\n".join(f"  - {c}: {n}" for c, n in fr_by_cust.items()))
+                                for _, row in fr_df.head(15).iterrows():
+                                    subj = row.get('SUBJECT_C', 'No subject')
+                                    cust = row.get('BU_NAME', row.get('ACCOUNT_NAME_C', 'Unknown'))
+                                    sections.append(f"  - {cust}: {subj}")
+                                context_summary_parts.append(f"{len(fr_df)} feature requests")
+                    except Exception as e:
+                        logger.debug(f"Ask AI: Feature requests skipped: {e}")
 
                     # --- Section 5: Customer Pulse ---
                     pulse_df = None
@@ -9210,7 +9282,64 @@ def ask_ai_portfolio():
 
         briefing = "\n".join(sections) if sections else "No portfolio data available."
         if len(briefing) > 80000:
-            briefing = briefing[:80000] + "\n\n[... briefing truncated to 80KB for AI processing ...]"
+            priority_headers = [
+                '=== PORTFOLIO OVERVIEW ===',
+                '=== FINANCIAL DATA ===',
+                '=== ARR AT RISK ===',
+                '=== BEMS ESCALATIONS REFERENCED',
+                '=== SOFTWARE DEFECTS REFERENCED',
+                '=== ADOPTION BARRIERS',
+                '=== SUPPORT CASES',
+                '=== ACTIVE SERVICE INCIDENTS',
+                '=== BARRIER VELOCITY ===',
+                '=== BARRIER AGING ANALYSIS ===',
+                '=== PULSE-REVENUE CORRELATION',
+                '=== ACCOUNT HEALTH',
+                '=== CONTRACT EXPIRATIONS ===',
+                '=== DERIVED PORTFOLIO INTELLIGENCE ===',
+                '=== CUSTOMER PULSE ===',
+                '=== TREND ANALYSIS',
+                '=== CROSS-REPORT TRENDS ===',
+                '=== HISTORICAL REPORT CONTEXT',
+                '=== FEATURE REQUESTS',
+                '=== RECENTLY EXPIRED',
+                '=== RENEWAL PROBABILITY ===',
+                '=== SUCCESS PRIORITIES',
+                '=== ACTION PLANS',
+            ]
+            kept_blocks = []
+            remaining_sections = []
+            for section_text in briefing.split('\n==='):
+                matched = False
+                for hdr in priority_headers:
+                    if hdr.lstrip('=').strip().lower() in section_text.lower():
+                        matched = True
+                        break
+                if matched or not section_text.strip().startswith(' '):
+                    kept_blocks.append(section_text)
+                else:
+                    remaining_sections.append(section_text)
+
+            rebuilt = '\n==='.join(kept_blocks)
+            budget = 80000 - len(rebuilt) - 200
+            if budget > 0 and remaining_sections:
+                for sec in remaining_sections:
+                    if len(sec) + 4 <= budget:
+                        rebuilt += '\n===' + sec
+                        budget -= len(sec) + 4
+
+            trimmed_names = []
+            for sec in remaining_sections:
+                first_line = sec.strip().split('\n')[0][:60] if sec.strip() else 'Unknown'
+                if '\n===' + sec not in rebuilt:
+                    trimmed_names.append(first_line)
+
+            if len(rebuilt) > 80000:
+                rebuilt = rebuilt[:80000]
+
+            if trimmed_names:
+                rebuilt += f"\n\n[Briefing trimmed to fit context window. Sections summarized/omitted: {', '.join(trimmed_names[:5])}]"
+            briefing = rebuilt
         context_summary = " | ".join(context_summary_parts) if context_summary_parts else "No data fetched"
 
         system_prompt = (
@@ -9236,6 +9365,17 @@ def ask_ai_portfolio():
             "7. CITE sources: reference CSConsole IDs, case numbers, customer names, and dates.\n"
             "8. RECOMMEND: provide specific, actionable next steps ranked by urgency and impact.\n"
             "9. FLAG GAPS: if data is missing or insufficient, state what's needed and why it matters.\n\n"
+            "ANALYTICAL EXAMPLES (follow this depth of cross-correlation):\n"
+            "- Revenue-Risk: 'Acme Corp has $2.1M ARR with 4 critical barriers and 2 P1 cases about the same "
+            "Webex Calling feature. Combined with a pulse score of 3.2 and contract expiring in 60 days, "
+            "this represents the highest churn risk in the portfolio at $2.1M.'\n"
+            "- Incident-Impact: 'The status.webex.com incident affecting Webex Meetings (ID: INC-2024-0145) "
+            "correlates with 3 P1 cases opened this week by customers representing $4.5M combined ARR. "
+            "This is not isolated - it is a systemic platform issue affecting your largest accounts.'\n"
+            "- Pattern-Detection: 'Six customers filed barriers mentioning \"SSO integration\" in the last "
+            "30 days (up from 1 in the previous period). Four of these customers also have open TAC cases "
+            "referencing the same CSC defect ID. This cluster suggests a product defect, not individual "
+            "customer configuration issues.'\n\n"
             "FORMAT: Start with a 2-3 sentence executive summary with the most critical finding. "
             "Then use clear **headings**, bullet points, and **bold** for key metrics and dollar amounts. "
             "End with a prioritized action list."
@@ -9375,19 +9515,62 @@ def ask_intel():
                 disc = (b.get('discovered_at') or '')[:10]
                 context_parts.append(f"- {b.get('bug_id','')} | {b.get('title','')} | Source: {b.get('source','')} | Discovered: {disc}")
 
+        # Add portfolio context so the LLM can correlate incidents with customer impact
+        try:
+            from adoptiq_backend import (
+                _connect_with_keeper, get_subscriptions_for_team,
+                fetch_support_cases_snowflake, TEAM_ROSTER,
+            )
+            cssm_emails = [email for _, _, email in TEAM_ROSTER]
+            _ctx = _connect_with_keeper()
+            if _ctx:
+                try:
+                    _subs = get_subscriptions_for_team(_ctx, cssm_emails)
+                    if _subs is not None and not _subs.empty:
+                        context_parts.append("\n=== PORTFOLIO CONTEXT (for impact correlation) ===")
+                        if 'BU_NAME' in _subs.columns:
+                            cust_names = sorted(_subs['BU_NAME'].dropna().unique().tolist())
+                            context_parts.append(f"Portfolio customers ({len(cust_names)}): " + ", ".join(cust_names[:60]))
+                        if 'TECHNOLOGY_C' in _subs.columns:
+                            techs = _subs['TECHNOLOGY_C'].dropna().value_counts().head(10)
+                            context_parts.append("Technologies: " + ", ".join(f"{t} ({c})" for t, c in techs.items()))
+                        acct_ids = _subs['ACCOUNT_ID_C'].unique().tolist() if 'ACCOUNT_ID_C' in _subs.columns else []
+                        if acct_ids:
+                            _cases = fetch_support_cases_snowflake(_ctx, acct_ids[:80], 90)
+                            if _cases is not None and not _cases.empty:
+                                p1p2 = _cases[_cases['SEVERITY'].isin(['1', '2', 'P1', 'P2', 'S1', 'S2'])] if 'SEVERITY' in _cases.columns else pd.DataFrame()
+                                context_parts.append(f"Active support cases (90d): {len(_cases)} total, {len(p1p2)} P1/P2")
+                                for _, row in _cases.head(10).iterrows():
+                                    context_parts.append(f"  - [{row.get('SEVERITY','')}] {row.get('SUBJECT','')}")
+                finally:
+                    try:
+                        _ctx.close()
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug(f"Ask-Intel: Portfolio context skipped: {e}")
+
         briefing = "\n".join(context_parts) if context_parts else "No intelligence data is currently stored."
 
         system_prompt = (
             "You are AdoptIQ's external intelligence analyst. You specialize in analyzing Webex "
-            "service incidents, scheduled maintenances, and known bugs/defects.\n\n"
+            "service incidents, scheduled maintenances, and known bugs/defects, AND correlating "
+            "them with portfolio customer impact.\n\n"
             "INSTRUCTIONS:\n"
             "1. Answer based ONLY on the data provided below.\n"
             "2. Identify patterns: recurring incidents, frequently affected services, time-based trends.\n"
             "3. Assess impact: which incidents are most severe and how they correlate with customer issues.\n"
-            "4. Provide timeline analysis when relevant (when did issues start, how long did they last).\n"
-            "5. Highlight any ongoing/unresolved incidents that need immediate attention.\n"
-            "6. If data is insufficient, clearly state what's missing.\n\n"
-            "FORMAT: Use headings, bullet points, and bold for key findings. Be concise but thorough."
+            "4. CORRELATE with portfolio: when possible, connect external incidents/bugs with active "
+            "customer support cases. Identify which portfolio customers may be affected by incidents.\n"
+            "5. Provide timeline analysis when relevant (when did issues start, how long did they last).\n"
+            "6. Distinguish between INCIDENTS (unplanned disruptions) and MAINTENANCES (planned work). "
+            "Incidents are higher priority and need different treatment.\n"
+            "7. Prioritize by severity: High > Medium > Low impact. Surface the most critical issues first.\n"
+            "8. Identify recurrence patterns: are certain services or components repeatedly affected?\n"
+            "9. Highlight any ongoing/unresolved incidents that need immediate attention.\n"
+            "10. If data is insufficient, clearly state what's missing.\n\n"
+            "FORMAT: Start with a 2-3 sentence executive summary of the most critical finding. "
+            "Use **headings**, bullet points, and **bold** for key findings. End with recommended actions."
         )
 
         from adoptiq_backend import generate_llm_response

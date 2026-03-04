@@ -4634,6 +4634,14 @@ PROMPT_PORTFOLIO_TEMPLATE = """
 
 **TECHNOLOGY FOCUS:** This analysis covers **{TECHNOLOGY}** adoption and support within {MANAGER}'s portfolio.
 
+**REASONING PROTOCOL (follow this before writing):**
+1. **IDENTIFY** the single most critical signal first: BEMS escalations > P1/P2 cases > critical adoption barriers > software defects > general barriers
+2. **CROSS-REFERENCE** across data domains: Do customers with BEMS also have adoption barriers? Do defect IDs in cases match known bugs? Do high-ARR customers overlap with high-barrier counts?
+3. **QUANTIFY** the revenue exposure: always calculate the ARR at risk from the identified issues
+4. **SYNTHESIZE** into a narrative that connects the dots - don't just list data, explain what it means together
+
+**DATA QUALITY NOTE:** If any data section appears incomplete, has unusual patterns (e.g., zero barriers for a large portfolio, missing severity fields), or shows anomalies, explicitly call this out. State what data may be missing and how it affects your confidence in the analysis.
+
 ---
 
 ## **Portfolio Health Score: [A/B/C/D/F]**
@@ -4880,14 +4888,6 @@ Generate a detailed, customer-specific report in Markdown. Do NOT omit any heade
 *   **Market Opportunities:** [Untapped potential and expansion possibilities]
 *   **Technology Evolution Impact:** [How emerging trends affect their {TECHNOLOGY} strategy]
 
-### **6. External Intelligence & Market Factors**
-*   **Software Defects Impact:** [How publicly known bugs (help.webex.com) may correlate with this customer's specific issues]
-*   **Service Incident Correlation:** [Impact of recent service incidents (status.webex.com) on this customer's experience]
-*   **Cross-Reference Analysis:** [Specific customer issues that align with known software defects or service incidents]
-*   **External Risk Assessment:** [How external factors (bugs, incidents) affect this customer's {TECHNOLOGY} adoption and satisfaction]
-*   **Engagement Quality:** [Analysis of how actively and constructively the customer engages with support]
-*   **Justification:** [A comprehensive, evidence-driven summary justifying the pulse rating. Focus on customer experience with {TECHNOLOGY}, outcomes, trends, risks, case history, problem severity, recurrence, and escalation patterns.]*
-
 ### **4. Predictive Risk Assessment**
 *   **Churn Risk Level:** [Low, Medium, High, Critical]
 *   **Risk Factors:** [Specific indicators that suggest potential issues or opportunities, **including BEMS escalation patterns**]
@@ -4915,10 +4915,12 @@ Generate a detailed, customer-specific report in Markdown. Do NOT omit any heade
 **Recommendation 3: [Priority Level]**
 - [Same detailed structure as Recommendation 1]
 
-### **6. Competitive Intelligence & Market Context**
-*   **Industry Benchmarking:** [How this customer's {TECHNOLOGY} adoption compares to industry standards]
+### **6. External Intelligence & Competitive Context**
+*   **Software Defects Impact:** [How publicly known bugs (help.webex.com) correlate with this customer's specific issues]
+*   **Service Incident Correlation:** [Impact of recent service incidents (status.webex.com) on this customer's experience]
+*   **Cross-Reference Analysis:** [Specific customer issues that align with known software defects or service incidents]
+*   **Industry Benchmarking:** [How this customer's {TECHNOLOGY} adoption compares to industry peers]
 *   **Competitive Positioning:** [Their {TECHNOLOGY} capabilities vs. market alternatives]
-*   **Market Trends Impact:** [External factors affecting their {TECHNOLOGY} strategy]
 *   **Innovation Opportunities:** [Emerging {TECHNOLOGY} capabilities they could leverage]
 
 ### **7. Success Metrics & Monitoring Plan**
@@ -4926,6 +4928,8 @@ Generate a detailed, customer-specific report in Markdown. Do NOT omit any heade
 *   **Monitoring Frequency:** [How often to review progress and adjust strategy]
 *   **Escalation Triggers:** [Specific conditions that require immediate intervention]
 *   **Success Celebration:** [How to recognize and reinforce positive outcomes]
+
+**CORRELATION MANDATE:** Before finalizing your analysis, you MUST connect adoption barriers with TAC case themes and external bugs. If a customer has both barriers and cases about the same technology area, that is a compound risk signal. Identify the single most impactful action that would address the largest cluster of connected issues.
 """
 
 def _json_lite(df: pd.DataFrame, limit=60, keep=None) -> str:
@@ -5752,6 +5756,15 @@ PROMPT_COMPACT_EXECUTIVE_TEMPLATE = """
 - **Quantify Impact:** How many customers? What's the business impact?
 - **Flag Escalations:** BEMS escalations are RED FLAGS - call them out explicitly
 - **Define Barriers:** Clearly explain what adoption barriers are blocking customers
+
+**SIGNAL PRIORITY (surface in this order):**
+1. **BEMS escalations** - complex engineering issues requiring backend support (highest priority)
+2. **P1/P2 TAC cases** - active high-severity customer issues
+3. **Critical adoption barriers** - issues blocking customers from using the product
+4. **Software defects (CSC IDs)** - known bugs affecting customers
+5. **General barriers and cases** - broader portfolio trends
+
+**DATA QUALITY:** If any section has zero data when the portfolio is large, flag it as a potential data gap rather than assuming no issues exist.
 
 ---
 
