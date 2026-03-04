@@ -866,3 +866,63 @@ class TestRound16Fixes:
         assert 'Acme Corp' in result
         assert 'Adoption Barriers' in result
         assert 'Barrier 1' in result
+
+
+class TestRound17Fixes:
+    """Tests for Round 17 audit fixes."""
+
+    def test_resolve_csone_path_rejects_arbitrary_paths(self):
+        """_resolve_csone_path_safe should reject paths outside uploads/OneDrive."""
+        from app_simple import _resolve_csone_path_safe
+        assert _resolve_csone_path_safe('/etc/passwd') is None
+        assert _resolve_csone_path_safe('../../etc/passwd') is None
+        assert _resolve_csone_path_safe('') is None
+        assert _resolve_csone_path_safe(None) is None
+
+    def test_leader_report_cancellation_uses_check_cancellation(self):
+        """Leader report runner should use check_cancellation for cancellation."""
+        from app_simple import check_cancellation, cancellation_flags, cancellation_flags_lock
+        test_id = 'test_leader_cancel'
+        with cancellation_flags_lock:
+            cancellation_flags[test_id] = True
+        assert check_cancellation(test_id) is True
+        with cancellation_flags_lock:
+            cancellation_flags.pop(test_id, None)
+
+    def test_bst_defect_id_validation(self, client):
+        """BST search should reject invalid defect IDs."""
+        import json
+        resp = client.post('/search_bst_defect',
+                           data=json.dumps({'defect_id': '<script>alert(1)</script>'}),
+                           content_type='application/json')
+        assert resp.status_code == 400
+
+    def test_psirt_advisory_id_validation(self, client):
+        """PSIRT search should reject invalid advisory IDs."""
+        import json
+        resp = client.post('/search_psirt_advisory',
+                           data=json.dumps({'advisory_id': '../../../etc/passwd'}),
+                           content_type='application/json')
+        assert resp.status_code == 400
+
+    def test_bst_defect_id_valid_format_accepted(self, client):
+        """BST search should accept valid alphanumeric IDs (even if search fails)."""
+        import json
+        resp = client.post('/search_bst_defect',
+                           data=json.dumps({'defect_id': 'CSCab12345'}),
+                           content_type='application/json')
+        assert resp.status_code != 400
+
+    def test_minimal_briefing_book_none_inputs(self):
+        """_create_minimal_briefing_book should handle None DataFrames."""
+        from adoptiq_backend import _create_minimal_briefing_book
+        result = _create_minimal_briefing_book('Test Manager', None, None, 'Test Tech')
+        assert 'Test Manager' in result
+        assert 'Test Tech' in result
+
+    def test_executive_briefing_book_none_inputs(self):
+        """_create_executive_briefing_book_with_csone should handle None DataFrames."""
+        from adoptiq_backend import _create_executive_briefing_book_with_csone
+        result = _create_executive_briefing_book_with_csone(
+            'Test Manager', None, None, None, 'Test Tech')
+        assert 'Test Manager' in result

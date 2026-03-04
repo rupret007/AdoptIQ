@@ -4251,6 +4251,10 @@ def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
 
 def _create_minimal_briefing_book(manager, ab_norm, team_subs_df, technology):
     """Create a minimal briefing book when data is limited"""
+    if ab_norm is None:
+        ab_norm = pd.DataFrame()
+    if team_subs_df is None:
+        team_subs_df = pd.DataFrame()
     briefing = []
     
     briefing.append(f"# Executive Portfolio Analysis - {manager}")
@@ -4286,6 +4290,12 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
         arr_data=None, arr_impact=None, feature_requests=None, software_defects=None, psirt_vulns=None):
     """Create a COMPREHENSIVE briefing book for executive analysis with FULL DATA for AI to generate rich insights.
     Optional kwargs (arr_data, arr_impact, feature_requests, software_defects, psirt_vulns) enrich the briefing when provided."""
+    if ab_norm is None:
+        ab_norm = pd.DataFrame()
+    if csone_df is None:
+        csone_df = pd.DataFrame()
+    if team_subs_df is None:
+        team_subs_df = pd.DataFrame()
     briefing = []
     
     briefing.append(f"# Executive Portfolio Analysis - {manager}")

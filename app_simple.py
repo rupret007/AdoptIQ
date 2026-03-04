@@ -6499,14 +6499,8 @@ def run_customer_renewal_analysis(analysis_id):
         # Process CSOne data; when no file, optionally try Snowflake SUPPORT_CASES so case counts are not always 0
         customer_csone = pd.DataFrame()
         support_cases_from_snowflake = False
-        # Resolve CSOne path (may be stored as filename only; try uploads folder)
-        csone_path = csone_file if (csone_file and os.path.exists(csone_file)) else None
-        if csone_file and not csone_path:
-            safe_name = secure_filename(os.path.basename(csone_file))
-            if safe_name:
-                uploads_path = os.path.join(app.config['UPLOAD_FOLDER'], safe_name)
-                if os.path.exists(uploads_path):
-                    csone_path = uploads_path
+        # Resolve CSOne path safely (prevents path traversal)
+        csone_path = _resolve_csone_path_safe(csone_file) if csone_file else None
         # When no file provided: try OneDrive folder (macro places reports daily)
         if not csone_path:
             csone_path = get_latest_csone_from_folder()
@@ -10662,6 +10656,10 @@ def run_leader_report_generation(analysis_id):
             else:
                 raise
         
+        if check_cancellation(analysis_id):
+            update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
+            return
+        
         with analysis_status_lock:
             _update_progress(status, 5, 'Connected to Snowflake. Fetching team subscriptions...', 'Team Data Retrieval')
         
@@ -10680,14 +10678,8 @@ def run_leader_report_generation(analysis_id):
         
         # Load and scope CSOne data to team portfolio (same approach as Comprehensive report)
         csone_df = pd.DataFrame()
-        # Resolve CSOne path (may be stored as filename only; try uploads folder)
-        csone_path = csone_file if (csone_file and os.path.exists(csone_file)) else None
-        if csone_file and not csone_path:
-            safe_name = secure_filename(os.path.basename(csone_file))
-            if safe_name:
-                uploads_path = os.path.join(app.config['UPLOAD_FOLDER'], safe_name)
-                if os.path.exists(uploads_path):
-                    csone_path = uploads_path
+        # Resolve CSOne path safely (prevents path traversal)
+        csone_path = _resolve_csone_path_safe(csone_file) if csone_file else None
         # When no file provided: try OneDrive folder (macro places reports daily)
         if not csone_path:
             csone_path = get_latest_csone_from_folder()
@@ -10736,6 +10728,10 @@ def run_leader_report_generation(analysis_id):
         if psirt_vulns:
             logger.info(f"[[PSIRT]] Found {psirt_vulns.get('total_vulnerabilities', 0)} vulnerabilities")
         
+        if check_cancellation(analysis_id):
+            update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
+            return
+        
         with analysis_status_lock:
             _update_progress(status, 17, 'Preparing to generate Word document...', 'Data Collection')
         
@@ -10756,6 +10752,10 @@ def run_leader_report_generation(analysis_id):
             psirt_vulns=psirt_vulns if 'psirt_vulns' in locals() else None,
             progress_callback=leader_progress_cb
         )
+        
+        if check_cancellation(analysis_id):
+            update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
+            return
         
         with analysis_status_lock:
             _update_progress(status, 82, 'Generating Excel workbook...', 'Excel Report Generation')
@@ -11040,6 +11040,10 @@ def search_bst_defect():
         if not defect_id:
             return jsonify({'error': 'Please provide a defect ID'}), 400
         
+        import re as _re
+        if len(defect_id) > 64 or not _re.match(r'^[A-Za-z0-9_\-]+$', defect_id):
+            return jsonify({'error': 'Invalid defect ID format'}), 400
+        
         # Import and initialize integrations
         from cisco_internal_integrations import CiscoInternalIntegrations
         import os
@@ -11089,6 +11093,10 @@ def search_psirt_advisory():
         
         if not advisory_id:
             return jsonify({'error': 'Please provide an advisory ID'}), 400
+        
+        import re as _re
+        if len(advisory_id) > 64 or not _re.match(r'^[A-Za-z0-9_\-:]+$', advisory_id):
+            return jsonify({'error': 'Invalid advisory ID format'}), 400
         
         # Import and initialize integrations
         from cisco_internal_integrations import CiscoInternalIntegrations

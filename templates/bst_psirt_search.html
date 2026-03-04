@@ -327,6 +327,20 @@
         const bstSearchBtn = document.getElementById('bstSearchBtn');
         const psirtSearchBtn = document.getElementById('psirtSearchBtn');
 
+        function _esc(s) {
+            if (!s) return '';
+            const d = document.createElement('div');
+            d.textContent = String(s);
+            return d.innerHTML;
+        }
+
+        function _safeHref(url) {
+            if (!url) return '#';
+            const s = String(url).trim();
+            if (s.startsWith('http://') || s.startsWith('https://')) return _esc(s);
+            return '#';
+        }
+
         function showLoading(message = 'Searching and generating AI summary...') {
             resultsPanel.classList.add('show');
             resultsContent.innerHTML = `
@@ -387,17 +401,17 @@
                     resultsContent.innerHTML = `
                         <div class="info-box">
                             <strong>📋 Defect Information:</strong><br>
-                            <strong>ID:</strong> ${data.defect_id}<br>
-                            <strong>Title:</strong> ${data.defect_info.title || 'N/A'}<br>
-                            <strong>Status:</strong> ${data.defect_info.status || 'N/A'}<br>
-                            <strong>Severity:</strong> ${data.defect_info.severity || 'N/A'}<br>
-                            <strong>Product:</strong> ${data.defect_info.product || 'N/A'}<br>
-                            <span class="classification-badge ${classificationClass}">
-                                ${data.defect_info.classification || 'CISCO_PUBLIC'}
+                            <strong>ID:</strong> ${_esc(data.defect_id)}<br>
+                            <strong>Title:</strong> ${_esc(data.defect_info.title || 'N/A')}<br>
+                            <strong>Status:</strong> ${_esc(data.defect_info.status || 'N/A')}<br>
+                            <strong>Severity:</strong> ${_esc(data.defect_info.severity || 'N/A')}<br>
+                            <strong>Product:</strong> ${_esc(data.defect_info.product || 'N/A')}<br>
+                            <span class="classification-badge ${_esc(classificationClass)}">
+                                ${_esc(data.defect_info.classification || 'CISCO_PUBLIC')}
                             </span>
                         </div>
-                        <div class="summary-box">${data.summary}</div>
-                        <a href="${data.direct_link}" target="_blank" class="direct-link">
+                        <div class="summary-box">${_esc(data.summary)}</div>
+                        <a href="${_safeHref(data.direct_link)}" target="_blank" rel="noopener noreferrer" class="direct-link">
                             View in BST →
                         </a>
                     `;
@@ -405,9 +419,9 @@
                     resultsTitle.textContent = 'Search Results';
                     resultsContent.innerHTML = `
                         <div class="warning-box">
-                            <strong>⚠️ Not Found:</strong> ${data.error}
+                            <strong>⚠️ Not Found:</strong> ${_esc(data.error)}
                         </div>
-                        <a href="${data.direct_link}" target="_blank" class="direct-link">
+                        <a href="${_safeHref(data.direct_link)}" target="_blank" rel="noopener noreferrer" class="direct-link">
                             Open BST to search manually →
                         </a>
                     `;
@@ -453,18 +467,18 @@
                     resultsContent.innerHTML = `
                         <div class="info-box">
                             <strong>🔒 Advisory Information:</strong><br>
-                            <strong>ID:</strong> ${data.advisory_id}<br>
-                            <strong>Title:</strong> ${data.advisory_info.title || 'N/A'}<br>
-                            <strong>Severity:</strong> ${data.advisory_info.severity || 'N/A'}<br>
-                            <strong>CVE IDs:</strong> ${cveList}<br>
-                            <strong>Bug IDs:</strong> ${bugList}<br>
-                            <strong>Products:</strong> ${productList}<br>
-                            <span class="classification-badge ${classificationClass}">
-                                ${data.advisory_info.classification || 'CISCO_PUBLIC'}
+                            <strong>ID:</strong> ${_esc(data.advisory_id)}<br>
+                            <strong>Title:</strong> ${_esc(data.advisory_info.title || 'N/A')}<br>
+                            <strong>Severity:</strong> ${_esc(data.advisory_info.severity || 'N/A')}<br>
+                            <strong>CVE IDs:</strong> ${_esc(cveList)}<br>
+                            <strong>Bug IDs:</strong> ${_esc(bugList)}<br>
+                            <strong>Products:</strong> ${_esc(productList)}<br>
+                            <span class="classification-badge ${_esc(classificationClass)}">
+                                ${_esc(data.advisory_info.classification || 'CISCO_PUBLIC')}
                             </span>
                         </div>
-                        <div class="summary-box">${data.summary}</div>
-                        <a href="${data.direct_link}" target="_blank" class="direct-link">
+                        <div class="summary-box">${_esc(data.summary)}</div>
+                        <a href="${_safeHref(data.direct_link)}" target="_blank" rel="noopener noreferrer" class="direct-link">
                             View PSIRT Advisory →
                         </a>
                     `;
@@ -472,9 +486,9 @@
                     resultsTitle.textContent = 'Search Results';
                     resultsContent.innerHTML = `
                         <div class="warning-box">
-                            <strong>⚠️ Not Found:</strong> ${data.error}
+                            <strong>⚠️ Not Found:</strong> ${_esc(data.error)}
                         </div>
-                        <a href="${data.direct_link}" target="_blank" class="direct-link">
+                        <a href="${_safeHref(data.direct_link)}" target="_blank" rel="noopener noreferrer" class="direct-link">
                             Open PSIRT to search manually →
                         </a>
                     `;
