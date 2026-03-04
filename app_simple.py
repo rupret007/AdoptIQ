@@ -8938,6 +8938,9 @@ def ask_ai_portfolio():
                         bems_by_customer = {}
                         csc_pattern = r'\bCSC[a-zA-Z0-9]{6,10}\b'
                         bems_pattern = r'\bBEMS\d{5,12}\b'
+                        acct_id_to_name = {}
+                        if team_subs_df is not None and not team_subs_df.empty and 'ACCOUNT_ID_C' in team_subs_df.columns and 'BU_NAME' in team_subs_df.columns:
+                            acct_id_to_name = dict(zip(team_subs_df['ACCOUNT_ID_C'], team_subs_df['BU_NAME']))
                         for src_label, src_df, subj_col, cust_col in [
                             ('case', cases_df, 'SUBJECT', 'ACCOUNT_ID'),
                             ('barrier', ab_df, 'SUBJECT_C', 'BU_NAME'),
@@ -8946,7 +8949,8 @@ def ask_ai_portfolio():
                                 continue
                             for _, row in src_df.iterrows():
                                 text = str(row.get(subj_col, ''))
-                                cust = str(row.get(cust_col, row.get('ACCOUNT_NAME_C', 'Unknown')))
+                                raw_cust = str(row.get(cust_col, row.get('ACCOUNT_NAME_C', 'Unknown')))
+                                cust = acct_id_to_name.get(raw_cust, raw_cust) if src_label == 'case' else raw_cust
                                 csc_matches = _re.findall(csc_pattern, text, _re.IGNORECASE)
                                 for m in csc_matches:
                                     defect_ids.add(m.upper())
@@ -9021,7 +9025,8 @@ def ask_ai_portfolio():
                             sections.append(f"\n=== SUCCESS PRIORITIES ({len(sp_df)} total) ===")
                             for _, row in sp_df.head(10).iterrows():
                                 subj = row.get('SUBJECT_C', row.get('NAME', 'N/A'))
-                                sections.append(f"  - {subj}")
+                                sp_id = row.get('ID', row.get('SP_ID', ''))
+                                sections.append(f"  - [SP-ID: {sp_id}] {subj}")
                     except Exception as e:
                         logger.debug(f"Ask AI: SP fetch skipped: {e}")
 
@@ -9033,7 +9038,8 @@ def ask_ai_portfolio():
                             for _, row in ap_df.head(10).iterrows():
                                 subj = row.get('SUBJECT_C', row.get('NAME', 'N/A'))
                                 status = row.get('STATUS_C', '')
-                                sections.append(f"  - {subj} (Status: {status})")
+                                ap_id = row.get('ID', row.get('AP_ID', ''))
+                                sections.append(f"  - [AP-ID: {ap_id}] {subj} (Status: {status})")
                     except Exception as e:
                         logger.debug(f"Ask AI: AP fetch skipped: {e}")
 
@@ -9216,7 +9222,8 @@ def ask_ai_portfolio():
                 if active_incidents:
                     sections.append(f"\n=== ACTIVE SERVICE INCIDENTS ({len(active_incidents)}) ===")
                     for inc in active_incidents[:10]:
-                        sections.append(f"  - [{(inc.get('status') or '').upper()}] {inc.get('title','')} | Impact: {inc.get('impact_level','')}")
+                        inc_id = inc.get('id', '')
+                        sections.append(f"  - [ID: {inc_id}] [{(inc.get('status') or '').upper()}] {inc.get('title','')} | Impact: {inc.get('impact_level','')}")
                 recent_bugs = (intel.get('bugs') or [])[:10]
                 if recent_bugs:
                     sections.append(f"\n=== RECENT KNOWN BUGS ({len(intel.get('bugs', []))}) ===")
@@ -9362,7 +9369,10 @@ def ask_ai_portfolio():
             "   - Contract expirations coinciding with unresolved customer issues\n"
             "   - Repeat offenders: accounts that keep generating new barriers\n"
             "6. PRIORITIZE by revenue impact: always lead with the highest-ARR findings.\n"
-            "7. CITE sources: reference CSConsole IDs, case numbers, customer names, and dates.\n"
+            "7. CITE sources: ALWAYS reference specific identifiers when available. Use AB-IDs for adoption barriers, "
+            "SP-IDs for success priorities, AP-IDs for action plans, Case IDs for support cases, "
+            "CSC IDs for software defects, BEMS IDs for escalations, and incident IDs for service disruptions. "
+            "Include customer names and dates. Citations build trust in the analysis.\n"
             "8. RECOMMEND: provide specific, actionable next steps ranked by urgency and impact.\n"
             "9. FLAG GAPS: if data is missing or insufficient, state what's needed and why it matters.\n\n"
             "ANALYTICAL EXAMPLES (follow this depth of cross-correlation):\n"
@@ -9497,7 +9507,8 @@ def ask_intel():
             context_parts.append("=== SERVICE INCIDENTS ===")
             for inc in intel['incidents'][:50]:
                 pub = (inc.get('published') or '')[:16]
-                line = f"- [{(inc.get('status') or '').upper()}] {inc.get('title','')} | Published: {pub} | Impact: {inc.get('impact_level','')}"
+                inc_id = inc.get('id', '')
+                line = f"- [ID: {inc_id}] [{(inc.get('status') or '').upper()}] {inc.get('title','')} | Published: {pub} | Impact: {inc.get('impact_level','')}"
                 desc = inc.get('description') or ''
                 if desc:
                     line += f" | Details: {desc[:200]}"
@@ -9507,7 +9518,8 @@ def ask_intel():
             context_parts.append("\n=== SCHEDULED MAINTENANCES ===")
             for m in intel['maintenances'][:50]:
                 pub = (m.get('published') or '')[:16]
-                context_parts.append(f"- [{(m.get('status') or '').upper()}] {m.get('title','')} | Date: {pub}")
+                m_id = m.get('id', '')
+                context_parts.append(f"- [ID: {m_id}] [{(m.get('status') or '').upper()}] {m.get('title','')} | Date: {pub}")
 
         if intel['bugs']:
             context_parts.append("\n=== KNOWN BUGS ===")
@@ -9541,7 +9553,8 @@ def ask_intel():
                                 p1p2 = _cases[_cases['SEVERITY'].isin(['1', '2', 'P1', 'P2', 'S1', 'S2'])] if 'SEVERITY' in _cases.columns else pd.DataFrame()
                                 context_parts.append(f"Active support cases (90d): {len(_cases)} total, {len(p1p2)} P1/P2")
                                 for _, row in _cases.head(10).iterrows():
-                                    context_parts.append(f"  - [{row.get('SEVERITY','')}] {row.get('SUBJECT','')}")
+                                    c_id = row.get('CASE_ID', row.get('ID', ''))
+                                    context_parts.append(f"  - [Case: {c_id}] [{row.get('SEVERITY','')}] {row.get('SUBJECT','')}")
                 finally:
                     try:
                         _ctx.close()
@@ -9570,7 +9583,10 @@ def ask_intel():
             "9. Highlight any ongoing/unresolved incidents that need immediate attention.\n"
             "10. If data is insufficient, clearly state what's missing.\n\n"
             "FORMAT: Start with a 2-3 sentence executive summary of the most critical finding. "
-            "Use **headings**, bullet points, and **bold** for key findings. End with recommended actions."
+            "Use **headings**, bullet points, and **bold** for key findings. End with recommended actions.\n\n"
+            "CITATION REQUIREMENT: Always cite data identifiers when referencing specific records. "
+            "Use incident IDs (e.g., 'Incident ID: INC-123'), bug IDs (e.g., 'CSCxx12345'), "
+            "and case IDs (e.g., 'Case: 500xxxxx') so readers can verify and follow up on specific items."
         )
 
         from adoptiq_backend import generate_llm_response

@@ -4244,18 +4244,27 @@ def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
             except Exception as _barrier_trend_err:
                 logger.debug(f"Barrier trend analysis skipped: {_barrier_trend_err}")
         
-        # FIXED: Show ALL barrier details for comprehensive context
         briefing.append("### Complete Barrier Details:")
         for idx, barrier in ab_norm.iterrows():
-            briefing.append(f"**Barrier {idx + 1}:**")
+            barrier_id = barrier.get('ID', barrier.get('id', ''))
+            label = f"[AB-ID: {barrier_id}]" if barrier_id else f"Barrier {idx + 1}"
+            briefing.append(f"**{label}:**")
             if 'subject_c' in barrier:
                 briefing.append(f"- Subject: {barrier['subject_c']}")
+            elif 'SUBJECT_C' in barrier:
+                briefing.append(f"- Subject: {barrier['SUBJECT_C']}")
+            elif 'title' in barrier:
+                briefing.append(f"- Subject: {barrier['title']}")
             if 'customer_name' in barrier:
                 briefing.append(f"- Customer: {barrier['customer_name']}")
             if 'ab_category_c' in barrier:
                 briefing.append(f"- Category: {barrier['ab_category_c']}")
+            elif 'AB_CATEGORY_C' in barrier:
+                briefing.append(f"- Category: {barrier['AB_CATEGORY_C']}")
             if 'severity_c' in barrier:
                 briefing.append(f"- Severity: {barrier['severity_c']}")
+            elif 'SEVERITY_C' in barrier:
+                briefing.append(f"- Severity: {barrier['SEVERITY_C']}")
             briefing.append("")
     
     return "\n".join(briefing)
@@ -4503,12 +4512,14 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
             high_sev = ab_norm[ab_norm[sev_col].astype(str).str.contains('High|Critical', case=False, na=False)]
             if not high_sev.empty:
                 briefing.append("### HIGH/CRITICAL Severity Barriers - REQUIRES ATTENTION:")
-                for _, barrier in high_sev.iterrows():
+                for _hi_idx, barrier in high_sev.iterrows():
                     subj = barrier.get('SUBJECT_C', barrier.get('subject_c', barrier.get('title', 'No subject')))
                     customer = barrier.get('customer_name', 'Unknown')
                     sev = barrier.get(sev_col, 'Unknown')
                     status = barrier.get('AB_STATUS_C', barrier.get('STATUS_C', 'Unknown'))
-                    briefing.append(f"- **{customer}**: {subj} - Severity: {sev}, Status: {status}")
+                    b_id = barrier.get('ID', barrier.get('id', ''))
+                    id_tag = f" [AB-ID: {b_id}]" if b_id else ''
+                    briefing.append(f"- **{customer}**: {subj} - Severity: {sev}, Status: {status}{id_tag}")
                 briefing.append("")
         
         # ALL Adoption Barrier Titles - COMPREHENSIVE for AI thematic analysis
@@ -4520,7 +4531,9 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
                 subject = barrier.get(subj_col, 'No subject')
                 sev = barrier.get(sev_col, 'N/A') if sev_col else 'N/A'
                 cat = barrier.get(cat_col, 'Uncategorized') if cat_col else 'Uncategorized'
-                briefing.append(f"- [{customer}] {subject} (Severity: {sev}, Category: {cat})")
+                b_id = barrier.get('ID', barrier.get('id', ''))
+                id_tag = f" [AB-ID: {b_id}]" if b_id else ''
+                briefing.append(f"- [{customer}] {subject} (Severity: {sev}, Category: {cat}){id_tag}")
         briefing.append("")
         
         # Complete barrier details with record IDs for traceability
@@ -4627,7 +4640,7 @@ PROMPT_PORTFOLIO_TEMPLATE = """
 
 **CRITICAL REQUIREMENTS:**
 - **Show the Problems:** Don't sugarcoat - executives need to see the real issues
-- **Cite Specifics:** Reference actual defect IDs, BEMS IDs, TAC case numbers, adoption barrier details
+- **Cite Specifics:** Reference actual record identifiers from the data: AB-IDs for adoption barriers, SP-IDs for success priorities, AP-IDs for action plans, CSC IDs for software defects, BEMS IDs for escalations, Case IDs for TAC cases, and incident IDs for service disruptions. These identifiers let readers verify and follow up on each claim
 - **Quantify Impact:** How many customers? What's the business impact? 
 - **Flag Escalations:** BEMS escalations are RED FLAGS - call them out explicitly
 - **Define Barriers:** Clearly explain what adoption barriers are blocking customers
@@ -4803,8 +4816,13 @@ You are CircuIT, an expert **Principal Technical Analyst and Business Strategist
 **CRITICAL INSTRUCTION:** When analyzing Adoption Barriers, your primary goal is to perform a **thematic analysis** of the barrier titles and descriptions specifically related to {TECHNOLOGY}. Do not simply state that they are uncategorized. Instead, read the text provided in the "All Adoption Barrier Titles for Thematic Analysis" section and group them into meaningful themes (e.g., 'Requests for Training,' 'Feature Gaps,' 'Internal Political Blockers'). Your value is in converting this unstructured text into strategic insight focused on {TECHNOLOGY}.
 
 **SOURCE CITATION REQUIREMENT:** When referencing specific data points, you MUST include the proper source citation in parentheses:
-- For CSConsole records: `(CSConsole Record: [ID])`
+- For adoption barriers: `(AB-ID: [ID])`
+- For success priorities: `(SP-ID: [ID])`
+- For action plans: `(AP-ID: [ID])`
 - For CSOne/TAC cases: `(TAC Case: [Case Number])`
+- For software defects: `(CSC ID: [ID])`
+- For BEMS escalations: `(BEMS: [ID])`
+- For service incidents: `(Incident ID: [ID])`
 
 **CSConsole DATA ANALYSIS REQUIREMENT:** You MUST comprehensively analyze and reference CSConsole data for this customer including:
 - **Action Plans:** Strategic initiatives specific to this customer and their impact
@@ -5752,7 +5770,7 @@ PROMPT_COMPACT_EXECUTIVE_TEMPLATE = """
 
 **CRITICAL REQUIREMENTS:**
 - **Show the Problems:** Executives need to see the real issues - don't sugarcoat
-- **Cite Specifics:** Reference actual defect IDs, BEMS IDs, TAC case numbers, adoption barrier details
+- **Cite Specifics:** Reference actual record identifiers from the data: AB-IDs for adoption barriers, SP-IDs for success priorities, AP-IDs for action plans, CSC IDs for software defects, BEMS IDs for escalations, Case IDs for TAC cases, and incident IDs for service disruptions. These identifiers let readers verify and follow up on each claim
 - **Quantify Impact:** How many customers? What's the business impact?
 - **Flag Escalations:** BEMS escalations are RED FLAGS - call them out explicitly
 - **Define Barriers:** Clearly explain what adoption barriers are blocking customers
