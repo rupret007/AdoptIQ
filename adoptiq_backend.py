@@ -1751,19 +1751,47 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
 
                     metrics = {'sheet': sheet, 'rows': len(df), 'columns': list(df.columns[:10])}
 
+                    cust_col_name = None
+                    arr_col_name = None
+                    subj_col_name = None
                     for col in df.columns:
                         col_lower = str(col).lower()
                         if any(k in col_lower for k in ['severity', 'sev', 'priority']):
-                            metrics['severity_distribution'] = df[col].value_counts().head(5).to_dict()
+                            metrics['severity_distribution'] = {str(k): int(v) for k, v in df[col].value_counts().head(8).items()}
                         elif any(k in col_lower for k in ['status', 'state']):
-                            metrics['status_distribution'] = df[col].value_counts().head(5).to_dict()
+                            metrics['status_distribution'] = {str(k): int(v) for k, v in df[col].value_counts().head(8).items()}
                         elif any(k in col_lower for k in ['customer', 'bu_name', 'account']):
                             metrics['unique_customers'] = int(df[col].nunique())
+                            cust_col_name = col
                         elif any(k in col_lower for k in ['arr', 'annual_contract', 'revenue']):
                             try:
                                 metrics['total_arr'] = float(pd.to_numeric(df[col], errors='coerce').sum())
+                                arr_col_name = col
                             except Exception:
                                 pass
+                        elif any(k in col_lower for k in ['subject', 'name', 'title', 'description']):
+                            if subj_col_name is None:
+                                subj_col_name = col
+                        elif any(k in col_lower for k in ['category', 'ab_category', 'type']):
+                            metrics['category_distribution'] = {str(k): int(v) for k, v in df[col].value_counts().head(8).items()}
+
+                    if cust_col_name and arr_col_name:
+                        try:
+                            cust_arr = df.groupby(cust_col_name)[arr_col_name].apply(
+                                lambda x: float(pd.to_numeric(x, errors='coerce').sum())
+                            ).sort_values(ascending=False).head(10)
+                            metrics['top_customers_by_arr'] = {str(k): v for k, v in cust_arr.items() if v > 0}
+                        except Exception:
+                            pass
+                    elif cust_col_name:
+                        metrics['top_customers_by_count'] = {str(k): int(v) for k, v in df[cust_col_name].value_counts().head(10).items()}
+
+                    if subj_col_name:
+                        try:
+                            subjects = df[subj_col_name].dropna().astype(str).head(10).tolist()
+                            metrics['sample_subjects'] = [s[:120] for s in subjects if s.strip()]
+                        except Exception:
+                            pass
 
                     report_info['metrics'][sheet] = metrics
                 except Exception:
@@ -1881,6 +1909,52 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
                 }
         except Exception as e:
             logger.debug(f"Enhanced expired accounts skipped: {e}")
+
+        # 4. Renewal probability
+        try:
+            cur.execute(f"""
+                SELECT CONTRACT_NUMBER, RENEWAL_STATUS, RENEWAL_PROBABILITY
+                FROM CX_DB.CX_SWSSBST_BR.RENEWAL_DATA
+                WHERE ACCOUNT_ID_C IN ({placeholders})
+                LIMIT 50
+            """, tuple(batch))
+            rows = cur.fetchall()
+            if rows:
+                cols = [d[0] for d in cur.description]
+                renewals = [dict(zip(cols, r)) for r in rows]
+                prob_values = []
+                for r in renewals:
+                    raw = r.get('RENEWAL_PROBABILITY')
+                    if raw is not None:
+                        try:
+                            prob_values.append(float(raw))
+                        except (ValueError, TypeError):
+                            pass
+                status_dist = {}
+                for r in renewals:
+                    st = str(r.get('RENEWAL_STATUS') or 'Unknown')
+                    status_dist[st] = status_dist.get(st, 0) + 1
+                at_risk_list = []
+                for r in renewals:
+                    try:
+                        p = float(r.get('RENEWAL_PROBABILITY') or 100)
+                    except (ValueError, TypeError):
+                        continue
+                    if p < 70:
+                        at_risk_list.append({
+                            'contract': str(r.get('CONTRACT_NUMBER', '')),
+                            'probability': p,
+                            'status': str(r.get('RENEWAL_STATUS', '')),
+                        })
+                result['renewals'] = {
+                    'count': len(renewals),
+                    'avg_probability': round(sum(prob_values) / len(prob_values), 1) if prob_values else 0,
+                    'min_probability': round(min(prob_values), 1) if prob_values else 0,
+                    'status_distribution': status_dist,
+                    'at_risk': at_risk_list[:10],
+                }
+        except Exception as e:
+            logger.debug(f"Enhanced renewals skipped: {e}")
 
     except Exception as e:
         logger.debug(f"Enhanced account insights error: {e}")
@@ -2009,6 +2083,77 @@ def derive_portfolio_intelligence(arr_df, ab_df, cases_df=None, team_subs_df=Non
     return insights
 
 
+def compute_barrier_aging(ab_df, arr_df=None):
+    """Compute aging analysis for open adoption barriers.
+
+    Groups barriers into aging buckets and identifies the most stale
+    barriers with their ARR exposure.
+    """
+    if ab_df is None or ab_df.empty:
+        return {}
+
+    try:
+        status_col = 'STATUS_C' if 'STATUS_C' in ab_df.columns else None
+        if status_col:
+            open_mask = ~ab_df[status_col].fillna('').str.upper().isin(['CLOSED', 'RESOLVED', 'COMPLETED'])
+            open_barriers = ab_df[open_mask].copy()
+        else:
+            open_barriers = ab_df.copy()
+
+        if open_barriers.empty:
+            return {'total_open': 0}
+
+        date_col = None
+        for dc in ('CREATED_DATE', 'OPEN_DATE_C', 'CREATEDDATE'):
+            if dc in open_barriers.columns:
+                date_col = dc
+                break
+
+        result = {'total_open': len(open_barriers)}
+        if date_col:
+            open_barriers['_parsed_date'] = pd.to_datetime(open_barriers[date_col], errors='coerce')
+            valid = open_barriers.dropna(subset=['_parsed_date'])
+            if not valid.empty:
+                now = pd.Timestamp.now()
+                valid = valid.copy()
+                valid['_days_open'] = (now - valid['_parsed_date']).dt.days.clip(lower=0)
+
+                buckets = {
+                    '0-30 days': int(((valid['_days_open'] >= 0) & (valid['_days_open'] < 30)).sum()),
+                    '30-60 days': int(((valid['_days_open'] >= 30) & (valid['_days_open'] < 60)).sum()),
+                    '60-90 days': int(((valid['_days_open'] >= 60) & (valid['_days_open'] < 90)).sum()),
+                    '90-180 days': int(((valid['_days_open'] >= 90) & (valid['_days_open'] < 180)).sum()),
+                    '180+ days': int((valid['_days_open'] >= 180).sum()),
+                }
+                result['aging_buckets'] = buckets
+                result['avg_days_open'] = round(float(valid['_days_open'].mean()), 1)
+                result['max_days_open'] = int(valid['_days_open'].max())
+                result['median_days_open'] = round(float(valid['_days_open'].median()), 1)
+
+                stale = valid.nlargest(5, '_days_open')
+                stale_list = []
+                for _, row in stale.iterrows():
+                    entry = {
+                        'days_open': int(row['_days_open']),
+                        'subject': str(row.get('SUBJECT_C', ''))[:100],
+                        'severity': str(row.get('SEVERITY_C', '')),
+                        'customer': str(row.get('BU_NAME', row.get('ACCOUNT_NAME_C', ''))),
+                        'id': str(row.get('ID', '')),
+                    }
+                    if arr_df is not None and not arr_df.empty and 'ACCOUNT_ID_C' in row.index:
+                        acct = row.get('ACCOUNT_ID_C')
+                        if acct and 'ACCOUNT_ID_C' in arr_df.columns and 'ANNUAL_CONTRACT_VALUE' in arr_df.columns:
+                            acct_arr = arr_df[arr_df['ACCOUNT_ID_C'] == acct]['ANNUAL_CONTRACT_VALUE'].sum()
+                            entry['account_arr'] = float(acct_arr)
+                    stale_list.append(entry)
+                result['stale_barriers'] = stale_list
+
+        return result
+    except Exception as e:
+        logger.debug(f"Barrier aging computation error: {e}")
+        return {}
+
+
 def build_cross_report_trends(reports_data):
     """Analyze multiple historical reports to identify cross-report trends.
 
@@ -2075,6 +2220,42 @@ def build_cross_report_trends(reports_data):
                     'change': arr_change,
                     'pct_change': round(arr_change / oldest['total_arr'] * 100, 1),
                 }
+
+            if oldest['severity_counts'] and newest['severity_counts']:
+                sev_trend = {}
+                all_sevs = set(list(oldest['severity_counts'].keys()) + list(newest['severity_counts'].keys()))
+                for sev in all_sevs:
+                    old_cnt = oldest['severity_counts'].get(sev, 0)
+                    new_cnt = newest['severity_counts'].get(sev, 0)
+                    if old_cnt or new_cnt:
+                        sev_trend[sev] = {
+                            'oldest': old_cnt, 'newest': new_cnt,
+                            'change': new_cnt - old_cnt,
+                        }
+                if sev_trend:
+                    trends['severity_trend'] = sev_trend
+
+        all_customer_sets = []
+        for rpt in reports_data:
+            cust_set = set()
+            for sheet, m_data in (rpt.get('metrics') or {}).items():
+                if isinstance(m_data, dict):
+                    for k in ('top_customers_by_arr', 'top_customers_by_count'):
+                        if k in m_data and isinstance(m_data[k], dict):
+                            cust_set.update(str(k) for k in m_data[k].keys() if k is not None)
+            all_customer_sets.append(cust_set)
+        if len(all_customer_sets) >= 2 and any(all_customer_sets):
+            non_empty = [s for s in all_customer_sets if s]
+            if len(non_empty) >= 2:
+                recurring = set.intersection(*non_empty)
+                recurring.discard('nan')
+                recurring.discard('None')
+                if recurring:
+                    trends['recurring_customers'] = {
+                        'count': len(recurring),
+                        'names': sorted(list(recurring))[:15],
+                        'appears_in_all_reports': True,
+                    }
 
     except Exception as e:
         logger.debug(f"Cross-report trend analysis error: {e}")

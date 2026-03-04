@@ -79,12 +79,12 @@
                     </div>
                     <div class="d-flex flex-wrap gap-2">
                         <small class="text-muted me-1 align-self-center">Try:</small>
-                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">What is the current ARR at risk across my portfolio and which accounts need immediate attention?</button>
-                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">Show me the trend: are adoption barriers increasing or decreasing compared to last period?</button>
-                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">Which customers have the highest concentration of unresolved critical barriers?</button>
-                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">What patterns do you see across my portfolio that indicate potential churn risk?</button>
-                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">Compare my portfolio health now vs the previous period - what's improving and what's getting worse?</button>
-                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">What is the barrier resolution velocity and are we keeping up with new barrier creation?</button>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">Which accounts have stale barriers over 90 days old and what is their combined ARR at risk?</button>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">Show me the silent risk: high-ARR customers with low pulse scores that might churn without warning</button>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">Cross-reference contract expirations with open barriers - which renewals are in danger?</button>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">What customers keep appearing in report after report with unresolved issues?</button>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">Give me a full portfolio health briefing with revenue-prioritized risk analysis and action items</button>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">Which technology segments have the worst barrier-to-ARR density and what is the financial exposure?</button>
                     </div>
                 </div>
             </div>
@@ -140,11 +140,15 @@ document.addEventListener('DOMContentLoaded', function() {
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;');
         return escaped
+            .replace(/^#### (.+)$/gm, '<h6 class="mb-1 mt-3 text-muted">$1</h6>')
             .replace(/^### (.+)$/gm, '<h6 class="mb-2 mt-3">$1</h6>')
-            .replace(/^## (.+)$/gm, '<h5 class="mb-2 mt-3">$1</h5>')
-            .replace(/^# (.+)$/gm, '<h5 class="mb-2 mt-3">$1</h5>')
+            .replace(/^## (.+)$/gm, '<h5 class="mb-2 mt-3 text-primary">$1</h5>')
+            .replace(/^# (.+)$/gm, '<h4 class="mb-2 mt-4 text-primary">$1</h4>')
             .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-            .replace(/^[\-\*]\s+/gm, '• ')
+            .replace(/^\d+\.\s+/gm, function(m) { return '<span class="text-primary fw-bold">' + m.trim() + '</span> '; })
+            .replace(/^[\-\*]\s+/gm, '<span class="text-primary me-1">&#9679;</span> ')
+            .replace(/^---$/gm, '<hr class="my-3">')
+            .replace(/`([^`]+)`/g, '<code class="bg-light px-1 rounded">$1</code>')
             .replace(/\n/g, '<br>');
     }
 

@@ -8786,6 +8786,7 @@ def ask_ai_portfolio():
             fetch_enhanced_account_insights,
             derive_portfolio_intelligence,
             build_cross_report_trends,
+            compute_barrier_aging,
             generate_llm_response,
             TEAM_ROSTER, MANAGERS,
         )
@@ -8907,6 +8908,7 @@ def ask_ai_portfolio():
                         logger.debug(f"Ask AI: Cases fetch skipped: {e}")
 
                     # --- Section 5: Customer Pulse ---
+                    pulse_df = None
                     try:
                         pulse_df = fetch_csconsole_customer_pulse(ctx, acct_batch, days)
                         if pulse_df is not None and not pulse_df.empty:
@@ -9019,6 +9021,16 @@ def ask_ai_portfolio():
                                 sections.append(f"\n=== RECENTLY EXPIRED ({r.get('count', 0)}) ===")
                                 for a in r.get('accounts', []):
                                     sections.append(f"  - {a.get('name','')} expired {a.get('expired','')}")
+                            if 'renewals' in enhanced:
+                                ren = enhanced['renewals']
+                                sections.append(f"\n=== RENEWAL PROBABILITY ===")
+                                sections.append(f"Contracts analyzed: {ren.get('count', 0)} | Avg probability: {ren.get('avg_probability', 0)}% | Min: {ren.get('min_probability', 0)}%")
+                                if ren.get('status_distribution'):
+                                    sections.append("Renewal status: " + ", ".join(f"{k}: {v}" for k, v in ren['status_distribution'].items()))
+                                if ren.get('at_risk'):
+                                    sections.append("At-risk renewals (<70% probability):")
+                                    for ar in ren['at_risk']:
+                                        sections.append(f"  - {ar.get('contract','')} | Probability: {ar.get('probability',0)}% | Status: {ar.get('status','')}")
                             context_summary_parts.append("Account health included")
                     except Exception as e:
                         logger.debug(f"Ask AI: Enhanced accounts skipped: {e}")
@@ -9049,6 +9061,54 @@ def ask_ai_portfolio():
                             context_summary_parts.append("Portfolio intelligence")
                     except Exception as e:
                         logger.debug(f"Ask AI: Portfolio intelligence skipped: {e}")
+
+                    # --- Section 15: BARRIER AGING ANALYSIS ---
+                    try:
+                        aging = compute_barrier_aging(ab_df, arr_df)
+                        if aging and aging.get('total_open', 0) > 0:
+                            sections.append(f"\n=== BARRIER AGING ANALYSIS ===")
+                            sections.append(f"Total open barriers: {aging['total_open']}")
+                            if 'aging_buckets' in aging:
+                                bucket_lines = [f"  - {k}: {v}" for k, v in aging['aging_buckets'].items() if v > 0]
+                                sections.append("Aging distribution:\n" + "\n".join(bucket_lines))
+                            if 'avg_days_open' in aging:
+                                sections.append(f"Average age: {aging['avg_days_open']} days | Median: {aging.get('median_days_open', 0)} days | Max: {aging.get('max_days_open', 0)} days")
+                            if aging.get('stale_barriers'):
+                                sections.append("Longest-standing open barriers:")
+                                for sb in aging['stale_barriers']:
+                                    line = f"  - {sb.get('days_open', 0)}d open: [{sb.get('severity', '')}] {sb.get('customer', '')}: {sb.get('subject', '')} (ID: {sb.get('id', '')})"
+                                    if sb.get('account_arr'):
+                                        line += f" | Account ARR: ${sb['account_arr']:,.0f}"
+                                    sections.append(line)
+                            context_summary_parts.append("Barrier aging")
+                    except Exception as e:
+                        logger.debug(f"Ask AI: Barrier aging skipped: {e}")
+
+                    # --- Section 16: PULSE-REVENUE CORRELATION ---
+                    try:
+                        if (pulse_df is not None and not pulse_df.empty
+                                and arr_df is not None and not arr_df.empty):
+                            score_col = next((c for c in ('SCORE__C', 'SCORE_C') if c in pulse_df.columns), None)
+                            pulse_acct_col = next((c for c in ('ACCOUNT__C', 'ACCOUNT_ID_C') if c in pulse_df.columns), None)
+                            if score_col and pulse_acct_col and 'ACCOUNT_ID_C' in arr_df.columns:
+                                acct_pulse = pulse_df.groupby(pulse_acct_col)[score_col].mean()
+                                low_pulse_accts = set(acct_pulse[acct_pulse < 5].index)
+                                if low_pulse_accts:
+                                    low_pulse_arr = arr_df[arr_df['ACCOUNT_ID_C'].isin(low_pulse_accts)]
+                                    if not low_pulse_arr.empty and 'ANNUAL_CONTRACT_VALUE' in low_pulse_arr.columns:
+                                        silent_risk_arr = float(low_pulse_arr['ANNUAL_CONTRACT_VALUE'].sum())
+                                        total_arr_val = float(arr_df['ANNUAL_CONTRACT_VALUE'].sum())
+                                        sections.append(f"\n=== PULSE-REVENUE CORRELATION (Silent Risk) ===")
+                                        sections.append(f"Accounts with low pulse (<5): {len(low_pulse_accts)}")
+                                        sections.append(f"Combined ARR of low-pulse accounts: ${silent_risk_arr:,.0f} ({round(silent_risk_arr / total_arr_val * 100, 1) if total_arr_val > 0 else 0}% of portfolio)")
+                                        if 'BU_NAME' in low_pulse_arr.columns:
+                                            top_silent = low_pulse_arr.groupby('BU_NAME')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False).head(5)
+                                            for cname, carr in top_silent.items():
+                                                pscore = acct_pulse.get(low_pulse_arr[low_pulse_arr['BU_NAME'] == cname]['ACCOUNT_ID_C'].iloc[0], 0) if len(low_pulse_arr[low_pulse_arr['BU_NAME'] == cname]) > 0 else 0
+                                                sections.append(f"  - {cname}: ${float(carr):,.0f} ARR | Pulse: {float(pscore):.1f}")
+                                        context_summary_parts.append("Silent risk analysis")
+                    except Exception as e:
+                        logger.debug(f"Ask AI: Pulse correlation skipped: {e}")
 
         finally:
             try:
@@ -9088,7 +9148,15 @@ def ask_ai_portfolio():
                             parts.append(f"ARR: ${m['total_arr']:,.0f}")
                         if 'severity_distribution' in m:
                             parts.append(f"Severity: {m['severity_distribution']}")
+                        if 'category_distribution' in m:
+                            parts.append(f"Categories: {m['category_distribution']}")
                         sections.append("  " + " | ".join(parts))
+                        if m.get('top_customers_by_arr'):
+                            sections.append("    Top customers: " + ", ".join(f"{c}: ${v:,.0f}" for c, v in list(m['top_customers_by_arr'].items())[:5]))
+                        elif m.get('top_customers_by_count'):
+                            sections.append("    Top customers: " + ", ".join(f"{c}: {v}" for c, v in list(m['top_customers_by_count'].items())[:5]))
+                        if m.get('sample_subjects'):
+                            sections.append("    Sample issues: " + " | ".join(m['sample_subjects'][:5]))
                 context_summary_parts.append(f"{len(hist)} past reports")
 
                 # Cross-report trend analysis
@@ -9108,6 +9176,13 @@ def ask_ai_portfolio():
                         if 'arr_trend' in cross_trends:
                             at = cross_trends['arr_trend']
                             sections.append(f"ARR trend: ${at['oldest']:,.0f} -> ${at['newest']:,.0f} ({at['pct_change']:+.1f}%)")
+                        if 'severity_trend' in cross_trends:
+                            sections.append("Severity evolution:")
+                            for sev, vals in cross_trends['severity_trend'].items():
+                                sections.append(f"  - {sev}: {vals['oldest']} -> {vals['newest']} ({vals['change']:+d})")
+                        if 'recurring_customers' in cross_trends:
+                            rc = cross_trends['recurring_customers']
+                            sections.append(f"Customers appearing in ALL reports ({rc['count']}): {', '.join(rc['names'][:10])}")
                 except Exception as e:
                     logger.debug(f"Ask AI: Cross-report trends skipped: {e}")
         except Exception as e:

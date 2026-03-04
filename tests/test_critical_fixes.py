@@ -426,3 +426,78 @@ class TestAdvancedAnalytics:
         assert result['record_trend']['pct_change'] == 100.0
         assert 'arr_trend' in result
         assert result['arr_trend']['pct_change'] == 50.0
+
+    def test_build_cross_report_trends_severity(self):
+        from adoptiq_backend import build_cross_report_trends
+        data = [
+            {'date': '2026-01-01', 'filename': 'a.xlsx',
+             'metrics': {'S1': {'rows': 50, 'severity_distribution': {'Critical': 5, 'High': 10}}}},
+            {'date': '2026-02-01', 'filename': 'b.xlsx',
+             'metrics': {'S1': {'rows': 80, 'severity_distribution': {'Critical': 8, 'High': 12, 'Medium': 3}}}},
+        ]
+        result = build_cross_report_trends(data)
+        assert 'severity_trend' in result
+        assert result['severity_trend']['Critical']['change'] == 3
+        assert result['severity_trend']['Medium']['oldest'] == 0
+
+    def test_build_cross_report_trends_recurring(self):
+        from adoptiq_backend import build_cross_report_trends
+        data = [
+            {'date': '2026-01-01', 'filename': 'a.xlsx',
+             'metrics': {'S1': {'rows': 50, 'top_customers_by_arr': {'Acme': 100, 'Beta': 200}}}},
+            {'date': '2026-02-01', 'filename': 'b.xlsx',
+             'metrics': {'S1': {'rows': 80, 'top_customers_by_arr': {'Acme': 150, 'Gamma': 300}}}},
+        ]
+        result = build_cross_report_trends(data)
+        assert 'recurring_customers' in result
+        assert 'Acme' in result['recurring_customers']['names']
+
+    def test_compute_barrier_aging_empty(self):
+        from adoptiq_backend import compute_barrier_aging
+        assert compute_barrier_aging(None) == {}
+        assert compute_barrier_aging(pd.DataFrame()) == {}
+
+    def test_compute_barrier_aging_all_closed(self):
+        from adoptiq_backend import compute_barrier_aging
+        df = pd.DataFrame({
+            'STATUS_C': ['Closed', 'Resolved', 'Completed'],
+            'CREATED_DATE': ['2025-01-01', '2025-02-01', '2025-03-01'],
+        })
+        result = compute_barrier_aging(df)
+        assert result.get('total_open', 0) == 0
+
+    def test_compute_barrier_aging_with_open(self):
+        from adoptiq_backend import compute_barrier_aging
+        df = pd.DataFrame({
+            'ACCOUNT_ID_C': ['A1', 'A2', 'A3'],
+            'STATUS_C': ['Open', 'In Progress', 'Closed'],
+            'SEVERITY_C': ['Critical', 'Medium', 'High'],
+            'SUBJECT_C': ['Login issue', 'Slow load', 'Bug fixed'],
+            'CREATED_DATE': ['2025-01-01', '2026-02-01', '2026-03-01'],
+            'BU_NAME': ['Acme', 'Beta', 'Gamma'],
+            'ID': ['AB-1', 'AB-2', 'AB-3'],
+        })
+        result = compute_barrier_aging(df)
+        assert result['total_open'] == 2
+        assert 'aging_buckets' in result
+        assert result['avg_days_open'] > 0
+        assert len(result.get('stale_barriers', [])) <= 5
+
+    def test_compute_barrier_aging_with_arr(self):
+        from adoptiq_backend import compute_barrier_aging
+        ab = pd.DataFrame({
+            'ACCOUNT_ID_C': ['A1'],
+            'STATUS_C': ['Open'],
+            'CREATED_DATE': ['2025-06-01'],
+            'SUBJECT_C': ['Test'],
+            'ID': ['AB-1'],
+        })
+        arr = pd.DataFrame({
+            'ACCOUNT_ID_C': ['A1'],
+            'ANNUAL_CONTRACT_VALUE': [500000],
+        })
+        result = compute_barrier_aging(ab, arr)
+        assert result['total_open'] == 1
+        stale = result.get('stale_barriers', [])
+        assert len(stale) == 1
+        assert stale[0].get('account_arr') == 500000

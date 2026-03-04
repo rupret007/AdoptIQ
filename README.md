@@ -21,6 +21,12 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **Enhanced Snowflake Intelligence:** Ask AI now queries additional Snowflake tables (COLLAB_ACCOUNT_SUMMARY, COLLAB_ARR_CON_SKU, ACCOUNTS_EXPIRED_LAST_MONTH) for renewal risk categories, contract expirations, customer tiers, and recently expired accounts.
 - **Portfolio Intelligence Engine:** Computes derived analytics including customer concentration risk (HHI index), CSSM workload distribution, technology risk density (barriers per $1M ARR), and repeat offender identification (accounts with both barriers AND cases).
 - **Cross-Report Trend Analysis:** Compares metrics across multiple past reports to surface trends in data volume, customer scope, and ARR over time.
+- **Barrier Aging Analysis:** Computes how long each open barrier has been active, groups into aging buckets (0-30d, 30-60d, 60-90d, 90-180d, 180+d), and identifies the longest-standing stale barriers with their ARR exposure.
+- **Pulse-Revenue Correlation (Silent Risk):** Identifies high-ARR accounts with critically low pulse scores — "silent risk" customers that may churn without obvious warning signs.
+- **Renewal Probability Intelligence:** Queries RENEWAL_DATA for contract renewal probabilities and flags at-risk renewals below 70% confidence.
+- **Severity Evolution Tracking:** Cross-report trends now track how severity distributions change over time (e.g., are P1 barriers increasing?).
+- **Customer Recurrence Detection:** Identifies customers appearing in every historical report — chronic problem accounts requiring intervention.
+- **Deeper Historical Mining:** Reports now extract individual barrier subjects, customer-level ARR breakdowns, and category distributions from past Excel files.
 - **Enhanced System Prompt:** The AI uses a chain-of-thought analytical framework with cross-domain correlation, hidden pattern detection, and revenue-based prioritization.
 
 #### Stability & Robustness (9 rounds of deep code review)
@@ -43,7 +49,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **XSS prevention:** All dynamic content in the progress page and subscription search is properly escaped.
 
 #### Testing
-- **Test suite:** 339 pytest tests covering validation, data processing, downloads, formatting, status management, error paths, NaN/Inf handling, security guards, and advanced analytics functions.
+- **Test suite:** 345 pytest tests covering validation, data processing, downloads, formatting, status management, error paths, NaN/Inf handling, security guards, and advanced analytics functions.
 - **Debug log cleanup:** Removed noisy DEBUG-prefixed log statements; downgraded to debug level for cleaner production logs.
 
 ### What's New in v1.0.2
@@ -96,7 +102,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **Dashboard / Run Analysis** — Start here; run new analyses from the dashboard buttons.
 - **History** — Lists previous portfolio analyses. Use **View** to open the progress page for an analysis and download Word/Excel reports when completed.
 - **Intel** — View tracked incidents, bugs, and maintenances from Webex status and help pages. Search, export/import historical data, and ask AI questions about intelligence.
-- **Ask AI** — Ask natural-language questions powered by 15 data dimensions: subscriptions, ARR, barriers, cases, pulse, priorities, action plans, trend analysis, barrier velocity, ARR at risk, account health/renewal risk, contract expirations, portfolio intelligence, cross-report trends, and external intelligence.
+- **Ask AI** — Ask natural-language questions powered by 18 data dimensions: subscriptions, ARR, barriers, cases, pulse, priorities, action plans, trend analysis, barrier velocity, ARR at risk, account health/renewal risk, contract expirations, renewal probability, portfolio intelligence, barrier aging, pulse-revenue correlation, cross-report trends, and external intelligence.
 - **Admin** — Opens the Admin Console (localhost:5002) in a new tab for system monitoring, report history, and logs.
 - **Help** — Links and usage notes.
 
