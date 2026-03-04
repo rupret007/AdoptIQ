@@ -227,7 +227,7 @@
 {% block extra_js %}
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    const analysisId = '{{ analysis_id }}';
+    const analysisId = {{ analysis_id | tojson }};
     let statusPolling;
     let statusLog = [];
     let pollFailures = 0;
@@ -493,10 +493,14 @@ document.addEventListener('DOMContentLoaded', function() {
         const notification = document.createElement('div');
         notification.className = `alert alert-${type === 'error' ? 'danger' : type} alert-dismissible fade show position-fixed`;
         notification.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
-        notification.innerHTML = `
-            ${message}
-            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        `;
+        const msgSpan = document.createElement('span');
+        msgSpan.textContent = message;
+        notification.appendChild(msgSpan);
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.className = 'btn-close';
+        closeBtn.setAttribute('data-bs-dismiss', 'alert');
+        notification.appendChild(closeBtn);
         
         // Add to page
         document.body.appendChild(notification);

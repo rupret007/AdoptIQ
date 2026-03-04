@@ -102,7 +102,7 @@ def format_currency(value: Union[int, float, None], decimals: int = 2) -> str:
         if pd.isna(v) or not math.isfinite(v):
             return "N/A"
         return f"${v:,.{decimals}f}"
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return str(value) if value is not None else "N/A"
 
 

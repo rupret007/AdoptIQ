@@ -453,6 +453,15 @@ def save_analysis_status():
     """Save analysis status to file safely from any caller context."""
     try:
         with analysis_status_lock:
+            if len(analysis_status) > 50:
+                sorted_ids = sorted(
+                    analysis_status.keys(),
+                    key=lambda k: analysis_status[k].get('start_time', ''),
+                    reverse=True
+                )
+                for old_id in sorted_ids[50:]:
+                    if analysis_status[old_id].get('status') not in ('running', 'starting', 'cancelling'):
+                        del analysis_status[old_id]
             serializable_status = {}
             for analysis_id, status in analysis_status.items():
                 serializable_status[analysis_id] = {}
@@ -4940,13 +4949,14 @@ def run_compact_analysis(analysis_id):
             analysis_status[analysis_id]['error'] = 'Analysis failed. Please check the Admin page for details.'
             save_analysis_status()
     finally:
-        # Ensure database connection is closed
         if 'ctx' in locals() and ctx is not None:
             try:
                 ctx.close()
                 logger.info(f"[[CLEANUP]] Database connection closed for {analysis_id}")
             except Exception as e:
                 logger.warning(f"[[WARNING]] Error closing database connection: {e}")
+        with cancellation_flags_lock:
+            cancellation_flags.pop(analysis_id, None)
 
 
 def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame, 
@@ -7077,13 +7087,14 @@ def run_customer_renewal_analysis(analysis_id):
             analysis_status[analysis_id]['error'] = 'Customer renewal analysis failed. Please check the Admin page for details.'
             save_analysis_status()
     finally:
-        # Ensure database connection is closed
         if 'ctx' in locals() and ctx is not None:
             try:
                 ctx.close()
                 logger.info(f"[[CLEANUP]] Database connection closed for {analysis_id}")
             except Exception as e:
                 logger.warning(f"[[WARNING]] Error closing database connection: {e}")
+        with cancellation_flags_lock:
+            cancellation_flags.pop(analysis_id, None)
 
 
 def run_comprehensive_analysis(analysis_id):
@@ -8105,13 +8116,14 @@ def run_comprehensive_analysis(analysis_id):
         except Exception as update_error:
             logger.error(f"Failed to update/persist error status: {update_error}")
     finally:
-        # Ensure database connection is closed
         if 'ctx' in locals() and ctx is not None:
             try:
                 ctx.close()
                 logger.info(f"[[CLEANUP]] Database connection closed for {analysis_id}")
             except Exception as e:
                 logger.warning(f"[[WARNING]] Error closing database connection: {e}")
+        with cancellation_flags_lock:
+            cancellation_flags.pop(analysis_id, None)
 
 def get_report_type_display(report_type):
     """Get user-friendly display name for report type"""
@@ -9442,11 +9454,11 @@ def download_file(filename):
             if (original_resolved.startswith(outputs_prefix)
                     and os.path.exists(original_resolved)):
                 file_path = original_resolved
-                safe_filename = filename
             else:
                 return f"File not found: {safe_filename}", 404
         
-        return send_file(file_path, as_attachment=True, download_name=safe_filename)
+        dl_name = secure_filename(os.path.basename(file_path)) or "download"
+        return send_file(file_path, as_attachment=True, download_name=dl_name)
         
     except Exception as e:
         logger.error(f"Error downloading file {filename}: {e}")
@@ -10282,6 +10294,9 @@ def run_subscription_analysis(analysis_id):
             analysis_status[analysis_id]['message'] = 'Subscription analysis failed. Please check the Admin page for details.'
             analysis_status[analysis_id]['error'] = 'Subscription analysis failed. Please check the Admin page for details.'
             save_analysis_status()
+    finally:
+        with cancellation_flags_lock:
+            cancellation_flags.pop(analysis_id, None)
 
 
 @app.route('/download/<analysis_id>/<file_type>')
@@ -10985,6 +11000,8 @@ def run_leader_report_generation(analysis_id):
                 logger.info(f"[[CLEANUP]] Database connection closed for leader report")
             except Exception as close_err:
                 logger.warning(f"[[WARNING]] Error closing database connection: {close_err}")
+        with cancellation_flags_lock:
+            cancellation_flags.pop(analysis_id, None)
 
 
 @app.route('/leader_report_form')

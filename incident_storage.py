@@ -47,7 +47,19 @@ def _connect():
 
 
 def init_db():
-    """Create tables if they don't exist."""
+    """Create tables if they don't exist. Recreates DB if corrupted."""
+    try:
+        return _init_db_inner()
+    except sqlite3.DatabaseError as e:
+        logger.warning(f"Database appears corrupted, recreating: {e}")
+        db_file = _db_path()
+        try:
+            os.remove(db_file)
+        except OSError:
+            pass
+        return _init_db_inner()
+
+def _init_db_inner():
     with _connect() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS incidents (

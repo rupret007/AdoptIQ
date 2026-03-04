@@ -743,22 +743,22 @@ def search_subscriptions_by_customer(customer_name: str, limit: int = 10) -> Lis
         
         ctx = _connect_with_keeper()
         cur = ctx.cursor(snowflake.connector.DictCursor)
-        
-        # Search for subscriptions by customer name (case-insensitive, partial match).
-        # Use only columns that exist in all dsm_assignment_data environments (no TECHNOLOGY_C/CSSM_* - schema varies).
-        search_query = """
-        SELECT SUBSCRIPTION_ID, ACCOUNT_ID_C, BU_NAME
-        FROM CX_DB.CX_SWSSBST_BR.dsm_assignment_data
-        WHERE UPPER(BU_NAME) LIKE UPPER(%s)
-        ORDER BY BU_NAME
-        LIMIT %s
-        """
-        
-        cur.execute(search_query, (f'%{customer_name}%', limit))
-        results = cur.fetchall()
-        
-        logger.info(f"[[OK]] Found {len(results)} subscriptions for customer: {customer_name}")
-        return results
+        try:
+            search_query = """
+            SELECT SUBSCRIPTION_ID, ACCOUNT_ID_C, BU_NAME
+            FROM CX_DB.CX_SWSSBST_BR.dsm_assignment_data
+            WHERE UPPER(BU_NAME) LIKE UPPER(%s)
+            ORDER BY BU_NAME
+            LIMIT %s
+            """
+            
+            cur.execute(search_query, (f'%{customer_name}%', limit))
+            results = cur.fetchall()
+            
+            logger.info(f"[[OK]] Found {len(results)} subscriptions for customer: {customer_name}")
+            return results
+        finally:
+            cur.close()
         
     except Exception as e:
         logger.error(f"[[ERROR]] Error searching subscriptions: {e}")
@@ -3662,8 +3662,8 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
             "success_priorities": "CSConsole_Success_Priorities",
             "adoption_barriers": "CSConsole_Adoption_Barriers",
         }
+        import numpy as _np
         with pd.ExcelWriter(f"{base_path}.xlsx", engine="xlsxwriter") as xw:
-            # Indicate fallback so readers know there's no issue
             report_info = pd.DataFrame([
                 ["Export type", "Standard (fallback)"],
                 ["Note", "This report was generated using the standard Excel export. The enhanced formatter was not available; all data is present and accurate."],
@@ -3680,7 +3680,6 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                 for col in df_copy.select_dtypes(include=['datetimetz']).columns:
                     if df_copy[col].dt.tz is not None:
                         df_copy[col] = df_copy[col].dt.tz_convert(None)
-                import numpy as _np
                 df_copy = df_copy.replace([_np.inf, -_np.inf], _np.nan)
 
                 sheet = (name or "Sheet")[:31]

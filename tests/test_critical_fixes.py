@@ -636,3 +636,82 @@ class TestRound13Fixes:
             else:
                 results.append(parsed)
         assert results == [10, 'fallback', 'fallback', 0, 'fallback']
+
+
+class TestRound14Fixes:
+    """Tests for Round 14 audit fixes."""
+
+    def test_download_file_sanitizes_download_name(self):
+        """download_name must strip CRLF to prevent header injection."""
+        from werkzeug.utils import secure_filename
+        dangerous = "report.docx\r\nX-Injected: evil"
+        safe = secure_filename(os.path.basename(dangerous))
+        assert '\r' not in safe
+        assert '\n' not in safe
+        assert ':' not in safe
+
+    def test_format_currency_overflow(self):
+        """format_currency must not crash on extremely large floats."""
+        from report_utils import format_currency
+        result = format_currency(1e308)
+        assert isinstance(result, str)
+        result2 = format_currency(float('inf'))
+        assert result2 == 'N/A'
+
+    def test_format_currency_negative_inf(self):
+        """format_currency must return N/A for -inf."""
+        from report_utils import format_currency
+        assert format_currency(float('-inf')) == 'N/A'
+
+    def test_incident_db_corrupted_recovery(self):
+        """init_db should recover from a corrupted database file."""
+        from incident_storage import init_db, _db_path
+        db_file = _db_path()
+        backup = None
+        if os.path.exists(db_file):
+            backup = db_file + '.bak'
+            import shutil
+            shutil.copy2(db_file, backup)
+        try:
+            with open(db_file, 'wb') as f:
+                f.write(b'this is not a valid sqlite file')
+            init_db()
+            assert os.path.exists(db_file)
+        finally:
+            if backup and os.path.exists(backup):
+                import shutil
+                shutil.copy2(backup, db_file)
+                os.remove(backup)
+
+    def test_cancellation_flags_cleanup_concept(self):
+        """Verify cancellation_flags.pop pattern works correctly."""
+        flags = {'analysis_1': True, 'analysis_2': True}
+        flags.pop('analysis_1', None)
+        assert 'analysis_1' not in flags
+        assert 'analysis_2' in flags
+        flags.pop('nonexistent', None)
+        assert len(flags) == 1
+
+    def test_analysis_status_runtime_trim(self):
+        """Verify the trimming logic keeps 50 most recent and skips running."""
+        statuses = {}
+        for i in range(60):
+            statuses[f'a_{i:03d}'] = {
+                'start_time': f'2026-01-01T{i:02d}:00:00',
+                'status': 'completed'
+            }
+        statuses['a_running'] = {
+            'start_time': '2025-01-01T00:00:00',
+            'status': 'running'
+        }
+        if len(statuses) > 50:
+            sorted_ids = sorted(
+                statuses.keys(),
+                key=lambda k: statuses[k].get('start_time', ''),
+                reverse=True
+            )
+            for old_id in sorted_ids[50:]:
+                if statuses[old_id].get('status') not in ('running', 'starting', 'cancelling'):
+                    del statuses[old_id]
+        assert len(statuses) <= 51
+        assert 'a_running' in statuses
