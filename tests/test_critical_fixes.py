@@ -1488,3 +1488,80 @@ class TestRound24Fixes:
         assert idx > 0
         next_100 = src[idx:idx + 200]
         assert next_100.count('logger.error') <= 1, "Duplicate logger.error should be removed"
+
+
+class TestRound25Fixes:
+    """Round 25: Error sanitization, silent-exception reduction, div-by-zero guard, admin whitelist, credential cleanup."""
+
+    def test_error_msg_not_in_status_error(self):
+        """Report generation error handler should not store raw exception details in status['error']."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find("status['error'] = 'Report generation encountered an internal error.")
+        assert idx > 0, "status['error'] should contain generic message, not raw exception"
+        raw_idx = src.find("status['error'] = error_msg")
+        pre_context = src[max(0, raw_idx - 200):raw_idx] if raw_idx > 0 else ''
+        if raw_idx > 0:
+            assert 'type(e).__name__' not in pre_context, \
+                "The error_msg near status['error'] should not contain type(e).__name__"
+
+    def test_silent_exception_reduction_backend(self):
+        """adoptiq_backend.py should have fewer bare 'except Exception: pass' blocks than before."""
+        with open(os.path.join(_PROJECT_ROOT, 'adoptiq_backend.py'), encoding='utf-8') as f:
+            src = f.read()
+        import re
+        count = len(re.findall(r'except Exception:\s*\n\s*pass', src))
+        assert count < 30, f"Expected fewer than 30 silent except-pass blocks, found {count}"
+
+    def test_silent_exception_reduction_app(self):
+        """app_simple.py should have reduced silent except-pass blocks."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        import re
+        count = len(re.findall(r'except Exception:\s*\n\s*pass', src))
+        assert count < 15, f"Expected fewer than 15 silent except-pass blocks, found {count}"
+
+    def test_div_by_zero_guard_customer_progress(self):
+        """Customer progress calculation should guard against division by zero."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'max(len(all_customers), 1)' in src, \
+            "Division-by-zero guard needed in customer progress calculation"
+
+    def test_admin_message_type_whitelist(self):
+        """Admin dashboard message_type should be whitelisted."""
+        with open(os.path.join(_PROJECT_ROOT, 'enhanced_admin_dashboard_v2.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "('info', 'success', 'warning', 'danger')" in src, \
+            "message_type should be whitelisted to safe CSS class values"
+
+    def test_placeholder_creds_removed(self):
+        """Test helper should not contain YOUR_ placeholder credentials."""
+        with open(os.path.join(_PROJECT_ROOT, 'cisco_internal_integrations.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'YOUR_PSIRT_API_KEY' not in src, "Placeholder API key should be replaced"
+        assert 'YOUR_PSIRT_CLIENT_SECRET' not in src, "Placeholder secret should be replaced"
+
+    def test_backend_trend_exception_logged(self):
+        """adoptiq_backend.py trend calculation should log exception, not silently pass."""
+        with open(os.path.join(_PROJECT_ROOT, 'adoptiq_backend.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'Trend calculation skipped:' in src
+
+    def test_backend_margin_exception_logged(self):
+        """adoptiq_backend.py margin setup should log exception, not silently pass."""
+        with open(os.path.join(_PROJECT_ROOT, 'adoptiq_backend.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'Margin setup skipped:' in src
+
+    def test_backend_heading_style_exception_logged(self):
+        """adoptiq_backend.py heading style should log exception, not silently pass."""
+        with open(os.path.join(_PROJECT_ROOT, 'adoptiq_backend.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'Heading style setup skipped' in src
+
+    def test_app_case_age_narrowed_exception(self):
+        """app_simple.py case age calculation should use narrowed exception type."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'Case age calculation skipped:' in src

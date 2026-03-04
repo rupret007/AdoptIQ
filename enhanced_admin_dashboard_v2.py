@@ -1079,7 +1079,8 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
         </div>
         
         {% if request.args.get('message') %}
-        <div class="alert alert-{{ request.args.get('message_type', 'info') }}">
+        {% set _mt = request.args.get('message_type', 'info') %}
+        <div class="alert alert-{{ _mt if _mt in ('info', 'success', 'warning', 'danger') else 'info' }}">
             {{ request.args.get('message') }}
         </div>
         {% endif %}

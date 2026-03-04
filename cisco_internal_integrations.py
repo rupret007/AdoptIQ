@@ -1764,8 +1764,8 @@ def test_cisco_integrations():
     integrations = CiscoInternalIntegrations(
         bst_api_key="mock_bst_key",
         circuit_api_key="mock_circuit_key",
-        psirt_api_key="YOUR_PSIRT_API_KEY",
-        psirt_client_secret="YOUR_PSIRT_CLIENT_SECRET"
+        psirt_api_key="test-psirt-key-not-real",
+        psirt_client_secret="test-psirt-secret-not-real"
     )
     
     # Test defect search

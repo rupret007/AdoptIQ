@@ -1542,8 +1542,8 @@ def fetch_period_comparison(ctx, account_ids, days):
                     'change': round(curr_avg - prev_avg, 1),
                     'trend': 'improving' if curr_avg > prev_avg else 'declining' if curr_avg < prev_avg else 'stable'
                 }
-        except Exception:
-            pass
+        except Exception as _trend_err:
+            logger.debug(f"Trend calculation skipped: {_trend_err}")
 
         # Action plans: current vs previous
         try:
@@ -2670,8 +2670,8 @@ def fetch_status_incidents(timeout=25) -> List[Dict[str,str]]:
                         try:
                             pub_date_text = pub_date_elem.strip() if isinstance(pub_date_elem, str) else pub_date_elem.get_text().strip()
                             published_date = pub_date_text
-                        except Exception:
-                            pass
+                        except Exception as _pub_err:
+                            logger.debug(f"Skipping unparsable published date: {_pub_err}")
                     
                     content_to_check = title.lower()
                     description_elem = item.get("description", "")
@@ -2850,8 +2850,8 @@ def fetch_status_maintenances(timeout=25) -> List[Dict[str, str]]:
                 if hasattr(item, 'published_parsed') and item.published_parsed:
                     try:
                         published = datetime(*item.published_parsed[:6]).strftime('%Y-%m-%dT%H:%M:%SZ')
-                    except Exception:
-                        pass
+                    except Exception as _dt_err:
+                        logger.debug(f"Feed date parse failed: {_dt_err}")
 
                 try:
                     pub_dt = datetime.strptime(published[:19], '%Y-%m-%dT%H:%M:%S')
@@ -2933,8 +2933,8 @@ def _correlate_incidents_with_cases(ext_incidents: List[Dict], csone_df: pd.Data
                             break
                         except Exception:
                             continue
-            except Exception:
-                pass
+            except Exception as _xref_err:
+                logger.debug(f"Cross-reference date parse failed: {_xref_err}")
         
         # Search through CSOne cases
         for idx, row in csone_df.iterrows():
@@ -3400,8 +3400,8 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
                 section.bottom_margin = Inches(1)
                 section.left_margin = Inches(1)
                 section.right_margin = Inches(1)
-        except Exception:
-            pass
+        except Exception as _margin_err:
+            logger.debug(f"Margin setup skipped: {_margin_err}")
         
         # Configure Heading styles with professional hierarchy
         for level in range(1, 5):
@@ -3431,8 +3431,8 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
                 
                 # Keep headings with their content
                 heading_style.paragraph_format.keep_with_next = True
-            except Exception:
-                pass
+            except Exception as _style_err:
+                logger.debug(f"Heading style setup skipped for level {level}: {_style_err}")
         
         # Configure List Bullet style for professional appearance
         try:
@@ -3896,8 +3896,8 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                         briefing.append(f"**{trend}:** Most recent month: {int(recent)} cases | Prior month: {int(prior)} cases | Change: {change_pct:+.1f}%")
                         briefing.append("**ANALYTICAL NOTE:** Increasing case volume may indicate emerging issues or deteriorating customer health. Decreasing volume suggests improving stability.")
                         briefing.append("---")
-            except Exception:
-                pass
+            except Exception as _case_trend_err:
+                logger.debug(f"Case volume trend calculation skipped: {_case_trend_err}")
 
     # FIXED: Show ALL CSOne data
     if csone_df is not None and not csone_df.empty:
@@ -4228,8 +4228,8 @@ def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
                 if len(recent_barriers) > 0:
                     briefing.append("- Recent barriers indicate ongoing challenges requiring immediate attention")
                 briefing.append("")
-            except Exception:
-                pass
+            except Exception as _barrier_trend_err:
+                logger.debug(f"Barrier trend analysis skipped: {_barrier_trend_err}")
         
         # FIXED: Show ALL barrier details for comprehensive context
         briefing.append("### Complete Barrier Details:")
@@ -5282,8 +5282,8 @@ def _filter_csconsole_data_by_technology(df: pd.DataFrame, technology: str, cust
                             try:
                                 col_mask = filtered_df[col].astype(str).str.contains(combined_pattern, case=False, na=False, regex=True)
                                 mask = mask | col_mask
-                            except Exception:
-                                pass
+                            except Exception as _filter_err:
+                                logger.debug(f"Column filter '{col}' skipped: {_filter_err}")
 
                 filtered_df = filtered_df[mask]
                 after_count = len(filtered_df)
@@ -5310,7 +5310,7 @@ def _prepare_ab(df: pd.DataFrame, dsm_df: pd.DataFrame) -> pd.DataFrame:
         try:
             if getattr(pd, 'isna', None) and pd.isna(v):
                 return ''
-        except Exception:
+        except (TypeError, ValueError):
             pass
         s = str(v).strip()
         if not s or s.lower() in ('nan', 'none'):

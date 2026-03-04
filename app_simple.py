@@ -443,8 +443,8 @@ def _update_progress(status, progress, message, step, save=True):
             remaining = min(remaining, 1800)
             status['eta_seconds'] = int(remaining)
             status['estimated_completion'] = (now + timedelta(seconds=remaining)).isoformat()
-        except Exception:
-            pass
+        except Exception as _eta_err:
+            logger.debug(f"ETA calculation skipped: {_eta_err}")
     if save:
         save_analysis_status()
 
@@ -4370,23 +4370,16 @@ def run_compact_analysis(analysis_id):
                 )
                 logger.info(f"[EXEC-REPORT] SUCCESS: Enhanced Compact Report created: {exec_report_path}")
         except Exception as e:
-            error_msg = (
-                f"❌ CRITICAL ERROR during report generation:\n\n"
-                f"Error Type: {type(e).__name__}\n"
-                f"Error Message: {str(e)}\n\n"
-                "This indicates a problem with the report generation process.\n"
-                "Please check the logs for detailed traceback information."
-            )
-            logger.error(f"[EXEC-REPORT] EXCEPTION CAUGHT: {type(e).__name__}: {str(e)}")
             import traceback
+            logger.error(f"[EXEC-REPORT] EXCEPTION CAUGHT: {type(e).__name__}: {str(e)}")
             logger.error(f"[EXEC-REPORT] Exception traceback:\n{traceback.format_exc()}")
             logger.error(f"[EXEC-REPORT] Report generation failed - NOT creating fallback report")
             
             with analysis_status_lock:
                 status['status'] = 'error'
                 status['progress'] = 0
-                status['message'] = f' Report generation failed - see logs for details'
-                status['error'] = error_msg
+                status['message'] = ' Report generation failed - see logs for details'
+                status['error'] = 'Report generation encountered an internal error. Please check the application logs for details and try again.'
                 status['current_step'] = 'Report Generation Failed'
                 save_analysis_status()
             return
@@ -5661,8 +5654,8 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                             age_str = ', open >14 days'
                         elif days_open > 7:
                             age_str = ', open >7 days'
-                except Exception:
-                    pass
+                except (TypeError, ValueError) as _age_err:
+                    logger.debug(f"Case age calculation skipped: {_age_err}")
             if cust_label:
                 p.add_run(cust_label).bold = True
             p.add_run(f'TAC {case_num}: ').bold = True
@@ -7717,7 +7710,7 @@ def run_comprehensive_analysis(analysis_id):
 
         for i, customer_name in enumerate(all_customers, 1):
             # Update progress for each customer
-            customer_progress = 75 + int((i / len(all_customers)) * 15)  # 75-90% range
+            customer_progress = 75 + int((i / max(len(all_customers), 1)) * 15)  # 75-90% range
             status['progress'] = customer_progress
             status['customer_progress']['completed'] = i - 1
             status['customer_progress']['current'] = customer_name
