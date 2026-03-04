@@ -1856,8 +1856,8 @@ class LeaderReportGenerator:
                 try:
                     sentiment_data = self.arr_sentiment_analyzer.analyze_customer_sentiment(cssm_name, data)
                     team_sentiment = sentiment_data.get('overall_sentiment', 'Unknown')
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Sentiment analysis failed for {cssm_name}: {e}")
             
             num_aps = self.safe_len(data['action_plans'])
             num_abs = self.safe_len(data['adoption_barriers'])
@@ -2454,7 +2454,7 @@ class LeaderReportGenerator:
             summary_para = self.doc.add_paragraph()
             arr_text = ""
             if arr_data.get('total_arr', 0) > 0:
-                arr_text = f"ARR: ${arr_data['total_arr']:,.0f} ({arr_data['arr_tier']} tier, {arr_data['strategic_priority']} priority)"
+                arr_text = f"ARR: ${arr_data['total_arr']:,.0f} ({arr_data.get('arr_tier', 'N/A')} tier, {arr_data.get('strategic_priority', 'N/A')} priority)"
             else:
                 arr_text = "ARR: Not available"
             
@@ -2773,11 +2773,10 @@ class LeaderReportGenerator:
             date = item.get('date', 'N/A')
             if date != 'N/A' and date:
                 try:
-                    # Format date for better readability
                     if isinstance(date, str):
                         date = pd.to_datetime(date).strftime('%Y-%m-%d')
-                except Exception:
-                    pass
+                except (TypeError, ValueError) as e:
+                    logger.debug(f"Date parse failed: {e}")
             row_cells[6].text = str(date) if date else 'N/A'
             if row_cells[6].paragraphs and row_cells[6].paragraphs[0].runs:
                 row_cells[6].paragraphs[0].runs[0].font.size = Pt(8)
@@ -2976,8 +2975,10 @@ class LeaderReportGenerator:
             
             if not data.get('adoption_barriers', pd.DataFrame()).empty:
                 abs_df = data['adoption_barriers']
-                high_severity_count = len(abs_df[abs_df['SEVERITY_C'].isin(['High', 'Critical'])])
-                open_ab_count = len(abs_df[abs_df['STATUS_C'].isin(['Open', 'New'])])
+                if 'SEVERITY_C' in abs_df.columns:
+                    high_severity_count = len(abs_df[abs_df['SEVERITY_C'].isin(['High', 'Critical'])])
+                if 'STATUS_C' in abs_df.columns:
+                    open_ab_count = len(abs_df[abs_df['STATUS_C'].isin(['Open', 'New'])])
             
             team_summary_data.append({
                 'cssm_name': cssm_name,
@@ -3338,8 +3339,8 @@ class LeaderReportGenerator:
                 try:
                     if isinstance(date, str):
                         date = pd.to_datetime(date).strftime('%Y-%m-%d')
-                except Exception:
-                    pass
+                except (TypeError, ValueError) as e:
+                    logger.debug(f"Date parse failed: {e}")
             row_cells[3].text = str(date)
             if row_cells[3].paragraphs and row_cells[3].paragraphs[0].runs:
                 row_cells[3].paragraphs[0].runs[0].font.size = Pt(9)
@@ -4258,8 +4259,8 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
         if progress_callback:
             try:
                 progress_callback(progress, message, step)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Progress callback failed: {e}")
 
     try:
         logger.info(f"Starting leader report generation for {manager_name}")

@@ -2579,7 +2579,8 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
     
     subtitle = doc.add_paragraph(f'{technology} - {days} Day Analysis')
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    subtitle.runs[0].bold = True
+    if subtitle.runs:
+        subtitle.runs[0].bold = True
     
     doc.add_paragraph()  # Spacing
     
@@ -2710,7 +2711,8 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
     if total_customers > 0 or not csone_df.empty or (ab_norm is not None and not ab_norm.empty):
         overview_para = doc.add_paragraph()
         overview_para.add_run('Portfolio Overview\n').bold = True
-        overview_para.runs[0].font.size = Pt(13)
+        if overview_para.runs:
+            overview_para.runs[0].font.size = Pt(13)
         
         # Use the total_customers already calculated from unified function above (line 1846)
         # No need to recalculate - ensures consistency with dashboard
@@ -2827,7 +2829,8 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         # Create insights based on actual data
         insights_para = doc.add_paragraph()
         insights_para.add_run('Critical Findings:\n').bold = True
-        insights_para.runs[0].font.size = Pt(13)
+        if insights_para.runs:
+            insights_para.runs[0].font.size = Pt(13)
         
         # Calculate risk indicators
         if customer_col:
@@ -3237,7 +3240,8 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
     doc.add_paragraph()
     footer = doc.add_paragraph(f"Report generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    footer.runs[0].italic = True
+    if footer.runs:
+        footer.runs[0].italic = True
     
     # Save
     output_path = f"{base_path}_enhanced.docx"
@@ -8411,7 +8415,7 @@ def progress(analysis_id):
         <div id="download-error" style="display: none; font-weight: bold; margin: 16px 0; padding: 14px; border-radius: 8px;"></div>
         
         <div style="margin: 20px 0; padding: 14px; background-color: #eff6ff; border-radius: 8px; font-size: 13px;">
-            <strong>Previous Reports:</strong> <a href="/previous-reports" target="_blank">Browse Previous Reports</a>
+            <strong>Previous Reports:</strong> <a href="/previous-reports" target="_blank" rel="noopener noreferrer">Browse Previous Reports</a>
         </div>
         
         <p style="font-size: 13px;"><a href="/">Start New Analysis</a></p>

@@ -49,7 +49,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **XSS prevention:** All dynamic content in the progress page and subscription search is properly escaped.
 
 #### Testing
-- **Test suite:** 495 pytest tests covering validation, data processing, downloads, formatting, status management, error paths, NaN/Inf handling, security guards, advanced analytics, error-response sanitization, XSS hardening, cursor safety, LLM call correctness, cancellation logic, path traversal prevention, input validation, external intel API safety, URL encoding, formula injection defense, upload collision prevention, TOCTOU download guards, report insights eviction, leader report None guards, renewal NaN safety, CSRF tokens, schema version handling, compact formatter None/NaN guards, column existence checks, prompt injection boundaries, template hardening, progress-route XSS escaping, insights filename sanitization, PSIRT URL encoding, LLM response guards, exec-intel None/NaN safety, Ask-AI error sanitization, admin port alignment, runs[0] guards, BST/PSIRT CSRF, division-by-zero defense, data source validator, config defaults, incident storage CRUD, error-leakage sanitization, silent-exception reduction, and admin message_type whitelist.
+- **Test suite:** Comprehensive pytest suite covering data processing, report formatting, security (XSS, CSRF, path traversal, input validation), error handling, NaN/None/Inf safety, API correctness, and edge-case defense.
 - **Debug log cleanup:** Removed noisy DEBUG-prefixed log statements; downgraded to debug level for cleaner production logs.
 
 ### What's New in v1.0.2

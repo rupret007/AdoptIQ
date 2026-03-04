@@ -1705,7 +1705,7 @@ Format your response clearly with these sections."""
                 logger.warning(f"Defect {defect_id} not found")
                 
         except Exception as e:
-            result['error'] = f"Error searching for defect: {str(e)}"
+            result['error'] = "An error occurred while searching for the defect. Please try again."
             logger.error(f"Error in search_and_summarize_defect: {e}", exc_info=True)
         
         return result
@@ -1751,7 +1751,7 @@ Format your response clearly with these sections."""
                 logger.warning(f"Advisory {advisory_id} not found")
                 
         except Exception as e:
-            result['error'] = f"Error searching for advisory: {str(e)}"
+            result['error'] = "An error occurred while searching for the advisory. Please try again."
             logger.error(f"Error in search_and_summarize_vulnerability: {e}", exc_info=True)
         
         return result

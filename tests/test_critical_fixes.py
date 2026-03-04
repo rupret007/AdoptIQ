@@ -1565,3 +1565,84 @@ class TestRound25Fixes:
         with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
             src = f.read()
         assert 'Case age calculation skipped:' in src
+
+
+class TestRound26Fixes:
+    """Tests for Round 26 audit fixes."""
+
+    def test_bst_error_sanitized(self):
+        """cisco_internal_integrations.py should not leak str(e) in BST defect search errors."""
+        with open(os.path.join(_PROJECT_ROOT, 'cisco_internal_integrations.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'An error occurred while searching for the defect' in src
+        assert 'f"Error searching for defect: {str(e)}"' not in src
+
+    def test_psirt_error_sanitized(self):
+        """cisco_internal_integrations.py should not leak str(e) in PSIRT advisory search errors."""
+        with open(os.path.join(_PROJECT_ROOT, 'cisco_internal_integrations.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'An error occurred while searching for the advisory' in src
+        assert 'f"Error searching for advisory: {str(e)}"' not in src
+
+    def test_leader_column_existence_check(self):
+        """leader_report_generator.py should check SEVERITY_C/STATUS_C column existence before access."""
+        with open(os.path.join(_PROJECT_ROOT, 'leader_report_generator.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "'SEVERITY_C' in abs_df.columns" in src
+        assert "'STATUS_C' in abs_df.columns" in src
+
+    def test_leader_dict_get_for_arr(self):
+        """leader_report_generator.py should use .get() for arr_tier and strategic_priority."""
+        with open(os.path.join(_PROJECT_ROOT, 'leader_report_generator.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "arr_data.get('arr_tier'" in src
+        assert "arr_data.get('strategic_priority'" in src
+
+    def test_renewal_nan_guard_completion_rate(self):
+        """advanced_renewal_analyzer.py should guard completion_rate against NaN before formatting."""
+        with open(os.path.join(_PROJECT_ROOT, 'advanced_renewal_analyzer.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('completion_rate = support_metrics.get')
+        assert idx != -1
+        section = src[idx:idx + 200]
+        assert 'completion_rate != completion_rate' in section
+
+    def test_renewal_nan_guard_health_score(self):
+        """advanced_renewal_analyzer.py should guard health_score against NaN before formatting."""
+        with open(os.path.join(_PROJECT_ROOT, 'advanced_renewal_analyzer.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('health_score = adoption_metrics.get')
+        assert idx != -1
+        section = src[idx:idx + 200]
+        assert 'health_score != health_score' in section
+
+    def test_app_runs0_guarded_subtitle(self):
+        """app_simple.py subtitle.runs[0] should be guarded with if subtitle.runs."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find("subtitle = doc.add_paragraph(f'{technology}")
+        assert idx != -1
+        section = src[idx:idx + 200]
+        assert 'if subtitle.runs:' in section
+
+    def test_app_runs0_guarded_footer(self):
+        """app_simple.py footer.runs[0] should be guarded with if footer.runs."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find("footer = doc.add_paragraph(f\"Report generated on:")
+        assert idx != -1
+        section = src[idx:idx + 200]
+        assert 'if footer.runs:' in section
+
+    def test_app_previous_reports_rel(self):
+        """app_simple.py previous-reports link should have rel='noopener noreferrer'."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'href="/previous-reports" target="_blank" rel="noopener noreferrer"' in src
+
+    def test_backend_cursor_close_logged(self):
+        """adoptiq_backend.py resource cleanup should log errors instead of silent pass."""
+        with open(os.path.join(_PROJECT_ROOT, 'adoptiq_backend.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'Error closing cursor:' in src
+        assert 'Error closing connection:' in src

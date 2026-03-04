@@ -718,13 +718,13 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         if 'cur' in locals() and cur is not None:
             try:
                 cur.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Error closing cursor: {e}")
         if ctx is not None:
             try:
                 ctx.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Error closing connection: {e}")
 
 
 def search_subscriptions_by_customer(customer_name: str, limit: int = 10) -> List[Dict[str, Any]]:
@@ -768,8 +768,8 @@ def search_subscriptions_by_customer(customer_name: str, limit: int = 10) -> Lis
         if ctx is not None:
             try:
                 ctx.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Error closing connection: {e}")
 
 
 def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[str, Any]:
@@ -1185,8 +1185,8 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         if cur:
             try:
                 cur.close()
-            except Exception:
-                pass
+            except Exception as ce:
+                logger.debug(f"Error closing cursor: {ce}")
             cur = None
         logger.warning(f"[[RENEWAL]] Snowflake SUPPORT_CASES (ACCOUNT_ID) failed: {str(e1).strip()}")
 
@@ -1215,8 +1215,8 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         if cur:
             try:
                 cur.close()
-            except Exception:
-                pass
+            except Exception as ce:
+                logger.debug(f"Error closing cursor: {ce}")
             cur = None
         logger.warning(f"[[RENEWAL]] Snowflake SUPPORT_CASES (ACCOUNT_ID_C) failed: {str(e2).strip()}")
 
@@ -1246,8 +1246,8 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         if cur:
             try:
                 cur.close()
-            except Exception:
-                pass
+            except Exception as ce:
+                logger.debug(f"Error closing cursor: {ce}")
         logger.warning(f"[[RENEWAL]] Snowflake support cases via dsm join failed: {str(e3).strip()}")
 
     return _normalize_cases_df(pd.DataFrame())
@@ -1345,12 +1345,12 @@ def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_
         if 'cur' in locals() and cur is not None:
             try:
                 cur.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Error closing cursor: {e}")
         try:
             ctx.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error closing connection: {e}")
 
 def fetch_csconsole_action_plans(ctx, account_ids: List[str], days: int) -> pd.DataFrame:
     """Fetch Action Plans from CSConsole with proper resource management"""

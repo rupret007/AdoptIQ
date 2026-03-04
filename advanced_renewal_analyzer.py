@@ -716,7 +716,9 @@ class AdvancedRenewalAnalyzer:
                 risk_score -= 10
             
             completion_rate = support_metrics.get('completion_rate', 0)
-            if completion_rate < 0.6:  # Low support completion
+            if isinstance(completion_rate, float) and (completion_rate != completion_rate):
+                completion_rate = 0
+            if completion_rate < 0.6:
                 risk_factors.append(f"Low support priority completion rate ({completion_rate:.1%})")
                 risk_score += 15
         
@@ -724,10 +726,12 @@ class AdvancedRenewalAnalyzer:
         adoption_metrics = analysis_results.get('adoption_metrics', {})
         if adoption_metrics:
             health_score = adoption_metrics.get('adoption_health_score', 0)
-            if health_score < 50:  # Poor adoption health
+            if isinstance(health_score, float) and (health_score != health_score):
+                health_score = 0
+            if health_score < 50:
                 risk_factors.append(f"Poor adoption health score ({health_score:.1f}/100)")
                 risk_score += 30
-            elif health_score > 80:  # Good adoption health
+            elif health_score > 80:
                 success_factors.append(f"Good adoption health score ({health_score:.1f}/100)")
                 risk_score -= 20
             
