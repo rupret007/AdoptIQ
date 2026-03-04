@@ -177,7 +177,7 @@ document.addEventListener('DOMContentLoaded', function() {
             loadingState.style.display = 'none';
             askBtn.disabled = false;
             if (data.ok) {
-                answerContent.textContent = data.answer;
+                answerContent.textContent = (data.answer && data.answer.trim()) ? data.answer : 'No answer was returned. Please try rephrasing your question.';
                 if (data.context_summary) {
                     contextInfo.style.display = '';
                     contextDetail.textContent = data.context_summary;

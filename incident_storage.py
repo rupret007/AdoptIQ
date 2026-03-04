@@ -375,8 +375,8 @@ def import_all_data(data: Dict) -> Dict:
         logger.warning(f"Import file schema v{version} is newer than supported v{_SCHEMA_VERSION}; proceeding anyway")
 
     counts = {'incidents': 0, 'bugs': 0, 'maintenances': 0}
-    counts['incidents'] = store_historical_incidents(data.get('incidents') or [])
-    counts['bugs'] = store_historical_bugs(data.get('bugs') or [])
-    counts['maintenances'] = store_historical_maintenances(data.get('maintenances') or [])
+    counts['incidents'] = store_historical_incidents([x for x in (data.get('incidents') or []) if isinstance(x, dict)])
+    counts['bugs'] = store_historical_bugs([x for x in (data.get('bugs') or []) if isinstance(x, dict)])
+    counts['maintenances'] = store_historical_maintenances([x for x in (data.get('maintenances') or []) if isinstance(x, dict)])
     logger.info(f"Imported data: {counts}")
     return counts

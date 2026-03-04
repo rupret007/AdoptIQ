@@ -9,7 +9,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 #### New Features
 - **Ask AI:** A new page where you can ask natural-language questions about your portfolio. The app fetches live Snowflake data (subscriptions, adoption barriers, ARR, support cases, customer pulse) based on your filters, then sends it to CircuIT for an AI-powered answer.
 - **External Intelligence:** Live incidents, bugs, and maintenances from status.webex.com and help.webex.com are fetched, stored historically in a local database, and displayed with search, export, and import capabilities. Ask the AI questions about any tracked intelligence.
-- **Embedded Admin Console:** System info, report history, and recent logs are now directly accessible from the Admin tab — no separate process needed.
+- **Admin Console:** The Admin tab opens the Admin Console (localhost:5002) in a new tab for monitoring, report history, and logs.
 - **Graceful shutdown:** Analysis status is automatically saved when the app exits, preventing data loss.
 
 #### Stability & Robustness (7 rounds of deep code review)
@@ -86,7 +86,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **History** — Lists previous portfolio analyses. Use **View** to open the progress page for an analysis and download Word/Excel reports when completed.
 - **Intel** — View tracked incidents, bugs, and maintenances from Webex status and help pages. Search, export/import historical data, and ask AI questions about intelligence.
 - **Ask AI** — Ask natural-language questions about your portfolio using live Snowflake data and CircuIT AI.
-- **Admin** — System information, report history, and recent application logs — all embedded directly in the app.
+- **Admin** — Opens the Admin Console (localhost:5002) in a new tab for system monitoring, report history, and logs.
 - **Help** — Links and usage notes.
 
 ---

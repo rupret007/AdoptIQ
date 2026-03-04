@@ -1623,35 +1623,8 @@ const AnalysisFormManager = (() => {
 })();
 
 // Initialize when DOM is ready
-// Handle manager field visibility based on report type
 document.addEventListener('DOMContentLoaded', function() {
     AnalysisFormManager.init();
-    
-    // Get form elements
-    const reportTypeRadios = document.querySelectorAll('input[name="report_type"]');
-    const managerSection = document.getElementById('manager-section');
-    const managerSelect = document.querySelector('select[name="manager"]');
-    
-    // Function to toggle manager field visibility
-    function toggleManagerField() {
-        const selectedReportType = document.querySelector('input[name="report_type"]:checked')?.value;
-        
-        if (selectedReportType === 'renewal' && managerSection && managerSelect) {
-            managerSection.style.display = 'none';
-            managerSelect.removeAttribute('required');
-        } else if (managerSection && managerSelect) {
-            managerSection.style.display = 'block';
-            managerSelect.setAttribute('required', 'required');
-        }
-    }
-    
-    // Add event listeners to report type radio buttons
-    reportTypeRadios.forEach(radio => {
-        radio.addEventListener('change', toggleManagerField);
-    });
-    
-    // Initialize visibility on page load
-    toggleManagerField();
 });
 
 // Expose global functions for onclick handlers

@@ -221,7 +221,7 @@
                                         <div>
                                             <h6 class="mb-1">
                                                 {% if inc.link %}
-                                                    <a href="{{ inc.link }}" target="_blank" rel="noopener noreferrer" class="text-decoration-none">
+                                                    <a href="{{ inc.link if inc.link and (inc.link.startswith('http://') or inc.link.startswith('https://')) else '#' }}" target="_blank" rel="noopener noreferrer" class="text-decoration-none">
                                                         {{ inc.title or 'Untitled Incident' }}
                                                     </a>
                                                 {% else %}
@@ -290,7 +290,7 @@
                                             <td class="align-middle small text-nowrap">{{ m.published[:16] if m.published else '&mdash;' }}</td>
                                             <td class="align-middle">
                                                 {% if m.link %}
-                                                    <a href="{{ m.link }}" target="_blank" rel="noopener noreferrer" class="text-decoration-none">
+                                                    <a href="{{ m.link if m.link and (m.link.startswith('http://') or m.link.startswith('https://')) else '#' }}" target="_blank" rel="noopener noreferrer" class="text-decoration-none">
                                                         {{ (m.title or '')[:120] }}{% if m.title and m.title|length > 120 %}&hellip;{% endif %}
                                                     </a>
                                                 {% else %}
@@ -344,7 +344,7 @@
                                         <tr class="bug-row">
                                             <td class="align-middle">
                                                 {% if bug.source_url %}
-                                                    <a href="{{ bug.source_url }}" target="_blank" rel="noopener noreferrer"
+                                                    <a href="{{ bug.source_url if bug.source_url and (bug.source_url.startswith('http://') or bug.source_url.startswith('https://')) else '#' }}" target="_blank" rel="noopener noreferrer"
                                                        class="text-decoration-none fw-semibold">{{ (bug.bug_id or '')[:30] }}</a>
                                                 {% else %}
                                                     <span class="fw-semibold">{{ (bug.bug_id or '')[:30] }}</span>

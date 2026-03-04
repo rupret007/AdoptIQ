@@ -8905,99 +8905,8 @@ def ask_ai_portfolio():
 
 @app.route('/admin')
 def admin_page():
-    """Embedded admin console with system info, report history, and logs."""
-    import platform
-    import shutil
-    from types import SimpleNamespace
-
-    # Gather system info
-    outputs_path = _APP_SUPPORT / 'outputs'
-    total_size = 0
-    file_count = 0
-    if outputs_path.exists():
-        for f in outputs_path.rglob('*'):
-            if f.is_file():
-                total_size += f.stat().st_size
-                file_count += 1
-    disk_mb = f"{total_size / (1024 * 1024):.1f} MB"
-    disk_free = 'N/A'
-    try:
-        usage = shutil.disk_usage(str(_APP_SUPPORT))
-        disk_free = f"{usage.free / (1024**3):.1f} GB free"
-    except Exception:
-        pass
-
-    system_info = {
-        'App Version': version_string(),
-        'Python': platform.python_version(),
-        'Platform': f"{platform.system()} {platform.release()}",
-        'Architecture': platform.machine(),
-        'Data Directory': str(_APP_SUPPORT),
-        'Output Files': f"{file_count} files ({disk_mb})",
-        'Disk Free': disk_free,
-        'Server Port': os.environ.get('PORT', '5001'),
-        'Process ID': os.getpid(),
-    }
-
-    # Gather report history from analysis_status
-    reports = []
-    with analysis_status_lock:
-        for aid, s in analysis_status.items():
-            reports.append(SimpleNamespace(
-                id=aid,
-                report_type=s.get('report_type', ''),
-                manager=s.get('manager', ''),
-                status=s.get('status', ''),
-                progress=s.get('progress', 0),
-                start_time=s.get('start_time', ''),
-            ))
-    reports.sort(key=lambda r: r.start_time or '', reverse=True)
-
-    total_reports = len(reports)
-    completed_reports = sum(1 for r in reports if r.status == 'completed')
-    error_reports = sum(1 for r in reports if r.status == 'error')
-
-    # Gather recent log entries (last 100 lines from the log handler)
-    log_entries = []
-    for handler in logger.handlers:
-        if hasattr(handler, 'baseFilename') and os.path.exists(handler.baseFilename):
-            try:
-                with open(handler.baseFilename, 'r') as lf:
-                    lines = lf.readlines()[-100:]
-                for line in reversed(lines):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    level = 'info'
-                    if 'ERROR' in line:
-                        level = 'error'
-                    elif 'WARNING' in line:
-                        level = 'warning'
-                    parts = line.split(' ', 2)
-                    time_str = parts[0] if len(parts) > 0 else ''
-                    msg = parts[2] if len(parts) > 2 else line
-                    log_entries.append(SimpleNamespace(time=time_str, level=level, message=msg))
-            except Exception:
-                pass
-            break
-
-    if not log_entries:
-        log_entries.append(SimpleNamespace(
-            time=datetime.now().strftime('%H:%M:%S'),
-            level='info',
-            message='Application running normally. Log entries will appear here during report generation.'
-        ))
-
-    return render_template(
-        'admin.html',
-        system_info=system_info,
-        reports=reports,
-        total_reports=total_reports,
-        completed_reports=completed_reports,
-        error_reports=error_reports,
-        disk_usage=disk_mb,
-        log_entries=log_entries,
-    )
+    """Redirect to the external Admin Console on port 5002."""
+    return redirect('http://localhost:5002')
 
 
 @app.route('/external-intelligence')
@@ -9042,9 +8951,9 @@ def refresh_external_intel():
     """Trigger a live fetch of incidents, bugs, and maintenances, then return counts."""
     try:
         from adoptiq_backend import fetch_status_incidents, fetch_help_webex_bugs, fetch_status_maintenances
-        incidents = fetch_status_incidents(timeout=20)
-        bugs = fetch_help_webex_bugs(timeout=20)
-        maintenances = fetch_status_maintenances(timeout=20)
+        incidents = fetch_status_incidents(timeout=20) or []
+        bugs = fetch_help_webex_bugs(timeout=20) or []
+        maintenances = fetch_status_maintenances(timeout=20) or []
         return jsonify({'ok': True, 'incidents': len(incidents), 'bugs': len(bugs), 'maintenances': len(maintenances)})
     except Exception as e:
         logger.error(f"Error refreshing external intel: {e}")
@@ -9076,7 +8985,7 @@ def ask_intel():
     """Answer a plain-language question about stored incidents, maintenances, and bugs."""
     try:
         data = request.get_json(silent=True) or {}
-        question = (data.get('question') or '').strip()
+        question = str(data.get('question') or '').strip()
         if not question or len(question) > 2000:
             return jsonify({'ok': False, 'error': 'Please provide a question (max 2000 characters).'}), 400
 
@@ -9126,7 +9035,7 @@ def ask_intel():
         return jsonify({'ok': True, 'answer': answer or 'No response generated.'})
     except Exception as e:
         logger.error(f"Error in ask-intel: {e}")
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        return jsonify({'ok': False, 'error': 'An error occurred processing your question. Please try again.'}), 500
 
 
 @app.route('/api/import-intel', methods=['POST'])
