@@ -696,6 +696,7 @@
     </style>
     
     {% block extra_css %}{% endblock %}
+    {% block head %}{% endblock %}
 </head>
 <body>
     <!-- Navigation -->
@@ -727,17 +728,25 @@
                         </a>
                     </li>
                     <li class="nav-item">
+                        <a class="nav-link {{ 'active' if request.endpoint == 'external_intelligence' }}" href="{{ url_for('external_intelligence') }}">
+                            <i class="fas fa-satellite-dish me-1"></i>Intel
+                        </a>
+                    </li>
+                    <li class="nav-item">
                         <a class="nav-link {{ 'active' if request.endpoint == 'help' }}" href="{{ url_for('help') }}">
                             <i class="fas fa-question-circle me-1"></i>Help
                         </a>
                     </li>
-                    {% if admin_console_url %}
                     <li class="nav-item">
-                        <a class="nav-link" href="{{ admin_console_url }}" target="_blank" rel="noopener noreferrer" title="Admin Console (monitoring, report history, logs)">
+                        <a class="nav-link{% if request.endpoint == 'ask_ai_page' %} active{% endif %}" href="{{ url_for('ask_ai_page') }}" title="Ask AI questions about your portfolio data">
+                            <i class="fas fa-robot me-1"></i>Ask AI
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link{% if request.endpoint == 'admin_page' %} active{% endif %}" href="{{ url_for('admin_page') }}" title="Admin Console (monitoring, report history, logs)">
                             <i class="fas fa-cog me-1"></i>Admin
                         </a>
                     </li>
-                    {% endif %}
                 </ul>
             </div>
         </div>

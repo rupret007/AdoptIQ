@@ -122,7 +122,8 @@ class LeaderReportGenerator:
         ext_bugs: List[Dict] = None,
         ext_incidents: List[Dict] = None,
         software_defects: Dict = None,
-        psirt_vulns: Dict = None
+        psirt_vulns: Dict = None,
+        progress_callback=None
     ) -> Tuple[Document, str, Dict, List]:
         """
         Generate comprehensive leader report for a manager
@@ -134,82 +135,67 @@ class LeaderReportGenerator:
             ext_incidents: External incidents from status.webex.com (optional)
             software_defects: Software defects extracted from CSOne/AB (optional)
             psirt_vulns: PSIRT vulnerabilities extracted from CSOne/AB (optional)
+            progress_callback: Optional callable(progress, message, step) for status updates
             
         Returns:
             Tuple of (Document object, file path, team_data dict, direct_reports list)
         """
-        logger.info(f"DEBUG: Generating leader report for {manager_name} covering last {days} days")
+        def _cb(progress, message, step):
+            if progress_callback:
+                try:
+                    progress_callback(progress, message, step)
+                except Exception:
+                    pass
+
+        logger.info(f"Generating leader report for {manager_name} covering last {days} days")
         
-        # Get direct reports for this manager
-        logger.info(f"DEBUG: About to call _get_direct_reports()")
+        _cb(18, f'Finding direct reports for {manager_name}...', 'Document Generation')
         direct_reports = self._get_direct_reports(manager_name)
-        logger.info(f"DEBUG: _get_direct_reports() returned. Type: {type(direct_reports)}, is None: {direct_reports is None}")
         
         if not direct_reports:
             raise ValueError(f"No direct reports found for manager: {manager_name}")
         
-        logger.info(f"DEBUG: Found {self.safe_len(direct_reports)} direct reports for {manager_name}")
+        n_reports = self.safe_len(direct_reports)
+        logger.info(f"Found {n_reports} direct reports for {manager_name}")
         
-        # Collect data for each direct report
-        logger.info(f"DEBUG: About to call _collect_team_data()")
-        team_data = self._collect_team_data(direct_reports, days)
-        logger.info(f"DEBUG: _collect_team_data() returned. Type: {type(team_data)}, is None: {team_data is None}, length: {len(team_data) if team_data else 0}")
+        _cb(19, f'Collecting data for {n_reports} team members...', 'Team Data Collection')
+        team_data = self._collect_team_data(direct_reports, days, progress_callback=progress_callback)
         
-        # Generate Word document
-        logger.info(f"DEBUG: About to call _create_title_page()")
+        _cb(70, 'Building title page...', 'Document Generation')
         self._create_title_page(manager_name, days, direct_reports)
-        logger.info(f"DEBUG: _create_title_page() completed")
         
-        logger.info(f"DEBUG: About to call _create_summary_table()")
+        _cb(71, 'Building team summary table...', 'Document Generation')
         self._create_summary_table(team_data, days)
-        logger.info(f"DEBUG: _create_summary_table() completed")
         
-        # Section separator
         self._add_section_separator()
         
-        # TAC cases are now integrated into individual team member sections
-        logger.info(f"DEBUG: About to call _create_adoptiq_summaries_per_person()")
+        _cb(73, 'Writing per-person AdoptIQ summaries...', 'Document Generation')
         self._create_adoptiq_summaries_per_person(team_data, days)
-        logger.info(f"DEBUG: _create_adoptiq_summaries_per_person() completed")
         
-        # Section separator
         self._add_section_separator()
         
-        logger.info(f"DEBUG: About to call _create_detailed_ab_list()")
+        _cb(75, 'Compiling adoption barriers detail...', 'Document Generation')
         self._create_detailed_ab_list(team_data)
-        logger.info(f"DEBUG: _create_detailed_ab_list() completed")
         
-        # Section separator
         self._add_section_separator()
         
-        # Add BEMS Summary (moved from summary table - better context with TAC data)
-        logger.info(f"DEBUG: About to call _add_bems_escalation_section()")
+        _cb(76, 'Adding BEMS escalation summary...', 'Document Generation')
         self._add_bems_escalation_section(team_data)
-        logger.info(f"DEBUG: _add_bems_escalation_section() completed")
         
-        # Section separator
         self._add_section_separator()
         
-        # Individual Team Member summaries are now added immediately after each team member's 
-        # row in the Activity Summary table (where the black arrow points in the user's image)
-        # This provides better context and flow for managers reviewing each team member
-        logger.info(f"DEBUG: Individual summaries are now integrated into the Activity Summary table")
-        
-        # Add External Intelligence (defects, PSIRT, incidents) - use all data sources
+        _cb(77, 'Adding external intelligence section...', 'Document Generation')
         self._add_external_intelligence_section(ext_bugs, ext_incidents, software_defects, psirt_vulns)
         
-        # Section separator
         self._add_section_separator()
         
-        # Add Overall Individual Summary (NEW)
-        logger.info(f"DEBUG: About to call _add_overall_individual_summary()")
+        _cb(78, 'Writing individual team member summaries...', 'Document Generation')
         self._add_overall_individual_summary(team_data, manager_name, days)
-        logger.info(f"DEBUG: _add_overall_individual_summary() completed")
         
-        # Save document (canonical outputs when frozen for .app/.exe download)
+        _cb(80, 'Saving Word document...', 'Document Generation')
         output_dir = _ensure_outputs()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_manager = "".join(c for c in manager_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        safe_manager = "".join(c for c in (manager_name or "Manager") if c.isalnum() or c in (' ', '-', '_')).rstrip()
         safe_manager = safe_manager.replace(' ', '_')
         filename = f"AdoptIQ_Report_Leader_{safe_manager}_{days}d_{timestamp}.docx"
         filepath = output_dir / filename
@@ -279,30 +265,37 @@ class LeaderReportGenerator:
         
         return direct_reports
     
-    def _collect_team_data(self, direct_reports: List[Dict[str, str]], days: int) -> Dict[str, Dict]:
+    def _collect_team_data(self, direct_reports: List[Dict[str, str]], days: int, progress_callback=None) -> Dict[str, Dict]:
         """
         Collect all data for each direct report
         
         Returns:
             Dict mapping CSSM name to their data (APs, ABs, CPs, TAC cases)
         """
-        logger.info(f"DEBUG: _collect_team_data called. direct_reports type: {type(direct_reports)}, is None: {direct_reports is None}, length: {len(direct_reports) if direct_reports else 0}")
+        logger.info(f"_collect_team_data called for {len(direct_reports) if direct_reports else 0} reports")
         team_data = {}
+        n_total = len(direct_reports) if direct_reports else 0
         
-        for report in direct_reports:
+        for idx, report in enumerate(direct_reports):
             cssm_name = report['name']
             cssm_email = report['email']
             
-            logger.info(f"DEBUG: Collecting data for {cssm_name}...")
+            # Per-team-member progress: spread across 19-69% (this is the slowest phase)
+            member_pct = 19 + int((idx / max(n_total, 1)) * 50)
+            if progress_callback:
+                try:
+                    progress_callback(member_pct, f'Fetching data for {cssm_name} ({idx + 1}/{n_total})...', 'Team Data Collection')
+                except Exception:
+                    pass
             
-            # Get subscriptions for this CSSM
-            logger.info(f"DEBUG: About to call _get_subscriptions_for_cssm() for {cssm_name}")
+            logger.info(f"Collecting data for {cssm_name} ({idx + 1}/{n_total})...")
+            
             subscriptions_df = self._get_subscriptions_for_cssm([cssm_email])
-            logger.info(f"DEBUG: _get_subscriptions_for_cssm() returned. Type: {type(subscriptions_df)}, is None: {subscriptions_df is None}, empty: {subscriptions_df.empty if subscriptions_df is not None else 'N/A'}")
+            logger.debug(f"_get_subscriptions_for_cssm() returned. Type: {type(subscriptions_df)}, is None: {subscriptions_df is None}, empty: {subscriptions_df.empty if subscriptions_df is not None else 'N/A'}")
             
             # Safety check: ensure subscriptions_df is never None
             if subscriptions_df is None:
-                logger.error(f"DEBUG: ERROR - subscriptions_df is None for {cssm_name}! This should not happen.")
+                logger.error(f"ERROR - subscriptions_df is None for {cssm_name}! This should not happen.")
                 subscriptions_df = pd.DataFrame()
             
             if subscriptions_df.empty:
@@ -376,18 +369,18 @@ class LeaderReportGenerator:
     
     def _get_subscriptions_for_cssm(self, cssm_emails: List[str]) -> pd.DataFrame:
         """Get subscriptions for specific CSSM emails"""
-        logger.info(f"DEBUG: _get_subscriptions_for_cssm called. cssm_emails: {cssm_emails}")
+        logger.debug(f"_get_subscriptions_for_cssm called. cssm_emails: {cssm_emails}")
         if not cssm_emails:
-            logger.info(f"DEBUG: No cssm_emails provided, returning empty DataFrame")
+            logger.debug(f"No cssm_emails provided, returning empty DataFrame")
             return pd.DataFrame()
         
         cur = None
         try:
             from adoptiq_backend import DSM_TABLE
-            logger.info(f"DEBUG: Creating cursor from ctx. ctx type: {type(self.ctx)}, ctx is None: {self.ctx is None}")
+            logger.debug(f"Creating cursor from ctx. ctx type: {type(self.ctx)}, ctx is None: {self.ctx is None}")
             
             cur = self.ctx.cursor()
-            logger.info(f"DEBUG: Cursor created successfully")
+            logger.debug(f"Cursor created successfully")
             
             placeholders = ','.join(['%s'] * len(cssm_emails))
             sql = f"""
@@ -396,27 +389,27 @@ class LeaderReportGenerator:
             WHERE PRIMARY_DSM_EMAIL IN ({placeholders})
             """
             
-            logger.info(f"DEBUG: Executing SQL query...")
+            logger.debug(f"Executing SQL query...")
             cur.execute(sql, cssm_emails)
-            logger.info(f"DEBUG: SQL executed, fetching rows...")
+            logger.debug(f"SQL executed, fetching rows...")
             rows = cur.fetchall()
-            logger.info(f"DEBUG: Fetched {len(rows) if rows else 0} rows")
+            logger.debug(f"Fetched {len(rows) if rows else 0} rows")
             
             if not rows:
-                logger.info(f"DEBUG: No rows returned, returning empty DataFrame")
+                logger.debug(f"No rows returned, returning empty DataFrame")
                 return pd.DataFrame()
             
             df = pd.DataFrame(rows, columns=[c[0] for c in cur.description])
-            logger.info(f"DEBUG: Created DataFrame with {len(df)} rows")
+            logger.debug(f"Created DataFrame with {len(df)} rows")
             
             return df
         except Exception as e:
-            logger.error(f"DEBUG: Error fetching subscriptions: {e}", exc_info=True)
+            logger.error(f"Error fetching subscriptions: {e}", exc_info=True)
             return pd.DataFrame()
         finally:
             if cur:
                 cur.close()
-                logger.info(f"DEBUG: Cursor closed")
+                logger.debug(f"Cursor closed")
     
     def _fetch_action_plans(self, account_ids: List[str], days: int) -> pd.DataFrame:
         """Fetch Action Plans for account IDs"""
@@ -749,15 +742,16 @@ class LeaderReportGenerator:
         # Title
         title = self.doc.add_heading('Leader Report', level=1)
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        title_run = title.runs[0]
-        title_run.font.size = Pt(28)
-        title_run.font.color.rgb = CISCO_BLUE
-        title_run.font.bold = True
+        if title.runs:
+            title_run = title.runs[0]
+            title_run.font.size = Pt(28)
+            title_run.font.color.rgb = CISCO_BLUE
+            title_run.font.bold = True
         
         # Manager name
         manager_para = self.doc.add_paragraph()
         manager_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        manager_run = manager_para.add_run(f'\n{manager_name}\'s Team')
+        manager_run = manager_para.add_run(f'\n{(manager_name or "Manager")}\'s Team')
         manager_run.font.size = Pt(20)
         manager_run.font.color.rgb = CISCO_GRAY
         manager_run.font.bold = True
@@ -832,7 +826,8 @@ class LeaderReportGenerator:
     def _add_css_to_customer_ratio_chart(self, team_data: Dict[str, Dict]):
         """Add CSS to Customer Ratio chart at the top of summary"""
         ratio_heading = self.doc.add_heading('CSS to Customer Ratio', level=2)
-        ratio_heading.runs[0].font.color.rgb = CISCO_BLUE
+        if ratio_heading.runs:
+            ratio_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Calculate ratios
         table = self.doc.add_table(rows=self.safe_len(team_data) + 2, cols=4)
@@ -845,14 +840,15 @@ class LeaderReportGenerator:
         for i, header_text in enumerate(headers):
             cell = header_cells[i]
             cell.text = header_text
-            cell.paragraphs[0].runs[0].font.bold = True
-            cell.paragraphs[0].runs[0].font.size = Pt(10)
+            if cell.paragraphs and cell.paragraphs[0].runs:
+                cell.paragraphs[0].runs[0].font.bold = True
+                cell.paragraphs[0].runs[0].font.size = Pt(10)
+                cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
             cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             # Background color
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '007BC7')
             cell._element.get_or_add_tcPr().append(shading_elm)
-            cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
         
         # Data rows
         row_idx = 1
@@ -884,16 +880,20 @@ class LeaderReportGenerator:
         # Totals row
         totals_cells = table.rows[row_idx].cells
         totals_cells[0].text = 'TEAM TOTAL'
-        totals_cells[0].paragraphs[0].runs[0].font.bold = True
+        if totals_cells[0].paragraphs and totals_cells[0].paragraphs[0].runs:
+            totals_cells[0].paragraphs[0].runs[0].font.bold = True
         totals_cells[1].text = str(total_customers)
-        totals_cells[1].paragraphs[0].runs[0].font.bold = True
+        if totals_cells[1].paragraphs and totals_cells[1].paragraphs[0].runs:
+            totals_cells[1].paragraphs[0].runs[0].font.bold = True
         totals_cells[2].text = str(total_css)
-        totals_cells[2].paragraphs[0].runs[0].font.bold = True
+        if totals_cells[2].paragraphs and totals_cells[2].paragraphs[0].runs:
+            totals_cells[2].paragraphs[0].runs[0].font.bold = True
         
         # Calculate average ratio
         avg_ratio = f"{total_customers/total_css:.1f}:1" if total_css > 0 else "0:1"
         totals_cells[3].text = avg_ratio
-        totals_cells[3].paragraphs[0].runs[0].font.bold = True
+        if totals_cells[3].paragraphs and totals_cells[3].paragraphs[0].runs:
+            totals_cells[3].paragraphs[0].runs[0].font.bold = True
         
         # Center align totals
         for i in range(1, 4):
@@ -911,8 +911,8 @@ class LeaderReportGenerator:
         # Check adoption barriers
         abs_df = data.get('adoption_barriers', pd.DataFrame())
         if not abs_df.empty:
-            logger.info(f"DEBUG: Checking {len(abs_df)} adoption barriers for BEMS patterns")
-            logger.info(f"DEBUG: Available columns in adoption barriers: {list(abs_df.columns)}")
+            logger.debug(f"Checking {len(abs_df)} adoption barriers for BEMS patterns")
+            logger.debug(f"Available columns in adoption barriers: {list(abs_df.columns)}")
             
             for _, row in abs_df.iterrows():
                 # Check multiple possible column names for BEMS detection
@@ -925,15 +925,15 @@ class LeaderReportGenerator:
                 # Check for BEMS patterns
                 if any(pattern in combined_text for pattern in ['bems', 'be ms', 'backend escalation', 'back-end escalation']):
                     bems_count += 1
-                    logger.info(f"DEBUG: Found BEMS pattern in adoption barrier: {combined_text[:100]}...")
+                    logger.debug(f"Found BEMS pattern in adoption barrier: {combined_text[:100]}...")
         else:
-            logger.info("DEBUG: No adoption barriers data found")
+            logger.debug("No adoption barriers data found")
         
         # Check TAC cases (IMPORTANT: BEMS data is primarily in bemscsc_refs column!)
         tac_df = data.get('tac_cases', pd.DataFrame())
         if not tac_df.empty:
-            logger.info(f"DEBUG: Checking {len(tac_df)} TAC cases for BEMS patterns")
-            logger.info(f"DEBUG: Available columns in TAC cases: {list(tac_df.columns)}")
+            logger.debug(f"Checking {len(tac_df)} TAC cases for BEMS patterns")
+            logger.debug(f"Available columns in TAC cases: {list(tac_df.columns)}")
             
             for _, row in tac_df.iterrows():
                 # PRIMARY: Check Transaction ID column (BEMS data in CSOne Excel)
@@ -954,17 +954,18 @@ class LeaderReportGenerator:
                 # 3. Description/subject contains BEMS keywords (text-based detection)
                 if 'bems' in transaction_id.lower() or 'bems' in bems_refs.lower() or any(pattern in combined_text for pattern in ['bems', 'be ms', 'backend escalation']):
                     bems_count += 1
-                    logger.info(f"DEBUG: Found BEMS in TAC case - Transaction ID: {transaction_id}, Refs: {bems_refs[:50]}, Text: {combined_text[:100]}...")
+                    logger.debug(f"Found BEMS in TAC case - Transaction ID: {transaction_id}, Refs: {bems_refs[:50]}, Text: {combined_text[:100]}...")
         else:
-            logger.info("DEBUG: No TAC cases data found")
+            logger.debug("No TAC cases data found")
         
-        logger.info(f"DEBUG: Total BEMS escalations found: {bems_count}")
+        logger.debug(f"Total BEMS escalations found: {bems_count}")
         return bems_count
     
     def _add_technology_breakdown(self, team_data: Dict[str, Dict]):
         """Add technology breakdown by team member"""
         tech_heading = self.doc.add_heading('Technology Assignment Breakdown', level=2)
-        tech_heading.runs[0].font.color.rgb = CISCO_BLUE
+        if tech_heading.runs:
+            tech_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Collect technology data from subscriptions
         tech_breakdown = {}
@@ -995,22 +996,25 @@ class LeaderReportGenerator:
             # Header
             header_cells = table.rows[0].cells
             header_cells[0].text = 'Team Member'
-            header_cells[0].paragraphs[0].runs[0].font.bold = True
+            if header_cells[0].paragraphs and header_cells[0].paragraphs[0].runs:
+                header_cells[0].paragraphs[0].runs[0].font.bold = True
             header_cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             
             for idx, tech in enumerate(all_techs, 1):
                 header_cells[idx].text = tech
-                header_cells[idx].paragraphs[0].runs[0].font.bold = True
-                header_cells[idx].paragraphs[0].runs[0].font.size = Pt(9)
+                if header_cells[idx].paragraphs and header_cells[idx].paragraphs[0].runs:
+                    header_cells[idx].paragraphs[0].runs[0].font.bold = True
+                    header_cells[idx].paragraphs[0].runs[0].font.size = Pt(9)
+                    header_cells[idx].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
                 header_cells[idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                 # Background color
                 shading_elm = OxmlElement('w:shd')
                 shading_elm.set(qn('w:fill'), '007BC7')
                 header_cells[idx]._element.get_or_add_tcPr().append(shading_elm)
-                header_cells[idx].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
             
             header_cells[num_cols-1].text = 'Total'
-            header_cells[num_cols-1].paragraphs[0].runs[0].font.bold = True
+            if header_cells[num_cols-1].paragraphs and header_cells[num_cols-1].paragraphs[0].runs:
+                header_cells[num_cols-1].paragraphs[0].runs[0].font.bold = True
             header_cells[num_cols-1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             
             # Background color for header
@@ -1018,7 +1022,8 @@ class LeaderReportGenerator:
                 shading_elm = OxmlElement('w:shd')
                 shading_elm.set(qn('w:fill'), '007BC7')
                 header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-                header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+                if header_cells[i].paragraphs and header_cells[i].paragraphs[0].runs:
+                    header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
             
             # Data rows
             row_idx = 1
@@ -1038,20 +1043,23 @@ class LeaderReportGenerator:
                 
                 row_cells[num_cols-1].text = str(row_total)
                 row_cells[num_cols-1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                row_cells[num_cols-1].paragraphs[0].runs[0].font.bold = True
+                if row_cells[num_cols-1].paragraphs and row_cells[num_cols-1].paragraphs[0].runs:
+                    row_cells[num_cols-1].paragraphs[0].runs[0].font.bold = True
                 
                 row_idx += 1
             
             # Totals row
             totals_cells = table.rows[row_idx].cells
             totals_cells[0].text = 'TOTAL'
-            totals_cells[0].paragraphs[0].runs[0].font.bold = True
+            if totals_cells[0].paragraphs and totals_cells[0].paragraphs[0].runs:
+                totals_cells[0].paragraphs[0].runs[0].font.bold = True
             
             grand_total = 0
             for idx, tech in enumerate(all_techs, 1):
                 count = tech_totals[tech]
                 totals_cells[idx].text = str(count)
-                totals_cells[idx].paragraphs[0].runs[0].font.bold = True
+                if totals_cells[idx].paragraphs and totals_cells[idx].paragraphs[0].runs:
+                    totals_cells[idx].paragraphs[0].runs[0].font.bold = True
                 totals_cells[idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                 grand_total += count
                 # Background
@@ -1060,7 +1068,8 @@ class LeaderReportGenerator:
                 totals_cells[idx]._element.get_or_add_tcPr().append(shading_elm)
             
             totals_cells[num_cols-1].text = str(grand_total)
-            totals_cells[num_cols-1].paragraphs[0].runs[0].font.bold = True
+            if totals_cells[num_cols-1].paragraphs and totals_cells[num_cols-1].paragraphs[0].runs:
+                totals_cells[num_cols-1].paragraphs[0].runs[0].font.bold = True
             totals_cells[num_cols-1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             
             # Background for first and last cells
@@ -1154,7 +1163,8 @@ class LeaderReportGenerator:
         
         # Add section heading
         section_heading = self.doc.add_heading('WARN:️ BEMS Escalation Analysis', level=1)
-        section_heading.runs[0].font.color.rgb = RGBColor(255, 0, 0)
+        if section_heading.runs:
+            section_heading.runs[0].font.color.rgb = RGBColor(255, 0, 0)
         
         # Add context paragraph
         context_para = self.doc.add_paragraph()
@@ -1257,7 +1267,8 @@ class LeaderReportGenerator:
     def _add_bems_summary(self, team_data: Dict[str, Dict]):
         """Add BEMS escalation summary with details"""
         bems_heading = self.doc.add_heading('BEMS Escalation Details', level=2)
-        bems_heading.runs[0].font.color.rgb = RGBColor(255, 0, 0)  # Red for attention
+        if bems_heading.runs:
+            bems_heading.runs[0].font.color.rgb = RGBColor(255, 0, 0)  # Red for attention
         
         # Warning paragraph
         warning_para = self.doc.add_paragraph()
@@ -1351,12 +1362,13 @@ class LeaderReportGenerator:
             for i, header_text in enumerate(headers):
                 cell = header_cells[i]
                 cell.text = header_text
-                cell.paragraphs[0].runs[0].font.bold = True
+                if cell.paragraphs and cell.paragraphs[0].runs:
+                    cell.paragraphs[0].runs[0].font.bold = True
+                    cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
                 cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                 shading_elm = OxmlElement('w:shd')
                 shading_elm.set(qn('w:fill'), 'FF6B6B')  # Red background
                 cell._element.get_or_add_tcPr().append(shading_elm)
-                cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
             
             # Data rows with BEMS ID
             for idx, detail in enumerate(bems_details, 1):
@@ -1387,7 +1399,8 @@ class LeaderReportGenerator:
         # Add page break and section heading
         self.doc.add_page_break()
         heading = self.doc.add_heading('Individual Team Member Account Summaries', level=1)
-        heading.runs[0].font.color.rgb = CISCO_BLUE
+        if heading.runs:
+            heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Add section description
         desc_para = self.doc.add_paragraph()
@@ -1399,18 +1412,19 @@ class LeaderReportGenerator:
         
         # Iterate through each team member
         for cssm_name, data in sorted(team_data.items()):
-            logger.info(f"DEBUG: Processing team member {cssm_name}")
+            logger.debug(f"Processing team member {cssm_name}")
             
             # Team member heading
             member_heading = self.doc.add_heading(f'{cssm_name}', level=2)
-            member_heading.runs[0].font.color.rgb = CISCO_GRAY
+            if member_heading.runs:
+                member_heading.runs[0].font.color.rgb = CISCO_GRAY
             
             # Add detailed paragraph summary for this individual
             try:
                 self._add_individual_summary_paragraph(cssm_name, data, days)
-                logger.info(f"DEBUG: Successfully added summary paragraph for {cssm_name}")
+                logger.debug(f"Successfully added summary paragraph for {cssm_name}")
             except Exception as e:
-                logger.error(f"DEBUG: Error adding summary paragraph for {cssm_name}: {e}")
+                logger.error(f"Error adding summary paragraph for {cssm_name}: {e}")
                 # Continue with other team members
             
             # Get unique customers for this CSS
@@ -1471,13 +1485,14 @@ class LeaderReportGenerator:
                 for i, header_text in enumerate(headers):
                     cell = header_cells[i]
                     cell.text = header_text
-                    cell.paragraphs[0].runs[0].font.bold = True
+                    if cell.paragraphs and cell.paragraphs[0].runs:
+                        cell.paragraphs[0].runs[0].font.bold = True
+                        cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
                     cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                     # Add blue background
                     shading_elm = OxmlElement('w:shd')
                     shading_elm.set(qn('w:fill'), '0076CE')
                     cell._element.get_or_add_tcPr().append(shading_elm)
-                    cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
                 
                 # Data rows
                 for idx, customer in enumerate(display_customers, 1):
@@ -1537,8 +1552,9 @@ class LeaderReportGenerator:
                     
                     row_cells[5].text = status
                     row_cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    row_cells[5].paragraphs[0].runs[0].font.color.rgb = status_color
-                    row_cells[5].paragraphs[0].runs[0].font.bold = True
+                    if row_cells[5].paragraphs and row_cells[5].paragraphs[0].runs:
+                        row_cells[5].paragraphs[0].runs[0].font.color.rgb = status_color
+                        row_cells[5].paragraphs[0].runs[0].font.bold = True
                 
                 # FIXED: Removed limit message - now showing ALL customers
             
@@ -1556,8 +1572,8 @@ class LeaderReportGenerator:
         Add a comprehensive paragraph summary for an individual team member.
         Provides detailed account overview, key issues, ARR context, sentiment analysis, and actionable recommendations.
         """
-        logger.info(f"DEBUG: Starting _add_individual_summary_paragraph for {cssm_name}")
-        logger.info(f"DEBUG: Data keys available: {list(data.keys())}")
+        logger.debug(f"Starting _add_individual_summary_paragraph for {cssm_name}")
+        logger.debug(f"Data keys available: {list(data.keys())}")
         
         # FIXED: Use PRIMARY customer list from subscriptions (same as CSS to Customer Ratio table)
         # This ensures consistency between the table and individual summaries
@@ -1567,7 +1583,7 @@ class LeaderReportGenerator:
         customers = [c for c in customers if c and str(c).strip()]
         total_customers = len(customers)
         
-        logger.info(f"DEBUG: Using PRIMARY customer list from subscriptions: {total_customers} customers")
+        logger.debug(f"Using PRIMARY customer list from subscriptions: {total_customers} customers")
         
         # Collect activity data for analysis
         adoption_barriers = data.get('adoption_barriers', pd.DataFrame())
@@ -1575,7 +1591,7 @@ class LeaderReportGenerator:
         customer_pulse = data.get('customer_pulse', pd.DataFrame())
         tac_cases = data.get('tac_cases', pd.DataFrame())
         
-        logger.info(f"DEBUG: Data sizes - ABs: {len(adoption_barriers)}, APs: {len(action_plans)}, CPs: {len(customer_pulse)}, TACs: {len(tac_cases)}")
+        logger.debug(f"Data sizes - ABs: {len(adoption_barriers)}, APs: {len(action_plans)}, CPs: {len(customer_pulse)}, TACs: {len(tac_cases)}")
         
         # Also collect customers from activity data for ARR/sentiment analysis (but don't use for count)
         activity_customers = set()
@@ -1601,7 +1617,7 @@ class LeaderReportGenerator:
         
         if customers and self.arr_sentiment_analyzer:
             # FIXED: Calculate ARR for ALL customers from PRIMARY list (EXACT same method as summary table)
-            logger.info(f"DEBUG: Calculating ARR for {len(customers)} customers from PRIMARY list")
+            logger.debug(f"Calculating ARR for {len(customers)} customers from PRIMARY list")
             for customer in customers:
                 try:
                     arr_data = self.arr_sentiment_analyzer.get_customer_arr_data(customer)
@@ -1613,7 +1629,7 @@ class LeaderReportGenerator:
                 except Exception as e:
                     logger.debug(f"Error getting ARR for customer {customer}: {e}")
                     continue
-            logger.info(f"DEBUG: Total ARR calculated: ${total_arr:,.0f} for {cssm_name}")
+            logger.debug(f"Total ARR calculated: ${total_arr:,.0f} for {cssm_name}")
             
             # FIXED: Use SAME sentiment analysis method as summary table (analyze entire portfolio)
             # This ensures sentiment matches between table and individual summary
@@ -1753,14 +1769,15 @@ class LeaderReportGenerator:
         # Add spacing after summary
         self.doc.add_paragraph()
         
-        logger.info(f"DEBUG: Completed _add_individual_summary_paragraph for {cssm_name}")
+        logger.debug(f"Completed _add_individual_summary_paragraph for {cssm_name}")
     
     def _create_summary_table(self, team_data: Dict[str, Dict], days: int):
         """Create Page 1: Summary table with counts of APs, ABs, and CPs per person"""
         # Page heading
         heading = self.doc.add_heading('Team Activity Summary', level=1)
-        heading_run = heading.runs[0]
-        heading_run.font.color.rgb = CISCO_BLUE
+        if heading.runs:
+            heading_run = heading.runs[0]
+            heading_run.font.color.rgb = CISCO_BLUE
         
         # Description
         desc_para = self.doc.add_paragraph()
@@ -1786,9 +1803,10 @@ class LeaderReportGenerator:
         for i, header_text in enumerate(headers):
             cell = header_cells[i]
             cell.text = header_text
-            cell.paragraphs[0].runs[0].font.bold = True
-            cell.paragraphs[0].runs[0].font.size = Pt(11)
-            cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+            if cell.paragraphs and cell.paragraphs[0].runs:
+                cell.paragraphs[0].runs[0].font.bold = True
+                cell.paragraphs[0].runs[0].font.size = Pt(11)
+                cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
             # Add background color
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '007BC7')  # Cisco blue
@@ -1821,7 +1839,7 @@ class LeaderReportGenerator:
             
             # FIXED: Calculate ARR for ALL customers from PRIMARY list (EXACT same method as individual summary)
             if self.arr_sentiment_analyzer:
-                logger.info(f"DEBUG: [Summary Table] Calculating ARR for {len(customers)} customers from PRIMARY list")
+                logger.debug(f"[Summary Table] Calculating ARR for {len(customers)} customers from PRIMARY list")
                 for customer in customers:
                     try:
                         arr_data = self.arr_sentiment_analyzer.get_customer_arr_data(customer)
@@ -1831,7 +1849,7 @@ class LeaderReportGenerator:
                     except Exception as e:
                         logger.debug(f"Could not get ARR for {customer}: {e}")
                         continue
-                logger.info(f"DEBUG: [Summary Table] Total ARR calculated: ${team_arr:,.0f} for {cssm_name}")
+                logger.debug(f"[Summary Table] Total ARR calculated: ${team_arr:,.0f} for {cssm_name}")
                 
                 # Analyze sentiment
                 try:
@@ -1870,12 +1888,14 @@ class LeaderReportGenerator:
                 row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             
             # Color-code sentiment
-            if team_sentiment == "Positive":
-                row_cells[6].paragraphs[0].runs[0].font.color.rgb = RGBColor(0, 128, 0)  # Green
-            elif team_sentiment == "Negative":
-                row_cells[6].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 0, 0)  # Red
-            else:
-                row_cells[6].paragraphs[0].runs[0].font.color.rgb = RGBColor(128, 128, 128)  # Gray
+            if row_cells[6].paragraphs and row_cells[6].paragraphs[0].runs:
+                if row_cells[6].paragraphs and row_cells[6].paragraphs[0].runs:
+                    if team_sentiment == "Positive":
+                        row_cells[6].paragraphs[0].runs[0].font.color.rgb = RGBColor(0, 128, 0)  # Green
+                    elif team_sentiment == "Negative":
+                        row_cells[6].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 0, 0)  # Red
+                    else:
+                        row_cells[6].paragraphs[0].runs[0].font.color.rgb = RGBColor(128, 128, 128)  # Gray
             
             # Highlight BEMS if > 0
             if num_bems > 0:
@@ -1890,9 +1910,9 @@ class LeaderReportGenerator:
             # Add the comprehensive summary paragraph for this team member
             try:
                 self._add_individual_summary_paragraph(cssm_name, data, days)
-                logger.info(f"DEBUG: Successfully added summary paragraph for {cssm_name} after table row")
+                logger.debug(f"Successfully added summary paragraph for {cssm_name} after table row")
             except Exception as e:
-                logger.error(f"DEBUG: Error adding summary paragraph for {cssm_name}: {e}")
+                logger.error(f"Error adding summary paragraph for {cssm_name}: {e}")
                 # Add a fallback paragraph
                 fallback_para = self.doc.add_paragraph()
                 fallback_para.add_run(f"Summary for {cssm_name}: Portfolio analysis temporarily unavailable.").font.italic = True
@@ -1919,7 +1939,8 @@ class LeaderReportGenerator:
         
         # Bold totals row
         for i in range(8):
-            totals_cells[i].paragraphs[0].runs[0].font.bold = True
+            if totals_cells[i].paragraphs and totals_cells[i].paragraphs[0].runs:
+                totals_cells[i].paragraphs[0].runs[0].font.bold = True
             if i > 0:
                 totals_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             # Add light gray background
@@ -1930,7 +1951,8 @@ class LeaderReportGenerator:
         # Add insights paragraph
         self.doc.add_paragraph('\n')
         insights_heading = self.doc.add_heading('Key Insights', level=2)
-        insights_heading.runs[0].font.color.rgb = CISCO_BLUE
+        if insights_heading.runs:
+            insights_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         insights_para = self.doc.add_paragraph()
         insights_para.add_run(f'• Total team activities: {total_aps + total_abs + total_cps + total_bems}\n')
@@ -1961,7 +1983,8 @@ class LeaderReportGenerator:
     def _create_adoptiq_summaries_per_person(self, team_data: Dict[str, Dict], days: int):
         """Create AdoptIQ summaries for each direct report"""
         heading = self.doc.add_heading('AdoptIQ Summaries by Team Member', level=1)
-        heading.runs[0].font.color.rgb = CISCO_BLUE
+        if heading.runs:
+            heading.runs[0].font.color.rgb = CISCO_BLUE
         
         desc_para = self.doc.add_paragraph()
         desc_para.add_run(
@@ -1975,7 +1998,8 @@ class LeaderReportGenerator:
             
             # Section heading
             member_heading = self.doc.add_heading(f'{idx + 1}. {cssm_name}', level=2)
-            member_heading.runs[0].font.color.rgb = CISCO_BLUE
+            if member_heading.runs:
+                member_heading.runs[0].font.color.rgb = CISCO_BLUE
             
             # Overview statistics
             stats_para = self.doc.add_paragraph()
@@ -1996,7 +2020,8 @@ class LeaderReportGenerator:
             # Customer list
             if data['customers']:
                 customers_heading = self.doc.add_heading('Customers', level=3)
-                customers_heading.runs[0].font.size = Pt(12)
+                if customers_heading.runs:
+                    customers_heading.runs[0].font.size = Pt(12)
                 
                 # FIXED: Show ALL customers
                 customers_para = self.doc.add_paragraph()
@@ -2009,7 +2034,8 @@ class LeaderReportGenerator:
                 
                 if self.safe_len(products) > 0:
                     products_heading = self.doc.add_heading('Technologies', level=3)
-                    products_heading.runs[0].font.size = Pt(12)
+                    if products_heading.runs:
+                        products_heading.runs[0].font.size = Pt(12)
                     
                     products_para = self.doc.add_paragraph()
                     for product in sorted(products):
@@ -2018,7 +2044,8 @@ class LeaderReportGenerator:
             # Top challenges (from ABs)
             if not data['adoption_barriers'].empty:
                 challenges_heading = self.doc.add_heading('Top Challenges', level=3)
-                challenges_heading.runs[0].font.size = Pt(12)
+                if challenges_heading.runs:
+                    challenges_heading.runs[0].font.size = Pt(12)
                 
                 # FIXED: Show ALL category counts
                 if 'AB_CATEGORY_C' in data['adoption_barriers'].columns:
@@ -2036,7 +2063,8 @@ class LeaderReportGenerator:
                     
                     if not high_severity.empty:
                         severity_heading = self.doc.add_heading('High-Severity Barriers', level=3)
-                        severity_heading.runs[0].font.size = Pt(12)
+                        if severity_heading.runs:
+                            severity_heading.runs[0].font.size = Pt(12)
                         
                         # FIXED: Show ALL high-severity barriers
                         for _, barrier in high_severity.iterrows():
@@ -2052,7 +2080,8 @@ class LeaderReportGenerator:
             # Recent Action Plans - FIXED: Show ALL action plans
             if not data['action_plans'].empty:
                 ap_heading = self.doc.add_heading('All Action Plans', level=3)
-                ap_heading.runs[0].font.size = Pt(12)
+                if ap_heading.runs:
+                    ap_heading.runs[0].font.size = Pt(12)
                 
                 for _, ap in data['action_plans'].iterrows():
                     ap_para = self.doc.add_paragraph(style='List Bullet')
@@ -2068,7 +2097,8 @@ class LeaderReportGenerator:
             if 'tac_cases' in data and not data['tac_cases'].empty:
                 tac_count = self.safe_len(data["tac_cases"])
                 tac_heading = self.doc.add_heading(f'TAC Cases ({tac_count} cases)', level=3)
-                tac_heading.runs[0].font.size = Pt(12)
+                if tac_heading.runs:
+                    tac_heading.runs[0].font.size = Pt(12)
                 
                 tac_cases = data['tac_cases']
                 
@@ -2102,14 +2132,14 @@ class LeaderReportGenerator:
                     headers = ['Case #', 'Customer', 'Title', 'Priority', 'Status', 'Date Opened']
                     for i, header_text in enumerate(headers):
                         header_cells[i].text = header_text
-                        header_cells[i].paragraphs[0].runs[0].font.bold = True
+                        if header_cells[i].paragraphs and header_cells[i].paragraphs[0].runs:
+                            header_cells[i].paragraphs[0].runs[0].font.bold = True
+                            header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
                         header_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                         # Add blue background to header
                         shading_elm = OxmlElement('w:shd')
                         shading_elm.set(qn('w:fill'), '0076CE')  # Cisco blue
                         header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-                        # Make header text white
-                        header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
                     
                     # Add data rows
                     for _, case in display_cases.iterrows():
@@ -2176,7 +2206,8 @@ class LeaderReportGenerator:
     def _create_detailed_ab_list(self, team_data: Dict[str, Dict]):
         """Create detailed list of all Adoption Barriers with metadata"""
         heading = self.doc.add_heading('Detailed Adoption Barriers List', level=1)
-        heading.runs[0].font.color.rgb = CISCO_BLUE
+        if heading.runs:
+            heading.runs[0].font.color.rgb = CISCO_BLUE
         
         desc_para = self.doc.add_paragraph()
         desc_para.add_run(
@@ -2221,7 +2252,8 @@ class LeaderReportGenerator:
         
         # Create detailed table
         detail_heading = self.doc.add_heading('Complete Barrier Details', level=2)
-        detail_heading.runs[0].font.color.rgb = CISCO_BLUE
+        if detail_heading.runs:
+            detail_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Define columns to show
         columns_to_show = []
@@ -2253,15 +2285,16 @@ class LeaderReportGenerator:
         for i, header_text in enumerate(column_headers):
             cell = header_cells[i]
             cell.text = header_text
-            cell.paragraphs[0].runs[0].font.bold = True
-            cell.paragraphs[0].runs[0].font.size = Pt(9)
-            cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+            if cell.paragraphs and cell.paragraphs[0].runs:
+                cell.paragraphs[0].runs[0].font.bold = True
+                cell.paragraphs[0].runs[0].font.size = Pt(9)
+                cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '007BC7')
             cell._element.get_or_add_tcPr().append(shading_elm)
         
-        # FIXED: Show ALL adoption barriers - no limit
-        for row_idx, (_, ab) in enumerate(combined_abs.iterrows(), start=1):
+        # FIXED: Show adoption barriers - limited to 100 to match table row count
+        for row_idx, (_, ab) in enumerate(list(combined_abs.iterrows())[:100], start=1):
             row_cells = table.rows[row_idx].cells
             
             for col_idx, col_name in enumerate(columns_to_show):
@@ -2277,7 +2310,8 @@ class LeaderReportGenerator:
                 
                 # No truncation - show full text for data verification
                 row_cells[col_idx].text = value
-                row_cells[col_idx].paragraphs[0].runs[0].font.size = Pt(8)
+                if row_cells[col_idx].paragraphs and row_cells[col_idx].paragraphs[0].runs:
+                    row_cells[col_idx].paragraphs[0].runs[0].font.size = Pt(8)
         
         # Add note about linked records
         note_para = self.doc.add_paragraph('\n')
@@ -2294,7 +2328,8 @@ class LeaderReportGenerator:
         
         # Table heading
         table_heading = self.doc.add_heading('Activity Summary', level=3)
-        table_heading.runs[0].font.color.rgb = CISCO_BLUE
+        if table_heading.runs:
+            table_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Create table with 5 columns: Team Member, Action Plans, Adoption Barriers, Customer Pulse, Total Activities
         table = self.doc.add_table(rows=2, cols=5)  # Header + 1 data row
@@ -2305,14 +2340,14 @@ class LeaderReportGenerator:
         headers = ['Team Member', 'Action Plans', 'Adoption Barriers', 'Customer Pulse', 'Total Activities']
         for i, header_text in enumerate(headers):
             header_cells[i].text = header_text
-            header_cells[i].paragraphs[0].runs[0].font.bold = True
+            if header_cells[i].paragraphs and header_cells[i].paragraphs[0].runs:
+                header_cells[i].paragraphs[0].runs[0].font.bold = True
+                header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
             header_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             # Add Cisco blue background to header
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '0076CE')  # Cisco blue
             header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-            # Make header text white
-            header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
         
         # Data row
         data_cells = table.rows[1].cells
@@ -2349,7 +2384,8 @@ class LeaderReportGenerator:
             data_cells[i]._element.get_or_add_tcPr().append(shading_elm)
         
         # Make total activities bold
-        data_cells[4].paragraphs[0].runs[0].font.bold = True
+        if data_cells[4].paragraphs and data_cells[4].paragraphs[0].runs:
+            data_cells[4].paragraphs[0].runs[0].font.bold = True
         
         # Add spacing after table
         self.doc.add_paragraph()
@@ -2361,7 +2397,8 @@ class LeaderReportGenerator:
         
         # Account Summary heading
         summary_heading = self.doc.add_heading('Account Summary & Source Attribution', level=3)
-        summary_heading.runs[0].font.color.rgb = CISCO_BLUE
+        if summary_heading.runs:
+            summary_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Get unique customers for this team member
         customers = data.get('customers', [])
@@ -2384,7 +2421,8 @@ class LeaderReportGenerator:
             customer_heading = self.doc.add_heading(f'Account: {customer} ({customer_technology})', level=4)
         else:
             customer_heading = self.doc.add_heading(f'Account: {customer}', level=4)
-        customer_heading.runs[0].font.color.rgb = CISCO_BLUE
+        if customer_heading.runs:
+            customer_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Add ARR and sentiment summary for this customer
         try:
@@ -2422,14 +2460,16 @@ class LeaderReportGenerator:
             sentiment_text = f"Sentiment: {sentiment_data.get('overall_sentiment', 'Unknown')} ({sentiment_data.get('confidence_level', 'Low')} confidence)"
             
             summary_para.add_run(f"{arr_text} | {sentiment_text}")
-            summary_para.runs[0].font.italic = True
+            if summary_para.runs:
+                summary_para.runs[0].font.italic = True
             
             # Add strategic recommendations if applicable
             if arr_data.get('total_arr', 0) >= 500000 and sentiment_data.get('overall_sentiment') == "Negative":
                 alert_para = self.doc.add_paragraph()
                 alert_para.add_run("⚠️ URGENT: High-value customer showing negative sentiment - immediate executive attention required!")
-                alert_para.runs[0].font.color.rgb = RGBColor(255, 0, 0)  # Red
-                alert_para.runs[0].font.bold = True
+                if alert_para.runs:
+                    alert_para.runs[0].font.color.rgb = RGBColor(255, 0, 0)  # Red
+                    alert_para.runs[0].font.bold = True
                 
         except Exception as e:
             logger.debug(f"Error adding ARR/sentiment context for {customer}: {e}")
@@ -2628,8 +2668,9 @@ class LeaderReportGenerator:
         headers = ['Type', 'Record ID', 'Subject/Title', 'Status', 'Category/Priority', 'Severity', 'Date']
         for i, header_text in enumerate(headers):
             header_cells[i].text = header_text
-            header_cells[i].paragraphs[0].runs[0].font.bold = True
-            header_cells[i].paragraphs[0].runs[0].font.size = Pt(9)
+            if header_cells[i].paragraphs and header_cells[i].paragraphs[0].runs:
+                header_cells[i].paragraphs[0].runs[0].font.bold = True
+                header_cells[i].paragraphs[0].runs[0].font.size = Pt(9)
             header_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             # Add light blue background to header
             shading_elm = OxmlElement('w:shd')
@@ -2655,8 +2696,9 @@ class LeaderReportGenerator:
             
             # Type (bold and colored)
             row_cells[0].text = item['type']
-            row_cells[0].paragraphs[0].runs[0].font.bold = True
-            row_cells[0].paragraphs[0].runs[0].font.size = Pt(9)
+            if row_cells[0].paragraphs and row_cells[0].paragraphs[0].runs:
+                row_cells[0].paragraphs[0].runs[0].font.bold = True
+                row_cells[0].paragraphs[0].runs[0].font.size = Pt(9)
             row_cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             # Add color coding by type
             shading_elm = OxmlElement('w:shd')
@@ -2682,14 +2724,16 @@ class LeaderReportGenerator:
                     except Exception:
                         # Fallback to plain text if hyperlink fails
                         row_cells[1].text = record_id_str
-                        row_cells[1].paragraphs[0].runs[0].font.size = Pt(8)
+                        if row_cells[1].paragraphs and row_cells[1].paragraphs[0].runs:
+                            row_cells[1].paragraphs[0].runs[0].font.size = Pt(8)
                 else:
                     row_cells[1].text = record_id_str
-                    row_cells[1].paragraphs[0].runs[0].font.size = Pt(8)
+                    if row_cells[1].paragraphs and row_cells[1].paragraphs[0].runs:
+                        row_cells[1].paragraphs[0].runs[0].font.size = Pt(8)
             else:
                 # For TAC cases or records without valid IDs, just show plain text
                 row_cells[1].text = record_id_str
-                if row_cells[1].paragraphs[0].runs:
+                if row_cells[1].paragraphs and row_cells[1].paragraphs[0].runs:
                     row_cells[1].paragraphs[0].runs[0].font.size = Pt(8)
             
             # Subject/Title (truncated for readability)
@@ -2698,24 +2742,28 @@ class LeaderReportGenerator:
                 subject = 'N/A'
             # FIXED: No truncation - show full subject for verification
             row_cells[2].text = str(subject)
-            row_cells[2].paragraphs[0].runs[0].font.size = Pt(8)
+            if row_cells[2].paragraphs and row_cells[2].paragraphs[0].runs:
+                row_cells[2].paragraphs[0].runs[0].font.size = Pt(8)
             
             # Status
             status = item.get('status', 'N/A')
             row_cells[3].text = str(status) if status else 'N/A'
-            row_cells[3].paragraphs[0].runs[0].font.size = Pt(8)
+            if row_cells[3].paragraphs and row_cells[3].paragraphs[0].runs:
+                row_cells[3].paragraphs[0].runs[0].font.size = Pt(8)
             row_cells[3].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             
             # Category/Priority (show category for ABs, priority for TAC)
             category = item.get('category', 'N/A')
             row_cells[4].text = str(category) if category and category != 'N/A' else '-'
-            row_cells[4].paragraphs[0].runs[0].font.size = Pt(8)
+            if row_cells[4].paragraphs and row_cells[4].paragraphs[0].runs:
+                row_cells[4].paragraphs[0].runs[0].font.size = Pt(8)
             row_cells[4].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             
             # Severity (mainly for ABs)
             severity = item.get('severity', 'N/A')
             row_cells[5].text = str(severity) if severity and severity != 'N/A' else '-'
-            row_cells[5].paragraphs[0].runs[0].font.size = Pt(8)
+            if row_cells[5].paragraphs and row_cells[5].paragraphs[0].runs:
+                row_cells[5].paragraphs[0].runs[0].font.size = Pt(8)
             row_cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             
             # Date
@@ -2728,7 +2776,8 @@ class LeaderReportGenerator:
                 except Exception:
                     pass
             row_cells[6].text = str(date) if date else 'N/A'
-            row_cells[6].paragraphs[0].runs[0].font.size = Pt(8)
+            if row_cells[6].paragraphs and row_cells[6].paragraphs[0].runs:
+                row_cells[6].paragraphs[0].runs[0].font.size = Pt(8)
             row_cells[6].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         
         # FIXED: Removed limit message - now showing ALL items
@@ -2744,8 +2793,9 @@ class LeaderReportGenerator:
         
         # Account Summary Heading
         summary_heading = self.doc.add_heading('Account Summary', level=3)
-        summary_heading.runs[0].font.color.rgb = CISCO_BLUE
-        summary_heading.runs[0].font.size = Pt(12)
+        if summary_heading.runs:
+            summary_heading.runs[0].font.color.rgb = CISCO_BLUE
+            summary_heading.runs[0].font.size = Pt(12)
         
         # Calculate account statistics
         ap_count = len([i for i in all_items if i['type'] == 'AP'])
@@ -2779,11 +2829,13 @@ class LeaderReportGenerator:
         # Header
         header_cells = summary_table.rows[0].cells
         header_cells[0].text = 'Metric'
-        header_cells[0].paragraphs[0].runs[0].font.bold = True
-        header_cells[0].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+        if header_cells[0].paragraphs and header_cells[0].paragraphs[0].runs:
+            header_cells[0].paragraphs[0].runs[0].font.bold = True
+            header_cells[0].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
         header_cells[1].text = 'Value'
-        header_cells[1].paragraphs[0].runs[0].font.bold = True
-        header_cells[1].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+        if header_cells[1].paragraphs and header_cells[1].paragraphs[0].runs:
+            header_cells[1].paragraphs[0].runs[0].font.bold = True
+            header_cells[1].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
         
         # Header background
         for cell in header_cells:
@@ -2813,9 +2865,11 @@ class LeaderReportGenerator:
                 row_cells = summary_table.add_row().cells
                 row_cells[0].text = metric
                 row_cells[1].text = value
-                row_cells[0].paragraphs[0].runs[0].font.size = Pt(9)
-                row_cells[1].paragraphs[0].runs[0].font.size = Pt(9)
-                row_cells[1].paragraphs[0].runs[0].font.bold = True
+                if row_cells[0].paragraphs and row_cells[0].paragraphs[0].runs:
+                    row_cells[0].paragraphs[0].runs[0].font.size = Pt(9)
+                if row_cells[1].paragraphs and row_cells[1].paragraphs[0].runs:
+                    row_cells[1].paragraphs[0].runs[0].font.size = Pt(9)
+                    row_cells[1].paragraphs[0].runs[0].font.bold = True
         
         # Add detailed breakdowns
         if status_counts:
@@ -2872,13 +2926,14 @@ class LeaderReportGenerator:
         
         # Overall Summary Heading
         summary_heading = self.doc.add_heading('📊 Overall Individual Summary', level=1)
-        summary_heading.runs[0].font.color.rgb = CISCO_BLUE
-        summary_heading.runs[0].font.size = Pt(16)
+        if summary_heading.runs:
+            summary_heading.runs[0].font.color.rgb = CISCO_BLUE
+            summary_heading.runs[0].font.size = Pt(16)
         
         # Executive Summary
         exec_para = self.doc.add_paragraph()
         exec_para.add_run('Executive Summary\n').font.bold = True
-        exec_para.add_run(f'This report provides a comprehensive analysis of {manager_name}\'s team performance over the last {days} days. ')
+        exec_para.add_run(f'This report provides a comprehensive analysis of {(manager_name or "Manager")}\'s team performance over the last {days} days. ')
         exec_para.add_run('The analysis covers all team members, their customer accounts, adoption barriers, action plans, customer pulse records, and TAC cases.\n\n')
         
         # Calculate overall team statistics
@@ -2936,7 +2991,8 @@ class LeaderReportGenerator:
         
         # Create overall statistics table
         stats_heading = self.doc.add_heading('Team Performance Metrics', level=2)
-        stats_heading.runs[0].font.color.rgb = CISCO_BLUE
+        if stats_heading.runs:
+            stats_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         stats_table = self.doc.add_table(rows=1, cols=3)
         stats_table.style = 'Light Grid Accent 1'
@@ -2946,8 +3002,9 @@ class LeaderReportGenerator:
         headers = ['Metric', 'Total', 'Average per Team Member']
         for i, header_text in enumerate(headers):
             header_cells[i].text = header_text
-            header_cells[i].paragraphs[0].runs[0].font.bold = True
-            header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+            if header_cells[i].paragraphs and header_cells[i].paragraphs[0].runs:
+                header_cells[i].paragraphs[0].runs[0].font.bold = True
+                header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
             header_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             # Header background
             shading_elm = OxmlElement('w:shd')
@@ -2972,11 +3029,14 @@ class LeaderReportGenerator:
             row_cells[0].text = metric
             row_cells[1].text = total
             row_cells[2].text = avg
-            row_cells[0].paragraphs[0].runs[0].font.size = Pt(9)
-            row_cells[1].paragraphs[0].runs[0].font.size = Pt(9)
-            row_cells[1].paragraphs[0].runs[0].font.bold = True
-            row_cells[2].paragraphs[0].runs[0].font.size = Pt(9)
-            row_cells[2].paragraphs[0].runs[0].font.bold = True
+            if row_cells[0].paragraphs and row_cells[0].paragraphs[0].runs:
+                row_cells[0].paragraphs[0].runs[0].font.size = Pt(9)
+            if row_cells[1].paragraphs and row_cells[1].paragraphs[0].runs:
+                row_cells[1].paragraphs[0].runs[0].font.size = Pt(9)
+                row_cells[1].paragraphs[0].runs[0].font.bold = True
+            if row_cells[2].paragraphs and row_cells[2].paragraphs[0].runs:
+                row_cells[2].paragraphs[0].runs[0].font.size = Pt(9)
+                row_cells[2].paragraphs[0].runs[0].font.bold = True
             # Center align numeric columns
             for i in range(1, 3):
                 row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -2984,7 +3044,8 @@ class LeaderReportGenerator:
         # Team Member Performance Table
         self.doc.add_paragraph()
         performance_heading = self.doc.add_heading('Individual Team Member Performance', level=2)
-        performance_heading.runs[0].font.color.rgb = CISCO_BLUE
+        if performance_heading.runs:
+            performance_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         perf_table = self.doc.add_table(rows=1, cols=8)
         perf_table.style = 'Light Grid Accent 1'
@@ -2994,8 +3055,9 @@ class LeaderReportGenerator:
         perf_headers = ['Team Member', 'Customers', 'APs', 'ABs', 'CPs', 'TAC', 'BEMS', 'Total']
         for i, header_text in enumerate(perf_headers):
             perf_header_cells[i].text = header_text
-            perf_header_cells[i].paragraphs[0].runs[0].font.bold = True
-            perf_header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+            if perf_header_cells[i].paragraphs and perf_header_cells[i].paragraphs[0].runs:
+                perf_header_cells[i].paragraphs[0].runs[0].font.bold = True
+                perf_header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
             perf_header_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             # Header background
             shading_elm = OxmlElement('w:shd')
@@ -3016,16 +3078,18 @@ class LeaderReportGenerator:
             
             # Formatting
             for i in range(8):
-                row_cells[i].paragraphs[0].runs[0].font.size = Pt(9)
+                if row_cells[i].paragraphs and row_cells[i].paragraphs[0].runs:
+                    row_cells[i].paragraphs[0].runs[0].font.size = Pt(9)
+                    if i == 7:  # Bold total column
+                        row_cells[i].paragraphs[0].runs[0].font.bold = True
                 if i > 0:  # Center align numeric columns
                     row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                if i == 7:  # Bold total column
-                    row_cells[i].paragraphs[0].runs[0].font.bold = True
         
         # Key Insights and Recommendations
         self.doc.add_paragraph()
         insights_heading = self.doc.add_heading('Key Insights and Recommendations', level=2)
-        insights_heading.runs[0].font.color.rgb = CISCO_BLUE
+        if insights_heading.runs:
+            insights_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Top performers
         top_performer = max(team_summary_data, key=lambda x: x['total_activities'])
@@ -3069,7 +3133,7 @@ class LeaderReportGenerator:
         meta_para = self.doc.add_paragraph()
         meta_para.add_run('REPORT: Report Metadata:\n').font.bold = True
         meta_para.add_run(f'• Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n')
-        meta_para.add_run(f'• Manager: {manager_name}\n')
+        meta_para.add_run(f'• Manager: {(manager_name or "Manager")}\n')
         meta_para.add_run(f'• Time Period: Last {days} days\n')
         meta_para.add_run(f'• Data Sources: CSConsole (APs, ABs, CPs), CSOne (TAC Cases), Snowflake (Customer Data)\n')
         meta_para.add_run(f'• Total Records Analyzed: {total_aps + total_abs + total_cps + total_tac_cases}\n')
@@ -3080,7 +3144,8 @@ class LeaderReportGenerator:
         try:
             # Add heading
             insights_heading = self.doc.add_heading('📊 Additional Customer Insights', level=5)
-            insights_heading.runs[0].font.color.rgb = CISCO_BLUE
+            if insights_heading.runs:
+                insights_heading.runs[0].font.color.rgb = CISCO_BLUE
             
             insights_added = False
             
@@ -3141,7 +3206,8 @@ class LeaderReportGenerator:
                         insights_added = True
                         bems_para = self.doc.add_paragraph()
                         bems_para.add_run('WARN:️ BEMS Escalations Detected: ').font.bold = True
-                        bems_para.runs[0].font.color.rgb = RGBColor(255, 140, 0)  # Orange
+                        if bems_para.runs:
+                            bems_para.runs[0].font.color.rgb = RGBColor(255, 140, 0)  # Orange
                         bems_para.add_run(f"{len(bems_items)} backend engineering escalation(s)")
                         
                         # FIXED: Show ALL BEMS items
@@ -3193,7 +3259,8 @@ class LeaderReportGenerator:
         
         # Section heading
         section_heading = self.doc.add_heading(f'{section_name} ({len(items)})', level=5)
-        section_heading.runs[0].font.color.rgb = CISCO_BLUE
+        if section_heading.runs:
+            section_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Create table for structured display
         table = self.doc.add_table(rows=1, cols=4)
@@ -3204,7 +3271,8 @@ class LeaderReportGenerator:
         headers = ['Record ID', 'Subject/Title', 'Status', 'Date']
         for i, header_text in enumerate(headers):
             header_cells[i].text = header_text
-            header_cells[i].paragraphs[0].runs[0].font.bold = True
+            if header_cells[i].paragraphs and header_cells[i].paragraphs[0].runs:
+                header_cells[i].paragraphs[0].runs[0].font.bold = True
             header_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             # Add light blue background to header
             shading_elm = OxmlElement('w:shd')
@@ -3220,7 +3288,8 @@ class LeaderReportGenerator:
             if section_name == 'TAC Cases':
                 record_id = f"TAC Case: {item.get('case_number', 'N/A')}"
                 row_cells[0].text = record_id
-                row_cells[0].paragraphs[0].runs[0].font.size = Pt(9)
+                if row_cells[0].paragraphs and row_cells[0].paragraphs[0].runs:
+                    row_cells[0].paragraphs[0].runs[0].font.size = Pt(9)
             else:
                 # CSConsole record - add hyperlink
                 record_id = item.get('id', 'N/A')
@@ -3237,10 +3306,12 @@ class LeaderReportGenerator:
                     except Exception:
                         # Fallback to plain text
                         row_cells[0].text = record_id_display
-                        row_cells[0].paragraphs[0].runs[0].font.size = Pt(9)
+                        if row_cells[0].paragraphs and row_cells[0].paragraphs[0].runs:
+                            row_cells[0].paragraphs[0].runs[0].font.size = Pt(9)
                 else:
                     row_cells[0].text = record_id_display
-                    row_cells[0].paragraphs[0].runs[0].font.size = Pt(9)
+                    if row_cells[0].paragraphs and row_cells[0].paragraphs[0].runs:
+                        row_cells[0].paragraphs[0].runs[0].font.size = Pt(9)
             
             # Subject/Title (truncated)
             subject = item.get('subject', item.get('title', 'N/A'))
@@ -3248,12 +3319,14 @@ class LeaderReportGenerator:
                 subject = 'N/A'
             # FIXED: Show full subject for data verification
             row_cells[1].text = str(subject)
-            row_cells[1].paragraphs[0].runs[0].font.size = Pt(9)
+            if row_cells[1].paragraphs and row_cells[1].paragraphs[0].runs:
+                row_cells[1].paragraphs[0].runs[0].font.size = Pt(9)
             
             # Status
             status = item.get('status', 'N/A')
             row_cells[2].text = status
-            row_cells[2].paragraphs[0].runs[0].font.size = Pt(9)
+            if row_cells[2].paragraphs and row_cells[2].paragraphs[0].runs:
+                row_cells[2].paragraphs[0].runs[0].font.size = Pt(9)
             row_cells[2].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             
             # Date
@@ -3265,7 +3338,8 @@ class LeaderReportGenerator:
                 except Exception:
                     pass
             row_cells[3].text = str(date)
-            row_cells[3].paragraphs[0].runs[0].font.size = Pt(9)
+            if row_cells[3].paragraphs and row_cells[3].paragraphs[0].runs:
+                row_cells[3].paragraphs[0].runs[0].font.size = Pt(9)
             row_cells[3].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         
         # Add note about source attribution
@@ -3289,7 +3363,8 @@ class LeaderReportGenerator:
         
         # Source Verification heading
         verification_heading = self.doc.add_heading('Source Verification & Data Attribution', level=3)
-        verification_heading.runs[0].font.color.rgb = CISCO_BLUE
+        if verification_heading.runs:
+            verification_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Create comprehensive source verification table
         table = self.doc.add_table(rows=1, cols=4)
@@ -3300,7 +3375,8 @@ class LeaderReportGenerator:
         headers = ['Data Source', 'Record Count', 'Source System', 'Verification Method']
         for i, header_text in enumerate(headers):
             header_cells[i].text = header_text
-            header_cells[i].paragraphs[0].runs[0].font.bold = True
+            if header_cells[i].paragraphs and header_cells[i].paragraphs[0].runs:
+                header_cells[i].paragraphs[0].runs[0].font.bold = True
             header_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             # Add light blue background to header
             shading_elm = OxmlElement('w:shd')
@@ -3329,7 +3405,8 @@ class LeaderReportGenerator:
         # Add verification instructions
         self.doc.add_paragraph()
         instructions_heading = self.doc.add_heading('How to Verify This Data', level=4)
-        instructions_heading.runs[0].font.color.rgb = CISCO_BLUE
+        if instructions_heading.runs:
+            instructions_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         instructions_para = self.doc.add_paragraph()
         instructions_para.add_run('To verify the accuracy of this report:\n\n').font.bold = True
@@ -3750,7 +3827,8 @@ class LeaderReportGenerator:
         
         # Validation heading
         validation_heading = self.doc.add_heading('Data Validation & Verification', level=1)
-        validation_heading.runs[0].font.color.rgb = CISCO_BLUE
+        if validation_heading.runs:
+            validation_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Summary
         summary = validation_results['summary']
@@ -3763,22 +3841,27 @@ class LeaderReportGenerator:
         # Critical Issues
         if summary['critical_issues']:
             issues_heading = self.doc.add_heading('Critical Issues', level=2)
-            issues_heading.runs[0].font.color.rgb = RGBColor(220, 20, 60)  # Red
+            if issues_heading.runs:
+                issues_heading.runs[0].font.color.rgb = RGBColor(220, 20, 60)  # Red
             for issue in summary['critical_issues']:
                 issue_para = self.doc.add_paragraph(f'• {issue}')
-                issue_para.runs[0].font.color.rgb = RGBColor(220, 20, 60)
+                if issue_para.runs:
+                    issue_para.runs[0].font.color.rgb = RGBColor(220, 20, 60)
         
         # Warnings
         if summary['warnings']:
             warnings_heading = self.doc.add_heading('Warnings', level=2)
-            warnings_heading.runs[0].font.color.rgb = RGBColor(255, 140, 0)  # Orange
+            if warnings_heading.runs:
+                warnings_heading.runs[0].font.color.rgb = RGBColor(255, 140, 0)  # Orange
             for warning in summary['warnings']:
                 warning_para = self.doc.add_paragraph(f'• {warning}')
-                warning_para.runs[0].font.color.rgb = RGBColor(255, 140, 0)
+                if warning_para.runs:
+                    warning_para.runs[0].font.color.rgb = RGBColor(255, 140, 0)
         
         # Data Sources Verification
         sources_heading = self.doc.add_heading('Data Sources Verification', level=2)
-        sources_heading.runs[0].font.color.rgb = CISCO_BLUE
+        if sources_heading.runs:
+            sources_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         sources_para = self.doc.add_paragraph()
         data_sources = validation_results['validation_checks']['data_sources']
@@ -3788,7 +3871,8 @@ class LeaderReportGenerator:
         
         # Activity Counts Cross-Check
         counts_heading = self.doc.add_heading('Activity Counts Cross-Check', level=2)
-        counts_heading.runs[0].font.color.rgb = CISCO_BLUE
+        if counts_heading.runs:
+            counts_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Create table for activity counts verification
         table = self.doc.add_table(rows=1, cols=6)
@@ -3799,13 +3883,14 @@ class LeaderReportGenerator:
         headers = ['Team Member', 'Action Plans', 'Adoption Barriers', 'Customer Pulse', 'TAC Cases', 'Total']
         for i, header_text in enumerate(headers):
             header_cells[i].text = header_text
-            header_cells[i].paragraphs[0].runs[0].font.bold = True
+            if header_cells[i].paragraphs and header_cells[i].paragraphs[0].runs:
+                header_cells[i].paragraphs[0].runs[0].font.bold = True
+                header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
             header_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             # Add blue background
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '0076CE')
             header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-            header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
         
         # Data rows
         cross_checks = validation_results['cross_checks']['activity_counts']
@@ -3825,7 +3910,8 @@ class LeaderReportGenerator:
         # Recommendations
         if summary['recommendations']:
             rec_heading = self.doc.add_heading('Recommendations', level=2)
-            rec_heading.runs[0].font.color.rgb = CISCO_BLUE
+            if rec_heading.runs:
+                rec_heading.runs[0].font.color.rgb = CISCO_BLUE
             for rec in summary['recommendations']:
                 rec_para = self.doc.add_paragraph(f'• {rec}')
 
@@ -3855,8 +3941,9 @@ class LeaderReportGenerator:
         
         # Style header
         for cell in header_cells:
-            cell.paragraphs[0].runs[0].font.bold = True
-            cell.paragraphs[0].runs[0].font.color.rgb = CISCO_BLUE
+            if cell.paragraphs and cell.paragraphs[0].runs:
+                cell.paragraphs[0].runs[0].font.bold = True
+                cell.paragraphs[0].runs[0].font.color.rgb = CISCO_BLUE
         
         # Add data rows
         insights_data = [
@@ -3949,8 +4036,9 @@ class LeaderReportGenerator:
         
         # Style header
         for cell in header_cells:
-            cell.paragraphs[0].runs[0].font.bold = True
-            cell.paragraphs[0].runs[0].font.color.rgb = CISCO_BLUE
+            if cell.paragraphs and cell.paragraphs[0].runs:
+                cell.paragraphs[0].runs[0].font.bold = True
+                cell.paragraphs[0].runs[0].font.color.rgb = CISCO_BLUE
         
         # Add key data sources
         key_sources = [
@@ -4101,8 +4189,9 @@ class LeaderReportGenerator:
         
         # Style header
         for cell in header_cells:
-            cell.paragraphs[0].runs[0].font.bold = True
-            cell.paragraphs[0].runs[0].font.color.rgb = CISCO_BLUE
+            if cell.paragraphs and cell.paragraphs[0].runs:
+                cell.paragraphs[0].runs[0].font.bold = True
+                cell.paragraphs[0].runs[0].font.color.rgb = CISCO_BLUE
         
         # Add data sources
         sources_data = [
@@ -4142,7 +4231,8 @@ class LeaderReportGenerator:
 def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[Tuple[str, str, str]], 
                           csone_df: Optional[pd.DataFrame] = None,
                           ext_bugs: List[Dict] = None, ext_incidents: List[Dict] = None,
-                          software_defects: Dict = None, psirt_vulns: Dict = None) -> Tuple[str, str, Dict]:
+                          software_defects: Dict = None, psirt_vulns: Dict = None,
+                          progress_callback=None) -> Tuple[str, str, Dict]:
     """
     Main function to generate leader report
     
@@ -4156,38 +4246,39 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
         ext_incidents: External incidents from status.webex.com (optional)
         software_defects: Software defects extracted from data (optional)
         psirt_vulns: PSIRT vulnerabilities extracted from data (optional)
+        progress_callback: Optional callable(progress, message, step) for status updates
         
     Returns:
-        Tuple of (document path, success message)
+        Tuple of (filepath, success_message, team_data dict)
     """
+    def _cb(progress, message, step):
+        if progress_callback:
+            try:
+                progress_callback(progress, message, step)
+            except Exception:
+                pass
+
     try:
-        logger.info(f"DEBUG: Starting leader report generation for {manager_name}")
-        logger.info(f"DEBUG: ctx type: {type(ctx)}, ctx is None: {ctx is None}")
-        logger.info(f"DEBUG: team_roster type: {type(team_roster)}, length: {len(team_roster) if team_roster else 0}")
-        logger.info(f"DEBUG: csone_df type: {type(csone_df)}, is None: {csone_df is None}, empty: {csone_df.empty if csone_df is not None else 'N/A'}")
+        logger.info(f"Starting leader report generation for {manager_name}")
         
         generator = LeaderReportGenerator(ctx, team_roster)
-        logger.info(f"DEBUG: LeaderReportGenerator created successfully")
         
-        # Generate the report and reuse team_data/direct_reports (avoids redundant Snowflake queries)
-        logger.info(f"DEBUG: About to call generator.generate_leader_report()")
         doc, filepath, team_data, direct_reports = generator.generate_leader_report(
             manager_name, days,
             ext_bugs=ext_bugs, ext_incidents=ext_incidents,
-            software_defects=software_defects, psirt_vulns=psirt_vulns
+            software_defects=software_defects, psirt_vulns=psirt_vulns,
+            progress_callback=progress_callback
         )
-        logger.info(f"DEBUG: generator.generate_leader_report() completed. filepath: {filepath}")
+        logger.info(f"generator.generate_leader_report() completed. filepath: {filepath}")
         
-        # Add TAC cases if CSOne data provided
-        logger.info(f"DEBUG: Checking csone_df: is None: {csone_df is None}, empty: {csone_df.empty if csone_df is not None else 'N/A'}")
         if csone_df is not None and not csone_df.empty:
-            logger.info(f"DEBUG: CSOne data provided, adding TAC cases...")
+            _cb(84, 'Integrating TAC cases from CSOne...', 'TAC Integration')
             generator.add_tac_cases_from_csone(team_data, csone_df, days)
             
-            # Perform comprehensive data validation
+            _cb(85, 'Validating data integrity...', 'Data Validation')
             validation_results = generator._validate_and_verify_data(team_data, days)
             
-            # Regenerate document with TAC cases and validation (use all data sources)
+            _cb(86, 'Regenerating document with TAC data...', 'Document Finalization')
             generator.doc = Document()
             generator._setup_document_settings()
             generator._create_title_page(manager_name, days, direct_reports)
@@ -4200,15 +4291,16 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             generator._add_external_intelligence_section(ext_bugs, ext_incidents, software_defects, psirt_vulns)
             generator._add_section_separator()
             generator._add_validation_section(validation_results)
+            _cb(87, 'Saving final Word document...', 'Document Finalization')
             generator.doc.save(filepath)
             
             logger.info(f"Leader report regenerated with TAC cases and validation (filtered to last {days} days)")
         else:
-            # Even without CSOne data, perform validation on Snowflake data
+            _cb(85, 'Validating data integrity...', 'Data Validation')
             validation_results = generator._validate_and_verify_data(team_data, days)
             
-            # Add validation section to existing document
             generator._add_validation_section(validation_results)
+            _cb(86, 'Saving final Word document...', 'Document Finalization')
             generator.doc.save(filepath)
             
             logger.info(f"Leader report updated with validation section")

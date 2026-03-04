@@ -127,7 +127,7 @@ function setupSubscriptionSearch() {
         } else {
             subscriptionList.innerHTML = subscriptions.map(sub => `
                 <div class="list-group-item list-group-item-action subscription-item" 
-                     data-subscription='${JSON.stringify(sub)}'>
+                     data-subscription="${JSON.stringify(sub).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}">
                     <div class="d-flex w-100 justify-content-between">
                         <h6 class="mb-1">${escapeHtml(sub.BU_NAME)}</h6>
                         <small>${escapeHtml(sub.SUBSCRIPTION_ID)}</small>

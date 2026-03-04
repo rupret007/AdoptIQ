@@ -6,16 +6,34 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 
 ### What's New in v1.0.3
 
+#### New Features
+- **Ask AI:** A new page where you can ask natural-language questions about your portfolio. The app fetches live Snowflake data (subscriptions, adoption barriers, ARR, support cases, customer pulse) based on your filters, then sends it to CircuIT for an AI-powered answer.
+- **External Intelligence:** Live incidents, bugs, and maintenances from status.webex.com and help.webex.com are fetched, stored historically in a local database, and displayed with search, export, and import capabilities. Ask the AI questions about any tracked intelligence.
+- **Embedded Admin Console:** System info, report history, and recent logs are now directly accessible from the Admin tab — no separate process needed.
+- **Graceful shutdown:** Analysis status is automatically saved when the app exits, preventing data loss.
+
+#### Stability & Robustness (7 rounds of deep code review)
 - **Leader Report Excel fix:** Leader report Excel downloads now work correctly (filename sanitization was causing 404s).
 - **Download resilience:** Report downloads survive app restarts — status is loaded from disk when not in memory.
-- **Excel export stability:** Fixed datetime timezone handling that could crash Excel exports for timezone-aware columns.
+- **Excel export stability:** Fixed datetime timezone handling and NaN/NaT/Inf sanitization that could crash or corrupt Excel exports.
 - **Leader report performance:** Eliminated redundant Snowflake queries during leader report generation (2 fewer round-trips).
-- **Division-by-zero guard:** Leader report summary no longer crashes when a manager has zero team members.
-- **Status persistence:** Error and cancellation states are now saved to disk immediately, preventing zombie entries after restart.
-- **Corrupt file handling:** Uploading a corrupt or invalid CSOne Excel file no longer crashes the app — returns a clear error instead.
-- **Chart stability:** Executive charts no longer crash when ARR data is unavailable.
-- **Status serialization:** Progress polling no longer fails when status contains datetime, numpy, or set values.
-- **Test suite:** Added 274 pytest tests covering validation, data processing, downloads, leader reports, formatting, status management, and error paths.
+- **Report error handling:** All report types now guarantee error status is recorded and persisted, even on unexpected failures.
+- **Startup cleanup:** Analyses left in "running" state from a previous session are automatically marked as cancelled on restart.
+- **Memory management:** Old analysis entries are automatically evicted (keeps most recent 50) to prevent unbounded growth.
+- **Database safety:** All Snowflake query functions handle None connections gracefully; connection leaks fixed with proper finally blocks.
+- **Path traversal hardening:** Download routes strictly verify file paths are within the outputs directory.
+- **Error message sanitization:** Internal stack traces and file paths are never exposed to users.
+- **Status API security:** Internal file paths are filtered from the status API response.
+
+#### UI & Progress
+- **Granular progress notifications:** All 5 report types show detailed, real-time status updates during generation — the leader report alone has ~20 sub-steps with per-team-member progress.
+- **Step timeline UI:** The progress page shows a visual pipeline of completed steps (with checkmarks), the current step (with a spinner), and a live elapsed-time clock.
+- **Robust polling:** Status polling handles network errors with retry limits, validates server responses, and has a 30-minute safety timeout.
+- **XSS prevention:** All dynamic content in the progress page and subscription search is properly escaped.
+
+#### Testing
+- **Test suite:** 321 pytest tests covering validation, data processing, downloads, formatting, status management, error paths, NaN/Inf handling, and security guards.
+- **Debug log cleanup:** Removed noisy DEBUG-prefixed log statements; downgraded to debug level for cleaner production logs.
 
 ### What's New in v1.0.2
 
@@ -64,10 +82,12 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 
 ### Navigation
 
-- **Dashboard** — Start here; run new analyses from **Run Analysis** or the dashboard buttons.
+- **Dashboard / Run Analysis** — Start here; run new analyses from the dashboard buttons.
 - **History** — Lists previous portfolio analyses. Use **View** to open the progress page for an analysis and download Word/Excel reports when completed.
+- **Intel** — View tracked incidents, bugs, and maintenances from Webex status and help pages. Search, export/import historical data, and ask AI questions about intelligence.
+- **Ask AI** — Ask natural-language questions about your portfolio using live Snowflake data and CircuIT AI.
+- **Admin** — System information, report history, and recent application logs — all embedded directly in the app.
 - **Help** — Links and usage notes.
-- **Admin** — Opens the optional Admin Console (monitoring, report history, logs) in a new tab. The console runs as a separate process; if you use it, set `ADOPTIQ_ADMIN_URL` (e.g. `http://localhost:5002`) when it runs on a different port.
 
 ---
 
@@ -100,6 +120,7 @@ Link: https://csone.lightning.force.com/lightning/r/Report/00OfX000001Nnh2UAC/vi
 | Uploads (CSOne Excel files) | `~/Library/Application Support/AdoptIQ/uploads/` |
 | Generated reports (Word, Excel) | `~/Library/Application Support/AdoptIQ/outputs/` |
 | Analysis status (progress tracking) | `~/Library/Application Support/AdoptIQ/analysis_status.json` |
+| External intelligence history | `~/Library/Application Support/AdoptIQ/external_intelligence.db` |
 
 In Finder, use **Go -> Go to Folder...** and enter `~/Library/Application Support/AdoptIQ/outputs` to open outputs.
 

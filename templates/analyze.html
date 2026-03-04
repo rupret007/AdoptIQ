@@ -157,7 +157,7 @@
                         </div>
                     </div>
 
-                    <form method="POST" action="/start_analysis" enctype="multipart/form-data" id="analysisForm" novalidate>
+                    <form method="POST" action="{{ url_for('start_analysis') }}" enctype="multipart/form-data" id="analysisForm" novalidate>
                         {{ form.hidden_tag() }}
                         
                         <!-- Manager Selection -->
@@ -1636,12 +1636,10 @@ document.addEventListener('DOMContentLoaded', function() {
     function toggleManagerField() {
         const selectedReportType = document.querySelector('input[name="report_type"]:checked')?.value;
         
-        if (selectedReportType === 'customer_renewal') {
-            // Hide manager section for customer renewal reports
+        if (selectedReportType === 'renewal' && managerSection && managerSelect) {
             managerSection.style.display = 'none';
             managerSelect.removeAttribute('required');
-        } else {
-            // Show manager section for other report types
+        } else if (managerSection && managerSelect) {
             managerSection.style.display = 'block';
             managerSelect.setAttribute('required', 'required');
         }

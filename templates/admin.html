@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+
+{% block title %}Admin Console - AdoptIQ{% endblock %}
+
+{% block extra_css %}
+<style>
+    .metric-card { transition: transform 0.2s; }
+    .metric-card:hover { transform: translateY(-2px); }
+    .log-entry { font-family: 'SF Mono', 'Menlo', monospace; font-size: 0.8rem; border-bottom: 1px solid var(--cisco-gray-200); padding: 0.4rem 0; }
+    .log-error { color: var(--cisco-danger); }
+    .log-warning { color: var(--cisco-warning); }
+    .log-info { color: var(--cisco-gray-600); }
+    .status-running { color: var(--cisco-blue); font-weight: 600; }
+    .status-completed { color: var(--cisco-success); font-weight: 600; }
+    .status-error { color: var(--cisco-danger); font-weight: 600; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-11">
+
+            <div class="text-center mb-5">
+                <div class="mb-4">
+                    <div class="bg-secondary bg-opacity-10 d-inline-flex p-4 rounded-circle mb-3 hover-scale">
+                        <i class="fas fa-cog fa-3x text-secondary"></i>
+                    </div>
+                </div>
+                <h1 class="display-4 fw-bold text-secondary mb-3 bounce-in">Admin Console</h1>
+                <p class="lead text-muted slide-in-left" style="animation-delay:0.2s; font-size:1.125rem;">
+                    System status, report history, and diagnostics.
+                </p>
+            </div>
+
+            <!-- Metric Cards -->
+            <div class="row g-4 mb-4">
+                <div class="col-6 col-md-3">
+                    <div class="card text-center h-100 fade-in shadow-cisco metric-card">
+                        <div class="card-body">
+                            <div class="bg-primary bg-opacity-10 p-3 rounded-circle d-inline-flex mb-2">
+                                <i class="fas fa-file-alt text-primary fa-2x"></i>
+                            </div>
+                            <h4 class="text-gradient mb-1">{{ total_reports }}</h4>
+                            <p class="text-muted mb-0 small">Total Reports</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-6 col-md-3">
+                    <div class="card text-center h-100 fade-in shadow-cisco metric-card">
+                        <div class="card-body">
+                            <div class="bg-success bg-opacity-10 p-3 rounded-circle d-inline-flex mb-2">
+                                <i class="fas fa-check-circle text-success fa-2x"></i>
+                            </div>
+                            <h4 class="text-gradient mb-1">{{ completed_reports }}</h4>
+                            <p class="text-muted mb-0 small">Completed</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-6 col-md-3">
+                    <div class="card text-center h-100 fade-in shadow-cisco metric-card">
+                        <div class="card-body">
+                            <div class="bg-danger bg-opacity-10 p-3 rounded-circle d-inline-flex mb-2">
+                                <i class="fas fa-exclamation-circle text-danger fa-2x"></i>
+                            </div>
+                            <h4 class="text-gradient mb-1">{{ error_reports }}</h4>
+                            <p class="text-muted mb-0 small">Errors</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-6 col-md-3">
+                    <div class="card text-center h-100 fade-in shadow-cisco metric-card">
+                        <div class="card-body">
+                            <div class="bg-info bg-opacity-10 p-3 rounded-circle d-inline-flex mb-2">
+                                <i class="fas fa-hdd text-info fa-2x"></i>
+                            </div>
+                            <h4 class="text-gradient mb-1">{{ disk_usage }}</h4>
+                            <p class="text-muted mb-0 small">Disk Usage</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tabs -->
+            <ul class="nav nav-tabs" role="tablist">
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#system-pane" type="button" role="tab">
+                        <i class="fas fa-server me-1"></i>System Info
+                    </button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#reports-pane" type="button" role="tab">
+                        <i class="fas fa-history me-1"></i>Report History
+                        <span class="badge bg-primary ms-1">{{ total_reports }}</span>
+                    </button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#logs-pane" type="button" role="tab">
+                        <i class="fas fa-terminal me-1"></i>Recent Logs
+                    </button>
+                </li>
+            </ul>
+
+            <div class="tab-content">
+
+                <!-- System Info -->
+                <div class="tab-pane fade show active" id="system-pane" role="tabpanel" style="padding-top:1.5rem;">
+                    <div class="card fade-in shadow-cisco">
+                        <div class="card-body">
+                            <div class="table-responsive">
+                                <table class="table table-sm mb-0">
+                                    <tbody>
+                                        {% for key, value in system_info.items() %}
+                                        <tr>
+                                            <td class="fw-semibold text-nowrap" style="width:200px;">{{ key }}</td>
+                                            <td>{{ value }}</td>
+                                        </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Report History -->
+                <div class="tab-pane fade" id="reports-pane" role="tabpanel" style="padding-top:1.5rem;">
+                    {% if reports %}
+                    <div class="card fade-in shadow-cisco">
+                        <div class="card-body p-0">
+                            <div class="table-responsive">
+                                <table class="table table-hover mb-0">
+                                    <thead class="table-light">
+                                        <tr>
+                                            <th class="border-0">ID</th>
+                                            <th class="border-0">Type</th>
+                                            <th class="border-0">Manager</th>
+                                            <th class="border-0">Status</th>
+                                            <th class="border-0">Progress</th>
+                                            <th class="border-0">Started</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% for r in reports %}
+                                        <tr>
+                                            <td class="align-middle small font-monospace">{{ (r.id or '')[:8] }}</td>
+                                            <td class="align-middle">{{ r.report_type or 'N/A' }}</td>
+                                            <td class="align-middle">{{ r.manager or 'N/A' }}</td>
+                                            <td class="align-middle">
+                                                <span class="status-{{ r.status or 'unknown' }}">
+                                                    <i class="fas fa-circle fa-xs me-1"></i>{{ (r.status or 'unknown')|capitalize }}
+                                                </span>
+                                            </td>
+                                            <td class="align-middle">{{ r.progress or 0 }}%</td>
+                                            <td class="align-middle small">{{ (r.start_time or '')[:19] }}</td>
+                                        </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    {% else %}
+                    <div class="card text-center py-5 fade-in shadow-cisco">
+                        <div class="card-body">
+                            <i class="fas fa-inbox fa-3x text-muted opacity-25 mb-3"></i>
+                            <h5>No Report History</h5>
+                            <p class="text-muted mb-0">Reports will appear here after you run your first analysis.</p>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+
+                <!-- Logs -->
+                <div class="tab-pane fade" id="logs-pane" role="tabpanel" style="padding-top:1.5rem;">
+                    <div class="card fade-in shadow-cisco">
+                        <div class="card-body">
+                            {% if log_entries %}
+                            <div style="max-height: 500px; overflow-y: auto;">
+                                {% for entry in log_entries %}
+                                <div class="log-entry log-{{ entry.level }}">
+                                    <span class="text-muted me-2">{{ entry.time }}</span>
+                                    <span class="badge bg-{{ 'danger' if entry.level == 'error' else ('warning' if entry.level == 'warning' else 'secondary') }} me-2">{{ entry.level|upper }}</span>
+                                    {{ entry.message }}
+                                </div>
+                                {% endfor %}
+                            </div>
+                            {% else %}
+                            <p class="text-muted text-center mb-0">No recent log entries.</p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Navigation -->
+            <div class="text-center mt-5 fade-in">
+                <div class="d-flex justify-content-center gap-3 flex-wrap">
+                    <a href="{{ url_for('index') }}" class="btn btn-primary btn-lg hover-lift">
+                        <i class="fas fa-home me-2"></i>Dashboard
+                    </a>
+                    <a href="{{ url_for('history') }}" class="btn btn-outline-primary btn-lg hover-lift">
+                        <i class="fas fa-history me-2"></i>Report History
+                    </a>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+{% endblock %}

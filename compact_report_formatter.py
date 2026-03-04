@@ -273,9 +273,13 @@ class CompactReportFormatter:
                         run.bold = True
                         run.font.size = Pt(14)
                         # Color code critical metrics
-                        if i == 2 and int(value) > 0:  # Critical P1
+                        try:
+                            _v = int(value)
+                        except (ValueError, TypeError):
+                            _v = 0
+                        if i == 2 and _v > 0:  # Critical P1
                             run.font.color.rgb = RGBColor(220, 20, 60)
-                        elif i == 4 and int(value) > 0:  # BEMS
+                        elif i == 4 and _v > 0:  # BEMS
                             run.font.color.rgb = RGBColor(220, 20, 60)
             
             self.doc.add_paragraph()  # Spacing
@@ -296,7 +300,8 @@ class CompactReportFormatter:
             risk_section.add_run('🎯 Overall Portfolio Risk Assessment: ').bold = True
             risk_section.add_run('\n')
             
-            overall_risk = risk_summary.get('overall_risk_score', 0)
+            raw_overall = risk_summary.get('overall_risk_score', 0)
+            overall_risk = raw_overall if isinstance(raw_overall, (int, float)) else 0
             risk_level_p = self.doc.add_paragraph()
             risk_level_p.style = 'CompactMetric'
             
@@ -511,7 +516,9 @@ class CompactReportFormatter:
             # IMPACT section (matches example format)
             impact_p = self.doc.add_paragraph()
             impact_p.add_run('- Impact: ').bold = True
-            impact_text = f'Risk score {risk_info["score"]:.1f}/10 - '
+            score = risk_info.get("score", 0)
+            score_str = f"{score:.1f}" if isinstance(score, (int, float)) else "N/A"
+            impact_text = f'Risk score {score_str}/10 - '
             if color == 'Red':
                 impact_text += 'High renewal risk, potential customer churn, escalation to executive level likely'
             elif color == 'Yellow':
@@ -738,11 +745,13 @@ class CompactReportFormatter:
             headers[2].text = 'Trend Indicator'
             
             # Data rows
+            score = risk_summary.get('overall_risk_score', 0)
+            renewal_risk_status = 'Low' if (isinstance(score, (int, float)) and score < 4) else 'Moderate' if (isinstance(score, (int, float)) and score < 7) else 'High'
             metrics_data = [
                 ('Customer Satisfaction', 'Good' if risk_summary.get('escalated_cases', 0) < 5 else 'Needs Attention', '📊'),
                 ('Adoption Health', 'Healthy' if risk_summary.get('critical_adoption_barriers', 0) < 3 else 'At Risk', '📈'),
                 ('Support Load', 'Normal' if risk_summary.get('escalated_cases', 0) < 10 else 'High', '⚠️'),
-                ('Renewal Risk', 'Low' if risk_summary.get('overall_risk_score', 0) < 4 else 'Moderate' if risk_summary.get('overall_risk_score', 0) < 7 else 'High', '🎯')
+                ('Renewal Risk', renewal_risk_status, '🎯')
             ]
             
             for i, (metric, status, trend) in enumerate(metrics_data, 1):
@@ -855,7 +864,7 @@ class CompactReportFormatter:
             if total_bems > 0 and 'customer_name' in bems_cases.columns:
                 summary_p.add_run('\nBEMS Escalations by Customer:\n')
                 
-                for customer in bems_cases['customer_name'].unique():
+                for customer in bems_cases['customer_name'].dropna().unique():
                     customer_bems = bems_cases[bems_cases['customer_name'] == customer]
                     
                     # Extract actual BEMS IDs
@@ -969,6 +978,8 @@ class CompactReportFormatter:
     
     def add_data_citations_section(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame):
         """Add data citations and source verification section – uses canonical data sources (same across all AdoptIQ reports)."""
+        ab_data = ab_data if ab_data is not None else pd.DataFrame()
+        csone_data = csone_data if csone_data is not None else pd.DataFrame()
         try:
             self.doc.add_heading('📑 Data Citations & Source Verification', level=1)
             
@@ -1050,7 +1061,7 @@ class CompactReportFormatter:
                 
                 if bems_mask.any() and 'customer_name' in csone_data.columns:
                     bems_cases = csone_data[bems_mask]
-                    for customer in bems_cases['customer_name'].unique():
+                    for customer in bems_cases['customer_name'].dropna().unique():
                         count = len(bems_cases[bems_cases['customer_name'] == customer])
                         warnings.append({
                             'severity': 'CRITICAL',
@@ -1069,7 +1080,7 @@ class CompactReportFormatter:
                     csone_copy['date_opened'] = pd.to_datetime(csone_copy[date_col_csone], errors='coerce')
                     recent_30 = csone_copy[csone_copy['date_opened'] >= (datetime.now() - timedelta(days=30))]
                     
-                    for customer in recent_30['customer_name'].unique():
+                    for customer in recent_30['customer_name'].dropna().unique():
                         recent_count = len(recent_30[recent_30['customer_name'] == customer])
                         total_count = len(csone_data[csone_data['customer_name'] == customer])
                         
@@ -1092,7 +1103,7 @@ class CompactReportFormatter:
                     open_mask = ab_data[status_col].astype(str).str.contains('Open|New|In Progress', case=False, na=False)
                     open_barriers = ab_data[open_mask]
                     
-                    for customer in open_barriers['customer_name'].unique():
+                    for customer in open_barriers['customer_name'].dropna().unique():
                         count = len(open_barriers[open_barriers['customer_name'] == customer])
                         if count >= 3:
                             warnings.append({

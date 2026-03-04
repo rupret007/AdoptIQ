@@ -1,0 +1,602 @@
+{% extends "base.html" %}
+
+{% block title %}External Intelligence - AdoptIQ{% endblock %}
+
+{% block extra_css %}
+<style>
+    .intel-timeline { position: relative; padding-left: 2rem; }
+    .intel-timeline::before {
+        content: '';
+        position: absolute;
+        left: 0.5rem;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        background: var(--cisco-gray-300);
+    }
+    .timeline-item { position: relative; margin-bottom: 1.5rem; padding-left: 1.5rem; }
+    .timeline-item::before {
+        content: '';
+        position: absolute;
+        left: -1.55rem;
+        top: 0.35rem;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        border: 2px solid var(--cisco-blue);
+        background: white;
+        z-index: 1;
+    }
+    .timeline-item.impact-high::before   { border-color: var(--cisco-danger); background: #fde8ec; }
+    .timeline-item.impact-medium::before { border-color: var(--cisco-warning); background: #fff5e6; }
+    .timeline-item.impact-low::before    { border-color: var(--cisco-success); background: #e6f9ef; }
+    .bug-row { transition: background 0.2s; }
+    .bug-row:hover { background: var(--cisco-light-blue) !important; }
+    .maint-row { transition: background 0.2s; }
+    .maint-row:hover { background: var(--cisco-light-blue) !important; }
+    .tab-content > .tab-pane { padding-top: 1.5rem; }
+    .impact-badge-high   { background: var(--cisco-danger);  color: #fff; }
+    .impact-badge-medium { background: var(--cisco-warning); color: #fff; }
+    .impact-badge-low    { background: var(--cisco-success); color: #fff; }
+    .status-active    { color: var(--cisco-danger);  font-weight: 600; }
+    .status-resolved  { color: var(--cisco-success); font-weight: 600; }
+    .status-scheduled { color: var(--cisco-blue);    font-weight: 600; }
+    .status-completed { color: var(--cisco-success); font-weight: 600; }
+    .refresh-spin { animation: spin 1s linear infinite; }
+    .import-file-input { display: none; }
+    .search-box { max-width: 400px; }
+    .hidden-by-search { display: none !important; }
+    .ai-answer { white-space: pre-wrap; font-size: 0.95rem; line-height: 1.6; }
+    .ai-card { border-left: 4px solid var(--cisco-blue); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-11">
+
+            <!-- Header -->
+            <div class="text-center mb-5">
+                <div class="mb-4">
+                    <div class="bg-warning bg-opacity-10 d-inline-flex p-4 rounded-circle mb-3 hover-scale">
+                        <i class="fas fa-satellite-dish fa-3x text-warning"></i>
+                    </div>
+                </div>
+                <h1 class="display-4 fw-bold text-warning mb-3 bounce-in">External Intelligence</h1>
+                <p class="lead text-muted slide-in-left" style="animation-delay:0.2s; font-size:1.125rem;">
+                    Live and historical service incidents, scheduled maintenances, and known bugs from
+                    <a href="https://status.webex.com" target="_blank" rel="noopener noreferrer">status.webex.com</a>
+                    and
+                    <a href="https://help.webex.com" target="_blank" rel="noopener noreferrer">help.webex.com</a>.
+                </p>
+            </div>
+
+            <!-- Summary cards -->
+            <div class="row g-4 mb-4">
+                <div class="col-6 col-md">
+                    <div class="card text-center h-100 fade-in shadow-cisco" style="animation-delay:0.05s;">
+                        <div class="card-body">
+                            <div class="bg-danger bg-opacity-10 p-3 rounded-circle d-inline-flex mb-2 hover-scale">
+                                <i class="fas fa-exclamation-triangle text-danger fa-2x"></i>
+                            </div>
+                            <h4 class="text-gradient mb-1" id="statTotalIncidents">{{ incident_stats.total }}</h4>
+                            <p class="text-muted mb-0 small">Tracked Incidents</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-6 col-md">
+                    <div class="card text-center h-100 fade-in shadow-cisco" style="animation-delay:0.1s;">
+                        <div class="card-body">
+                            <div class="bg-danger bg-opacity-10 p-3 rounded-circle d-inline-flex mb-2 hover-scale">
+                                <i class="fas fa-bolt text-danger fa-2x"></i>
+                            </div>
+                            <h4 class="text-gradient mb-1">{{ incident_stats.active }}</h4>
+                            <p class="text-muted mb-0 small">Active Incidents</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-6 col-md">
+                    <div class="card text-center h-100 fade-in shadow-cisco" style="animation-delay:0.15s;">
+                        <div class="card-body">
+                            <div class="bg-success bg-opacity-10 p-3 rounded-circle d-inline-flex mb-2 hover-scale">
+                                <i class="fas fa-check-circle text-success fa-2x"></i>
+                            </div>
+                            <h4 class="text-gradient mb-1">{{ incident_stats.resolved }}</h4>
+                            <p class="text-muted mb-0 small">Resolved</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-6 col-md">
+                    <div class="card text-center h-100 fade-in shadow-cisco" style="animation-delay:0.2s;">
+                        <div class="card-body">
+                            <div class="bg-primary bg-opacity-10 p-3 rounded-circle d-inline-flex mb-2 hover-scale">
+                                <i class="fas fa-wrench text-primary fa-2x"></i>
+                            </div>
+                            <h4 class="text-gradient mb-1">{{ maintenance_stats.total }}</h4>
+                            <p class="text-muted mb-0 small">Maintenances</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-6 col-md">
+                    <div class="card text-center h-100 fade-in shadow-cisco" style="animation-delay:0.25s;">
+                        <div class="card-body">
+                            <div class="bg-info bg-opacity-10 p-3 rounded-circle d-inline-flex mb-2 hover-scale">
+                                <i class="fas fa-bug text-info fa-2x"></i>
+                            </div>
+                            <h4 class="text-gradient mb-1">{{ bug_stats.total }}</h4>
+                            <p class="text-muted mb-0 small">Tracked Bugs</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Toolbar: Refresh + Export/Import + Filter -->
+            <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <button id="refreshBtn" class="btn btn-outline-primary btn-sm hover-lift">
+                        <i class="fas fa-sync-alt me-1" id="refreshIcon"></i>Refresh Live Data
+                    </button>
+                    <a href="/api/export-intel" class="btn btn-outline-secondary btn-sm hover-lift">
+                        <i class="fas fa-download me-1"></i>Export
+                    </a>
+                    <button id="importBtn" class="btn btn-outline-secondary btn-sm hover-lift">
+                        <i class="fas fa-upload me-1"></i>Import
+                    </button>
+                    <input type="file" id="importFileInput" class="import-file-input" accept=".json">
+                    <span class="text-muted small ms-2" id="lastRefreshed">
+                        {% if incident_stats.newest %}
+                            Last data: {{ incident_stats.newest[:16] }}
+                        {% endif %}
+                    </span>
+                </div>
+                <div>
+                    <select id="daysFilter" class="form-select form-select-sm" style="width:auto;display:inline-block;">
+                        <option value="30" {{ 'selected' if days_back == 30 }}>Last 30 days</option>
+                        <option value="90" {{ 'selected' if days_back == 90 }}>Last 90 days</option>
+                        <option value="180" {{ 'selected' if days_back == 180 }}>Last 180 days</option>
+                        <option value="365" {{ 'selected' if days_back == 365 }}>Last year</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Search bar -->
+            <div class="mb-3">
+                <div class="input-group search-box">
+                    <span class="input-group-text bg-white"><i class="fas fa-search text-muted"></i></span>
+                    <input type="text" id="intelSearch" class="form-control" placeholder="Search incidents, maintenances, bugs...">
+                    <button class="btn btn-outline-secondary" type="button" id="clearSearch" style="display:none;">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <small class="text-muted mt-1 d-block" id="searchResultCount" style="display:none;"></small>
+            </div>
+
+            <!-- Tabs -->
+            <ul class="nav nav-tabs" id="intelTabs" role="tablist">
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link active" id="incidents-tab" data-bs-toggle="tab"
+                            data-bs-target="#incidents-pane" type="button" role="tab">
+                        <i class="fas fa-exclamation-circle me-1"></i>
+                        Service Incidents
+                        <span class="badge bg-danger ms-1">{{ incidents|length }}</span>
+                    </button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="maintenances-tab" data-bs-toggle="tab"
+                            data-bs-target="#maintenances-pane" type="button" role="tab">
+                        <i class="fas fa-wrench me-1"></i>
+                        Scheduled Maintenances
+                        <span class="badge bg-primary ms-1">{{ maintenances|length }}</span>
+                    </button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="bugs-tab" data-bs-toggle="tab"
+                            data-bs-target="#bugs-pane" type="button" role="tab">
+                        <i class="fas fa-bug me-1"></i>
+                        Known Bugs
+                        <span class="badge bg-info ms-1">{{ bugs|length }}</span>
+                    </button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="askai-tab" data-bs-toggle="tab"
+                            data-bs-target="#askai-pane" type="button" role="tab">
+                        <i class="fas fa-robot me-1"></i>
+                        Ask AI
+                    </button>
+                </li>
+            </ul>
+
+            <div class="tab-content" id="intelTabContent">
+
+                <!-- ==================== INCIDENTS ==================== -->
+                <div class="tab-pane fade show active" id="incidents-pane" role="tabpanel">
+                    {% if incidents %}
+                    <div class="card fade-in shadow-cisco">
+                        <div class="card-body">
+                            <div class="intel-timeline">
+                                {% for inc in incidents %}
+                                <div class="timeline-item impact-{{ inc.impact_level|lower if inc.impact_level else 'low' }}">
+                                    <div class="d-flex justify-content-between align-items-start flex-wrap">
+                                        <div>
+                                            <h6 class="mb-1">
+                                                {% if inc.link %}
+                                                    <a href="{{ inc.link }}" target="_blank" rel="noopener noreferrer" class="text-decoration-none">
+                                                        {{ inc.title or 'Untitled Incident' }}
+                                                    </a>
+                                                {% else %}
+                                                    {{ inc.title or 'Untitled Incident' }}
+                                                {% endif %}
+                                            </h6>
+                                            <small class="text-muted">
+                                                {{ inc.published[:16] if inc.published else 'Unknown date' }}
+                                                {% if inc.source %}
+                                                    &middot; <span class="text-secondary">{{ inc.source }}</span>
+                                                {% endif %}
+                                            </small>
+                                        </div>
+                                        <div class="d-flex gap-2 mt-1 mt-md-0">
+                                            {% if inc.impact_level %}
+                                            <span class="badge impact-badge-{{ inc.impact_level|lower }} rounded-pill">
+                                                {{ inc.impact_level }}
+                                            </span>
+                                            {% endif %}
+                                            {% if inc.status %}
+                                            <span class="status-{{ inc.status|lower }}">
+                                                <i class="fas fa-circle fa-xs me-1"></i>{{ inc.status|capitalize }}
+                                            </span>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                    {% if inc.description %}
+                                    <p class="mb-0 mt-1 small text-muted">{{ inc.description[:300] }}{% if inc.description|length > 300 %}&hellip;{% endif %}</p>
+                                    {% endif %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                    {% else %}
+                    <div class="card text-center py-5 fade-in shadow-cisco">
+                        <div class="card-body">
+                            <i class="fas fa-satellite-dish fa-3x text-muted opacity-25 mb-3"></i>
+                            <h5>No Incidents Recorded Yet</h5>
+                            <p class="text-muted mb-3">
+                                Click <strong>Refresh Live Data</strong> above to fetch incidents from status.webex.com.
+                            </p>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+
+                <!-- ==================== MAINTENANCES ==================== -->
+                <div class="tab-pane fade" id="maintenances-pane" role="tabpanel">
+                    {% if maintenances %}
+                    <div class="card fade-in shadow-cisco">
+                        <div class="card-body p-0">
+                            <div class="table-responsive">
+                                <table class="table table-hover mb-0">
+                                    <thead class="table-light">
+                                        <tr>
+                                            <th class="border-0"><i class="fas fa-calendar-alt me-1"></i>Date</th>
+                                            <th class="border-0"><i class="fas fa-wrench me-1"></i>Title</th>
+                                            <th class="border-0"><i class="fas fa-info-circle me-1"></i>Status</th>
+                                            <th class="border-0"><i class="fas fa-globe me-1"></i>Source</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% for m in maintenances %}
+                                        <tr class="maint-row">
+                                            <td class="align-middle small text-nowrap">{{ m.published[:16] if m.published else '&mdash;' }}</td>
+                                            <td class="align-middle">
+                                                {% if m.link %}
+                                                    <a href="{{ m.link }}" target="_blank" rel="noopener noreferrer" class="text-decoration-none">
+                                                        {{ (m.title or '')[:120] }}{% if m.title and m.title|length > 120 %}&hellip;{% endif %}
+                                                    </a>
+                                                {% else %}
+                                                    {{ (m.title or '')[:120] }}{% if m.title and m.title|length > 120 %}&hellip;{% endif %}
+                                                {% endif %}
+                                            </td>
+                                            <td class="align-middle">
+                                                <span class="status-{{ m.status|lower if m.status else 'completed' }}">
+                                                    <i class="fas fa-circle fa-xs me-1"></i>{{ m.status|capitalize if m.status else 'Completed' }}
+                                                </span>
+                                            </td>
+                                            <td class="align-middle"><span class="badge bg-secondary">{{ m.source or 'status.webex.com' }}</span></td>
+                                        </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    {% else %}
+                    <div class="card text-center py-5 fade-in shadow-cisco">
+                        <div class="card-body">
+                            <i class="fas fa-wrench fa-3x text-muted opacity-25 mb-3"></i>
+                            <h5>No Maintenances Recorded Yet</h5>
+                            <p class="text-muted mb-3">
+                                Click <strong>Refresh Live Data</strong> above to fetch maintenance events from status.webex.com.
+                            </p>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+
+                <!-- ==================== BUGS ==================== -->
+                <div class="tab-pane fade" id="bugs-pane" role="tabpanel">
+                    {% if bugs %}
+                    <div class="card fade-in shadow-cisco">
+                        <div class="card-body p-0">
+                            <div class="table-responsive">
+                                <table class="table table-hover mb-0">
+                                    <thead class="table-light">
+                                        <tr>
+                                            <th class="border-0"><i class="fas fa-hashtag me-1"></i>Bug ID</th>
+                                            <th class="border-0"><i class="fas fa-heading me-1"></i>Title</th>
+                                            <th class="border-0"><i class="fas fa-globe me-1"></i>Source</th>
+                                            <th class="border-0"><i class="fas fa-calendar me-1"></i>Discovered</th>
+                                            <th class="border-0"><i class="fas fa-eye me-1"></i>Last Seen</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% for bug in bugs %}
+                                        <tr class="bug-row">
+                                            <td class="align-middle">
+                                                {% if bug.source_url %}
+                                                    <a href="{{ bug.source_url }}" target="_blank" rel="noopener noreferrer"
+                                                       class="text-decoration-none fw-semibold">{{ (bug.bug_id or '')[:30] }}</a>
+                                                {% else %}
+                                                    <span class="fw-semibold">{{ (bug.bug_id or '')[:30] }}</span>
+                                                {% endif %}
+                                            </td>
+                                            <td class="align-middle">{{ (bug.title or '')[:120] }}{% if bug.title and bug.title|length > 120 %}&hellip;{% endif %}</td>
+                                            <td class="align-middle"><span class="badge bg-secondary">{{ bug.source or 'help.webex.com' }}</span></td>
+                                            <td class="align-middle small">{{ (bug.discovered_at or '')[:10] if bug.discovered_at else '&mdash;' }}</td>
+                                            <td class="align-middle small">{{ (bug.last_seen or '')[:10] if bug.last_seen else '&mdash;' }}</td>
+                                        </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    {% else %}
+                    <div class="card text-center py-5 fade-in shadow-cisco">
+                        <div class="card-body">
+                            <i class="fas fa-bug fa-3x text-muted opacity-25 mb-3"></i>
+                            <h5>No Bugs Recorded Yet</h5>
+                            <p class="text-muted mb-3">
+                                Click <strong>Refresh Live Data</strong> above to fetch known bugs from help.webex.com.
+                            </p>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+
+                <!-- ==================== ASK AI ==================== -->
+                <div class="tab-pane fade" id="askai-pane" role="tabpanel">
+                    <div class="card fade-in shadow-cisco">
+                        <div class="card-body">
+                            <h5 class="mb-3"><i class="fas fa-robot text-primary me-2"></i>Ask AI About Your Intel Data</h5>
+                            <p class="text-muted small mb-3">
+                                Ask a plain-language question about tracked incidents, maintenances, bugs, or any captured data.
+                                The AI will analyze your stored intelligence and provide an answer.
+                            </p>
+                            <div class="mb-3">
+                                <div class="input-group">
+                                    <input type="text" id="aiQuestion" class="form-control form-control-lg"
+                                           placeholder="e.g. What are the most common Webex Calling issues this month?">
+                                    <button class="btn btn-primary" type="button" id="askAiBtn">
+                                        <i class="fas fa-paper-plane me-1"></i>Ask
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="mb-2">
+                                <small class="text-muted">Try:</small>
+                                <button class="btn btn-outline-secondary btn-sm ms-1 ai-suggestion" type="button">What incidents affected Webex Meetings recently?</button>
+                                <button class="btn btn-outline-secondary btn-sm ms-1 ai-suggestion" type="button">Summarize the most impactful service disruptions</button>
+                                <button class="btn btn-outline-secondary btn-sm ms-1 ai-suggestion" type="button">Any patterns in recent maintenance windows?</button>
+                            </div>
+                            <div id="aiAnswerArea" style="display:none;" class="mt-4">
+                                <div class="card ai-card bg-light">
+                                    <div class="card-body">
+                                        <div id="aiLoading" style="display:none;" class="text-center py-3">
+                                            <div class="spinner-border text-primary" role="status"></div>
+                                            <p class="text-muted mt-2 mb-0">Analyzing your intelligence data...</p>
+                                        </div>
+                                        <div id="aiAnswer" class="ai-answer"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Navigation -->
+            <div class="text-center mt-5 fade-in" style="animation-delay:0.4s;">
+                <div class="d-flex justify-content-center gap-3 flex-wrap">
+                    <a href="{{ url_for('index') }}" class="btn btn-primary btn-lg hover-lift">
+                        <i class="fas fa-home me-2"></i>Dashboard
+                    </a>
+                    <a href="{{ url_for('history') }}" class="btn btn-outline-primary btn-lg hover-lift">
+                        <i class="fas fa-history me-2"></i>Report History
+                    </a>
+                    <a href="{{ url_for('help') }}" class="btn btn-outline-secondary btn-lg hover-lift">
+                        <i class="fas fa-question-circle me-2"></i>Help
+                    </a>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    var refreshBtn = document.getElementById('refreshBtn');
+    var refreshIcon = document.getElementById('refreshIcon');
+
+    refreshBtn.addEventListener('click', function() {
+        refreshIcon.classList.add('refresh-spin');
+        refreshBtn.disabled = true;
+        refreshBtn.innerHTML = '<i class="fas fa-sync-alt refresh-spin me-1"></i>Fetching\u2026';
+
+        fetch('/api/refresh-external-intel', { method: 'POST' })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.ok) {
+                    window.location.reload();
+                } else {
+                    alert('Refresh failed: ' + (data.error || 'unknown error'));
+                    refreshBtn.disabled = false;
+                    refreshBtn.innerHTML = '<i class="fas fa-sync-alt me-1"></i>Refresh Live Data';
+                }
+            })
+            .catch(function(err) {
+                alert('Network error: ' + err);
+                refreshBtn.disabled = false;
+                refreshBtn.innerHTML = '<i class="fas fa-sync-alt me-1"></i>Refresh Live Data';
+            });
+    });
+
+    document.getElementById('daysFilter').addEventListener('change', function() {
+        window.location.href = '/external-intelligence?days=' + this.value;
+    });
+
+    /* ---------- Search / filter ---------- */
+    var searchInput = document.getElementById('intelSearch');
+    var clearBtn = document.getElementById('clearSearch');
+    var resultCount = document.getElementById('searchResultCount');
+
+    function filterItems(query) {
+        var q = query.trim().toLowerCase();
+        clearBtn.style.display = q ? '' : 'none';
+
+        var selectors = [
+            { items: '#incidents-pane .timeline-item', textSel: 'h6, small, p' },
+            { items: '#maintenances-pane .maint-row', textSel: 'td' },
+            { items: '#bugs-pane .bug-row', textSel: 'td' },
+        ];
+        var total = 0, visible = 0;
+        selectors.forEach(function(s) {
+            var items = document.querySelectorAll(s.items);
+            items.forEach(function(el) {
+                total++;
+                var text = '';
+                el.querySelectorAll(s.textSel).forEach(function(t) { text += ' ' + t.textContent; });
+                if (!q || text.toLowerCase().indexOf(q) !== -1) {
+                    el.classList.remove('hidden-by-search');
+                    visible++;
+                } else {
+                    el.classList.add('hidden-by-search');
+                }
+            });
+        });
+        if (q) {
+            resultCount.style.display = '';
+            resultCount.textContent = visible + ' of ' + total + ' items match "' + query.trim() + '"';
+        } else {
+            resultCount.style.display = 'none';
+        }
+    }
+
+    searchInput.addEventListener('input', function() { filterItems(this.value); });
+    clearBtn.addEventListener('click', function() {
+        searchInput.value = '';
+        filterItems('');
+        searchInput.focus();
+    });
+
+    /* ---------- AI Q&A ---------- */
+    var aiQuestion = document.getElementById('aiQuestion');
+    var askBtn = document.getElementById('askAiBtn');
+    var aiArea = document.getElementById('aiAnswerArea');
+    var aiLoading = document.getElementById('aiLoading');
+    var aiAnswer = document.getElementById('aiAnswer');
+
+    function askAI(question) {
+        if (!question.trim()) return;
+        aiArea.style.display = '';
+        aiLoading.style.display = '';
+        aiAnswer.textContent = '';
+        askBtn.disabled = true;
+
+        fetch('/api/ask-intel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question: question.trim() })
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            aiLoading.style.display = 'none';
+            askBtn.disabled = false;
+            if (data.ok) {
+                aiAnswer.textContent = data.answer;
+            } else {
+                aiAnswer.textContent = 'Error: ' + (data.error || 'Unknown error. Make sure CircuIT credentials are configured.');
+            }
+        })
+        .catch(function(err) {
+            aiLoading.style.display = 'none';
+            askBtn.disabled = false;
+            aiAnswer.textContent = 'Network error: ' + err;
+        });
+    }
+
+    askBtn.addEventListener('click', function() { askAI(aiQuestion.value); });
+    aiQuestion.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); askAI(this.value); }
+    });
+
+    document.querySelectorAll('.ai-suggestion').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            aiQuestion.value = this.textContent;
+            askAI(this.textContent);
+        });
+    });
+
+    /* ---------- Import button wiring ---------- */
+    var importBtn = document.getElementById('importBtn');
+    var importInput = document.getElementById('importFileInput');
+
+    importBtn.addEventListener('click', function() {
+        importInput.click();
+    });
+
+    importInput.addEventListener('change', function() {
+        var file = this.files[0];
+        if (!file) return;
+        var formData = new FormData();
+        formData.append('file', file);
+
+        importBtn.disabled = true;
+        importBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Importing\u2026';
+
+        fetch('/api/import-intel', { method: 'POST', body: formData })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.ok) {
+                    var c = data.imported;
+                    alert('Import complete: ' + c.incidents + ' incidents, ' + c.maintenances + ' maintenances, ' + c.bugs + ' bugs merged.');
+                    window.location.reload();
+                } else {
+                    alert('Import failed: ' + (data.error || 'unknown error'));
+                    importBtn.disabled = false;
+                    importBtn.innerHTML = '<i class="fas fa-upload me-1"></i>Import';
+                }
+            })
+            .catch(function(err) {
+                alert('Network error: ' + err);
+                importBtn.disabled = false;
+                importBtn.innerHTML = '<i class="fas fa-upload me-1"></i>Import';
+            });
+
+        importInput.value = '';
+    });
+});
+</script>
+{% endblock %}

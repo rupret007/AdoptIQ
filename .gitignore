@@ -21,6 +21,7 @@ venv/
 # Installer output
 OUTBOX/
 *.dmg
+v1.0.*/
 
 # Runtime artifacts
 *.log

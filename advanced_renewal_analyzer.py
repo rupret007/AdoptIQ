@@ -261,8 +261,9 @@ class AdvancedRenewalAnalyzer:
                 contract_info['contracts'].append(contract)
                 
                 # Calculate totals
-                if row[9]:  # ARR_AMOUNT
-                    contract_info['total_arr'] += float(row[9])
+                val = row[9]
+                if val is not None and not pd.isna(val):
+                    contract_info['total_arr'] += float(val)
                 
                 # Check for auto-renewal
                 if row[13] and 'AUTO' in str(row[13]).upper():
@@ -328,12 +329,15 @@ class AdvancedRenewalAnalyzer:
             }
             
             for row in results:
-                if row[1]:  # TOTAL_ARR
-                    financial_metrics['total_arr'] += float(row[1])
-                if row[2]:  # PRODUCT_ARR
-                    financial_metrics['product_arr'] += float(row[2])
-                if row[3]:  # CONTRACT_VALUE
-                    financial_metrics['contract_value'] += float(row[3])
+                val = row[1]
+                if val is not None and not pd.isna(val):
+                    financial_metrics['total_arr'] += float(val)
+                val = row[2]
+                if val is not None and not pd.isna(val):
+                    financial_metrics['product_arr'] += float(val)
+                val = row[3]
+                if val is not None and not pd.isna(val):
+                    financial_metrics['contract_value'] += float(val)
                 
                 if row[4]:  # PAYMENT_TERMS
                     financial_metrics['payment_terms'].append(row[4])
@@ -341,8 +345,9 @@ class AdvancedRenewalAnalyzer:
                     financial_metrics['billing_frequency'].append(row[5])
                 if row[6]:  # CURRENCY
                     financial_metrics['currency'] = row[6]
-                if row[7]:  # DISCOUNT_PERCENTAGE
-                    financial_metrics['discount_percentage'] = max(financial_metrics['discount_percentage'], float(row[7]))
+                val = row[7]
+                if val is not None and not pd.isna(val):
+                    financial_metrics['discount_percentage'] = max(financial_metrics['discount_percentage'], float(val))
                 if row[8]:  # PRICING_TIER
                     financial_metrics['pricing_tier'] = row[8]
             
@@ -852,7 +857,7 @@ class AdvancedRenewalAnalyzer:
         output_dir.mkdir(exist_ok=True)
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_customer = "".join(c for c in customer_name if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
+        safe_customer = "".join(c for c in (customer_name or "Unknown") if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
         filename = f"AdoptIQ_Report_Renewal_{safe_customer}_{days}d_{timestamp}.docx"
         filepath = output_dir / filename
         
@@ -866,13 +871,15 @@ class AdvancedRenewalAnalyzer:
         """Create title page for renewal report"""
         # Title
         title = doc.add_heading('Customer Renewal Risk Analysis', level=1)
-        title.runs[0].font.color.rgb = CISCO_BLUE
-        title.runs[0].font.size = Pt(24)
+        if title.runs:
+            title.runs[0].font.color.rgb = CISCO_BLUE
+            title.runs[0].font.size = Pt(24)
         
         # Customer name
         customer_heading = doc.add_heading(customer_name, level=2)
-        customer_heading.runs[0].font.color.rgb = CISCO_BLUE
-        customer_heading.runs[0].font.size = Pt(18)
+        if customer_heading.runs:
+            customer_heading.runs[0].font.color.rgb = CISCO_BLUE
+            customer_heading.runs[0].font.size = Pt(18)
         
         # Analysis details
         details_para = doc.add_paragraph()
@@ -896,7 +903,8 @@ class AdvancedRenewalAnalyzer:
         """Create executive summary section"""
         # Heading
         heading = doc.add_heading('Executive Summary', level=1)
-        heading.runs[0].font.color.rgb = CISCO_BLUE
+        if heading.runs:
+            heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Risk assessment
         risk_score = analysis_results.get('renewal_risk_score', 0)
@@ -938,7 +946,8 @@ class AdvancedRenewalAnalyzer:
         """Create detailed risk analysis section"""
         # Heading
         heading = doc.add_heading('Detailed Risk Analysis', level=1)
-        heading.runs[0].font.color.rgb = CISCO_BLUE
+        if heading.runs:
+            heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Risk score breakdown
         risk_para = doc.add_paragraph()
@@ -952,14 +961,17 @@ class AdvancedRenewalAnalyzer:
         header_cells = table.rows[0].cells
         headers = ['Risk Factor', 'Impact', 'Source']
         for i, header_text in enumerate(headers):
-            header_cells[i].text = header_text
-            header_cells[i].paragraphs[0].runs[0].font.bold = True
-            header_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            cell = header_cells[i]
+            cell.text = header_text
+            if cell.paragraphs and cell.paragraphs[0].runs:
+                cell.paragraphs[0].runs[0].font.bold = True
+            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             # Add blue background
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '0076CE')
-            header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-            header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+            cell._element.get_or_add_tcPr().append(shading_elm)
+            if cell.paragraphs and cell.paragraphs[0].runs:
+                cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
         
         # Add risk factors
         risk_factors = analysis_results.get('risk_factors', [])
@@ -979,7 +991,8 @@ class AdvancedRenewalAnalyzer:
         """Create contract analysis section"""
         # Heading
         heading = doc.add_heading('Contract & Financial Analysis', level=1)
-        heading.runs[0].font.color.rgb = CISCO_BLUE
+        if heading.runs:
+            heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Contract information
         contract_info = analysis_results.get('contract_information', {})
@@ -1010,7 +1023,8 @@ class AdvancedRenewalAnalyzer:
         """Create usage and adoption analysis section"""
         # Heading
         heading = doc.add_heading('Usage & Adoption Analysis', level=1)
-        heading.runs[0].font.color.rgb = CISCO_BLUE
+        if heading.runs:
+            heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Usage metrics
         usage_metrics = analysis_results.get('usage_metrics', {})
@@ -1051,7 +1065,8 @@ class AdvancedRenewalAnalyzer:
         """Create support and engagement analysis section"""
         # Heading
         heading = doc.add_heading('Support & Engagement Analysis', level=1)
-        heading.runs[0].font.color.rgb = CISCO_BLUE
+        if heading.runs:
+            heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Support metrics
         support_metrics = analysis_results.get('support_metrics', {})
@@ -1072,7 +1087,8 @@ class AdvancedRenewalAnalyzer:
         """Create recommendations section"""
         # Heading
         heading = doc.add_heading('Renewal Recommendations', level=1)
-        heading.runs[0].font.color.rgb = CISCO_BLUE
+        if heading.runs:
+            heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Recommendations
         recommendations = analysis_results.get('recommendations', [])
@@ -1092,7 +1108,8 @@ class AdvancedRenewalAnalyzer:
         """Create data sources and verification section – uses canonical data sources (same across all AdoptIQ reports)."""
         # Heading
         heading = doc.add_heading('Report Data Sources', level=1)
-        heading.runs[0].font.color.rgb = CISCO_BLUE
+        if heading.runs:
+            heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Canonical data sources (same across all AdoptIQ reports)
         try:
@@ -1118,13 +1135,16 @@ class AdvancedRenewalAnalyzer:
         table.style = 'Light Grid Accent 1'
         header_cells = table.rows[0].cells
         for i, header_text in enumerate(['Metric', 'Source System', 'Verification Method']):
-            header_cells[i].text = header_text
-            header_cells[i].paragraphs[0].runs[0].font.bold = True
-            header_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            cell = header_cells[i]
+            cell.text = header_text
+            if cell.paragraphs and cell.paragraphs[0].runs:
+                cell.paragraphs[0].runs[0].font.bold = True
+            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '0076CE')
-            header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-            header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+            cell._element.get_or_add_tcPr().append(shading_elm)
+            if cell.paragraphs and cell.paragraphs[0].runs:
+                cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
         
         for metric, source, verification in get_data_sources_list():
             row_cells = table.add_row().cells

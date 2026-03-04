@@ -7,8 +7,10 @@ Uses EXACT CircuIT AI logic from working script with simple HTML forms
 
 import os
 import sys
+import atexit
 import json
 import logging
+import math
 import time
 import threading
 import re
@@ -26,7 +28,7 @@ if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
     sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
     sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
-from flask import Flask, request, jsonify, redirect, url_for, send_file, render_template
+from flask import Flask, request, jsonify, redirect, url_for, send_file, render_template, Response
 from werkzeug.utils import secure_filename
 from flask_wtf import FlaskForm
 from flask_wtf.csrf import validate_csrf
@@ -318,7 +320,6 @@ def inject_version():
         'adoptiq_build': ADOPTIQ_BUILD,
         'adoptiq_version_string': version_string(),
         'csone_shared_folder_url': app.config.get('CSONE_SHARED_FOLDER_URL', ''),
-        'admin_console_url': os.environ.get('ADOPTIQ_ADMIN_URL', 'http://localhost:5001'),
     }
 
 # Import Document and Inches for Word report generation
@@ -364,15 +365,88 @@ def _build_insights_payload(
     return payload
 
 
+def _sanitize_for_json(obj):
+    """Recursively replace NaN/Inf floats with None so json.dumps never emits invalid tokens."""
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(v) for v in obj]
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    return obj
+
+
 def _json_default(obj):
     """Handle non-standard types during JSON serialization of analysis status."""
     if isinstance(obj, datetime):
         return obj.isoformat()
     if hasattr(obj, 'item'):
-        return obj.item()
+        val = obj.item()
+        if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+            return None
+        return val
     if isinstance(obj, (set, frozenset)):
         return list(obj)
     return str(obj)
+
+
+def _update_progress(status, progress, message, step, save=True):
+    """Update analysis status with progress, message, step tracking, and dynamic ETA.
+    
+    Automatically manages completed_steps list and computes ETA using a blended
+    recent-rate / overall-rate approach for adaptive accuracy.
+    Must be called while holding analysis_status_lock.
+    """
+    prev_step = status.get('current_step')
+    completed = status.get('completed_steps', [])
+    if prev_step and prev_step != step and prev_step not in completed:
+        completed.append(prev_step)
+    status['completed_steps'] = completed
+    progress = max(0, min(100, int(progress)))
+    status['progress'] = progress
+    status['message'] = message
+    status['current_step'] = step
+    status['sub_step'] = message
+
+    now = datetime.now()
+    start_time = status.get('start_time')
+    if start_time and progress > 0:
+        try:
+            if isinstance(start_time, str):
+                t0 = datetime.fromisoformat(start_time)
+            else:
+                t0 = start_time
+            elapsed = (now - t0).total_seconds()
+
+            history = status.get('_progress_history', [])
+            history.append((now.timestamp(), progress))
+            if len(history) > 6:
+                history = history[-6:]
+            status['_progress_history'] = history
+
+            overall_rate = progress / max(elapsed, 0.1)
+
+            recent_rate = None
+            if len(history) >= 3:
+                old_ts, old_pct = history[-3]
+                dt = now.timestamp() - old_ts
+                dp = progress - old_pct
+                if dt > 0.5 and dp > 0:
+                    recent_rate = dp / dt
+
+            if recent_rate and recent_rate > 0:
+                effective_rate = 0.7 * recent_rate + 0.3 * overall_rate
+            else:
+                effective_rate = overall_rate
+
+            remaining = max(0, (100 - progress) / max(effective_rate, 0.001))
+            remaining = min(remaining, 1800)
+            status['eta_seconds'] = int(remaining)
+            status['estimated_completion'] = (now + timedelta(seconds=remaining)).isoformat()
+        except Exception:
+            pass
+    if save:
+        save_analysis_status()
 
 
 def save_analysis_status():
@@ -383,11 +457,14 @@ def save_analysis_status():
             for analysis_id, status in analysis_status.items():
                 serializable_status[analysis_id] = {}
                 for key, value in status.items():
+                    if key.startswith('_'):
+                        continue
                     if isinstance(value, datetime):
                         serializable_status[analysis_id][key] = value.isoformat()
                     else:
                         serializable_status[analysis_id][key] = value
             status_file_path = str(_APP_SUPPORT / STATUS_FILE) if not os.path.isabs(STATUS_FILE) else STATUS_FILE
+            serializable_status = _sanitize_for_json(serializable_status)
             temp_file_path = f"{status_file_path}.tmp"
             with open(temp_file_path, 'w', encoding='utf-8') as f:
                 json.dump(serializable_status, f, indent=2, default=_json_default)
@@ -404,6 +481,7 @@ def load_analysis_status():
             with open(status_file_path, 'r', encoding='utf-8') as f:
                 loaded_status = json.load(f)
                 
+            cleaned_any = False
             with analysis_status_lock:
                 for analysis_id, status in loaded_status.items():
                     # Convert datetime strings back to datetime objects
@@ -415,7 +493,27 @@ def load_analysis_status():
                             except (ValueError, TypeError) as e:
                                 logger.debug(f"Could not parse datetime for {key}: {e}")  # FIXED: Proper exception handling
                     analysis_status[analysis_id] = status
-                    
+
+                # Clean up stuck analyses from previous runs
+                for aid, s in analysis_status.items():
+                    if s.get('status') in ('running', 'starting'):
+                        s['status'] = 'cancelled'
+                        s['message'] = 'Analysis interrupted by app restart'
+                        s['error'] = 'Analysis was interrupted when the application restarted'
+                        cleaned_any = True
+
+                # Evict old entries to prevent unbounded growth (keep most recent 50)
+                if len(analysis_status) > 50:
+                    sorted_ids = sorted(
+                        analysis_status.keys(),
+                        key=lambda k: analysis_status[k].get('start_time', ''),
+                        reverse=True
+                    )
+                    for old_id in sorted_ids[50:]:
+                        del analysis_status[old_id]
+
+            if cleaned_any:
+                save_analysis_status()
             logger.info(f"Loaded {len(analysis_status)} analysis statuses from file: {status_file_path}")
         else:
             logger.info(f"Status file not found at: {status_file_path} (this is normal for first run)")
@@ -769,9 +867,11 @@ def start_analysis():
             analysis_status[analysis_id] = {
                 'status': 'starting',
                 'progress': 0,
-                'message': ' Initializing AdoptIQ Ultra Intelligence System...',
+                'message': 'Initializing AdoptIQ Ultra Intelligence System...',
                 'start_time': datetime.now().isoformat(),
                 'current_step': 'System Initialization',
+                'completed_steps': [],
+                'sub_step': '',
                 'total_steps': 12,
                 'step_start_time': datetime.now().isoformat(),
                 'estimated_completion': None,
@@ -3398,11 +3498,7 @@ def run_compact_analysis(analysis_id):
     """Run compact analysis focused on renewal risk"""
     try:
         import os
-        logger.info(f"========================================")
-        logger.info(f"  NEW CODE LOADED - VERSION 11:55 AM")
-        logger.info(f"  PID: {os.getpid()}")
-        logger.info(f"========================================")
-        logger.info(f"[[START]] Starting compact analysis: {analysis_id}")
+        logger.info(f"[[START]] Starting compact analysis: {analysis_id} (PID: {os.getpid()})")
         
         # Initialize variables that might not be set (prevents UnboundLocalError)
         arr_data = pd.DataFrame()
@@ -3422,24 +3518,15 @@ def run_compact_analysis(analysis_id):
             logger.info(f"[[SEARCH]] DEBUGGING - Analysis status CSOne file: '{csone_file}'")
             logger.info(f"[[SEARCH]] DEBUGGING - Analysis status keys: {list(status.keys())}")
         
-        # Update status immediately
         with analysis_status_lock:
             status['status'] = 'running'
-            status['progress'] = 5
-            status['message'] = ' Analysis started - initializing...'
-            status['current_step'] = 'Initialization'
-            status['step_start_time'] = datetime.now().isoformat()
-            save_analysis_status()
+            status['completed_steps'] = []
+            _update_progress(status, 5, 'Analysis started - initializing...', 'Initialization')
         
         logger.info(f"[[OK]] Analysis status updated to running")
         
-        # Update status for database connection
         with analysis_status_lock:
-            status['progress'] = 10
-            status['message'] = ' Connecting to Snowflake...'
-            status['current_step'] = 'Database Connection'
-            status['step_start_time'] = datetime.now().isoformat()
-            save_analysis_status()
+            _update_progress(status, 10, 'Connecting to Snowflake...', 'Database Connection')
         
         # Connect to Snowflake with timeout and fallback
         ctx = None
@@ -3491,11 +3578,8 @@ def run_compact_analysis(analysis_id):
                 save_analysis_status()
             return
         
-        # Update status
         with analysis_status_lock:
-            status['progress'] = 20
-            status['message'] = ' Fetching team data...'
-            status['current_step'] = 'Team Data Retrieval'
+            _update_progress(status, 20, 'Fetching team data...', 'Team Data Retrieval')
         
         # CRITICAL FIX: Initialize unfiltered team_subs_df variable outside try block for scope
         # This ensures it's accessible throughout the function for customer counting
@@ -3640,11 +3724,8 @@ def run_compact_analysis(analysis_id):
         
         # Only fetch real data if we have team subscriptions AND database connection
         if not team_subs_df.empty and ctx is not None:
-            # Update status
             with analysis_status_lock:
-                status['progress'] = 30
-                status['message'] = ' Fetching adoption barriers...'
-                status['current_step'] = 'Adoption Barriers Analysis'
+                _update_progress(status, 30, 'Fetching adoption barriers and ARR data...', 'Adoption Barriers Analysis')
             
             # Fetch ARR data for executive insights
             try:
@@ -3723,11 +3804,8 @@ def run_compact_analysis(analysis_id):
         # NOTE: CSOne enrichment, feature request analysis, and chart generation
         # will be done AFTER CSOne file processing (see lines ~3482-3508)
         
-        # Update status
         with analysis_status_lock:
-            status['progress'] = 35
-            status['message'] = ' Fetching CSConsole data...'
-            status['current_step'] = 'CSConsole Data Integration'
+            _update_progress(status, 35, 'Fetching CSConsole data...', 'CSConsole Data Integration')
             
             # Fetch CSConsole data for compact analysis with timeout protection
         if not team_subs_df.empty and ctx is not None:
@@ -3782,11 +3860,8 @@ def run_compact_analysis(analysis_id):
                 save_analysis_status()
             return
         
-        # Update status
         with analysis_status_lock:
-            status['progress'] = 40
-            status['message'] = ' Processing CSOne data...'
-            status['current_step'] = 'CSOne Data Processing'
+            _update_progress(status, 40, 'Processing CSOne data...', 'CSOne Data Processing')
         
         # Process CSOne data with timeout protection
         # NOTE: csone_df is already initialized above as empty DataFrame
@@ -3951,16 +4026,9 @@ def run_compact_analysis(analysis_id):
             logger.error(f"[[ERROR]] Traceback: {traceback.format_exc()}")
             chart_paths = []
         
-        # Update status
         with analysis_status_lock:
-            status['progress'] = 55
-            status['message'] = '[AI] Generating AI insights...'
-            status['current_step'] = 'AI Analysis'
-            save_analysis_status()  # Save status more frequently
+            _update_progress(status, 55, 'Gathering external intelligence (defects, incidents)...', 'External Intelligence')
         
-        logger.info(f"[[SEARCH]] DEBUGGING - Starting AI Analysis step...")
-        
-        # External intelligence gathering (required for briefing book)
         logger.info(f"[[WEB]] Gathering external intelligence...")
         try:
             ext_bugs = fetch_help_webex_bugs()
@@ -3975,7 +4043,8 @@ def run_compact_analysis(analysis_id):
             matches = []
             matched_df = pd.DataFrame()
         
-        # Extract software defects (BST/CSC IDs) and PSIRT vulnerabilities from data
+        with analysis_status_lock:
+            _update_progress(status, 58, 'Extracting software defects and PSIRT vulnerabilities...', 'Defect Analysis')
         logger.info(f"[[DEFECTS]] Extracting software defects and PSIRT vulnerabilities...")
         try:
             software_defects = extract_software_defects(csone_df, ab_norm) if not csone_df.empty else {'total_defects': 0, 'total_cases_with_defects': 0, 'defect_by_customer': {}}
@@ -3986,8 +4055,8 @@ def run_compact_analysis(analysis_id):
             software_defects = {'total_defects': 0, 'total_cases_with_defects': 0, 'defect_by_customer': {}}
             psirt_vulns = {'total_vulnerabilities': 0, 'cve_ids': set(), 'psirt_advisories': set(), 'vulnerability_by_customer': {}}
         
-        # Generate AI insights
-        logger.info(f"[[SEARCH]] DEBUGGING - Starting AI Analysis step...")
+        with analysis_status_lock:
+            _update_progress(status, 60, 'Preparing AI briefing book...', 'AI Analysis')
         
         # For compact analysis, create a more focused briefing book with available data
         if not ab_norm.empty:
@@ -4021,11 +4090,8 @@ def run_compact_analysis(analysis_id):
                     logger.info(f" Analysis cancelled before AI insights generation")
                     return
             
-            # Update status with more detailed progress
             with analysis_status_lock:
-                status['message'] = '[AI] Generating AI insights (this may take up to 60 seconds)...'
-                status['current_step'] = 'AI Analysis - CircuIT Processing'
-                save_analysis_status()
+                _update_progress(status, 63, '[AI] Sending to CircuIT (this may take up to 60 seconds)...', 'AI Analysis - CircuIT')
             
             logger.info(f"[[AI]] Starting AI analysis with timeout protection...")
             ai_insights_raw = generate_llm_response(ai_prompt, briefing_book)
@@ -4082,13 +4148,13 @@ def run_compact_analysis(analysis_id):
                 'raw_response': f'AI analysis failed: {str(ai_error)}'
             }
             
-        logger.info(f"[[SEARCH]] DEBUGGING - AI insights processing completed, updating status...")
-        
-        # Update status
         with analysis_status_lock:
-            status['progress'] = 75
-            status['message'] = ' Creating compact report...'
-            status['current_step'] = 'Compact Report Generation'
+            _update_progress(status, 70, '[AI] Processing AI response...', 'AI Analysis - Processing')
+        
+        logger.info(f"AI insights processing completed")
+        
+        with analysis_status_lock:
+            _update_progress(status, 75, 'Building compact Word report...', 'Compact Report Generation')
         
         # Create compact report with timeout protection
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -4313,13 +4379,9 @@ def run_compact_analysis(analysis_id):
             return
         
         logger.info(f"[[OK]] Executive Intelligence Report created: {exec_report_path}")
-        logger.info(f"[[FILE]] File exists: {os.path.exists(exec_report_path)}")
         
-        # Update status
         with analysis_status_lock:
-            status['progress'] = 90
-            status['message'] = ' Creating Excel summary...'
-            status['current_step'] = 'Excel Report Generation'
+            _update_progress(status, 82, 'Word report saved. Preparing Excel workbook...', 'Excel Report Generation')
         
         # Create Excel summary with timeout protection
         excel_path = f"{base}.xlsx"
@@ -4363,7 +4425,8 @@ def run_compact_analysis(analysis_id):
             logger.error(f"[[ERROR]] Excel generation failed: {e}")
             risk_scores = {}
         
-        # Create risk summary DataFrame
+        with analysis_status_lock:
+            _update_progress(status, 85, 'Building risk summary for Excel...', 'Excel Report Generation')
         logger.info(f"[[LIST]] Creating risk summary DataFrame...")
         risk_summary_data = []
         for customer, risk_data in risk_scores.items():
@@ -4390,6 +4453,8 @@ def run_compact_analysis(analysis_id):
         high_risk_customers = risk_summary_df[risk_summary_df['Risk_Score'] >= 6].sort_values('Risk_Score', ascending=False)
         logger.info(f"[[WARNING]] High-risk customers identified: {len(high_risk_customers)}")
         
+        with analysis_status_lock:
+            _update_progress(status, 90, 'Writing Excel workbook sheets...', 'Excel Report Generation')
         logger.info(f"[[LIST]] Preparing enhanced Excel sheets...")
         
         # Calculate risk summary metrics
@@ -4677,8 +4742,10 @@ def run_compact_analysis(analysis_id):
                         df_clean.to_excel(writer, sheet_name=dashboard_sheet_name, index=False, startrow=1)
                         worksheet = writer.sheets[dashboard_sheet_name]
                         title_text = f" {dashboard_sheet_name.replace('_', ' ')} - {manager} Portfolio Analysis"
-                        if len(df_clean.columns) > 0:
+                        if len(df_clean.columns) > 1:
                             worksheet.merge_range(0, 0, 0, len(df_clean.columns)-1, title_text, title_format)
+                        elif len(df_clean.columns) == 1:
+                            worksheet.write(0, 0, title_text, title_format)
                             for col_num, value in enumerate(df_clean.columns.values):
                                 worksheet.write(1, col_num, value, header_format)
                             for row_idx in range(2, len(df_clean) + 2):
@@ -4735,7 +4802,10 @@ def run_compact_analysis(analysis_id):
                     
                         # Write enhanced title with analysis info
                         title_text = f" {sheet_name.replace('_', ' ')} - {manager} Portfolio Analysis"
-                        worksheet.merge_range(0, 0, 0, len(df_clean.columns)-1, title_text, title_format)
+                        if len(df_clean.columns) > 1:
+                            worksheet.merge_range(0, 0, 0, len(df_clean.columns)-1, title_text, title_format)
+                        else:
+                            worksheet.write(0, 0, title_text, title_format)
                     
                         # Format headers with enhanced styling
                         for col_num, value in enumerate(df_clean.columns.values):
@@ -4820,12 +4890,12 @@ def run_compact_analysis(analysis_id):
             logger.error(f"[[ERROR]] Error creating Excel file: {excel_error}")
             raise excel_error
         
-        # Update status
         with analysis_status_lock:
+            _update_progress(status, 97, 'Finalizing results...', 'Finalization')
+        
+        with analysis_status_lock:
+            _update_progress(status, 100, 'Compact analysis completed successfully!', 'Completed')
             status['status'] = 'completed'
-            status['progress'] = 100
-            status['message'] = ' Compact analysis completed successfully!'
-            status['current_step'] = 'Completed'
             status['completion_time'] = datetime.now().isoformat()
             completion_time = status['completion_time']
             report_type = status.get('report_type', 'compact')
@@ -4862,13 +4932,14 @@ def run_compact_analysis(analysis_id):
         logger.info(f"[[DATA]] Excel report: {excel_path} (exists: {os.path.exists(excel_path)})")
         
     except Exception as e:
-        logger.error(f"[[ERROR]] Error in compact analysis: {e}")
+        logger.error(f"[[ERROR]] Error in compact analysis: {e}", exc_info=True)
         with analysis_status_lock:
-            if analysis_id in analysis_status:
-                analysis_status[analysis_id]['status'] = 'error'
-                analysis_status[analysis_id]['message'] = f' Analysis failed: {str(e)}'
-                analysis_status[analysis_id]['error'] = str(e)
-        save_analysis_status()
+            if analysis_id not in analysis_status:
+                analysis_status[analysis_id] = {}
+            analysis_status[analysis_id]['status'] = 'error'
+            analysis_status[analysis_id]['message'] = 'Analysis failed. Please check the Admin page for details.'
+            analysis_status[analysis_id]['error'] = 'Analysis failed. Please check the Admin page for details.'
+            save_analysis_status()
     finally:
         # Ensure database connection is closed
         if 'ctx' in locals() and ctx is not None:
@@ -6134,36 +6205,30 @@ def run_customer_renewal_analysis(analysis_id):
         logger.info(f"   - Days: {days}")
         logger.info(f"   - CSOne File: {csone_file}")
         
-        # Update status
         with analysis_status_lock:
             status['status'] = 'running'
-            status['progress'] = 20
-            status['message'] = ' Connecting to Snowflake...'
-            status['current_step'] = 'Database Connection'
+            status['completed_steps'] = []
+            _update_progress(status, 10, 'Connecting to Snowflake...', 'Database Connection')
         
-        # Connect to Snowflake
         ctx = _connect_with_keeper()
         
         if ctx is None:
             error_msg = (
-                "❌ CRITICAL: Snowflake database connection failed.\n\n"
+                "CRITICAL: Snowflake database connection failed.\n\n"
                 "Cannot generate renewal report without database access."
             )
             logger.error(f"[[ERROR]] {error_msg}")
             with analysis_status_lock:
                 status['status'] = 'error'
                 status['progress'] = 0
-                status['message'] = f' Database connection failed'
+                status['message'] = 'Database connection failed'
                 status['error'] = error_msg
                 status['current_step'] = 'Connection Failed'
                 save_analysis_status()
             return
         
-        # Update status
         with analysis_status_lock:
-            status['progress'] = 30
-            status['message'] = ' Fetching team data...'
-            status['current_step'] = 'Team Data Retrieval'
+            _update_progress(status, 20, 'Connected. Fetching team data...', 'Team Data Retrieval')
         
         # Get team subscriptions - handle single customer renewal without manager
         if renewal_type == 'renewal_single' and (not manager or manager == ''):
@@ -6315,13 +6380,9 @@ def run_customer_renewal_analysis(analysis_id):
         
         account_ids = team_subs_df['ACCOUNT_ID_C'].dropna().unique().tolist()
         
-        # Update status
         with analysis_status_lock:
-            status['progress'] = 40
-            status['message'] = ' Fetching customer data...'
-            status['current_step'] = 'Customer Data Analysis'
+            _update_progress(status, 35, 'Fetching adoption barriers...', 'Customer Data Analysis')
         
-        # Fetch adoption barriers
         ab_raw = fetch_adoption_barriers(ctx, account_ids, days)
         if not ab_raw.empty and "ACCOUNT_ID_C" in ab_raw.columns:
             ab_raw = ab_raw.merge(team_subs_df[["ACCOUNT_ID_C","BU_NAME","CSSM_EMAIL"]].drop_duplicates(), on="ACCOUNT_ID_C", how="left")
@@ -6520,13 +6581,12 @@ def run_customer_renewal_analysis(analysis_id):
                 save_analysis_status()
             return
         
-        # Update status
         with analysis_status_lock:
-            status['progress'] = 55
-            status['message'] = ' Gathering external intelligence (BST defects, status.webex.com incidents)...'
-            status['current_step'] = 'External Intelligence Gathering'
+            _update_progress(status, 50, 'Loading and scoping CSOne support cases...', 'CSOne Processing')
         
-        # FIXED: Fetch external intelligence (BST defects, status.webex.com incidents) for comprehensive analysis
+        with analysis_status_lock:
+            _update_progress(status, 55, 'Gathering external intelligence (defects, incidents)...', 'External Intelligence')
+        
         logger.info(f"[[WEB]] Gathering external intelligence for renewal report...")
         try:
             ext_bugs = fetch_help_webex_bugs()
@@ -6543,11 +6603,8 @@ def run_customer_renewal_analysis(analysis_id):
         psirt_vulns = extract_psirt_vulnerabilities(customer_csone, customer_ab)
         logger.info(f"[[DEFECTS]] Found {software_defects.get('total_defects', 0)} defects and {psirt_vulns.get('total_vulnerabilities', 0)} vulnerabilities")
         
-        # Update status
         with analysis_status_lock:
-            status['progress'] = 60
-            status['message'] = ' Analyzing renewal risk...'
-            status['current_step'] = 'Renewal Risk Analysis'
+            _update_progress(status, 60, 'Analyzing renewal risk...', 'Renewal Risk Analysis')
         
         # Calculate renewal risk based on type
         if renewal_type == 'renewal_portfolio':
@@ -6710,11 +6767,8 @@ def run_customer_renewal_analysis(analysis_id):
             logger.warning(f"[[WARNING]] Renewal chart generation failed: {e}")
             renewal_chart_paths = []
         
-        # Update status
         with analysis_status_lock:
-            status['progress'] = 80
-            status['message'] = ' Creating renewal report...'
-            status['current_step'] = 'Report Generation'
+            _update_progress(status, 80, 'Building renewal Word report...', 'Report Generation')
         
         # Create renewal report
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -6759,11 +6813,8 @@ def run_customer_renewal_analysis(analysis_id):
         else:
             success_msg = f"Renewal report generated for {customer_name}"
         
-        # Store Word report path early so it's available even if Excel fails
         with analysis_status_lock:
-            status['progress'] = 90
-            status['message'] = ' Creating Excel summary...'
-            status['current_step'] = 'Excel Report Generation'
+            _update_progress(status, 88, 'Word report saved. Generating Excel workbook...', 'Excel Report Generation')
             status['word_report'] = renewal_word_path
         
         # Create Excel summary for renewal analysis
@@ -6977,14 +7028,11 @@ def run_customer_renewal_analysis(analysis_id):
                         worksheet.write(0, 0, f"{sheet_name.replace('_', ' ')} - {customer_name} Renewal Analysis", title_format)
         except Exception as excel_error:
             logger.error(f"[[ERROR]] Renewal Excel generation failed: {excel_error}", exc_info=True)
-            excel_path = None
+            raise excel_error
         
-        # Update status
         with analysis_status_lock:
+            _update_progress(status, 100, 'Customer renewal analysis completed successfully!', 'Completed')
             status['status'] = 'completed'
-            status['progress'] = 100
-            status['message'] = ' Customer renewal analysis completed successfully!'
-            status['current_step'] = 'Completed'
             status['completion_time'] = datetime.now().isoformat()
             completion_time = status['completion_time']
             report_type = status.get('report_type', 'renewal')
@@ -7021,12 +7069,14 @@ def run_customer_renewal_analysis(analysis_id):
         logger.info(f"[[OK]] Customer renewal analysis completed: {analysis_id}")
         
     except Exception as e:
-        logger.error(f"[[ERROR]] Error in customer renewal analysis: {e}")
+        logger.error(f"[[ERROR]] Error in customer renewal analysis: {e}", exc_info=True)
         with analysis_status_lock:
-            if analysis_id in analysis_status:
-                analysis_status[analysis_id]['status'] = 'error'
-                analysis_status[analysis_id]['message'] = f' Analysis failed: {str(e)}'
-                analysis_status[analysis_id]['error'] = str(e)
+            if analysis_id not in analysis_status:
+                analysis_status[analysis_id] = {}
+            analysis_status[analysis_id]['status'] = 'error'
+            analysis_status[analysis_id]['message'] = 'Customer renewal analysis failed. Please check the Admin page for details.'
+            analysis_status[analysis_id]['error'] = 'Customer renewal analysis failed. Please check the Admin page for details.'
+            save_analysis_status()
     finally:
         # Ensure database connection is closed
         if 'ctx' in locals() and ctx is not None:
@@ -7051,15 +7101,10 @@ def run_comprehensive_analysis(analysis_id):
             
         logger.info(f"DEBUGGING - Comprehensive Analysis starting for {manager} with {tech} technology, {days} days")
         
-        # Update status (thread-safe)
-        update_analysis_status(analysis_id, {
-            'status': 'running',
-            'progress': 8,
-            'message': ' Connecting to Snowflake Data Warehouse...',
-            'current_step': 'Database Connection',
-            'step_start_time': datetime.now().isoformat(),
-            'estimated_completion': (datetime.now() + pd.Timedelta(minutes=15)).isoformat()
-        })
+        with analysis_status_lock:
+            status['status'] = 'running'
+            status['completed_steps'] = []
+            _update_progress(status, 8, 'Connecting to Snowflake Data Warehouse...', 'Database Connection')
         
         # [EXACT SAME LOGIC AS YOUR WORKING SCRIPT - SHORTENED FOR BREVITY]
         # Get team roster for the selected manager
@@ -7081,7 +7126,7 @@ def run_comprehensive_analysis(analysis_id):
             'message': ' Fetching team subscriptions and customer data...',
             'current_step': 'Team Data Retrieval',
             'step_start_time': datetime.now().isoformat(),
-            'estimated_completion': (datetime.now() + pd.Timedelta(minutes=12)).isoformat()
+            'estimated_completion': (datetime.now() + timedelta(minutes=12)).isoformat()
         })
         
         # Connect to Snowflake and get subscriptions
@@ -7607,7 +7652,7 @@ def run_comprehensive_analysis(analysis_id):
         status['message'] = ' Generating AI-powered customer deep dives and storyboards...'
         status['current_step'] = 'AI Customer Analysis'
         status['step_start_time'] = datetime.now().isoformat()
-        status['estimated_completion'] = (datetime.now() + pd.Timedelta(minutes=8)).isoformat()
+        status['estimated_completion'] = (datetime.now() + timedelta(minutes=8)).isoformat()
         
         # FIXED: Use comprehensive function to get ALL customers from ALL available data sources
         # Use UNFILTERED team_subs_df for customer counting (we want ALL customers, not just filtered ones)
@@ -7649,7 +7694,7 @@ def run_comprehensive_analysis(analysis_id):
         estimated_total_time = elapsed_time / 0.75  # We're at 75% progress
         remaining_time = estimated_total_time - elapsed_time
         status['eta_seconds'] = int(remaining_time)
-        status['estimated_completion'] = (datetime.now() + pd.Timedelta(seconds=remaining_time)).isoformat()
+        status['estimated_completion'] = (datetime.now() + timedelta(seconds=remaining_time)).isoformat()
         
         # Add customer processing progress
         status['customer_progress'] = {
@@ -7681,7 +7726,7 @@ def run_comprehensive_analysis(analysis_id):
             status['step_start_time'] = datetime.now().isoformat()
             remaining_customers = len(all_customers) - i
             estimated_minutes = remaining_customers * 0.5  # Estimate 30 seconds per customer
-            status['estimated_completion'] = (datetime.now() + pd.Timedelta(minutes=estimated_minutes)).isoformat()
+            status['estimated_completion'] = (datetime.now() + timedelta(minutes=estimated_minutes)).isoformat()
             
             logger.info(f"  [[LIST]] ({i}/{len(all_customers)}) Generating AI StoryBoard for: {customer_name}...")
             ab_norm_safe_check = ab_norm is not None and (hasattr(ab_norm, 'columns') and 'customer_name' in ab_norm.columns)
@@ -7858,7 +7903,7 @@ def run_comprehensive_analysis(analysis_id):
         status['message'] = ' Finalizing comprehensive AI-powered report and generating outputs...'
         status['current_step'] = 'Report Generation'
         status['step_start_time'] = datetime.now().isoformat()
-        status['estimated_completion'] = (datetime.now() + pd.Timedelta(minutes=2)).isoformat()
+        status['estimated_completion'] = (datetime.now() + timedelta(minutes=2)).isoformat()
         
         logger.info(f"[[DOC]] Saving main Word document with clean formatting (NO markdown symbols)...")
         docx_path = f"{base}.docx"
@@ -7871,7 +7916,7 @@ def run_comprehensive_analysis(analysis_id):
             status['message'] = ' Creating enhanced executive Word report with detailed technology analysis...'
             status['current_step'] = 'Enhanced Report Generation'
             status['step_start_time'] = datetime.now().isoformat()
-            status['estimated_completion'] = (datetime.now() + pd.Timedelta(minutes=1)).isoformat()
+            status['estimated_completion'] = (datetime.now() + timedelta(minutes=1)).isoformat()
             
             logger.info(f"[[ENHANCED]] Generating enhanced Word report with technology focus...")
             # Create enhanced Word report
@@ -7896,7 +7941,7 @@ def run_comprehensive_analysis(analysis_id):
             status['message'] = ' Writing comprehensive Excel workbook with detailed data analysis...'
             status['current_step'] = 'Excel Report Generation'
             status['step_start_time'] = datetime.now().isoformat()
-            status['estimated_completion'] = (datetime.now() + pd.Timedelta(seconds=30)).isoformat()
+            status['estimated_completion'] = (datetime.now() + timedelta(seconds=30)).isoformat()
             
             logger.info(f"[[DATA]] Writing comprehensive Excel workbook...")
             
@@ -7941,7 +7986,7 @@ def run_comprehensive_analysis(analysis_id):
             status['message'] = ' Finalizing analysis results and updating status...'
             status['current_step'] = 'Final Status Update'
             status['step_start_time'] = datetime.now().isoformat()
-            status['estimated_completion'] = (datetime.now() + pd.Timedelta(seconds=10)).isoformat()
+            status['estimated_completion'] = (datetime.now() + timedelta(seconds=10)).isoformat()
             
             logger.info(f"[[SUCCESS]] Updating final status with comprehensive results...")
             
@@ -8039,28 +8084,27 @@ def run_comprehensive_analysis(analysis_id):
             logger.error(f"[[ERROR]] Failed to get status: {status_error}")
             status = {}
         
-        # Check for specific connection errors and provide guidance
         error_message = str(e)
         if "is not allowed to access Snowflake" in error_message or "Failed to connect to DB" in error_message:
-            status['error'] = f"Database Connection Error: Please connect to the Cisco VPN and retry the analysis. Error: {error_message}"
+            status['error'] = "Database Connection Error: Please connect to the Cisco VPN and retry the analysis."
         elif "keeper.cisco.com" in error_message and "Read timed out" in error_message:
-            status['error'] = f"Network Connection Error: Unable to connect to Cisco Keeper service. Please check your network connection and Cisco VPN status. Error: {error_message}"
+            status['error'] = "Network Connection Error: Unable to reach Cisco Keeper. Please check your VPN connection."
         elif "keeper.cisco.com" in error_message:
-            status['error'] = f"Cisco Keeper Connection Error: Please ensure you're connected to the Cisco VPN and have proper access to Keeper services. Error: {error_message}"
+            status['error'] = "Cisco Keeper Connection Error: Please ensure you are connected to the Cisco VPN."
         elif "CircuIT" in error_message or "AzureOpenAI" in error_message:
-            status['error'] = f"AI Service Error: CircuIT AI service may be unavailable. Please try again in a few minutes. Error: {error_message}"
+            status['error'] = "AI Service Error: CircuIT AI service may be unavailable. Please try again in a few minutes."
         else:
-            status['error'] = f"{error_message} - Full traceback: {error_details}"
+            status['error'] = "An unexpected error occurred during analysis. Please check the Admin page for details."
         
         status['status'] = 'error'
         status['progress'] = 0
         
-        # Ensure status is updated in the global dictionary
         try:
             with analysis_status_lock:
                 analysis_status[analysis_id] = status
+            save_analysis_status()
         except Exception as update_error:
-            logger.error(f"[[ERROR]] Failed to update status: {update_error}")
+            logger.error(f"Failed to update/persist error status: {update_error}")
     finally:
         # Ensure database connection is closed
         if 'ctx' in locals() and ctx is not None:
@@ -8083,48 +8127,6 @@ def get_report_type_display(report_type):
     }
     return report_type_map.get(report_type, ' Custom Report')
 
-def get_eta_display(status):
-    """Calculate and format ETA display"""
-    if status.get('status') == 'completed':
-        return 'Completed'
-    elif status.get('status') == 'error':
-        return 'Error occurred'
-    elif status.get('status') == 'cancelled':
-        return 'Cancelled'
-    
-    # Try to get from estimated_completion first
-    if status.get('estimated_completion'):
-        try:
-            eta_str = status.get('estimated_completion') or ''
-            eta_time = eta_str[:19] if isinstance(eta_str, str) else ''
-            return f"~{eta_time.split('T')[1]}"
-        except Exception:
-            pass
-    
-    # Try to calculate from eta_seconds
-    if status.get('eta_seconds'):
-        eta_seconds = status.get('eta_seconds')
-        eta_minutes = max(1, eta_seconds // 60)
-        return f"~{eta_minutes} minute{'s' if eta_minutes != 1 else ''}"
-    
-    # Fallback: estimate based on progress
-    progress = status.get('progress', 0)
-    if progress > 10:
-        try:
-            start_str = (status.get('start_time') or '').replace('Z', '+00:00')
-            if not start_str:
-                raise ValueError("No start_time")
-            start_time = datetime.fromisoformat(start_str)
-            elapsed = (datetime.now() - start_time).total_seconds()
-            if progress > 0:
-                estimated_total = elapsed * (100 / progress)
-                remaining = max(0, estimated_total - elapsed)
-                eta_minutes = max(1, int(remaining // 60))
-                return f"~{eta_minutes} minute{'s' if eta_minutes != 1 else ''}"
-        except Exception:
-            pass
-    
-    return 'Calculating...'
 
 @app.route('/progress/<analysis_id>')
 def progress(analysis_id):
@@ -8165,9 +8167,11 @@ def progress(analysis_id):
                         return f"<h1>Analysis not found</h1><p>Analysis ID: {analysis_id_safe}</p><a href='/'>Start New Analysis</a>", 404
         except Exception as e:
             logger.error(f"Error loading analysis status from file: {e}", exc_info=True)
-            return f"<h1>Analysis not found</h1><p>Error: {html_module.escape(str(e))}</p><a href='/'>Start New Analysis</a>", 404
+            logger.error(f"Error loading analysis status: {e}", exc_info=True)
+            return f"<h1>Analysis not found</h1><p>The analysis could not be loaded.</p><a href='/'>Start New Analysis</a>", 404
     else:
-        status = analysis_status[analysis_id]
+        with analysis_status_lock:
+            status = analysis_status[analysis_id]
     html_content = f"""
     <!DOCTYPE html>
     <html>
@@ -8176,147 +8180,173 @@ def progress(analysis_id):
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-            body {{ font-family: Arial, sans-serif; max-width: 1000px; margin: 50px auto; padding: 20px; }}
+            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; max-width: 1000px; margin: 40px auto; padding: 20px; color: #1a1a2e; }}
             .header {{ text-align: center; margin-bottom: 30px; }}
-            .progress-bar {{ width: 100%; background-color: #f0f0f0; border-radius: 10px; margin: 20px 0; }}
-            .progress-fill {{ height: 30px; background-color: #007bff; border-radius: 10px; transition: width 0.3s; }}
-            .status {{ padding: 15px; border-radius: 5px; margin: 20px 0; }}
-            .running {{ background-color: #e7f3ff; }}
-            .completed {{ background-color: #d4edda; }}
-            .error {{ background-color: #f8d7da; }}
+            .header h1 {{ margin-bottom: 4px; }}
+            .header p {{ color: #6b7280; margin-top: 0; }}
+            .progress-bar {{ width: 100%; background-color: #e5e7eb; border-radius: 10px; margin: 16px 0; overflow: hidden; }}
+            .progress-fill {{ height: 28px; background: linear-gradient(90deg, #2563eb, #3b82f6); border-radius: 10px; transition: width 0.6s ease; }}
+            .progress-row {{ display: flex; justify-content: space-between; align-items: center; font-size: 15px; color: #374151; }}
+            .progress-pct {{ font-size: 22px; font-weight: 700; color: #1e40af; }}
+            .status-box {{ padding: 14px 18px; border-radius: 8px; margin: 16px 0; }}
+            .status-box.running {{ background-color: #eff6ff; border-left: 4px solid #3b82f6; }}
+            .status-box.completed {{ background-color: #ecfdf5; border-left: 4px solid #10b981; }}
+            .status-box.error {{ background-color: #fef2f2; border-left: 4px solid #ef4444; }}
             .download-links {{ margin: 20px 0; }}
-            .download-links a {{ display: inline-block; margin: 10px; padding: 10px 20px; background-color: #28a745; color: white; text-decoration: none; border-radius: 5px; }}
-            .info-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 20px 0; }}
-            .info-card {{ background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #007bff; }}
-            .csone-status {{ background-color: #e7f3ff; padding: 15px; border-radius: 8px; margin: 15px 0; }}
-            .csone-success {{ border-left: 4px solid #28a745; background-color: #d4edda; }}
-            .csone-warning {{ border-left: 4px solid #ffc107; background-color: #fff3cd; }}
-            .csone-error {{ border-left: 4px solid #dc3545; background-color: #f8d7da; }}
+            .download-links a {{ display: inline-block; margin: 8px 8px 8px 0; padding: 10px 22px; background-color: #10b981; color: white; text-decoration: none; border-radius: 6px; font-weight: 600; }}
+            .download-links a:hover {{ background-color: #059669; }}
+            .info-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0; }}
+            .info-card {{ background-color: #f9fafb; padding: 14px 16px; border-radius: 8px; border-left: 4px solid #3b82f6; }}
+            .info-card h3 {{ margin: 0 0 8px 0; font-size: 15px; color: #374151; }}
+            .info-card p {{ margin: 4px 0; font-size: 13px; }}
+            .csone-status {{ padding: 12px 16px; border-radius: 8px; margin: 12px 0; font-size: 13px; }}
+            .csone-success {{ border-left: 4px solid #10b981; background-color: #ecfdf5; }}
+            .csone-warning {{ border-left: 4px solid #f59e0b; background-color: #fffbeb; }}
+            .csone-error {{ border-left: 4px solid #ef4444; background-color: #fef2f2; }}
+            /* Step timeline */
+            .step-timeline {{ margin: 20px 0; padding: 0; list-style: none; }}
+            .step-item {{ display: flex; align-items: flex-start; padding: 6px 0; font-size: 13px; color: #9ca3af; transition: color 0.3s; }}
+            .step-item.done {{ color: #059669; }}
+            .step-item.active {{ color: #1e40af; font-weight: 600; }}
+            .step-icon {{ width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-right: 10px; flex-shrink: 0; font-size: 12px; border: 2px solid #d1d5db; background: #fff; }}
+            .step-item.done .step-icon {{ border-color: #10b981; background: #10b981; color: #fff; }}
+            .step-item.active .step-icon {{ border-color: #3b82f6; background: #eff6ff; color: #3b82f6; }}
+            @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+            .spinner {{ display: inline-block; width: 14px; height: 14px; border: 2px solid #bfdbfe; border-top-color: #3b82f6; border-radius: 50%; animation: spin 0.8s linear infinite; }}
+            .elapsed {{ font-size: 13px; color: #6b7280; text-align: center; margin: 4px 0 0 0; }}
         </style>
         <script>
             const ANALYSIS_ID = {json.dumps(analysis_id)};
+            const START_TS = Date.now();
+            function fmtElapsed(ms) {{
+                const s = Math.floor(ms / 1000);
+                const m = Math.floor(s / 60);
+                const sec = s % 60;
+                return m > 0 ? m + 'm ' + sec + 's' : sec + 's';
+            }}
             function refreshStatus() {{
                 fetch('/status/' + ANALYSIS_ID)
-                .then(response => response.json())
+                .then(r => r.json())
                 .then(data => {{
-                    // Update progress bar and percentage
-                    const progressBar = document.getElementById('progress');
-                    const progressText = document.getElementById('progress-text');
-                    if (progressBar && progressText) {{
-                        progressBar.style.width = data.progress + '%';
-                        progressText.textContent = data.progress + '%';
+                    const bar = document.getElementById('progress');
+                    const pct = document.getElementById('progress-pct');
+                    if (bar) bar.style.width = data.progress + '%';
+                    if (pct) pct.textContent = data.progress + '%';
+
+                    const msg = document.getElementById('message');
+                    if (msg) msg.textContent = data.message || '';
+
+                    const st = document.getElementById('status');
+                    if (st) st.textContent = data.status;
+
+
+                    const curStep = document.getElementById('current-step');
+                    if (curStep) curStep.textContent = data.current_step || '';
+
+                    // Step timeline
+                    const timeline = document.getElementById('step-timeline');
+                    if (timeline && data.completed_steps) {{
+                        let html = '';
+                        for (const s of data.completed_steps) {{
+                            html += '<li class="step-item done"><span class="step-icon">&#10003;</span>' + s + '</li>';
+                        }}
+                        if (data.current_step && data.status !== 'completed') {{
+                            html += '<li class="step-item active"><span class="step-icon"><span class="spinner"></span></span>' + data.current_step + '</li>';
+                        }}
+                        if (data.status === 'completed') {{
+                            html += '<li class="step-item done"><span class="step-icon">&#10003;</span>Complete</li>';
+                        }}
+                        timeline.innerHTML = html;
                     }}
-                    
-                    // Update status message
-                    const messageElement = document.getElementById('message');
-                    if (messageElement) {{
-                        messageElement.textContent = data.message;
-                    }}
-                    
-                    // Update customer progress if available
+
+                    // Customer progress
                     if (data.customer_progress) {{
-                        const customerProgress = data.customer_progress;
-                        const progressText = document.getElementById('customer-progress-text');
-                        if (progressText) {{
-                            if (customerProgress.current) {{
-                                progressText.innerHTML = `
-                                    <strong>Current:</strong> ${{customerProgress.current}}<br>
-                                    <strong>Progress:</strong> ${{customerProgress.completed}}/${{customerProgress.total}} customers completed<br>
-                                    <strong>Remaining:</strong> ${{customerProgress.total - customerProgress.completed}} customers
-                                `;
+                        const cp = data.customer_progress;
+                        const cpEl = document.getElementById('customer-progress-text');
+                        if (cpEl) {{
+                            if (cp.current) {{
+                                cpEl.innerHTML = '<strong>Current:</strong> ' + cp.current + '<br><strong>Progress:</strong> ' + cp.completed + '/' + cp.total + ' customers<br><strong>Remaining:</strong> ' + (cp.total - cp.completed);
                             }} else {{
-                                progressText.textContent = `Processing ${{customerProgress.total}} customers...`;
+                                cpEl.textContent = 'Processing ' + cp.total + ' customers...';
                             }}
                         }}
                     }}
-                    
-                    // Update status
-                    const statusElement = document.getElementById('status');
-                    if (statusElement) {{
-                        statusElement.textContent = data.status;
-                    }}
-                    
-                    // Update ETA display
-                    const etaElement = document.getElementById('eta-display');
-                    if (etaElement && data.eta_display) {{
-                        etaElement.textContent = data.eta_display;
-                    }}
-                    
-                    // Update CSOne import status
+
+                    // CSOne status
                     if (data.csone_import_status) {{
-                        const csoneStatus = document.getElementById('csone-status');
-                        if (csoneStatus) {{
-                            csoneStatus.textContent = data.csone_import_message;
-                            csoneStatus.className = 'csone-status csone-' + data.csone_import_status;
-                        }}
+                        const cs = document.getElementById('csone-status');
+                        if (cs) {{ cs.textContent = data.csone_import_message; cs.className = 'csone-status csone-' + data.csone_import_status; }}
                     }}
-                    
+
+                    // Status box class
+                    const sb = document.getElementById('status-box');
+                    if (sb) {{
+                        sb.className = 'status-box ' + (data.status === 'completed' ? 'completed' : data.status === 'error' ? 'error' : 'running');
+                    }}
+
                     if (data.status === 'completed') {{
                         document.getElementById('downloads').style.display = 'block';
+                        var xlsLink = document.getElementById('xlsx-download');
+                        var xlsNote = document.getElementById('xlsx-unavailable');
+                        if (xlsLink && xlsNote) {{
+                            if (data.excel_available) {{
+                                xlsLink.style.display = '';
+                                xlsNote.style.display = 'none';
+                            }} else {{
+                                xlsLink.style.display = 'none';
+                                xlsNote.style.display = 'block';
+                            }}
+                        }}
                         document.getElementById('cancel-btn').style.display = 'none';
                         clearInterval(window.refreshInterval);
+                        clearInterval(window.elapsedInterval);
                     }} else if (data.status === 'error') {{
                         document.getElementById('error').style.display = 'block';
                         document.getElementById('error').textContent = 'Error: ' + (data.error || data.message || 'Unknown error');
                         document.getElementById('cancel-btn').style.display = 'none';
                         clearInterval(window.refreshInterval);
+                        clearInterval(window.elapsedInterval);
                     }} else if (data.status === 'cancelling') {{
-                        document.getElementById('message').textContent = ' Cancellation requested...';
+                        if (msg) msg.textContent = 'Cancellation requested...';
                         document.getElementById('cancel-btn').style.display = 'none';
                     }}
                 }});
             }}
-            
             function cancelAnalysis() {{
                 if (confirm('Are you sure you want to cancel this analysis?')) {{
                     fetch('/cancel/' + ANALYSIS_ID, {{method: 'POST'}})
-                        .then(response => response.json())
-                        .then(data => {{
-                            if (data.success) {{
+                        .then(r => r.json())
+                        .then(d => {{
+                            if (d.success) {{
                                 document.getElementById('cancel-btn').style.display = 'none';
-                                document.getElementById('message').textContent = ' Cancellation requested...';
-                            }} else {{
-                                alert('Failed to cancel analysis: ' + data.error);
-                            }}
+                                document.getElementById('message').textContent = 'Cancellation requested...';
+                            }} else {{ alert('Failed to cancel: ' + d.error); }}
                         }})
-                        .catch(error => {{
-                            console.error('Error:', error);
-                            alert('Failed to cancel analysis');
-                        }});
+                        .catch(() => alert('Failed to cancel analysis'));
                 }}
             }}
-            
-            function checkDownload(fileType) {{
-                const downloadError = document.getElementById('download-error');
-                downloadError.style.display = 'none';
-                
-                // Show loading message
-                downloadError.style.display = 'block';
-                downloadError.style.backgroundColor = '#d1ecf1';
-                downloadError.style.color = '#0c5460';
-                downloadError.textContent = 'Downloading ' + fileType.toUpperCase() + ' file...';
-                
+            function checkDownload(ft) {{
+                const de = document.getElementById('download-error');
+                de.style.display = 'block'; de.style.backgroundColor = '#dbeafe'; de.style.color = '#1e40af';
+                de.textContent = 'Downloading ' + ft.toUpperCase() + ' file...';
                 return true;
             }}
-            
-            function showDownloadError(message) {{
-                const downloadError = document.getElementById('download-error');
-                downloadError.style.display = 'block';
-                downloadError.style.backgroundColor = '#f8d7da';
-                downloadError.style.color = '#721c24';
-                downloadError.textContent = 'Download Error: ' + message;
+            function updateElapsed() {{
+                const el = document.getElementById('elapsed');
+                if (el) el.textContent = 'Elapsed: ' + fmtElapsed(Date.now() - START_TS);
             }}
-            
             window.onload = function() {{
                 refreshStatus();
                 window.refreshInterval = setInterval(refreshStatus, 2000);
+                window.elapsedInterval = setInterval(updateElapsed, 1000);
+                updateElapsed();
             }};
         </script>
     </head>
     <body>
         <div class="header">
             <h1>AdoptIQ Analysis Progress</h1>
-            <p>AI-Powered Executive Analytics in Progress</p>
+            <p>AI-Powered Executive Analytics</p>
         </div>
         
         <div class="info-grid">
@@ -8331,8 +8361,7 @@ def progress(analysis_id):
             <div class="info-card">
                 <h3>Current Status</h3>
                 <p><strong>Status:</strong> <span id="status">{html_module.escape(str(status['status']))}</span></p>
-                <p><strong>Step:</strong> {html_module.escape(str(status.get('current_step', 'N/A')))}</p>
-                <p><strong>ETA:</strong> <span id="eta-display">{get_eta_display(status)}</span></p>
+                <p><strong>Step:</strong> <span id="current-step">{html_module.escape(str(status.get('current_step', 'N/A')))}</span></p>
             </div>
         </div>
         
@@ -8340,53 +8369,56 @@ def progress(analysis_id):
             {html_module.escape(str(status.get('csone_import_message', 'Processing analysis...')))}
         </div>
         
-        <div class="status {'completed' if status['status'] == 'completed' else 'error' if status['status'] == 'error' else 'running'}">
-            <h3>Analysis Progress</h3>
-            <p><strong>Message:</strong> <span id="message">{html_module.escape(str(status['message']))}</span></p>
+        <div class="status-box {'completed' if status['status'] == 'completed' else 'error' if status['status'] == 'error' else 'running'}" id="status-box">
+            <p style="margin:0;"><strong>Current Activity:</strong> <span id="message">{html_module.escape(str(status['message']))}</span></p>
         </div>
         
         <div class="progress-bar">
             <div class="progress-fill" id="progress" style="width: {status['progress']}%"></div>
         </div>
-        <p style="text-align: center; font-size: 18px; font-weight: bold;">Progress: <span id="progress-text">{status['progress']}</span></p>
+        <div class="progress-row">
+            <span class="elapsed" id="elapsed">Elapsed: 0s</span>
+            <span class="progress-pct" id="progress-pct">{status['progress']}%</span>
+        </div>
+        
+        <!-- Step Timeline -->
+        <ul class="step-timeline" id="step-timeline">
+            <li class="step-item active"><span class="step-icon"><span class="spinner"></span></span>Starting...</li>
+        </ul>
         
         <!-- Customer Progress Indicator -->
-        <div id="customer-progress" style="margin: 15px 0; padding: 15px; background-color: #f8fafc; border-radius: 8px; border-left: 4px solid #3b82f6;">
-            <div style="font-weight: bold; color: #1e3a8a; margin-bottom: 8px;">
- Customer Analysis Progress
-            </div>
-            <div id="customer-progress-text" style="color: #4b5563; font-size: 14px;">
-                Loading customer progress...
-            </div>
+        <div id="customer-progress" style="margin: 12px 0; padding: 12px 16px; background-color: #f8fafc; border-radius: 8px; border-left: 4px solid #3b82f6;">
+            <div style="font-weight: 600; color: #1e3a8a; margin-bottom: 6px; font-size: 14px;">Customer Analysis Progress</div>
+            <div id="customer-progress-text" style="color: #4b5563; font-size: 13px;">Loading...</div>
         </div>
         
-        <div id="cancel-btn" style="margin: 20px 0; {'display: none;' if status['status'] in ['completed', 'error', 'cancelling'] else ''}">
-            <button onclick="cancelAnalysis()" style="padding: 10px 20px; background-color: #dc3545; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px;">
- Cancel Analysis
-            </button>
+        <div id="cancel-btn" style="margin: 16px 0; {'display: none;' if status['status'] in ['completed', 'error', 'cancelling'] else ''}">
+            <button onclick="cancelAnalysis()" style="padding: 10px 20px; background-color: #ef4444; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 15px; font-weight: 600;">Cancel Analysis</button>
         </div>
         
-        <div id="error" style="display: none; color: red; font-weight: bold;"></div>
+        <div id="error" style="display: none; color: #b91c1c; font-weight: bold; padding: 14px; background: #fef2f2; border-radius: 8px; margin: 16px 0;"></div>
         
         <div id="downloads" class="download-links" style="display: {'block' if status['status'] == 'completed' else 'none'};">
-            <h3> Download Your Comprehensive Report:</h3>
-            <a href="/download/{analysis_id_safe}/docx" onclick="return checkDownload('docx')"> Download Word Report</a>
-            <a href="/download/{analysis_id_safe}/xlsx" onclick="return checkDownload('xlsx')"> Download Excel Data</a>
+            <h3>Download Your Report:</h3>
+            <a href="/download/{analysis_id_safe}/docx" onclick="return checkDownload('docx')">Download Word Report</a>
+            <a id="xlsx-download" href="/download/{analysis_id_safe}/xlsx" onclick="return checkDownload('xlsx')">Download Excel Data</a>
+            <span id="xlsx-unavailable" style="display: none; color: #6b7280; font-size: 13px; margin-left: 8px;">Excel data not available for this report.</span>
         </div>
         
-        <div id="download-error" style="display: none; color: red; font-weight: bold; margin: 20px 0; padding: 15px; background-color: #f8d7da; border-radius: 5px;"></div>
+        <div id="download-error" style="display: none; font-weight: bold; margin: 16px 0; padding: 14px; border-radius: 8px;"></div>
         
-        <div style="margin: 20px 0; padding: 15px; background-color: #e7f3ff; border-radius: 5px;">
-            <h4>Previous Reports:</h4>
-            <p>View and download previously generated reports from the output folder.</p>
-            <p><a href="/previous-reports" target="_blank">Browse Previous Reports</a></p>
+        <div style="margin: 20px 0; padding: 14px; background-color: #eff6ff; border-radius: 8px; font-size: 13px;">
+            <strong>Previous Reports:</strong> <a href="/previous-reports" target="_blank">Browse Previous Reports</a>
         </div>
         
-        <p><a href="/">Start New Analysis</a></p>
+        <p style="font-size: 13px;"><a href="/">Start New Analysis</a></p>
     </body>
     </html>
     """
     return html_content
+
+_EXCLUDE_FROM_STATUS_API = {'word_report', 'excel_report', 'csone_file', '_thread'}
+
 
 @app.route('/status/<analysis_id>')
 def get_status(analysis_id):
@@ -8415,8 +8447,8 @@ def get_status(analysis_id):
                 with analysis_status_lock:
                     if analysis_id in analysis_status:
                         status = analysis_status[analysis_id]
-                        status_copy = dict(status)
-                        status_copy['eta_display'] = get_eta_display(status_copy)
+                        status_copy = {k: v for k, v in status.items() if not k.startswith('_') and k not in _EXCLUDE_FROM_STATUS_API}
+                        status_copy['excel_available'] = bool(status.get('excel_report'))
                         return jsonify(status_copy)
                     else:
                         logger.warning(f"Analysis ID '{analysis_id}' not found in memory or file")
@@ -8431,11 +8463,13 @@ def get_status(analysis_id):
             return jsonify({'error': 'Analysis not found', 'analysis_id': analysis_id}), 404
         status_copy = {}
         for key, value in status.items():
+            if key.startswith('_') or key in _EXCLUDE_FROM_STATUS_API:
+                continue
             if isinstance(value, datetime):
                 status_copy[key] = value.isoformat()
             else:
                 status_copy[key] = value
-    status_copy['eta_display'] = get_eta_display(status_copy)
+    status_copy['excel_available'] = bool(status.get('excel_report'))
     
     return jsonify(status_copy)
 
@@ -8451,6 +8485,8 @@ def get_all_status():
                 
                 # Copy fields safely, converting datetime to string
                 for key, value in status.items():
+                    if key.startswith('_'):
+                        continue
                     if isinstance(value, datetime):
                         status_copy[key] = value.isoformat()
                     elif isinstance(value, (str, int, float, bool, type(None))):
@@ -8459,9 +8495,6 @@ def get_all_status():
                         status_copy[key] = str(value)
                 
                 status_copy['analysis_id'] = analysis_id
-                
-                # Calculate ETA display
-                status_copy['eta_display'] = get_eta_display(status)
                 
                 # Add IP address if available
                 if 'ip_address' not in status_copy:
@@ -8712,6 +8745,416 @@ def history():
     ]
     return render_template('history.html', analyses=analyses)
 
+@app.route('/ask-ai')
+def ask_ai_page():
+    """Page for asking AI questions with live Snowflake data context."""
+    return render_template(
+        'ask_ai.html',
+        managers=MANAGERS,
+        technologies=TECH_CHOICES,
+    )
+
+
+@app.route('/api/ask-ai-portfolio', methods=['POST'])
+def ask_ai_portfolio():
+    """Fetch live Snowflake data, build a compact briefing, and send to Circuit AI."""
+    try:
+        data = request.get_json(silent=True) or {}
+        question = (data.get('question') or '').strip()
+        if not question or len(question) > 2000:
+            return jsonify({'ok': False, 'error': 'Please provide a question (max 2000 characters).'}), 400
+
+        manager = (data.get('manager') or '').strip() or 'All Managers'
+        technology = (data.get('technology') or '').strip() or 'All'
+        try:
+            days = min(max(int(data.get('days') or 90), 1), 365)
+        except (ValueError, TypeError):
+            days = 90
+
+        from adoptiq_backend import (
+            _connect_with_keeper, get_subscriptions_for_team,
+            fetch_adoption_barriers, fetch_arr_data,
+            fetch_support_cases_snowflake,
+            fetch_csconsole_customer_pulse,
+            fetch_csconsole_success_priorities,
+            generate_llm_response,
+            TEAM_ROSTER, MANAGERS,
+        )
+
+        cssm_emails = [email for mgr, name, email in TEAM_ROSTER
+                        if mgr == manager or manager == 'All Managers']
+        if not cssm_emails:
+            return jsonify({'ok': False, 'error': f'No team members found for manager: {manager}'}), 400
+
+        ctx = _connect_with_keeper()
+        if ctx is None:
+            return jsonify({'ok': False, 'error': 'Database connection failed. Please connect to Cisco VPN and try again.'}), 503
+        context_parts = []
+        context_summary_parts = []
+
+        try:
+            team_subs_df = get_subscriptions_for_team(ctx, cssm_emails)
+            if team_subs_df is not None and not team_subs_df.empty:
+                if technology and technology != 'All':
+                    tech_col = 'TECHNOLOGY_C' if 'TECHNOLOGY_C' in team_subs_df.columns else None
+                    if tech_col:
+                        team_subs_df = team_subs_df[team_subs_df[tech_col].str.contains(technology, case=False, na=False)]
+
+                account_ids = team_subs_df['ACCOUNT_ID_C'].unique().tolist() if 'ACCOUNT_ID_C' in team_subs_df.columns else []
+                n_subs = len(team_subs_df)
+                n_customers = team_subs_df['BU_NAME'].nunique() if 'BU_NAME' in team_subs_df.columns else n_subs
+                context_summary_parts.append(f"{n_subs} subscriptions, {n_customers} customers")
+                context_parts.append(f"=== PORTFOLIO OVERVIEW ===\nManager: {manager} | Technology: {technology} | Days: {days}")
+                context_parts.append(f"Total subscriptions: {n_subs}, Unique customers: {n_customers}")
+
+                if 'BU_NAME' in team_subs_df.columns:
+                    top_customers = team_subs_df['BU_NAME'].value_counts().head(20)
+                    context_parts.append("\nTop customers by subscription count:")
+                    for cust, cnt in top_customers.items():
+                        context_parts.append(f"  - {cust}: {cnt} subscriptions")
+
+                if account_ids:
+                    try:
+                        arr_df = fetch_arr_data(ctx, account_ids[:50])
+                        if arr_df is not None and not arr_df.empty:
+                            total_arr = arr_df['ANNUAL_CONTRACT_VALUE'].sum() if 'ANNUAL_CONTRACT_VALUE' in arr_df.columns else 0
+                            context_parts.append(f"\n=== ARR DATA ===\nTotal ARR: ${total_arr:,.0f}")
+                            context_summary_parts.append(f"ARR: ${total_arr:,.0f}")
+                    except Exception as e:
+                        logger.debug(f"Ask AI: ARR fetch skipped: {e}")
+
+                    try:
+                        ab_df = fetch_adoption_barriers(ctx, account_ids[:50], days)
+                        if ab_df is not None and not ab_df.empty:
+                            n_abs = len(ab_df)
+                            context_parts.append(f"\n=== ADOPTION BARRIERS ({n_abs} total) ===")
+                            context_summary_parts.append(f"{n_abs} adoption barriers")
+                            for _, row in ab_df.head(25).iterrows():
+                                cust = row.get('BU_NAME', row.get('ACCOUNT_NAME_C', 'Unknown'))
+                                subj = row.get('SUBJECT_C', 'No subject')
+                                sev = row.get('SEVERITY_C', '')
+                                context_parts.append(f"  - [{sev}] {cust}: {subj}")
+                    except Exception as e:
+                        logger.debug(f"Ask AI: AB fetch skipped: {e}")
+
+                    try:
+                        cases_df = fetch_support_cases_snowflake(ctx, account_ids[:50], days)
+                        if cases_df is not None and not cases_df.empty:
+                            n_cases = len(cases_df)
+                            context_parts.append(f"\n=== SUPPORT CASES ({n_cases} total) ===")
+                            context_summary_parts.append(f"{n_cases} support cases")
+                            if 'SEVERITY_C' in cases_df.columns:
+                                sev_counts = cases_df['SEVERITY_C'].value_counts()
+                                for sev, cnt in sev_counts.items():
+                                    context_parts.append(f"  {sev}: {cnt} cases")
+                    except Exception as e:
+                        logger.debug(f"Ask AI: Cases fetch skipped: {e}")
+
+                    try:
+                        pulse_df = fetch_csconsole_customer_pulse(ctx, account_ids[:50], days)
+                        if pulse_df is not None and not pulse_df.empty:
+                            score_col = 'SCORE__C' if 'SCORE__C' in pulse_df.columns else 'SCORE_C' if 'SCORE_C' in pulse_df.columns else None
+                            if score_col:
+                                avg_pulse = pulse_df[score_col].mean()
+                                context_parts.append(f"\n=== CUSTOMER PULSE ===\nAverage pulse score: {avg_pulse:.1f}")
+                                context_summary_parts.append(f"Avg pulse: {avg_pulse:.1f}")
+                    except Exception as e:
+                        logger.debug(f"Ask AI: Pulse fetch skipped: {e}")
+
+                    try:
+                        sp_df = fetch_csconsole_success_priorities(ctx, account_ids[:50], days)
+                        if sp_df is not None and not sp_df.empty:
+                            context_parts.append(f"\n=== SUCCESS PRIORITIES ({len(sp_df)} total) ===")
+                    except Exception as e:
+                        logger.debug(f"Ask AI: SP fetch skipped: {e}")
+            else:
+                context_parts.append("No subscription data found for the selected manager/technology combination.")
+        finally:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+
+        briefing = "\n".join(context_parts) if context_parts else "No portfolio data available."
+        context_summary = " | ".join(context_summary_parts) if context_summary_parts else "No data fetched"
+
+        system_prompt = (
+            "You are AdoptIQ's portfolio intelligence assistant. You have access to live Cisco Webex "
+            "portfolio data including subscriptions, adoption barriers, support cases, ARR, and customer "
+            "pulse scores. Answer the user's question based ONLY on the data provided below. Be concise, "
+            "specific, and actionable. Use bullet points where appropriate. If the data doesn't contain "
+            "enough information to answer fully, say so clearly and suggest what additional data might help."
+        )
+
+        full_prompt = f"{briefing}\n\n---\nUser question: {question}"
+        answer = generate_llm_response(system_prompt, full_prompt)
+
+        if answer and answer.startswith("ERROR:"):
+            return jsonify({'ok': False, 'error': answer})
+
+        return jsonify({
+            'ok': True,
+            'answer': answer or 'No response generated.',
+            'context_summary': f"Data: {context_summary}",
+        })
+
+    except Exception as e:
+        logger.error(f"Error in ask-ai-portfolio: {e}")
+        return jsonify({'ok': False, 'error': 'An error occurred while processing your question. Please try again.'}), 500
+
+
+@app.route('/admin')
+def admin_page():
+    """Embedded admin console with system info, report history, and logs."""
+    import platform
+    import shutil
+    from types import SimpleNamespace
+
+    # Gather system info
+    outputs_path = _APP_SUPPORT / 'outputs'
+    total_size = 0
+    file_count = 0
+    if outputs_path.exists():
+        for f in outputs_path.rglob('*'):
+            if f.is_file():
+                total_size += f.stat().st_size
+                file_count += 1
+    disk_mb = f"{total_size / (1024 * 1024):.1f} MB"
+    disk_free = 'N/A'
+    try:
+        usage = shutil.disk_usage(str(_APP_SUPPORT))
+        disk_free = f"{usage.free / (1024**3):.1f} GB free"
+    except Exception:
+        pass
+
+    system_info = {
+        'App Version': version_string(),
+        'Python': platform.python_version(),
+        'Platform': f"{platform.system()} {platform.release()}",
+        'Architecture': platform.machine(),
+        'Data Directory': str(_APP_SUPPORT),
+        'Output Files': f"{file_count} files ({disk_mb})",
+        'Disk Free': disk_free,
+        'Server Port': os.environ.get('PORT', '5001'),
+        'Process ID': os.getpid(),
+    }
+
+    # Gather report history from analysis_status
+    reports = []
+    with analysis_status_lock:
+        for aid, s in analysis_status.items():
+            reports.append(SimpleNamespace(
+                id=aid,
+                report_type=s.get('report_type', ''),
+                manager=s.get('manager', ''),
+                status=s.get('status', ''),
+                progress=s.get('progress', 0),
+                start_time=s.get('start_time', ''),
+            ))
+    reports.sort(key=lambda r: r.start_time or '', reverse=True)
+
+    total_reports = len(reports)
+    completed_reports = sum(1 for r in reports if r.status == 'completed')
+    error_reports = sum(1 for r in reports if r.status == 'error')
+
+    # Gather recent log entries (last 100 lines from the log handler)
+    log_entries = []
+    for handler in logger.handlers:
+        if hasattr(handler, 'baseFilename') and os.path.exists(handler.baseFilename):
+            try:
+                with open(handler.baseFilename, 'r') as lf:
+                    lines = lf.readlines()[-100:]
+                for line in reversed(lines):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    level = 'info'
+                    if 'ERROR' in line:
+                        level = 'error'
+                    elif 'WARNING' in line:
+                        level = 'warning'
+                    parts = line.split(' ', 2)
+                    time_str = parts[0] if len(parts) > 0 else ''
+                    msg = parts[2] if len(parts) > 2 else line
+                    log_entries.append(SimpleNamespace(time=time_str, level=level, message=msg))
+            except Exception:
+                pass
+            break
+
+    if not log_entries:
+        log_entries.append(SimpleNamespace(
+            time=datetime.now().strftime('%H:%M:%S'),
+            level='info',
+            message='Application running normally. Log entries will appear here during report generation.'
+        ))
+
+    return render_template(
+        'admin.html',
+        system_info=system_info,
+        reports=reports,
+        total_reports=total_reports,
+        completed_reports=completed_reports,
+        error_reports=error_reports,
+        disk_usage=disk_mb,
+        log_entries=log_entries,
+    )
+
+
+@app.route('/external-intelligence')
+def external_intelligence():
+    """Browsable page showing historical service incidents, bugs, and maintenances."""
+    from incident_storage import get_all_external_intel, get_incident_statistics, get_maintenance_statistics
+    days_back = request.args.get('days', 90, type=int)
+    if days_back not in (30, 90, 180, 365):
+        days_back = 90
+
+    inc_stats = get_incident_statistics()
+    maint_stats = get_maintenance_statistics()
+    stale_threshold = (datetime.now() - timedelta(hours=6)).strftime('%Y-%m-%d %H:%M:%S')
+    total_items = inc_stats['total'] + maint_stats['total']
+    newest = max(inc_stats.get('newest', ''), maint_stats.get('newest', ''))
+    needs_refresh = total_items < 10 or (newest < stale_threshold)
+    if needs_refresh:
+        try:
+            from adoptiq_backend import fetch_status_incidents, fetch_help_webex_bugs, fetch_status_maintenances
+            fetch_status_incidents(timeout=20)
+            fetch_help_webex_bugs(timeout=20)
+            fetch_status_maintenances(timeout=20)
+            logger.info("Auto-refreshed external intelligence (data was stale or sparse)")
+        except Exception as e:
+            logger.warning(f"Auto-refresh of external intelligence failed: {e}")
+
+    intel = get_all_external_intel(days_back=days_back)
+    return render_template(
+        'external_intelligence.html',
+        incidents=intel['incidents'],
+        bugs=intel['bugs'],
+        maintenances=intel['maintenances'],
+        incident_stats=intel['incident_stats'],
+        bug_stats=intel['bug_stats'],
+        maintenance_stats=intel['maintenance_stats'],
+        days_back=days_back,
+    )
+
+
+@app.route('/api/refresh-external-intel', methods=['POST'])
+def refresh_external_intel():
+    """Trigger a live fetch of incidents, bugs, and maintenances, then return counts."""
+    try:
+        from adoptiq_backend import fetch_status_incidents, fetch_help_webex_bugs, fetch_status_maintenances
+        incidents = fetch_status_incidents(timeout=20)
+        bugs = fetch_help_webex_bugs(timeout=20)
+        maintenances = fetch_status_maintenances(timeout=20)
+        return jsonify({'ok': True, 'incidents': len(incidents), 'bugs': len(bugs), 'maintenances': len(maintenances)})
+    except Exception as e:
+        logger.error(f"Error refreshing external intel: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/export-intel')
+def export_intel():
+    """Download all external intelligence data as a portable JSON file."""
+    import json as _json
+    from incident_storage import export_all_data
+    try:
+        payload = export_all_data()
+        json_bytes = _json.dumps(payload, indent=2, default=str).encode('utf-8')
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        filename = f"AdoptIQ-Intel-Export-{date_str}.json"
+        return Response(
+            json_bytes,
+            mimetype='application/json',
+            headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+        )
+    except Exception as e:
+        logger.error(f"Error exporting intel data: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/ask-intel', methods=['POST'])
+def ask_intel():
+    """Answer a plain-language question about stored incidents, maintenances, and bugs."""
+    try:
+        data = request.get_json(silent=True) or {}
+        question = (data.get('question') or '').strip()
+        if not question or len(question) > 2000:
+            return jsonify({'ok': False, 'error': 'Please provide a question (max 2000 characters).'}), 400
+
+        from incident_storage import get_all_external_intel
+        intel = get_all_external_intel(days_back=365)
+
+        context_parts = []
+        if intel['incidents']:
+            context_parts.append("=== SERVICE INCIDENTS ===")
+            for inc in intel['incidents'][:50]:
+                pub = (inc.get('published') or '')[:16]
+                line = f"- [{(inc.get('status') or '').upper()}] {inc.get('title','')} | Published: {pub} | Impact: {inc.get('impact_level','')}"
+                desc = inc.get('description') or ''
+                if desc:
+                    line += f" | Details: {desc[:200]}"
+                context_parts.append(line)
+
+        if intel['maintenances']:
+            context_parts.append("\n=== SCHEDULED MAINTENANCES ===")
+            for m in intel['maintenances'][:50]:
+                pub = (m.get('published') or '')[:16]
+                context_parts.append(f"- [{(m.get('status') or '').upper()}] {m.get('title','')} | Date: {pub}")
+
+        if intel['bugs']:
+            context_parts.append("\n=== KNOWN BUGS ===")
+            for b in intel['bugs'][:50]:
+                disc = (b.get('discovered_at') or '')[:10]
+                context_parts.append(f"- {b.get('bug_id','')} | {b.get('title','')} | Source: {b.get('source','')} | Discovered: {disc}")
+
+        briefing = "\n".join(context_parts) if context_parts else "No intelligence data is currently stored."
+
+        system_prompt = (
+            "You are AdoptIQ's intelligence analyst assistant. You have access to Webex service "
+            "incidents, scheduled maintenance events, and known bugs/defects. Answer the user's "
+            "question based ONLY on the data provided below. Be concise, specific, and helpful. "
+            "If the data doesn't contain enough information to answer, say so clearly. "
+            "Format your answer in plain text with bullet points where appropriate."
+        )
+
+        from adoptiq_backend import generate_llm_response
+        full_prompt = f"{briefing}\n\n---\nUser question: {question}"
+        answer = generate_llm_response(system_prompt, full_prompt)
+
+        if answer and answer.startswith("ERROR:"):
+            return jsonify({'ok': False, 'error': answer})
+
+        return jsonify({'ok': True, 'answer': answer or 'No response generated.'})
+    except Exception as e:
+        logger.error(f"Error in ask-intel: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/import-intel', methods=['POST'])
+def import_intel():
+    """Import external intelligence data from an uploaded JSON file (merge, not replace)."""
+    import json as _json
+    from incident_storage import import_all_data
+    try:
+        if 'file' not in request.files:
+            return jsonify({'ok': False, 'error': 'No file uploaded'}), 400
+        f = request.files['file']
+        if not f.filename or not f.filename.lower().endswith('.json'):
+            return jsonify({'ok': False, 'error': 'File must be a .json file'}), 400
+        raw = f.read()
+        if len(raw) > 50 * 1024 * 1024:
+            return jsonify({'ok': False, 'error': 'File too large (max 50 MB)'}), 400
+        data = _json.loads(raw)
+        if not isinstance(data, dict) or 'schema_version' not in data:
+            return jsonify({'ok': False, 'error': 'Invalid AdoptIQ export file (missing schema_version)'}), 400
+        counts = import_all_data(data)
+        return jsonify({'ok': True, 'imported': counts})
+    except _json.JSONDecodeError:
+        return jsonify({'ok': False, 'error': 'Invalid JSON file'}), 400
+    except Exception as e:
+        logger.error(f"Error importing intel data: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 @app.route('/download-file/<filename>')
 def download_file(filename):
     """Download a specific file from the outputs directory with security validation"""
@@ -8737,16 +9180,16 @@ def download_file(filename):
         
         # Use canonical outputs dir when frozen (Application Support) so path is stable
         outputs_dir = str(_APP_SUPPORT / "outputs") if _frozen else os.path.abspath("outputs")
+        outputs_abs = os.path.abspath(outputs_dir)
+        outputs_prefix = outputs_abs + os.sep
         file_path = os.path.join(outputs_dir, safe_filename)
         resolved_path = os.path.abspath(file_path)
-        if not resolved_path.startswith(os.path.abspath(outputs_dir)):
+        if not resolved_path.startswith(outputs_prefix):
             return "Access denied", 403
         if not os.path.exists(file_path):
-            # Fallback: secure_filename may have altered the name (e.g. spaces → underscores).
-            # Try the original URL-decoded filename with a path-traversal guard.
             original_path = os.path.join(outputs_dir, filename)
             original_resolved = os.path.abspath(original_path)
-            if (original_resolved.startswith(os.path.abspath(outputs_dir))
+            if (original_resolved.startswith(outputs_prefix)
                     and os.path.exists(original_resolved)):
                 file_path = original_resolved
                 safe_filename = filename
@@ -8757,7 +9200,7 @@ def download_file(filename):
         
     except Exception as e:
         logger.error(f"Error downloading file {filename}: {e}")
-        return f"Error downloading file: {str(e)}", 500
+        return "Error downloading file. Please try again.", 500
 
 @app.route('/cancel/<analysis_id>', methods=['POST'])
 def cancel_analysis(analysis_id):
@@ -8872,7 +9315,7 @@ def start_compact_analysis():
                 'start_time': datetime.now().isoformat(),
                 'current_step': 'Initialization',
                 'step_start_time': datetime.now().isoformat(),
-                'estimated_completion': (datetime.now() + pd.Timedelta(minutes=5)).isoformat(),
+                'estimated_completion': (datetime.now() + timedelta(minutes=5)).isoformat(),
                 'report_type': 'compact'
             }
         
@@ -8890,19 +9333,21 @@ def start_compact_analysis():
                     future.result(timeout=300)  # 5-minute timeout for entire analysis
                     
             except FutureTimeoutError:
-                logger.error(f"⏰ Analysis timed out after 5 minutes")
+                logger.error(f"Analysis timed out after 5 minutes")
                 with analysis_status_lock:
-                    if analysis_id in analysis_status:
-                        analysis_status[analysis_id]['status'] = 'error'
-                        analysis_status[analysis_id]['message'] = 'Analysis timed out after 5 minutes'
-                        save_analysis_status()
+                    if analysis_id not in analysis_status:
+                        analysis_status[analysis_id] = {}
+                    analysis_status[analysis_id]['status'] = 'error'
+                    analysis_status[analysis_id]['message'] = 'Analysis timed out after 5 minutes'
+                    save_analysis_status()
             except Exception as e:
-                logger.error(f"[[ERROR]] Analysis thread error: {e}")
+                logger.error(f"[[ERROR]] Analysis thread error: {e}", exc_info=True)
                 with analysis_status_lock:
-                    if analysis_id in analysis_status:
-                        analysis_status[analysis_id]['status'] = 'error'
-                        analysis_status[analysis_id]['message'] = f'Analysis failed: {str(e)}'
-                        save_analysis_status()
+                    if analysis_id not in analysis_status:
+                        analysis_status[analysis_id] = {}
+                    analysis_status[analysis_id]['status'] = 'error'
+                    analysis_status[analysis_id]['message'] = 'Analysis failed. Please check the Admin page for details.'
+                    save_analysis_status()
         
         thread = threading.Thread(target=run_analysis_with_timeout)
         thread.daemon = True
@@ -8992,7 +9437,7 @@ def start_customer_renewal_analysis():
                 'start_time': datetime.now().isoformat(),
                 'current_step': 'Initialization',
                 'step_start_time': datetime.now().isoformat(),
-                'estimated_completion': (datetime.now() + pd.Timedelta(minutes=5 if renewal_type == 'renewal_portfolio' else 3)).isoformat(),
+                'estimated_completion': (datetime.now() + timedelta(minutes=5 if renewal_type == 'renewal_portfolio' else 3)).isoformat(),
                 'report_type': 'customer_renewal'
             }
             save_analysis_status()
@@ -9190,52 +9635,46 @@ def run_subscription_analysis(analysis_id):
             days = status['days']
             report_type = status['report_type']
         
-        # Update status
         with analysis_status_lock:
             status['status'] = 'running'
-            status['progress'] = 10
-            status['message'] = ' Fetching subscription data...'
-            status['current_step'] = 'Data Retrieval'
-            status['step_start_time'] = datetime.now().isoformat()
+            status['completed_steps'] = []
+            _update_progress(status, 10, 'Querying subscription details...', 'Data Retrieval')
         
-        # Get subscription data
         sub_data = fetch_subscription_data(subscription_id, days)
         
         if not sub_data['found']:
             with analysis_status_lock:
                 status['status'] = 'error'
-                status['message'] = f" Subscription not found: {sub_data.get('error', 'Unknown error')}"
+                status['message'] = f"Subscription not found: {sub_data.get('error', 'Unknown error')}"
             save_analysis_status()
             return
         
-        # Update status
         with analysis_status_lock:
-            status['progress'] = 30
-            status['message'] = ' Analyzing subscription data...'
-            status['current_step'] = 'Data Analysis'
+            _update_progress(status, 20, f'Loading customer context for {sub_data.get("customer_name", "")}...', 'Data Retrieval')
         
-        # Convert to DataFrames for analysis
         ab_df = pd.DataFrame(sub_data['adoption_barriers']) if sub_data['adoption_barriers'] else pd.DataFrame()
         ap_df = pd.DataFrame(sub_data['action_plans']) if sub_data['action_plans'] else pd.DataFrame()
         cp_df = pd.DataFrame(sub_data['customer_pulse']) if sub_data['customer_pulse'] else pd.DataFrame()
         sp_df = pd.DataFrame(sub_data['success_priorities']) if sub_data['success_priorities'] else pd.DataFrame()
         
-        # Calculate renewal risk
+        with analysis_status_lock:
+            _update_progress(status, 30, 'Analyzing adoption barriers and support cases...', 'Data Analysis')
+        
+        with analysis_status_lock:
+            _update_progress(status, 40, 'Calculating renewal risk scores...', 'Risk Analysis')
+        
         renewal_analysis = get_subscription_renewal_risk(subscription_id, days)
         
-        # Update status
         with analysis_status_lock:
-            status['progress'] = 60
-            status['message'] = '[AI] Generating AI insights...'
-            status['current_step'] = 'AI Analysis'
+            _update_progress(status, 50, 'Preparing AI briefing book...', 'AI Analysis')
         
-        # Generate AI insights using existing logic
         try:
-            # Create briefing book
             all_records = sub_data['adoption_barriers'] + sub_data['action_plans'] + sub_data['customer_pulse'] + sub_data['success_priorities']
             briefing_book, metrics = _create_briefing_book(all_records, [], [])
             
-            # Generate AI response
+            with analysis_status_lock:
+                _update_progress(status, 55, '[AI] Sending to CircuIT (this may take up to 60 seconds)...', 'AI Analysis - CircuIT')
+            
             ai_response = generate_llm_response(
                 briefing_book, 
                 sub_data['customer_name'], 
@@ -9243,22 +9682,22 @@ def run_subscription_analysis(analysis_id):
                 days,
                 PROMPT_CUSTOMER_TEMPLATE
             )
+            
+            with analysis_status_lock:
+                _update_progress(status, 70, '[AI] Processing AI response...', 'AI Analysis - Processing')
         except Exception as e:
             logger.warning(f"AI analysis failed, using fallback: {e}")
             ai_response = f"Analysis completed for {sub_data['customer_name']} (Subscription: {subscription_id})"
         
-        # Update status
         with analysis_status_lock:
-            status['progress'] = 80
-            status['message'] = ' Generating reports...'
-            status['current_step'] = 'Report Generation'
+            _update_progress(status, 75, 'Building Word report...', 'Report Generation')
         
         # Generate reports (canonical outputs when frozen)
         output_dir = _APP_SUPPORT / "outputs" if _frozen else Path("outputs")
         output_dir.mkdir(parents=True, exist_ok=True)
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_customer_name = "".join(c for c in sub_data['customer_name'] if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        safe_customer_name = "".join(c for c in (sub_data.get('customer_name') or 'Unknown') if c.isalnum() or c in (' ', '-', '_')).rstrip()
         safe_subscription_id = subscription_id.replace(':', '_').replace('/', '_')
         
         # Generate Word report
@@ -9269,13 +9708,13 @@ def run_subscription_analysis(analysis_id):
             doc = Document()
             
             # Title page
-            title = doc.add_heading(f'Subscription Analysis: {sub_data["customer_name"]}', 0)
+            title = doc.add_heading(f'Subscription Analysis: {sub_data.get("customer_name") or "Unknown"}', 0)
             subtitle = doc.add_heading(f'Subscription ID: {subscription_id}', level=1)
             details = doc.add_paragraph()
             details.add_run(f'Analysis Date: {datetime.now().strftime("%B %d, %Y")}\n').bold = True
             details.add_run(f'Analysis Period: {days} days\n').bold = True
-            details.add_run(f'Technology: {sub_data["technology"]} | Sub-Technology: {sub_data["sub_technology"]}\n').bold = True
-            details.add_run(f'Status: {sub_data["status"]}\n').bold = True
+            details.add_run(f'Technology: {sub_data.get("technology", "N/A")} | Sub-Technology: {sub_data.get("sub_technology", "N/A")}\n').bold = True
+            details.add_run(f'Status: {sub_data.get("status", "N/A")}\n').bold = True
             
             doc.add_page_break()
             
@@ -9284,24 +9723,24 @@ def run_subscription_analysis(analysis_id):
             summary_p = doc.add_paragraph()
             summary_p.add_run(f'Customer: {sub_data["customer_name"]}\n')
             summary_p.add_run(f'Subscription: {subscription_id}\n')
-            summary_p.add_run(f'Renewal Risk Level: {renewal_analysis["risk_level"]} ({renewal_analysis["overall_risk_score"]}/10)\n')
+            summary_p.add_run(f'Renewal Risk Level: {renewal_analysis.get("risk_level", "Unknown")} ({renewal_analysis.get("overall_risk_score", renewal_analysis.get("risk_score", 0))}/10)\n')
             
             # Risk Analysis
             doc.add_heading('Renewal Risk Analysis', level=1)
             risk_p = doc.add_paragraph()
-            risk_p.add_run(f'Overall Risk Score: {renewal_analysis["overall_risk_score"]}/10\n').bold = True
-            risk_p.add_run(f'Risk Level: {renewal_analysis["risk_level"]}\n').bold = True
+            risk_p.add_run(f'Overall Risk Score: {renewal_analysis.get("overall_risk_score", renewal_analysis.get("risk_score", 0))}/10\n').bold = True
+            risk_p.add_run(f'Risk Level: {renewal_analysis.get("risk_level", "Unknown")}\n').bold = True
             
             # Risk Components
             doc.add_heading('Risk Components', level=2)
-            for component, data in renewal_analysis['risk_components'].items():
+            for component, data in renewal_analysis.get('risk_components', {}).items():
                 comp_p = doc.add_paragraph()
                 comp_p.add_run(f'{component.replace("_", " ").title()}: ').bold = True
                 comp_p.add_run(f'{data["score"]:.1f}/10 - Count: {data["count"]}')
             
             # Recommendations
             doc.add_heading('Recommendations', level=1)
-            for i, rec in enumerate(renewal_analysis['recommendations'], 1):
+            for i, rec in enumerate(renewal_analysis.get('recommendations', []), 1):
                 rec_p = doc.add_paragraph()
                 rec_p.add_run(f'{i}. {rec}')
             
@@ -9414,11 +9853,15 @@ def run_subscription_analysis(analysis_id):
                 ai_p = doc.add_paragraph()
                 ai_p.add_run(ai_response)
             
-            # Save document
+            with analysis_status_lock:
+                _update_progress(status, 85, 'Saving Word document...', 'Report Generation')
             doc.save(word_path)
             
         except Exception as e:
             logger.error(f"Error creating Word report: {e}")
+        
+        with analysis_status_lock:
+            _update_progress(status, 88, 'Generating Excel workbook...', 'Excel Report Generation')
         
         # Generate Excel report
         excel_filename = f"Subscription_Analysis_{safe_customer_name}_{safe_subscription_id}_{timestamp}.xlsx"
@@ -9449,16 +9892,16 @@ def run_subscription_analysis(analysis_id):
                 summary_data = {
                     'Metric': ['Customer Name', 'Subscription ID', 'Technology', 'Sub-Technology', 'Status', 
                                'Analysis Period (Days)', 'Renewal Risk Score', 'Risk Level'],
-                    'Value': [sub_data['customer_name'], subscription_id, sub_data['technology'], 
-                              sub_data['sub_technology'], sub_data['status'], days,
-                              renewal_analysis['overall_risk_score'], renewal_analysis['risk_level']]
+                    'Value': [sub_data.get('customer_name') or 'Unknown', subscription_id, sub_data.get('technology', 'N/A'), 
+                              sub_data.get('sub_technology', 'N/A'), sub_data.get('status', 'N/A'), days,
+                              renewal_analysis.get('overall_risk_score', renewal_analysis.get('risk_score', 0)), renewal_analysis.get('risk_level', 'Unknown')]
                 }
                 summary_df = pd.DataFrame(summary_data)
                 summary_df.to_excel(writer, sheet_name='Summary', index=False)
                 
                 # Risk Components sheet
                 risk_data = []
-                for component, data in renewal_analysis['risk_components'].items():
+                for component, data in renewal_analysis.get('risk_components', {}).items():
                     risk_data.append({
                         'Component': component.replace('_', ' ').title(),
                         'Score': data['score'],
@@ -9543,15 +9986,11 @@ def run_subscription_analysis(analysis_id):
             
         except Exception as e:
             logger.error(f"Error creating Excel report: {e}", exc_info=True)
-            excel_path = None
-            excel_filename = None
+            raise e
         
-        # Update status
         with analysis_status_lock:
+            _update_progress(status, 100, 'Subscription analysis completed successfully!', 'Completed')
             status['status'] = 'completed'
-            status['progress'] = 100
-            status['message'] = ' Subscription analysis completed successfully!'
-            status['current_step'] = 'Completed'
             status['word_file'] = word_filename
             status['excel_file'] = excel_filename
             # Keep canonical keys consistent with /download endpoint expectations
@@ -9585,12 +10024,14 @@ def run_subscription_analysis(analysis_id):
         logger.info(f"[[OK]] Subscription analysis completed: {analysis_id}")
         
     except Exception as e:
-        logger.error(f"[[ERROR]] Error in subscription analysis: {e}")
+        logger.error(f"[[ERROR]] Error in subscription analysis: {e}", exc_info=True)
         with analysis_status_lock:
-            if analysis_id in analysis_status:
-                analysis_status[analysis_id]['status'] = 'error'
-                analysis_status[analysis_id]['message'] = f' Analysis failed: {str(e)}'
-        save_analysis_status()
+            if analysis_id not in analysis_status:
+                analysis_status[analysis_id] = {}
+            analysis_status[analysis_id]['status'] = 'error'
+            analysis_status[analysis_id]['message'] = 'Subscription analysis failed. Please check the Admin page for details.'
+            analysis_status[analysis_id]['error'] = 'Subscription analysis failed. Please check the Admin page for details.'
+            save_analysis_status()
 
 
 @app.route('/download/<analysis_id>/<file_type>')
@@ -9602,8 +10043,9 @@ def download_result(analysis_id, file_type):
     if file_type not in ('docx', 'xlsx'):
         return jsonify({'error': f'Invalid file type: {file_type}', 'available_files': ['docx', 'xlsx']}), 404
     
-    # Check if analysis exists (try saved file if not in memory, e.g. after restart)
-    if analysis_id not in analysis_status:
+    with analysis_status_lock:
+        status = analysis_status.get(analysis_id)
+    if status is None:
         try:
             status_file_path = str(_APP_SUPPORT / STATUS_FILE) if not os.path.isabs(STATUS_FILE) else STATUS_FILE
             if os.path.exists(status_file_path):
@@ -9612,26 +10054,12 @@ def download_result(analysis_id, file_type):
                     if analysis_id in loaded_status:
                         with analysis_status_lock:
                             analysis_status[analysis_id] = loaded_status[analysis_id]
-                    else:
-                        logger.error(f"[[ERROR]] Analysis not found in memory or file: {analysis_id}")
-                        return jsonify({
-                            'error': 'Analysis not found',
-                            'analysis_id': analysis_id,
-                        }), 404
-            else:
-                logger.error(f"[[ERROR]] Analysis not found and no status file: {analysis_id}")
-                return jsonify({
-                    'error': 'Analysis not found',
-                    'analysis_id': analysis_id,
-                }), 404
+                            status = analysis_status[analysis_id]
+            if status is None:
+                return jsonify({'error': 'Analysis not found', 'analysis_id': analysis_id}), 404
         except Exception as e:
             logger.error(f"[[ERROR]] Error loading analysis status from file: {e}", exc_info=True)
-            return jsonify({
-                'error': 'Analysis not found',
-                'analysis_id': analysis_id,
-            }), 404
-    
-    status = analysis_status[analysis_id]
+            return jsonify({'error': 'Analysis not found', 'analysis_id': analysis_id}), 404
     logger.info(f"[[DATA]] Analysis status: {status.get('status', 'unknown')}")
     
     # Check if analysis is completed
@@ -9668,42 +10096,49 @@ def download_result(analysis_id, file_type):
     # Canonical outputs dir (Application Support when frozen) so download works even if status stored wrong path
     _out_dir = _APP_SUPPORT / "outputs" if _frozen else Path(os.path.abspath("outputs"))
 
-    # Handle file downloads with better error handling
+    def _resolve_safe_path(raw_path, out_dir):
+        """Resolve file path and verify it's under the outputs directory."""
+        out_abs = os.path.abspath(str(out_dir))
+        prefix = out_abs + os.sep
+        resolved = os.path.abspath(raw_path)
+        if not os.path.exists(resolved):
+            resolved = os.path.abspath(str(Path(out_dir) / os.path.basename(raw_path)))
+        if not os.path.exists(resolved):
+            return None
+        if resolved == out_abs or resolved.startswith(prefix):
+            return resolved
+        return None
+
     try:
         if file_type == 'docx' and word_report:
-            file_path = word_report
-            if not os.path.exists(file_path):
-                fallback = _out_dir / os.path.basename(file_path)
-                if fallback.exists():
-                    file_path = str(fallback)
-            logger.info(f"[[WRITE]] Downloading Word document: {file_path}")
-            if not os.path.exists(file_path):
-                logger.error(f"[[ERROR]] Word file not found: {file_path}")
-                return jsonify({'error': f'Word file not found: {file_path}'}), 404
+            file_path = _resolve_safe_path(word_report, _out_dir)
+            if not file_path:
+                logger.error(f"[[ERROR]] Word file not found or outside outputs dir")
+                return jsonify({'error': 'Word file not found'}), 404
             safe_name = secure_filename(analysis_id) or "report"
             return send_file(file_path, as_attachment=True, download_name=f"AdoptIQ_Report_{safe_name}.docx")
 
         elif file_type == 'xlsx' and excel_report:
-            file_path = excel_report
-            if not os.path.exists(file_path):
-                fallback = _out_dir / os.path.basename(file_path)
-                if fallback.exists():
-                    file_path = str(fallback)
-            logger.info(f"[[DATA]] Downloading Excel file: {file_path}")
-            if not os.path.exists(file_path):
-                logger.error(f"[[ERROR]] Excel file not found: {file_path}")
-                return jsonify({'error': f'Excel file not found: {file_path}'}), 404
+            file_path = _resolve_safe_path(excel_report, _out_dir)
+            if not file_path:
+                logger.error(f"[[ERROR]] Excel file not found or outside outputs dir")
+                return jsonify({'error': 'Excel file not found'}), 404
             safe_name = secure_filename(analysis_id) or "data"
             return send_file(file_path, as_attachment=True, download_name=f"AdoptIQ_Data_{safe_name}.xlsx")
             
         else:
-            logger.error(f"[[ERROR]] Invalid file type or file not found: {file_type}")
-            # Only show files that actually exist
             available = []
             if word_report:
                 available.append('docx')
             if excel_report:
                 available.append('xlsx')
+            if file_type == 'xlsx' and not excel_report:
+                logger.warning(f"[[WARNING]] Excel file not generated for analysis: {analysis_id}")
+                return jsonify({
+                    'error': 'Excel file was not generated for this report. Only the Word document is available.',
+                    'available_files': available
+                }), 404
+            logger.error(f"[[ERROR]] Invalid file type or file not found: {file_type}")
             return jsonify({
                 'error': f'Invalid file type or file not found: {file_type}',
                 'available_files': available
@@ -9906,16 +10341,18 @@ def run_leader_report_generation(analysis_id):
         with analysis_status_lock:
             status = analysis_status[analysis_id]
             status['status'] = 'running'
-            status['progress'] = 5
-            status['message'] = 'Connecting to Snowflake (CSConsole data)...'
-            status['current_step'] = 'Database Connection'
-            save_analysis_status()
+            status['completed_steps'] = []
+            _update_progress(status, 2, 'Connecting to Snowflake (CSConsole data)...', 'Database Connection')
         
         manager = status['manager']
         days = status['days']
         csone_file = status.get('csone_file')
         
-        # Connect to Snowflake - with VPN detection
+        # Callback closure for leader_report_generator to push sub-step updates
+        def leader_progress_cb(pct, msg, step):
+            with analysis_status_lock:
+                _update_progress(status, pct, msg, step)
+        
         logger.info(f"Connecting to Snowflake for leader report...")
         try:
             ctx = _connect_with_keeper()
@@ -9923,7 +10360,6 @@ def run_leader_report_generation(analysis_id):
         except Exception as conn_error:
             error_msg = str(conn_error)
             
-            # Check if it's a VPN/network error
             if any(keyword in error_msg.lower() for keyword in ['not allowed to access', 'failed to connect', 'network', 'timeout']):
                 logger.error(f"ERROR: Snowflake connection failed - VPN may not be connected")
                 
@@ -9947,17 +10383,10 @@ def run_leader_report_generation(analysis_id):
                 
                 return
             else:
-                # Some other connection error
                 raise
         
-        # Update progress with ETA
         with analysis_status_lock:
-            status['progress'] = 20
-            status['message'] = ' Fetching team data...'
-            status['current_step'] = 'Team Data Retrieval'
-            status['eta_seconds'] = 240  # Estimated 4 minutes remaining
-            status['estimated_completion'] = (datetime.now() + pd.Timedelta(minutes=4)).isoformat()
-            save_analysis_status()
+            _update_progress(status, 5, 'Connected to Snowflake. Fetching team subscriptions...', 'Team Data Retrieval')
         
         # Fetch team subscriptions first (needed to scope CSOne to manager's portfolio)
         team_subs_df = pd.DataFrame()
@@ -9968,6 +10397,9 @@ def run_leader_report_generation(analysis_id):
                 logger.info(f"[[OK]] Retrieved {len(team_subs_df)} team subscriptions for {manager}")
         except Exception as e:
             logger.warning(f"[[WARNING]] Failed to fetch team subscriptions: {e}")
+        
+        with analysis_status_lock:
+            _update_progress(status, 8, 'Loading and scoping CSOne data...', 'CSOne Processing')
         
         # Load and scope CSOne data to team portfolio (same approach as Comprehensive report)
         csone_df = pd.DataFrame()
@@ -10003,13 +10435,10 @@ def run_leader_report_generation(analysis_id):
                 logger.warning(f"[[WARNING]] No team subscriptions - using {csone_count} cases (date filter only)")
             
             with analysis_status_lock:
-                status['progress'] = 30
-                status['message'] = f' Loaded {csone_count} TAC cases in scope for team...'
-                status['eta_seconds'] = 210  # Estimated 3.5 minutes remaining
-                status['estimated_completion'] = (datetime.now() + pd.Timedelta(minutes=3.5)).isoformat()
-                save_analysis_status()
+                _update_progress(status, 12, f'Loaded {csone_count} TAC cases in scope for team...', 'CSOne Processing')
         
-        # FIXED: Gather external intelligence (BST defects, status.webex.com incidents) for leader reports
+        with analysis_status_lock:
+            _update_progress(status, 13, 'Gathering external intelligence (defects, incidents)...', 'External Intelligence')
         logger.info(f"[[WEB]] Gathering external intelligence for leader report...")
         try:
             ext_bugs = fetch_help_webex_bugs()
@@ -10020,7 +10449,8 @@ def run_leader_report_generation(analysis_id):
             ext_bugs = []
             ext_incidents = []
         
-        # Extract software defects and PSIRT vulnerabilities from CSOne data
+        with analysis_status_lock:
+            _update_progress(status, 15, 'Extracting software defects and PSIRT vulnerabilities...', 'Defect Analysis')
         logger.info(f"[[DEFECTS]] Extracting software defects and PSIRT vulnerabilities...")
         software_defects = extract_software_defects(csone_df, pd.DataFrame()) if not csone_df.empty else None
         psirt_vulns = extract_psirt_vulnerabilities(csone_df, pd.DataFrame()) if not csone_df.empty else None
@@ -10029,30 +10459,11 @@ def run_leader_report_generation(analysis_id):
         if psirt_vulns:
             logger.info(f"[[PSIRT]] Found {psirt_vulns.get('total_vulnerabilities', 0)} vulnerabilities")
         
-        # Update progress with ETA
         with analysis_status_lock:
-            status['progress'] = 40
-            status['message'] = ' Collecting Action Plans, Adoption Barriers, and Customer Pulse...'
-            status['current_step'] = 'Data Collection'
-            status['eta_seconds'] = 180  # Estimated 3 minutes remaining
-            status['estimated_completion'] = (datetime.now() + pd.Timedelta(minutes=3)).isoformat()
-            save_analysis_status()
+            _update_progress(status, 17, 'Preparing to generate Word document...', 'Data Collection')
         
-        # Generate the leader report
         logger.info(f"[[WRITE]] Generating leader report for {manager}...")
-        # Note: External intelligence (ext_bugs, ext_incidents, software_defects, psirt_vulns) 
-        # is now available and can be integrated into leader report sections if needed
         
-        # Update progress with ETA
-        with analysis_status_lock:
-            status['progress'] = 50
-            status['message'] = ' Generating Word document...'
-            status['current_step'] = 'Document Generation'
-            status['eta_seconds'] = 120  # Estimated 2 minutes remaining
-            status['estimated_completion'] = (datetime.now() + pd.Timedelta(minutes=2)).isoformat()
-            save_analysis_status()
-        
-        # Check if we have a valid database connection before proceeding
         if ctx is None:
             raise Exception("Database connection failed. Please check your VPN connection and try again.")
         
@@ -10065,17 +10476,12 @@ def run_leader_report_generation(analysis_id):
             ext_bugs=ext_bugs if 'ext_bugs' in locals() else [],
             ext_incidents=ext_incidents if 'ext_incidents' in locals() else [],
             software_defects=software_defects if 'software_defects' in locals() else None,
-            psirt_vulns=psirt_vulns if 'psirt_vulns' in locals() else None
+            psirt_vulns=psirt_vulns if 'psirt_vulns' in locals() else None,
+            progress_callback=leader_progress_cb
         )
         
-        # Update progress with ETA
         with analysis_status_lock:
-            status['progress'] = 85
-            status['message'] = ' Generating Excel workbook...'
-            status['current_step'] = 'Excel Report Generation'
-            status['eta_seconds'] = 20  # Estimated 20 seconds remaining
-            status['estimated_completion'] = (datetime.now() + pd.Timedelta(seconds=20)).isoformat()
-            save_analysis_status()
+            _update_progress(status, 82, 'Generating Excel workbook...', 'Excel Report Generation')
         
         # Generate Excel file with team data
         excel_path = None
@@ -10133,6 +10539,23 @@ def run_leader_report_generation(analysis_id):
             
             # Combine all DataFrames
             sheets = {}
+            
+            # Always build a Team_Summary sheet so the Excel file is never empty
+            summary_rows = []
+            for cssm_name, data in team_data.items():
+                summary_rows.append({
+                    'Team_Member': cssm_name,
+                    'Num_Subscriptions': len(data.get('subscriptions', pd.DataFrame())),
+                    'Num_Action_Plans': len(data.get('action_plans', pd.DataFrame())),
+                    'Num_Adoption_Barriers': len(data.get('adoption_barriers', pd.DataFrame())),
+                    'Num_Customer_Pulse': len(data.get('customer_pulse', pd.DataFrame())),
+                    'Num_Success_Priorities': len(data.get('success_priorities', pd.DataFrame())),
+                    'Num_TAC_Cases': len(data.get('tac_cases', pd.DataFrame())),
+                    'Customers': ', '.join(data.get('customers', []))
+                })
+            if summary_rows:
+                sheets['Team_Summary'] = pd.DataFrame(summary_rows)
+            
             if all_action_plans:
                 sheets['Action_Plans'] = pd.concat(all_action_plans, ignore_index=True)
             if all_adoption_barriers:
@@ -10172,9 +10595,10 @@ def run_leader_report_generation(analysis_id):
                 if vuln_rows:
                     sheets['PSIRT_Vulnerabilities'] = pd.DataFrame(vuln_rows)
             
-            # Create Excel file
+            # Create Excel file (Team_Summary provides a fallback when team_data is non-empty)
             if sheets:
-                logger.info(f"[[WRITE]] Writing Excel file with {len(sheets)} sheets...")
+                logger.info(f"[[WRITE]] Writing Excel file with {len(sheets)} sheets: {list(sheets.keys())}")
+                sheets_written = 0
                 with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
                     workbook = writer.book
                     
@@ -10201,48 +10625,62 @@ def run_leader_report_generation(analysis_id):
                     
                     for sheet_name, df in sheets.items():
                         if not df.empty:
-                            # Clean datetime columns for Excel compatibility
-                            df_clean = _clean_datetime_columns_for_excel(df)
-                            
-                            # Write data
-                            df_clean.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
-                            
-                            # Format worksheet
-                            worksheet = writer.sheets[sheet_name]
-                            
-                            # Write title
-                            title_text = f"{sheet_name.replace('_', ' ')} - {manager} Team Report"
-                            worksheet.merge_range(0, 0, 0, len(df_clean.columns)-1, title_text, title_format)
-                            
-                            # Format headers
-                            for col_num, value in enumerate(df_clean.columns.values):
-                                worksheet.write(1, col_num, value, header_format)
-                            
-                            # Auto-adjust column widths (guard against NaN from empty columns)
-                            for i, col in enumerate(df_clean.columns):
-                                try:
-                                    content_max = df_clean[col].astype(str).map(len).max()
-                                    content_max = content_max if pd.notna(content_max) else 0
-                                except (ValueError, TypeError):
-                                    content_max = 0
-                                max_length = max(content_max, len(str(col)))
-                                worksheet.set_column(i, i, min(max_length + 2, 50))
+                            try:
+                                # Clean datetime columns for Excel compatibility
+                                df_clean = _clean_datetime_columns_for_excel(df)
+                                
+                                # Write data
+                                df_clean.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
+                                
+                                # Format worksheet
+                                worksheet = writer.sheets[sheet_name]
+                                
+                                # Write title -- merge_range requires >=2 columns
+                                title_text = f"{sheet_name.replace('_', ' ')} - {manager} Team Report"
+                                n_cols = len(df_clean.columns)
+                                if n_cols > 1:
+                                    worksheet.merge_range(0, 0, 0, n_cols - 1, title_text, title_format)
+                                else:
+                                    worksheet.write(0, 0, title_text, title_format)
+                                
+                                # Format headers
+                                for col_num, value in enumerate(df_clean.columns.values):
+                                    worksheet.write(1, col_num, value, header_format)
+                                
+                                # Auto-adjust column widths (guard against NaN from empty columns)
+                                for i, col in enumerate(df_clean.columns):
+                                    try:
+                                        content_max = df_clean[col].astype(str).map(len).max()
+                                        content_max = content_max if pd.notna(content_max) else 0
+                                    except (ValueError, TypeError):
+                                        content_max = 0
+                                    max_length = max(content_max, len(str(col)))
+                                    worksheet.set_column(i, i, min(max_length + 2, 50))
+                                
+                                sheets_written += 1
+                            except Exception as sheet_error:
+                                logger.warning(f"[[WARNING]] Failed to write sheet '{sheet_name}': {sheet_error}")
                 
-                logger.info(f"[[OK]] Excel file created successfully: {excel_path}")
+                if sheets_written > 0:
+                    logger.info(f"[[OK]] Excel file created successfully ({sheets_written} sheets): {excel_path}")
+                else:
+                    logger.error(f"[[ERROR]] All sheets failed to write, removing empty Excel file")
+                    try:
+                        os.remove(excel_path)
+                    except OSError:
+                        pass
+                    excel_path = None
             else:
-                logger.warning(f"[[WARNING]] No data to write to Excel file")
+                logger.warning(f"[[WARNING]] No team data available for Excel (team_data keys: {list(team_data.keys())})")
                 excel_path = None
                 
         except Exception as excel_error:
             logger.error(f"[[ERROR]] Error creating Excel file: {excel_error}", exc_info=True)
             excel_path = None
         
-        # Update progress
         with analysis_status_lock:
-            status['progress'] = 100
+            _update_progress(status, 100, 'Leader report generated successfully!', 'Complete')
             status['status'] = 'completed'
-            status['message'] = ' Leader report generated successfully!'
-            status['current_step'] = 'Complete'
             status['completion_time'] = datetime.now().isoformat()
             completion_time = status['completion_time']
             report_type = status.get('report_type', 'leader')
@@ -10283,10 +10721,12 @@ def run_leader_report_generation(analysis_id):
         logger.error(f"[[SEARCH]] DEBUG: Full traceback:\n{error_traceback}")
         
         with analysis_status_lock:
-            status['status'] = 'error'
-            status['error'] = str(e)
-            status['message'] = f' Error: {str(e)}'
-            status['completion_time'] = datetime.now().isoformat()
+            if analysis_id not in analysis_status:
+                analysis_status[analysis_id] = {}
+            analysis_status[analysis_id]['status'] = 'error'
+            analysis_status[analysis_id]['error'] = "Leader report generation failed. Please check the Admin page for details."
+            analysis_status[analysis_id]['message'] = 'Error during leader report generation'
+            analysis_status[analysis_id]['completion_time'] = datetime.now().isoformat()
             save_analysis_status()
     finally:
         if ctx:
@@ -10576,6 +11016,18 @@ def _check_port_available(port):
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, FileNotFoundError):
             pass
     return (False, pid, name)
+
+
+def _shutdown_handler():
+    """Save analysis status on shutdown."""
+    try:
+        save_analysis_status()
+        logger.info("Analysis status saved on shutdown")
+    except Exception as e:
+        logger.error(f"Failed to save status on shutdown: {e}")
+
+
+atexit.register(_shutdown_handler)
 
 
 if __name__ == '__main__':

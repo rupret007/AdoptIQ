@@ -7,7 +7,9 @@ Shared formatting, risk scoring explanation, metadata, and canonical data source
 
 from datetime import datetime
 from typing import Optional, Union, Any, List, Tuple
+import math
 import re
+import pandas as pd
 
 
 # --- Canonical Data Sources (used by all reports) ---
@@ -57,8 +59,9 @@ def format_date(value: Any, style: str = "long") -> str:
         return "N/A"
     try:
         if isinstance(value, str):
-            from pandas import to_datetime
-            value = to_datetime(value, errors="coerce")
+            value = pd.to_datetime(value, errors="coerce")
+        if pd.isna(value):
+            return "N/A"
         if hasattr(value, "strftime"):
             fmt = {
                 "long": DATE_FORMAT_LONG,
@@ -78,6 +81,8 @@ def format_number(value: Union[int, float, None], decimals: int = 0, as_percent:
         return "N/A"
     try:
         v = float(value)
+        if pd.isna(v):
+            return "N/A"
         if as_percent:
             return f"{v:.1f}%"
         if decimals == 0:
@@ -93,6 +98,8 @@ def format_currency(value: Union[int, float, None], decimals: int = 2) -> str:
         return "N/A"
     try:
         v = float(value)
+        if pd.isna(v) or not math.isfinite(v):
+            return "N/A"
         return f"${v:,.{decimals}f}"
     except (ValueError, TypeError):
         return str(value) if value is not None else "N/A"

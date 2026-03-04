@@ -43,20 +43,44 @@ class TestDownloadFileRoute:
 
     @pytest.mark.flask
     def test_valid_file_download(self, client, tmp_path):
-        test_file = tmp_path / "test_report.docx"
-        test_file.write_text("test content")
+        """Ensure a valid .docx file in the outputs dir can be downloaded."""
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        test_file = outputs_dir / "test_report.docx"
+        test_file.write_bytes(b"fake docx content")
 
-        outputs_dir = str(tmp_path)
-        with mock.patch.object(app_mod, "_frozen", False):
-            with mock.patch("os.path.abspath", side_effect=lambda p: str(tmp_path / os.path.basename(p)) if "outputs" not in p else str(tmp_path)):
-                pass
+        original_app_support = app_mod._APP_SUPPORT
+        original_frozen = app_mod._frozen
+        try:
+            app_mod._APP_SUPPORT = tmp_path
+            app_mod._frozen = True
+            rv = client.get("/download-file/test_report.docx")
+            assert rv.status_code == 200
+            assert rv.data == b"fake docx content"
+        finally:
+            app_mod._APP_SUPPORT = original_app_support
+            app_mod._frozen = original_frozen
 
     @pytest.mark.flask
     def test_secure_filename_fallback(self, client, tmp_path):
         """Round 1 Fix 2 regression: files with spaces should still be downloadable
         via the fallback that tries the original filename."""
-        file_with_spaces = tmp_path / "Report_Brian Frazier_90d.docx"
-        file_with_spaces.write_text("test content")
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        file_with_spaces = outputs_dir / "Report_Brian Frazier_90d.docx"
+        file_with_spaces.write_bytes(b"spaced name content")
+
+        original_app_support = app_mod._APP_SUPPORT
+        original_frozen = app_mod._frozen
+        try:
+            app_mod._APP_SUPPORT = tmp_path
+            app_mod._frozen = True
+            rv = client.get("/download-file/Report_Brian Frazier_90d.docx")
+            assert rv.status_code == 200
+            assert rv.data == b"spaced name content"
+        finally:
+            app_mod._APP_SUPPORT = original_app_support
+            app_mod._frozen = original_frozen
 
 
 # ── /download/<analysis_id>/<file_type> ──────────────────────────────────

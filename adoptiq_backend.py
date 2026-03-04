@@ -573,6 +573,7 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
     Returns:
         Dictionary containing customer info and all related data
     """
+    ctx = None
     try:
         logger.info(f"[[SEARCH]] Fetching subscription data for: {subscription_id}")
         
@@ -594,7 +595,6 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         
         if not account_result:
             logger.warning(f"No account found for Subscription ID: {subscription_id}")
-            ctx.close()
             return {
                 'subscription_id': subscription_id,
                 'customer_name': 'Unknown Customer',
@@ -669,8 +669,6 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
             logger.info(f"Team/CSSM columns not available in dsm_assignment_data: {team_err}")
             team_data = []
 
-        ctx.close()
-
         # Compile results (include cssm_email for single-customer renewal manager fallback)
         subscription_data = {
             'subscription_id': subscription_id,
@@ -716,6 +714,16 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
             'found': False,
             'error': str(e)
         }
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+        if ctx is not None:
+            try:
+                ctx.close()
+            except Exception:
+                pass
 
 
 def search_subscriptions_by_customer(customer_name: str, limit: int = 10) -> List[Dict[str, Any]]:
@@ -729,6 +737,7 @@ def search_subscriptions_by_customer(customer_name: str, limit: int = 10) -> Lis
     Returns:
         List of subscription records
     """
+    ctx = None
     try:
         logger.info(f"[[SEARCH]] Searching subscriptions for customer: {customer_name}")
         
@@ -748,14 +757,18 @@ def search_subscriptions_by_customer(customer_name: str, limit: int = 10) -> Lis
         cur.execute(search_query, (f'%{customer_name}%', limit))
         results = cur.fetchall()
         
-        ctx.close()
-        
         logger.info(f"[[OK]] Found {len(results)} subscriptions for customer: {customer_name}")
         return results
         
     except Exception as e:
         logger.error(f"[[ERROR]] Error searching subscriptions: {e}")
         return []
+    finally:
+        if ctx is not None:
+            try:
+                ctx.close()
+            except Exception:
+                pass
 
 
 def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[str, Any]:
@@ -898,6 +911,8 @@ def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[
 
 def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
     """Gets all subscriptions and associated accounts for a list of CSSM emails with proper resource management."""
+    if ctx is None:
+        return pd.DataFrame()
     if not emails:
         return pd.DataFrame()
     
@@ -1239,6 +1254,8 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
 
 def fetch_adoption_barriers(ctx, account_ids: List[str], days: int) -> pd.DataFrame:
     """Fetch adoption barriers with proper resource management and input validation"""
+    if ctx is None:
+        return pd.DataFrame()
     if not account_ids: 
         return pd.DataFrame()
     
@@ -1324,10 +1341,19 @@ def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_
         logging.error(f"Error in load_and_merge_data_for_subscription: {e}")
         return "Error", csone_data
     finally:
-        ctx.close()
+        try:
+            cur.close()
+        except Exception:
+            pass
+        try:
+            ctx.close()
+        except Exception:
+            pass
 
 def fetch_csconsole_action_plans(ctx, account_ids: List[str], days: int) -> pd.DataFrame:
     """Fetch Action Plans from CSConsole with proper resource management"""
+    if ctx is None:
+        return pd.DataFrame()
     if not account_ids: 
         return pd.DataFrame()
     
@@ -1358,6 +1384,8 @@ def fetch_csconsole_action_plans(ctx, account_ids: List[str], days: int) -> pd.D
 
 def fetch_csconsole_customer_pulse(ctx, account_ids: List[str], days: int) -> pd.DataFrame:
     """Fetch Customer Pulse records from CSConsole with proper resource management"""
+    if ctx is None:
+        return pd.DataFrame()
     if not account_ids: 
         return pd.DataFrame()
     
@@ -1387,6 +1415,8 @@ def fetch_csconsole_customer_pulse(ctx, account_ids: List[str], days: int) -> pd
 
 def fetch_csconsole_success_priorities(ctx, account_ids: List[str], days: int) -> pd.DataFrame:
     """Fetch Success Priorities from CSConsole with proper resource management"""
+    if ctx is None:
+        return pd.DataFrame()
     if not account_ids: 
         return pd.DataFrame()
     
@@ -1415,6 +1445,8 @@ def fetch_csconsole_success_priorities(ctx, account_ids: List[str], days: int) -
 
 def fetch_csconsole_adoption_barriers(ctx, account_ids: List[str], days: int) -> pd.DataFrame:
     """Fetch Adoption Barriers from CSConsole with proper resource management"""
+    if ctx is None:
+        return pd.DataFrame()
     if not account_ids: 
         return pd.DataFrame()
     
@@ -1446,7 +1478,7 @@ def fetch_csconsole_adoption_barriers(ctx, account_ids: List[str], days: int) ->
 HELP_URLS = [
     "https://help.webex.com/en-us/article/mqkve8/Webex-App-%7C-Release-notes",
     "https://help.webex.com/en-us/article/8dmbcr/What's-New-in-Webex-Suite",
-    "https://help.webex.com/en-us/article/n8z6v5c/Webex-App-%7C-Known-issues",
+    "https://help.webex.com/article/bsmvpdb/Webex-App-%7C-Known-issues",
 ]
 
 def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
@@ -1543,7 +1575,7 @@ def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
                             bug_id = re.search(r'(\d+)', link.get_text())
                         
                         if bug_id:
-                            bug_id = bug_id.group(2) if bug_id.groups() and bug_id.group(2) else bug_id.group(1)
+                            bug_id = bug_id.group(2) if len(bug_id.groups()) >= 2 else bug_id.group(1)
                             # Only use numeric-only IDs if we can't find a proper CSC format
                             # Prefer to skip rather than create non-standard formats like BUG_ or DEF-
                             if not bug_id.startswith(('CSC', 'BUG', 'ISSUE', 'DEF')):
@@ -1580,6 +1612,17 @@ def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
     # Return unique bugs
     unique_bugs = list(all_bugs.values())
     logger.info(f"Successfully fetched {len(unique_bugs)} software bugs from help.webex.com")
+
+    # Persist bugs to SQLite for historical tracking
+    try:
+        from incident_storage import store_historical_bugs
+        if unique_bugs:
+            store_historical_bugs(unique_bugs)
+    except ImportError:
+        logger.warning("incident_storage not available — bugs will not be persisted")
+    except Exception as e:
+        logger.warning(f"Error persisting bugs to storage: {e}")
+
     return unique_bugs
 
 def fetch_status_webex_incident_history_playwright():
@@ -1709,173 +1752,236 @@ def fetch_status_incidents(timeout=25) -> List[Dict[str,str]]:
     # First, try to get incidents from storage
     if storage_available:
         try:
-            stored_incidents = get_historical_incidents(days_back=90, limit=30)
+            stored_incidents = get_historical_incidents(days_back=90, limit=50)
             if stored_incidents:
+                for si in stored_incidents:
+                    si['_from_storage'] = True
                 data.extend(stored_incidents)
                 logger.info(f"Loaded {len(stored_incidents)} incidents from historical storage")
                 
-                # Show storage statistics
                 stats = get_incident_statistics()
                 logger.info(f"Storage contains {stats['total']} total incidents from {len(stats['sources'])} sources")
         except Exception as e:
             logger.warning(f"Error loading from storage: {e}")
     
-    # Strategy 1: Enhanced RSS Feed parsing
+    # Primary strategy: JSON API (returns up to 50 incidents with full detail)
+    json_api_succeeded = False
     try:
-        logger.info("Fetching incidents from RSS feed...")
-        rss_url = "https://status.webex.com/incidents.rss"
+        logger.info("Fetching incidents from all-incidents.json API...")
+        api_url = "https://status.webex.com/all-incidents.json"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/rss+xml, application/xml, text/xml, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br'
+            'Accept': 'application/json',
         }
         
-        r = requests.get(rss_url, headers=headers, timeout=timeout)
+        r = requests.get(api_url, headers=headers, timeout=timeout)
         r.raise_for_status()
-        logger.debug(f"RSS feed fetched: {len(r.text)} characters")
+        api_data = r.json()
+        incidents_list = api_data.get('incidents', []) if isinstance(api_data, dict) else []
+        logger.info(f"JSON API returned {len(incidents_list)} incidents")
         
-        # Parse RSS content with feedparser (more reliable for RSS)
-        import feedparser
-        feed = feedparser.parse(r.text)
-        logger.debug(f"Feedparser found {len(feed.entries)} entries")
-        items = feed.entries
-        use_feedparser = True
+        impact_map = {'none': 'Low', 'minor': 'Medium', 'major': 'High', 'critical': 'High'}
         
-        for i, item in enumerate(items[:50]):  # Get up to 50 incidents
+        for inc in incidents_list:
             try:
-                if use_feedparser:
-                    # Handle feedparser entries
+                inc_id = inc.get('id', '')
+                title = inc.get('name', '').strip()
+                if not title:
+                    continue
+                
+                inc_status = inc.get('status', 'resolved')
+                if inc_status in ('investigating', 'identified', 'monitoring'):
+                    mapped_status = 'active'
+                else:
+                    mapped_status = 'resolved'
+                
+                impact_raw = inc.get('impact', 'minor')
+                impact_level = impact_map.get(impact_raw, 'Medium')
+                
+                published = inc.get('created_at', '')
+                resolved_at = inc.get('resolved_at', '')
+                locations = inc.get('locations', '')
+                pub_id = inc.get('publicationId', '')
+                inc_number = inc.get('incidentNumber', '')
+                
+                link = f"https://status.webex.com/incident/history?lang=en_US#{inc_id}"
+                
+                description = ''
+                updates = inc.get('incident_updates', [])
+                if updates:
+                    latest = updates[0]
+                    description = latest.get('body', '')[:500]
+                
+                affected = []
+                for comp in inc.get('components', []):
+                    cname = comp.get('name', '')
+                    if cname:
+                        affected.append(cname)
+                
+                data.append({
+                    "id": inc_id,
+                    "title": title,
+                    "link": link,
+                    "published": published,
+                    "status": mapped_status,
+                    "impact_level": impact_level,
+                    "source": "status.webex.com/api",
+                    "description": description,
+                    "locations": locations,
+                    "publication_id": pub_id,
+                    "incident_number": inc_number,
+                    "resolved_at": resolved_at,
+                    "affected_components": ', '.join(affected),
+                })
+            except Exception as e:
+                logger.warning(f"Error processing JSON API incident: {e}")
+                continue
+        
+        json_api_succeeded = True
+        logger.info(f"JSON API processed: {len(incidents_list)} incidents added")
+        
+    except Exception as e:
+        logger.warning(f"Error fetching JSON API: {e}")
+    
+    # Fallback: RSS feed (only if JSON API failed)
+    if not json_api_succeeded:
+        try:
+            logger.info("JSON API failed, falling back to RSS feed...")
+            rss_url = "https://status.webex.com/incidents.rss"
+            rss_headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+            }
+            
+            r = requests.get(rss_url, headers=rss_headers, timeout=timeout)
+            r.raise_for_status()
+            
+            import feedparser
+            feed = feedparser.parse(r.text)
+            
+            for item in feed.entries[:50]:
+                try:
                     title = item.get("title", "").strip()
                     link = item.get("link", "").strip()
                     pub_date_elem = item.get("published", "")
-                    description_elem = item.get("description", "")
-                else:
-                    # Handle BeautifulSoup items
-                    title_elem = item.find('title')
-                    link_elem = item.find('link')
-                    pub_date_elem = item.find('pubdate')
-                    description_elem = item.find('description')
                     
-                    if title_elem and link_elem:
-                        title = title_elem.get_text().strip()
-                        link = link_elem.get_text().strip()
-                    else:
+                    if not title or not link:
                         continue
-                
-                if title and link:
-                    # Include maintenance items as they are relevant for analysis
                     
-                    # Use the full URL as the incident ID since it's useful and traceable
-                    incident_id = link if link else f"RSS_{len(data)+1}"
-                    
-                    # Get published date
                     published_date = time.strftime('%Y-%m-%d %H:%M:%S')
                     if pub_date_elem:
                         try:
-                            pub_date_text = pub_date_elem.get_text().strip()
+                            pub_date_text = pub_date_elem.strip() if isinstance(pub_date_elem, str) else pub_date_elem.get_text().strip()
                             published_date = pub_date_text
                         except Exception:
                             pass
                     
-                    # Determine impact level based on title and description content
-                    impact_level = "Low"
                     content_to_check = title.lower()
+                    description_elem = item.get("description", "")
                     if description_elem:
-                        if use_feedparser:
-                            content_to_check += " " + str(description_elem).lower()
-                        else:
-                            try:
-                                content_to_check += " " + description_elem.get_text().lower()
-                            except AttributeError:
-                                content_to_check += " " + str(description_elem).lower()
+                        content_to_check += " " + str(description_elem).lower()
                     
-                    if any(word in content_to_check for word in ["outage", "down", "unavailable", "critical", "major", "severe", "complete failure"]):
+                    impact_level = "Low"
+                    if any(w in content_to_check for w in ["outage", "down", "unavailable", "critical", "major", "severe"]):
                         impact_level = "High"
-                    elif any(word in content_to_check for word in ["degraded", "slow", "intermittent", "partial", "minor", "limited", "delays"]):
+                    elif any(w in content_to_check for w in ["degraded", "slow", "intermittent", "partial", "minor"]):
                         impact_level = "Medium"
                     
-                    # Determine status based on content
-                    status = "resolved"
-                    if any(word in content_to_check for word in ["ongoing", "active", "investigating", "monitoring", "identified"]):
-                        status = "active"
-                    elif any(word in content_to_check for word in ["resolved", "fixed", "completed", "restored"]):
-                        status = "resolved"
+                    inc_status = "resolved"
+                    if any(w in content_to_check for w in ["ongoing", "active", "investigating", "monitoring", "identified"]):
+                        inc_status = "active"
                     
                     data.append({
-                        "id": incident_id,
+                        "id": link,
                         "title": title,
                         "link": link,
                         "published": published_date,
-                        "status": status,
+                        "status": inc_status,
                         "impact_level": impact_level,
                         "source": "status.webex.com/rss"
                     })
-                    
-            except Exception as e:
-                logger.warning(f"Error processing RSS item: {e}")
-                continue
-        
-        logger.info(f"RSS feed processed: {len(data)} incidents added")
-                
-    except Exception as e:
-        logger.warning(f"Error fetching RSS feed: {e}")
-    
-    # Strategy 2: Playwright-based historical page scraping
-    playwright_incidents = fetch_status_webex_incident_history_playwright()
-    data.extend(playwright_incidents)
-    logger.info(f"Playwright-based incident fetching completed: {len(playwright_incidents)} incidents added")
-    
-    # Strategy 3: Current status page fallback
-    try:
-        status_url = "https://status.webex.com/"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        r = requests.get(status_url, headers=headers, timeout=timeout)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        
-        # Look for current incident-related content
-        incident_elements = soup.find_all(['div', 'article', 'section'], class_=re.compile(r'incident|status|alert', re.IGNORECASE))
-        
-        for element in incident_elements[:5]:  # Limit to 5 current incidents
-            try:
-                title_elem = element.find(['h1', 'h2', 'h3', 'h4', 'title'])
-                title = title_elem.get_text().strip() if title_elem else "Unknown Incident"
-                
-                if "maintenance" in title.lower():
+                except Exception as e:
+                    logger.warning(f"Error processing RSS item: {e}")
                     continue
-                
-                # Extract incident ID
-                incident_id = re.search(r'(\d+)', title)
-                incident_id = incident_id.group(1) if incident_id else f"CURR_{len(data)+1}"
-                
-                # Determine impact level
-                impact_level = "Low"
-                if any(word in title.lower() for word in ["outage", "down", "unavailable", "critical"]):
-                    impact_level = "High"
-                elif any(word in title.lower() for word in ["degraded", "slow", "intermittent", "partial"]):
-                    impact_level = "Medium"
-                
+            
+            logger.info(f"RSS feed fallback processed: {len(data)} total incidents")
+        except Exception as e:
+            logger.warning(f"RSS feed fallback also failed: {e}")
+
+    # Supplement: parse non-maintenance incidents from history.rss
+    try:
+        logger.info("Supplementing incidents from history.rss...")
+        hist_url = "https://status.webex.com/history.rss"
+        hist_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+        }
+        hr = requests.get(hist_url, headers=hist_headers, timeout=timeout)
+        hr.raise_for_status()
+
+        import feedparser
+        hist_feed = feedparser.parse(hr.text)
+        hist_added = 0
+
+        for item in hist_feed.entries:
+            try:
+                title = item.get('title', '').strip()
+                if not title or 'maintenance' in title.lower():
+                    continue
+                link = item.get('link', '').strip()
+                if not link:
+                    continue
+
+                # Extract the hash fragment from the link to match JSON API IDs
+                # e.g. "https://...#ec864820..." -> "ec864820..."
+                rss_id = link
+                if '#' in link:
+                    fragment = link.split('#', 1)[1]
+                    if fragment:
+                        rss_id = fragment
+
+                published = ''
+                if hasattr(item, 'published_parsed') and item.published_parsed:
+                    try:
+                        published = datetime(*item.published_parsed[:6]).strftime('%Y-%m-%dT%H:%M:%SZ')
+                    except Exception:
+                        published = item.get('published', '')
+                else:
+                    published = item.get('published', '')
+
+                content_to_check = title.lower()
+                desc_raw = item.get('description', '') or item.get('summary', '')
+                if desc_raw:
+                    content_to_check += ' ' + str(desc_raw).lower()
+
+                impact_level = 'Medium'
+                if any(w in content_to_check for w in ['outage', 'down', 'unavailable', 'critical', 'major', 'severe']):
+                    impact_level = 'High'
+                elif any(w in content_to_check for w in ['low', 'minor', 'informational']):
+                    impact_level = 'Low'
+
+                inc_status = 'resolved'
+                if any(w in content_to_check for w in ['ongoing', 'active', 'investigating', 'monitoring', 'identified']):
+                    inc_status = 'active'
+
                 data.append({
-                    "id": incident_id,
-                    "title": title,
-                    "link": status_url,
-                    "published": time.strftime('%Y-%m-%d %H:%M:%S'),
-                    "status": "active",
-                    "impact_level": impact_level,
-                    "source": "status.webex.com/current"
+                    'id': rss_id,
+                    'title': title,
+                    'link': link,
+                    'published': published,
+                    'status': inc_status,
+                    'impact_level': impact_level,
+                    'source': 'status.webex.com/history.rss',
+                    'description': str(desc_raw)[:500] if desc_raw else '',
                 })
-                
-            except Exception as e:
-                logger.warning(f"Error processing current incident element: {e}")
+                hist_added += 1
+            except Exception:
                 continue
-                
+
+        logger.info(f"Supplemented {hist_added} incidents from history.rss")
     except Exception as e:
-        logger.warning(f"Error in current status page fetching: {e}")
-    
+        logger.warning(f"Error supplementing from history.rss: {e}")
+
     # Remove duplicates and sort by published date
     unique_incidents = []
     seen_ids = set()
@@ -1885,15 +1991,14 @@ def fetch_status_incidents(timeout=25) -> List[Dict[str,str]]:
             seen_ids.add(incident['id'])
     
     # Sort by published date (most recent first)
-    unique_incidents.sort(key=lambda x: x.get('published', ''), reverse=True)
+    unique_incidents.sort(key=lambda x: str(x.get('published') or ''), reverse=True)
     
     # Note: Sample incidents removed - using only real data from RSS feed and storage
     
     # Store new incidents in persistent storage
     if storage_available:
         try:
-            # Only store incidents that aren't from storage
-            new_incidents = [inc for inc in unique_incidents if not inc.get('source_storage', False)]
+            new_incidents = [inc for inc in unique_incidents if not inc.get('_from_storage', False)]
             if new_incidents:
                 stored_count = store_historical_incidents(new_incidents)
                 logger.info(f"Stored {stored_count} new incidents in persistent storage")
@@ -1906,6 +2011,94 @@ def fetch_status_incidents(timeout=25) -> List[Dict[str,str]]:
     logger.debug(f"Sample incidents: {[inc.get('id', 'no-id') for inc in unique_incidents[:5]]}")
     
     return unique_incidents
+
+def fetch_status_maintenances(timeout=25) -> List[Dict[str, str]]:
+    """Fetch scheduled maintenance events from status.webex.com history RSS feed."""
+    try:
+        from incident_storage import store_historical_maintenances
+        storage_available = True
+    except ImportError:
+        storage_available = False
+
+    data: List[Dict[str, str]] = []
+
+    try:
+        logger.info("Fetching maintenances from history.rss...")
+        rss_url = "https://status.webex.com/history.rss"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+        }
+        r = requests.get(rss_url, headers=headers, timeout=timeout)
+        r.raise_for_status()
+
+        import feedparser
+        feed = feedparser.parse(r.text)
+
+        now_utc = datetime.utcnow()
+
+        for item in feed.entries:
+            try:
+                title = item.get('title', '').strip()
+                if not title:
+                    continue
+                if 'maintenance' not in title.lower():
+                    continue
+
+                link = item.get('link', '').strip()
+                maint_id = link or title
+
+                pub_raw = item.get('published', '')
+                published = pub_raw
+                if hasattr(item, 'published_parsed') and item.published_parsed:
+                    try:
+                        published = datetime(*item.published_parsed[:6]).strftime('%Y-%m-%dT%H:%M:%SZ')
+                    except Exception:
+                        pass
+
+                try:
+                    pub_dt = datetime.strptime(published[:19], '%Y-%m-%dT%H:%M:%S')
+                except (ValueError, IndexError):
+                    pub_dt = None
+
+                if pub_dt is None:
+                    maint_status = 'unknown'
+                else:
+                    maint_status = 'completed'
+                    if pub_dt > now_utc:
+                        maint_status = 'scheduled'
+
+                description = ''
+                desc_raw = item.get('description', '') or item.get('summary', '')
+                if desc_raw:
+                    description = str(desc_raw)[:500]
+
+                data.append({
+                    'id': maint_id,
+                    'title': title,
+                    'link': link,
+                    'published': published,
+                    'status': maint_status,
+                    'source': 'status.webex.com/history.rss',
+                    'description': description,
+                })
+            except Exception as e:
+                logger.warning(f"Error processing maintenance RSS item: {e}")
+                continue
+
+        logger.info(f"Parsed {len(data)} maintenance events from history.rss")
+    except Exception as e:
+        logger.warning(f"Error fetching maintenance RSS: {e}")
+
+    if storage_available and data:
+        try:
+            stored = store_historical_maintenances(data)
+            logger.info(f"Stored {stored} maintenances in persistent storage")
+        except Exception as e:
+            logger.warning(f"Error storing maintenances: {e}")
+
+    return data
+
 
 def _correlate_incidents_with_cases(ext_incidents: List[Dict], csone_df: pd.DataFrame, ab_df: pd.DataFrame) -> Dict[str, List[Dict]]:
     """
@@ -1924,10 +2117,10 @@ def _correlate_incidents_with_cases(ext_incidents: List[Dict], csone_df: pd.Data
     import re
     
     for incident in ext_incidents:
-        incident_id = incident.get('id', '')
-        incident_title = incident.get('title', '').lower()
-        incident_desc = incident.get('description', '').lower()
-        incident_published = incident.get('published', '')
+        incident_id = (incident.get('id') or '')
+        incident_title = (incident.get('title') or '').lower()
+        incident_desc = (incident.get('description') or '').lower()
+        incident_published = (incident.get('published') or '')
         
         correlated_cases = []
         
@@ -1935,13 +2128,14 @@ def _correlate_incidents_with_cases(ext_incidents: List[Dict], csone_df: pd.Data
         incident_date = None
         if incident_published:
             try:
-                # Try various date formats
-                for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%m/%d/%Y', '%d/%m/%Y']:
-                    try:
-                        incident_date = datetime.strptime(incident_published.split()[0], fmt)
-                        break
-                    except Exception:
-                        continue
+                parts = incident_published.split()
+                if parts:
+                    for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%m/%d/%Y', '%d/%m/%Y']:
+                        try:
+                            incident_date = datetime.strptime(parts[0], fmt)
+                            break
+                        except Exception:
+                            continue
             except Exception:
                 pass
         
@@ -2062,7 +2256,9 @@ class CircuitChatClient:
         )
         resp.raise_for_status()
         data = resp.json()
-        self._access_token = data["access_token"]
+        self._access_token = data.get("access_token")
+        if self._access_token is None:
+            raise ValueError("No access_token in Okta response")
         self._expiry = time.time() + int(data.get("expires_in", 3600))
         return self._access_token
 
@@ -2082,6 +2278,8 @@ class CircuitChatClient:
                 user=json.dumps({"appkey": self.app_key}),
                 stop=["<|im_end|>"]
             )
+            if not res.choices:
+                return None
             return res.choices[0].message.content
         except APITimeoutError:
             logger.error("CircuIT API call timed out after 120 seconds.")
@@ -2366,6 +2564,9 @@ Report Date: {datetime.now().strftime("%B %d, %Y")}
 
 def append_to_word_report(doc_or_path, markdown_content: str, heading: str = None):
     """Enhanced Word report writer with professional executive-ready formatting - removes ALL markdown symbols"""
+    
+    if not isinstance(markdown_content, str) or not markdown_content.strip():
+        return
     
     # Pre-process markdown content to ensure clean formatting
     # Remove any stray markdown symbols that aren't at line starts
@@ -2678,11 +2879,17 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
             report_info.to_excel(xw, sheet_name="Report_Info", index=False)
             for name, df in sheets.items():
                 if df is None: continue
+                if not isinstance(df, pd.DataFrame):
+                    try:
+                        df = pd.DataFrame(df) if df else pd.DataFrame()
+                    except Exception:
+                        continue
                 df_copy = df.copy()
                 for col in df_copy.select_dtypes(include=['datetimetz']).columns:
-                    df_copy[col] = df_copy[col].dt.tz_convert(None)
+                    if df_copy[col].dt.tz is not None:
+                        df_copy[col] = df_copy[col].dt.tz_convert(None)
 
-                sheet = name[:31]
+                sheet = (name or "Sheet")[:31]
                 if hasattr(df_copy, "to_excel"):
                     df_copy.to_excel(xw, sheet_name=sheet, index=False)
                 else:
@@ -2693,7 +2900,8 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                     if df is not None and hasattr(df, "empty") and not df.empty:
                         df_copy = df.copy()
                         for col in df_copy.select_dtypes(include=['datetimetz']).columns:
-                            df_copy[col] = df_copy[col].dt.tz_convert(None)
+                            if df_copy[col].dt.tz is not None:
+                                df_copy[col] = df_copy[col].dt.tz_convert(None)
                         df_copy.to_excel(xw, sheet_name=sheet_name[:31], index=False)
         return f"{base_path}.xlsx"
 
@@ -3124,10 +3332,10 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
         
         # Show ALL incidents
         for incident in ext_incidents:
-            incident_id = incident.get('id', 'Unknown')
-            title = incident.get('title', 'No Title')
-            status = incident.get('status', 'Unknown')
-            published = incident.get('published', 'Unknown')
+            incident_id = (incident.get('id') or 'Unknown')
+            title = (incident.get('title') or 'No Title')
+            status = (incident.get('status') or 'Unknown')
+            published = (incident.get('published') or 'Unknown')
             
             # FIXED: Check for ALL correlations
             correlated_cases = incident_correlations.get(incident_id, [])
