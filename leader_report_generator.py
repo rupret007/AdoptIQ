@@ -123,7 +123,7 @@ class LeaderReportGenerator:
         ext_incidents: List[Dict] = None,
         software_defects: Dict = None,
         psirt_vulns: Dict = None
-    ) -> Tuple[Document, str]:
+    ) -> Tuple[Document, str, Dict, List]:
         """
         Generate comprehensive leader report for a manager
         
@@ -136,7 +136,7 @@ class LeaderReportGenerator:
             psirt_vulns: PSIRT vulnerabilities extracted from CSOne/AB (optional)
             
         Returns:
-            Tuple of (Document object, file path)
+            Tuple of (Document object, file path, team_data dict, direct_reports list)
         """
         logger.info(f"DEBUG: Generating leader report for {manager_name} covering last {days} days")
         
@@ -210,11 +210,12 @@ class LeaderReportGenerator:
         output_dir = _ensure_outputs()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_manager = "".join(c for c in manager_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        safe_manager = safe_manager.replace(' ', '_')
         filename = f"AdoptIQ_Report_Leader_{safe_manager}_{days}d_{timestamp}.docx"
         filepath = output_dir / filename
         self.doc.save(str(filepath))
         logger.info(f"Leader report saved to: {filepath}")
-        return self.doc, str(filepath)
+        return self.doc, str(filepath), team_data, direct_reports
     
     def add_hyperlink(self, paragraph, url, text, font_size=9):
         """
@@ -2954,15 +2955,16 @@ class LeaderReportGenerator:
             header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
         
         # Statistics rows
+        avg_divisor = max(total_team_members, 1)
         stats_data = [
             ('Team Members', str(total_team_members), f"{total_team_members}"),
-            ('Total Customers', str(total_customers), f"{total_customers/total_team_members:.1f}"),
-            ('Action Plans', str(total_aps), f"{total_aps/total_team_members:.1f}"),
-            ('Adoption Barriers', str(total_abs), f"{total_abs/total_team_members:.1f}"),
-            ('Customer Pulse Records', str(total_cps), f"{total_cps/total_team_members:.1f}"),
-            ('TAC Cases', str(total_tac_cases), f"{total_tac_cases/total_team_members:.1f}"),
-            ('BEMS Escalations', str(total_bems), f"{total_bems/total_team_members:.1f}"),
-            ('Total Activities', str(total_aps + total_abs + total_cps + total_tac_cases), f"{(total_aps + total_abs + total_cps + total_tac_cases)/total_team_members:.1f}")
+            ('Total Customers', str(total_customers), f"{total_customers/avg_divisor:.1f}"),
+            ('Action Plans', str(total_aps), f"{total_aps/avg_divisor:.1f}"),
+            ('Adoption Barriers', str(total_abs), f"{total_abs/avg_divisor:.1f}"),
+            ('Customer Pulse Records', str(total_cps), f"{total_cps/avg_divisor:.1f}"),
+            ('TAC Cases', str(total_tac_cases), f"{total_tac_cases/avg_divisor:.1f}"),
+            ('BEMS Escalations', str(total_bems), f"{total_bems/avg_divisor:.1f}"),
+            ('Total Activities', str(total_aps + total_abs + total_cps + total_tac_cases), f"{(total_aps + total_abs + total_cps + total_tac_cases)/avg_divisor:.1f}")
         ]
         
         for metric, total, avg in stats_data:
@@ -4167,9 +4169,9 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
         generator = LeaderReportGenerator(ctx, team_roster)
         logger.info(f"DEBUG: LeaderReportGenerator created successfully")
         
-        # Generate the report (pass all data sources for consistency)
+        # Generate the report and reuse team_data/direct_reports (avoids redundant Snowflake queries)
         logger.info(f"DEBUG: About to call generator.generate_leader_report()")
-        doc, filepath = generator.generate_leader_report(
+        doc, filepath, team_data, direct_reports = generator.generate_leader_report(
             manager_name, days,
             ext_bugs=ext_bugs, ext_incidents=ext_incidents,
             software_defects=software_defects, psirt_vulns=psirt_vulns
@@ -4180,9 +4182,6 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
         logger.info(f"DEBUG: Checking csone_df: is None: {csone_df is None}, empty: {csone_df.empty if csone_df is not None else 'N/A'}")
         if csone_df is not None and not csone_df.empty:
             logger.info(f"DEBUG: CSOne data provided, adding TAC cases...")
-            # Need to regenerate with TAC cases - get team data first
-            direct_reports = generator._get_direct_reports(manager_name)
-            team_data = generator._collect_team_data(direct_reports, days)
             generator.add_tac_cases_from_csone(team_data, csone_df, days)
             
             # Perform comprehensive data validation
@@ -4193,7 +4192,6 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             generator._setup_document_settings()
             generator._create_title_page(manager_name, days, direct_reports)
             generator._create_summary_table(team_data, days)
-            # TAC cases are now integrated into individual sections, not a separate page
             generator._create_adoptiq_summaries_per_person(team_data, days)
             generator._create_detailed_ab_list(team_data)
             generator._add_section_separator()
@@ -4201,15 +4199,12 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             generator._add_section_separator()
             generator._add_external_intelligence_section(ext_bugs, ext_incidents, software_defects, psirt_vulns)
             generator._add_section_separator()
-            # Add validation section
             generator._add_validation_section(validation_results)
             generator.doc.save(filepath)
             
             logger.info(f"Leader report regenerated with TAC cases and validation (filtered to last {days} days)")
         else:
             # Even without CSOne data, perform validation on Snowflake data
-            direct_reports = generator._get_direct_reports(manager_name)
-            team_data = generator._collect_team_data(direct_reports, days)
             validation_results = generator._validate_and_verify_data(team_data, days)
             
             # Add validation section to existing document

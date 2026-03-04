@@ -130,7 +130,7 @@
                                     <p class="card-text text-muted">
                                         Executive summary with detailed insights and recommendations.
                                     </p>
-                                    <a href="{{ url_for('download_file', analysis_id=analysis_id, file_type='word') }}" 
+                                    <a href="{{ url_for('download_result', analysis_id=analysis_id, file_type='docx') }}" 
                                        class="btn btn-primary download-btn" data-type="word">
                                         <i class="fas fa-download me-2"></i>Download Word
                                     </a>
@@ -147,7 +147,7 @@
                                     <p class="card-text text-muted">
                                         Detailed data analysis with multiple worksheets.
                                     </p>
-                                    <a href="{{ url_for('download_file', analysis_id=analysis_id, file_type='excel') }}" 
+                                    <a href="{{ url_for('download_result', analysis_id=analysis_id, file_type='xlsx') }}" 
                                        class="btn btn-success download-btn" data-type="excel">
                                         <i class="fas fa-download me-2"></i>Download Excel
                                     </a>

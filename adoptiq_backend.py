@@ -421,32 +421,37 @@ LIKELY_SUB_COLS = {"Subscription ID", "SUBSCRIPTION_ID", "SUB_ID", "Subscription
 def load_csone_excel(path: Optional[Path]) -> pd.DataFrame:
     if path is None or not Path(path).exists():
         return pd.DataFrame()
-    wb = openpyxl.load_workbook(str(path), data_only=True)
-    sheet = wb.active
-    header = None; start = 2
-    for i, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-        if row and sum(1 for c in row if c) >= 3:
-            header = [str(c).strip() if c else f"col_{j}" for j, c in enumerate(row)]
-            start = i + 1; break
-    if not header:
-        return pd.DataFrame()
-    rows = []
-    for r in sheet.iter_rows(min_row=start, values_only=True):
-        rows.append(dict(zip(header, r)))
-    df = pd.DataFrame(rows)
-    df.columns = [c.strip() for c in df.columns]
-    
-    # === DEFINITIVE FIX: Remove blank col_0 ===
-    if 'col_0' in df.columns:
-        df.drop(columns=['col_0'], inplace=True)
+    try:
+        wb = openpyxl.load_workbook(str(path), data_only=True)
+        sheet = wb.active
+        if sheet is None:
+            logger.warning("CSOne workbook has no active sheet")
+            return pd.DataFrame()
+        header = None; start = 2
+        for i, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+            if row and sum(1 for c in row if c) >= 3:
+                header = [str(c).strip() if c else f"col_{j}" for j, c in enumerate(row)]
+                start = i + 1; break
+        if not header:
+            return pd.DataFrame()
+        rows = []
+        for r in sheet.iter_rows(min_row=start, values_only=True):
+            rows.append(dict(zip(header, r)))
+        df = pd.DataFrame(rows)
+        df.columns = [c.strip() for c in df.columns]
         
-    # add refs - use LIKELY_* cols for robustness (CSOne exports may use TITLE, SUBJECT, DESCRIPTION, etc.)
-    title_col = next((c for c in LIKELY_TITLE_COLS if c in df.columns), None)
-    desc_col = next((c for c in LIKELY_DESC_COLS if c in df.columns), None)
-    _title = df[title_col].fillna("").astype(str) if title_col else pd.Series([""] * len(df), index=df.index)
-    _desc = df[desc_col].fillna("").astype(str) if desc_col else pd.Series([""] * len(df), index=df.index)
-    df["bemscsc_refs"] = (_title + " " + _desc).apply(_extract_refs)
-    return df
+        if 'col_0' in df.columns:
+            df.drop(columns=['col_0'], inplace=True)
+            
+        title_col = next((c for c in LIKELY_TITLE_COLS if c in df.columns), None)
+        desc_col = next((c for c in LIKELY_DESC_COLS if c in df.columns), None)
+        _title = df[title_col].fillna("").astype(str) if title_col else pd.Series([""] * len(df), index=df.index)
+        _desc = df[desc_col].fillna("").astype(str) if desc_col else pd.Series([""] * len(df), index=df.index)
+        df["bemscsc_refs"] = (_title + " " + _desc).apply(_extract_refs)
+        return df
+    except Exception as e:
+        logger.error(f"Failed to load CSOne Excel file: {e}")
+        return pd.DataFrame()
 
 def newest_csone(folder: Path) -> Optional[Path]:
     cands = sorted(Path(folder).glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -2675,7 +2680,7 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                 if df is None: continue
                 df_copy = df.copy()
                 for col in df_copy.select_dtypes(include=['datetimetz']).columns:
-                    df_copy[col] = df_copy[col].dt.tz_localize(None)
+                    df_copy[col] = df_copy[col].dt.tz_convert(None)
 
                 sheet = name[:31]
                 if hasattr(df_copy, "to_excel"):
@@ -2688,7 +2693,7 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                     if df is not None and hasattr(df, "empty") and not df.empty:
                         df_copy = df.copy()
                         for col in df_copy.select_dtypes(include=['datetimetz']).columns:
-                            df_copy[col] = df_copy[col].dt.tz_localize(None)
+                            df_copy[col] = df_copy[col].dt.tz_convert(None)
                         df_copy.to_excel(xw, sheet_name=sheet_name[:31], index=False)
         return f"{base_path}.xlsx"
 
@@ -4007,7 +4012,7 @@ def _apply_scope_filter_ab(df: pd.DataFrame, tech: str, days: int) -> pd.DataFra
 def _apply_scope_filter_csone(df: pd.DataFrame, tech: str, days: int, sub_ids: List[str], team_customer_names: List[str]) -> pd.DataFrame:
     if df is None or df.empty: 
         logger.debug("CSOne filter: Input DataFrame is empty or None")
-        return df
+        return pd.DataFrame()
     
     logger.debug(f"CSOne filter: Starting with {len(df)} cases")
     logger.debug(f"CSOne filter: Technology='{tech}', Days={days}")

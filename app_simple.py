@@ -364,11 +364,20 @@ def _build_insights_payload(
     return payload
 
 
+def _json_default(obj):
+    """Handle non-standard types during JSON serialization of analysis status."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if hasattr(obj, 'item'):
+        return obj.item()
+    if isinstance(obj, (set, frozenset)):
+        return list(obj)
+    return str(obj)
+
+
 def save_analysis_status():
     """Save analysis status to file safely from any caller context."""
     try:
-        # Convert datetime objects to strings for JSON serialization.
-        # Copy under lock so callers do not need to manage locking semantics.
         with analysis_status_lock:
             serializable_status = {}
             for analysis_id, status in analysis_status.items():
@@ -378,11 +387,10 @@ def save_analysis_status():
                         serializable_status[analysis_id][key] = value.isoformat()
                     else:
                         serializable_status[analysis_id][key] = value
-            # Use _APP_SUPPORT so frozen app writes to writable dir (%APPDATA%\AdoptIQ), not bundle
             status_file_path = str(_APP_SUPPORT / STATUS_FILE) if not os.path.isabs(STATUS_FILE) else STATUS_FILE
             temp_file_path = f"{status_file_path}.tmp"
             with open(temp_file_path, 'w', encoding='utf-8') as f:
-                json.dump(serializable_status, f, indent=2)
+                json.dump(serializable_status, f, indent=2, default=_json_default)
             os.replace(temp_file_path, status_file_path)
         logger.debug(f"Saved {len(serializable_status)} analysis statuses to {status_file_path}")
     except Exception as e:
@@ -1243,12 +1251,9 @@ def _clean_datetime_columns_for_excel(df):
         for col in df_clean.columns:
             if pd.api.types.is_datetime64_any_dtype(df_clean[col]):
                 try:
-                    # Remove timezone information if present
+                    # Strip timezone from tz-aware columns; tz-naive columns need no conversion
                     if hasattr(df_clean[col].dtype, 'tz') and df_clean[col].dtype.tz is not None:
-                        df_clean[col] = df_clean[col].dt.tz_localize(None)
-                    elif str(df_clean[col].dtype).startswith('datetime64[ns'):
-                        # Convert to timezone-naive datetime
-                        df_clean[col] = pd.to_datetime(df_clean[col]).dt.tz_localize(None)
+                        df_clean[col] = df_clean[col].dt.tz_convert(None)
                 except Exception as col_error:
                     logger.warning(f"Could not clean datetime column {col}: {col_error}")
                     # If we can't clean the column, convert to string
@@ -1754,7 +1759,7 @@ def create_executive_charts(ab_norm: pd.DataFrame, arr_data: pd.DataFrame, arr_i
             chart_paths.append(chart_path)
         
         # Chart 3: Customer ARR Distribution
-        if not arr_data.empty and 'ANNUAL_CONTRACT_VALUE' in arr_data.columns:
+        if arr_data is not None and not arr_data.empty and 'ANNUAL_CONTRACT_VALUE' in arr_data.columns:
             fig, ax = plt.subplots(figsize=(10, 6))
             arr_values = arr_data['ANNUAL_CONTRACT_VALUE'].fillna(0)
             arr_values = arr_values[arr_values > 0]  # Only positive values
@@ -4863,6 +4868,7 @@ def run_compact_analysis(analysis_id):
                 analysis_status[analysis_id]['status'] = 'error'
                 analysis_status[analysis_id]['message'] = f' Analysis failed: {str(e)}'
                 analysis_status[analysis_id]['error'] = str(e)
+        save_analysis_status()
     finally:
         # Ensure database connection is closed
         if 'ctx' in locals() and ctx is not None:
@@ -8423,8 +8429,12 @@ def get_status(analysis_id):
         status = analysis_status.get(analysis_id)
         if not status:
             return jsonify({'error': 'Analysis not found', 'analysis_id': analysis_id}), 404
-        # Return a copy to avoid mutating shared state in responses.
-        status_copy = dict(status)
+        status_copy = {}
+        for key, value in status.items():
+            if isinstance(value, datetime):
+                status_copy[key] = value.isoformat()
+            else:
+                status_copy[key] = value
     status_copy['eta_display'] = get_eta_display(status_copy)
     
     return jsonify(status_copy)
@@ -8732,7 +8742,16 @@ def download_file(filename):
         if not resolved_path.startswith(os.path.abspath(outputs_dir)):
             return "Access denied", 403
         if not os.path.exists(file_path):
-            return f"File not found: {safe_filename}", 404
+            # Fallback: secure_filename may have altered the name (e.g. spaces → underscores).
+            # Try the original URL-decoded filename with a path-traversal guard.
+            original_path = os.path.join(outputs_dir, filename)
+            original_resolved = os.path.abspath(original_path)
+            if (original_resolved.startswith(os.path.abspath(outputs_dir))
+                    and os.path.exists(original_resolved)):
+                file_path = original_resolved
+                safe_filename = filename
+            else:
+                return f"File not found: {safe_filename}", 404
         
         return send_file(file_path, as_attachment=True, download_name=safe_filename)
         
@@ -8760,6 +8779,7 @@ def cancel_analysis(analysis_id):
         status['status'] = 'cancelling'
         status['message'] = ' Cancellation requested...'
         status['progress'] = 0
+    save_analysis_status()
     
     return jsonify({'success': True, 'message': 'Cancellation requested'})
 
@@ -9185,6 +9205,7 @@ def run_subscription_analysis(analysis_id):
             with analysis_status_lock:
                 status['status'] = 'error'
                 status['message'] = f" Subscription not found: {sub_data.get('error', 'Unknown error')}"
+            save_analysis_status()
             return
         
         # Update status
@@ -9569,6 +9590,7 @@ def run_subscription_analysis(analysis_id):
             if analysis_id in analysis_status:
                 analysis_status[analysis_id]['status'] = 'error'
                 analysis_status[analysis_id]['message'] = f' Analysis failed: {str(e)}'
+        save_analysis_status()
 
 
 @app.route('/download/<analysis_id>/<file_type>')
@@ -9580,15 +9602,34 @@ def download_result(analysis_id, file_type):
     if file_type not in ('docx', 'xlsx'):
         return jsonify({'error': f'Invalid file type: {file_type}', 'available_files': ['docx', 'xlsx']}), 404
     
-    # Check if analysis exists
+    # Check if analysis exists (try saved file if not in memory, e.g. after restart)
     if analysis_id not in analysis_status:
-        logger.error(f"[[ERROR]] Analysis not found: {analysis_id}")
-        logger.info(f"[[LIST]] Available analyses: {list(analysis_status.keys())}")
-        return jsonify({
-            'error': 'Analysis not found', 
-            'analysis_id': analysis_id,
-            'available_analyses': list(analysis_status.keys())
-        }), 404
+        try:
+            status_file_path = str(_APP_SUPPORT / STATUS_FILE) if not os.path.isabs(STATUS_FILE) else STATUS_FILE
+            if os.path.exists(status_file_path):
+                with open(status_file_path, 'r', encoding='utf-8') as f:
+                    loaded_status = json.load(f)
+                    if analysis_id in loaded_status:
+                        with analysis_status_lock:
+                            analysis_status[analysis_id] = loaded_status[analysis_id]
+                    else:
+                        logger.error(f"[[ERROR]] Analysis not found in memory or file: {analysis_id}")
+                        return jsonify({
+                            'error': 'Analysis not found',
+                            'analysis_id': analysis_id,
+                        }), 404
+            else:
+                logger.error(f"[[ERROR]] Analysis not found and no status file: {analysis_id}")
+                return jsonify({
+                    'error': 'Analysis not found',
+                    'analysis_id': analysis_id,
+                }), 404
+        except Exception as e:
+            logger.error(f"[[ERROR]] Error loading analysis status from file: {e}", exc_info=True)
+            return jsonify({
+                'error': 'Analysis not found',
+                'analysis_id': analysis_id,
+            }), 404
     
     status = analysis_status[analysis_id]
     logger.info(f"[[DATA]] Analysis status: {status.get('status', 'unknown')}")
@@ -10210,6 +10251,8 @@ def run_leader_report_generation(analysis_id):
             customer_name = status.get('customer_name', '')
             start_time = status.get('start_time', '')
             insights_payload = _build_insights_payload(status, 'Leader report completed')
+            status['word_report'] = filepath
+            status['excel_report'] = excel_path if excel_path else None
             status['results'] = {
                 'word_report': filepath,
                 'excel_report': excel_path if excel_path else None,
