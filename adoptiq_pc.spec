@@ -39,6 +39,7 @@ hidden_imports = [
     'data_source_validator', 'leader_report_generator', 'enhanced_snowflake_insights',
     'executive_intelligence_formatter',
     'enhanced_admin_dashboard_v2',
+    'incident_storage',
     'cisco_internal_integrations',
     '_bundled_secrets',
 ]

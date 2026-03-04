@@ -5,7 +5,7 @@ REM Run this script ON WINDOWS. Requires: Python 3, pip, PyInstaller.
 setlocal
 cd /d "%~dp0"
 
-set ADOPTIQ_VERSION=1.0.2
+set ADOPTIQ_VERSION=1.0.3
 set ADOPTIQ_BUILD=1
 
 echo ==============================================
