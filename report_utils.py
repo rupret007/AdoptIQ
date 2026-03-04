@@ -79,6 +79,8 @@ def format_number(value: Union[int, float, None], decimals: int = 0, as_percent:
     """Format number for consistent display in reports."""
     if value is None:
         return "N/A"
+    if isinstance(value, str) and not value.strip():
+        return "N/A"
     try:
         v = float(value)
         if pd.isna(v) or not math.isfinite(v):
@@ -96,6 +98,8 @@ def format_number(value: Union[int, float, None], decimals: int = 0, as_percent:
 def format_currency(value: Union[int, float, None], decimals: int = 2) -> str:
     """Format currency for reports."""
     if value is None:
+        return "N/A"
+    if isinstance(value, str) and not value.strip():
         return "N/A"
     try:
         v = float(value)

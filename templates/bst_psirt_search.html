@@ -356,7 +356,7 @@
             resultsPanel.classList.add('show');
             resultsContent.innerHTML = `
                 <div class="error-box">
-                    <strong>❌ Error:</strong> ${error}
+                    <strong>❌ Error:</strong> ${_esc(String(error))}
                 </div>
             `;
         }

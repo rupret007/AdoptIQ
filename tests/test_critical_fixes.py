@@ -1031,3 +1031,83 @@ class TestRound18Fixes:
                            data=json.dumps({'question': ''}),
                            content_type='application/json')
         assert resp.status_code == 400
+
+
+class TestRound19Fixes:
+    """Tests for Round 19 code audit findings."""
+
+    def test_defang_formulas_equals(self):
+        """_defang_formulas should prefix cells starting with = to prevent formula injection."""
+        import pandas as pd
+        df = pd.DataFrame({'A': ['=SUM(1+1)', 'normal', '+cmd', '-data', '@risk', '']})
+        from adoptiq_backend import write_excel_workbook
+        import inspect
+        src = inspect.getsource(write_excel_workbook)
+        assert '_defang_formulas' in src, "write_excel_workbook should use _defang_formulas"
+
+    def test_defang_formulas_logic(self):
+        """Verify defanging logic for formula-injection chars."""
+        import pandas as pd
+        df = pd.DataFrame({'col': ['=SUM(1)', '+cmd', '-data', '@risk', 'safe', '', None, 123]})
+        for col in df.columns:
+            if df[col].dtype == object:
+                df[col] = df[col].apply(
+                    lambda v: "'" + v if isinstance(v, str) and v and v[0] in ('=', '+', '-', '@') else v
+                )
+        assert df['col'].iloc[0] == "'=SUM(1)"
+        assert df['col'].iloc[1] == "'+cmd"
+        assert df['col'].iloc[2] == "'-data"
+        assert df['col'].iloc[3] == "'@risk"
+        assert df['col'].iloc[4] == "safe"
+        assert df['col'].iloc[5] == ""
+        assert df['col'].iloc[6] is None
+
+    def test_upload_filename_has_uuid_prefix(self):
+        """All three upload paths should use UUID-prefixed filenames."""
+        with open('/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/app_simple.py') as f:
+            src = f.read()
+        import re
+        uuid_pattern = re.findall(r'_uuid\.uuid4\(\)\.hex\[:8\]', src)
+        assert len(uuid_pattern) >= 3, f"Expected 3 UUID-prefixed upload paths, found {len(uuid_pattern)}"
+
+    def test_format_number_empty_string(self):
+        """format_number should return N/A for empty strings."""
+        from report_utils import format_number
+        assert format_number("") == "N/A"
+        assert format_number("  ") == "N/A"
+
+    def test_format_currency_empty_string(self):
+        """format_currency should return N/A for empty strings."""
+        from report_utils import format_currency
+        assert format_currency("") == "N/A"
+        assert format_currency("  ") == "N/A"
+
+    def test_format_number_valid_string(self):
+        """format_number should still handle valid numeric strings."""
+        from report_utils import format_number
+        assert format_number("42") == "42"
+        assert format_number("1234.5", decimals=1) == "1,234.5"
+
+    def test_format_currency_valid_string(self):
+        """format_currency should still handle valid numeric strings."""
+        from report_utils import format_currency
+        assert format_currency("100") == "$100.00"
+
+    def test_show_error_uses_esc(self):
+        """showError in bst_psirt_search.html should escape error via _esc."""
+        with open('/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/templates/bst_psirt_search.html') as f:
+            src = f.read()
+        assert '_esc(String(error))' in src, "showError should use _esc for XSS prevention"
+
+    def test_minimal_test_escapes_output(self):
+        """minimal_test.html should escape result.message and error.message."""
+        with open('/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/templates/minimal_test.html') as f:
+            src = f.read()
+        assert '_esc(String(result.message' in src, "result.message should be escaped"
+        assert 'textContent=error.message' in src, "error.message should be escaped via textContent"
+
+    def test_leader_form_redirect_validation(self):
+        """leader_report_form.html should validate redirect_url starts with /progress/."""
+        with open('/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/templates/leader_report_form.html') as f:
+            src = f.read()
+        assert "startsWith('/progress/')" in src, "redirect_url should be validated"

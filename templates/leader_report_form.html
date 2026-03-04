@@ -258,8 +258,14 @@ document.addEventListener('DOMContentLoaded', function() {
             const result = await response.json();
             
             if (result.success) {
-                // Redirect to progress page
-                window.location.href = result.redirect_url;
+                const url = result.redirect_url || '';
+                if (!url.startsWith('/progress/')) {
+                    alert('Unexpected redirect URL received.');
+                    submitBtn.disabled = false;
+                    submitBtn.innerHTML = '<i class="fas fa-rocket me-2"></i>Generate Leader Report';
+                    return;
+                }
+                window.location.href = url;
             } else {
                 // Show error
                 alert('Error: ' + (result.error || 'Unknown error occurred'));

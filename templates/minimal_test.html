@@ -146,20 +146,27 @@
 
                 const result = await response.json();
                 
+                function _esc(s) {
+                    const d = document.createElement('div');
+                    d.textContent = s;
+                    return d.innerHTML;
+                }
                 if (result.success) {
                     statusDiv.className = 'status success';
+                    const safeId = _esc(String(result.analysis_id || ''));
+                    const safeHref = '/progress/' + encodeURIComponent(result.analysis_id || '');
                     statusDiv.innerHTML = `
                         <strong>✅ Analysis Started Successfully!</strong><br>
-                        Analysis ID: ${result.analysis_id}<br>
-                        <a href="/progress/${result.analysis_id}" target="_blank">View Progress</a>
+                        Analysis ID: ${safeId}<br>
+                        <a href="${safeHref}" target="_blank" rel="noopener noreferrer">View Progress</a>
                     `;
                 } else {
                     statusDiv.className = 'status error';
-                    statusDiv.innerHTML = `<strong>❌ Error:</strong> ${result.message || 'Unknown error'}`;
+                    statusDiv.innerHTML = `<strong>❌ Error:</strong> ${_esc(String(result.message || 'Unknown error'))}`;
                 }
             } catch (error) {
                 statusDiv.className = 'status error';
-                statusDiv.innerHTML = `<strong>❌ Error:</strong> ${error.message}`;
+                statusDiv.innerHTML = `<strong>❌ Error:</strong> ${(function(){const d=document.createElement('div');d.textContent=error.message;return d.innerHTML;})()}`;
             }
         });
     </script>

@@ -839,7 +839,9 @@ def start_analysis():
                         'success': False,
                         'error': error_msg
                     }), 400
-                filename = secure_filename(file.filename)
+                import uuid as _uuid
+                raw_name = secure_filename(file.filename)
+                filename = f"{_uuid.uuid4().hex[:8]}_{raw_name}"
                 filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                 file.save(filepath)
                 csone_file = filepath
@@ -9523,11 +9525,12 @@ def start_compact_analysis():
                     if not is_valid:
                         return jsonify({'success': False, 'error': error_msg})
                     
-                    # Save file to uploads directory
-                    filename = secure_filename(file.filename)
+                    import uuid as _uuid
+                    raw_name = secure_filename(file.filename)
+                    filename = f"{_uuid.uuid4().hex[:8]}_{raw_name}"
                     filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                     file.save(filepath)
-                    csone_file = filename  # Store just the filename
+                    csone_file = filename
                     logger.info(f"[[OK]] CSOne file saved: {filepath}")
             
             if not csone_file:
@@ -10560,7 +10563,9 @@ def start_leader_report():
                 if not is_valid:
                     return jsonify({'success': False, 'error': error_msg}), 400
                 
-                filename = secure_filename(file.filename)
+                import uuid as _uuid
+                raw_name = secure_filename(file.filename)
+                filename = f"{_uuid.uuid4().hex[:8]}_{raw_name}"
                 filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                 file.save(filepath)
                 csone_file = filepath

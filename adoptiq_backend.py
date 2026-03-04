@@ -3667,6 +3667,15 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
             "adoption_barriers": "CSConsole_Adoption_Barriers",
         }
         import numpy as _np
+
+        def _defang_formulas(df: pd.DataFrame) -> pd.DataFrame:
+            """Prefix string cells starting with =, +, -, or @ with a quote to prevent Excel formula injection."""
+            for col in df.columns:
+                if df[col].dtype == object:
+                    df[col] = df[col].apply(
+                        lambda v: "'" + v if isinstance(v, str) and v and v[0] in ('=', '+', '-', '@') else v
+                    )
+            return df
         with pd.ExcelWriter(f"{base_path}.xlsx", engine="xlsxwriter") as xw:
             report_info = pd.DataFrame([
                 ["Export type", "Standard (fallback)"],
@@ -3686,6 +3695,7 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                     if df_copy[col].dt.tz is not None:
                         df_copy[col] = df_copy[col].dt.tz_convert(None)
                 df_copy = df_copy.replace([_np.inf, -_np.inf], _np.nan)
+                df_copy = _defang_formulas(df_copy)
 
                 sheet = (name or "Sheet")[:31]
                 base_sheet = sheet
@@ -3706,6 +3716,7 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                         for col in df_copy.select_dtypes(include=['datetimetz']).columns:
                             if df_copy[col].dt.tz is not None:
                                 df_copy[col] = df_copy[col].dt.tz_convert(None)
+                        df_copy = _defang_formulas(df_copy)
                         df_copy.to_excel(xw, sheet_name=sheet_name[:31], index=False)
         return f"{base_path}.xlsx"
 
