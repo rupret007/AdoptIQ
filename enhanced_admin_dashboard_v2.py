@@ -9,6 +9,7 @@ load_dotenv()
 import os
 import sys
 import json
+import tempfile
 try:
     import psutil
 except ImportError:
@@ -290,6 +291,11 @@ def store_report_insights(request_id: str, report_type: str, manager: str, techn
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (request_id, report_type, manager or '', technology or '', customer_name or '',
                   insights_json, datetime.now().isoformat()))
+            cursor.execute('''
+                DELETE FROM report_insights WHERE id NOT IN (
+                    SELECT id FROM report_insights ORDER BY created_at DESC LIMIT 500
+                )
+            ''')
     except Exception as e:
         logger.warning(f"Could not store report insights: {e}")
 
@@ -1457,8 +1463,9 @@ def export_logs():
             'export_timestamp': datetime.now().isoformat()
         }
         
-        # Save to file
-        export_file = f"admin_logs_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        export_dir = os.path.join(tempfile.gettempdir(), 'adoptiq_exports')
+        os.makedirs(export_dir, exist_ok=True)
+        export_file = os.path.join(export_dir, f"admin_logs_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
         with open(export_file, 'w', encoding='utf-8') as f:
             json.dump(logs_data, f, indent=2)
         

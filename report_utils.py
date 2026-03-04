@@ -7,6 +7,7 @@ Shared formatting, risk scoring explanation, metadata, and canonical data source
 
 from datetime import datetime
 from typing import Optional, Union, Any, List, Tuple
+import logging
 import math
 import re
 import pandas as pd
@@ -70,8 +71,8 @@ def format_date(value: Any, style: str = "long") -> str:
                 "iso": DATE_FORMAT_ISO,
             }.get(style, DATE_FORMAT_LONG)
             return value.strftime(fmt)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).debug(f"format_date could not parse {type(value).__name__}: {e}")
     return str(value) if value is not None else "N/A"
 
 

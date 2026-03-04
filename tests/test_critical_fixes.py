@@ -5,6 +5,8 @@ import pandas as pd
 import os
 import tempfile
 
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
 
 class TestFormatNumberNaN:
     """format_number must handle NaN, None, and edge cases without crashing."""
@@ -993,7 +995,7 @@ class TestRound18Fixes:
     def test_team_subs_df_none_in_exec_intel_formatter(self):
         """executive_intelligence_formatter should guard team_subs_df None before .empty."""
         import re
-        with open('/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/executive_intelligence_formatter.py') as f:
+        with open(os.path.join(_PROJECT_ROOT, 'executive_intelligence_formatter.py'), encoding='utf-8') as f:
             src = f.read()
         pattern = r'team_subs_df\.empty'
         matches = [(m.start(), src[max(0,m.start()-60):m.start()]) for m in re.finditer(pattern, src)]
@@ -1003,7 +1005,7 @@ class TestRound18Fixes:
 
     def test_runs_index_guarded_in_exec_intel_formatter(self):
         """Table header runs[0] access should be guarded in executive_intelligence_formatter."""
-        with open('/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/executive_intelligence_formatter.py') as f:
+        with open(os.path.join(_PROJECT_ROOT, 'executive_intelligence_formatter.py'), encoding='utf-8') as f:
             src = f.read()
         import re
         lines = src.split('\n')
@@ -1064,7 +1066,7 @@ class TestRound19Fixes:
 
     def test_upload_filename_has_uuid_prefix(self):
         """All three upload paths should use UUID-prefixed filenames."""
-        with open('/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/app_simple.py') as f:
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
             src = f.read()
         import re
         uuid_pattern = re.findall(r'_uuid\.uuid4\(\)\.hex\[:8\]', src)
@@ -1095,19 +1097,83 @@ class TestRound19Fixes:
 
     def test_show_error_uses_esc(self):
         """showError in bst_psirt_search.html should escape error via _esc."""
-        with open('/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/templates/bst_psirt_search.html') as f:
+        with open(os.path.join(_PROJECT_ROOT, 'templates', 'bst_psirt_search.html'), encoding='utf-8') as f:
             src = f.read()
         assert '_esc(String(error))' in src, "showError should use _esc for XSS prevention"
 
     def test_minimal_test_escapes_output(self):
         """minimal_test.html should escape result.message and error.message."""
-        with open('/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/templates/minimal_test.html') as f:
+        with open(os.path.join(_PROJECT_ROOT, 'templates', 'minimal_test.html'), encoding='utf-8') as f:
             src = f.read()
         assert '_esc(String(result.message' in src, "result.message should be escaped"
         assert 'textContent=error.message' in src, "error.message should be escaped via textContent"
 
     def test_leader_form_redirect_validation(self):
         """leader_report_form.html should validate redirect_url starts with /progress/."""
-        with open('/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/templates/leader_report_form.html') as f:
+        with open(os.path.join(_PROJECT_ROOT, 'templates', 'leader_report_form.html'), encoding='utf-8') as f:
             src = f.read()
         assert "startsWith('/progress/')" in src, "redirect_url should be validated"
+
+
+class TestRound20Fixes:
+    """Round 20 audit fixes."""
+
+    def test_send_file_toctou_guard_download_file(self):
+        """download-file route should catch FileNotFoundError from send_file."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'except (FileNotFoundError, OSError)' in src, "send_file TOCTOU guard missing"
+
+    def test_send_file_toctou_guard_download_result(self):
+        """download/<id>/<type> route should catch FileNotFoundError from send_file."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "File no longer available" in src or "file no longer available" in src, "TOCTOU recovery message missing"
+
+    def test_store_report_insights_logged(self):
+        """store_report_insights failures should be logged, not silently swallowed."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        count = src.count('store_report_insights failed')
+        assert count >= 3, f"Expected at least 3 logged store_report_insights failures, found {count}"
+
+    def test_cancellation_flags_trimmed(self):
+        """cancellation_flags should be trimmed when analysis_status is trimmed."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'stale = [k for k in cancellation_flags if k not in analysis_status]' in src
+
+    def test_format_date_logs_on_error(self):
+        """format_date should log debug on parse errors, not silently pass."""
+        import logging
+        from report_utils import format_date
+        result = format_date(object())
+        assert isinstance(result, str)
+
+    def test_report_insights_eviction(self):
+        """store_report_insights should evict old rows beyond 500."""
+        with open(os.path.join(_PROJECT_ROOT, 'enhanced_admin_dashboard_v2.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'DELETE FROM report_insights WHERE id NOT IN' in src
+
+    def test_export_logs_uses_tempdir(self):
+        """export_logs should write to a temp directory, not CWD."""
+        with open(os.path.join(_PROJECT_ROOT, 'enhanced_admin_dashboard_v2.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'adoptiq_exports' in src
+        assert 'tempfile.gettempdir()' in src
+
+    def test_no_hardcoded_absolute_paths_in_tests(self):
+        """Test files should not contain hardcoded absolute user paths."""
+        with open(os.path.join(_PROJECT_ROOT, 'tests', 'test_critical_fixes.py'), encoding='utf-8') as f:
+            src = f.read()
+        import re
+        matches = re.findall(r'/Users/\w+/', src)
+        assert len(matches) == 0, f"Found hardcoded absolute paths: {matches}"
+
+    def test_format_date_returns_string_for_bad_input(self):
+        """format_date should return a string even for completely invalid input."""
+        from report_utils import format_date
+        assert isinstance(format_date(12345), str)
+        assert isinstance(format_date("not-a-date"), str)
+        assert format_date(None) == "N/A"

@@ -465,6 +465,10 @@ def save_analysis_status():
                 for old_id in sorted_ids[50:]:
                     if analysis_status[old_id].get('status') not in ('running', 'starting', 'cancelling'):
                         del analysis_status[old_id]
+                with cancellation_flags_lock:
+                    stale = [k for k in cancellation_flags if k not in analysis_status]
+                    for k in stale:
+                        del cancellation_flags[k]
             serializable_status = {}
             for analysis_id, status in analysis_status.items():
                 serializable_status[analysis_id] = {}
@@ -4932,8 +4936,8 @@ def run_compact_analysis(analysis_id):
                 customer_name,
                 _build_insights_payload(status, 'Compact analysis completed'),
             )
-        except Exception:
-            pass
+        except Exception as _si_err:
+            logger.warning(f"store_report_insights failed: {_si_err}")
         
         logger.info(f"[[OK]] Executive Intelligence Report analysis completed: {analysis_id}")
         logger.info(f"[[FILE]] Word report: {exec_report_path} (exists: {os.path.exists(exec_report_path)})")
@@ -7066,8 +7070,8 @@ def run_customer_renewal_analysis(analysis_id):
             store_report_insights(
                 analysis_id, report_type, manager, technology, customer_name_val, insights_payload
             )
-        except Exception:
-            pass
+        except Exception as _si_err:
+            logger.warning(f"store_report_insights failed: {_si_err}")
         
         logger.info(f"[[OK]] Customer renewal analysis completed: {analysis_id}")
         
@@ -9454,7 +9458,10 @@ def download_file(filename):
                 return f"File not found: {safe_filename}", 404
         
         dl_name = secure_filename(os.path.basename(file_path)) or "download"
-        return send_file(file_path, as_attachment=True, download_name=dl_name)
+        try:
+            return send_file(file_path, as_attachment=True, download_name=dl_name)
+        except (FileNotFoundError, OSError):
+            return "File no longer available. It may have been cleaned up.", 404
         
     except Exception as e:
         logger.error(f"Error downloading file {filename}: {e}")
@@ -10289,8 +10296,8 @@ def run_subscription_analysis(analysis_id):
             store_report_insights(
                 analysis_id, report_type, manager, technology, customer_name, insights_payload
             )
-        except Exception:
-            pass
+        except Exception as _si_err:
+            logger.warning(f"store_report_insights failed: {_si_err}")
         
         logger.info(f"[[OK]] Subscription analysis completed: {analysis_id}")
         
@@ -10390,7 +10397,10 @@ def download_result(analysis_id, file_type):
                 logger.error(f"[[ERROR]] Word file not found or outside outputs dir")
                 return jsonify({'error': 'Word file not found'}), 404
             safe_name = secure_filename(analysis_id) or "report"
-            return send_file(file_path, as_attachment=True, download_name=f"AdoptIQ_Report_{safe_name}.docx")
+            try:
+                return send_file(file_path, as_attachment=True, download_name=f"AdoptIQ_Report_{safe_name}.docx")
+            except (FileNotFoundError, OSError):
+                return jsonify({'error': 'Word file no longer available'}), 404
 
         elif file_type == 'xlsx' and excel_report:
             file_path = _resolve_safe_path(excel_report, _out_dir)
@@ -10398,7 +10408,10 @@ def download_result(analysis_id, file_type):
                 logger.error(f"[[ERROR]] Excel file not found or outside outputs dir")
                 return jsonify({'error': 'Excel file not found'}), 404
             safe_name = secure_filename(analysis_id) or "data"
-            return send_file(file_path, as_attachment=True, download_name=f"AdoptIQ_Data_{safe_name}.xlsx")
+            try:
+                return send_file(file_path, as_attachment=True, download_name=f"AdoptIQ_Data_{safe_name}.xlsx")
+            except (FileNotFoundError, OSError):
+                return jsonify({'error': 'Excel file no longer available'}), 404
             
         else:
             available = []
@@ -10991,8 +11004,8 @@ def run_leader_report_generation(analysis_id):
             store_report_insights(
                 analysis_id, report_type, manager, technology, customer_name, insights_payload
             )
-        except Exception:
-            pass
+        except Exception as _si_err:
+            logger.warning(f"store_report_insights failed: {_si_err}")
         
         logger.info(f"[[OK]] Leader report completed: {analysis_id}")
         
