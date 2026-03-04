@@ -8427,8 +8427,10 @@ def get_status(analysis_id):
     # URL decode the analysis_id in case it was encoded
     analysis_id = unquote(analysis_id)
     
-    # Check in-memory status first
-    if analysis_id not in analysis_status:
+    # Check in-memory status first (under lock to avoid TOCTOU race)
+    with analysis_status_lock:
+        in_memory = analysis_id in analysis_status
+    if not in_memory:
         # If not in memory, try to load from saved file
         try:
             status_file_path = str(_APP_SUPPORT / STATUS_FILE) if not os.path.isabs(STATUS_FILE) else STATUS_FILE
@@ -9011,11 +9013,11 @@ def ask_ai_portfolio():
                                 c = enhanced['contracts']
                                 sections.append(f"\n=== CONTRACT EXPIRATIONS ===")
                                 sections.append(f"Active contracts: {c.get('active_contracts', 0)}")
-                                sections.append(f"Expiring within 90 days: {c.get('expiring_within_90d', 0)} (ARR: ${c.get('expiring_arr', 0):,.0f})")
+                                sections.append(f"Expiring within 90 days: {c.get('expiring_within_90d', 0)} (ARR: ${float(c.get('expiring_arr') or 0):,.0f})")
                                 if c.get('upcoming_expirations'):
                                     sections.append("Upcoming expirations:")
                                     for exp in c['upcoming_expirations']:
-                                        sections.append(f"  - {exp.get('contract','')} | Ends: {exp.get('end_date','')} | ARR: ${exp.get('arr',0):,.0f}")
+                                        sections.append(f"  - {exp.get('contract','')} | Ends: {exp.get('end_date','')} | ARR: ${float(exp.get('arr') or 0):,.0f}")
                             if 'recently_expired' in enhanced:
                                 r = enhanced['recently_expired']
                                 sections.append(f"\n=== RECENTLY EXPIRED ({r.get('count', 0)}) ===")
@@ -9052,10 +9054,10 @@ def ask_ai_portfolio():
                             if 'tech_hotspots' in portfolio_intel:
                                 sections.append("Technology risk density (barriers per $1M ARR):")
                                 for th in portfolio_intel['tech_hotspots']:
-                                    sections.append(f"  - {th['technology']}: {th['risk_density']} barriers/$1M (ARR: ${th['arr']:,.0f}, {th['barriers']} barriers)")
+                                    sections.append(f"  - {th['technology']}: {th.get('risk_density', 0)} barriers/$1M (ARR: ${float(th.get('arr') or 0):,.0f}, {th.get('barriers', 0)} barriers)")
                             if 'repeat_offenders' in portfolio_intel:
                                 ro = portfolio_intel['repeat_offenders']
-                                sections.append(f"Repeat offenders (barriers + cases): {ro.get('count',0)} accounts, ${ro.get('combined_arr',0):,.0f} ARR ({ro.get('pct_of_portfolio',0)}% of portfolio)")
+                                sections.append(f"Repeat offenders (barriers + cases): {ro.get('count',0)} accounts, ${float(ro.get('combined_arr') or 0):,.0f} ARR ({ro.get('pct_of_portfolio',0)}% of portfolio)")
                                 if ro.get('customers'):
                                     sections.append("  Customers: " + ", ".join(ro['customers'][:10]))
                             context_summary_parts.append("Portfolio intelligence")
@@ -9078,7 +9080,7 @@ def ask_ai_portfolio():
                                 for sb in aging['stale_barriers']:
                                     line = f"  - {sb.get('days_open', 0)}d open: [{sb.get('severity', '')}] {sb.get('customer', '')}: {sb.get('subject', '')} (ID: {sb.get('id', '')})"
                                     if sb.get('account_arr'):
-                                        line += f" | Account ARR: ${sb['account_arr']:,.0f}"
+                                        line += f" | Account ARR: ${float(sb['account_arr']):,.0f}"
                                     sections.append(line)
                             context_summary_parts.append("Barrier aging")
                     except Exception as e:
@@ -9152,7 +9154,7 @@ def ask_ai_portfolio():
                             parts.append(f"Categories: {m['category_distribution']}")
                         sections.append("  " + " | ".join(parts))
                         if m.get('top_customers_by_arr'):
-                            sections.append("    Top customers: " + ", ".join(f"{c}: ${v:,.0f}" for c, v in list(m['top_customers_by_arr'].items())[:5]))
+                            sections.append("    Top customers: " + ", ".join(f"{c}: ${float(v or 0):,.0f}" for c, v in list(m['top_customers_by_arr'].items())[:5]))
                         elif m.get('top_customers_by_count'):
                             sections.append("    Top customers: " + ", ".join(f"{c}: {v}" for c, v in list(m['top_customers_by_count'].items())[:5]))
                         if m.get('sample_subjects'):

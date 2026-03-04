@@ -2184,8 +2184,11 @@ def build_cross_report_trends(reports_data):
                     combined['total_arr'] = m['total_arr']
                 for sev, cnt in m.get('severity_distribution', {}).items():
                     sev_str = str(sev)
-                    combined['severity_counts'][sev_str] = (
-                        combined['severity_counts'].get(sev_str, 0) + int(cnt))
+                    try:
+                        combined['severity_counts'][sev_str] = (
+                            combined['severity_counts'].get(sev_str, 0) + int(cnt))
+                    except (ValueError, TypeError):
+                        pass
             dated_metrics.append(combined)
 
         dated_metrics.sort(key=lambda x: x['date'])

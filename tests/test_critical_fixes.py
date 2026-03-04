@@ -501,3 +501,56 @@ class TestAdvancedAnalytics:
         stale = result.get('stale_barriers', [])
         assert len(stale) == 1
         assert stale[0].get('account_arr') == 500000
+
+    def test_compute_barrier_aging_nan_dates(self):
+        from adoptiq_backend import compute_barrier_aging
+        df = pd.DataFrame({
+            'STATUS_C': ['Open', 'Open', 'Open'],
+            'CREATED_DATE': [None, 'not-a-date', '2025-01-01'],
+            'SUBJECT_C': ['A', 'B', 'C'],
+            'ID': ['1', '2', '3'],
+        })
+        result = compute_barrier_aging(df)
+        assert result['total_open'] == 3
+        assert len(result.get('stale_barriers', [])) >= 1
+
+    def test_compute_barrier_aging_future_dates(self):
+        from adoptiq_backend import compute_barrier_aging
+        df = pd.DataFrame({
+            'STATUS_C': ['Open'],
+            'CREATED_DATE': ['2030-01-01'],
+        })
+        result = compute_barrier_aging(df)
+        assert result['total_open'] == 1
+        if result.get('stale_barriers'):
+            assert result['stale_barriers'][0]['days_open'] == 0
+
+    def test_format_number_inf(self):
+        from report_utils import format_number
+        assert format_number(float('inf')) == 'N/A'
+        assert format_number(float('-inf')) == 'N/A'
+        assert format_number(float('inf'), as_percent=True) == 'N/A'
+
+    def test_format_number_negative_inf(self):
+        from report_utils import format_number
+        assert format_number(float('-inf'), decimals=2) == 'N/A'
+
+    def test_build_cross_report_trends_empty_metrics(self):
+        from adoptiq_backend import build_cross_report_trends
+        data = [
+            {'date': '2026-01-01', 'filename': 'a.xlsx', 'metrics': {}},
+            {'date': '2026-02-01', 'filename': 'b.xlsx', 'metrics': {}},
+        ]
+        result = build_cross_report_trends(data)
+        assert result.get('period', {}).get('reports_analyzed') == 2
+
+    def test_build_cross_report_trends_non_int_severity(self):
+        from adoptiq_backend import build_cross_report_trends
+        data = [
+            {'date': '2026-01-01', 'filename': 'a.xlsx',
+             'metrics': {'S1': {'rows': 10, 'severity_distribution': {'Critical': 'bad'}}}},
+            {'date': '2026-02-01', 'filename': 'b.xlsx',
+             'metrics': {'S1': {'rows': 20, 'severity_distribution': {'Critical': 5}}}},
+        ]
+        result = build_cross_report_trends(data)
+        assert 'period' in result

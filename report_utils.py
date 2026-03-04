@@ -81,17 +81,15 @@ def format_number(value: Union[int, float, None], decimals: int = 0, as_percent:
         return "N/A"
     try:
         v = float(value)
-        if pd.isna(v):
+        if pd.isna(v) or not math.isfinite(v):
             return "N/A"
         if as_percent:
-            if pd.isna(v) or not math.isfinite(v):
-                return "N/A"
             return f"{v:.1f}%"
         decimals = max(0, decimals)
         if decimals == 0:
             return f"{int(v):,}"
         return f"{v:,.{decimals}f}"
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return str(value) if value is not None else "N/A"
 
 
