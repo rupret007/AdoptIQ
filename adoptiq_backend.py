@@ -153,7 +153,6 @@ TECH_CHOICES = [
     "Webex Contact Center",
     "Cisco UCCE",
     "Cisco UCCX",
-    "All",
 ]
 
 TECH_FILTERS = {

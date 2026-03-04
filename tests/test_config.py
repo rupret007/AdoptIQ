@@ -35,7 +35,7 @@ class TestConfigDefaults:
 
     def test_tech_choices_has_entries(self):
         assert len(Config.TECH_CHOICES) >= 5
-        assert 'All' in Config.TECH_CHOICES
+        assert 'All' not in Config.TECH_CHOICES
 
     def test_official_categories_structure(self):
         assert isinstance(Config.OFFICIAL_CATEGORIES, dict)

@@ -124,7 +124,6 @@ class Config:
         "Webex Contact Center Enterprise",
         "Cisco UCCE",
         "Cisco UCCX",
-        "All",
     ]
     
     # Technology Filters
