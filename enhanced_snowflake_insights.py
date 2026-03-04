@@ -332,7 +332,7 @@ class EnhancedSnowflakeInsights:
                     logger.info("Optional: Booking insights table/column not available; skipping for all customers.")
             else:
                 logger.error(f"Error getting booking insights: {e}")
-            insights['error'] = err_str
+            insights['error'] = 'Booking insights unavailable.'
         
         return insights
     
@@ -644,7 +644,7 @@ class EnhancedSnowflakeInsights:
                     logger.info("Optional: RISK_ASSESSMENT table not available or not authorized; skipping for all customers.")
             else:
                 logger.error(f"Error getting risk insights: {e}")
-            insights['error'] = err_str
+            insights['error'] = 'Risk insights unavailable.'
         
         return insights
     

@@ -1856,3 +1856,102 @@ class TestRound28Fixes:
         with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
             src = f.read()
         assert 'generate_csrf' in src
+
+
+class TestRound29Fixes:
+    """Tests for Round 29 final audit fixes."""
+
+    def test_no_str_e_in_word_report(self):
+        """H1: app_simple.py should not write str(portfolio_error) into Word report."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'str(portfolio_error)' not in src
+
+    def test_analyze_main_fetch_csrf(self):
+        """H2: analyze.html main fetch must include X-CSRFToken header."""
+        with open(os.path.join(_PROJECT_ROOT, 'templates', 'analyze.html'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('fetchOptions.headers')
+        assert idx != -1
+        section = src[idx:idx + 200]
+        assert 'X-CSRFToken' in section
+
+    def test_analyze_typeahead_csrf(self):
+        """H2: analyze.html inline typeahead fetches must include X-CSRFToken."""
+        with open(os.path.join(_PROJECT_ROOT, 'templates', 'analyze.html'), encoding='utf-8') as f:
+            src = f.read()
+        typeahead_fetches = [i for i in range(len(src)) if src[i:].startswith("fetch('/search_subscriptions'")]
+        for pos in typeahead_fetches:
+            block = src[pos:pos + 300]
+            assert 'X-CSRFToken' in block, f"Typeahead fetch at position {pos} missing CSRF"
+
+    def test_compact_route_csrf_validation(self):
+        """H3: /start_compact_analysis must validate CSRF token."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('def start_compact_analysis')
+        assert idx != -1
+        func_body = src[idx:idx + 600]
+        assert 'validate_csrf' in func_body
+
+    def test_renewal_route_csrf_validation(self):
+        """H4: /start_customer_renewal_analysis must validate CSRF token."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('def start_customer_renewal_analysis')
+        assert idx != -1
+        func_body = src[idx:idx + 600]
+        assert 'validate_csrf' in func_body
+
+    def test_admin_audit_no_str_e(self):
+        """H5: enhanced_admin_dashboard_v2.py audit result should not expose str(e)."""
+        with open(os.path.join(_PROJECT_ROOT, 'enhanced_admin_dashboard_v2.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "audit_result['error'] = str(e)" not in src
+
+    def test_ext_intel_try_except(self):
+        """H6: External intelligence calls in comprehensive flow should be wrapped in try/except."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('# External intelligence')
+        assert idx != -1
+        section = src[idx:idx + 300]
+        assert 'try:' in section
+        assert 'except Exception' in section
+
+    def test_snowflake_insights_booking_no_str_e(self):
+        """M1: enhanced_snowflake_insights.py booking insights should not expose str(e)."""
+        with open(os.path.join(_PROJECT_ROOT, 'enhanced_snowflake_insights.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "insights['error'] = err_str" not in src
+
+    def test_renewal_financial_safe_num(self):
+        """M2: advanced_renewal_analyzer.py financial formatting should use _safe_num()."""
+        with open(os.path.join(_PROJECT_ROOT, 'advanced_renewal_analyzer.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find("Financial Metrics:")
+        assert idx != -1
+        section = src[idx:idx + 500]
+        assert '_safe_num(' in section
+
+    def test_compact_risk_score_safe_access(self):
+        """M3: compact_report_formatter.py should use v.get('score', 0) not v['score']."""
+        with open(os.path.join(_PROJECT_ROOT, 'compact_report_formatter.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "v['score']" not in src
+
+    def test_renewal_runtime_error_no_str_e(self):
+        """M4: advanced_renewal_analyzer.py RuntimeError should not include str(e)."""
+        with open(os.path.join(_PROJECT_ROOT, 'advanced_renewal_analyzer.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('raise RuntimeError')
+        assert idx != -1
+        line = src[idx:idx + 120]
+        assert 'See logs for details' in line
+
+    def test_minimal_test_csrf(self):
+        """L1: minimal_test.html must include CSRF meta tag and X-CSRFToken in fetch."""
+        with open(os.path.join(_PROJECT_ROOT, 'templates', 'minimal_test.html'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'csrf-token' in src
+        assert 'X-CSRFToken' in src

@@ -1025,9 +1025,9 @@ class AdvancedRenewalAnalyzer:
             contract_para = doc.add_paragraph()
             contract_para.add_run('Contract Summary:\n').font.bold = True
             contract_para.add_run(f'Total Contracts: {len(contract_info.get("contracts", []))}\n')
-            contract_para.add_run(f'Total ARR: ${contract_info.get("total_arr", 0):,.2f}\n')
-            contract_para.add_run(f'Auto-Renewal Contracts: {contract_info.get("auto_renewal_contracts", 0)}\n')
-            contract_para.add_run(f'Manual Renewal Contracts: {contract_info.get("manual_renewal_contracts", 0)}\n')
+            contract_para.add_run(f'Total ARR: ${_safe_num(contract_info.get("total_arr", 0)):,.2f}\n')
+            contract_para.add_run(f'Auto-Renewal Contracts: {_safe_num(contract_info.get("auto_renewal_contracts", 0))}\n')
+            contract_para.add_run(f'Manual Renewal Contracts: {_safe_num(contract_info.get("manual_renewal_contracts", 0))}\n')
             contract_para.add_run(f'Contracts Expiring Soon: {len(contract_info.get("contracts_expiring_soon", []))}\n')
         
         # Financial metrics
@@ -1035,10 +1035,10 @@ class AdvancedRenewalAnalyzer:
         if financial_metrics:
             financial_para = doc.add_paragraph()
             financial_para.add_run('Financial Metrics:\n').font.bold = True
-            financial_para.add_run(f'Total ARR: ${financial_metrics.get("total_arr", 0):,.2f}\n')
-            financial_para.add_run(f'Product ARR: ${financial_metrics.get("product_arr", 0):,.2f}\n')
-            financial_para.add_run(f'Contract Value: ${financial_metrics.get("contract_value", 0):,.2f}\n')
-            financial_para.add_run(f'Discount Percentage: {financial_metrics.get("discount_percentage", 0):.1f}%\n')
+            financial_para.add_run(f'Total ARR: ${_safe_num(financial_metrics.get("total_arr", 0)):,.2f}\n')
+            financial_para.add_run(f'Product ARR: ${_safe_num(financial_metrics.get("product_arr", 0)):,.2f}\n')
+            financial_para.add_run(f'Contract Value: ${_safe_num(financial_metrics.get("contract_value", 0)):,.2f}\n')
+            financial_para.add_run(f'Discount Percentage: {_safe_num(financial_metrics.get("discount_percentage", 0)):.1f}%\n')
             financial_para.add_run(f'Pricing Tier: {financial_metrics.get("pricing_tier", "Standard")}\n')
         
         # Add page break
@@ -1227,6 +1227,5 @@ def generate_advanced_renewal_analysis(customer_name: str, days: int, ctx) -> Tu
         return filepath, success_msg
         
     except Exception as e:
-        error_msg = f"Error generating advanced renewal analysis: {e}"
-        logger.error(error_msg, exc_info=True)
-        raise RuntimeError(error_msg)
+        logger.error(f"Error generating advanced renewal analysis: {e}", exc_info=True)
+        raise RuntimeError("Error generating advanced renewal analysis. See logs for details.")

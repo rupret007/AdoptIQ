@@ -979,8 +979,10 @@ const AnalysisFormManager = (() => {
             };
             
             // Set headers
+            var csrfMeta = document.querySelector('meta[name="csrf-token"]');
             fetchOptions.headers = {
-                'X-Requested-With': 'XMLHttpRequest'  // Identify as AJAX request
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-CSRFToken': csrfMeta ? csrfMeta.content : ''
             };
             
             // Only set Content-Type header for JSON requests (FormData sets it automatically)
@@ -1396,9 +1398,10 @@ const AnalysisFormManager = (() => {
                 return;
             }
             debounceTimer = setTimeout(() => {
+                var _csrf1 = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
                 fetch('/search_subscriptions', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': _csrf1 },
                     body: JSON.stringify({ customer_name: q, limit: 50 })
                 })
                     .then(r => r.json())
@@ -1502,9 +1505,10 @@ const AnalysisFormManager = (() => {
             const q = (input.value || '').trim();
             if (q.length < MIN_CHARS || isSubscriptionId(q)) { hideList(); return; }
             debounceTimer = setTimeout(() => {
+                var _csrf2 = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
                 fetch('/search_subscriptions', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': _csrf2 },
                     body: JSON.stringify({ customer_name: q, limit: 50 })
                 })
                     .then(r => r.json())

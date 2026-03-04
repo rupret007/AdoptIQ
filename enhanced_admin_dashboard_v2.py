@@ -1801,7 +1801,7 @@ def audit_report(analysis_id):
     except Exception as e:
         logger.error(f"Error auditing report {analysis_id}: {e}")
         audit_result['status'] = 'error'
-        audit_result['error'] = str(e)
+        audit_result['error'] = 'An error occurred during report audit. See logs for details.'
     
     return audit_result
 

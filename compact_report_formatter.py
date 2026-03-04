@@ -1541,8 +1541,8 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
         risk_data = calculate_renewal_risk_scores(ab_data, csone_data)
         
         # Create risk summary
-        high_risk_customers = {k: v for k, v in risk_data.items() if v['score'] >= 6}
-        moderate_risk_customers = {k: v for k, v in risk_data.items() if 4 <= v['score'] < 6}
+        high_risk_customers = {k: v for k, v in risk_data.items() if isinstance(v, dict) and v.get('score', 0) >= 6}
+        moderate_risk_customers = {k: v for k, v in risk_data.items() if isinstance(v, dict) and 4 <= v.get('score', 0) < 6}
         
         # Calculate BEMS count
         total_bems = 0
@@ -1554,7 +1554,7 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
                 bems_mask |= csone_data['bemscsc_refs'].astype(str).str.contains('BEMS', case=False, na=False)
             total_bems = bems_mask.sum()
         
-        _scores = [v['score'] for v in risk_data.values() if isinstance(v.get('score'), (int, float)) and not np.isnan(v['score'])] if risk_data else []
+        _scores = [v.get('score', 0) for v in risk_data.values() if isinstance(v, dict) and isinstance(v.get('score'), (int, float)) and not np.isnan(v.get('score', 0))] if risk_data else []
         overall_risk_score = float(np.mean(_scores)) if _scores else 0.0
         if np.isnan(overall_risk_score) or np.isinf(overall_risk_score):
             overall_risk_score = 0.0
