@@ -298,7 +298,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (elapsedMinutes > MAX_POLL_MINUTES) {
             clearInterval(statusPolling);
             addStatusLog('Status polling timed out after ' + MAX_POLL_MINUTES + ' minutes', 'error');
-            showNotification('Analysis appears to be taking too long. Please check the Admin page.', 'error');
+            showNotification('Analysis appears to be taking too long. Please try again or check the application logs.', 'error');
             return;
         }
         fetch(`/status/${analysisId}`)

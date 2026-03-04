@@ -9253,12 +9253,6 @@ def ask_ai_portfolio():
         return jsonify({'ok': False, 'error': 'An error occurred while processing your question. Please try again.'}), 500
 
 
-@app.route('/admin')
-def admin_page():
-    """Redirect to the external Admin Console on port 5002."""
-    return redirect('http://localhost:5002')
-
-
 @app.route('/external-intelligence')
 def external_intelligence():
     """Browsable page showing historical service incidents, bugs, and maintenances."""

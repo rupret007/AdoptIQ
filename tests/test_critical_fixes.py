@@ -132,11 +132,11 @@ class TestDownloadPathTraversal:
 
 
 class TestNewRoutes:
-    """New routes (admin, ask-ai) must render without errors."""
+    """New routes (ask-ai) must render without errors."""
 
-    def test_admin_page_redirects(self, app, client):
+    def test_admin_page_removed(self, app, client):
         response = client.get('/admin')
-        assert response.status_code == 302
+        assert response.status_code == 404
 
     def test_ask_ai_page_renders(self, app, client):
         response = client.get('/ask-ai')
