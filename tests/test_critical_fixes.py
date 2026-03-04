@@ -286,3 +286,71 @@ class TestCtxNoneGuards:
         from adoptiq_backend import fetch_csconsole_action_plans
         result = fetch_csconsole_action_plans(None, ['ACC123'], 90)
         assert result.empty
+
+
+class TestAdvancedAnalytics:
+    """Tests for the new AI analytics functions."""
+
+    def test_calculate_arr_at_risk_empty(self):
+        from adoptiq_backend import calculate_arr_at_risk
+        result = calculate_arr_at_risk(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+        assert result == {}
+
+    def test_calculate_arr_at_risk_none(self):
+        from adoptiq_backend import calculate_arr_at_risk
+        result = calculate_arr_at_risk(None, None, None)
+        assert result == {}
+
+    def test_calculate_arr_at_risk_basic(self):
+        from adoptiq_backend import calculate_arr_at_risk
+        arr_df = pd.DataFrame({
+            'ACCOUNT_ID_C': ['A1', 'A2', 'A3'],
+            'ANNUAL_CONTRACT_VALUE': [100000, 200000, 300000],
+        })
+        ab_df = pd.DataFrame({
+            'ACCOUNT_ID_C': ['A1'],
+            'SEVERITY_C': ['Critical'],
+        })
+        result = calculate_arr_at_risk(arr_df, ab_df)
+        assert result['total_portfolio_arr'] == 600000
+        assert result['arr_at_risk'] == 100000
+        assert result['arr_critical'] == 100000
+        assert result['arr_healthy'] == 500000
+        assert result['pct_at_risk'] > 0
+        assert result['troubled_account_count'] == 1
+        assert result['critical_account_count'] == 1
+
+    def test_fetch_period_comparison_none_ctx(self):
+        from adoptiq_backend import fetch_period_comparison
+        result = fetch_period_comparison(None, ['A1'], 90)
+        assert result == {}
+
+    def test_fetch_period_comparison_empty_accounts(self):
+        from adoptiq_backend import fetch_period_comparison
+        result = fetch_period_comparison('mock', [], 90)
+        assert result == {}
+
+    def test_fetch_barrier_velocity_none_ctx(self):
+        from adoptiq_backend import fetch_barrier_velocity
+        result = fetch_barrier_velocity(None, ['A1'], 90)
+        assert result == {}
+
+    def test_fetch_barrier_velocity_empty_accounts(self):
+        from adoptiq_backend import fetch_barrier_velocity
+        result = fetch_barrier_velocity('mock', [], 90)
+        assert result == {}
+
+    def test_scan_historical_reports_missing_dir(self):
+        from adoptiq_backend import scan_historical_reports
+        result = scan_historical_reports('/nonexistent/path/outputs')
+        assert result == []
+
+    def test_scan_historical_reports_empty_string(self):
+        from adoptiq_backend import scan_historical_reports
+        result = scan_historical_reports('')
+        assert result == []
+
+    def test_scan_historical_reports_temp_dir(self, tmp_path):
+        from adoptiq_backend import scan_historical_reports
+        result = scan_historical_reports(str(tmp_path))
+        assert result == []

@@ -1474,6 +1474,312 @@ def fetch_csconsole_adoption_barriers(ctx, account_ids: List[str], days: int) ->
         if cur:
             cur.close()
 
+
+def fetch_period_comparison(ctx, account_ids, days):
+    """Compare current vs previous period metrics for trend analysis.
+
+    Compares adoption barriers, customer pulse, and action plans between
+    the current period (last N days) and previous period (N to 2N days ago).
+    Returns a dict with counts and percentage changes.
+    """
+    if ctx is None or not account_ids:
+        return {}
+
+    comparison = {}
+    placeholders = ", ".join(["%s"] * len(account_ids))
+    cur = None
+    try:
+        cur = ctx.cursor()
+
+        # Adoption barriers: current vs previous
+        ab_query = f"""
+            SELECT
+                SUM(CASE WHEN DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
+                         >= DATEADD(day, -%s, CURRENT_DATE()) THEN 1 ELSE 0 END) AS current_period,
+                SUM(CASE WHEN DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
+                         BETWEEN DATEADD(day, -%s, CURRENT_DATE())
+                                 AND DATEADD(day, -%s, CURRENT_DATE()) THEN 1 ELSE 0 END) AS previous_period
+            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
+            WHERE ACCOUNT_ID_C IN ({placeholders})
+              AND (RECORD_TYPE_ID = '0122T000000GJfTQAW' OR RECORD_TYPE_ID IS NULL)
+              AND DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
+                  >= DATEADD(day, -%s, CURRENT_DATE())
+        """
+        cur.execute(ab_query, (days, days * 2, days, *account_ids, days * 2))
+        row = cur.fetchone()
+        if row:
+            curr, prev = int(row[0] or 0), int(row[1] or 0)
+            pct = round(((curr - prev) / prev * 100) if prev > 0 else 0, 1)
+            comparison['adoption_barriers'] = {
+                'current': curr, 'previous': prev,
+                'change_pct': pct,
+                'trend': 'increasing' if pct > 10 else 'decreasing' if pct < -10 else 'stable'
+            }
+
+        # Customer pulse: average score current vs previous
+        try:
+            pulse_query = f"""
+                SELECT
+                    AVG(CASE WHEN DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())
+                             THEN SCORE__C END) AS current_avg,
+                    AVG(CASE WHEN DATE(CREATEDDATE) BETWEEN DATEADD(day, -%s, CURRENT_DATE())
+                                                        AND DATEADD(day, -%s, CURRENT_DATE())
+                             THEN SCORE__C END) AS previous_avg
+                FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C
+                WHERE ACCOUNT__C IN ({placeholders})
+                  AND DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())
+            """
+            cur.execute(pulse_query, (days, days * 2, days, *account_ids, days * 2))
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                curr_avg = float(row[0])
+                prev_avg = float(row[1]) if row[1] is not None else curr_avg
+                comparison['customer_pulse'] = {
+                    'current_avg': round(curr_avg, 1),
+                    'previous_avg': round(prev_avg, 1),
+                    'change': round(curr_avg - prev_avg, 1),
+                    'trend': 'improving' if curr_avg > prev_avg else 'declining' if curr_avg < prev_avg else 'stable'
+                }
+        except Exception:
+            pass
+
+        # Action plans: current vs previous
+        try:
+            ap_query = f"""
+                SELECT
+                    SUM(CASE WHEN DATE(CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE()) THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN DATE(CREATED_DATE) BETWEEN DATEADD(day, -%s, CURRENT_DATE())
+                                                        AND DATEADD(day, -%s, CURRENT_DATE()) THEN 1 ELSE 0 END)
+                FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
+                WHERE record_type_id = '0122T000000QHBGQA4'
+                  AND ACCOUNT_ID_C IN ({placeholders})
+                  AND DATE(CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())
+            """
+            cur.execute(ap_query, (days, days * 2, days, *account_ids, days * 2))
+            row = cur.fetchone()
+            if row:
+                curr, prev = int(row[0] or 0), int(row[1] or 0)
+                pct = round(((curr - prev) / prev * 100) if prev > 0 else 0, 1)
+                comparison['action_plans'] = {
+                    'current': curr, 'previous': prev,
+                    'change_pct': pct,
+                    'trend': 'increasing' if pct > 10 else 'decreasing' if pct < -10 else 'stable'
+                }
+        except Exception:
+            pass
+
+    except Exception as e:
+        logger.debug(f"Period comparison query error: {e}")
+    finally:
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+    return comparison
+
+
+def fetch_barrier_velocity(ctx, account_ids, days):
+    """Calculate the rate of barrier creation and resolution over time.
+
+    Breaks the analysis period into weekly buckets and computes
+    new-barrier and closed-barrier counts per week, plus a net velocity.
+    """
+    if ctx is None or not account_ids:
+        return {}
+
+    placeholders = ", ".join(["%s"] * len(account_ids))
+    velocity = {}
+    cur = None
+    try:
+        cur = ctx.cursor()
+        query = f"""
+            SELECT
+                DATE_TRUNC('week', COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C)) AS week_start,
+                COUNT(*) AS new_barriers,
+                SUM(CASE WHEN UPPER(STATUS_C) IN ('CLOSED', 'RESOLVED', 'COMPLETED') THEN 1 ELSE 0 END) AS closed_barriers
+            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
+            WHERE ACCOUNT_ID_C IN ({placeholders})
+              AND (RECORD_TYPE_ID = '0122T000000GJfTQAW' OR RECORD_TYPE_ID IS NULL)
+              AND DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
+                  >= DATEADD(day, -%s, CURRENT_DATE())
+            GROUP BY week_start
+            ORDER BY week_start DESC
+        """
+        cur.execute(query, (*account_ids, days))
+        rows = cur.fetchall()
+
+        weeks = []
+        total_new = total_closed = 0
+        for row in rows:
+            wk = str(row[0])[:10] if row[0] else 'Unknown'
+            new_ct = int(row[1] or 0)
+            closed_ct = int(row[2] or 0)
+            weeks.append({'week': wk, 'new': new_ct, 'closed': closed_ct, 'net': new_ct - closed_ct})
+            total_new += new_ct
+            total_closed += closed_ct
+
+        n_weeks = max(len(weeks), 1)
+        velocity = {
+            'weeks': weeks[:12],
+            'avg_new_per_week': round(total_new / n_weeks, 1),
+            'avg_closed_per_week': round(total_closed / n_weeks, 1),
+            'net_velocity_per_week': round((total_new - total_closed) / n_weeks, 1),
+            'resolution_rate_pct': round(total_closed / total_new * 100 if total_new > 0 else 0, 1),
+        }
+
+    except Exception as e:
+        logger.debug(f"Barrier velocity query error: {e}")
+    finally:
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+    return velocity
+
+
+def calculate_arr_at_risk(arr_df, ab_df, cases_df=None):
+    """Calculate total ARR tied to accounts with active adoption barriers or cases.
+
+    Returns a breakdown of ARR by risk tier and the total portfolio ARR at risk.
+    """
+    if arr_df is None or arr_df.empty:
+        return {}
+    if ab_df is None:
+        ab_df = pd.DataFrame()
+    if cases_df is None:
+        cases_df = pd.DataFrame()
+
+    result = {}
+    try:
+        arr_col = 'ANNUAL_CONTRACT_VALUE' if 'ANNUAL_CONTRACT_VALUE' in arr_df.columns else None
+        acct_col = 'ACCOUNT_ID_C' if 'ACCOUNT_ID_C' in arr_df.columns else None
+        if not arr_col or not acct_col:
+            return {}
+
+        total_arr = arr_df[arr_col].sum()
+        result['total_portfolio_arr'] = float(total_arr)
+
+        troubled_accounts = set()
+        critical_accounts = set()
+
+        if not ab_df.empty and 'ACCOUNT_ID_C' in ab_df.columns:
+            troubled_accounts.update(ab_df['ACCOUNT_ID_C'].dropna().unique())
+            sev_col = 'SEVERITY_C' if 'SEVERITY_C' in ab_df.columns else None
+            if sev_col:
+                crit_mask = ab_df[sev_col].str.contains('Critical|P1|Sev-1|High', case=False, na=False)
+                critical_accounts.update(ab_df.loc[crit_mask, 'ACCOUNT_ID_C'].dropna().unique())
+
+        if not cases_df.empty:
+            case_acct = 'ACCOUNT_ID' if 'ACCOUNT_ID' in cases_df.columns else 'ACCOUNT_ID_C' if 'ACCOUNT_ID_C' in cases_df.columns else None
+            if case_acct:
+                troubled_accounts.update(cases_df[case_acct].dropna().unique())
+
+        at_risk_mask = arr_df[acct_col].isin(troubled_accounts)
+        arr_at_risk = arr_df.loc[at_risk_mask, arr_col].sum()
+
+        critical_mask = arr_df[acct_col].isin(critical_accounts)
+        arr_critical = arr_df.loc[critical_mask, arr_col].sum()
+
+        result['arr_at_risk'] = float(arr_at_risk)
+        result['arr_critical'] = float(arr_critical)
+        result['arr_healthy'] = float(total_arr - arr_at_risk)
+        result['pct_at_risk'] = round(arr_at_risk / total_arr * 100 if total_arr > 0 else 0, 1)
+        result['pct_critical'] = round(arr_critical / total_arr * 100 if total_arr > 0 else 0, 1)
+        result['troubled_account_count'] = len(troubled_accounts)
+        result['critical_account_count'] = len(critical_accounts)
+
+    except Exception as e:
+        logger.debug(f"ARR at risk calculation error: {e}")
+    return result
+
+
+def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5):
+    """Scan past report Excel files for historical trend context.
+
+    Looks for AdoptIQ_Data_*.xlsx files in the outputs folder, reads their
+    summary sheets, and extracts key metrics for period-over-period comparison.
+    """
+    import glob as _glob
+    from pathlib import Path
+
+    if not outputs_path:
+        return []
+    outputs = Path(outputs_path)
+    if not outputs.exists():
+        return []
+
+    patterns = ['AdoptIQ_Data_*.xlsx', 'AdoptIQ_Report_*.xlsx']
+    found = []
+    for pat in patterns:
+        found.extend(outputs.glob(pat))
+
+    try:
+        found.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+    except OSError:
+        pass
+
+    if manager:
+        mgr_lower = manager.lower().replace(' ', '_')
+        filtered = [f for f in found if mgr_lower in f.name.lower()]
+        if filtered:
+            found = filtered
+    if technology and technology.lower() != 'all':
+        tech_lower = technology.lower()
+        filtered = [f for f in found if tech_lower in f.name.lower()]
+        if filtered:
+            found = filtered
+
+    reports = []
+    for fpath in found[:limit]:
+        report_info = {'filename': fpath.name, 'date': '', 'metrics': {}}
+        try:
+            import re
+            date_match = re.search(r'(\d{8})_(\d{6})', fpath.name)
+            if date_match:
+                report_info['date'] = f"{date_match.group(1)[:4]}-{date_match.group(1)[4:6]}-{date_match.group(1)[6:8]}"
+
+            xl = pd.ExcelFile(fpath, engine='openpyxl')
+            sheet_names = xl.sheet_names
+
+            for sheet in sheet_names:
+                try:
+                    df = pd.read_excel(xl, sheet_name=sheet, nrows=200)
+                    if df.empty:
+                        continue
+
+                    metrics = {'sheet': sheet, 'rows': len(df), 'columns': list(df.columns[:10])}
+
+                    for col in df.columns:
+                        col_lower = str(col).lower()
+                        if any(k in col_lower for k in ['severity', 'sev', 'priority']):
+                            metrics['severity_distribution'] = df[col].value_counts().head(5).to_dict()
+                        elif any(k in col_lower for k in ['status', 'state']):
+                            metrics['status_distribution'] = df[col].value_counts().head(5).to_dict()
+                        elif any(k in col_lower for k in ['customer', 'bu_name', 'account']):
+                            metrics['unique_customers'] = int(df[col].nunique())
+                        elif any(k in col_lower for k in ['arr', 'annual_contract', 'revenue']):
+                            try:
+                                metrics['total_arr'] = float(pd.to_numeric(df[col], errors='coerce').sum())
+                            except Exception:
+                                pass
+
+                    report_info['metrics'][sheet] = metrics
+                except Exception:
+                    continue
+
+            xl.close()
+        except Exception as e:
+            logger.debug(f"Error scanning historical report {fpath.name}: {e}")
+            continue
+
+        if report_info['metrics']:
+            reports.append(report_info)
+
+    return reports
+
+
 # --------------------------- External Intelligence ---------------------------
 HELP_URLS = [
     "https://help.webex.com/en-us/article/mqkve8/Webex-App-%7C-Release-notes",

@@ -8757,10 +8757,11 @@ def ask_ai_page():
 
 @app.route('/api/ask-ai-portfolio', methods=['POST'])
 def ask_ai_portfolio():
-    """Fetch live Snowflake data, build a compact briefing, and send to Circuit AI."""
+    """Advanced AI assistant: fetches live Snowflake data, historical context,
+    external intelligence, and trend analysis before querying the LLM."""
     try:
         data = request.get_json(silent=True) or {}
-        question = (data.get('question') or '').strip()
+        question = str(data.get('question') or '').strip()
         if not question or len(question) > 2000:
             return jsonify({'ok': False, 'error': 'Please provide a question (max 2000 characters).'}), 400
 
@@ -8777,9 +8778,15 @@ def ask_ai_portfolio():
             fetch_support_cases_snowflake,
             fetch_csconsole_customer_pulse,
             fetch_csconsole_success_priorities,
+            fetch_csconsole_action_plans,
+            fetch_period_comparison,
+            fetch_barrier_velocity,
+            calculate_arr_at_risk,
+            scan_historical_reports,
             generate_llm_response,
             TEAM_ROSTER, MANAGERS,
         )
+        from incident_storage import get_all_external_intel
 
         cssm_emails = [email for mgr, name, email in TEAM_ROSTER
                         if mgr == manager or manager == 'All Managers']
@@ -8789,12 +8796,15 @@ def ask_ai_portfolio():
         ctx = _connect_with_keeper()
         if ctx is None:
             return jsonify({'ok': False, 'error': 'Database connection failed. Please connect to Cisco VPN and try again.'}), 503
-        context_parts = []
+
+        sections = []
         context_summary_parts = []
 
         try:
             team_subs_df = get_subscriptions_for_team(ctx, cssm_emails)
-            if team_subs_df is not None and not team_subs_df.empty:
+            if team_subs_df is None or team_subs_df.empty:
+                sections.append("No subscription data found for the selected manager/technology.")
+            else:
                 if technology and technology != 'All':
                     tech_col = 'TECHNOLOGY_C' if 'TECHNOLOGY_C' in team_subs_df.columns else None
                     if tech_col:
@@ -8803,87 +8813,246 @@ def ask_ai_portfolio():
                 account_ids = team_subs_df['ACCOUNT_ID_C'].unique().tolist() if 'ACCOUNT_ID_C' in team_subs_df.columns else []
                 n_subs = len(team_subs_df)
                 n_customers = team_subs_df['BU_NAME'].nunique() if 'BU_NAME' in team_subs_df.columns else n_subs
-                context_summary_parts.append(f"{n_subs} subscriptions, {n_customers} customers")
-                context_parts.append(f"=== PORTFOLIO OVERVIEW ===\nManager: {manager} | Technology: {technology} | Days: {days}")
-                context_parts.append(f"Total subscriptions: {n_subs}, Unique customers: {n_customers}")
+                context_summary_parts.append(f"{n_subs} subs, {n_customers} customers")
+
+                # --- Section 1: Portfolio Overview ---
+                sections.append(f"=== PORTFOLIO OVERVIEW ===\nManager: {manager} | Technology: {technology} | Period: last {days} days")
+                sections.append(f"Total subscriptions: {n_subs} | Unique customers: {n_customers}")
 
                 if 'BU_NAME' in team_subs_df.columns:
-                    top_customers = team_subs_df['BU_NAME'].value_counts().head(20)
-                    context_parts.append("\nTop customers by subscription count:")
-                    for cust, cnt in top_customers.items():
-                        context_parts.append(f"  - {cust}: {cnt} subscriptions")
+                    top_customers = team_subs_df['BU_NAME'].value_counts().head(15)
+                    cust_lines = [f"  - {cust}: {cnt} subs" for cust, cnt in top_customers.items()]
+                    sections.append("Top customers:\n" + "\n".join(cust_lines))
 
-                if account_ids:
+                if not account_ids:
+                    sections.append("No account IDs found for detailed analysis.")
+                else:
+                    acct_batch = account_ids[:100]
+
+                    # --- Section 2: ARR & Financial ---
+                    arr_df = None
                     try:
-                        arr_df = fetch_arr_data(ctx, account_ids[:50])
+                        arr_df = fetch_arr_data(ctx, acct_batch)
                         if arr_df is not None and not arr_df.empty:
                             total_arr = arr_df['ANNUAL_CONTRACT_VALUE'].sum() if 'ANNUAL_CONTRACT_VALUE' in arr_df.columns else 0
-                            context_parts.append(f"\n=== ARR DATA ===\nTotal ARR: ${total_arr:,.0f}")
+                            sections.append(f"\n=== FINANCIAL DATA ===\nTotal Active ARR: ${total_arr:,.0f}")
+                            if 'BU_NAME' in arr_df.columns and 'ANNUAL_CONTRACT_VALUE' in arr_df.columns:
+                                arr_by_cust = arr_df.groupby('BU_NAME')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False).head(10)
+                                arr_lines = [f"  - {c}: ${v:,.0f}" for c, v in arr_by_cust.items()]
+                                sections.append("Top 10 customers by ARR:\n" + "\n".join(arr_lines))
+                            if 'TECHNOLOGY_C' in arr_df.columns:
+                                arr_by_tech = arr_df.groupby('TECHNOLOGY_C')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False)
+                                tech_lines = [f"  - {t}: ${v:,.0f}" for t, v in arr_by_tech.head(8).items()]
+                                sections.append("ARR by technology:\n" + "\n".join(tech_lines))
                             context_summary_parts.append(f"ARR: ${total_arr:,.0f}")
                     except Exception as e:
                         logger.debug(f"Ask AI: ARR fetch skipped: {e}")
 
+                    # --- Section 3: Adoption Barriers (detailed) ---
+                    ab_df = None
                     try:
-                        ab_df = fetch_adoption_barriers(ctx, account_ids[:50], days)
+                        ab_df = fetch_adoption_barriers(ctx, acct_batch, days)
                         if ab_df is not None and not ab_df.empty:
                             n_abs = len(ab_df)
-                            context_parts.append(f"\n=== ADOPTION BARRIERS ({n_abs} total) ===")
-                            context_summary_parts.append(f"{n_abs} adoption barriers")
-                            for _, row in ab_df.head(25).iterrows():
+                            sections.append(f"\n=== ADOPTION BARRIERS ({n_abs} total) ===")
+                            context_summary_parts.append(f"{n_abs} barriers")
+
+                            if 'SEVERITY_C' in ab_df.columns:
+                                sev_dist = ab_df['SEVERITY_C'].value_counts()
+                                sections.append("By severity: " + ", ".join(f"{s}: {c}" for s, c in sev_dist.items()))
+                            if 'STATUS_C' in ab_df.columns:
+                                status_dist = ab_df['STATUS_C'].value_counts()
+                                open_count = sum(c for s, c in status_dist.items() if str(s).upper() not in ('CLOSED', 'RESOLVED', 'COMPLETED'))
+                                sections.append(f"Open/active: {open_count} | Closed/resolved: {n_abs - open_count}")
+                            if 'BU_NAME' in ab_df.columns or 'ACCOUNT_NAME_C' in ab_df.columns:
+                                cust_col = 'BU_NAME' if 'BU_NAME' in ab_df.columns else 'ACCOUNT_NAME_C'
+                                ab_by_cust = ab_df[cust_col].value_counts().head(10)
+                                sections.append("Top 10 customers by barrier count:\n" + "\n".join(f"  - {c}: {n}" for c, n in ab_by_cust.items()))
+                            if 'AB_CATEGORY_C' in ab_df.columns:
+                                cat_dist = ab_df['AB_CATEGORY_C'].value_counts().head(8)
+                                sections.append("Top categories:\n" + "\n".join(f"  - {c}: {n}" for c, n in cat_dist.items()))
+
+                            sections.append("Barrier details (up to 30):")
+                            for _, row in ab_df.head(30).iterrows():
                                 cust = row.get('BU_NAME', row.get('ACCOUNT_NAME_C', 'Unknown'))
                                 subj = row.get('SUBJECT_C', 'No subject')
                                 sev = row.get('SEVERITY_C', '')
-                                context_parts.append(f"  - [{sev}] {cust}: {subj}")
+                                status = row.get('STATUS_C', '')
+                                cat = row.get('AB_CATEGORY_C', '')
+                                csid = row.get('ID', '')
+                                sections.append(f"  - [{sev}] {cust}: {subj} (Status: {status}, Category: {cat}, ID: {csid})")
                     except Exception as e:
                         logger.debug(f"Ask AI: AB fetch skipped: {e}")
 
+                    # --- Section 4: Support Cases ---
+                    cases_df = None
                     try:
-                        cases_df = fetch_support_cases_snowflake(ctx, account_ids[:50], days)
+                        cases_df = fetch_support_cases_snowflake(ctx, acct_batch, days)
                         if cases_df is not None and not cases_df.empty:
                             n_cases = len(cases_df)
-                            context_parts.append(f"\n=== SUPPORT CASES ({n_cases} total) ===")
-                            context_summary_parts.append(f"{n_cases} support cases")
-                            if 'SEVERITY_C' in cases_df.columns:
-                                sev_counts = cases_df['SEVERITY_C'].value_counts()
-                                for sev, cnt in sev_counts.items():
-                                    context_parts.append(f"  {sev}: {cnt} cases")
+                            sections.append(f"\n=== SUPPORT CASES ({n_cases} total) ===")
+                            context_summary_parts.append(f"{n_cases} cases")
+                            sev_col = next((c for c in ('SEVERITY', 'SEVERITY_C') if c in cases_df.columns), None)
+                            if sev_col:
+                                sev_counts = cases_df[sev_col].value_counts()
+                                sections.append("By severity: " + ", ".join(f"{s}: {c}" for s, c in sev_counts.items()))
+                            for _, row in cases_df.head(15).iterrows():
+                                subj = row.get('SUBJECT', 'N/A')
+                                sev = row.get(sev_col, '') if sev_col else ''
+                                sections.append(f"  - [{sev}] {subj}")
                     except Exception as e:
                         logger.debug(f"Ask AI: Cases fetch skipped: {e}")
 
+                    # --- Section 5: Customer Pulse ---
                     try:
-                        pulse_df = fetch_csconsole_customer_pulse(ctx, account_ids[:50], days)
+                        pulse_df = fetch_csconsole_customer_pulse(ctx, acct_batch, days)
                         if pulse_df is not None and not pulse_df.empty:
-                            score_col = 'SCORE__C' if 'SCORE__C' in pulse_df.columns else 'SCORE_C' if 'SCORE_C' in pulse_df.columns else None
+                            score_col = next((c for c in ('SCORE__C', 'SCORE_C') if c in pulse_df.columns), None)
                             if score_col:
                                 avg_pulse = pulse_df[score_col].mean()
-                                context_parts.append(f"\n=== CUSTOMER PULSE ===\nAverage pulse score: {avg_pulse:.1f}")
-                                context_summary_parts.append(f"Avg pulse: {avg_pulse:.1f}")
+                                min_pulse = pulse_df[score_col].min()
+                                max_pulse = pulse_df[score_col].max()
+                                sections.append(f"\n=== CUSTOMER PULSE ===\nAvg: {avg_pulse:.1f} | Min: {min_pulse:.1f} | Max: {max_pulse:.1f} | Records: {len(pulse_df)}")
+                                context_summary_parts.append(f"Pulse: {avg_pulse:.1f}")
                     except Exception as e:
                         logger.debug(f"Ask AI: Pulse fetch skipped: {e}")
 
+                    # --- Section 6: Success Priorities ---
                     try:
-                        sp_df = fetch_csconsole_success_priorities(ctx, account_ids[:50], days)
+                        sp_df = fetch_csconsole_success_priorities(ctx, acct_batch, days)
                         if sp_df is not None and not sp_df.empty:
-                            context_parts.append(f"\n=== SUCCESS PRIORITIES ({len(sp_df)} total) ===")
+                            sections.append(f"\n=== SUCCESS PRIORITIES ({len(sp_df)} total) ===")
+                            for _, row in sp_df.head(10).iterrows():
+                                subj = row.get('SUBJECT_C', row.get('NAME', 'N/A'))
+                                sections.append(f"  - {subj}")
                     except Exception as e:
                         logger.debug(f"Ask AI: SP fetch skipped: {e}")
-            else:
-                context_parts.append("No subscription data found for the selected manager/technology combination.")
+
+                    # --- Section 7: Action Plans ---
+                    try:
+                        ap_df = fetch_csconsole_action_plans(ctx, acct_batch, days)
+                        if ap_df is not None and not ap_df.empty:
+                            sections.append(f"\n=== ACTION PLANS ({len(ap_df)} total) ===")
+                            for _, row in ap_df.head(10).iterrows():
+                                subj = row.get('SUBJECT_C', row.get('NAME', 'N/A'))
+                                status = row.get('STATUS_C', '')
+                                sections.append(f"  - {subj} (Status: {status})")
+                    except Exception as e:
+                        logger.debug(f"Ask AI: AP fetch skipped: {e}")
+
+                    # --- Section 8: TREND ANALYSIS (NEW) ---
+                    try:
+                        trends = fetch_period_comparison(ctx, acct_batch, days)
+                        if trends:
+                            sections.append(f"\n=== TREND ANALYSIS (current {days}d vs previous {days}d) ===")
+                            if 'adoption_barriers' in trends:
+                                t = trends['adoption_barriers']
+                                sections.append(f"Adoption barriers: {t['current']} (current) vs {t['previous']} (previous) = {t['change_pct']:+.1f}% ({t['trend']})")
+                            if 'customer_pulse' in trends:
+                                t = trends['customer_pulse']
+                                sections.append(f"Customer pulse avg: {t['current_avg']} (current) vs {t['previous_avg']} (previous) = {t['change']:+.1f} ({t['trend']})")
+                            if 'action_plans' in trends:
+                                t = trends['action_plans']
+                                sections.append(f"Action plans: {t['current']} (current) vs {t['previous']} (previous) = {t['change_pct']:+.1f}% ({t['trend']})")
+                            context_summary_parts.append("Trends included")
+                    except Exception as e:
+                        logger.debug(f"Ask AI: Trends skipped: {e}")
+
+                    # --- Section 9: BARRIER VELOCITY (NEW) ---
+                    try:
+                        velocity = fetch_barrier_velocity(ctx, acct_batch, days)
+                        if velocity:
+                            sections.append(f"\n=== BARRIER VELOCITY ===")
+                            sections.append(f"Avg new barriers/week: {velocity.get('avg_new_per_week', 0)}")
+                            sections.append(f"Avg resolved/week: {velocity.get('avg_closed_per_week', 0)}")
+                            sections.append(f"Net velocity/week: {velocity.get('net_velocity_per_week', 0)} (positive = growing backlog)")
+                            sections.append(f"Resolution rate: {velocity.get('resolution_rate_pct', 0)}%")
+                            if velocity.get('weeks'):
+                                sections.append("Weekly breakdown (recent first):")
+                                for wk in velocity['weeks'][:8]:
+                                    sections.append(f"  - {wk['week']}: +{wk['new']} new, -{wk['closed']} resolved, net {wk['net']:+d}")
+                    except Exception as e:
+                        logger.debug(f"Ask AI: Velocity skipped: {e}")
+
+                    # --- Section 10: ARR AT RISK (NEW) ---
+                    try:
+                        risk = calculate_arr_at_risk(arr_df, ab_df, cases_df)
+                        if risk:
+                            sections.append(f"\n=== ARR AT RISK ===")
+                            sections.append(f"Total portfolio ARR: ${risk.get('total_portfolio_arr', 0):,.0f}")
+                            sections.append(f"ARR at risk (accounts with barriers/cases): ${risk.get('arr_at_risk', 0):,.0f} ({risk.get('pct_at_risk', 0)}%)")
+                            sections.append(f"ARR critical (accounts with P1/Critical issues): ${risk.get('arr_critical', 0):,.0f} ({risk.get('pct_critical', 0)}%)")
+                            sections.append(f"Healthy ARR: ${risk.get('arr_healthy', 0):,.0f}")
+                            sections.append(f"Troubled accounts: {risk.get('troubled_account_count', 0)} | Critical: {risk.get('critical_account_count', 0)}")
+                            context_summary_parts.append(f"${risk.get('arr_at_risk', 0):,.0f} at risk")
+                    except Exception as e:
+                        logger.debug(f"Ask AI: ARR risk skipped: {e}")
+
         finally:
             try:
                 ctx.close()
             except Exception:
                 pass
 
-        briefing = "\n".join(context_parts) if context_parts else "No portfolio data available."
+        # --- Section 11: EXTERNAL INTELLIGENCE (NEW) ---
+        try:
+            intel = get_all_external_intel()
+            if intel:
+                active_incidents = [i for i in (intel.get('incidents') or []) if (i.get('status') or '').lower() not in ('resolved', 'completed')]
+                if active_incidents:
+                    sections.append(f"\n=== ACTIVE SERVICE INCIDENTS ({len(active_incidents)}) ===")
+                    for inc in active_incidents[:10]:
+                        sections.append(f"  - [{(inc.get('status') or '').upper()}] {inc.get('title','')} | Impact: {inc.get('impact_level','')}")
+                recent_bugs = (intel.get('bugs') or [])[:10]
+                if recent_bugs:
+                    sections.append(f"\n=== RECENT KNOWN BUGS ({len(intel.get('bugs', []))}) ===")
+                    for b in recent_bugs:
+                        sections.append(f"  - {b.get('bug_id','')} | {b.get('title','')}")
+        except Exception as e:
+            logger.debug(f"Ask AI: Intel skipped: {e}")
+
+        # --- Section 12: HISTORICAL CONTEXT (NEW) ---
+        try:
+            hist = scan_historical_reports(str(_APP_SUPPORT / 'outputs'), manager=manager, technology=technology, limit=3)
+            if hist:
+                sections.append(f"\n=== HISTORICAL REPORT CONTEXT ({len(hist)} past reports found) ===")
+                for rpt in hist:
+                    sections.append(f"Report: {rpt['filename']} (Date: {rpt.get('date', 'unknown')})")
+                    for sheet, m in rpt.get('metrics', {}).items():
+                        parts = [f"Sheet '{sheet}': {m.get('rows', 0)} rows"]
+                        if 'unique_customers' in m:
+                            parts.append(f"{m['unique_customers']} customers")
+                        if 'total_arr' in m:
+                            parts.append(f"ARR: ${m['total_arr']:,.0f}")
+                        if 'severity_distribution' in m:
+                            parts.append(f"Severity: {m['severity_distribution']}")
+                        sections.append("  " + " | ".join(parts))
+                context_summary_parts.append(f"{len(hist)} past reports")
+        except Exception as e:
+            logger.debug(f"Ask AI: Historical scan skipped: {e}")
+
+        briefing = "\n".join(sections) if sections else "No portfolio data available."
+        if len(briefing) > 80000:
+            briefing = briefing[:80000] + "\n\n[... briefing truncated to 80KB for AI processing ...]"
         context_summary = " | ".join(context_summary_parts) if context_summary_parts else "No data fetched"
 
         system_prompt = (
-            "You are AdoptIQ's portfolio intelligence assistant. You have access to live Cisco Webex "
-            "portfolio data including subscriptions, adoption barriers, support cases, ARR, and customer "
-            "pulse scores. Answer the user's question based ONLY on the data provided below. Be concise, "
-            "specific, and actionable. Use bullet points where appropriate. If the data doesn't contain "
-            "enough information to answer fully, say so clearly and suggest what additional data might help."
+            "You are AdoptIQ, a senior portfolio intelligence analyst for Cisco Webex Customer Success. "
+            "You have deep expertise in subscription analytics, adoption barriers, ARR risk, and customer health.\n\n"
+            "INSTRUCTIONS:\n"
+            "1. ANALYZE the data provided below thoroughly before answering.\n"
+            "2. IDENTIFY patterns, correlations, and anomalies that aren't immediately obvious.\n"
+            "3. QUANTIFY your findings with specific numbers, percentages, and dollar amounts from the data.\n"
+            "4. COMPARE current metrics against historical baselines and trends when available.\n"
+            "5. PRIORITIZE insights by business impact (revenue at risk, customer churn potential).\n"
+            "6. RECOMMEND specific, actionable next steps ranked by urgency.\n"
+            "7. CITE data sources (CSConsole IDs, case numbers, customer names) for every claim.\n"
+            "8. SURFACE hidden risks: look for customers with multiple concurrent issues, "
+            "declining pulse scores, high ARR with unresolved barriers, or patterns across the portfolio.\n"
+            "9. If trend data is available, highlight whether things are improving or worsening.\n"
+            "10. If the data is insufficient to fully answer, state what's missing and what it would reveal.\n\n"
+            "FORMAT: Use clear headings, bullet points, and bold for key metrics. "
+            "Start with a 2-sentence executive summary, then provide detailed analysis."
         )
 
         full_prompt = f"{briefing}\n\n---\nUser question: {question}"
@@ -9018,11 +9187,16 @@ def ask_intel():
         briefing = "\n".join(context_parts) if context_parts else "No intelligence data is currently stored."
 
         system_prompt = (
-            "You are AdoptIQ's intelligence analyst assistant. You have access to Webex service "
-            "incidents, scheduled maintenance events, and known bugs/defects. Answer the user's "
-            "question based ONLY on the data provided below. Be concise, specific, and helpful. "
-            "If the data doesn't contain enough information to answer, say so clearly. "
-            "Format your answer in plain text with bullet points where appropriate."
+            "You are AdoptIQ's external intelligence analyst. You specialize in analyzing Webex "
+            "service incidents, scheduled maintenances, and known bugs/defects.\n\n"
+            "INSTRUCTIONS:\n"
+            "1. Answer based ONLY on the data provided below.\n"
+            "2. Identify patterns: recurring incidents, frequently affected services, time-based trends.\n"
+            "3. Assess impact: which incidents are most severe and how they correlate with customer issues.\n"
+            "4. Provide timeline analysis when relevant (when did issues start, how long did they last).\n"
+            "5. Highlight any ongoing/unresolved incidents that need immediate attention.\n"
+            "6. If data is insufficient, clearly state what's missing.\n\n"
+            "FORMAT: Use headings, bullet points, and bold for key findings. Be concise but thorough."
         )
 
         from adoptiq_backend import generate_llm_response

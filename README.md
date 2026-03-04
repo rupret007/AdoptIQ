@@ -7,12 +7,20 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 ### What's New in v1.0.3
 
 #### New Features
-- **Ask AI:** A new page where you can ask natural-language questions about your portfolio. The app fetches live Snowflake data (subscriptions, adoption barriers, ARR, support cases, customer pulse) based on your filters, then sends it to CircuIT for an AI-powered answer.
+- **Ask AI (Enhanced):** Ask natural-language questions about your portfolio with dramatically richer context. The AI now receives 12 data sections including live Snowflake data, period-over-period trend analysis, barrier creation/resolution velocity, ARR at risk calculations, historical report baselines, and active service incidents — producing insights that combine financial, operational, and external data in ways never seen before.
 - **External Intelligence:** Live incidents, bugs, and maintenances from status.webex.com and help.webex.com are fetched, stored historically in a local database, and displayed with search, export, and import capabilities. Ask the AI questions about any tracked intelligence.
 - **Admin Console:** The Admin tab opens the Admin Console (localhost:5002) in a new tab for monitoring, report history, and logs.
 - **Graceful shutdown:** Analysis status is automatically saved when the app exits, preventing data loss.
 
-#### Stability & Robustness (7 rounds of deep code review)
+#### AI Intelligence Engine
+- **Trend Analysis:** Compares current period metrics (barriers, pulse, action plans) against the previous period to show whether things are improving or worsening.
+- **Barrier Velocity:** Tracks weekly barrier creation vs resolution rates to show if the team is keeping up with new issues.
+- **ARR at Risk:** Calculates exactly how much revenue is tied to accounts with active barriers or support cases, broken down by severity tier.
+- **Historical Baselines:** Scans past report Excel files to establish historical context, so the AI can identify significant changes from previous baselines.
+- **External Intelligence Fusion:** Active service incidents and known bugs are automatically included in Ask AI context, enabling cross-domain insights (e.g., "Which customers are affected by the current outage?").
+- **Enhanced System Prompt:** The AI now acts as a senior portfolio intelligence analyst with 10 structured instructions for pattern recognition, quantification, prioritization, and actionable recommendations.
+
+#### Stability & Robustness (9 rounds of deep code review)
 - **Leader Report Excel fix:** Leader report Excel downloads now work correctly (filename sanitization was causing 404s).
 - **Download resilience:** Report downloads survive app restarts — status is loaded from disk when not in memory.
 - **Excel export stability:** Fixed datetime timezone handling and NaN/NaT/Inf sanitization that could crash or corrupt Excel exports.
@@ -32,7 +40,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **XSS prevention:** All dynamic content in the progress page and subscription search is properly escaped.
 
 #### Testing
-- **Test suite:** 321 pytest tests covering validation, data processing, downloads, formatting, status management, error paths, NaN/Inf handling, and security guards.
+- **Test suite:** 331 pytest tests covering validation, data processing, downloads, formatting, status management, error paths, NaN/Inf handling, security guards, and advanced analytics functions.
 - **Debug log cleanup:** Removed noisy DEBUG-prefixed log statements; downgraded to debug level for cleaner production logs.
 
 ### What's New in v1.0.2
@@ -85,7 +93,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **Dashboard / Run Analysis** — Start here; run new analyses from the dashboard buttons.
 - **History** — Lists previous portfolio analyses. Use **View** to open the progress page for an analysis and download Word/Excel reports when completed.
 - **Intel** — View tracked incidents, bugs, and maintenances from Webex status and help pages. Search, export/import historical data, and ask AI questions about intelligence.
-- **Ask AI** — Ask natural-language questions about your portfolio using live Snowflake data and CircuIT AI.
+- **Ask AI** — Ask natural-language questions powered by 12 data dimensions: subscriptions, ARR, barriers, cases, pulse, priorities, action plans, trend analysis, barrier velocity, ARR at risk, external intelligence, and historical baselines.
 - **Admin** — Opens the Admin Console (localhost:5002) in a new tab for system monitoring, report history, and logs.
 - **Help** — Links and usage notes.
 
