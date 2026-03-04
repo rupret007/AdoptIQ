@@ -113,47 +113,48 @@ class EnhancedSnowflakeInsights:
             """
             
             cur = self.ctx.cursor()
-            cur.execute(account_query, (f'%{customer_name}%',))
-            account_results = cur.fetchall()
-            
-            if account_results:
-                insights['account_summary'] = {
-                    'total_accounts_found': len(account_results),
-                    'accounts': [dict(zip([col[0] for col in cur.description], row)) for row in account_results]
-                }
-                insights['sources'].append({
-                    'table': 'CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY',
-                    'records_found': len(account_results),
-                    'verification_method': f"Search by BU_ACCOUNT_NAME containing '{customer_name}'"
-                })
-            
-            # Account Expiration Data
-            expiration_query = """
-            SELECT 
-                ID,
-                NAME,
-                EXPIRED_DATE,
-                RENEWAL_ACCOUNT
-            FROM CX_DB.CX_SWSSBST_BR.ACCOUNTS_EXPIRED_LAST_MONTH 
-            WHERE UPPER(NAME) LIKE UPPER(%s)
-            LIMIT 5
-            """
-            
-            cur.execute(expiration_query, (f'%{customer_name}%',))
-            expiration_results = cur.fetchall()
-            
-            if expiration_results:
-                insights['account_expiration'] = {
-                    'expired_accounts_found': len(expiration_results),
-                    'expired_accounts': [dict(zip([col[0] for col in cur.description], row)) for row in expiration_results]
-                }
-                insights['sources'].append({
-                    'table': 'CX_DB.CX_SWSSBST_BR.ACCOUNTS_EXPIRED_LAST_MONTH',
-                    'records_found': len(expiration_results),
-                    'verification_method': f"Search by NAME containing '{customer_name}'"
-                })
-            
-            cur.close()
+            try:
+                cur.execute(account_query, (f'%{customer_name}%',))
+                account_results = cur.fetchall()
+                
+                if account_results:
+                    insights['account_summary'] = {
+                        'total_accounts_found': len(account_results),
+                        'accounts': [dict(zip([col[0] for col in cur.description], row)) for row in account_results]
+                    }
+                    insights['sources'].append({
+                        'table': 'CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY',
+                        'records_found': len(account_results),
+                        'verification_method': f"Search by BU_ACCOUNT_NAME containing '{customer_name}'"
+                    })
+                
+                # Account Expiration Data
+                expiration_query = """
+                SELECT 
+                    ID,
+                    NAME,
+                    EXPIRED_DATE,
+                    RENEWAL_ACCOUNT
+                FROM CX_DB.CX_SWSSBST_BR.ACCOUNTS_EXPIRED_LAST_MONTH 
+                WHERE UPPER(NAME) LIKE UPPER(%s)
+                LIMIT 5
+                """
+                
+                cur.execute(expiration_query, (f'%{customer_name}%',))
+                expiration_results = cur.fetchall()
+                
+                if expiration_results:
+                    insights['account_expiration'] = {
+                        'expired_accounts_found': len(expiration_results),
+                        'expired_accounts': [dict(zip([col[0] for col in cur.description], row)) for row in expiration_results]
+                    }
+                    insights['sources'].append({
+                        'table': 'CX_DB.CX_SWSSBST_BR.ACCOUNTS_EXPIRED_LAST_MONTH',
+                        'records_found': len(expiration_results),
+                        'verification_method': f"Search by NAME containing '{customer_name}'"
+                    })
+            finally:
+                cur.close()
             
         except Exception as e:
             logger.debug(f"Error getting account insights: {e}")
@@ -190,56 +191,57 @@ class EnhancedSnowflakeInsights:
             """
             
             cur = self.ctx.cursor()
-            cur.execute(contract_query, (f'%{customer_name}%', days))
-            contract_results = cur.fetchall()
-            
-            if contract_results:
-                insights['contract_data'] = {
-                    'contracts_found': len(contract_results),
-                    'contracts': [dict(zip([col[0] for col in cur.description], row)) for row in contract_results],
-                    'total_arr': sum(row[3] for row in contract_results if row[3])
-                }
-                insights['sources'].append({
-                    'table': 'CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU',
-                    'records_found': len(contract_results),
-                    'verification_method': f"Search by CONTRACT_NUMBER for accounts matching '{customer_name}'"
-                })
-            
-            # Renewal Data
-            renewal_query = """
-            SELECT 
-                CONTRACT_NUMBER,
-                RENEWAL_DATE,
-                RENEWAL_STATUS,
-                RENEWAL_PROBABILITY
-            FROM CX_DB.CX_SWSSBST_BR.RENEWAL_DATA 
-            WHERE UPPER(CONTRACT_NUMBER) IN (
-                SELECT UPPER(CONTRACT_NUMBER) 
-                FROM CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU 
-                WHERE UPPER(ACCOUNT_ID_C) IN (
-                    SELECT UPPER(ACCOUNT_ID_C) 
-                    FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
-                    WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
+            try:
+                cur.execute(contract_query, (f'%{customer_name}%', days))
+                contract_results = cur.fetchall()
+                
+                if contract_results:
+                    insights['contract_data'] = {
+                        'contracts_found': len(contract_results),
+                        'contracts': [dict(zip([col[0] for col in cur.description], row)) for row in contract_results],
+                        'total_arr': sum(row[3] for row in contract_results if row[3])
+                    }
+                    insights['sources'].append({
+                        'table': 'CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU',
+                        'records_found': len(contract_results),
+                        'verification_method': f"Search by CONTRACT_NUMBER for accounts matching '{customer_name}'"
+                    })
+                
+                # Renewal Data
+                renewal_query = """
+                SELECT 
+                    CONTRACT_NUMBER,
+                    RENEWAL_DATE,
+                    RENEWAL_STATUS,
+                    RENEWAL_PROBABILITY
+                FROM CX_DB.CX_SWSSBST_BR.RENEWAL_DATA 
+                WHERE UPPER(CONTRACT_NUMBER) IN (
+                    SELECT UPPER(CONTRACT_NUMBER) 
+                    FROM CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU 
+                    WHERE UPPER(ACCOUNT_ID_C) IN (
+                        SELECT UPPER(ACCOUNT_ID_C) 
+                        FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
+                        WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
+                    )
                 )
-            )
-            LIMIT 10
-            """
-            
-            cur.execute(renewal_query, (f'%{customer_name}%',))
-            renewal_results = cur.fetchall()
-            
-            if renewal_results:
-                insights['renewal_data'] = {
-                    'renewals_found': len(renewal_results),
-                    'renewals': [dict(zip([col[0] for col in cur.description], row)) for row in renewal_results]
-                }
-                insights['sources'].append({
-                    'table': 'CX_DB.CX_SWSSBST_BR.RENEWAL_DATA',
-                    'records_found': len(renewal_results),
-                    'verification_method': f"Search by CONTRACT_NUMBER for accounts matching '{customer_name}'"
-                })
-            
-            cur.close()
+                LIMIT 10
+                """
+                
+                cur.execute(renewal_query, (f'%{customer_name}%',))
+                renewal_results = cur.fetchall()
+                
+                if renewal_results:
+                    insights['renewal_data'] = {
+                        'renewals_found': len(renewal_results),
+                        'renewals': [dict(zip([col[0] for col in cur.description], row)) for row in renewal_results]
+                    }
+                    insights['sources'].append({
+                        'table': 'CX_DB.CX_SWSSBST_BR.RENEWAL_DATA',
+                        'records_found': len(renewal_results),
+                        'verification_method': f"Search by CONTRACT_NUMBER for accounts matching '{customer_name}'"
+                    })
+            finally:
+                cur.close()
             
         except Exception as e:
             logger.debug(f"Error getting contract insights: {e}")
@@ -271,53 +273,54 @@ class EnhancedSnowflakeInsights:
             """
             
             cur = self.ctx.cursor()
-            cur.execute(booking_query, (f'%{customer_name}%', days))
-            booking_results = cur.fetchall()
-            
-            if booking_results:
-                insights['booking_data'] = {
-                    'bookings_found': len(booking_results),
-                    'bookings': [dict(zip([col[0] for col in cur.description], row)) for row in booking_results],
-                    'total_booking_amount': sum(row[4] for row in booking_results if row[4])
-                }
-                insights['sources'].append({
-                    'table': 'CX_DB.CX_SWSSBST_BR.BOOKINGS_TABLE_FOR_ACCOUNT_CHECK',
-                    'records_found': len(booking_results),
-                    'verification_method': f"Search by END_CUSTOMER_NAME containing '{customer_name}'"
-                })
-            
-            # Upsell Data
-            upsell_query = """
-            SELECT 
-                SUBSCRIPTION_REFERENCE_ID,
-                UPSELL_AMOUNT,
-                PRODUCT,
-                DATE_CREATED
-            FROM CX_DB.CX_SWSSBST_BR.TSS_BOOKINGS_COLLAB_UPSELL_WITH_SUBS_REFERENCE_ID 
-            WHERE UPPER(SUBSCRIPTION_REFERENCE_ID) IN (
-                SELECT UPPER(SUBSCRIPTION_REFERENCE_ID) 
-                FROM CX_DB.CX_SWSSBST_BR.BOOKINGS_TABLE_FOR_ACCOUNT_CHECK 
-                WHERE UPPER(END_CUSTOMER_NAME) LIKE UPPER(%s)
-            )
-            LIMIT 10
-            """
-            
-            cur.execute(upsell_query, (f'%{customer_name}%',))
-            upsell_results = cur.fetchall()
-            
-            if upsell_results:
-                insights['upsell_data'] = {
-                    'upsells_found': len(upsell_results),
-                    'upsells': [dict(zip([col[0] for col in cur.description], row)) for row in upsell_results],
-                    'total_upsell_amount': sum(row[1] for row in upsell_results if row[1])
-                }
-                insights['sources'].append({
-                    'table': 'CX_DB.CX_SWSSBST_BR.TSS_BOOKINGS_COLLAB_UPSELL_WITH_SUBS_REFERENCE_ID',
-                    'records_found': len(upsell_results),
-                    'verification_method': f"Search by SUBSCRIPTION_REFERENCE_ID for accounts matching '{customer_name}'"
-                })
-            
-            cur.close()
+            try:
+                cur.execute(booking_query, (f'%{customer_name}%', days))
+                booking_results = cur.fetchall()
+                
+                if booking_results:
+                    insights['booking_data'] = {
+                        'bookings_found': len(booking_results),
+                        'bookings': [dict(zip([col[0] for col in cur.description], row)) for row in booking_results],
+                        'total_booking_amount': sum(row[4] for row in booking_results if row[4])
+                    }
+                    insights['sources'].append({
+                        'table': 'CX_DB.CX_SWSSBST_BR.BOOKINGS_TABLE_FOR_ACCOUNT_CHECK',
+                        'records_found': len(booking_results),
+                        'verification_method': f"Search by END_CUSTOMER_NAME containing '{customer_name}'"
+                    })
+                
+                # Upsell Data
+                upsell_query = """
+                SELECT 
+                    SUBSCRIPTION_REFERENCE_ID,
+                    UPSELL_AMOUNT,
+                    PRODUCT,
+                    DATE_CREATED
+                FROM CX_DB.CX_SWSSBST_BR.TSS_BOOKINGS_COLLAB_UPSELL_WITH_SUBS_REFERENCE_ID 
+                WHERE UPPER(SUBSCRIPTION_REFERENCE_ID) IN (
+                    SELECT UPPER(SUBSCRIPTION_REFERENCE_ID) 
+                    FROM CX_DB.CX_SWSSBST_BR.BOOKINGS_TABLE_FOR_ACCOUNT_CHECK 
+                    WHERE UPPER(END_CUSTOMER_NAME) LIKE UPPER(%s)
+                )
+                LIMIT 10
+                """
+                
+                cur.execute(upsell_query, (f'%{customer_name}%',))
+                upsell_results = cur.fetchall()
+                
+                if upsell_results:
+                    insights['upsell_data'] = {
+                        'upsells_found': len(upsell_results),
+                        'upsells': [dict(zip([col[0] for col in cur.description], row)) for row in upsell_results],
+                        'total_upsell_amount': sum(row[1] for row in upsell_results if row[1])
+                    }
+                    insights['sources'].append({
+                        'table': 'CX_DB.CX_SWSSBST_BR.TSS_BOOKINGS_COLLAB_UPSELL_WITH_SUBS_REFERENCE_ID',
+                        'records_found': len(upsell_results),
+                        'verification_method': f"Search by SUBSCRIPTION_REFERENCE_ID for accounts matching '{customer_name}'"
+                    })
+            finally:
+                cur.close()
             
         except Exception as e:
             err_str = str(e)
@@ -364,119 +367,120 @@ class EnhancedSnowflakeInsights:
             """
             
             cur = self.ctx.cursor()
-            cur.execute(ap_query, (f'%{customer_name}%', days))
-            ap_results = cur.fetchall()
-            
-            if ap_results:
-                insights['action_plans'] = {
-                    'action_plans_found': len(ap_results),
-                    'action_plans': [dict(zip([col[0] for col in cur.description], row)) for row in ap_results]
-                }
-                insights['sources'].append({
-                    'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C',
-                    'records_found': len(ap_results),
-                    'verification_method': f"Search by ID where record_type_id = '0122T000000QHBGQA4' for accounts matching '{customer_name}'"
-                })
-            
-            # Adoption Barriers
-            ab_query = """
-            SELECT 
-                ID,
-                SUBJECT_C,
-                AB_CATEGORY_C,
-                SEVERITY_C,
-                ACCOUNT_ID_C,
-                CREATED_DATE
-            FROM EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C 
-            WHERE record_type_id = '0122T000000GJfTQAW'
-            AND UPPER(ACCOUNT_ID_C) IN (
-                SELECT UPPER(ACCOUNT_ID_C) 
-                FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
-                WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
-            )
-            AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
-            LIMIT 20
-            """
-            
-            cur.execute(ab_query, (f'%{customer_name}%', days))
-            ab_results = cur.fetchall()
-            
-            if ab_results:
-                insights['adoption_barriers'] = {
-                    'adoption_barriers_found': len(ab_results),
-                    'adoption_barriers': [dict(zip([col[0] for col in cur.description], row)) for row in ab_results]
-                }
-                insights['sources'].append({
-                    'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C',
-                    'records_found': len(ab_results),
-                    'verification_method': f"Search by ID where record_type_id = '0122T000000GJfTQAW' for accounts matching '{customer_name}'"
-                })
-            
-            # Customer Pulse
-            cp_query = """
-            SELECT 
-                ID,
-                SUBJECT_C,
-                STATUS_C,
-                ACCOUNT__C,
-                CREATED_DATE
-            FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C 
-            WHERE UPPER(ACCOUNT__C) IN (
-                SELECT UPPER(ACCOUNT_ID_C) 
-                FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
-                WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
-            )
-            AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
-            LIMIT 20
-            """
-            
-            cur.execute(cp_query, (f'%{customer_name}%', days))
-            cp_results = cur.fetchall()
-            
-            if cp_results:
-                insights['customer_pulse'] = {
-                    'customer_pulse_found': len(cp_results),
-                    'customer_pulse': [dict(zip([col[0] for col in cur.description], row)) for row in cp_results]
-                }
-                insights['sources'].append({
-                    'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C',
-                    'records_found': len(cp_results),
-                    'verification_method': f"Search by ID for accounts matching '{customer_name}'"
-                })
-            
-            # Success Priorities
-            sp_query = """
-            SELECT 
-                ID,
-                SUBJECT_C,
-                PRIORITY_C,
-                RELATED_CUSTOMER__C,
-                CREATED_DATE
-            FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C 
-            WHERE UPPER(RELATED_CUSTOMER__C) IN (
-                SELECT UPPER(ACCOUNT_ID_C) 
-                FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
-                WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
-            )
-            AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
-            LIMIT 20
-            """
-            
-            cur.execute(sp_query, (f'%{customer_name}%', days))
-            sp_results = cur.fetchall()
-            
-            if sp_results:
-                insights['success_priorities'] = {
-                    'success_priorities_found': len(sp_results),
-                    'success_priorities': [dict(zip([col[0] for col in cur.description], row)) for row in sp_results]
-                }
-                insights['sources'].append({
-                    'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C',
-                    'records_found': len(sp_results),
-                    'verification_method': f"Search by ID for accounts matching '{customer_name}'"
-                })
-            
-            cur.close()
+            try:
+                cur.execute(ap_query, (f'%{customer_name}%', days))
+                ap_results = cur.fetchall()
+                
+                if ap_results:
+                    insights['action_plans'] = {
+                        'action_plans_found': len(ap_results),
+                        'action_plans': [dict(zip([col[0] for col in cur.description], row)) for row in ap_results]
+                    }
+                    insights['sources'].append({
+                        'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C',
+                        'records_found': len(ap_results),
+                        'verification_method': f"Search by ID where record_type_id = '0122T000000QHBGQA4' for accounts matching '{customer_name}'"
+                    })
+                
+                # Adoption Barriers
+                ab_query = """
+                SELECT 
+                    ID,
+                    SUBJECT_C,
+                    AB_CATEGORY_C,
+                    SEVERITY_C,
+                    ACCOUNT_ID_C,
+                    CREATED_DATE
+                FROM EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C 
+                WHERE record_type_id = '0122T000000GJfTQAW'
+                AND UPPER(ACCOUNT_ID_C) IN (
+                    SELECT UPPER(ACCOUNT_ID_C) 
+                    FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
+                    WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
+                )
+                AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
+                LIMIT 20
+                """
+                
+                cur.execute(ab_query, (f'%{customer_name}%', days))
+                ab_results = cur.fetchall()
+                
+                if ab_results:
+                    insights['adoption_barriers'] = {
+                        'adoption_barriers_found': len(ab_results),
+                        'adoption_barriers': [dict(zip([col[0] for col in cur.description], row)) for row in ab_results]
+                    }
+                    insights['sources'].append({
+                        'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C',
+                        'records_found': len(ab_results),
+                        'verification_method': f"Search by ID where record_type_id = '0122T000000GJfTQAW' for accounts matching '{customer_name}'"
+                    })
+                
+                # Customer Pulse
+                cp_query = """
+                SELECT 
+                    ID,
+                    SUBJECT_C,
+                    STATUS_C,
+                    ACCOUNT__C,
+                    CREATED_DATE
+                FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C 
+                WHERE UPPER(ACCOUNT__C) IN (
+                    SELECT UPPER(ACCOUNT_ID_C) 
+                    FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
+                    WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
+                )
+                AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
+                LIMIT 20
+                """
+                
+                cur.execute(cp_query, (f'%{customer_name}%', days))
+                cp_results = cur.fetchall()
+                
+                if cp_results:
+                    insights['customer_pulse'] = {
+                        'customer_pulse_found': len(cp_results),
+                        'customer_pulse': [dict(zip([col[0] for col in cur.description], row)) for row in cp_results]
+                    }
+                    insights['sources'].append({
+                        'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C',
+                        'records_found': len(cp_results),
+                        'verification_method': f"Search by ID for accounts matching '{customer_name}'"
+                    })
+                
+                # Success Priorities
+                sp_query = """
+                SELECT 
+                    ID,
+                    SUBJECT_C,
+                    PRIORITY_C,
+                    RELATED_CUSTOMER__C,
+                    CREATED_DATE
+                FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C 
+                WHERE UPPER(RELATED_CUSTOMER__C) IN (
+                    SELECT UPPER(ACCOUNT_ID_C) 
+                    FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
+                    WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
+                )
+                AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
+                LIMIT 20
+                """
+                
+                cur.execute(sp_query, (f'%{customer_name}%', days))
+                sp_results = cur.fetchall()
+                
+                if sp_results:
+                    insights['success_priorities'] = {
+                        'success_priorities_found': len(sp_results),
+                        'success_priorities': [dict(zip([col[0] for col in cur.description], row)) for row in sp_results]
+                    }
+                    insights['sources'].append({
+                        'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C',
+                        'records_found': len(sp_results),
+                        'verification_method': f"Search by ID for accounts matching '{customer_name}'"
+                    })
+            finally:
+                cur.close()
             
         except Exception as e:
             logger.debug(f"Error getting engagement insights: {e}")
@@ -512,21 +516,22 @@ class EnhancedSnowflakeInsights:
             """
             
             cur = self.ctx.cursor()
-            cur.execute(user_query, (f'%{customer_name}%', days))
-            user_results = cur.fetchall()
-            
-            if user_results:
-                insights['user_data'] = {
-                    'users_found': len(user_results),
-                    'users': [dict(zip([col[0] for col in cur.description], row)) for row in user_results]
-                }
-                insights['sources'].append({
-                    'table': 'CX_DB.CX_SWSSBST_BR.USER_DATA',
-                    'records_found': len(user_results),
-                    'verification_method': f"Search by USER_ID for accounts matching '{customer_name}'"
-                })
-            
-            cur.close()
+            try:
+                cur.execute(user_query, (f'%{customer_name}%', days))
+                user_results = cur.fetchall()
+                
+                if user_results:
+                    insights['user_data'] = {
+                        'users_found': len(user_results),
+                        'users': [dict(zip([col[0] for col in cur.description], row)) for row in user_results]
+                    }
+                    insights['sources'].append({
+                        'table': 'CX_DB.CX_SWSSBST_BR.USER_DATA',
+                        'records_found': len(user_results),
+                        'verification_method': f"Search by USER_ID for accounts matching '{customer_name}'"
+                    })
+            finally:
+                cur.close()
             
         except Exception as e:
             logger.debug(f"Error getting usage insights: {e}")
@@ -563,21 +568,22 @@ class EnhancedSnowflakeInsights:
             """
             
             cur = self.ctx.cursor()
-            cur.execute(support_query, (f'%{customer_name}%', days))
-            support_results = cur.fetchall()
-            
-            if support_results:
-                insights['support_cases'] = {
-                    'support_cases_found': len(support_results),
-                    'support_cases': [dict(zip([col[0] for col in cur.description], row)) for row in support_results]
-                }
-                insights['sources'].append({
-                    'table': 'CX_DB.CX_SWSSBST_BR.SUPPORT_CASES',
-                    'records_found': len(support_results),
-                    'verification_method': f"Search by CASE_ID for accounts matching '{customer_name}'"
-                })
-            
-            cur.close()
+            try:
+                cur.execute(support_query, (f'%{customer_name}%', days))
+                support_results = cur.fetchall()
+                
+                if support_results:
+                    insights['support_cases'] = {
+                        'support_cases_found': len(support_results),
+                        'support_cases': [dict(zip([col[0] for col in cur.description], row)) for row in support_results]
+                    }
+                    insights['sources'].append({
+                        'table': 'CX_DB.CX_SWSSBST_BR.SUPPORT_CASES',
+                        'records_found': len(support_results),
+                        'verification_method': f"Search by CASE_ID for accounts matching '{customer_name}'"
+                    })
+            finally:
+                cur.close()
             
         except Exception as e:
             logger.debug(f"Error getting support insights: {e}")
@@ -612,25 +618,25 @@ class EnhancedSnowflakeInsights:
             """
             
             cur = self.ctx.cursor()
-            cur.execute(risk_query, (f'%{customer_name}%',))
-            risk_results = cur.fetchall()
-            
-            if risk_results:
-                insights['risk_assessment'] = {
-                    'risk_assessments_found': len(risk_results),
-                    'risk_assessments': [dict(zip([col[0] for col in cur.description], row)) for row in risk_results]
-                }
-                insights['sources'].append({
-                    'table': 'CX_DB.CX_SWSSBST_BR.RISK_ASSESSMENT',
-                    'records_found': len(risk_results),
-                    'verification_method': f"Search by ACCOUNT_ID for accounts matching '{customer_name}'"
-                })
-            
-            cur.close()
+            try:
+                cur.execute(risk_query, (f'%{customer_name}%',))
+                risk_results = cur.fetchall()
+                
+                if risk_results:
+                    insights['risk_assessment'] = {
+                        'risk_assessments_found': len(risk_results),
+                        'risk_assessments': [dict(zip([col[0] for col in cur.description], row)) for row in risk_results]
+                    }
+                    insights['sources'].append({
+                        'table': 'CX_DB.CX_SWSSBST_BR.RISK_ASSESSMENT',
+                        'records_found': len(risk_results),
+                        'verification_method': f"Search by ACCOUNT_ID for accounts matching '{customer_name}'"
+                    })
+            finally:
+                cur.close()
             
         except Exception as e:
             err_str = str(e)
-            # RISK_ASSESSMENT may not exist or role may lack access; don't flood logs
             if "does not exist" in err_str or "not authorized" in err_str or "invalid identifier" in err_str:
                 logger.debug(f"Risk insights skipped (table unavailable): {err_str[:120]}")
                 if "risk" not in self._skip_warned:
@@ -669,21 +675,22 @@ class EnhancedSnowflakeInsights:
             """
             
             cur = self.ctx.cursor()
-            cur.execute(product_query, (f'%{customer_name}%',))
-            product_results = cur.fetchall()
-            
-            if product_results:
-                insights['product_usage'] = {
-                    'products_found': len(product_results),
-                    'products': [dict(zip([col[0] for col in cur.description], row)) for row in product_results]
-                }
-                insights['sources'].append({
-                    'table': 'CX_DB.CX_SWSSBST_BR.PRODUCT_USAGE',
-                    'records_found': len(product_results),
-                    'verification_method': f"Search by PRODUCT_ID for accounts matching '{customer_name}'"
-                })
-            
-            cur.close()
+            try:
+                cur.execute(product_query, (f'%{customer_name}%',))
+                product_results = cur.fetchall()
+                
+                if product_results:
+                    insights['product_usage'] = {
+                        'products_found': len(product_results),
+                        'products': [dict(zip([col[0] for col in cur.description], row)) for row in product_results]
+                    }
+                    insights['sources'].append({
+                        'table': 'CX_DB.CX_SWSSBST_BR.PRODUCT_USAGE',
+                        'records_found': len(product_results),
+                        'verification_method': f"Search by PRODUCT_ID for accounts matching '{customer_name}'"
+                    })
+            finally:
+                cur.close()
             
         except Exception as e:
             logger.debug(f"Error getting product insights: {e}")

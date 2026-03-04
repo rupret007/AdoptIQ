@@ -1765,7 +1765,8 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
                             cust_col_name = col
                         elif any(k in col_lower for k in ['arr', 'annual_contract', 'revenue']):
                             try:
-                                metrics['total_arr'] = float(pd.to_numeric(df[col], errors='coerce').sum())
+                                arr_sum = pd.to_numeric(df[col], errors='coerce').sum()
+                                metrics['total_arr'] = 0.0 if pd.isna(arr_sum) else float(arr_sum)
                                 arr_col_name = col
                             except Exception:
                                 pass
@@ -3679,6 +3680,8 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                 for col in df_copy.select_dtypes(include=['datetimetz']).columns:
                     if df_copy[col].dt.tz is not None:
                         df_copy[col] = df_copy[col].dt.tz_convert(None)
+                import numpy as _np
+                df_copy = df_copy.replace([_np.inf, -_np.inf], _np.nan)
 
                 sheet = (name or "Sheet")[:31]
                 if hasattr(df_copy, "to_excel"):

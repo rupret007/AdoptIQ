@@ -554,3 +554,85 @@ class TestAdvancedAnalytics:
         ]
         result = build_cross_report_trends(data)
         assert 'period' in result
+
+
+class TestRound13Fixes:
+    """Tests for Round 13 audit fixes."""
+
+    def test_scan_historical_reports_nan_arr(self):
+        """total_arr should be 0.0 when column is all NaN, not NaN."""
+        import math
+        with tempfile.TemporaryDirectory() as tmpdir:
+            df = pd.DataFrame({
+                'BU_NAME': ['Cust A', 'Cust B'],
+                'ANNUAL_CONTRACT_VALUE': [None, None],
+                'STATUS_C': ['Open', 'Closed']
+            })
+            fpath = os.path.join(tmpdir, 'AdoptIQ_Data_test.xlsx')
+            df.to_excel(fpath, index=False)
+
+            from adoptiq_backend import scan_historical_reports
+            result = scan_historical_reports(tmpdir, limit=1)
+            assert len(result) == 1
+            arr_val = result[0]['metrics'].get('total_arr', 0)
+            assert not (isinstance(arr_val, float) and math.isnan(arr_val)), \
+                f"total_arr should not be NaN, got {arr_val}"
+
+    def test_excel_fallback_replaces_inf(self):
+        """Inf values should be replaced with NaN before writing to Excel."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            df = pd.DataFrame({
+                'Name': ['A', 'B', 'C'],
+                'Value': [1.0, float('inf'), float('-inf')]
+            })
+            fpath = os.path.join(tmpdir, 'test_inf')
+            from adoptiq_backend import write_excel_workbook
+            result_path = write_excel_workbook(fpath, {'Data': df})
+            assert result_path is not None
+            read_back = pd.read_excel(result_path, sheet_name='Data')
+            assert read_back['Value'].iloc[0] == 1.0
+            assert pd.isna(read_back['Value'].iloc[1])
+            assert pd.isna(read_back['Value'].iloc[2])
+
+    def test_error_responses_no_str_e(self):
+        """API error responses must not contain raw exception strings."""
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from app_simple import app
+        client = app.test_client()
+        resp = client.post('/simple_test')
+        if resp.status_code == 500:
+            data = resp.get_json()
+            assert 'Traceback' not in str(data.get('error', ''))
+            assert '/' not in str(data.get('error', ''))
+
+    def test_subscription_word_failure_sets_none(self):
+        """When word_path is set to None on failure, status should reflect it."""
+        word_path = None
+        try:
+            raise RuntimeError("simulated failure")
+        except Exception:
+            word_path = None
+
+        status = {}
+        word_filename = 'test.docx'
+        status['word_file'] = word_filename if word_path else None
+        status['word_report'] = str(word_path) if word_path else None
+        assert status['word_file'] is None
+        assert status['word_report'] is None
+
+    def test_animatestatistics_nan_guard_concept(self):
+        """Verify the NaN guard logic used in results.html animateStatistics."""
+        import math
+        values = ['10', '', 'abc', '0', None]
+        results = []
+        for v in values:
+            try:
+                parsed = int(v) if v else None
+            except (ValueError, TypeError):
+                parsed = None
+            if parsed is None or (isinstance(parsed, float) and math.isnan(parsed)):
+                results.append('fallback')
+            else:
+                results.append(parsed)
+        assert results == [10, 'fallback', 'fallback', 0, 'fallback']

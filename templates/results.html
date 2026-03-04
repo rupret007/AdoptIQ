@@ -303,7 +303,11 @@ document.addEventListener('DOMContentLoaded', function() {
         
         stats.forEach(stat => {
             const finalValue = parseInt(stat.dataset.value);
-            const duration = 2000; // 2 seconds
+            if (isNaN(finalValue)) {
+                stat.textContent = stat.dataset.value || '0';
+                return;
+            }
+            const duration = 2000;
             const steps = 60;
             const increment = finalValue / steps;
             let currentValue = 0;

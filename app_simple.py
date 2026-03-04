@@ -915,11 +915,10 @@ def start_analysis():
         })
         
     except Exception as e:
-        # For errors, return JSON error response
         logger.error(f"Error in start_analysis: {e}", exc_info=True)
         return jsonify({
             'success': False,
-            'error': str(e)
+            'error': 'An internal error occurred while starting the analysis'
         }), 500
 
 def check_cancellation(analysis_id):
@@ -8438,14 +8437,13 @@ def get_status(analysis_id):
                 with open(status_file_path, 'r', encoding='utf-8') as f:
                     loaded_status = json.load(f)
                     if analysis_id in loaded_status:
-                        # Load it into memory
                         with analysis_status_lock:
-                            analysis_status[analysis_id] = loaded_status[analysis_id]
+                            if analysis_id not in analysis_status:
+                                analysis_status[analysis_id] = loaded_status[analysis_id]
                     else:
-                        logger.warning(f"Analysis ID '{analysis_id}' not found in status file")
-                        return jsonify({'error': 'Analysis not found', 'analysis_id': analysis_id}), 404
+                        logger.warning(f"Analysis ID not found in status file")
+                        return jsonify({'error': 'Analysis not found'}), 404
             else:
-                # Check if analysis is in memory (might have been created but not saved yet)
                 with analysis_status_lock:
                     if analysis_id in analysis_status:
                         status = analysis_status[analysis_id]
@@ -8453,11 +8451,11 @@ def get_status(analysis_id):
                         status_copy['excel_available'] = bool(status.get('excel_report'))
                         return jsonify(status_copy)
                     else:
-                        logger.warning(f"Analysis ID '{analysis_id}' not found in memory or file")
-                        return jsonify({'error': 'Analysis not found', 'analysis_id': analysis_id}), 404
+                        logger.warning(f"Analysis ID not found in memory or file")
+                        return jsonify({'error': 'Analysis not found'}), 404
         except Exception as e:
-            logger.error(f"Error loading analysis status from file: {e}", exc_info=True)
-            return jsonify({'error': 'Analysis not found', 'details': str(e)}), 404
+            logger.error(f"Error loading analysis status: {e}", exc_info=True)
+            return jsonify({'error': 'Analysis not found'}), 404
     
     with analysis_status_lock:
         status = analysis_status.get(analysis_id)
@@ -8506,7 +8504,8 @@ def get_all_status():
             
             return jsonify(all_statuses)
     except Exception as e:
-        return jsonify({'error': str(e), 'statuses': []}), 500
+        logger.error(f"Error fetching batch statuses: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to retrieve statuses', 'statuses': []}), 500
 
 @app.route('/previous-reports')
 def previous_reports():
@@ -8719,7 +8718,7 @@ def previous_reports():
         
     except Exception as e:
         logger.error(f"Error browsing previous reports: {e}")
-        return f"Error loading previous reports: {str(e)}", 500
+        return "Error loading previous reports. Please try again.", 500
 
 @app.route('/help')
 def help():
@@ -9293,8 +9292,8 @@ def refresh_external_intel():
         maintenances = fetch_status_maintenances(timeout=20) or []
         return jsonify({'ok': True, 'incidents': len(incidents), 'bugs': len(bugs), 'maintenances': len(maintenances)})
     except Exception as e:
-        logger.error(f"Error refreshing external intel: {e}")
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        logger.error(f"Error refreshing external intel: {e}", exc_info=True)
+        return jsonify({'ok': False, 'error': 'Failed to refresh external intelligence'}), 500
 
 
 @app.route('/api/export-intel')
@@ -9313,8 +9312,8 @@ def export_intel():
             headers={'Content-Disposition': f'attachment; filename="{filename}"'},
         )
     except Exception as e:
-        logger.error(f"Error exporting intel data: {e}")
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        logger.error(f"Error exporting intel data: {e}", exc_info=True)
+        return jsonify({'ok': False, 'error': 'Failed to export intelligence data'}), 500
 
 
 @app.route('/api/ask-intel', methods=['POST'])
@@ -9402,8 +9401,8 @@ def import_intel():
     except _json.JSONDecodeError:
         return jsonify({'ok': False, 'error': 'Invalid JSON file'}), 400
     except Exception as e:
-        logger.error(f"Error importing intel data: {e}")
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        logger.error(f"Error importing intel data: {e}", exc_info=True)
+        return jsonify({'ok': False, 'error': 'Failed to import intelligence data'}), 500
 
 
 @app.route('/download-file/<filename>')
@@ -9613,8 +9612,8 @@ def start_compact_analysis():
         })
         
     except Exception as e:
-        logger.error(f"[[ERROR]] Error starting compact analysis: {e}")
-        return jsonify({'error': f'Failed to start analysis: {str(e)}'}), 500
+        logger.error(f"[[ERROR]] Error starting compact analysis: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to start analysis'}), 500
 
 
 @app.route('/start_customer_renewal_analysis', methods=['POST'])
@@ -9707,8 +9706,8 @@ def start_customer_renewal_analysis():
         })
         
     except Exception as e:
-        logger.error(f"[[ERROR]] Error starting renewal analysis: {e}")
-        return jsonify({'error': f'Failed to start analysis: {str(e)}'}), 500
+        logger.error(f"[[ERROR]] Error starting renewal analysis: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to start analysis'}), 500
 
 
 @app.route('/search_subscriptions', methods=['POST'])
@@ -9753,7 +9752,7 @@ def search_subscriptions():
         
     except Exception as e:
         logger.error(f"Error searching subscriptions: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'Failed to search subscriptions'}), 500
 
 
 @app.route('/subscription_analysis/<subscription_id>')
@@ -9782,7 +9781,7 @@ def subscription_analysis(subscription_id):
         
     except Exception as e:
         logger.error(f"Error getting subscription analysis: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'Failed to retrieve subscription analysis'}), 500
 
 
 @app.route('/subscription_renewal_risk/<subscription_id>')
@@ -9811,7 +9810,7 @@ def subscription_renewal_risk(subscription_id):
         
     except Exception as e:
         logger.error(f"Error getting subscription renewal risk: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'Failed to retrieve renewal risk analysis'}), 500
 
 
 @app.route('/start_subscription_analysis', methods=['POST'])
@@ -9871,7 +9870,7 @@ def start_subscription_analysis():
         
     except Exception as e:
         logger.error(f"Error starting subscription analysis: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'Failed to start subscription analysis'}), 500
 
 
 def run_subscription_analysis(analysis_id):
@@ -10110,6 +10109,7 @@ def run_subscription_analysis(analysis_id):
             
         except Exception as e:
             logger.error(f"Error creating Word report: {e}")
+            word_path = None
         
         with analysis_status_lock:
             _update_progress(status, 88, 'Generating Excel workbook...', 'Excel Report Generation')
@@ -10242,10 +10242,9 @@ def run_subscription_analysis(analysis_id):
         with analysis_status_lock:
             _update_progress(status, 100, 'Subscription analysis completed successfully!', 'Completed')
             status['status'] = 'completed'
-            status['word_file'] = word_filename
+            status['word_file'] = word_filename if word_path else None
             status['excel_file'] = excel_filename
-            # Keep canonical keys consistent with /download endpoint expectations
-            status['word_report'] = str(word_path)
+            status['word_report'] = str(word_path) if word_path else None
             status['excel_report'] = str(excel_path) if excel_path else None
             status['end_time'] = datetime.now().isoformat()
             status['completion_time'] = status['end_time']
@@ -10396,8 +10395,8 @@ def download_result(analysis_id, file_type):
             }), 404
             
     except Exception as e:
-        logger.error(f"[[ERROR]] Download error: {str(e)}")
-        return jsonify({'error': f'Download failed: {str(e)}'}), 500
+        logger.error(f"[[ERROR]] Download error: {e}")
+        return jsonify({'error': 'Download failed due to an internal error'}), 500
 
 
 @app.route('/simple_test', methods=['POST'])
@@ -10408,7 +10407,7 @@ def simple_test():
         return jsonify({'success': True, 'message': 'Simple test successful'})
     except Exception as e:
         logger.error(f"[[ERROR]] Simple test failed: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': 'Test endpoint failed'}), 500
 
 @app.route('/test_generate_report', methods=['POST'])
 def test_generate_report():
@@ -10468,7 +10467,7 @@ def test_generate_report():
         
     except Exception as e:
         logger.error(f"[[ERROR]] Test analysis failed: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': 'Test analysis failed'}), 500
 
 @app.route('/clear_stuck_analyses', methods=['POST'])
 def clear_stuck_analyses():
@@ -10504,7 +10503,7 @@ def clear_stuck_analyses():
                 
     except Exception as e:
         logger.error(f"[[ERROR]] Error clearing stuck analyses: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': 'Failed to clear stuck analyses'}), 500
 
 
 # ============================================================================
@@ -10582,7 +10581,7 @@ def start_leader_report():
         
     except Exception as e:
         logger.error(f"[[ERROR]] Error starting leader report: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': 'Failed to start leader report'}), 500
 
 
 def run_leader_report_generation(analysis_id):
@@ -11049,7 +11048,7 @@ def search_bst_defect():
             
     except Exception as e:
         logger.error(f"Error in search_bst_defect: {e}", exc_info=True)
-        return jsonify({'error': f'Internal error: {str(e)}'}), 500
+        return jsonify({'error': 'An internal error occurred during defect search'}), 500
 
 
 @app.route('/search_psirt_advisory', methods=['POST'])
@@ -11100,7 +11099,7 @@ def search_psirt_advisory():
             
     except Exception as e:
         logger.error(f"Error in search_psirt_advisory: {e}", exc_info=True)
-        return jsonify({'error': f'Internal error: {str(e)}'}), 500
+        return jsonify({'error': 'An internal error occurred during advisory search'}), 500
 
 
 @app.route('/search_related_defects', methods=['POST'])
@@ -11160,7 +11159,7 @@ def search_related_defects():
             
     except Exception as e:
         logger.error(f"Error in search_related_defects: {e}", exc_info=True)
-        return jsonify({'error': f'Internal error: {str(e)}'}), 500
+        return jsonify({'error': 'An internal error occurred during defect search'}), 500
 
 
 @app.route('/search_related_vulnerabilities', methods=['POST'])
@@ -11221,7 +11220,7 @@ def search_related_vulnerabilities():
             
     except Exception as e:
         logger.error(f"Error in search_related_vulnerabilities: {e}", exc_info=True)
-        return jsonify({'error': f'Internal error: {str(e)}'}), 500
+        return jsonify({'error': 'An internal error occurred during vulnerability search'}), 500
 
 
 

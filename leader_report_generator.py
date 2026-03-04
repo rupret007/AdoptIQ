@@ -3977,7 +3977,7 @@ class LeaderReportGenerator:
             try:
                 enhanced_data = self.enhanced_insights.get_comprehensive_customer_insights(customer, 90)
                 
-                if enhanced_data.get('insights'):
+                if enhanced_data and enhanced_data.get('insights'):
                     insights = enhanced_data['insights']
                     
                     # Account insights
