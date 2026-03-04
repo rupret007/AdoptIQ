@@ -401,10 +401,10 @@ class CompactReportFormatter:
             self.doc.add_heading('Customer Risk Assessment - Color-Coded Categories', level=1)
             
             # Get customers by risk level
-            red_customers = {k: v for k, v in risk_data.items() if v['color'] == 'Red'}
-            yellow_customers = {k: v for k, v in risk_data.items() if v['color'] == 'Yellow'}
-            green_customers = {k: v for k, v in risk_data.items() if v['color'] == 'Green'}
-            gray_customers = {k: v for k, v in risk_data.items() if v['color'] == 'Gray'}
+            red_customers = {k: v for k, v in risk_data.items() if isinstance(v, dict) and v.get('color') == 'Red'}
+            yellow_customers = {k: v for k, v in risk_data.items() if isinstance(v, dict) and v.get('color') == 'Yellow'}
+            green_customers = {k: v for k, v in risk_data.items() if isinstance(v, dict) and v.get('color') == 'Green'}
+            gray_customers = {k: v for k, v in risk_data.items() if isinstance(v, dict) and v.get('color') == 'Gray'}
             
             if not risk_data:
                 no_risk_p = self.doc.add_paragraph()

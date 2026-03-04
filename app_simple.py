@@ -2872,7 +2872,8 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         # Strategic Recommendations
         recommendations_para = doc.add_paragraph()
         recommendations_para.add_run('Strategic Recommendations:\n').bold = True
-        recommendations_para.runs[0].font.size = Pt(13)
+        if recommendations_para.runs:
+            recommendations_para.runs[0].font.size = Pt(13)
         
         if bems_count > 0:
             recommendations_para.add_run('• IMMEDIATE: Address engineering escalations to prevent customer churn\n')
@@ -4214,13 +4215,12 @@ def run_compact_analysis(analysis_id):
             )
             logger.info(f"[[VALIDATION]] All required data sources validated successfully")
         except DataSourceValidationError as e:
-            error_msg = str(e)
-            logger.error(f"[[VALIDATION]] Data validation failed: {error_msg}")
+            logger.error(f"[[VALIDATION]] Data validation failed: {e}")
             with analysis_status_lock:
                 status['status'] = 'error'
                 status['progress'] = 0
-                status['message'] = f' Data validation failed - see logs for details'
-                status['error'] = error_msg
+                status['message'] = ' Data validation failed - see logs for details'
+                status['error'] = 'Data validation failed. Please check your input and try again.'
                 status['current_step'] = 'Validation Failed'
                 save_analysis_status()
             return
@@ -5243,7 +5243,8 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         if isinstance(v, str) and v.strip().lower() == 'none': return 'N/A'
         try:
             if getattr(pd, 'isna', None) and pd.isna(v): return 'N/A'
-        except Exception: pass
+        except Exception as e:
+            logger.debug(f"_na() isna check failed for value type {type(v).__name__}: {e}")
         return v
 
     def _pulse_rating(v):
@@ -6574,13 +6575,12 @@ def run_customer_renewal_analysis(analysis_id):
             )
             logger.info(f"[[VALIDATION]] All required data sources validated successfully")
         except DataSourceValidationError as e:
-            error_msg = str(e)
-            logger.error(f"[[VALIDATION]] Data validation failed: {error_msg}")
+            logger.error(f"[[VALIDATION]] Data validation failed: {e}")
             with analysis_status_lock:
                 status['status'] = 'error'
                 status['progress'] = 0
-                status['message'] = f' Data validation failed - see logs for details'
-                status['error'] = error_msg
+                status['message'] = ' Data validation failed - see logs for details'
+                status['error'] = 'Data validation failed. Please check your input and try again.'
                 status['current_step'] = 'Validation Failed'
                 save_analysis_status()
             return
@@ -7403,13 +7403,12 @@ def run_comprehensive_analysis(analysis_id):
             )
             logger.info(f"[[VALIDATION]] All required data sources validated successfully")
         except DataSourceValidationError as e:
-            error_msg = str(e)
-            logger.error(f"[[VALIDATION]] Data validation failed: {error_msg}")
+            logger.error(f"[[VALIDATION]] Data validation failed: {e}")
             update_analysis_status(analysis_id, {
                 'status': 'error',
                 'progress': 0,
                 'message': ' Data validation failed - see logs for details',
-                'error': error_msg,
+                'error': 'Data validation failed. Please check your input and try again.',
                 'current_step': 'Validation Failed'
             })
             return

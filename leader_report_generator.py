@@ -999,7 +999,8 @@ class LeaderReportGenerator:
             header_cells[0].text = 'Team Member'
             if header_cells[0].paragraphs and header_cells[0].paragraphs[0].runs:
                 header_cells[0].paragraphs[0].runs[0].font.bold = True
-            header_cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            if header_cells[0].paragraphs:
+                header_cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             
             for idx, tech in enumerate(all_techs, 1):
                 header_cells[idx].text = tech
@@ -1007,7 +1008,8 @@ class LeaderReportGenerator:
                     header_cells[idx].paragraphs[0].runs[0].font.bold = True
                     header_cells[idx].paragraphs[0].runs[0].font.size = Pt(9)
                     header_cells[idx].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
-                header_cells[idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                if header_cells[idx].paragraphs:
+                    header_cells[idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                 # Background color
                 shading_elm = OxmlElement('w:shd')
                 shading_elm.set(qn('w:fill'), '007BC7')
@@ -1016,7 +1018,8 @@ class LeaderReportGenerator:
             header_cells[num_cols-1].text = 'Total'
             if header_cells[num_cols-1].paragraphs and header_cells[num_cols-1].paragraphs[0].runs:
                 header_cells[num_cols-1].paragraphs[0].runs[0].font.bold = True
-            header_cells[num_cols-1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            if header_cells[num_cols-1].paragraphs:
+                header_cells[num_cols-1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             
             # Background color for header
             for i in [0, num_cols-1]:
@@ -1038,12 +1041,14 @@ class LeaderReportGenerator:
                 for idx, tech in enumerate(all_techs, 1):
                     count = tech_breakdown[cssm_name].get(tech, 0)
                     row_cells[idx].text = str(count) if count > 0 else '-'
-                    row_cells[idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    if row_cells[idx].paragraphs:
+                        row_cells[idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                     tech_totals[tech] += count
                     row_total += count
                 
                 row_cells[num_cols-1].text = str(row_total)
-                row_cells[num_cols-1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                if row_cells[num_cols-1].paragraphs:
+                    row_cells[num_cols-1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                 if row_cells[num_cols-1].paragraphs and row_cells[num_cols-1].paragraphs[0].runs:
                     row_cells[num_cols-1].paragraphs[0].runs[0].font.bold = True
                 
@@ -1812,7 +1817,8 @@ class LeaderReportGenerator:
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '007BC7')  # Cisco blue
             cell._element.get_or_add_tcPr().append(shading_elm)
-            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            if cell.paragraphs:
+                cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         
         # Data rows
         total_aps = 0
@@ -1886,7 +1892,8 @@ class LeaderReportGenerator:
             
             # Center align numeric cells and format ARR
             for i in range(1, 8):
-                row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                if row_cells[i].paragraphs:
+                    row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             
             # Color-code sentiment
             if row_cells[6].paragraphs and row_cells[6].paragraphs[0].runs:
@@ -2376,7 +2383,8 @@ class LeaderReportGenerator:
         
         # Center align numeric cells
         for i in range(1, 5):
-            data_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            if data_cells[i].paragraphs:
+                data_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         
         # Add light gray background to data row
         for i in range(5):
@@ -3909,7 +3917,8 @@ class LeaderReportGenerator:
             
             # Center align numeric cells
             for i in range(1, 6):
-                row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                if row_cells[i].paragraphs:
+                    row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         
         # Recommendations
         if summary['recommendations']:

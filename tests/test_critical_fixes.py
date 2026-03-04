@@ -1646,3 +1646,117 @@ class TestRound26Fixes:
             src = f.read()
         assert 'Error closing cursor:' in src
         assert 'Error closing connection:' in src
+
+
+class TestRound27Fixes:
+    """Tests for Round 27 audit fixes."""
+
+    def test_validation_error_sanitized_compact(self):
+        """H1: DataSourceValidationError should not leak user input in status JSON (compact path)."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "Data validation failed. Please check your input and try again." in src
+
+    def test_validation_error_no_str_e_in_status(self):
+        """H1: status['error'] must not contain raw str(e) from validation errors."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        sections = src.split('except DataSourceValidationError')
+        for section in sections[1:]:
+            block = section[:500]
+            assert "error_msg" not in block or "status['error'] = error_msg" not in block, \
+                "Validation error should use generic message, not error_msg"
+
+    def test_backend_fetch_subscription_generic_error(self):
+        """H2: fetch_subscription_data should return generic error, not str(e)."""
+        with open(os.path.join(_PROJECT_ROOT, 'adoptiq_backend.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('def fetch_subscription_data')
+        assert idx != -1
+        func_end = src.find('\ndef ', idx + 10)
+        func_body = src[idx:func_end] if func_end != -1 else src[idx:]
+        assert "'error': str(e)" not in func_body
+
+    def test_backend_renewal_risk_generic_error(self):
+        """H2: get_subscription_renewal_risk should return generic error, not str(e)."""
+        with open(os.path.join(_PROJECT_ROOT, 'adoptiq_backend.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('def get_subscription_renewal_risk')
+        assert idx != -1
+        func_end = src.find('\ndef ', idx + 10)
+        func_body = src[idx:func_end] if func_end != -1 else src[idx:]
+        assert "'error': str(e)" not in func_body
+
+    def test_ask_ai_csrf_token(self):
+        """H3: ask_ai.html must include CSRF token in fetch header."""
+        with open(os.path.join(_PROJECT_ROOT, 'templates', 'ask_ai.html'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'csrf-token' in src
+        assert 'X-CSRFToken' in src
+
+    def test_subscription_search_csrf_token(self):
+        """M1: subscription-search.js must include CSRF token in fetch header."""
+        with open(os.path.join(_PROJECT_ROOT, 'static', 'js', 'subscription-search.js'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'X-CSRFToken' in src
+
+    def test_safe_num_rejects_non_numeric(self):
+        """M2: _safe_num should reject non-numeric values and infinity."""
+        import sys
+        sys.path.insert(0, _PROJECT_ROOT)
+        from advanced_renewal_analyzer import _safe_num
+        assert _safe_num("50") == 0
+        assert _safe_num(float('inf')) == 0
+        assert _safe_num(float('-inf')) == 0
+        assert _safe_num(float('nan')) == 0
+        assert _safe_num(None) == 0
+        assert _safe_num(42) == 42
+        assert _safe_num(3.14) == 3.14
+
+    def test_renewal_recommendations_use_safe_num(self):
+        """M3: _generate_renewal_recommendations should use _safe_num for metrics."""
+        with open(os.path.join(_PROJECT_ROOT, 'advanced_renewal_analyzer.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('def _generate_renewal_recommendations')
+        assert idx != -1
+        next_def = src.find('\n    def ', idx + 10)
+        func_body = src[idx:next_def] if next_def != -1 else src[idx:]
+        assert '_safe_num(' in func_body
+
+    def test_leader_paragraphs_guarded(self):
+        """M4: leader_report_generator.py alignment lines should guard paragraphs[0]."""
+        with open(os.path.join(_PROJECT_ROOT, 'leader_report_generator.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('row_cells[idx].paragraphs[0].alignment')
+        assert idx != -1
+        context = src[max(0, idx - 80):idx]
+        assert 'if row_cells[idx].paragraphs:' in context
+
+    def test_compact_risk_data_safe_access(self):
+        """M5: compact_report_formatter.py should use v.get('color') not v['color']."""
+        with open(os.path.join(_PROJECT_ROOT, 'compact_report_formatter.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('add_high_risk_customers')
+        assert idx != -1
+        section = src[idx:idx + 500]
+        assert "v.get('color')" in section
+        assert "v['color']" not in section
+
+    def test_recommendations_runs_guarded(self):
+        """L1: recommendations_para.runs[0] should be guarded in app_simple.py."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find("recommendations_para.add_run('Strategic Recommendations:")
+        assert idx != -1
+        section = src[idx:idx + 200]
+        assert 'if recommendations_para.runs:' in section
+
+    def test_na_function_logs_exception(self):
+        """L2: _na() should log exceptions instead of silent pass."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('def _na(v):')
+        assert idx != -1
+        func_body = src[idx:idx + 400]
+        assert 'logger.debug' in func_body
+        assert 'except Exception: pass' not in func_body

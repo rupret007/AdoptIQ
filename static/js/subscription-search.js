@@ -37,10 +37,14 @@ function setupSubscriptionSearch() {
             searchBtn.disabled = true;
             searchBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Searching...';
             
+            var csrfMeta = document.querySelector('meta[name="csrf-token"]');
+            var csrfInput = document.querySelector('input[name="csrf_token"]');
+            var csrfVal = (csrfMeta && csrfMeta.getAttribute('content')) || (csrfInput && csrfInput.value) || '';
             const response = await fetch('/search_subscriptions', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
+                    'X-CSRFToken': csrfVal,
                 },
                 body: JSON.stringify({
                     customer_name: customerName,

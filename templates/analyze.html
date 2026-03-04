@@ -10,6 +10,7 @@
                style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; 
                img-src 'self' data: https:; 
                font-src 'self' https://cdn.jsdelivr.net;">
+<meta name="csrf-token" content="{{ csrf_token() }}">
 <!-- Subscription Search Script -->
 <script src="{{ url_for('static', filename='js/subscription-search.js') }}"></script>
 {% endblock %}

@@ -712,7 +712,7 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
             'customer_name': 'Error',
             'account_id': None,
             'found': False,
-            'error': str(e)
+            'error': 'An error occurred while fetching subscription data. Please try again.'
         }
     finally:
         if 'cur' in locals() and cur is not None:
@@ -904,7 +904,7 @@ def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[
         logger.error(f"[[ERROR]] Error calculating subscription renewal risk: {e}")
         return {
             'subscription_id': subscription_id,
-            'error': str(e),
+            'error': 'An error occurred while calculating renewal risk. Please try again.',
             'risk_score': 0,
             'risk_level': 'ERROR'
         }

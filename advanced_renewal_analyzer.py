@@ -4,6 +4,7 @@ Comprehensive renewal risk assessment using all available Snowflake data sources
 """
 
 import logging
+import math
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Tuple, Optional
@@ -26,6 +27,10 @@ def _safe_num(val, default=0):
             return default
     except (TypeError, ValueError):
         pass
+    if not isinstance(val, (int, float)):
+        return default
+    if not math.isfinite(val):
+        return default
     return val
 
 
@@ -789,12 +794,12 @@ class AdvancedRenewalAnalyzer:
         # Usage and adoption recommendations
         usage_metrics = analysis_results.get('usage_metrics', {})
         if usage_metrics:
-            completion_rate = usage_metrics.get('overall_completion_rate', 0)
+            completion_rate = _safe_num(usage_metrics.get('overall_completion_rate', 0))
             if completion_rate < 0.5:
                 recommendations.append("📚 Provide additional training and onboarding support")
                 recommendations.append("🎯 Focus on completing existing action plans and adoption barriers")
             
-            recent_engagement = usage_metrics.get('recent_engagement_score', 0)
+            recent_engagement = _safe_num(usage_metrics.get('recent_engagement_score', 0))
             if recent_engagement < 30:
                 recommendations.append("📞 Schedule regular check-ins to increase engagement")
                 recommendations.append("🎪 Organize user community events or webinars")
@@ -810,14 +815,14 @@ class AdvancedRenewalAnalyzer:
         # Adoption health recommendations
         adoption_metrics = analysis_results.get('adoption_metrics', {})
         if adoption_metrics:
-            health_score = adoption_metrics.get('adoption_health_score', 0)
+            health_score = _safe_num(adoption_metrics.get('adoption_health_score', 0))
             if health_score < 50:
                 recommendations.append("🔧 Address unresolved adoption barriers immediately")
                 recommendations.append("📊 Implement adoption health monitoring and reporting")
             
-            high_severity_barriers = adoption_metrics.get('high_severity_barriers', 0)
+            high_severity_barriers = _safe_num(adoption_metrics.get('high_severity_barriers', 0))
             if high_severity_barriers > 0:
-                recommendations.append(f"⚠️ Resolve {high_severity_barriers} high-severity adoption barriers")
+                recommendations.append(f"⚠️ Resolve {int(high_severity_barriers)} high-severity adoption barriers")
         
         # Financial recommendations
         financial_metrics = analysis_results.get('financial_metrics', {})
