@@ -3688,7 +3688,8 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                 if not isinstance(df, pd.DataFrame):
                     try:
                         df = pd.DataFrame(df) if df else pd.DataFrame()
-                    except Exception:
+                    except Exception as _conv_err:
+                        logger.debug(f"Skipping sheet '{name}': cannot convert to DataFrame: {_conv_err}")
                         continue
                 df_copy = df.copy()
                 for col in df_copy.select_dtypes(include=['datetimetz']).columns:

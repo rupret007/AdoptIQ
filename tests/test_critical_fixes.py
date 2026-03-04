@@ -1331,3 +1331,78 @@ class TestRound22Fixes:
             src = f.read()
         assert 'manager or "N/A"' in src
         assert 'technology or "N/A"' in src
+
+
+class TestRound23Fixes:
+    """Round 23: XSS escaping, path traversal, None/NaN guards, URL encoding, fetch checks."""
+
+    def test_progress_html_escapes_steps(self):
+        """Progress route inline HTML should escape step names via _esc()."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "_esc(s) + '</li>'" in src, "completed_steps should be escaped"
+        assert "_esc(data.current_step) + '</li>'" in src, "current_step should be escaped"
+
+    def test_progress_fetch_ok_checks(self):
+        """Inline progress HTML fetch calls should check r.ok."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        progress_html = src[src.find("const ANALYSIS_ID"):src.find("</html>")]
+        assert progress_html.count('if (!r.ok)') >= 2, "status and cancel fetches need r.ok check"
+
+    def test_insights_filename_sanitized(self):
+        """enhanced_snowflake_insights.py should sanitize customer_name in filenames."""
+        with open(os.path.join(_PROJECT_ROOT, 'enhanced_snowflake_insights.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "re.sub(r'[^\\w\\-.]', '_', customer_name)" in src, "customer_name must be sanitized"
+
+    def test_insights_nan_filter_in_sums(self):
+        """Sum calculations in enhanced_snowflake_insights.py should filter NaN."""
+        with open(os.path.join(_PROJECT_ROOT, 'enhanced_snowflake_insights.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert src.count('row[3] != row[3]') >= 1, "total_arr sum should filter NaN via x!=x"
+        assert src.count('row[4] != row[4]') >= 1, "total_booking_amount sum should filter NaN"
+        assert src.count('row[1] != row[1]') >= 1, "total_upsell_amount sum should filter NaN"
+
+    def test_exec_intel_csone_none_guard(self):
+        """executive_intelligence_formatter.py add_executive_dashboard should guard None csone_data."""
+        with open(os.path.join(_PROJECT_ROOT, 'executive_intelligence_formatter.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx_dashboard = src.find('def add_executive_dashboard')
+        assert idx_dashboard > 0
+        guard_section = src[idx_dashboard:idx_dashboard + 1000]
+        assert 'if csone_data is None:' in guard_section
+        assert 'if ab_data is None:' in guard_section
+
+    def test_exec_intel_paragraphs_guard(self):
+        """executive_intelligence_formatter.py should guard paragraphs[0] access."""
+        with open(os.path.join(_PROJECT_ROOT, 'executive_intelligence_formatter.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'if table.rows[0].cells[i].paragraphs:' in src
+
+    def test_exec_intel_subtitle_none_guard(self):
+        """Subtitle should use 'N/A' for None manager/technology/days."""
+        with open(os.path.join(_PROJECT_ROOT, 'executive_intelligence_formatter.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "manager or 'N/A'" in src
+        assert "technology or 'N/A'" in src
+
+    def test_psirt_advisory_id_encoded(self):
+        """cisco_internal_integrations.py should URL-encode advisory_id in API call."""
+        with open(os.path.join(_PROJECT_ROOT, 'cisco_internal_integrations.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "urllib.parse.quote(str(advisory_id), safe='')" in src
+
+    def test_llm_content_hasattr_guard(self):
+        """LLM message.content[0] access should check hasattr for .text."""
+        with open(os.path.join(_PROJECT_ROOT, 'cisco_internal_integrations.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert src.count("hasattr(message.content[0], 'text')") >= 2, \
+            "Both defect and vuln summary paths need hasattr guard"
+
+    def test_backend_excel_exception_logged(self):
+        """write_excel_workbook sheet conversion failure should be logged, not silently skipped."""
+        with open(os.path.join(_PROJECT_ROOT, 'adoptiq_backend.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'cannot convert to DataFrame' in src, \
+            "Sheet conversion exception should log debug message"

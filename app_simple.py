@@ -5265,7 +5265,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         try:
             if getattr(pd, 'isna', None) and pd.isna(v):
                 return True
-        except Exception:
+        except (TypeError, ValueError):
             pass
         if isinstance(v, str):
             s = v.strip().lower()
@@ -8234,9 +8234,10 @@ def progress(analysis_id):
                 const sec = s % 60;
                 return m > 0 ? m + 'm ' + sec + 's' : sec + 's';
             }}
+            function _esc(s) {{ var d=document.createElement('div'); d.textContent=String(s); return d.innerHTML; }}
             function refreshStatus() {{
                 fetch('/status/' + ANALYSIS_ID)
-                .then(r => r.json())
+                .then(r => {{ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }})
                 .then(data => {{
                     const bar = document.getElementById('progress');
                     const pct = document.getElementById('progress-pct');
@@ -8258,10 +8259,10 @@ def progress(analysis_id):
                     if (timeline && data.completed_steps) {{
                         let html = '';
                         for (const s of data.completed_steps) {{
-                            html += '<li class="step-item done"><span class="step-icon">&#10003;</span>' + s + '</li>';
+                            html += '<li class="step-item done"><span class="step-icon">&#10003;</span>' + _esc(s) + '</li>';
                         }}
                         if (data.current_step && data.status !== 'completed') {{
-                            html += '<li class="step-item active"><span class="step-icon"><span class="spinner"></span></span>' + data.current_step + '</li>';
+                            html += '<li class="step-item active"><span class="step-icon"><span class="spinner"></span></span>' + _esc(data.current_step) + '</li>';
                         }}
                         if (data.status === 'completed') {{
                             html += '<li class="step-item done"><span class="step-icon">&#10003;</span>Complete</li>';
@@ -8326,7 +8327,7 @@ def progress(analysis_id):
             function cancelAnalysis() {{
                 if (confirm('Are you sure you want to cancel this analysis?')) {{
                     fetch('/cancel/' + ANALYSIS_ID, {{method: 'POST'}})
-                        .then(r => r.json())
+                        .then(r => {{ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }})
                         .then(d => {{
                             if (d.success) {{
                                 document.getElementById('cancel-btn').style.display = 'none';
@@ -10060,8 +10061,8 @@ def run_subscription_analysis(analysis_id):
                         recent_ab = ab_df[ab_df['CREATED_DATE'] >= recent_cutoff]
                         if not recent_ab.empty:
                             ab_p.add_run(f' {len(recent_ab)} barriers created in the last 30 days.')
-                    except Exception:
-                        pass
+                    except Exception as _dt_err:
+                        logger.debug(f"Subscription AB date parse error: {_dt_err}")
             else:
                 doc.add_heading('Adoption Barriers', level=2)
                 ab_p = doc.add_paragraph()

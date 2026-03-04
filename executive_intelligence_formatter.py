@@ -121,7 +121,7 @@ class ExecutiveIntelligenceFormatter:
         # Subtitle
         subtitle_para = self.doc.add_paragraph()
         subtitle_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        subtitle_run = subtitle_para.add_run(f"{manager} | {technology} | {days} Day Analysis")
+        subtitle_run = subtitle_para.add_run(f"{manager or 'N/A'} | {technology or 'N/A'} | {days or 'N/A'} Day Analysis")
         subtitle_run.font.name = 'Segoe UI'
         subtitle_run.font.size = Pt(14)
         subtitle_run.font.color.rgb = CISCO_GRAY
@@ -144,6 +144,10 @@ class ExecutiveIntelligenceFormatter:
                                csconsole_adoption_barriers: pd.DataFrame = None,
                                software_defects: Dict = None, psirt_vulns: Dict = None):
         """Add executive dashboard with key metrics using ALL data sources"""
+        if csone_data is None:
+            csone_data = pd.DataFrame()
+        if ab_data is None:
+            ab_data = pd.DataFrame()
         self.doc.add_paragraph()
         
         # Dashboard header
@@ -355,9 +359,10 @@ class ExecutiveIntelligenceFormatter:
                 headers = ['Customer', 'Risk Score', 'Key Issues']
                 for i, h in enumerate(headers):
                     table.rows[0].cells[i].text = h
-                    cell_para = table.rows[0].cells[i].paragraphs[0]
-                    if cell_para.runs:
-                        cell_para.runs[0].font.bold = True
+                    if table.rows[0].cells[i].paragraphs:
+                        cell_para = table.rows[0].cells[i].paragraphs[0]
+                        if cell_para.runs:
+                            cell_para.runs[0].font.bold = True
                 
                 # FIXED: Show ALL high-risk customers
                 for customer, data in sorted(high_risk.items(), key=lambda x: x[1].get('score', 0), reverse=True):

@@ -199,7 +199,7 @@ class EnhancedSnowflakeInsights:
                     insights['contract_data'] = {
                         'contracts_found': len(contract_results),
                         'contracts': [dict(zip([col[0] for col in cur.description], row)) for row in contract_results],
-                        'total_arr': sum(row[3] for row in contract_results if row[3])
+                        'total_arr': sum(row[3] for row in contract_results if row[3] and not (isinstance(row[3], float) and (row[3] != row[3])))
                     }
                     insights['sources'].append({
                         'table': 'CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU',
@@ -281,7 +281,7 @@ class EnhancedSnowflakeInsights:
                     insights['booking_data'] = {
                         'bookings_found': len(booking_results),
                         'bookings': [dict(zip([col[0] for col in cur.description], row)) for row in booking_results],
-                        'total_booking_amount': sum(row[4] for row in booking_results if row[4])
+                        'total_booking_amount': sum(row[4] for row in booking_results if row[4] and not (isinstance(row[4], float) and (row[4] != row[4])))
                     }
                     insights['sources'].append({
                         'table': 'CX_DB.CX_SWSSBST_BR.BOOKINGS_TABLE_FOR_ACCOUNT_CHECK',
@@ -312,7 +312,7 @@ class EnhancedSnowflakeInsights:
                     insights['upsell_data'] = {
                         'upsells_found': len(upsell_results),
                         'upsells': [dict(zip([col[0] for col in cur.description], row)) for row in upsell_results],
-                        'total_upsell_amount': sum(row[1] for row in upsell_results if row[1])
+                        'total_upsell_amount': sum(row[1] for row in upsell_results if row[1] and not (isinstance(row[1], float) and (row[1] != row[1])))
                     }
                     insights['sources'].append({
                         'table': 'CX_DB.CX_SWSSBST_BR.TSS_BOOKINGS_COLLAB_UPSELL_WITH_SUBS_REFERENCE_ID',
@@ -764,8 +764,10 @@ class EnhancedSnowflakeInsights:
         self._add_comprehensive_source_attribution(doc, insights['source_attribution'])
         
         # Save document
+        import re
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"Enhanced_Insights_{customer_name.replace(' ', '_')}_{timestamp}.docx"
+        safe_name = re.sub(r'[^\w\-.]', '_', customer_name)[:80]
+        filename = f"Enhanced_Insights_{safe_name}_{timestamp}.docx"
         doc.save(filename)
         
         logger.info(f"SUCCESS: Enhanced insights report generated: {filename}")

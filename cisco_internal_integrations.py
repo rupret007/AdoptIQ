@@ -1141,7 +1141,7 @@ class CiscoInternalIntegrations:
             
             # PSIRT API endpoint for specific advisory
             response = requests.get(
-                f"{self.psirt_base_url}/v2/advisory/{advisory_id}",  # v2 endpoint
+                f"{self.psirt_base_url}/v2/advisory/{urllib.parse.quote(str(advisory_id), safe='')}",
                 headers=headers,
                 timeout=30
             )
@@ -1495,7 +1495,7 @@ Format your response clearly with these sections."""
                         }]
                     )
                     
-                    summary = message.content[0].text if message.content else "Summary generation failed."
+                    summary = (message.content[0].text if message.content and hasattr(message.content[0], 'text') else "Summary generation failed.")
                     logger.info(f"Generated LLM summary for defect {defect.defect_id}")
                     return summary
                 else:
@@ -1603,7 +1603,7 @@ Format your response clearly with these sections."""
                         }]
                     )
                     
-                    summary = message.content[0].text if message.content else "Summary generation failed."
+                    summary = (message.content[0].text if message.content and hasattr(message.content[0], 'text') else "Summary generation failed.")
                     logger.info(f"Generated LLM summary for PSIRT advisory {vulnerability.advisory_id}")
                     return summary
                 else:
