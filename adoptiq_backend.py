@@ -1780,6 +1780,307 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
     return reports
 
 
+def fetch_enhanced_account_insights(ctx, account_ids, days=90):
+    """Query enhanced Snowflake tables (COLLAB_ACCOUNT_SUMMARY, ARR contracts,
+    renewal data) to surface renewal risk, contract health, and account-level
+    intelligence not available from the basic dsm_assignment_data table.
+
+    These tables may not exist or may not be accessible -- every query is wrapped
+    in try/except so missing tables are silently skipped.
+    """
+    if ctx is None or not account_ids:
+        return {}
+
+    result = {}
+    placeholders = ", ".join(["%s"] * min(len(account_ids), 100))
+    batch = account_ids[:100]
+    cur = None
+    try:
+        cur = ctx.cursor()
+
+        # 1. Account summary with renewal risk
+        try:
+            cur.execute(f"""
+                SELECT BU_ACCOUNT_NAME, RENEWAL_RISK_CATEGORY,
+                       CONTRACT_STATUS, CISCO_TIER_RANKING__C, ABC_CATEGORY__C
+                FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY
+                WHERE ACCOUNT_ID_C IN ({placeholders})
+            """, tuple(batch))
+            rows = cur.fetchall()
+            if rows:
+                cols = [d[0] for d in cur.description]
+                records = [dict(zip(cols, r)) for r in rows]
+                risk_dist = {}
+                for rec in records:
+                    cat = str(rec.get('RENEWAL_RISK_CATEGORY') or 'Unknown')
+                    risk_dist[cat] = risk_dist.get(cat, 0) + 1
+                result['account_summary'] = {
+                    'count': len(records),
+                    'renewal_risk_distribution': risk_dist,
+                    'tier_distribution': {},
+                    'details': records[:20],
+                }
+                tier_dist = {}
+                for rec in records:
+                    tier = str(rec.get('CISCO_TIER_RANKING__C') or 'Unknown')
+                    tier_dist[tier] = tier_dist.get(tier, 0) + 1
+                result['account_summary']['tier_distribution'] = tier_dist
+        except Exception as e:
+            logger.debug(f"Enhanced account summary skipped: {e}")
+
+        # 2. Contract data with service end dates
+        try:
+            cur.execute(f"""
+                SELECT CONTRACT_NUMBER, SERVICE_END_DATE, C_360_SERVICE_TIER_C,
+                       COALESCE(ARR_AMOUNT, 0) AS ARR_AMOUNT, ACCOUNT_ID_C
+                FROM CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU
+                WHERE ACCOUNT_ID_C IN ({placeholders})
+                  AND SERVICE_END_DATE >= CURRENT_DATE()
+                ORDER BY SERVICE_END_DATE ASC
+                LIMIT 50
+            """, tuple(batch))
+            rows = cur.fetchall()
+            if rows:
+                cols = [d[0] for d in cur.description]
+                contracts = [dict(zip(cols, r)) for r in rows]
+                expiring_90d = [c for c in contracts
+                                if c.get('SERVICE_END_DATE') and
+                                str(c['SERVICE_END_DATE'])[:10] <= (
+                                    datetime.now() + timedelta(days=90)).strftime('%Y-%m-%d')]
+                result['contracts'] = {
+                    'active_contracts': len(contracts),
+                    'expiring_within_90d': len(expiring_90d),
+                    'expiring_arr': sum(float(c.get('ARR_AMOUNT') or 0) for c in expiring_90d),
+                    'upcoming_expirations': [
+                        {'contract': c.get('CONTRACT_NUMBER', ''),
+                         'end_date': str(c.get('SERVICE_END_DATE', ''))[:10],
+                         'arr': float(c.get('ARR_AMOUNT') or 0)}
+                        for c in expiring_90d[:10]
+                    ],
+                }
+        except Exception as e:
+            logger.debug(f"Enhanced contracts skipped: {e}")
+
+        # 3. Recently expired accounts
+        try:
+            cur.execute(f"""
+                SELECT NAME, EXPIRED_DATE, RENEWAL_ACCOUNT
+                FROM CX_DB.CX_SWSSBST_BR.ACCOUNTS_EXPIRED_LAST_MONTH
+                WHERE ACCOUNT_ID_C IN ({placeholders})
+                LIMIT 20
+            """, tuple(batch))
+            rows = cur.fetchall()
+            if rows:
+                cols = [d[0] for d in cur.description]
+                expired = [dict(zip(cols, r)) for r in rows]
+                result['recently_expired'] = {
+                    'count': len(expired),
+                    'accounts': [{'name': e.get('NAME', ''),
+                                  'expired': str(e.get('EXPIRED_DATE', ''))[:10]}
+                                 for e in expired],
+                }
+        except Exception as e:
+            logger.debug(f"Enhanced expired accounts skipped: {e}")
+
+    except Exception as e:
+        logger.debug(f"Enhanced account insights error: {e}")
+    finally:
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+    return result
+
+
+def derive_portfolio_intelligence(arr_df, ab_df, cases_df=None, team_subs_df=None):
+    """Compute derived analytics that surface hidden patterns in the portfolio.
+
+    Produces metrics the LLM can use to identify non-obvious risks:
+    - Customer concentration risk (% of ARR in top N troubled accounts)
+    - CSSM workload distribution (barriers per CSSM)
+    - Technology risk hotspots (issues per ARR dollar by technology)
+    - Repeat offender identification (customers with both barriers AND cases)
+    """
+    if arr_df is None or arr_df.empty:
+        return {}
+
+    insights = {}
+    try:
+        arr_col = 'ANNUAL_CONTRACT_VALUE' if 'ANNUAL_CONTRACT_VALUE' in arr_df.columns else None
+        acct_col = 'ACCOUNT_ID_C' if 'ACCOUNT_ID_C' in arr_df.columns else None
+        if not arr_col or not acct_col:
+            return {}
+
+        total_arr = float(arr_df[arr_col].sum())
+        if total_arr <= 0:
+            return {}
+
+        # 1. Customer concentration risk
+        if 'BU_NAME' in arr_df.columns:
+            cust_arr = arr_df.groupby('BU_NAME')[arr_col].sum().sort_values(ascending=False)
+            top5_arr = float(cust_arr.head(5).sum())
+            top10_arr = float(cust_arr.head(10).sum())
+            insights['concentration'] = {
+                'top5_pct': round(top5_arr / total_arr * 100, 1),
+                'top10_pct': round(top10_arr / total_arr * 100, 1),
+                'top5_customers': {str(k): float(v) for k, v in cust_arr.head(5).items()},
+                'hhi_index': round(float((cust_arr / total_arr * 100).pow(2).sum()), 1),
+            }
+
+        # 2. CSSM workload imbalance
+        if ab_df is not None and not ab_df.empty and team_subs_df is not None:
+            cssm_col = None
+            for c in ('CSSM_EMAIL', 'PRIMARY_DSM_EMAIL', 'OWNER_EMAIL', 'ASSIGNEE_EMAIL'):
+                if c in ab_df.columns:
+                    cssm_col = c
+                    break
+                if c in team_subs_df.columns and 'ACCOUNT_ID_C' in ab_df.columns:
+                    try:
+                        merged = ab_df.merge(
+                            team_subs_df[['ACCOUNT_ID_C', c]].drop_duplicates(),
+                            on='ACCOUNT_ID_C', how='left')
+                        if c in merged.columns:
+                            ab_df = merged
+                            cssm_col = c
+                            break
+                    except Exception:
+                        pass
+            if cssm_col and cssm_col in ab_df.columns:
+                workload = ab_df[cssm_col].value_counts()
+                if len(workload) > 1:
+                    insights['cssm_workload'] = {
+                        'max_barriers': int(workload.max()),
+                        'min_barriers': int(workload.min()),
+                        'avg_barriers': round(float(workload.mean()), 1),
+                        'std_dev': round(float(workload.std()), 1),
+                        'top_loaded': {str(k): int(v) for k, v in workload.head(5).items()},
+                    }
+
+        # 3. Technology risk hotspots
+        if 'TECHNOLOGY_C' in arr_df.columns:
+            tech_arr = arr_df.groupby('TECHNOLOGY_C')[arr_col].sum()
+            tech_barriers = pd.Series(dtype=int)
+            if ab_df is not None and not ab_df.empty:
+                for tc in ('CSS_PRE_UNLINK_TECHNOLOGY_NAME_C', 'TECHNOLOGY_C', 'SUCCESS_TRACK_C'):
+                    if tc in ab_df.columns:
+                        tech_barriers = ab_df[tc].value_counts()
+                        break
+            if not tech_barriers.empty:
+                hotspots = []
+                for tech in tech_arr.index:
+                    arr_val = float(tech_arr.get(tech, 0))
+                    barrier_count = 0
+                    for bt in tech_barriers.index:
+                        if str(bt).lower() in str(tech).lower() or str(tech).lower() in str(bt).lower():
+                            barrier_count += int(tech_barriers[bt])
+                    if arr_val > 0:
+                        hotspots.append({
+                            'technology': str(tech),
+                            'arr': arr_val,
+                            'barriers': barrier_count,
+                            'risk_density': round(barrier_count / (arr_val / 1000000), 2) if arr_val > 0 else 0,
+                        })
+                hotspots.sort(key=lambda x: x['risk_density'], reverse=True)
+                insights['tech_hotspots'] = hotspots[:8]
+
+        # 4. Repeat offenders (customers with both barriers AND cases)
+        if ab_df is not None and not ab_df.empty and cases_df is not None and not cases_df.empty:
+            ab_accts = set()
+            if 'ACCOUNT_ID_C' in ab_df.columns:
+                ab_accts = set(ab_df['ACCOUNT_ID_C'].dropna().unique())
+            case_accts = set()
+            case_acct_col = next((c for c in ('ACCOUNT_ID', 'ACCOUNT_ID_C') if c in cases_df.columns), None)
+            if case_acct_col:
+                case_accts = set(cases_df[case_acct_col].dropna().unique())
+            overlap = ab_accts & case_accts
+            if overlap and 'BU_NAME' in arr_df.columns:
+                overlap_names = [str(n) for n in arr_df[arr_df[acct_col].isin(overlap)]['BU_NAME'].dropna().unique().tolist()]
+                overlap_arr = float(arr_df[arr_df[acct_col].isin(overlap)][arr_col].sum())
+                insights['repeat_offenders'] = {
+                    'count': len(overlap),
+                    'customers': overlap_names[:15],
+                    'combined_arr': overlap_arr,
+                    'pct_of_portfolio': round(overlap_arr / total_arr * 100, 1),
+                }
+
+    except Exception as e:
+        logger.debug(f"Portfolio intelligence derivation error: {e}")
+    return insights
+
+
+def build_cross_report_trends(reports_data):
+    """Analyze multiple historical reports to identify cross-report trends.
+
+    Takes the output of scan_historical_reports and produces a narrative
+    of how key metrics have changed across report generations.
+    """
+    if not reports_data or len(reports_data) < 2:
+        return {}
+
+    trends = {}
+    try:
+        dated_metrics = []
+        for rpt in reports_data:
+            date_str = rpt.get('date', '')
+            combined = {
+                'date': date_str,
+                'filename': rpt.get('filename', ''),
+                'total_rows': 0,
+                'unique_customers': 0,
+                'total_arr': 0,
+                'severity_counts': {},
+            }
+            for sheet, m in rpt.get('metrics', {}).items():
+                combined['total_rows'] += m.get('rows', 0)
+                if m.get('unique_customers', 0) > combined['unique_customers']:
+                    combined['unique_customers'] = m['unique_customers']
+                if m.get('total_arr', 0) > combined['total_arr']:
+                    combined['total_arr'] = m['total_arr']
+                for sev, cnt in m.get('severity_distribution', {}).items():
+                    sev_str = str(sev)
+                    combined['severity_counts'][sev_str] = (
+                        combined['severity_counts'].get(sev_str, 0) + int(cnt))
+            dated_metrics.append(combined)
+
+        dated_metrics.sort(key=lambda x: x['date'])
+
+        if len(dated_metrics) >= 2:
+            oldest = dated_metrics[0]
+            newest = dated_metrics[-1]
+            trends['period'] = {
+                'from': oldest['date'], 'to': newest['date'],
+                'reports_analyzed': len(dated_metrics),
+            }
+            if oldest['total_rows'] > 0:
+                row_change = newest['total_rows'] - oldest['total_rows']
+                trends['record_trend'] = {
+                    'oldest': oldest['total_rows'],
+                    'newest': newest['total_rows'],
+                    'change': row_change,
+                    'pct_change': round(row_change / oldest['total_rows'] * 100, 1),
+                }
+            if oldest['unique_customers'] > 0 and newest['unique_customers'] > 0:
+                cust_change = newest['unique_customers'] - oldest['unique_customers']
+                trends['customer_trend'] = {
+                    'oldest': oldest['unique_customers'],
+                    'newest': newest['unique_customers'],
+                    'change': cust_change,
+                }
+            if oldest['total_arr'] > 0 and newest['total_arr'] > 0:
+                arr_change = newest['total_arr'] - oldest['total_arr']
+                trends['arr_trend'] = {
+                    'oldest': oldest['total_arr'],
+                    'newest': newest['total_arr'],
+                    'change': arr_change,
+                    'pct_change': round(arr_change / oldest['total_arr'] * 100, 1),
+                }
+
+    except Exception as e:
+        logger.debug(f"Cross-report trend analysis error: {e}")
+    return trends
+
+
 # --------------------------- External Intelligence ---------------------------
 HELP_URLS = [
     "https://help.webex.com/en-us/article/mqkve8/Webex-App-%7C-Release-notes",

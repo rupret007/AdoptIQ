@@ -18,7 +18,10 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **ARR at Risk:** Calculates exactly how much revenue is tied to accounts with active barriers or support cases, broken down by severity tier.
 - **Historical Baselines:** Scans past report Excel files to establish historical context, so the AI can identify significant changes from previous baselines.
 - **External Intelligence Fusion:** Active service incidents and known bugs are automatically included in Ask AI context, enabling cross-domain insights (e.g., "Which customers are affected by the current outage?").
-- **Enhanced System Prompt:** The AI now acts as a senior portfolio intelligence analyst with 10 structured instructions for pattern recognition, quantification, prioritization, and actionable recommendations.
+- **Enhanced Snowflake Intelligence:** Ask AI now queries additional Snowflake tables (COLLAB_ACCOUNT_SUMMARY, COLLAB_ARR_CON_SKU, ACCOUNTS_EXPIRED_LAST_MONTH) for renewal risk categories, contract expirations, customer tiers, and recently expired accounts.
+- **Portfolio Intelligence Engine:** Computes derived analytics including customer concentration risk (HHI index), CSSM workload distribution, technology risk density (barriers per $1M ARR), and repeat offender identification (accounts with both barriers AND cases).
+- **Cross-Report Trend Analysis:** Compares metrics across multiple past reports to surface trends in data volume, customer scope, and ARR over time.
+- **Enhanced System Prompt:** The AI uses a chain-of-thought analytical framework with cross-domain correlation, hidden pattern detection, and revenue-based prioritization.
 
 #### Stability & Robustness (9 rounds of deep code review)
 - **Leader Report Excel fix:** Leader report Excel downloads now work correctly (filename sanitization was causing 404s).
@@ -40,7 +43,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **XSS prevention:** All dynamic content in the progress page and subscription search is properly escaped.
 
 #### Testing
-- **Test suite:** 331 pytest tests covering validation, data processing, downloads, formatting, status management, error paths, NaN/Inf handling, security guards, and advanced analytics functions.
+- **Test suite:** 339 pytest tests covering validation, data processing, downloads, formatting, status management, error paths, NaN/Inf handling, security guards, and advanced analytics functions.
 - **Debug log cleanup:** Removed noisy DEBUG-prefixed log statements; downgraded to debug level for cleaner production logs.
 
 ### What's New in v1.0.2
@@ -93,7 +96,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **Dashboard / Run Analysis** — Start here; run new analyses from the dashboard buttons.
 - **History** — Lists previous portfolio analyses. Use **View** to open the progress page for an analysis and download Word/Excel reports when completed.
 - **Intel** — View tracked incidents, bugs, and maintenances from Webex status and help pages. Search, export/import historical data, and ask AI questions about intelligence.
-- **Ask AI** — Ask natural-language questions powered by 12 data dimensions: subscriptions, ARR, barriers, cases, pulse, priorities, action plans, trend analysis, barrier velocity, ARR at risk, external intelligence, and historical baselines.
+- **Ask AI** — Ask natural-language questions powered by 15 data dimensions: subscriptions, ARR, barriers, cases, pulse, priorities, action plans, trend analysis, barrier velocity, ARR at risk, account health/renewal risk, contract expirations, portfolio intelligence, cross-report trends, and external intelligence.
 - **Admin** — Opens the Admin Console (localhost:5002) in a new tab for system monitoring, report history, and logs.
 - **Help** — Links and usage notes.
 

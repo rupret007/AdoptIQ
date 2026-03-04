@@ -8783,6 +8783,9 @@ def ask_ai_portfolio():
             fetch_barrier_velocity,
             calculate_arr_at_risk,
             scan_historical_reports,
+            fetch_enhanced_account_insights,
+            derive_portfolio_intelligence,
+            build_cross_report_trends,
             generate_llm_response,
             TEAM_ROSTER, MANAGERS,
         )
@@ -8988,6 +8991,65 @@ def ask_ai_portfolio():
                     except Exception as e:
                         logger.debug(f"Ask AI: ARR risk skipped: {e}")
 
+                    # --- Section 13: ENHANCED ACCOUNT INSIGHTS (NEW) ---
+                    try:
+                        enhanced = fetch_enhanced_account_insights(ctx, acct_batch, days)
+                        if enhanced:
+                            if 'account_summary' in enhanced:
+                                s = enhanced['account_summary']
+                                sections.append(f"\n=== ACCOUNT HEALTH & RENEWAL RISK ===")
+                                sections.append(f"Accounts analyzed: {s.get('count', 0)}")
+                                if s.get('renewal_risk_distribution'):
+                                    risk_lines = [f"  - {k}: {v} accounts" for k, v in s['renewal_risk_distribution'].items()]
+                                    sections.append("Renewal risk distribution:\n" + "\n".join(risk_lines))
+                                if s.get('tier_distribution'):
+                                    tier_lines = [f"  - {k}: {v}" for k, v in s['tier_distribution'].items()]
+                                    sections.append("Customer tier distribution:\n" + "\n".join(tier_lines))
+                            if 'contracts' in enhanced:
+                                c = enhanced['contracts']
+                                sections.append(f"\n=== CONTRACT EXPIRATIONS ===")
+                                sections.append(f"Active contracts: {c.get('active_contracts', 0)}")
+                                sections.append(f"Expiring within 90 days: {c.get('expiring_within_90d', 0)} (ARR: ${c.get('expiring_arr', 0):,.0f})")
+                                if c.get('upcoming_expirations'):
+                                    sections.append("Upcoming expirations:")
+                                    for exp in c['upcoming_expirations']:
+                                        sections.append(f"  - {exp.get('contract','')} | Ends: {exp.get('end_date','')} | ARR: ${exp.get('arr',0):,.0f}")
+                            if 'recently_expired' in enhanced:
+                                r = enhanced['recently_expired']
+                                sections.append(f"\n=== RECENTLY EXPIRED ({r.get('count', 0)}) ===")
+                                for a in r.get('accounts', []):
+                                    sections.append(f"  - {a.get('name','')} expired {a.get('expired','')}")
+                            context_summary_parts.append("Account health included")
+                    except Exception as e:
+                        logger.debug(f"Ask AI: Enhanced accounts skipped: {e}")
+
+                    # --- Section 14: PORTFOLIO INTELLIGENCE (NEW) ---
+                    try:
+                        portfolio_intel = derive_portfolio_intelligence(arr_df, ab_df, cases_df, team_subs_df)
+                        if portfolio_intel:
+                            sections.append(f"\n=== DERIVED PORTFOLIO INTELLIGENCE ===")
+                            if 'concentration' in portfolio_intel:
+                                c = portfolio_intel['concentration']
+                                sections.append(f"Customer concentration: Top 5 = {c.get('top5_pct', 0)}% of ARR, Top 10 = {c.get('top10_pct', 0)}% of ARR")
+                                sections.append(f"HHI concentration index: {c.get('hhi_index', 0)} (>2500=highly concentrated, <1500=diversified)")
+                            if 'cssm_workload' in portfolio_intel:
+                                w = portfolio_intel['cssm_workload']
+                                sections.append(f"CSSM workload: max={w.get('max_barriers',0)} barriers, min={w.get('min_barriers',0)}, avg={w.get('avg_barriers',0)}, std_dev={w.get('std_dev',0)}")
+                                if w.get('top_loaded'):
+                                    sections.append("Most loaded CSSMs: " + ", ".join(f"{k}: {v}" for k, v in w['top_loaded'].items()))
+                            if 'tech_hotspots' in portfolio_intel:
+                                sections.append("Technology risk density (barriers per $1M ARR):")
+                                for th in portfolio_intel['tech_hotspots']:
+                                    sections.append(f"  - {th['technology']}: {th['risk_density']} barriers/$1M (ARR: ${th['arr']:,.0f}, {th['barriers']} barriers)")
+                            if 'repeat_offenders' in portfolio_intel:
+                                ro = portfolio_intel['repeat_offenders']
+                                sections.append(f"Repeat offenders (barriers + cases): {ro.get('count',0)} accounts, ${ro.get('combined_arr',0):,.0f} ARR ({ro.get('pct_of_portfolio',0)}% of portfolio)")
+                                if ro.get('customers'):
+                                    sections.append("  Customers: " + ", ".join(ro['customers'][:10]))
+                            context_summary_parts.append("Portfolio intelligence")
+                    except Exception as e:
+                        logger.debug(f"Ask AI: Portfolio intelligence skipped: {e}")
+
         finally:
             try:
                 ctx.close()
@@ -9013,7 +9075,7 @@ def ask_ai_portfolio():
 
         # --- Section 12: HISTORICAL CONTEXT (NEW) ---
         try:
-            hist = scan_historical_reports(str(_APP_SUPPORT / 'outputs'), manager=manager, technology=technology, limit=3)
+            hist = scan_historical_reports(str(_APP_SUPPORT / 'outputs'), manager=manager, technology=technology, limit=5)
             if hist:
                 sections.append(f"\n=== HISTORICAL REPORT CONTEXT ({len(hist)} past reports found) ===")
                 for rpt in hist:
@@ -9028,6 +9090,26 @@ def ask_ai_portfolio():
                             parts.append(f"Severity: {m['severity_distribution']}")
                         sections.append("  " + " | ".join(parts))
                 context_summary_parts.append(f"{len(hist)} past reports")
+
+                # Cross-report trend analysis
+                try:
+                    cross_trends = build_cross_report_trends(hist)
+                    if cross_trends:
+                        sections.append("\n=== CROSS-REPORT TRENDS ===")
+                        if 'period' in cross_trends:
+                            p = cross_trends['period']
+                            sections.append(f"Analyzing {p.get('reports_analyzed', 0)} reports from {p.get('from','')} to {p.get('to','')}")
+                        if 'record_trend' in cross_trends:
+                            rt = cross_trends['record_trend']
+                            sections.append(f"Data volume: {rt['oldest']} records -> {rt['newest']} records ({rt['pct_change']:+.1f}%)")
+                        if 'customer_trend' in cross_trends:
+                            ct = cross_trends['customer_trend']
+                            sections.append(f"Customer scope: {ct['oldest']} -> {ct['newest']} customers ({ct['change']:+d})")
+                        if 'arr_trend' in cross_trends:
+                            at = cross_trends['arr_trend']
+                            sections.append(f"ARR trend: ${at['oldest']:,.0f} -> ${at['newest']:,.0f} ({at['pct_change']:+.1f}%)")
+                except Exception as e:
+                    logger.debug(f"Ask AI: Cross-report trends skipped: {e}")
         except Exception as e:
             logger.debug(f"Ask AI: Historical scan skipped: {e}")
 
@@ -9038,21 +9120,30 @@ def ask_ai_portfolio():
 
         system_prompt = (
             "You are AdoptIQ, a senior portfolio intelligence analyst for Cisco Webex Customer Success. "
-            "You have deep expertise in subscription analytics, adoption barriers, ARR risk, and customer health.\n\n"
-            "INSTRUCTIONS:\n"
-            "1. ANALYZE the data provided below thoroughly before answering.\n"
-            "2. IDENTIFY patterns, correlations, and anomalies that aren't immediately obvious.\n"
-            "3. QUANTIFY your findings with specific numbers, percentages, and dollar amounts from the data.\n"
-            "4. COMPARE current metrics against historical baselines and trends when available.\n"
-            "5. PRIORITIZE insights by business impact (revenue at risk, customer churn potential).\n"
-            "6. RECOMMEND specific, actionable next steps ranked by urgency.\n"
-            "7. CITE data sources (CSConsole IDs, case numbers, customer names) for every claim.\n"
-            "8. SURFACE hidden risks: look for customers with multiple concurrent issues, "
-            "declining pulse scores, high ARR with unresolved barriers, or patterns across the portfolio.\n"
-            "9. If trend data is available, highlight whether things are improving or worsening.\n"
-            "10. If the data is insufficient to fully answer, state what's missing and what it would reveal.\n\n"
-            "FORMAT: Use clear headings, bullet points, and bold for key metrics. "
-            "Start with a 2-sentence executive summary, then provide detailed analysis."
+            "You combine financial data, operational metrics, customer health signals, and external "
+            "intelligence to produce insights that no single data source could reveal alone.\n\n"
+            "ANALYTICAL FRAMEWORK:\n"
+            "1. THINK step by step: first understand the question, then identify relevant data sections, "
+            "then cross-reference across domains, then synthesize findings.\n"
+            "2. CROSS-CORRELATE: Connect ARR data with barrier data to find revenue at risk. "
+            "Connect customer pulse trends with contract expirations to predict churn. "
+            "Connect external incidents with customer cases to identify systemic issues.\n"
+            "3. QUANTIFY everything: specific dollar amounts, percentages, counts, and trends.\n"
+            "4. COMPARE: current vs historical baselines, period-over-period changes, "
+            "barrier velocity vs creation rate, team workload distribution.\n"
+            "5. SURFACE HIDDEN PATTERNS:\n"
+            "   - Customers appearing across multiple risk dimensions (barriers + cases + low pulse)\n"
+            "   - Technology segments with disproportionate issues relative to ARR\n"
+            "   - CSSM workload imbalances that may indicate coverage gaps\n"
+            "   - Contract expirations coinciding with unresolved customer issues\n"
+            "   - Repeat offenders: accounts that keep generating new barriers\n"
+            "6. PRIORITIZE by revenue impact: always lead with the highest-ARR findings.\n"
+            "7. CITE sources: reference CSConsole IDs, case numbers, customer names, and dates.\n"
+            "8. RECOMMEND: provide specific, actionable next steps ranked by urgency and impact.\n"
+            "9. FLAG GAPS: if data is missing or insufficient, state what's needed and why it matters.\n\n"
+            "FORMAT: Start with a 2-3 sentence executive summary with the most critical finding. "
+            "Then use clear **headings**, bullet points, and **bold** for key metrics and dollar amounts. "
+            "End with a prioritized action list."
         )
 
         full_prompt = f"{briefing}\n\n---\nUser question: {question}"

@@ -354,3 +354,75 @@ class TestAdvancedAnalytics:
         from adoptiq_backend import scan_historical_reports
         result = scan_historical_reports(str(tmp_path))
         assert result == []
+
+    def test_fetch_enhanced_account_insights_none_ctx(self):
+        from adoptiq_backend import fetch_enhanced_account_insights
+        result = fetch_enhanced_account_insights(None, ['A1'])
+        assert result == {}
+
+    def test_fetch_enhanced_account_insights_empty_accounts(self):
+        from adoptiq_backend import fetch_enhanced_account_insights
+        result = fetch_enhanced_account_insights('mock', [])
+        assert result == {}
+
+    def test_derive_portfolio_intelligence_none(self):
+        from adoptiq_backend import derive_portfolio_intelligence
+        result = derive_portfolio_intelligence(None, None)
+        assert result == {}
+
+    def test_derive_portfolio_intelligence_empty(self):
+        from adoptiq_backend import derive_portfolio_intelligence
+        result = derive_portfolio_intelligence(pd.DataFrame(), pd.DataFrame())
+        assert result == {}
+
+    def test_derive_portfolio_intelligence_basic(self):
+        from adoptiq_backend import derive_portfolio_intelligence
+        arr = pd.DataFrame({
+            'ACCOUNT_ID_C': ['A1', 'A2', 'A3'],
+            'BU_NAME': ['Acme', 'Beta', 'Gamma'],
+            'ANNUAL_CONTRACT_VALUE': [100000, 200000, 300000],
+            'TECHNOLOGY_C': ['Webex', 'Webex', 'Teams'],
+        })
+        ab = pd.DataFrame({
+            'ACCOUNT_ID_C': ['A1', 'A1'],
+            'SEVERITY_C': ['Critical', 'Medium'],
+            'CSS_PRE_UNLINK_TECHNOLOGY_NAME_C': ['Webex', 'Webex'],
+        })
+        result = derive_portfolio_intelligence(arr, ab)
+        assert 'concentration' in result
+        assert result['concentration']['top5_pct'] == 100.0
+        assert 'tech_hotspots' in result
+
+    def test_derive_portfolio_intelligence_repeat_offenders(self):
+        from adoptiq_backend import derive_portfolio_intelligence
+        arr = pd.DataFrame({
+            'ACCOUNT_ID_C': ['A1', 'A2'],
+            'BU_NAME': ['Acme', 'Beta'],
+            'ANNUAL_CONTRACT_VALUE': [100000, 200000],
+        })
+        ab = pd.DataFrame({'ACCOUNT_ID_C': ['A1']})
+        cases = pd.DataFrame({'ACCOUNT_ID': ['A1', 'A2']})
+        result = derive_portfolio_intelligence(arr, ab, cases)
+        assert 'repeat_offenders' in result
+        assert result['repeat_offenders']['count'] == 1
+        assert 'Acme' in result['repeat_offenders']['customers']
+
+    def test_build_cross_report_trends_insufficient(self):
+        from adoptiq_backend import build_cross_report_trends
+        assert build_cross_report_trends([]) == {}
+        assert build_cross_report_trends(None) == {}
+        assert build_cross_report_trends([{'date': '2026-01-01'}]) == {}
+
+    def test_build_cross_report_trends_basic(self):
+        from adoptiq_backend import build_cross_report_trends
+        data = [
+            {'date': '2026-01-01', 'filename': 'a.xlsx',
+             'metrics': {'S1': {'rows': 50, 'unique_customers': 10, 'total_arr': 1000000}}},
+            {'date': '2026-02-01', 'filename': 'b.xlsx',
+             'metrics': {'S1': {'rows': 100, 'unique_customers': 15, 'total_arr': 1500000}}},
+        ]
+        result = build_cross_report_trends(data)
+        assert 'record_trend' in result
+        assert result['record_trend']['pct_change'] == 100.0
+        assert 'arr_trend' in result
+        assert result['arr_trend']['pct_change'] == 50.0
