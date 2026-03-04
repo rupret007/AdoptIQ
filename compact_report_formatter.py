@@ -414,7 +414,7 @@ class CompactReportFormatter:
             # Red customers (Critical/High Risk) - FIXED: Show ALL red customers
             if red_customers:
                 self.doc.add_heading('🔴 RED - Critical/High Risk Customers', level=2)
-                sorted_red = sorted(red_customers.items(), key=lambda x: x[1]['score'], reverse=True)
+                sorted_red = sorted(red_customers.items(), key=lambda x: x[1].get('score', 0) if isinstance(x[1], dict) else 0, reverse=True)
                 
                 for customer_name, risk_info in sorted_red:  # Show ALL red customers
                     self._add_customer_risk_section(customer_name, risk_info, ab_data, csone_data, 'Red')
@@ -422,7 +422,7 @@ class CompactReportFormatter:
             # Yellow customers (Moderate Risk) - FIXED: Show ALL yellow customers
             if yellow_customers:
                 self.doc.add_heading('🟡 YELLOW - Moderate Risk Customers', level=2)
-                sorted_yellow = sorted(yellow_customers.items(), key=lambda x: x[1]['score'], reverse=True)
+                sorted_yellow = sorted(yellow_customers.items(), key=lambda x: x[1].get('score', 0) if isinstance(x[1], dict) else 0, reverse=True)
                 
                 for customer_name, risk_info in sorted_yellow:  # Show ALL yellow customers
                     self._add_customer_risk_section(customer_name, risk_info, ab_data, csone_data, 'Yellow')
@@ -1641,7 +1641,7 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
         formatter.doc.add_page_break()
         
         # Add Top 10 by Risk / Focus Accounts
-        sorted_by_risk = sorted(risk_data.items(), key=lambda x: x[1]['score'], reverse=True)[:10]
+        sorted_by_risk = sorted(risk_data.items(), key=lambda x: x[1].get('score', 0) if isinstance(x[1], dict) else 0, reverse=True)[:10]
         if sorted_by_risk:
             formatter.doc.add_heading('Top 10 Focus Accounts by Risk', level=1)
             focus_table = formatter.doc.add_table(rows=1 + len(sorted_by_risk), cols=4)

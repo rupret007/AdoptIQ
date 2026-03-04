@@ -57,27 +57,27 @@ if _frozen:
         if cacert.exists():
             os.environ['SSL_CERT_FILE'] = str(cacert)
             os.environ['REQUESTS_CA_BUNDLE'] = str(cacert)
-    except Exception:
-        pass
+    except Exception as _e:
+        logging.getLogger(__name__).debug("certifi setup skipped: %s", _e)
     try:
         from dotenv import load_dotenv
         load_dotenv(_APP_SUPPORT / '.env')
         load_dotenv(_BASE_PATH / '.env')
-    except Exception:
-        pass
+    except Exception as _e:
+        logging.getLogger(__name__).debug("dotenv load skipped: %s", _e)
     # Use embedded configuration compiled into the app (from embed_credentials.py)
     try:
         import _bundled_secrets
         if hasattr(_bundled_secrets, 'get_secrets'):
             os.environ.update(_bundled_secrets.get_secrets())
-    except Exception:
-        pass
+    except Exception as _e:
+        logging.getLogger(__name__).debug("bundled secrets unavailable: %s", _e)
     # Load .env again after bundled secrets so missing credentials (e.g. Snowflake) can come from .env
     try:
         from dotenv import load_dotenv
         load_dotenv(_APP_SUPPORT / '.env')  # override=False: only set vars not already set
-    except Exception:
-        pass
+    except Exception as _e:
+        logging.getLogger(__name__).debug("dotenv reload skipped: %s", _e)
 else:
     _BASE_PATH = Path(__file__).resolve().parent
     _APP_SUPPORT = _BASE_PATH
@@ -93,8 +93,8 @@ if _frozen:
             import traceback
             with open(_startup_error_file, 'w', encoding='utf-8') as f:
                 f.write(''.join(traceback.format_exception(etype, value, tb)))
-        except Exception:
-            pass
+        except Exception as _e:
+            logging.getLogger(__name__).debug("startup error file write failed: %s", _e)
         _original_excepthook(etype, value, tb)
     sys.excepthook = _frozen_excepthook
 
@@ -1670,8 +1670,8 @@ def create_executive_charts(ab_norm: pd.DataFrame, arr_data: pd.DataFrame, arr_i
         except Exception:
             try:
                 plt.style.use('seaborn-whitegrid')
-            except Exception:
-                pass  # Use default style
+            except Exception as _e:
+                logger.debug("matplotlib seaborn style unavailable, using default: %s", _e)
         
         plt.rcParams['figure.facecolor'] = 'white'
         plt.rcParams['axes.facecolor'] = 'white'
@@ -2096,8 +2096,8 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         except Exception:
             try:
                 plt.style.use('seaborn-whitegrid')
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("matplotlib seaborn style unavailable, using default: %s", _e)
         
         plt.rcParams['figure.facecolor'] = 'white'
         plt.rcParams['axes.facecolor'] = 'white'
@@ -2186,8 +2186,8 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                             incident_dates.append(date)
                             status = inc.get('status', 'Unknown').lower()
                             incident_statuses.append(status)
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.debug("incident date parse skipped: %s", _e)
             
             if incident_dates:
                 # Group by week
@@ -5284,8 +5284,8 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             try:
                 if getattr(pd, 'isna', None) and pd.isna(v):
                     continue
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("pd.isna check skipped for value: %s", _e)
             if isinstance(v, str) and not v.strip():
                 continue
             s = str(v).strip()
@@ -5308,8 +5308,8 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             try:
                 if getattr(pd, 'isna', None) and pd.isna(v):
                     continue
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("pd.isna check skipped for value: %s", _e)
             s = str(v).strip()
             if s and s.lower() not in ('', 'nan', 'none'):
                 return _na(v)
@@ -9133,8 +9133,8 @@ def ask_ai_portfolio():
         finally:
             try:
                 ctx.close()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("app context close failed: %s", _e)
 
         # --- Section 11: EXTERNAL INTELLIGENCE (NEW) ---
         try:
@@ -9488,6 +9488,8 @@ def download_file(filename):
 @app.route('/cancel/<analysis_id>', methods=['POST'])
 def cancel_analysis(analysis_id):
     """Cancel a running analysis (thread-safe)"""
+    from urllib.parse import unquote
+    analysis_id = unquote(analysis_id)
     if app.config.get('WTF_CSRF_ENABLED', True):
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
@@ -9505,12 +9507,13 @@ def cancel_analysis(analysis_id):
     with cancellation_flags_lock:
         cancellation_flags[analysis_id] = True
     
-    # Update status (thread-safe) — re-check in case analysis finished between flag and lock
+    # Update status (thread-safe) — re-fetch to avoid stale reference
     with analysis_status_lock:
-        if status.get('status') in ('starting', 'running'):
-            status['status'] = 'cancelling'
-            status['message'] = ' Cancellation requested...'
-            status['progress'] = 0
+        live = analysis_status.get(analysis_id)
+        if live and live.get('status') in ('starting', 'running'):
+            live['status'] = 'cancelling'
+            live['message'] = ' Cancellation requested...'
+            live['progress'] = 0
     save_analysis_status()
     
     return jsonify({'success': True, 'message': 'Cancellation requested'})
@@ -10381,7 +10384,7 @@ def download_result(analysis_id, file_type):
     
     # Validate file_type (whitelist)
     if file_type not in ('docx', 'xlsx'):
-        return jsonify({'error': f'Invalid file type: {file_type}', 'available_files': ['docx', 'xlsx']}), 404
+        return jsonify({'error': 'Invalid file type. Use docx or xlsx.', 'available_files': ['docx', 'xlsx']}), 404
     
     with analysis_status_lock:
         status = analysis_status.get(analysis_id)
@@ -11545,8 +11548,8 @@ if __name__ == '__main__':
         time.sleep(BROWSER_LAUNCH_DELAY_SECONDS)  # Give server time to bind
         try:
             webbrowser.open('http://localhost:%s/' % PORT)
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("browser launch failed: %s", _e)
 
     threading.Thread(target=_open_browser, daemon=True).start()
 

@@ -2012,12 +2012,12 @@ class LeaderReportGenerator:
             # Overview statistics
             stats_para = self.doc.add_paragraph()
             stats_para.add_run('Overview:\n').font.bold = True
-            stats_para.add_run(f'  • Customers: {self.safe_len(data["customers"])}\n')
-            stats_para.add_run(f'  • Subscriptions: {self.safe_len(data["subscriptions"])}\n')
-            stats_para.add_run(f'  • Action Plans: {self.safe_len(data["action_plans"])}\n')
-            stats_para.add_run(f'  • Adoption Barriers: {self.safe_len(data["adoption_barriers"])}\n')
-            stats_para.add_run(f'  • Customer Pulse: {self.safe_len(data["customer_pulse"])}\n')
-            stats_para.add_run(f'  • TAC Cases: {self.safe_len(data["tac_cases"])}\n')
+            stats_para.add_run(f'  • Customers: {self.safe_len(data.get("customers"))}\n')
+            stats_para.add_run(f'  • Subscriptions: {self.safe_len(data.get("subscriptions"))}\n')
+            stats_para.add_run(f'  • Action Plans: {self.safe_len(data.get("action_plans"))}\n')
+            stats_para.add_run(f'  • Adoption Barriers: {self.safe_len(data.get("adoption_barriers"))}\n')
+            stats_para.add_run(f'  • Customer Pulse: {self.safe_len(data.get("customer_pulse"))}\n')
+            stats_para.add_run(f'  • TAC Cases: {self.safe_len(data.get("tac_cases"))}\n')
             
             # Add detailed activity table for this team member
             self._add_team_member_activity_table(cssm_name, data)
@@ -3843,15 +3843,15 @@ class LeaderReportGenerator:
             validation_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         # Summary
-        summary = validation_results['summary']
+        summary = validation_results.get('summary', {})
         summary_para = self.doc.add_paragraph()
         summary_para.add_run('Validation Summary:\n').font.bold = True
-        summary_para.add_run(f'  • Overall Status: {summary["overall_status"]}\n')
-        summary_para.add_run(f'  • Data Quality Score: {summary["data_quality_score"]}/100\n')
-        summary_para.add_run(f'  • Validation Timestamp: {validation_results["timestamp"]}\n')
+        summary_para.add_run(f'  • Overall Status: {summary.get("overall_status", "N/A")}\n')
+        summary_para.add_run(f'  • Data Quality Score: {summary.get("data_quality_score", "N/A")}/100\n')
+        summary_para.add_run(f'  • Validation Timestamp: {validation_results.get("timestamp", "N/A")}\n')
         
         # Critical Issues
-        if summary['critical_issues']:
+        if summary.get('critical_issues'):
             issues_heading = self.doc.add_heading('Critical Issues', level=2)
             if issues_heading.runs:
                 issues_heading.runs[0].font.color.rgb = RGBColor(220, 20, 60)  # Red
@@ -3861,7 +3861,7 @@ class LeaderReportGenerator:
                     issue_para.runs[0].font.color.rgb = RGBColor(220, 20, 60)
         
         # Warnings
-        if summary['warnings']:
+        if summary.get('warnings'):
             warnings_heading = self.doc.add_heading('Warnings', level=2)
             if warnings_heading.runs:
                 warnings_heading.runs[0].font.color.rgb = RGBColor(255, 140, 0)  # Orange
@@ -3876,8 +3876,8 @@ class LeaderReportGenerator:
             sources_heading.runs[0].font.color.rgb = CISCO_BLUE
         
         sources_para = self.doc.add_paragraph()
-        data_sources = validation_results['validation_checks']['data_sources']
-        sources_para.add_run(f'• Snowflake Connection: {"OK: Verified" if data_sources["snowflake_connection"] else "✗ Failed"}\n')
+        data_sources = (validation_results.get('validation_checks') or {}).get('data_sources', {})
+        sources_para.add_run(f'• Snowflake Connection: {"OK: Verified" if data_sources.get("snowflake_connection") else "✗ Failed"}\n')
         sources_para.add_run(f'• Team Roster: OK: Loaded\n')
         sources_para.add_run(f'• CSOne Data: {"OK: Loaded" if data_sources.get("csone_data_loaded") else "WARN: Not Available"}\n')
         

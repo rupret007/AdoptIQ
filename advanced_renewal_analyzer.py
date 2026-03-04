@@ -988,9 +988,10 @@ class AdvancedRenewalAnalyzer:
         for i, header_text in enumerate(headers):
             cell = header_cells[i]
             cell.text = header_text
-            if cell.paragraphs and cell.paragraphs[0].runs:
-                cell.paragraphs[0].runs[0].font.bold = True
-            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            if cell.paragraphs:
+                if cell.paragraphs[0].runs:
+                    cell.paragraphs[0].runs[0].font.bold = True
+                cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             # Add blue background
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '0076CE')
@@ -1007,7 +1008,8 @@ class AdvancedRenewalAnalyzer:
             row_cells[2].text = 'Snowflake Data'
             
             # Center align impact
-            row_cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            if row_cells[1].paragraphs:
+                row_cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         
         # Add page break
         doc.add_page_break()
@@ -1159,9 +1161,10 @@ class AdvancedRenewalAnalyzer:
         for i, header_text in enumerate(['Metric', 'Source System', 'Verification Method']):
             cell = header_cells[i]
             cell.text = header_text
-            if cell.paragraphs and cell.paragraphs[0].runs:
-                cell.paragraphs[0].runs[0].font.bold = True
-            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            if cell.paragraphs:
+                if cell.paragraphs[0].runs:
+                    cell.paragraphs[0].runs[0].font.bold = True
+                cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '0076CE')
             cell._element.get_or_add_tcPr().append(shading_elm)

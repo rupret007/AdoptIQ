@@ -1955,3 +1955,102 @@ class TestRound29Fixes:
             src = f.read()
         assert 'csrf-token' in src
         assert 'X-CSRFToken' in src
+
+
+class TestRound31Fixes:
+    """Tests for Round 31 audit fixes."""
+
+    def test_h1_admin_dashboard_no_raw_error_in_redirect(self):
+        """H1: Admin dashboard error redirects must not expose raw exception text."""
+        with open(os.path.join(_PROJECT_ROOT, 'enhanced_admin_dashboard_v2.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "message=f'Export failed: {e}'" not in src
+        assert "message=f'Clear failed: {e}'" not in src
+        assert "message=f'Failed to start server: {result" not in src
+        assert "message=f'Failed to stop server: {result" not in src
+        assert "Check logs for details" in src
+
+    def test_h2_leader_report_validation_uses_get(self):
+        """H2: leader_report_generator.py validation_results must use .get() for safe access."""
+        with open(os.path.join(_PROJECT_ROOT, 'leader_report_generator.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('Data Validation & Verification')
+        assert idx != -1
+        section = src[idx:idx + 2500]
+        assert "validation_results.get('summary'" in section
+        assert "(validation_results.get('validation_checks') or {}).get('data_sources'" in section
+
+    def test_h2_leader_report_data_dict_uses_get(self):
+        """H2: leader_report_generator.py team member stats must use data.get() not data[]."""
+        with open(os.path.join(_PROJECT_ROOT, 'leader_report_generator.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('self.safe_len(data.get("customers")')
+        assert idx != -1, "data.get('customers') pattern not found"
+        section = src[idx:idx + 600]
+        assert 'data.get("subscriptions")' in section
+        assert 'data.get("tac_cases")' in section
+
+    def test_h3_cancel_race_fix(self):
+        """H3: Cancel route must re-fetch status from analysis_status inside the lock."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('def cancel_analysis(analysis_id)')
+        assert idx != -1
+        func_body = src[idx:idx + 1200]
+        assert 'live = analysis_status.get(analysis_id)' in func_body
+        assert "if live and live.get('status')" in func_body
+
+    def test_m1_renewal_paragraphs_guarded(self):
+        """M1: advanced_renewal_analyzer.py paragraphs[0] access must be guarded."""
+        with open(os.path.join(_PROJECT_ROOT, 'advanced_renewal_analyzer.py'), encoding='utf-8') as f:
+            src = f.read()
+        lines = src.splitlines()
+        for i, line in enumerate(lines):
+            if 'paragraphs[0].alignment' in line and 'if ' not in line:
+                context = '\n'.join(lines[max(0, i-3):i+1])
+                assert 'if cell.paragraphs' in context or 'if row_cells' in context, \
+                    f"Unguarded paragraphs[0].alignment at line {i+1}"
+
+    def test_m3_risk_score_uses_get(self):
+        """M3: compact_report_formatter.py sorted risk_data must use .get('score', 0)."""
+        with open(os.path.join(_PROJECT_ROOT, 'compact_report_formatter.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "x[1]['score']" not in src, "Direct x[1]['score'] access found"
+        assert ".get('score', 0)" in src
+
+    def test_m4_silent_handlers_have_debug(self):
+        """M4: app_simple.py startup silent handlers should have logger.debug instead of bare pass."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('certifi setup skipped')
+        assert idx != -1, "certifi debug message not found"
+        idx = src.find('dotenv load skipped')
+        assert idx != -1, "dotenv debug message not found"
+        idx = src.find('bundled secrets unavailable')
+        assert idx != -1, "bundled secrets debug message not found"
+
+    def test_l1_file_type_not_echoed(self):
+        """L1: download_result must not echo file_type in error response."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('def download_result')
+        assert idx != -1
+        func_body = src[idx:idx + 400]
+        assert 'Invalid file type. Use docx or xlsx.' in func_body
+        assert 'f\'Invalid file type: {file_type}\'' not in func_body
+
+    def test_l1_file_type_functional(self, client):
+        """L1: Requesting an invalid file type must return 404 without echoing the type."""
+        resp = client.get('/result/test_id/invalid_type')
+        assert resp.status_code == 404
+        body = resp.get_data(as_text=True)
+        assert 'invalid_type' not in body
+
+    def test_l2_cancel_route_unquotes(self):
+        """L2: Cancel route must URL-decode analysis_id for consistency."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('def cancel_analysis(analysis_id)')
+        assert idx != -1
+        func_body = src[idx:idx + 300]
+        assert 'unquote(analysis_id)' in func_body

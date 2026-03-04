@@ -1439,7 +1439,8 @@ def start_server_route():
     if result['success']:
         return redirect(url_for('enhanced_admin_dashboard', message='Server started successfully!', message_type='success'))
     else:
-        return redirect(url_for('enhanced_admin_dashboard', message=f'Failed to start server: {result["error"]}', message_type='danger'))
+        log_error('WARNING', f'Server start failed: {result.get("error", "unknown")}', 'start_server_route')
+        return redirect(url_for('enhanced_admin_dashboard', message='Failed to start server. Check logs for details.', message_type='danger'))
 
 @admin_app.route('/stop_server')
 def stop_server_route():
@@ -1449,7 +1450,8 @@ def stop_server_route():
     if result['success']:
         return redirect(url_for('enhanced_admin_dashboard', message='Server stopped successfully!', message_type='success'))
     else:
-        return redirect(url_for('enhanced_admin_dashboard', message=f'Failed to stop server: {result["error"]}', message_type='danger'))
+        log_error('WARNING', f'Server stop failed: {result.get("error", "unknown")}', 'stop_server_route')
+        return redirect(url_for('enhanced_admin_dashboard', message='Failed to stop server. Check logs for details.', message_type='danger'))
 
 @admin_app.route('/export_logs')
 def export_logs():
@@ -1474,7 +1476,7 @@ def export_logs():
         
     except Exception as e:
         log_error('ERROR', f'Log export failed: {e}', 'export_logs')
-        return redirect(url_for('enhanced_admin_dashboard', message=f'Export failed: {e}', message_type='danger'))
+        return redirect(url_for('enhanced_admin_dashboard', message='Export failed. Check logs for details.', message_type='danger'))
 
 @admin_app.route('/clear_logs')
 def clear_logs():
@@ -1506,7 +1508,7 @@ def clear_logs():
         
     except Exception as e:
         log_error('ERROR', f'Log clear failed: {e}', 'clear_logs')
-        return redirect(url_for('enhanced_admin_dashboard', message=f'Clear failed: {e}', message_type='danger'))
+        return redirect(url_for('enhanced_admin_dashboard', message='Clear failed. Check logs for details.', message_type='danger'))
 
 @admin_app.route('/api/reports')
 def api_reports():
