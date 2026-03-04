@@ -9308,7 +9308,7 @@ def export_intel():
     import json as _json
     from incident_storage import export_all_data
     try:
-        payload = export_all_data()
+        payload = _sanitize_for_json(export_all_data())
         json_bytes = _json.dumps(payload, indent=2, default=str).encode('utf-8')
         date_str = datetime.now().strftime('%Y-%m-%d')
         filename = f"AdoptIQ-Intel-Export-{date_str}.json"

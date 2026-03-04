@@ -183,7 +183,7 @@ class CompactReportFormatter:
                             else:  # Data row
                                 run.font.size = Pt(14)
                                 # Color code the risk score
-                                if cell.text.endswith('/10') and isinstance(risk_summary.get('overall_risk_score'), (int, float)):
+                                if (cell.text or '').endswith('/10') and isinstance(risk_summary.get('overall_risk_score'), (int, float)):
                                     score = risk_summary.get('overall_risk_score', 0)
                                     if score >= 7:
                                         run.font.color.rgb = None  # Red for high risk
@@ -384,7 +384,6 @@ class CompactReportFormatter:
                 # FIXED: Create a callout box for AI insights - show FULL summary
                 ai_callout = self.doc.add_paragraph()
                 ai_callout.style = 'CompactCallout'
-                ai_callout.add_run('"')
                 ai_callout.add_run(f'"{ai_summary}"')
             
             # Add visual separator
@@ -732,6 +731,8 @@ class CompactReportFormatter:
     def add_portfolio_health_dashboard(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame, risk_summary: Dict):
         """Add portfolio health dashboard section"""
         try:
+            if risk_summary is None:
+                risk_summary = {}
             self.doc.add_heading('📈 Portfolio Health Dashboard', level=1)
             
             # Create health metrics table
@@ -774,6 +775,8 @@ class CompactReportFormatter:
     def add_renewal_recommendations(self, risk_summary: Dict, ai_insights: Dict):
         """Add renewal recommendations section"""
         try:
+            if risk_summary is None:
+                risk_summary = {}
             self.doc.add_heading('💡 Strategic Renewal Recommendations', level=1)
             
             # Immediate actions

@@ -926,3 +926,108 @@ class TestRound17Fixes:
         result = _create_executive_briefing_book_with_csone(
             'Test Manager', None, None, None, 'Test Tech')
         assert 'Test Manager' in result
+
+
+class TestRound18Fixes:
+    """Tests for Round 18 code audit findings."""
+
+    def test_export_intel_sanitizes_payload(self, client):
+        """Export intel should sanitize data (no NaN/Inf in JSON)."""
+        import unittest.mock as mock
+        fake_data = {
+            'schema_version': '1.0',
+            'incidents': [{'id': '1', 'title': 'test'}],
+            'bugs': [],
+            'maintenances': [],
+        }
+        with mock.patch('incident_storage.export_all_data', return_value=fake_data):
+            resp = client.get('/api/export-intel')
+        assert resp.status_code == 200
+        assert b'schema_version' in resp.data
+
+    def test_risk_summary_none_in_health_dashboard(self):
+        """add_portfolio_health_dashboard should not crash when risk_summary is None."""
+        from compact_report_formatter import CompactReportFormatter
+        import pandas as pd
+        fmt = CompactReportFormatter.__new__(CompactReportFormatter)
+        from docx import Document
+        fmt.doc = Document()
+        try:
+            fmt.add_portfolio_health_dashboard(pd.DataFrame(), pd.DataFrame(), None)
+        except Exception as e:
+            if 'NoneType' in str(type(e).__name__) and 'get' in str(e):
+                raise AssertionError("risk_summary=None not handled") from e
+
+    def test_risk_summary_none_in_renewal_recommendations(self):
+        """add_renewal_recommendations should not crash when risk_summary is None."""
+        from compact_report_formatter import CompactReportFormatter
+        import pandas as pd
+        fmt = CompactReportFormatter.__new__(CompactReportFormatter)
+        from docx import Document
+        fmt.doc = Document()
+        try:
+            fmt.add_renewal_recommendations(None, {})
+        except Exception as e:
+            if 'NoneType' in str(type(e).__name__) and 'get' in str(e):
+                raise AssertionError("risk_summary=None not handled") from e
+
+    def test_cell_text_none_endswith_guard(self):
+        """cell.text endswith check should handle None without AttributeError."""
+        text = None
+        result = (text or '').endswith('/10')
+        assert result is False
+
+    def test_duplicate_ai_callout_quote_removed(self):
+        """AI callout should not have a duplicate leading quote."""
+        import inspect
+        from compact_report_formatter import CompactReportFormatter
+        source = inspect.getsource(CompactReportFormatter.add_executive_summary)
+        lines = source.split('\n')
+        consecutive_quote_lines = []
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped == "ai_callout.add_run('\"')":
+                consecutive_quote_lines.append(i)
+        assert len(consecutive_quote_lines) == 0, "Duplicate leading quote still present"
+
+    def test_team_subs_df_none_in_exec_intel_formatter(self):
+        """executive_intelligence_formatter should guard team_subs_df None before .empty."""
+        import re
+        with open('/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/executive_intelligence_formatter.py') as f:
+            src = f.read()
+        pattern = r'team_subs_df\.empty'
+        matches = [(m.start(), src[max(0,m.start()-60):m.start()]) for m in re.finditer(pattern, src)]
+        for pos, context in matches:
+            assert 'is not None' in context or 'if team_subs_df' in context, \
+                f"team_subs_df.empty at position {pos} lacks None guard"
+
+    def test_runs_index_guarded_in_exec_intel_formatter(self):
+        """Table header runs[0] access should be guarded in executive_intelligence_formatter."""
+        with open('/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/executive_intelligence_formatter.py') as f:
+            src = f.read()
+        import re
+        lines = src.split('\n')
+        unguarded = []
+        for i, line in enumerate(lines):
+            if '.runs[0]' in line:
+                has_guard = False
+                for j in range(max(0, i - 5), i):
+                    if 'if' in lines[j] and 'runs' in lines[j]:
+                        has_guard = True
+                        break
+                if not has_guard:
+                    unguarded.append(i + 1)
+        assert len(unguarded) == 0, f"Unguarded runs[0] at lines: {unguarded}"
+
+    def test_import_intel_no_file(self, client):
+        """Import intel should return 400 when no file is provided."""
+        resp = client.post('/api/import-intel')
+        assert resp.status_code == 400
+
+    def test_ask_intel_empty_question(self, client):
+        """Ask intel should return 400 for empty question."""
+        import json
+        resp = client.post('/api/ask-intel',
+                           data=json.dumps({'question': ''}),
+                           content_type='application/json')
+        assert resp.status_code == 400

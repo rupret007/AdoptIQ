@@ -663,8 +663,8 @@ class CiscoInternalIntegrations:
             
             # Determine API endpoint based on available parameters
             if product_filter:
-                # Use product-specific search
-                url = f"https://apix.cisco.com/bug/v2.0/bugs/product_name/{product_filter}"
+                safe_product = urllib.parse.quote(product_filter, safe='')
+                url = f"https://apix.cisco.com/bug/v2.0/bugs/product_name/{safe_product}"
                 params = {
                     'keyword': search_query,
                     'modified_date': self._get_modified_date_param(days_back),
@@ -1621,8 +1621,8 @@ Format your response clearly with these sections."""
     def _generate_structured_summary_vulnerability(self, vulnerability: PSIRTVulnerability) -> str:
         """Generate a structured summary without LLM"""
         cve_links = []
-        for cve_id in vulnerability.cve_ids[:5]:  # Limit to first 5
-            cve_links.append(f"https://cve.mitre.org/cgi-bin/cvename.cgi?name={cve_id}")
+        for cve_id in vulnerability.cve_ids[:5]:
+            cve_links.append(f"https://cve.mitre.org/cgi-bin/cvename.cgi?name={urllib.parse.quote(str(cve_id), safe='')}")
         
         summary = f"""**PSIRT SECURITY ADVISORY SUMMARY**
 
@@ -1664,7 +1664,7 @@ Format your response clearly with these sections."""
 """
         return summary
     
-    def search_and_summarize_defect(self, defect_id: str, llm_api_key: Optional[str] = None) -> Dict[str, Any]:
+    def search_and_summarize_defect(self, defect_id: str, llm_api_key: Optional[str] = None) -> Dict[str, Any]:  # noqa: C901
         """
         Search for a specific BST defect and generate comprehensive summary
         
@@ -1680,7 +1680,7 @@ Format your response clearly with these sections."""
             'defect_id': defect_id,
             'defect': None,
             'summary': None,
-            'direct_link': f"https://bst.cisco.com/bugsearch/bug/{defect_id}",
+            'direct_link': f"https://bst.cisco.com/bugsearch/bug/{urllib.parse.quote(str(defect_id), safe='')}",
             'error': None
         }
         
@@ -1726,7 +1726,7 @@ Format your response clearly with these sections."""
             'advisory_id': advisory_id,
             'vulnerability': None,
             'summary': None,
-            'direct_link': f"https://tools.cisco.com/security/center/content/CiscoSecurityAdvisory/{advisory_id}",
+            'direct_link': f"https://tools.cisco.com/security/center/content/CiscoSecurityAdvisory/{urllib.parse.quote(str(advisory_id), safe='')}",
             'error': None
         }
         

@@ -171,9 +171,9 @@ class ExecutiveIntelligenceFormatter:
             )
             total_customers = len(all_customers_set)
             logger.info(f"[[CUSTOMER_COUNT]] Executive Intelligence Report - Total unique customers from all data sources: {total_customers}")
-            logger.info(f"[[CUSTOMER_COUNT]] Team subscriptions (PRIMARY SOURCE): {len(team_subs_df['BU_NAME'].unique()) if not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns else 0} customers")
-            logger.info(f"[[CUSTOMER_COUNT]] Team subscriptions DataFrame has {len(team_subs_df)} rows")
-            if not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns:
+            logger.info(f"[[CUSTOMER_COUNT]] Team subscriptions (PRIMARY SOURCE): {len(team_subs_df['BU_NAME'].unique()) if team_subs_df is not None and not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns else 0} customers")
+            logger.info(f"[[CUSTOMER_COUNT]] Team subscriptions DataFrame has {len(team_subs_df) if team_subs_df is not None else 0} rows")
+            if team_subs_df is not None and not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns:
                 sample_customers = team_subs_df['BU_NAME'].dropna().unique()[:5].tolist()
                 logger.info(f"[[CUSTOMER_COUNT]] Sample customers from team_subs_df: {sample_customers}")
         except (ImportError, AttributeError) as e:
@@ -355,7 +355,9 @@ class ExecutiveIntelligenceFormatter:
                 headers = ['Customer', 'Risk Score', 'Key Issues']
                 for i, h in enumerate(headers):
                     table.rows[0].cells[i].text = h
-                    table.rows[0].cells[i].paragraphs[0].runs[0].font.bold = True
+                    cell_para = table.rows[0].cells[i].paragraphs[0]
+                    if cell_para.runs:
+                        cell_para.runs[0].font.bold = True
                 
                 # FIXED: Show ALL high-risk customers
                 for customer, data in sorted(high_risk.items(), key=lambda x: x[1].get('score', 0), reverse=True):
