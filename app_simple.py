@@ -31,7 +31,7 @@ if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
 from flask import Flask, request, jsonify, redirect, url_for, send_file, render_template, Response
 from werkzeug.utils import secure_filename
 from flask_wtf import FlaskForm
-from flask_wtf.csrf import validate_csrf
+from flask_wtf.csrf import validate_csrf, generate_csrf
 from wtforms import SelectField, IntegerField, FileField, SubmitField, RadioField, StringField
 from wtforms.validators import DataRequired, NumberRange, Optional as OptionalValidator
 
@@ -274,6 +274,7 @@ app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 # CSRF protection - enabled with extended timeout to prevent timeout issues
 app.config['WTF_CSRF_ENABLED'] = True
 app.config['WTF_CSRF_TIME_LIMIT'] = None  # No timeout limit for CSRF tokens
+app.jinja_env.globals['csrf_token'] = generate_csrf
 
 # Local-only protection for sensitive routes (desktop app default posture).
 _SENSITIVE_ENDPOINTS = {
@@ -3349,7 +3350,7 @@ def _get_customer_specific_technology(customer: str, data: Dict) -> str:
         elif 'Cisco UCCX' in technologies_found:
             return 'Cisco UCCX'
         elif technologies_found:
-            return list(technologies_found)[0]  # Return any contact center tech found
+            return next(iter(technologies_found), None)
         
         return None
         

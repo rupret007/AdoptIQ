@@ -4027,7 +4027,8 @@ class LeaderReportGenerator:
                             self.doc.add_paragraph(f"      Verification: {source['verification_method']}")
                 
             except Exception as e:
-                self.doc.add_paragraph(f"• Enhanced insights unavailable: {str(e)}")
+                logger.debug(f"Enhanced insights error: {e}")
+                self.doc.add_paragraph("• Enhanced insights unavailable.")
             
             self.doc.add_paragraph()
         
@@ -4179,7 +4180,8 @@ class LeaderReportGenerator:
                         self.doc.add_paragraph(f"• {source}")
                 
             except Exception as e:
-                self.doc.add_paragraph(f"Defect analysis unavailable for {customer}: {str(e)}")
+                logger.debug(f"Defect analysis error for {customer}: {e}")
+                self.doc.add_paragraph(f"Defect analysis unavailable for {customer}.")
             
             self.doc.add_paragraph()
         

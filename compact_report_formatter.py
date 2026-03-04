@@ -453,7 +453,7 @@ class CompactReportFormatter:
         import re
         try:
             # Customer header with risk level (matches example: "### 1. NATIONAL GRID PLC US – Risk: CRITICAL")
-            customer_heading = self.doc.add_heading(f'{customer_name} – Risk: {risk_info["category"].upper()}', level=3)
+            customer_heading = self.doc.add_heading(f'{customer_name} – Risk: {risk_info.get("category", "Unknown").upper()}', level=3)
             
             if ab_data is None:
                 ab_data = pd.DataFrame()

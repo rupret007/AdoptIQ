@@ -141,7 +141,7 @@ class AdvancedRenewalAnalyzer:
             
         except Exception as e:
             logger.error(f"❌ Error in renewal analysis for {customer_name}: {e}")
-            analysis_results['error'] = str(e)
+            analysis_results['error'] = 'Renewal analysis encountered an error. See logs for details.'
             analysis_results['renewal_risk_category'] = 'ERROR'
             return analysis_results
     

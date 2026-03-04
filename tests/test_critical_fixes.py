@@ -1760,3 +1760,99 @@ class TestRound27Fixes:
         func_body = src[idx:idx + 400]
         assert 'logger.debug' in func_body
         assert 'except Exception: pass' not in func_body
+
+
+class TestRound28Fixes:
+    """Tests for Round 28 audit fixes."""
+
+    def test_csrf_token_jinja_global(self):
+        """H1 fix: csrf_token must be registered as a Jinja2 global so templates can use {{ csrf_token() }}."""
+        import sys
+        sys.path.insert(0, _PROJECT_ROOT)
+        from app_simple import app
+        with app.app_context():
+            assert 'csrf_token' in app.jinja_env.globals, \
+                "csrf_token must be a Jinja2 global for template CSRF meta tags"
+
+    def test_ask_ai_uses_block_head(self):
+        """H1: ask_ai.html must use {% block head %} (not extra_head) for CSRF meta."""
+        with open(os.path.join(_PROJECT_ROOT, 'templates', 'ask_ai.html'), encoding='utf-8') as f:
+            src = f.read()
+        assert '{% block head %}' in src
+        assert '{% block extra_head %}' not in src
+
+    def test_external_intel_csrf(self):
+        """H2: external_intelligence.html must include CSRF token on all POST fetches."""
+        with open(os.path.join(_PROJECT_ROOT, 'templates', 'external_intelligence.html'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'csrf-token' in src
+        assert src.count('X-CSRFToken') >= 3, "All 3 POST fetch calls need CSRF header"
+
+    def test_progress_cancel_csrf(self):
+        """H3: progress.html cancel POST must include CSRF token."""
+        with open(os.path.join(_PROJECT_ROOT, 'templates', 'progress.html'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'csrf-token' in src
+        assert 'X-CSRFToken' in src
+
+    def test_renewal_analyzer_no_str_e(self):
+        """H4: advanced_renewal_analyzer.py should not return str(e) in analysis results."""
+        with open(os.path.join(_PROJECT_ROOT, 'advanced_renewal_analyzer.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('def analyze_customer_renewal_risk')
+        assert idx != -1
+        func_end = src.find('\n    def ', idx + 10)
+        func_body = src[idx:func_end] if func_end != -1 else src[idx:]
+        assert "analysis_results['error'] = str(e)" not in func_body
+
+    def test_leader_report_no_str_e_in_doc(self):
+        """H5: leader_report_generator.py should not write str(e) into Word documents."""
+        with open(os.path.join(_PROJECT_ROOT, 'leader_report_generator.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'str(e)' not in src, "No str(e) should appear in leader report generator"
+
+    def test_admin_dashboard_no_str_e(self):
+        """H6: enhanced_admin_dashboard_v2.py should not return str(e) to clients."""
+        with open(os.path.join(_PROJECT_ROOT, 'enhanced_admin_dashboard_v2.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "'error': str(e)" not in src
+
+    def test_snowflake_insights_no_str_e(self):
+        """M1: enhanced_snowflake_insights.py should not return str(e) in insights dict."""
+        with open(os.path.join(_PROJECT_ROOT, 'enhanced_snowflake_insights.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "insights['error'] = str(e)" not in src
+
+    def test_technologies_found_safe_access(self):
+        """M2: app_simple.py should use next(iter(...)) instead of list(...)[0] for technologies_found."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('def _get_customer_specific_technology')
+        assert idx != -1
+        func_end = src.find('\ndef ', idx + 10)
+        func_body = src[idx:func_end] if func_end != -1 else src[idx:]
+        assert 'list(technologies_found)[0]' not in func_body
+        assert 'next(iter(technologies_found)' in func_body
+
+    def test_compact_risk_info_safe_get(self):
+        """M3: compact_report_formatter.py should use risk_info.get('category') not risk_info['category']."""
+        with open(os.path.join(_PROJECT_ROOT, 'compact_report_formatter.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'risk_info["category"]' not in src
+        assert "risk_info.get(" in src
+
+    def test_backend_period_comparison_logged(self):
+        """L1: adoptiq_backend.py period comparison should log instead of silent pass."""
+        with open(os.path.join(_PROJECT_ROOT, 'adoptiq_backend.py'), encoding='utf-8') as f:
+            src = f.read()
+        idx = src.find('def fetch_period_comparison')
+        assert idx != -1
+        func_end = src.find('\ndef ', idx + 10)
+        func_body = src[idx:func_end] if func_end != -1 else src[idx:]
+        assert 'Period comparison action plans error' in func_body
+
+    def test_generate_csrf_imported(self):
+        """Root cause fix: generate_csrf must be imported in app_simple.py."""
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert 'generate_csrf' in src

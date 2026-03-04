@@ -1846,7 +1846,7 @@ def get_audit_history(limit=50):
             'audits': [],
             'average_score': 0,
             'last_audit': None,
-            'error': str(e)
+            'error': 'An error occurred while retrieving audit history.'
         }
 
 def get_audit_summary():
@@ -1903,7 +1903,7 @@ def get_audit_summary():
                 'acceptable': 0,
                 'needs_improvement': 0
             },
-            'error': str(e)
+            'error': 'An error occurred while retrieving audit summary.'
         }
 
 def start_server():
@@ -1930,7 +1930,7 @@ def start_server():
             
     except Exception as e:
         log_error('ERROR', f'Failed to start server: {e}', 'start_server')
-        return {'success': False, 'error': str(e)}
+        return {'success': False, 'error': 'Failed to start server. See logs for details.'}
 
 def stop_server():
     """Stop the AdoptIQ server"""
@@ -1947,7 +1947,7 @@ def stop_server():
             
     except Exception as e:
         log_error('ERROR', f'Failed to stop server: {e}', 'stop_server')
-        return {'success': False, 'error': str(e)}
+        return {'success': False, 'error': 'Failed to stop server. See logs for details.'}
 
 if __name__ == '__main__':
     try:

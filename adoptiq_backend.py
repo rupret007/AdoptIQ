@@ -1567,8 +1567,8 @@ def fetch_period_comparison(ctx, account_ids, days):
                     'change_pct': pct,
                     'trend': 'increasing' if pct > 10 else 'decreasing' if pct < -10 else 'stable'
                 }
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Period comparison action plans error: {e}")
 
     except Exception as e:
         logger.debug(f"Period comparison query error: {e}")

@@ -158,7 +158,7 @@ class EnhancedSnowflakeInsights:
             
         except Exception as e:
             logger.debug(f"Error getting account insights: {e}")
-            insights['error'] = str(e)
+            insights['error'] = 'Account insights unavailable.'
         
         return insights
     
@@ -245,7 +245,7 @@ class EnhancedSnowflakeInsights:
             
         except Exception as e:
             logger.debug(f"Error getting contract insights: {e}")
-            insights['error'] = str(e)
+            insights['error'] = 'Contract insights unavailable.'
         
         return insights
     
@@ -484,7 +484,7 @@ class EnhancedSnowflakeInsights:
             
         except Exception as e:
             logger.debug(f"Error getting engagement insights: {e}")
-            insights['error'] = str(e)
+            insights['error'] = 'Engagement insights unavailable.'
         
         return insights
     
@@ -535,7 +535,7 @@ class EnhancedSnowflakeInsights:
             
         except Exception as e:
             logger.debug(f"Error getting usage insights: {e}")
-            insights['error'] = str(e)
+            insights['error'] = 'Usage insights unavailable.'
         
         return insights
     
@@ -587,7 +587,7 @@ class EnhancedSnowflakeInsights:
             
         except Exception as e:
             logger.debug(f"Error getting support insights: {e}")
-            insights['error'] = str(e)
+            insights['error'] = 'Support insights unavailable.'
         
         return insights
     
@@ -694,7 +694,7 @@ class EnhancedSnowflakeInsights:
             
         except Exception as e:
             logger.debug(f"Error getting product insights: {e}")
-            insights['error'] = str(e)
+            insights['error'] = 'Product insights unavailable.'
         
         return insights
     

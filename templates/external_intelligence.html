@@ -2,6 +2,10 @@
 
 {% block title %}External Intelligence - AdoptIQ{% endblock %}
 
+{% block head %}
+<meta name="csrf-token" content="{{ csrf_token() }}">
+{% endblock %}
+
 {% block extra_css %}
 <style>
     .intel-timeline { position: relative; padding-left: 2rem; }
@@ -445,7 +449,8 @@ document.addEventListener('DOMContentLoaded', function() {
         refreshBtn.disabled = true;
         refreshBtn.innerHTML = '<i class="fas fa-sync-alt refresh-spin me-1"></i>Fetching\u2026';
 
-        fetch('/api/refresh-external-intel', { method: 'POST' })
+        var csrfToken = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
+        fetch('/api/refresh-external-intel', { method: 'POST', headers: { 'X-CSRFToken': csrfToken } })
             .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
             .then(function(data) {
                 if (data.ok) {
@@ -525,9 +530,10 @@ document.addEventListener('DOMContentLoaded', function() {
         aiAnswer.textContent = '';
         askBtn.disabled = true;
 
+        var csrfTok = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
         fetch('/api/ask-intel', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfTok },
             body: JSON.stringify({ question: question.trim() })
         })
         .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
@@ -576,7 +582,8 @@ document.addEventListener('DOMContentLoaded', function() {
         importBtn.disabled = true;
         importBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Importing\u2026';
 
-        fetch('/api/import-intel', { method: 'POST', body: formData })
+        var csrfImport = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
+        fetch('/api/import-intel', { method: 'POST', headers: { 'X-CSRFToken': csrfImport }, body: formData })
             .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
             .then(function(data) {
                 if (data.ok) {
