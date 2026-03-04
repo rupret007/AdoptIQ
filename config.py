@@ -1,7 +1,7 @@
 # AdoptIQ Executive Analyzer - Configuration
 # All secrets and DB credentials come from environment variables (.env). No hardcoded credentials.
 # Version and build - updated by build_mac_dmg.sh
-ADOPTIQ_VERSION = "1.0.2"
+ADOPTIQ_VERSION = "1.0.3"
 ADOPTIQ_BUILD = "1"
 
 def version_string():

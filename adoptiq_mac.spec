@@ -101,7 +101,7 @@ app = BUNDLE(
         # Ensure the app is a standard foreground app.
         "LSBackgroundOnly": False,
         # Populate version metadata in Finder/About dialogs.
-        "CFBundleShortVersionString": os.environ.get("ADOPTIQ_VERSION", "1.0.2"),
+        "CFBundleShortVersionString": os.environ.get("ADOPTIQ_VERSION", "1.0.3"),
         "CFBundleVersion": os.environ.get("ADOPTIQ_BUILD", "1"),
         "NSHighResolutionCapable": True,
     },

@@ -1,8 +1,21 @@
 # AdoptIQ for macOS
 
-**Version 1.0.2** — Version and build are shown in the app footer (e.g. v1.0.2 build 1).
+**Version 1.0.3** — Version and build are shown in the app footer (e.g. v1.0.3 build 1).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools required. Credentials (Snowflake, CircuIT, PSIRT) are embedded in the app—no .env file needed.
+
+### What's New in v1.0.3
+
+- **Leader Report Excel fix:** Leader report Excel downloads now work correctly (filename sanitization was causing 404s).
+- **Download resilience:** Report downloads survive app restarts — status is loaded from disk when not in memory.
+- **Excel export stability:** Fixed datetime timezone handling that could crash Excel exports for timezone-aware columns.
+- **Leader report performance:** Eliminated redundant Snowflake queries during leader report generation (2 fewer round-trips).
+- **Division-by-zero guard:** Leader report summary no longer crashes when a manager has zero team members.
+- **Status persistence:** Error and cancellation states are now saved to disk immediately, preventing zombie entries after restart.
+- **Corrupt file handling:** Uploading a corrupt or invalid CSOne Excel file no longer crashes the app — returns a clear error instead.
+- **Chart stability:** Executive charts no longer crash when ARR data is unavailable.
+- **Status serialization:** Progress polling no longer fails when status contains datetime, numpy, or set values.
+- **Test suite:** Added 274 pytest tests covering validation, data processing, downloads, leader reports, formatting, status management, and error paths.
 
 ### What's New in v1.0.2
 
@@ -27,7 +40,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 
 ### Install
 
-1. Open the **AdoptIQ** DMG (e.g. `AdoptIQ-v1.0.2-build1.dmg`).
+1. Open the **AdoptIQ** DMG (e.g. `AdoptIQ-v1.0.3-build1.dmg`).
 2. Drag **AdoptIQ.app** to **Applications**.
 3. Eject the DMG. Launch **AdoptIQ** from Applications (or Spotlight).
 

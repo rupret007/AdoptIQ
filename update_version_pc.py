@@ -3,7 +3,7 @@
 import re
 import os
 
-v = os.environ.get("ADOPTIQ_VERSION", "1.0.2")
+v = os.environ.get("ADOPTIQ_VERSION", "1.0.3")
 b = os.environ.get("ADOPTIQ_BUILD", "1")
 
 with open("config.py", "r", encoding="utf-8") as f:
