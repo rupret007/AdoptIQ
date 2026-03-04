@@ -27,6 +27,12 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **Customer Recurrence Detection:** Identifies customers appearing in every historical report — chronic problem accounts requiring intervention.
 - **Deeper Historical Mining:** Reports now extract individual barrier subjects, customer-level ARR breakdowns, and category distributions from past Excel files.
 - **Enhanced System Prompt:** The AI uses a chain-of-thought analytical framework with cross-domain correlation, hidden pattern detection, and revenue-based prioritization.
+- **Software Defect & BEMS Extraction:** Ask AI automatically scans support cases and adoption barriers for CSC defect IDs and BEMS escalation IDs, groups them by customer, and surfaces them to the AI for correlation analysis.
+- **Feature Request Detection:** Barrier categories and subjects are scanned for feature request patterns, surfacing product feedback themes across the portfolio.
+- **Portfolio-Aware External Intelligence:** When asking about incidents or bugs, the AI receives portfolio context (customer names, technologies, active cases) so it can correlate external disruptions with internal customer impact.
+- **Citation-Ready Data:** All briefing data now includes record identifiers (AB-IDs, SP-IDs, AP-IDs, Case IDs, incident IDs, CSC IDs, BEMS IDs) so the AI can cite specific sources in its analysis, making reports verifiable and actionable.
+- **Smart Briefing Truncation:** When briefing data exceeds the LLM context window, a priority-based truncation system preserves the most critical sections (financial data, BEMS escalations, software defects) rather than blindly cutting from the end.
+- **Few-Shot Analytical Examples:** Prompt templates include example analyses demonstrating the expected depth of cross-correlation (revenue-risk, incident-impact, pattern-detection).
 
 #### Stability & Robustness
 - **Leader Report Excel fix:** Leader report Excel downloads now work correctly (filename sanitization was causing 404s).
