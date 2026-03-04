@@ -706,10 +706,11 @@ def start_analysis():
                 or json_data.get('csrf_token')
                 or request.form.get('csrf_token')
             )
-            try:
-                validate_csrf(csrf_token)
-            except Exception:
-                return jsonify({'success': False, 'error': 'CSRF validation failed'}), 400
+            if app.config.get('WTF_CSRF_ENABLED', True):
+                try:
+                    validate_csrf(csrf_token)
+                except Exception:
+                    return jsonify({'success': False, 'error': 'CSRF validation failed'}), 400
             if json_data:
                 # JSON data (typically for renewal reports)
                 manager = json_data.get('manager', '').strip() if json_data.get('manager') else ''
@@ -8773,6 +8774,11 @@ def ask_ai_page():
 def ask_ai_portfolio():
     """Advanced AI assistant: fetches live Snowflake data, historical context,
     external intelligence, and trend analysis before querying the LLM."""
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
+        except Exception:
+            return jsonify({'ok': False, 'error': 'CSRF validation failed'}), 403
     try:
         data = request.get_json(silent=True) or {}
         question = str(data.get('question') or '').strip()
@@ -9293,6 +9299,11 @@ def external_intelligence():
 @app.route('/api/refresh-external-intel', methods=['POST'])
 def refresh_external_intel():
     """Trigger a live fetch of incidents, bugs, and maintenances, then return counts."""
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
+        except Exception:
+            return jsonify({'ok': False, 'error': 'CSRF validation failed'}), 403
     try:
         from adoptiq_backend import fetch_status_incidents, fetch_help_webex_bugs, fetch_status_maintenances
         incidents = fetch_status_incidents(timeout=20) or []
@@ -9327,6 +9338,11 @@ def export_intel():
 @app.route('/api/ask-intel', methods=['POST'])
 def ask_intel():
     """Answer a plain-language question about stored incidents, maintenances, and bugs."""
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
+        except Exception:
+            return jsonify({'ok': False, 'error': 'CSRF validation failed'}), 403
     try:
         data = request.get_json(silent=True) or {}
         question = str(data.get('question') or '').strip()
@@ -9391,6 +9407,11 @@ def ask_intel():
 @app.route('/api/import-intel', methods=['POST'])
 def import_intel():
     """Import external intelligence data from an uploaded JSON file (merge, not replace)."""
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
+        except Exception:
+            return jsonify({'ok': False, 'error': 'CSRF validation failed'}), 403
     import json as _json
     from incident_storage import import_all_data
     try:
@@ -9467,6 +9488,11 @@ def download_file(filename):
 @app.route('/cancel/<analysis_id>', methods=['POST'])
 def cancel_analysis(analysis_id):
     """Cancel a running analysis (thread-safe)"""
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
+        except Exception:
+            return jsonify({'error': 'CSRF validation failed'}), 403
     with analysis_status_lock:
         if analysis_id not in analysis_status:
             return jsonify({'error': 'Analysis not found'}), 404
@@ -9501,10 +9527,11 @@ def start_compact_analysis():
             or (request.get_json(silent=True) or {}).get('csrf_token')
             or request.form.get('csrf_token')
         )
-        try:
-            validate_csrf(csrf_token)
-        except Exception:
-            return jsonify({'success': False, 'error': 'CSRF validation failed'}), 400
+        if app.config.get('WTF_CSRF_ENABLED', True):
+            try:
+                validate_csrf(csrf_token)
+            except Exception:
+                return jsonify({'success': False, 'error': 'CSRF validation failed'}), 400
 
         # Handle both form data and JSON data
         subscription_id = ''
@@ -9653,10 +9680,11 @@ def start_customer_renewal_analysis():
             or (request.get_json(silent=True) or {}).get('csrf_token')
             or request.form.get('csrf_token')
         )
-        try:
-            validate_csrf(csrf_token)
-        except Exception:
-            return jsonify({'success': False, 'error': 'CSRF validation failed'}), 400
+        if app.config.get('WTF_CSRF_ENABLED', True):
+            try:
+                validate_csrf(csrf_token)
+            except Exception:
+                return jsonify({'success': False, 'error': 'CSRF validation failed'}), 400
 
         data = request.get_json() or {}
         logger.info(f"[[DEBUG]] Renewal analysis request data: {data}")
@@ -9751,6 +9779,11 @@ def start_customer_renewal_analysis():
 @app.route('/search_subscriptions', methods=['POST'])
 def search_subscriptions():
     """Search for subscriptions by customer name"""
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
+        except Exception:
+            return jsonify({'error': 'CSRF validation failed'}), 403
     try:
         data = request.get_json() or {}
         customer_name = data.get('customer_name', '').strip()
@@ -9854,6 +9887,11 @@ def subscription_renewal_risk(subscription_id):
 @app.route('/start_subscription_analysis', methods=['POST'])
 def start_subscription_analysis():
     """Start subscription-based analysis"""
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token') or request.form.get('csrf_token'))
+        except Exception:
+            return jsonify({'error': 'CSRF validation failed'}), 403
     try:
         data = request.form
         subscription_id = data.get('subscription_id', '').strip()
@@ -10571,8 +10609,12 @@ def clear_stuck_analyses():
 @app.route('/start_leader_report', methods=['POST'])
 def start_leader_report():
     """Start a leader report generation"""
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token') or request.form.get('csrf_token'))
+        except Exception:
+            return jsonify({'error': 'CSRF validation failed'}), 403
     try:
-        # Get form data
         manager = request.form.get('manager')
         try:
             days = int(request.form.get('days', 90))
@@ -11072,6 +11114,11 @@ def bst_psirt_search():
 @app.route('/search_bst_defect', methods=['POST'])
 def search_bst_defect():
     """Search for a specific BST defect and generate LLM summary"""
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
+        except Exception:
+            return jsonify({'error': 'CSRF validation failed'}), 403
     try:
         data = request.get_json() or {}
         defect_id = data.get('defect_id', '').strip()
@@ -11126,6 +11173,11 @@ def search_bst_defect():
 @app.route('/search_psirt_advisory', methods=['POST'])
 def search_psirt_advisory():
     """Search for a specific PSIRT advisory and generate LLM summary"""
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
+        except Exception:
+            return jsonify({'error': 'CSRF validation failed'}), 403
     try:
         data = request.get_json() or {}
         advisory_id = data.get('advisory_id', '').strip()
@@ -11181,6 +11233,11 @@ def search_psirt_advisory():
 @app.route('/search_related_defects', methods=['POST'])
 def search_related_defects():
     """Search for defects related to a product or issue"""
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
+        except Exception:
+            return jsonify({'error': 'CSRF validation failed'}), 403
     try:
         data = request.get_json() or {}
         search_terms = data.get('search_terms', [])
@@ -11241,6 +11298,11 @@ def search_related_defects():
 @app.route('/search_related_vulnerabilities', methods=['POST'])
 def search_related_vulnerabilities():
     """Search for vulnerabilities related to a product or issue"""
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
+        except Exception:
+            return jsonify({'error': 'CSRF validation failed'}), 403
     try:
         data = request.get_json() or {}
         search_terms = data.get('search_terms', [])

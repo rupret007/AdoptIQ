@@ -9,7 +9,6 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 #### New Features
 - **Ask AI (Enhanced):** Ask natural-language questions about your portfolio with dramatically richer context. The AI now receives 16 data sections including live Snowflake data, period-over-period trend analysis, barrier creation/resolution velocity, ARR at risk calculations, historical report baselines, portfolio intelligence, barrier aging analysis, pulse-revenue correlation, and active service incidents — producing insights that combine financial, operational, and external data in ways never seen before.
 - **External Intelligence:** Live incidents, bugs, and maintenances from status.webex.com and help.webex.com are fetched, stored historically in a local database, and displayed with search, export, and import capabilities. Ask the AI questions about any tracked intelligence.
-- **Admin Console:** The Admin tab opens the Admin Console (localhost:5002) in a new tab for monitoring, report history, and logs.
 - **Graceful shutdown:** Analysis status is automatically saved when the app exits, preventing data loss.
 
 #### AI Intelligence Engine
@@ -65,7 +64,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **Security:** Path traversal protection for CSOne file paths; download route validates filenames
 - **Logging:** Replaced `print()` with structured logging in backend for better diagnostics
 - **Validation:** Centralized days input validation (1–365) across all report types
-- **Admin dashboard:** Secret key is set at build time (embedded via `ADOPTIQ_ADMIN_SECRET_KEY` in secrets.env); packaged builds require it for the Admin Console.
+- **Admin dashboard:** Secret key is set at build time (embedded via `ADOPTIQ_ADMIN_SECRET_KEY` in secrets.env).
 
 ---
 
@@ -103,7 +102,6 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **History** — Lists previous portfolio analyses. Use **View** to open the progress page for an analysis and download Word/Excel reports when completed.
 - **Intel** — View tracked incidents, bugs, and maintenances from Webex status and help pages. Search, export/import historical data, and ask AI questions about intelligence.
 - **Ask AI** — Ask natural-language questions powered by 16 live data sections: portfolio overview, ARR and financials, adoption barriers, support cases, customer pulse, success priorities, action plans, trend analysis, barrier velocity, ARR at risk, external intelligence, historical context, account insights, portfolio intelligence, barrier aging, and pulse-revenue correlation.
-- **Admin** — Opens the Admin Console (localhost:5002) in a new tab for system monitoring, report history, and logs.
 - **Help** — Links and usage notes.
 
 ---

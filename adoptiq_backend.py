@@ -58,7 +58,8 @@ CIRCUIT_CONFIG = Config.CIRCUIT_CONFIG
 # Learned insights (past analyses) — optional; inject into CircuIT prompt when available
 try:
     from enhanced_admin_dashboard_v2 import get_learned_insights
-except Exception:
+except Exception as _import_err:
+    logging.getLogger(__name__).debug("enhanced_admin_dashboard_v2 unavailable, using stub: %s", _import_err)
     def get_learned_insights(manager: str, technology: str, limit: int = 5) -> str:
         return ""
 
@@ -1576,8 +1577,8 @@ def fetch_period_comparison(ctx, account_ids, days):
         if cur:
             try:
                 cur.close()
-            except Exception:
-                pass
+            except Exception as _close_err:
+                logger.debug("Cursor close error (period comparison): %s", _close_err)
     return comparison
 
 
@@ -1636,8 +1637,8 @@ def fetch_barrier_velocity(ctx, account_ids, days):
         if cur:
             try:
                 cur.close()
-            except Exception:
-                pass
+            except Exception as _close_err:
+                logger.debug("Cursor close error (barrier velocity): %s", _close_err)
     return velocity
 
 
@@ -1721,8 +1722,8 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
 
     try:
         found.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-    except OSError:
-        pass
+    except OSError as _sort_err:
+        logger.debug("File sort by mtime failed: %s", _sort_err)
 
     if manager:
         mgr_lower = manager.lower().replace(' ', '_')
@@ -1772,8 +1773,8 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
                                 arr_sum = pd.to_numeric(df[col], errors='coerce').sum()
                                 metrics['total_arr'] = 0.0 if pd.isna(arr_sum) else float(arr_sum)
                                 arr_col_name = col
-                            except Exception:
-                                pass
+                            except Exception as _arr_err:
+                                logger.debug("ARR sum failed for col %s: %s", col, _arr_err)
                         elif any(k in col_lower for k in ['subject', 'name', 'title', 'description']):
                             if subj_col_name is None:
                                 subj_col_name = col
@@ -1786,8 +1787,8 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
                                 lambda x: float(pd.to_numeric(x, errors='coerce').sum())
                             ).sort_values(ascending=False).head(10)
                             metrics['top_customers_by_arr'] = {str(k): v for k, v in cust_arr.items() if v > 0}
-                        except Exception:
-                            pass
+                        except Exception as _cust_err:
+                            logger.debug("Top customers by ARR failed: %s", _cust_err)
                     elif cust_col_name:
                         metrics['top_customers_by_count'] = {str(k): int(v) for k, v in df[cust_col_name].value_counts().head(10).items()}
 
@@ -1795,11 +1796,12 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
                         try:
                             subjects = df[subj_col_name].dropna().astype(str).head(10).tolist()
                             metrics['sample_subjects'] = [s[:120] for s in subjects if s.strip()]
-                        except Exception:
-                            pass
+                        except Exception as _subj_err:
+                            logger.debug("Sample subjects extraction failed: %s", _subj_err)
 
                     report_info['metrics'][sheet] = metrics
-                except Exception:
+                except Exception as _sheet_err:
+                    logger.debug("Sheet %s scan failed: %s", sheet, _sheet_err)
                     continue
 
             xl.close()
@@ -1967,8 +1969,8 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
         if cur:
             try:
                 cur.close()
-            except Exception:
-                pass
+            except Exception as _close_err:
+                logger.debug("Cursor close error (account insights): %s", _close_err)
     return result
 
 
@@ -2024,8 +2026,8 @@ def derive_portfolio_intelligence(arr_df, ab_df, cases_df=None, team_subs_df=Non
                             ab_df = merged
                             cssm_col = c
                             break
-                    except Exception:
-                        pass
+                    except Exception as _merge_err:
+                        logger.debug("CSSM merge failed for column %s: %s", c, _merge_err)
             if cssm_col and cssm_col in ab_df.columns:
                 workload = ab_df[cssm_col].value_counts()
                 if len(workload) > 1:
@@ -2673,7 +2675,8 @@ def fetch_status_incidents(timeout=25) -> List[Dict[str,str]]:
                 if hasattr(item, 'published_parsed') and item.published_parsed:
                     try:
                         published_date = datetime(*item.published_parsed[:6]).strftime('%Y-%m-%dT%H:%M:%SZ')
-                    except Exception:
+                    except Exception as _date_err:
+                        logger.debug("RSS published_parsed conversion failed: %s", _date_err)
                         published_date = item.get('published', '')
                 else:
                     published_date = item.get('published', '')
@@ -2748,7 +2751,8 @@ def fetch_status_incidents(timeout=25) -> List[Dict[str,str]]:
                 if hasattr(item, 'published_parsed') and item.published_parsed:
                     try:
                         published = datetime(*item.published_parsed[:6]).strftime('%Y-%m-%dT%H:%M:%SZ')
-                    except Exception:
+                    except Exception as _date_err:
+                        logger.debug("history.rss published_parsed conversion failed: %s", _date_err)
                         published = item.get('published', '')
                 else:
                     published = item.get('published', '')
@@ -2779,7 +2783,8 @@ def fetch_status_incidents(timeout=25) -> List[Dict[str,str]]:
                     'description': str(desc_raw)[:500] if desc_raw else '',
                 })
                 hist_added += 1
-            except Exception:
+            except Exception as _rss_err:
+                logger.debug("Skipped history.rss entry: %s", _rss_err)
                 continue
 
         logger.info(f"Supplemented {hist_added} incidents from history.rss")
@@ -2938,7 +2943,8 @@ def _correlate_incidents_with_cases(ext_incidents: List[Dict], csone_df: pd.Data
                         try:
                             incident_date = datetime.strptime(parts[0], fmt)
                             break
-                        except Exception:
+                        except Exception as _fmt_err:
+                            logger.debug("Date format %s did not match %s: %s", fmt, parts[0], _fmt_err)
                             continue
             except Exception as _xref_err:
                 logger.debug(f"Cross-reference date parse failed: {_xref_err}")
@@ -2970,8 +2976,8 @@ def _correlate_incidents_with_cases(ext_incidents: List[Dict], csone_df: pd.Data
                         days_diff = abs((incident_date - case_date).days)
                         if days_diff <= 7:
                             temporal_match = True
-                except Exception:
-                    pass
+                except Exception as _temp_err:
+                    logger.debug("Temporal correlation parse failed: %s", _temp_err)
             
             # If either keyword or temporal match, consider it correlated
             if keyword_match or temporal_match:
@@ -2990,7 +2996,7 @@ def _correlate_incidents_with_cases(ext_incidents: List[Dict], csone_df: pd.Data
 
 def cross_reference_refs(ab_df: pd.DataFrame, csone_df: pd.DataFrame, ext_bugs: List[Dict[str,str]]):
     # Build a set of CSC IDs from external
-    ext_set = {b["bug_id"].upper() for b in ext_bugs}
+    ext_set = {b.get("bug_id", "").upper() for b in ext_bugs if b.get("bug_id")}
     # Aggregate refs from datasets
     refs = set()
     for df in [ab_df, csone_df]:
@@ -3449,8 +3455,8 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
             bullet_style.paragraph_format.space_after = Pt(4)
             bullet_style.paragraph_format.line_spacing = 1.15
             bullet_style.paragraph_format.left_indent = Inches(0.25)
-        except Exception:
-            pass
+        except Exception as _bs_err:
+            logger.debug("List Bullet style config skipped: %s", _bs_err)
             
         # Configure List Number style
         try:
@@ -3460,11 +3466,11 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
             number_style.paragraph_format.space_after = Pt(4)
             number_style.paragraph_format.line_spacing = 1.15
             number_style.paragraph_format.left_indent = Inches(0.25)
-        except Exception:
-            pass
+        except Exception as _ns_err:
+            logger.debug("List Number style config skipped: %s", _ns_err)
             
-    except Exception:
-        pass
+    except Exception as _style_err:
+        logger.debug("Document style configuration skipped: %s", _style_err)
     
     # Add heading if provided
     if heading:
@@ -3553,8 +3559,8 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
             try:
                 p.paragraph_format.space_after = Pt(6)
                 p.paragraph_format.line_spacing = 1.15
-            except Exception:
-                pass
+            except Exception as _fmt_err:
+                logger.debug("Bullet paragraph format skipped: %s", _fmt_err)
         
         # Handle numbered lists - remove ALL markdown symbols
         elif len(line) > 2 and line[0].isdigit() and line[1:3] in ['. ', ') ']:
@@ -3566,8 +3572,8 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
             try:
                 p.paragraph_format.space_after = Pt(6)
                 p.paragraph_format.line_spacing = 1.15
-            except Exception:
-                pass
+            except Exception as _fmt_err:
+                logger.debug("Numbered list paragraph format skipped: %s", _fmt_err)
         
         # Regular paragraphs - use helper to clean ALL markdown
         else:
@@ -3583,8 +3589,8 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
                 # (Not for single-line statements)
                 if len(line) > 80:  # Only indent longer paragraphs
                     p.paragraph_format.first_line_indent = Inches(0)  # No indent - keep clean
-            except Exception:
-                pass
+            except Exception as _fmt_err:
+                logger.debug("Paragraph format skipped: %s", _fmt_err)
         
         i += 1
     

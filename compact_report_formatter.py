@@ -367,7 +367,7 @@ class CompactReportFormatter:
                 ai_summary = ""
                 if isinstance(ai_insights, dict):
                     if 'portfolio_summary' in ai_insights:
-                        ai_summary = ai_insights['portfolio_summary'].get('executive_summary', '')
+                        ai_summary = (ai_insights.get('portfolio_summary') or {}).get('executive_summary', '')
                     elif 'executive_summary' in ai_insights:
                         ai_summary = ai_insights['executive_summary']
                     else:
@@ -817,7 +817,7 @@ class CompactReportFormatter:
                 ai_summary = ""
                 if isinstance(ai_insights, dict):
                     if 'portfolio_summary' in ai_insights:
-                        ai_summary = ai_insights['portfolio_summary'].get('executive_summary', '')
+                        ai_summary = (ai_insights.get('portfolio_summary') or {}).get('executive_summary', '')
                     elif 'executive_summary' in ai_insights:
                         ai_summary = ai_insights['executive_summary']
                     else:

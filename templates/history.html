@@ -94,10 +94,6 @@
                                                         data-analysis-id="{{ analysis.id }}">
                                                     <i class="fas fa-download me-1"></i>Download
                                                 </button>
-                                                <button type="button" class="btn btn-sm btn-outline-danger delete-btn hover-lift" 
-                                                        data-analysis-id="{{ analysis.id }}">
-                                                    <i class="fas fa-trash me-1"></i>Delete
-                                                </button>
                                             </div>
                                         </td>
                                     </tr>
@@ -185,45 +181,6 @@
     </div>
 </div>
 
-<!-- Delete Confirmation Modal -->
-<div class="modal fade" id="deleteModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="fas fa-exclamation-triangle text-danger me-2"></i>Confirm Deletion
-                </h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <p>Are you sure you want to delete this analysis? This action cannot be undone.</p>
-                <p class="text-muted small mb-0">
-                    <strong>Note:</strong> This will remove the analysis from your history but won't affect any downloaded reports.
-                </p>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                <button type="button" class="btn btn-danger" id="confirmDeleteBtn">
-                    <i class="fas fa-trash me-2"></i>Delete Analysis
-                </button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- Success Notification -->
-<div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 9999;">
-    <div id="successToast" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
-        <div class="toast-header bg-success text-white">
-            <i class="fas fa-check-circle me-2"></i>
-            <strong class="me-auto">Success</strong>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="toast"></button>
-        </div>
-        <div class="toast-body">
-            Analysis deleted successfully.
-        </div>
-    </div>
-</div>
 {% endblock %}
 
 {% block extra_js %}
@@ -246,49 +203,6 @@ document.addEventListener('DOMContentLoaded', function() {
             const analysisId = this.dataset.analysisId;
             window.location.href = `/progress/${encodeURIComponent(analysisId)}`;
         });
-    });
-    
-    // Delete button
-    document.querySelectorAll('.delete-btn').forEach(btn => {
-        btn.addEventListener('click', function() {
-            const analysisId = this.dataset.analysisId;
-            const modal = new bootstrap.Modal(document.getElementById('deleteModal'));
-            
-            // Store the analysis ID for deletion
-            document.getElementById('confirmDeleteBtn').dataset.analysisId = analysisId;
-            modal.show();
-        });
-    });
-    
-    // Confirm delete
-    document.getElementById('confirmDeleteBtn').addEventListener('click', function() {
-        const analysisId = this.dataset.analysisId;
-        
-        // Add loading state
-        this.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Deleting...';
-        this.disabled = true;
-        
-        // Here you would make an API call to delete the analysis
-        // For now, we'll just hide the modal and show a message
-        setTimeout(() => {
-            const modal = bootstrap.Modal.getInstance(document.getElementById('deleteModal'));
-            modal.hide();
-            
-            // Remove the row from the table
-            const row = document.querySelector(`[data-analysis-id="${analysisId}"]`);
-            if (row) {
-                row.style.opacity = '0.5';
-                row.style.pointerEvents = 'none';
-                row.innerHTML = '<td colspan="5" class="text-center text-muted">Analysis deleted</td>';
-            }
-            
-            // Show success toast
-            const toast = new bootstrap.Toast(document.getElementById('successToast'));
-            toast.show();
-            
-            // Update statistics
-            updateStatistics();
-        }, 1000);
     });
     
     // Statistics animation
@@ -315,16 +229,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 stat.textContent = Math.floor(currentValue);
             }, duration / steps);
         });
-    }
-    
-    // Update statistics after deletion
-    function updateStatistics() {
-        const totalAnalyses = document.querySelector('[data-value]');
-        if (totalAnalyses) {
-            const currentValue = parseInt(totalAnalyses.textContent);
-            totalAnalyses.textContent = currentValue - 1;
-            totalAnalyses.dataset.value = currentValue - 1;
-        }
     }
     
     // Enhanced hover effects for table rows
