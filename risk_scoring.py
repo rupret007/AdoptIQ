@@ -15,6 +15,7 @@ from data_normalization import (
     normalize_severity_label,
     normalize_status_label,
 )
+from report_utils import format_inline_source
 
 
 @dataclass(frozen=True)
@@ -244,30 +245,47 @@ def compute_customer_risk_profile(
     risk_factors: List[str] = []
     if ab_component["details"].get("critical_high_count", 0) > 0:
         risk_factors.append(
-            f"{ab_component['details']['critical_high_count']} critical/high adoption barriers"
+            f"{ab_component['details']['critical_high_count']} critical/high adoption barriers "
+            f"{format_inline_source('Adoption Barriers', fields=['SEVERITY_C', 'AB_STATUS_C'])}"
         )
     if support_component["details"].get("escalated_count", 0) > 0:
         risk_factors.append(
-            f"{support_component['details']['escalated_count']} escalated TAC cases (P1/P2)"
+            f"{support_component['details']['escalated_count']} escalated TAC cases (P1/P2) "
+            f"{format_inline_source('Support Cases (TAC)', fields=['Severity', 'Status', 'Case #'])}"
         )
     if support_component["details"].get("bems_count", 0) > 0:
         risk_factors.append(
-            f"{support_component['details']['bems_count']} BEMS escalations"
+            f"{support_component['details']['bems_count']} BEMS escalations "
+            f"{format_inline_source('BEMS Escalations', fields=['Transaction ID', 'bemscsc_refs'])}"
         )
     if pulse_component["details"].get("poor_bad_count", 0) > 0:
         risk_factors.append(
-            f"{pulse_component['details']['poor_bad_count']} poor/bad customer pulse records"
+            f"{pulse_component['details']['poor_bad_count']} poor/bad customer pulse records "
+            f"{format_inline_source('Customer Pulse', fields=['PULSE_RATING__C'])}"
         )
     if action_component["details"].get("unresolved_count", 0) > 0:
         risk_factors.append(
-            f"{action_component['details']['unresolved_count']} unresolved action plans"
+            f"{action_component['details']['unresolved_count']} unresolved action plans "
+            f"{format_inline_source('Action Plans', fields=['STATUS_C'])}"
         )
 
     key_findings = [
-        f"Adoption barriers analyzed: {ab_component['details'].get('count', 0)}",
-        f"Support cases analyzed: {support_component['details'].get('count', 0)}",
-        f"Customer pulse records analyzed: {pulse_component['details'].get('count', 0)}",
-        f"Derived risk score: {score_0_100}/100 ({risk_band})",
+        (
+            f"Adoption barriers analyzed: {ab_component['details'].get('count', 0)} "
+            f"{format_inline_source('Adoption Barriers', fields=['SEVERITY_C', 'AB_STATUS_C'])}"
+        ),
+        (
+            f"Support cases analyzed: {support_component['details'].get('count', 0)} "
+            f"{format_inline_source('Support Cases (TAC)', fields=['Case #', 'Severity', 'Status'])}"
+        ),
+        (
+            f"Customer pulse records analyzed: {pulse_component['details'].get('count', 0)} "
+            f"{format_inline_source('Customer Pulse', fields=['PULSE_RATING__C'])}"
+        ),
+        (
+            f"Derived risk score: {score_0_100}/100 ({risk_band}) "
+            f"{format_inline_source('Derived Metric', source_override='Deterministic weighted AdoptIQ risk engine', verification_override='Recompute from normalized component metrics')}"
+        ),
     ]
 
     recommendations: List[str] = []

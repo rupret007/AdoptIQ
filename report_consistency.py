@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -13,12 +14,26 @@ def _safe_count(df: Optional[pd.DataFrame]) -> int:
     return 0 if df is None or df.empty else len(df)
 
 
+def _missing_inline_source_claims(factual_claims: Optional[list]) -> list:
+    if not factual_claims:
+        return []
+    missing = []
+    for claim in factual_claims:
+        text = str(claim or "").strip()
+        if not text:
+            continue
+        if not re.search(r"\[\s*source\s*:", text, flags=re.IGNORECASE):
+            missing.append(text)
+    return missing
+
+
 def validate_report_consistency(
     ab_df: Optional[pd.DataFrame],
     csone_df: Optional[pd.DataFrame],
     portfolio_metrics: Optional[Dict[str, Any]] = None,
     risk_data: Optional[Dict[str, Dict[str, Any]]] = None,
     defects: Optional[Dict[str, Any]] = None,
+    factual_claims: Optional[list] = None,
     max_other_unknown_ratio: float = 0.60,
 ) -> Dict[str, Any]:
     """
@@ -87,6 +102,15 @@ def validate_report_consistency(
                 f"{len(unknown_defect_customers)} defect-customer entries are not in normalized customer set."
             )
         metrics["unknown_defect_customers"] = sorted(set(unknown_defect_customers))
+
+    # Inline source attribution coverage
+    missing_sources = _missing_inline_source_claims(factual_claims)
+    metrics["missing_inline_sources_count"] = len(missing_sources)
+    if missing_sources:
+        errors.append(
+            f"{len(missing_sources)} factual claim(s) missing inline source attribution."
+        )
+        metrics["missing_inline_sources_samples"] = missing_sources[:5]
 
     return {
         "is_valid": len(errors) == 0,

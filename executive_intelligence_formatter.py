@@ -17,6 +17,8 @@ import numpy as np
 from typing import Dict, List, Any, Optional
 import logging
 import re
+from data_normalization import add_case_lifecycle_fields, detect_bems_mask
+from report_utils import format_inline_source, format_metric_with_source
 
 logger = logging.getLogger(__name__)
 
@@ -189,37 +191,17 @@ class ExecutiveIntelligenceFormatter:
                 total_customers = len(ab_data['customer_name'].unique())
             else:
                 total_customers = 0
-        total_cases = len(csone_data) if not csone_data.empty else 0
+        csone_norm = add_case_lifecycle_fields(csone_data if csone_data is not None else pd.DataFrame())
+        total_cases = len(csone_norm) if not csone_norm.empty else 0
         
         p1_count = 0
         p2_count = 0
         bems_count = 0
         
-        if not csone_data.empty:
-            severity_col = None
-            for col in ['Severity', 'severity', 'Priority', 'priority']:
-                if col in csone_data.columns:
-                    severity_col = col
-                    break
-            
-            if severity_col:
-                p1_count = len(csone_data[csone_data[severity_col].astype(str).str.contains('P1|1|Critical', case=False, na=False)])
-                p2_count = len(csone_data[csone_data[severity_col].astype(str).str.contains('P2|2|High', case=False, na=False)])
-            
-            # Use centralized BEMS detection
-            try:
-                from app_simple import detect_bems_escalations
-            except ImportError:
-                try:
-                    from adoptiq_backend import detect_bems_escalations
-                except ImportError:
-                    try:
-                        from bems_escalation_analyzer import detect_bems_escalations
-                    except ImportError:
-                        # Fallback: simple BEMS detection
-                        def detect_bems_escalations(df):
-                            return pd.DataFrame(), 0
-            bems_cases, bems_count = detect_bems_escalations(csone_data)
+        if not csone_norm.empty:
+            p1_count = int((csone_norm.get('case_priority_norm', pd.Series(dtype=str)) == "P1").sum())
+            p2_count = int((csone_norm.get('case_priority_norm', pd.Series(dtype=str)) == "P2").sum())
+            bems_count = int(detect_bems_mask(csone_norm).sum())
         
         # Extract software defects and PSIRT vulnerabilities counts
         defect_count = 0
@@ -255,6 +237,29 @@ class ExecutiveIntelligenceFormatter:
                         run.font.color.rgb = color
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         
+        # Inline source-backed metrics for dashboard facts
+        src_para = self.doc.add_paragraph()
+        src_para.add_run("Metric source backing:\n").bold = True
+        dashboard_metric_facts = [
+            format_metric_with_source(
+                "Total Customers",
+                total_customers,
+                "Derived Metric",
+                fields=["BU_NAME", "customer_name", "ACCOUNT_ID_C"],
+                source_override="Normalized customer set from team subscriptions + CSConsole + CSOne",
+                verification_override="Cross-check customer IDs/names in source exports",
+            ),
+            format_metric_with_source("Support Cases", total_cases, "Support Cases (TAC)", fields=["Case #", "Severity", "Status"]),
+            format_metric_with_source("Critical (P1)", p1_count, "Support Cases (TAC)", fields=["Severity"]),
+            format_metric_with_source("High (P2)", p2_count, "Support Cases (TAC)", fields=["Severity"]),
+            format_metric_with_source("BEMS Escalations", bems_count, "BEMS Escalations", fields=["Transaction ID", "bemscsc_refs"]),
+            format_metric_with_source("Software Defects", defect_count, "Software Defects", fields=["CSC ID", "BST ID"]),
+            format_metric_with_source("Security Vulnerabilities", vuln_count, "Service Incidents", fields=["CVE ID", "Advisory ID"], source_override="PSIRT advisories and vulnerability feeds", verification_override="Verify advisory/CVE identifiers in PSIRT and public advisories"),
+        ]
+        for fact in dashboard_metric_facts:
+            bullet = self.doc.add_paragraph(style='List Bullet')
+            bullet.add_run(fact)
+
         self.doc.add_paragraph()
         
         # Risk Summary
@@ -401,17 +406,9 @@ class ExecutiveIntelligenceFormatter:
         bems_ids = []
         
         if csone_data is not None and not csone_data.empty:
-            bems_mask = pd.Series([False] * len(csone_data), index=csone_data.index)
-            
-            # Check Transaction ID column (primary BEMS source)
-            if 'Transaction ID' in csone_data.columns:
-                bems_mask |= csone_data['Transaction ID'].astype(str).str.contains('BEMS', case=False, na=False)
-            
-            # Check bemscsc_refs column (secondary BEMS source)
-            if 'bemscsc_refs' in csone_data.columns:
-                bems_mask |= csone_data['bemscsc_refs'].astype(str).str.contains('BEMS', case=False, na=False)
-            
-            bems_cases = csone_data[bems_mask]
+            csone_norm = add_case_lifecycle_fields(csone_data)
+            bems_mask = detect_bems_mask(csone_norm)
+            bems_cases = csone_norm[bems_mask]
             total_bems = len(bems_cases)
             
             # Group by customer
@@ -432,6 +429,9 @@ class ExecutiveIntelligenceFormatter:
         count_run.bold = True
         if total_bems > 0:
             count_run.font.color.rgb = DANGER_RED
+        metrics_para.add_run(
+            f" {format_inline_source('BEMS Escalations', fields=['Transaction ID', 'bemscsc_refs'])}"
+        )
         metrics_para.add_run(f'\n• Customers Affected: {len(bems_by_customer)}\n')
         
         if bems_ids:

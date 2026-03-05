@@ -19,6 +19,7 @@ from docx.oxml.shared import OxmlElement, qn
 from risk_scoring import compute_customer_risk_profile
 from data_normalization import add_case_lifecycle_fields, detect_bems_mask, normalize_customer_name
 from report_consistency import validate_report_consistency
+from report_utils import format_inline_source, format_metric_with_source
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -274,6 +275,27 @@ class CompactReportFormatter:
                         elif i == 4 and _v > 0:  # BEMS
                             run.font.color.rgb = RGBColor(220, 20, 60)
             
+            # Inline source-backed facts for each metric
+            fact_p = self.doc.add_paragraph()
+            fact_p.add_run("Metric source backing:\n").bold = True
+            metric_facts = [
+                format_metric_with_source(
+                    "Total Customers",
+                    total_customers,
+                    "Derived Metric",
+                    fields=["BU_NAME", "customer_name", "ACCOUNT_ID_C"],
+                    source_override="Normalized customer set from team subscriptions + CSConsole + CSOne",
+                    verification_override="Cross-check customer IDs/names in source exports",
+                ),
+                format_metric_with_source("Support Cases", total_support_cases, "Support Cases (TAC)", fields=["Case #", "Status"]),
+                format_metric_with_source("Critical (P1)", critical_p1, "Support Cases (TAC)", fields=["Severity"]),
+                format_metric_with_source("High (P2)", high_p2, "Support Cases (TAC)", fields=["Severity"]),
+                format_metric_with_source("BEMS Escalations", bems_count, "BEMS Escalations", fields=["Transaction ID", "bemscsc_refs"]),
+            ]
+            for metric_fact in metric_facts:
+                bullet = self.doc.add_paragraph(style='List Bullet')
+                bullet.add_run(metric_fact)
+
             self.doc.add_paragraph()  # Spacing
             
         except Exception as e:
@@ -846,24 +868,21 @@ class CompactReportFormatter:
                 no_data_p.add_run('No CSOne (TAC) case data was provided for this analysis. BEMS escalations are identified from CSOne (Transaction ID, bemscsc_refs). Upload a CSOne export to include TAC cases and BEMS analysis.')
                 return
             
-            # Extract BEMS data
-            import re
-            bems_mask = pd.Series([False] * len(csone_data), index=csone_data.index)
-            
-            if 'Transaction ID' in csone_data.columns:
-                bems_mask |= csone_data['Transaction ID'].astype(str).str.contains('BEMS', case=False, na=False)
-            if 'bemscsc_refs' in csone_data.columns:
-                bems_mask |= csone_data['bemscsc_refs'].astype(str).str.contains('BEMS', case=False, na=False)
-            
-            bems_cases = csone_data[bems_mask]
+            # Canonical BEMS extraction from normalized TAC fields
+            csone_norm = add_case_lifecycle_fields(csone_data)
+            bems_mask = detect_bems_mask(csone_norm)
+            bems_cases = csone_norm[bems_mask]
             total_bems = len(bems_cases)
-            bems_rate = (total_bems / len(csone_data) * 100) if len(csone_data) > 0 else 0
+            bems_rate = (total_bems / len(csone_norm) * 100) if len(csone_norm) > 0 else 0
             
             # Active BEMS summary
             summary_heading = self.doc.add_paragraph()
             summary_heading.add_run('Active BEMS Escalations\n').bold = True
             summary_p = self.doc.add_paragraph()
-            summary_p.add_run(f'Total BEMS Escalations: {total_bems}\n')
+            summary_p.add_run(
+                f"Total BEMS Escalations: {total_bems} "
+                f"{format_inline_source('BEMS Escalations', fields=['Transaction ID', 'bemscsc_refs'])}\n"
+            )
             
             if total_bems > 0 and 'customer_name' in bems_cases.columns:
                 summary_p.add_run('\nBEMS Escalations by Customer:\n')
@@ -872,6 +891,7 @@ class CompactReportFormatter:
                     customer_bems = bems_cases[bems_cases['customer_name'] == customer]
                     
                     # Extract actual BEMS IDs
+                    import re
                     bems_ids = set()
                     for _, row in customer_bems.iterrows():
                         for col in ['Transaction ID', 'bemscsc_refs']:
@@ -883,7 +903,10 @@ class CompactReportFormatter:
                     bems_id_list = sorted(list(bems_ids))
                     bems_id_str = ', '.join([f'[{bid}]' for bid in bems_id_list])  # FIXED: Show all IDs
                     
-                    summary_p.add_run(f'• {customer}: {len(customer_bems)} escalation(s) - {bems_id_str}\n')
+                    summary_p.add_run(
+                        f"• {customer}: {len(customer_bems)} escalation(s) - {bems_id_str} "
+                        f"{format_inline_source('BEMS Escalations', fields=['Transaction ID', 'bemscsc_refs'])}\n"
+                    )
             else:
                 summary_p.add_run('\nActive BEMS Escalations: None Detected\n')
                 summary_p.add_run('No BEMS escalations were detected in the CSOne data for this period.\n')
@@ -903,9 +926,12 @@ class CompactReportFormatter:
             non_bems_heading = self.doc.add_paragraph()
             non_bems_heading.add_run('TAC Cases Without BEMS Escalations\n').bold = True
             
-            non_bems_cases = csone_data[~bems_mask]
+            non_bems_cases = csone_norm[~bems_mask]
             non_bems_p = self.doc.add_paragraph()
-            non_bems_p.add_run(f'Total TAC Cases Without BEMS: {len(non_bems_cases)}\n')
+            non_bems_p.add_run(
+                f"Total TAC Cases Without BEMS: {len(non_bems_cases)} "
+                f"{format_inline_source('Support Cases (TAC)', fields=['Case #', 'Status'])}\n"
+            )
             non_bems_p.add_run('These cases may require monitoring for potential escalation risk.\n\n')
             
             if not non_bems_cases.empty and 'customer_name' in non_bems_cases.columns:
@@ -971,7 +997,10 @@ class CompactReportFormatter:
                         
                         barrier_p = self.doc.add_paragraph()
                         barrier_p.add_run(f'• {customer}: ').bold = True
-                        barrier_p.add_run(f'{subj} (Severity: {sev})')
+                        barrier_p.add_run(
+                            f"{subj} (Severity: {sev}) "
+                            f"{format_inline_source('Adoption Barriers', fields=['SEVERITY_C', 'AB_STATUS_C'])}"
+                        )
                 else:
                     no_critical_p = self.doc.add_paragraph()
                     no_critical_p.add_run('No critical adoption barriers identified in current data.')
@@ -1063,12 +1092,10 @@ class CompactReportFormatter:
             
             # Check for BEMS escalations
             if not csone_data.empty:
-                bems_mask = pd.Series([False] * len(csone_data), index=csone_data.index)
-                if 'Transaction ID' in csone_data.columns:
-                    bems_mask |= csone_data['Transaction ID'].astype(str).str.contains('BEMS', case=False, na=False)
-                
+                csone_norm = add_case_lifecycle_fields(csone_data)
+                bems_mask = detect_bems_mask(csone_norm)
                 if bems_mask.any() and 'customer_name' in csone_data.columns:
-                    bems_cases = csone_data[bems_mask]
+                    bems_cases = csone_norm[bems_mask]
                     for customer in bems_cases['customer_name'].dropna().unique():
                         count = len(bems_cases[bems_cases['customer_name'] == customer])
                         warnings.append({
@@ -1283,9 +1310,7 @@ class CompactReportFormatter:
             
             bems_count = 0
             if not csone_data.empty:
-                for col in ['Transaction ID', 'bemscsc_refs']:
-                    if col in csone_data.columns:
-                        bems_count += csone_data[col].astype(str).str.contains('BEMS', case=False, na=False).sum()
+                bems_count = int(detect_bems_mask(add_case_lifecycle_fields(csone_data)).sum())
             
             risk_p = self.doc.add_paragraph()
             risk_p.add_run('- ARR At Risk: ').bold = True
@@ -1412,7 +1437,10 @@ def calculate_renewal_risk_scores(ab_data: pd.DataFrame, csone_data: pd.DataFram
             risk_factors = list(profile["risk_factors"])
             aging_open = profile["components"]["adoption_barriers"]["details"].get("aging_open_count", 0)
             if aging_open > 0:
-                risk_factors.append(f"{aging_open} barrier(s) open 60+ days")
+                risk_factors.append(
+                    f"{aging_open} barrier(s) open 60+ days "
+                    f"{format_inline_source('Adoption Barriers', fields=['OPEN_DATE_C', 'AB_STATUS_C'])}"
+                )
             
             # Determine color category
             if final_score >= 8:
@@ -1506,7 +1534,12 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
                 "Coordinate with engineering on BEMS escalations"
             ]
         }
-        consistency = validate_report_consistency(ab_data, csone_norm, risk_data=risk_data)
+        factual_claims = []
+        for profile in risk_data.values():
+            if isinstance(profile, dict):
+                factual_claims.extend(profile.get("risk_factors", []) or [])
+                factual_claims.extend(profile.get("key_findings", []) or [])
+        consistency = validate_report_consistency(ab_data, csone_norm, risk_data=risk_data, factual_claims=factual_claims)
         if consistency["warnings"]:
             logger.warning(f"[CONSISTENCY] Compact report warnings: {consistency['warnings']}")
         

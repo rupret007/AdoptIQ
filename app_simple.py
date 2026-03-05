@@ -1543,15 +1543,13 @@ def _generate_comprehensive_fallback_insights(ab_norm, csone_df, manager, techno
             insights.append(f"TOP CUSTOMERS BY ADOPTION BARRIERS: {', '.join(top_at_risk[:5])}.")
     bems_total = 0
     if not csone_df.empty:
-        bems_mask = pd.Series([False] * len(csone_df), index=csone_df.index)
-        if 'Transaction ID' in csone_df.columns:
-            bems_mask |= csone_df['Transaction ID'].astype(str).str.contains('BEMS', case=False, na=False)
-        if 'bemscsc_refs' in csone_df.columns:
-            refs = csone_df['bemscsc_refs'].fillna('').astype(str)
-            bems_mask |= ((refs != '') & (refs != '[]') & refs.str.contains('BEMS', case=False, na=False))
-        bems_total = bems_mask.sum()
+        _cs_norm = add_case_lifecycle_fields(csone_df)
+        bems_total = int(detect_bems_mask(_cs_norm).sum())
     if bems_total > 0:
-        insights.append(f"BEMS ENGINEERING ESCALATIONS: {int(bems_total)} cases require specialized engineering support—high renewal risk indicator.")
+        insights.append(
+            f"BEMS ENGINEERING ESCALATIONS: {int(bems_total)} cases require specialized engineering support—high renewal risk indicator. "
+            f"[Source: CSOne (Transaction ID, bemscsc_refs); Field(s): Transaction ID, bemscsc_refs; Verification: BEMS IDs verifiable in CSOne]"
+        )
     
     # Strategic recommendations
     insights.append("STRATEGIC RECOMMENDATIONS:")
@@ -5374,7 +5372,10 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     ab_count = renewal_analysis.get('adoption_barriers_count', 0) or (len(customer_ab) if not customer_ab.empty else 0)
     ab_para = doc.add_paragraph()
     ab_para.add_run(f'Total Adoption Barriers: {ab_count}\n').bold = True
-    ab_para.add_run('Source: CSConsole / Snowflake C360_CS_TASK_C_VW.\n').italic = True
+    ab_para.add_run(
+        'Source: CSConsole / Snowflake C360_CS_TASK_C_VW '
+        '[Field(s): SEVERITY_C, AB_STATUS_C, CREATED_DATE/CLOSED_DATE; Verification: Query by Record ID].\n'
+    ).italic = True
     if portfolio_mode and all_customers and not customer_ab.empty:
         cust_col_ab = 'customer_name' if 'customer_name' in customer_ab.columns else ('BU_NAME' if 'BU_NAME' in customer_ab.columns else None)
         if cust_col_ab:
@@ -5716,7 +5717,10 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         doc.add_heading('CSConsole Customer Pulse', level=1)
         cp_para = doc.add_paragraph()
         cp_para.add_run(f'Total Customer Pulse Records: {len(customer_customer_pulse)}\n').bold = True
-        cp_para.add_run('Source: CSConsole.\n').italic = True
+        cp_para.add_run(
+            'Source: CSConsole '
+            '[Field(s): PULSE_RATING__C, COMMENTS__C, CREATED_DATE/CLOSED_DATE; Verification: Query by customer and record ID].\n'
+        ).italic = True
         
         # Show pulse ratings
         if 'PULSE_RATING__C' in customer_customer_pulse.columns:
@@ -6578,10 +6582,12 @@ def run_customer_renewal_analysis(analysis_id):
         renewal_analysis['software_defects'] = software_defects
         renewal_analysis['psirt_vulnerabilities'] = psirt_vulns
         
+        factual_claims = list(renewal_analysis.get("key_findings", [])) + list(renewal_analysis.get("risk_factors", []))
         consistency_check = validate_report_consistency(
             customer_ab,
             add_case_lifecycle_fields(customer_csone),
             defects=software_defects,
+            factual_claims=factual_claims,
         )
         if not consistency_check["is_valid"]:
             raise ValueError(f"Renewal consistency checks failed: {'; '.join(consistency_check['errors'])}")
@@ -7367,7 +7373,18 @@ def run_comprehensive_analysis(analysis_id):
             'health_score': 'B' if healthy_customers >= high_risk_customers else 'C',
             'trend_direction': 'Stable'  # Default
         }
-        consistency = validate_report_consistency(_ab, _cs_norm, portfolio_metrics=portfolio_metrics, risk_data=risk_profiles)
+        factual_claims = []
+        for profile in risk_profiles.values():
+            if isinstance(profile, dict):
+                factual_claims.extend(profile.get("key_findings", []) or [])
+                factual_claims.extend(profile.get("risk_factors", []) or [])
+        consistency = validate_report_consistency(
+            _ab,
+            _cs_norm,
+            portfolio_metrics=portfolio_metrics,
+            risk_data=risk_profiles,
+            factual_claims=factual_claims,
+        )
         if not consistency["is_valid"]:
             logger.error(f"[[CONSISTENCY]] Errors: {consistency['errors']}")
         if consistency["warnings"]:

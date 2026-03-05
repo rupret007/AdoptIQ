@@ -28,6 +28,79 @@ DATA_SOURCES_CANONICAL: List[Tuple[str, str, str]] = [
 ]
 
 
+def _canonical_source_lookup() -> dict:
+    return {metric.lower(): (metric, source, verification) for metric, source, verification in DATA_SOURCES_CANONICAL}
+
+
+def resolve_canonical_source(metric_name: str) -> Tuple[str, str, str]:
+    """
+    Resolve canonical source metadata for a metric-like label.
+    Falls back to generic source metadata when the metric is derived.
+    """
+    metric_text = (metric_name or "").strip().lower()
+    if not metric_text:
+        return (
+            "Derived Metric",
+            "Normalized AdoptIQ composite metrics (CSConsole, CSOne, Snowflake)",
+            "Verify component records by referenced IDs in source systems",
+        )
+    lookup = _canonical_source_lookup()
+    if metric_text in lookup:
+        return lookup[metric_text]
+    for canonical_metric, source, verification in DATA_SOURCES_CANONICAL:
+        token = canonical_metric.lower()
+        if token in metric_text or metric_text in token:
+            return canonical_metric, source, verification
+    return (
+        metric_name,
+        "Normalized AdoptIQ composite metrics (CSConsole, CSOne, Snowflake)",
+        "Verify component records by referenced IDs in source systems",
+    )
+
+
+def format_inline_source(
+    metric_name: str,
+    fields: Optional[List[str]] = None,
+    record_id: str = "",
+    source_override: str = "",
+    verification_override: str = "",
+) -> str:
+    """
+    Format a standard inline source citation.
+    Example:
+    [Source: CSOne (TAC case data); Field(s): Case #,Transaction ID; Verification: Query by Case Number / SR Number in CSOne; Record: TAC12345]
+    """
+    _, source, verification = resolve_canonical_source(metric_name)
+    source_text = source_override.strip() or source
+    verification_text = verification_override.strip() or verification
+    parts = [f"Source: {source_text}"]
+    if fields:
+        clean_fields = [str(f).strip() for f in fields if str(f).strip()]
+        if clean_fields:
+            parts.append(f"Field(s): {', '.join(clean_fields)}")
+    if verification_text:
+        parts.append(f"Verification: {verification_text}")
+    if record_id and str(record_id).strip():
+        parts.append(f"Record: {str(record_id).strip()}")
+    return f"[{'; '.join(parts)}]"
+
+
+def format_metric_with_source(
+    label: str,
+    value: Union[str, int, float],
+    metric_name: str,
+    fields: Optional[List[str]] = None,
+    record_id: str = "",
+    source_override: str = "",
+    verification_override: str = "",
+) -> str:
+    """Format a metric statement with an inline source citation."""
+    return (
+        f"{label}: {value} "
+        f"{format_inline_source(metric_name, fields=fields, record_id=record_id, source_override=source_override, verification_override=verification_override)}"
+    )
+
+
 def get_data_sources_paragraph_text() -> str:
     """Return the standard Report Data Sources paragraph text for inline use."""
     parts = [

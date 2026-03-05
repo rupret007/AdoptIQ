@@ -18,7 +18,7 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from adoptiq_backend import _ensure_outputs
 from enhanced_snowflake_insights import EnhancedSnowflakeInsights
-from data_normalization import normalize_customer_name
+from data_normalization import detect_bems_mask, normalize_customer_name
 
 # Optional analyzers - may not be available in all deployments
 try:
@@ -914,60 +914,14 @@ class LeaderReportGenerator:
         self.doc.add_paragraph()
     
     def _count_bems_escalations(self, data: Dict) -> int:
-        """Count BEMS escalations in adoption barriers and TAC cases"""
-        bems_count = 0
-        
-        # Check adoption barriers
+        """Count BEMS escalations using canonical centralized detection."""
         abs_df = data.get('adoption_barriers', pd.DataFrame())
-        if not abs_df.empty:
-            logger.debug(f"Checking {len(abs_df)} adoption barriers for BEMS patterns")
-            logger.debug(f"Available columns in adoption barriers: {list(abs_df.columns)}")
-            
-            for _, row in abs_df.iterrows():
-                # Check multiple possible column names for BEMS detection
-                description = str(row.get('description', row.get('DESCRIPTION__C', row.get('DESCRIPTION', ''))))
-                subject = str(row.get('title', row.get('SUBJECT_C', row.get('SUBJECT', ''))))
-                bems_refs = str(row.get('bemscsc_refs', ''))
-                
-                combined_text = f"{subject} {description} {bems_refs}".lower()
-                
-                # Check for BEMS patterns
-                if any(pattern in combined_text for pattern in ['bems', 'be ms', 'backend escalation', 'back-end escalation']):
-                    bems_count += 1
-                    logger.debug(f"Found BEMS pattern in adoption barrier: {combined_text[:100]}...")
-        else:
-            logger.debug("No adoption barriers data found")
-        
-        # Check TAC cases (IMPORTANT: BEMS data is primarily in bemscsc_refs column!)
         tac_df = data.get('tac_cases', pd.DataFrame())
-        if not tac_df.empty:
-            logger.debug(f"Checking {len(tac_df)} TAC cases for BEMS patterns")
-            logger.debug(f"Available columns in TAC cases: {list(tac_df.columns)}")
-            
-            for _, row in tac_df.iterrows():
-                # PRIMARY: Check Transaction ID column (BEMS data in CSOne Excel)
-                transaction_id = str(row.get('Transaction ID', ''))
-                
-                # ALSO CHECK: bemscsc_refs column (alternate location)
-                bems_refs = str(row.get('bemscsc_refs', ''))
-                
-                # SECONDARY: Also check description/subject text for BEMS keywords
-                description = str(row.get('Problem Description', row.get('DESCRIPTION', row.get('Description', ''))))
-                subject = str(row.get('Problem', row.get('Title', row.get('SUBJECT', ''))))
-                
-                combined_text = f"{transaction_id} {subject} {description} {bems_refs}".lower()
-                
-                # Count as BEMS if any of these contain BEMS:
-                # 1. Transaction ID contains 'BEMS' (primary indicator from CSOne Excel)
-                # 2. bemscsc_refs column contains 'BEMS' (alternate location)
-                # 3. Description/subject contains BEMS keywords (text-based detection)
-                if 'bems' in transaction_id.lower() or 'bems' in bems_refs.lower() or any(pattern in combined_text for pattern in ['bems', 'be ms', 'backend escalation']):
-                    bems_count += 1
-                    logger.debug(f"Found BEMS in TAC case - Transaction ID: {transaction_id}, Refs: {bems_refs[:50]}, Text: {combined_text[:100]}...")
-        else:
-            logger.debug("No TAC cases data found")
-        
-        logger.debug(f"Total BEMS escalations found: {bems_count}")
+
+        ab_bems = int(detect_bems_mask(abs_df).sum()) if abs_df is not None and not abs_df.empty else 0
+        tac_bems = int(detect_bems_mask(tac_df).sum()) if tac_df is not None and not tac_df.empty else 0
+        bems_count = ab_bems + tac_bems
+        logger.debug(f"Total BEMS escalations found via canonical detector: {bems_count} (AB={ab_bems}, TAC={tac_bems})")
         return bems_count
     
     def _add_technology_breakdown(self, team_data: Dict[str, Dict]):
