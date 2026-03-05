@@ -20,9 +20,30 @@ env:
   ADOPTIQ_BUILD: ${{ github.event.inputs.build_number || '1' }}
 
 jobs:
+  quality-checks:
+    name: Quality Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run test suite
+        run: pytest -q
+
   build-mac:
     name: Build macOS DMG
     runs-on: macos-latest
+    needs: quality-checks
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,6 +82,7 @@ jobs:
   build-windows:
     name: Build Windows EXE
     runs-on: windows-latest
+    needs: quality-checks
     steps:
       - name: Checkout
         uses: actions/checkout@v4
