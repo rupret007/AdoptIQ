@@ -6,6 +6,11 @@ from typing import Any, Dict, Iterable, List, Tuple
 import pandas as pd
 
 from adoptiq_backend import (
+    fetch_arr_data,
+    fetch_barrier_velocity,
+    fetch_enhanced_account_insights,
+    fetch_period_comparison,
+    fetch_adoption_barriers,
     fetch_csconsole_action_plans,
     fetch_csconsole_customer_pulse,
     fetch_csconsole_success_priorities,
@@ -15,7 +20,32 @@ from adoptiq_backend import (
 from data_normalization import normalize_customer_name
 
 
+def _fetch_arr_data(ctx: Any, account_ids: List[str], _days: int) -> pd.DataFrame:
+    return fetch_arr_data(ctx, account_ids)
+
+
+def _fetch_adoption_barriers(ctx: Any, account_ids: List[str], days: int) -> pd.DataFrame:
+    return fetch_adoption_barriers(ctx, account_ids, days)
+
+
+def _fetch_period_comparison(ctx: Any, account_ids: List[str], days: int) -> Dict[str, Any]:
+    return fetch_period_comparison(ctx, account_ids, days) or {}
+
+
+def _fetch_barrier_velocity(ctx: Any, account_ids: List[str], days: int) -> Dict[str, Any]:
+    return fetch_barrier_velocity(ctx, account_ids, days) or {}
+
+
+def _fetch_enhanced_account_insights(ctx: Any, account_ids: List[str], days: int) -> Dict[str, Any]:
+    return fetch_enhanced_account_insights(ctx, account_ids, days) or {}
+
+
 _FETCHERS = {
+    "arr_data": _fetch_arr_data,
+    "adoption_barriers": _fetch_adoption_barriers,
+    "period_comparison": _fetch_period_comparison,
+    "barrier_velocity": _fetch_barrier_velocity,
+    "enhanced_account_insights": _fetch_enhanced_account_insights,
     "csconsole_action_plans": fetch_csconsole_action_plans,
     "csconsole_customer_pulse": fetch_csconsole_customer_pulse,
     "csconsole_success_priorities": fetch_csconsole_success_priorities,
@@ -56,7 +86,7 @@ class AnalysisRunContext:
     account_ids: Tuple[str, ...]
     days: int
     customer_names: Tuple[str, ...] = field(default_factory=tuple)
-    cache: Dict[str, pd.DataFrame] = field(default_factory=dict)
+    cache: Dict[str, Any] = field(default_factory=dict)
     metrics: Dict[str, int] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
 
@@ -75,7 +105,7 @@ class AnalysisRunContext:
             customer_names=_normalize_customer_names(customer_names),
         )
 
-    def get_or_fetch(self, dataset_name: str) -> pd.DataFrame:
+    def get_or_fetch(self, dataset_name: str) -> Any:
         with self._lock:
             if dataset_name in self.cache:
                 self.metrics[f"{dataset_name}_cache_hits"] = self.metrics.get(f"{dataset_name}_cache_hits", 0) + 1
@@ -97,8 +127,8 @@ class AnalysisRunContext:
             return df
 
 
-def prefetch_datasets(run_ctx: AnalysisRunContext, dataset_names: Iterable[str]) -> Dict[str, pd.DataFrame]:
-    results: Dict[str, pd.DataFrame] = {}
+def prefetch_datasets(run_ctx: AnalysisRunContext, dataset_names: Iterable[str]) -> Dict[str, Any]:
+    results: Dict[str, Any] = {}
     for name in dataset_names:
         if name not in _FETCHERS:
             logger.warning("Unknown dataset name '%s' in prefetch request", name)
@@ -137,3 +167,29 @@ def prefetch_ask_ai(run_ctx: AnalysisRunContext) -> Dict[str, pd.DataFrame]:
             "csconsole_action_plans",
         ),
     )
+
+
+def prefetch_ask_ai_grounded(
+    run_ctx: AnalysisRunContext,
+    include_datasets: Iterable[str] = (),
+) -> Dict[str, Any]:
+    """
+    Grounded Ask AI bundle with optional dataset gating.
+    The optional include list enables intent-based retrieval planning to reduce query volume.
+    """
+    base = (
+        "support_cases_snowflake",
+        "csconsole_customer_pulse",
+        "csconsole_success_priorities",
+        "csconsole_action_plans",
+        "arr_data",
+        "adoption_barriers",
+        "period_comparison",
+        "barrier_velocity",
+        "enhanced_account_insights",
+    )
+    if include_datasets:
+        selected = tuple(name for name in base if name in set(include_datasets))
+    else:
+        selected = base
+    return prefetch_datasets(run_ctx, selected)

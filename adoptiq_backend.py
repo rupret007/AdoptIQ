@@ -5078,6 +5078,51 @@ def generate_llm_response(system_prompt: str, briefing_book: str) -> str:
         logger.error(f"[[ERROR]] Unexpected error in CircuIT AI call: {e}")
         return "ERROR: CircuIT summarization failed due to unexpected error."
 
+
+def generate_llm_json_response(system_prompt: str, briefing_book: str, schema: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Request JSON-only LLM output and parse it with strict key checks.
+    Falls back gracefully when the model returns wrapped markdown.
+    """
+    schema_keys = sorted((schema or {}).get("properties", {}).keys())
+    required_keys = sorted((schema or {}).get("required", []))
+    schema_hint = json.dumps(schema or {}, separators=(",", ":"), default=str)
+    constrained_prompt = (
+        f"{briefing_book}\n\n"
+        "Return ONLY a valid JSON object. No markdown, no prose outside JSON.\n"
+        f"Schema keys: {', '.join(schema_keys)}\n"
+        f"Required keys: {', '.join(required_keys)}\n"
+        f"JSON schema: {schema_hint}\n"
+    )
+    raw = generate_llm_response(system_prompt, constrained_prompt)
+    if not raw or str(raw).startswith("ERROR:"):
+        return {"ok": False, "error": raw or "ERROR: empty response", "raw": raw}
+
+    payload = None
+    text = str(raw).strip()
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            payload = parsed
+    except json.JSONDecodeError:
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except json.JSONDecodeError:
+                payload = None
+
+    if payload is None:
+        return {"ok": False, "error": "ERROR: model did not return parseable JSON", "raw": raw}
+
+    missing = [key for key in required_keys if key not in payload]
+    if missing:
+        return {"ok": False, "error": f"ERROR: JSON missing required keys: {missing}", "raw": raw, "data": payload}
+
+    return {"ok": True, "data": payload, "raw": raw}
+
 # --------------------------- Core flow ---------------------------
 def _apply_scope_filter_ab(df: pd.DataFrame, tech: str, days: int) -> pd.DataFrame:
     if df is None or df.empty: 

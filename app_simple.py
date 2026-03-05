@@ -204,6 +204,12 @@ from data_normalization import (
 from risk_scoring import compute_customer_risk_profile
 from report_consistency import validate_report_consistency
 from snowflake_prefetch import AnalysisRunContext, prefetch_comprehensive, prefetch_ask_ai
+from ask_ai_grounded import (
+    AskAIRequest,
+    is_grounded_ask_ai_enabled,
+    run_intel_grounded_ask_ai,
+    run_portfolio_grounded_ask_ai,
+)
 
 # Import data source validator
 from data_source_validator import (
@@ -8843,6 +8849,33 @@ def ask_ai_portfolio():
         except (ValueError, TypeError):
             days = 90
 
+        if is_grounded_ask_ai_enabled():
+            grounded_result = run_portfolio_grounded_ask_ai(
+                AskAIRequest(
+                    question=question,
+                    manager=manager,
+                    technology=technology,
+                    days=days,
+                )
+            )
+            if grounded_result.get('ok'):
+                return jsonify({
+                    'ok': True,
+                    'answer': grounded_result.get('answer') or 'No response generated.',
+                    'context_summary': grounded_result.get('context_summary', 'Data: grounded pipeline'),
+                })
+            if grounded_result.get('fallback_to_legacy'):
+                logger.warning(
+                    "Ask-AI grounded mode fallback to legacy path: %s",
+                    grounded_result.get('reason', 'unspecified'),
+                )
+            else:
+                status_code = int(grounded_result.get('status_code', 500))
+                return jsonify({
+                    'ok': False,
+                    'error': grounded_result.get('error', 'Unable to generate a response. Please try again later.'),
+                }), status_code
+
         from adoptiq_backend import (
             _connect_with_keeper, get_subscriptions_for_team,
             fetch_adoption_barriers, fetch_arr_data,
@@ -9558,6 +9591,26 @@ def ask_intel():
         question = str(data.get('question') or '').strip()
         if not question or len(question) > 2000:
             return jsonify({'ok': False, 'error': 'Please provide a question (max 2000 characters).'}), 400
+
+        if is_grounded_ask_ai_enabled():
+            grounded_result = run_intel_grounded_ask_ai(question)
+            if grounded_result.get('ok'):
+                return jsonify({
+                    'ok': True,
+                    'answer': grounded_result.get('answer') or 'No response generated.',
+                    'context_summary': grounded_result.get('context_summary', ''),
+                })
+            if grounded_result.get('fallback_to_legacy'):
+                logger.warning(
+                    "Ask-Intel grounded mode fallback to legacy path: %s",
+                    grounded_result.get('reason', 'unspecified'),
+                )
+            else:
+                status_code = int(grounded_result.get('status_code', 500))
+                return jsonify({
+                    'ok': False,
+                    'error': grounded_result.get('error', 'Unable to generate a response. Please try again later.'),
+                }), status_code
 
         from incident_storage import get_all_external_intel
         intel = get_all_external_intel(days_back=365)

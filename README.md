@@ -99,6 +99,14 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - Verbose mode is intended for troubleshooting and query optimization validation; disable it for normal use.
 - Detailed rollout notes are in `SNOWFLAKE_OPTIMIZATION.md`.
 
+### Ask AI Grounded Mode (default enabled)
+
+- Ask AI now uses a retrieval-first grounded pipeline that builds a bounded evidence context and validates citations before returning claims.
+- Source-backed claims include explicit source IDs (for example AB IDs, Case IDs, incident IDs, bug IDs, BEMS/CSC IDs).
+- Claims without verifiable citations are moved to an "Evidence Gaps" section instead of being presented as facts.
+- Retrieval is intent-aware: Ask AI fetches only relevant dataset bundles for the question to reduce unnecessary Snowflake queries.
+- Rollback toggle: set `ADOPTIQ_ASK_AI_V2=0` to force legacy Ask AI behavior.
+
 **To quit:** Use **AdoptIQ → Quit AdoptIQ** from the menu bar (or ⌘Q). Closing only the terminal window may leave the app running in the background.
 
 ### If macOS blocks the app ("cannot be opened because it is from an unidentified developer")
@@ -115,7 +123,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **Dashboard / Run Analysis** — Start here; run new analyses from the dashboard buttons.
 - **History** — Lists previous portfolio analyses. Use **View** to open the progress page for an analysis and download Word/Excel reports when completed.
 - **Intel** — View tracked incidents, bugs, and maintenances from Webex status and help pages. Search, export/import historical data, and ask AI questions about intelligence.
-- **Ask AI** — Ask natural-language questions powered by 16 live data sections: portfolio overview, ARR and financials, adoption barriers, support cases, customer pulse, success priorities, action plans, trend analysis, barrier velocity, ARR at risk, external intelligence, historical context, account insights, portfolio intelligence, barrier aging, and pulse-revenue correlation.
+- **Ask AI** — Ask natural-language questions powered by grounded retrieval and source-validated answers across portfolio, ARR, adoption barriers, support cases, pulse, priorities, action plans, trends, external intelligence, and historical context.
 - **Help** — Links and usage notes.
 
 ---

@@ -150,6 +150,28 @@ def test_prefetch_failure_is_cached_and_not_retried(monkeypatch):
     assert run_ctx.metrics.get("csconsole_customer_pulse_errors") == 1
 
 
+def test_prefetch_ask_ai_grounded_respects_include_datasets(monkeypatch):
+    seen = []
+
+    def _factory(name):
+        def _fetcher(ctx, identifiers, days):
+            seen.append(name)
+            return pd.DataFrame([{"dataset": name}])
+        return _fetcher
+
+    monkeypatch.setitem(sp._FETCHERS, "support_cases_snowflake", _factory("support_cases_snowflake"))
+    monkeypatch.setitem(sp._FETCHERS, "arr_data", _factory("arr_data"))
+    monkeypatch.setitem(sp._FETCHERS, "adoption_barriers", _factory("adoption_barriers"))
+
+    run_ctx = sp.AnalysisRunContext.build(ctx=object(), account_ids=["001"], days=90)
+    result = sp.prefetch_ask_ai_grounded(
+        run_ctx,
+        include_datasets=("support_cases_snowflake", "arr_data"),
+    )
+    assert set(result.keys()) == {"support_cases_snowflake", "arr_data"}
+    assert set(seen) == {"support_cases_snowflake", "arr_data"}
+
+
 def test_prefetch_skips_unknown_dataset_names():
     run_ctx = sp.AnalysisRunContext.build(ctx=object(), account_ids=["001"], days=90)
     result = sp.prefetch_datasets(run_ctx, ["unknown_dataset_name"])
