@@ -67,3 +67,6 @@ class TestConfigDefaults:
             val = sc[key]
             assert val == (os.environ.get(f'SNOWFLAKE_{key.upper()}') or ''), \
                 f"SNOWFLAKE_{key.upper()} should come from env"
+
+    def test_secret_key_not_static_dev_literal(self):
+        assert Config.SECRET_KEY != "dev-secret-key-change-in-production"

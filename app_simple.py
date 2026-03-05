@@ -11,6 +11,7 @@ import atexit
 import json
 import logging
 import math
+import secrets
 import time
 import threading
 import re
@@ -195,6 +196,8 @@ from data_normalization import (
     add_case_lifecycle_fields,
     build_customer_lookup,
     detect_bems_mask,
+    extract_bems_ids_from_row,
+    extract_bems_ids_from_text,
     normalize_customer_name,
 )
 from risk_scoring import compute_customer_risk_profile
@@ -268,14 +271,14 @@ app = Flask(
     template_folder=str(_BASE_PATH / 'templates'),
     static_folder=str(_BASE_PATH / 'static'),
 )
-# Use environment key in packaged builds; allow dev fallback only in source mode.
+# Use environment key in packaged builds; generate dev-only ephemeral key in source mode.
 _env_secret_key = os.environ.get('ADOPTIQ_SECRET_KEY')
 if _env_secret_key:
     app.config['SECRET_KEY'] = _env_secret_key
 elif _frozen:
     raise RuntimeError("ADOPTIQ_SECRET_KEY must be set for packaged builds.")
 else:
-    app.config['SECRET_KEY'] = 'adoptiq-secret-key-2024-dev-change-in-production'
+    app.config['SECRET_KEY'] = secrets.token_urlsafe(48)
 app.config['UPLOAD_FOLDER'] = str(_APP_SUPPORT / 'uploads')
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 
@@ -290,6 +293,13 @@ _SENSITIVE_ENDPOINTS = {
     'start_subscription_analysis', 'start_leader_report', 'cancel_analysis',
     'download_result', 'clear_stuck_analyses', 'simple_test', 'test_generate_report',
 }
+
+_ANALYSIS_ID_RE = re.compile(r'^[A-Za-z0-9._-]{1,200}$')
+
+
+def _is_valid_analysis_id(value: str) -> bool:
+    """Strict validation for route-level analysis IDs."""
+    return isinstance(value, str) and bool(_ANALYSIS_ID_RE.fullmatch(value))
 
 
 def _client_ip_from_request(req) -> str:
@@ -2905,19 +2915,9 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             customer_bems_cases, customer_bems_count = detect_bems_escalations(customer_data)
             
             if customer_bems_count > 0:
-                # Extract BEMS references from Transaction ID (primary) and bemscsc_refs (secondary)
                 bems_refs_list = []
                 for _, row in customer_bems_cases.iterrows():
-                    # PRIMARY: Transaction ID
-                    if 'Transaction ID' in row and pd.notna(row['Transaction ID']):
-                        tx_id = str(row['Transaction ID']).strip()
-                        if tx_id and 'BEMS' in tx_id.upper():
-                            bems_refs_list.append(tx_id)
-                    # SECONDARY: bemscsc_refs
-                    if 'bemscsc_refs' in row and pd.notna(row['bemscsc_refs']):
-                        bems_ref = str(row['bemscsc_refs']).strip()
-                        if bems_ref and bems_ref != '[]' and 'BEMS' in bems_ref.upper():
-                            bems_refs_list.append(bems_ref)
+                    bems_refs_list.extend(extract_bems_ids_from_row(row))
                 
                 if bems_refs_list:
                     all_refs = ', '.join(set(bems_refs_list))  # Remove duplicates
@@ -2963,21 +2963,10 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
     bems_cases, bems_count = detect_bems_escalations(csone_df)
     if not bems_cases.empty and bems_count > 0:
         doc.add_heading('BEMS Escalations & Engineering Issues', level=2)
-        # Group by customer - extract BEMS from Transaction ID (primary) and bemscsc_refs (secondary)
+        # Group by customer using canonical BEMS ID extraction
         def extract_bems_refs(row):
-            """Extract BEMS references from Transaction ID and bemscsc_refs"""
-            refs = []
-            # PRIMARY: Transaction ID
-            if 'Transaction ID' in bems_cases.columns and pd.notna(row.get('Transaction ID', None)):
-                tx_id = str(row['Transaction ID']).strip()
-                if tx_id and 'BEMS' in tx_id.upper():
-                    refs.append(tx_id)
-            # SECONDARY: bemscsc_refs (check even when Transaction ID is empty)
-            if 'bemscsc_refs' in bems_cases.columns and pd.notna(row.get('bemscsc_refs', None)):
-                bems_ref = str(row['bemscsc_refs']).strip()
-                if bems_ref and bems_ref != '[]' and 'BEMS' in bems_ref.upper():
-                    refs.append(bems_ref)
-            return ', '.join([ref for ref in refs if ref])
+            refs = extract_bems_ids_from_row(row)
+            return ', '.join(refs)
         
         bems_cases['bems_extracted'] = bems_cases.apply(extract_bems_refs, axis=1)
         
@@ -4962,12 +4951,7 @@ def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame
     if not normalized_csone.empty:
         bems_rows = normalized_csone[normalized_csone.get("is_bems", False)]
         for _, row in bems_rows.iterrows():
-            tx = str(row.get("Transaction ID", "")).strip()
-            if tx and "BEMS" in tx.upper():
-                bems_ids.append(tx)
-            refs = str(row.get("bemscsc_refs", "")).strip()
-            if refs and "BEMS" in refs.upper():
-                bems_ids.append(refs)
+            bems_ids.extend(extract_bems_ids_from_row(row))
     bems_ids = sorted(set(bems_ids))
 
     incident_count = len(ext_incidents) if ext_incidents else 0
@@ -5945,13 +5929,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                             reasons.append(f'BEMS escalation(s): {len(cust_bems)} case(s) (Source: CSOne)')
                             refs = []
                             for _, r in cust_bems.iterrows():
-                                tx = r.get('Transaction ID') or r.get('bemscsc_refs') or ''
-                                if tx and str(tx).strip() and 'BEMS' in str(tx).upper():
-                                    refs.append(str(tx).strip())
+                                refs.extend(extract_bems_ids_from_row(r))
                             if refs:
                                 p = doc.add_paragraph(style='List Bullet')
                                 p.add_run('BEMS refs: ').bold = True
-                                p.add_run('; '.join(refs[:5]) + ('…' if len(refs) > 5 else ''))
+                                refs_unique = sorted(set(refs))
+                                p.add_run('; '.join(refs_unique[:5]) + ('…' if len(refs_unique) > 5 else ''))
                 if reasons:
                     p = doc.add_paragraph(style='List Bullet')
                     p.add_run('Risk factors: ').bold = True
@@ -8057,6 +8040,8 @@ def progress(analysis_id):
     
     # URL decode the analysis_id in case it was encoded
     analysis_id = unquote(analysis_id)
+    if not _is_valid_analysis_id(analysis_id):
+        return "<h1>Invalid analysis ID</h1><a href='/'>Start New Analysis</a>", 400
     analysis_id_safe = html_module.escape(analysis_id)  # Prevent XSS when embedding in HTML
     
     with analysis_status_lock:
@@ -8347,6 +8332,8 @@ def get_status(analysis_id):
     
     # URL decode the analysis_id in case it was encoded
     analysis_id = unquote(analysis_id)
+    if not _is_valid_analysis_id(analysis_id):
+        return jsonify({'error': 'Invalid analysis ID'}), 400
     
     # Check in-memory status first (under lock to avoid TOCTOU race)
     with analysis_status_lock:
@@ -8845,7 +8832,6 @@ def ask_ai_portfolio():
                         bems_ids = set()
                         bems_by_customer = {}
                         csc_pattern = r'\bCSC[a-zA-Z0-9]{6,10}\b'
-                        bems_pattern = r'\bBEMS\d{5,12}\b'
                         acct_id_to_name = {}
                         if team_subs_df is not None and not team_subs_df.empty and 'ACCOUNT_ID_C' in team_subs_df.columns and 'BU_NAME' in team_subs_df.columns:
                             acct_id_to_name = dict(zip(team_subs_df['ACCOUNT_ID_C'], team_subs_df['BU_NAME']))
@@ -8863,7 +8849,7 @@ def ask_ai_portfolio():
                                 for m in csc_matches:
                                     defect_ids.add(m.upper())
                                     defect_by_customer.setdefault(cust, set()).add(m.upper())
-                                bems_matches = _re.findall(bems_pattern, text, _re.IGNORECASE)
+                                bems_matches = extract_bems_ids_from_text(text)
                                 for m in bems_matches:
                                     bems_ids.add(m.upper())
                                     bems_by_customer.setdefault(cust, set()).add(m.upper())
@@ -9597,6 +9583,8 @@ def cancel_analysis(analysis_id):
     """Cancel a running analysis (thread-safe)"""
     from urllib.parse import unquote
     analysis_id = unquote(analysis_id)
+    if not _is_valid_analysis_id(analysis_id):
+        return jsonify({'error': 'Invalid analysis ID'}), 400
     if app.config.get('WTF_CSRF_ENABLED', True):
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
@@ -10492,6 +10480,8 @@ def download_result(analysis_id, file_type):
     # Validate file_type (whitelist)
     if file_type not in ('docx', 'xlsx'):
         return jsonify({'error': 'Invalid file type. Use docx or xlsx.', 'available_files': ['docx', 'xlsx']}), 404
+    if not _is_valid_analysis_id(analysis_id):
+        return jsonify({'error': 'Invalid analysis ID'}), 400
     
     with analysis_status_lock:
         status = analysis_status.get(analysis_id)

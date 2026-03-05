@@ -87,6 +87,13 @@ class TestDownloadFileRoute:
 
 class TestDownloadResultRoute:
     @pytest.mark.flask
+    def test_invalid_analysis_id(self, client):
+        rv = client.get("/download/bad%20id/docx")
+        assert rv.status_code == 400
+        data = rv.get_json()
+        assert "invalid analysis id" in data["error"].lower()
+
+    @pytest.mark.flask
     def test_invalid_file_type(self, client):
         rv = client.get("/download/test-id/pdf")
         assert rv.status_code == 404

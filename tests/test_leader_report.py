@@ -195,3 +195,31 @@ def test_customer_matching_uses_normalized_exact_compare():
     src = Path(__file__).resolve().parent.parent.joinpath("leader_report_generator.py").read_text(encoding="utf-8")
     assert "str.contains(customer, case=False, na=False)" not in src
     assert "detect_bems_mask(" in src
+
+
+def test_customer_pulse_join_maps_account_id_and_customer_name(generator, monkeypatch):
+    monkeypatch.setattr(
+        generator,
+        "_get_subscriptions_for_cssm",
+        lambda emails: pd.DataFrame(
+            [{"ACCOUNT_ID_C": "001", "BU_NAME": "Acme Corp", "CSSM_EMAIL": emails[0]}]
+        ),
+    )
+    monkeypatch.setattr(generator, "_fetch_action_plans", lambda account_ids, days: pd.DataFrame())
+    monkeypatch.setattr(generator, "_fetch_adoption_barriers", lambda account_ids, days: pd.DataFrame())
+    monkeypatch.setattr(
+        generator,
+        "_fetch_customer_pulse",
+        lambda account_ids, days: pd.DataFrame([{"ACCOUNT__C": "001", "SCORE__C": 7.5}]),
+    )
+    monkeypatch.setattr(generator, "_fetch_success_priorities", lambda customers, days: pd.DataFrame())
+
+    team_data = generator._collect_team_data(
+        direct_reports=[{"name": "Alice", "email": "alice@example.com"}],
+        days=90,
+    )
+    pulse = team_data["Alice"]["customer_pulse"]
+    assert not pulse.empty
+    assert "ACCOUNT_ID_C" in pulse.columns
+    assert "BU_NAME" in pulse.columns
+    assert pulse.iloc[0]["BU_NAME"] == "Acme Corp"

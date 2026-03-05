@@ -51,6 +51,32 @@ def validate_report_consistency(
     metrics["total_barriers"] = ab_count
     metrics["total_cases"] = cs_count
     metrics["bems_count"] = bems_count
+    metrics["total_customers"] = 0
+    metrics["critical_p1"] = 0
+    metrics["high_p2"] = 0
+
+    # Canonical dashboard metrics (customer/case-severity parity checks)
+    customer_set = set()
+    for frame in (ab_df, csone_df):
+        if frame is None or frame.empty:
+            continue
+        for col in ("customer_name", "BU_NAME", "Customer Name"):
+            if col in frame.columns:
+                customer_set.update(
+                    normalize_customer_name(v) for v in frame[col].dropna().astype(str).tolist()
+                )
+    customer_set = {c for c in customer_set if c and c != "Unknown"}
+    metrics["total_customers"] = len(customer_set)
+
+    if csone_df is not None and not csone_df.empty:
+        sev_col = next(
+            (c for c in ("case_priority_norm", "Severity", "Highest Priority", "Priority") if c in csone_df.columns),
+            None,
+        )
+        if sev_col:
+            sev_text = csone_df[sev_col].fillna("").astype(str)
+            metrics["critical_p1"] = int(sev_text.str.contains(r"\bP1\b|critical|sev1|priority 1|^1$", case=False, regex=True).sum())
+            metrics["high_p2"] = int(sev_text.str.contains(r"\bP2\b|high|sev2|priority 2|^2$", case=False, regex=True).sum())
 
     # Adoption-barrier categorization leakage
     if ab_df is not None and not ab_df.empty and "sub_technology" in ab_df.columns:
@@ -72,6 +98,12 @@ def validate_report_consistency(
             errors.append("Portfolio metric mismatch: total_cases does not match normalized TAC cases.")
         if int(portfolio_metrics.get("bems_count", 0)) != bems_count:
             errors.append("Portfolio metric mismatch: bems_count does not match canonical BEMS detection.")
+        if "total_customers" in portfolio_metrics and int(portfolio_metrics.get("total_customers", 0)) != metrics["total_customers"]:
+            errors.append("Portfolio metric mismatch: total_customers does not match normalized customer universe.")
+        if "critical_p1" in portfolio_metrics and int(portfolio_metrics.get("critical_p1", 0)) != metrics["critical_p1"]:
+            errors.append("Portfolio metric mismatch: critical_p1 does not match canonical severity counting.")
+        if "high_p2" in portfolio_metrics and int(portfolio_metrics.get("high_p2", 0)) != metrics["high_p2"]:
+            errors.append("Portfolio metric mismatch: high_p2 does not match canonical severity counting.")
 
     # Risk data/customer totals coherence
     if risk_data is not None:
@@ -81,6 +113,7 @@ def validate_report_consistency(
 
     # Defect linkage consistency
     if defects:
+        defect_ids = set(str(x).strip().upper() for x in (defects.get("csc_ids", []) or []) if str(x).strip())
         defect_by_customer = defects.get("defect_by_customer", {}) or {}
         known_customers = set()
         for frame in (ab_df, csone_df):
@@ -102,6 +135,17 @@ def validate_report_consistency(
                 f"{len(unknown_defect_customers)} defect-customer entries are not in normalized customer set."
             )
         metrics["unknown_defect_customers"] = sorted(set(unknown_defect_customers))
+        linked_ids = set()
+        for values in defect_by_customer.values():
+            for defect_id in values or []:
+                if str(defect_id).strip():
+                    linked_ids.add(str(defect_id).strip().upper())
+        unlinked_defects = sorted(defect_ids - linked_ids)
+        metrics["unlinked_defects"] = unlinked_defects
+        if unlinked_defects:
+            warnings.append(
+                f"{len(unlinked_defects)} defect ID(s) are missing customer linkage."
+            )
 
     # Inline source attribution coverage
     missing_sources = _missing_inline_source_claims(factual_claims)

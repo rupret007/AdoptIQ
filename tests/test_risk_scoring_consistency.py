@@ -7,7 +7,7 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from data_normalization import add_case_lifecycle_fields, detect_bems_mask
+from data_normalization import add_case_lifecycle_fields, detect_bems_mask, extract_bems_ids_from_row
 from report_consistency import validate_report_consistency
 from risk_scoring import compute_customer_risk_profile
 
@@ -93,4 +93,38 @@ def test_bems_mask_uses_multiple_columns():
     )
     mask = detect_bems_mask(df)
     assert int(mask.sum()) == 3
+
+
+def test_case_lifecycle_marks_unknown_status_with_closed_date_as_closed():
+    now = datetime.utcnow()
+    csone = pd.DataFrame(
+        [
+            {
+                "customer_name": "Acme Corp",
+                "Status": "",
+                "Date/Time Opened": (now - timedelta(days=12)).isoformat(),
+                "Date/Time Closed": (now - timedelta(days=2)).isoformat(),
+                "Transaction ID": "BEMS-12345",
+            }
+        ]
+    )
+    normalized = add_case_lifecycle_fields(csone)
+    row = normalized.iloc[0]
+    assert bool(row["is_closed"]) is True
+    assert bool(row["is_open"]) is False
+    assert int(row["closed_age_days"]) >= 1
+    assert pd.isna(row["open_age_days"])
+
+
+def test_extract_bems_ids_from_row_normalizes_multiple_sources():
+    row = pd.Series(
+        {
+            "Transaction ID": "Escalation BEMS-12345",
+            "bemscsc_refs": "follow-up BEMS67890",
+            "Title": "BEMS issue",
+        }
+    )
+    ids = extract_bems_ids_from_row(row)
+    assert "BEMS-12345" in ids
+    assert "BEMS67890" in ids
 

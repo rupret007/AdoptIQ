@@ -18,7 +18,7 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from adoptiq_backend import _ensure_outputs
 from enhanced_snowflake_insights import EnhancedSnowflakeInsights
-from data_normalization import detect_bems_mask, normalize_customer_name
+from data_normalization import detect_bems_mask, extract_bems_ids_from_row, normalize_customer_name
 
 # Optional analyzers - may not be available in all deployments
 try:
@@ -1256,68 +1256,38 @@ class LeaderReportGenerator:
             # Check adoption barriers - enhanced with BEMS ID extraction
             abs_df = data.get('adoption_barriers', pd.DataFrame())
             if not abs_df.empty:
-                for _, row in abs_df.iterrows():
-                    description = str(row.get('DESCRIPTION__C', ''))
-                    subject = str(row.get('SUBJECT_C', ''))
-                    combined_text = f"{subject} {description}".lower()
-                    
-                    if any(pattern in combined_text for pattern in ['bems', 'be ms', 'backend escalation']):
-                        # Try to extract BEMS ID from text
-                        import re
-                        bems_id = 'N/A'
-                        bems_match = re.search(r'BEMS[-]?\d+', f"{subject} {description}", re.IGNORECASE)
-                        if bems_match:
-                            bems_id = bems_match.group(0).upper()
-                        
-                        bems_details.append({
-                            'css': cssm_name,
-                            'type': 'Adoption Barrier',
-                            'customer': row.get('BU_NAME', row.get('customer_name', 'Unknown')),
-                            'subject': subject,
-                            'id': row.get('ID', 'N/A'),
-                            'bems_id': bems_id
-                        })
-            
-            # Check TAC cases - enhanced with Transaction ID and bemscsc_refs columns
+                ab_bems_mask = detect_bems_mask(abs_df)
+                for _, row in abs_df[ab_bems_mask].iterrows():
+                    subject = str(row.get('SUBJECT_C', row.get('title', '')))
+                    bems_ids = extract_bems_ids_from_row(row)
+                    bems_id = ", ".join(bems_ids) if bems_ids else 'N/A'
+
+                    bems_details.append({
+                        'css': cssm_name,
+                        'type': 'Adoption Barrier',
+                        'customer': row.get('BU_NAME', row.get('customer_name', 'Unknown')),
+                        'subject': subject,
+                        'id': row.get('ID', 'N/A'),
+                        'bems_id': bems_id
+                    })
+
+            # Check TAC cases - canonical BEMS detection and extraction
             tac_df = data.get('tac_cases', pd.DataFrame())
             if not tac_df.empty:
-                for _, row in tac_df.iterrows():
-                    description = str(row.get('Problem Description', ''))
+                tac_bems_mask = detect_bems_mask(tac_df)
+                for _, row in tac_df[tac_bems_mask].iterrows():
                     subject = str(row.get('Problem', '') or row.get('Title', ''))
-                    transaction_id = str(row.get('Transaction ID', ''))
-                    bemscsc_refs = str(row.get('bemscsc_refs', ''))
-                    combined_text = f"{subject} {description} {transaction_id} {bemscsc_refs}".lower()
-                    
-                    # Enhanced pattern matching including Transaction ID and bemscsc_refs
-                    is_bems = any(pattern in combined_text for pattern in ['bems', 'be ms', 'backend escalation'])
-                    
-                    # Also check if Transaction ID contains BEMS ID (primary source)
-                    if not is_bems and transaction_id and 'bems' in transaction_id.lower():
-                        is_bems = True
-                    
-                    # Check bemscsc_refs column (secondary source)  
-                    if not is_bems and bemscsc_refs and 'bems' in bemscsc_refs.lower():
-                        is_bems = True
-                    
-                    if is_bems:
-                        # Extract actual BEMS ID from Transaction ID or bemscsc_refs
-                        bems_id = 'N/A'
-                        if transaction_id and 'BEMS' in transaction_id.upper():
-                            bems_id = transaction_id
-                        elif bemscsc_refs and 'BEMS' in bemscsc_refs.upper():
-                            import re
-                            bems_match = re.search(r'BEMS[-]?\d+', bemscsc_refs, re.IGNORECASE)
-                            if bems_match:
-                                bems_id = bems_match.group(0).upper()
-                        
-                        bems_details.append({
-                            'css': cssm_name,
-                            'type': 'TAC Case',
-                            'customer': row.get('Account:', row.get('customer_name', 'Unknown')),
-                            'subject': subject,
-                            'id': row.get('Case #', row.get('SR Number', 'N/A')),
-                            'bems_id': bems_id
-                        })
+                    bems_ids = extract_bems_ids_from_row(row)
+                    bems_id = ", ".join(bems_ids) if bems_ids else 'N/A'
+
+                    bems_details.append({
+                        'css': cssm_name,
+                        'type': 'TAC Case',
+                        'customer': row.get('Account:', row.get('customer_name', 'Unknown')),
+                        'subject': subject,
+                        'id': row.get('Case #', row.get('SR Number', 'N/A')),
+                        'bems_id': bems_id
+                    })
         
         # Create BEMS details table with enhanced columns
         if bems_details:
@@ -2568,15 +2538,7 @@ class LeaderReportGenerator:
                 customer_abs = data['adoption_barriers'][
                     data['adoption_barriers']['BU_NAME'].fillna("").astype(str).apply(normalize_customer_name) == customer_norm
                 ]
-                for _, ab in customer_abs.iterrows():
-                    # Try multiple column names for BEMS detection
-                    subject = str(ab.get('title', ab.get('SUBJECT_C', ab.get('SUBJECT', ''))))
-                    description = str(ab.get('description', ab.get('DESCRIPTION__C', ab.get('DESCRIPTION', ''))))
-                    bems_refs = str(ab.get('bemscsc_refs', ''))
-                    
-                    combined_text = f"{subject} {description} {bems_refs}".upper()
-                    if 'BEMS' in combined_text:
-                        bems_count += 1
+                bems_count += int(detect_bems_mask(customer_abs).sum())
             
             # Check for BEMS references in TAC cases
             if not data.get('tac_cases', pd.DataFrame()).empty:
@@ -2591,18 +2553,7 @@ class LeaderReportGenerator:
                     customer_tacs = data['tac_cases'][
                         data['tac_cases'][customer_col].fillna("").astype(str).apply(normalize_customer_name) == customer_norm
                     ]
-                    for _, tac in customer_tacs.iterrows():
-                        # PRIMARY: Check Transaction ID column (BEMS data in CSOne Excel)
-                        transaction_id = str(tac.get('Transaction ID', ''))
-                        
-                        # ALSO CHECK: bemscsc_refs and text fields
-                        bems_refs = str(tac.get('bemscsc_refs', ''))
-                        title = str(tac.get('Title', tac.get('Problem', tac.get('SUBJECT', ''))))
-                        description = str(tac.get('Problem Description', tac.get('DESCRIPTION', '')))
-                        
-                        combined_text = f"{transaction_id} {title} {description} {bems_refs}".upper()
-                        if 'BEMS' in combined_text:
-                            bems_count += 1
+                    bems_count += int(detect_bems_mask(customer_tacs).sum())
         except Exception as e:
             logger.warning(f"Error counting BEMS escalations: {e}")
         
@@ -3171,17 +3122,16 @@ class LeaderReportGenerator:
                     ]
                     
                     bems_items = []
-                    for _, ab in customer_abs.iterrows():
+                    for _, ab in customer_abs[detect_bems_mask(customer_abs)].iterrows():
                         subject = str(ab.get('SUBJECT_C', ''))
                         description = str(ab.get('DESCRIPTION', ''))
-                        if 'BEMS' in subject.upper() or 'BEMS' in description.upper():
-                            bems_items.append({
-                                'id': ab.get('ID', 'N/A'),
-                                'subject': subject,
-                                'severity': str(ab.get('SEVERITY_C', 'N/A') if pd.notna(ab.get('SEVERITY_C')) else 'N/A'),
-                                'status': str(ab.get('STATUS_C', 'N/A') if pd.notna(ab.get('STATUS_C')) else 'N/A'),
-                                'date': str(ab.get('CREATED_DATE', 'N/A') if pd.notna(ab.get('CREATED_DATE')) else 'N/A')
-                            })
+                        bems_items.append({
+                            'id': ab.get('ID', 'N/A'),
+                            'subject': subject or description,
+                            'severity': str(ab.get('SEVERITY_C', 'N/A') if pd.notna(ab.get('SEVERITY_C')) else 'N/A'),
+                            'status': str(ab.get('STATUS_C', 'N/A') if pd.notna(ab.get('STATUS_C')) else 'N/A'),
+                            'date': str(ab.get('CREATED_DATE', 'N/A') if pd.notna(ab.get('CREATED_DATE')) else 'N/A')
+                        })
                     
                     if bems_items:
                         insights_added = True

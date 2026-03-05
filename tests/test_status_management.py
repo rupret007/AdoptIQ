@@ -162,6 +162,13 @@ class TestStatusPersistence:
 
 class TestGetStatusRoute:
     @pytest.mark.flask
+    def test_status_invalid_analysis_id(self, client):
+        rv = client.get("/status/bad%20id")
+        assert rv.status_code == 400
+        data = rv.get_json()
+        assert "invalid analysis id" in data["error"].lower()
+
+    @pytest.mark.flask
     def test_status_with_datetime_values(self, client):
         with app_mod.analysis_status_lock:
             original_status = dict(app_mod.analysis_status)

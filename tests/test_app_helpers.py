@@ -18,8 +18,10 @@ from app_simple import (
     _categorize_technology,
     _build_insights_payload,
     _has_customer_activity_for_deep_dive,
+    _is_valid_analysis_id,
     filter_subscriptions_by_criteria,
     _clean_datetime_columns_for_excel,
+    app,
     INSIGHT_SUMMARY_MAX_CHARS,
 )
 
@@ -72,6 +74,21 @@ class TestCategorizeTechnology:
     def test_wxcc_vs_enterprise_disambiguation(self):
         assert _categorize_technology("Webex Contact Center Enterprise") == "Webex Contact Center Enterprise"
         assert _categorize_technology("Webex Contact Center") == "Webex Contact Center"
+
+
+class TestAnalysisIdValidation:
+    def test_valid_analysis_id(self):
+        assert _is_valid_analysis_id("analysis_123-ABC.def") is True
+
+    def test_invalid_analysis_id(self):
+        assert _is_valid_analysis_id("../etc/passwd") is False
+        assert _is_valid_analysis_id("bad id with space") is False
+        assert _is_valid_analysis_id("") is False
+
+
+class TestSecretKeyDefaults:
+    def test_app_secret_key_is_not_static_dev_literal(self):
+        assert app.config["SECRET_KEY"] != "adoptiq-secret-key-2024-dev-change-in-production"
 
 
 # ── _build_insights_payload ──────────────────────────────────────────────

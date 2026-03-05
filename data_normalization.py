@@ -52,6 +52,8 @@ BREAK_FIX_PATTERNS = (
     r"\bsev[ -]?[1-2]\b",
 )
 
+BEMS_ID_PATTERN = re.compile(r"\bBEMS[- ]?\d+\b|\bBEMS\b", re.IGNORECASE)
+
 LIKELY_OPEN_DATE_COLS = (
     "Date/Time Opened",
     "Created",
@@ -245,7 +247,10 @@ def normalize_severity_label(value: Any) -> str:
 
 
 def parse_datetime_series(series: pd.Series) -> pd.Series:
-    parsed = pd.to_datetime(series, errors="coerce", utc=True)
+    try:
+        parsed = pd.to_datetime(series, errors="coerce", utc=True, format="mixed")
+    except TypeError:
+        parsed = pd.to_datetime(series, errors="coerce", utc=True)
     try:
         parsed = parsed.dt.tz_convert(None)
     except Exception:
@@ -295,6 +300,34 @@ def detect_bems_mask(df: Optional[pd.DataFrame]) -> pd.Series:
         )
 
     return mask.fillna(False)
+
+
+def extract_bems_ids_from_text(text: Any) -> List[str]:
+    """Extract canonical BEMS references from free text."""
+    candidate = _clean_text(text)
+    if not candidate:
+        return []
+    found = BEMS_ID_PATTERN.findall(candidate)
+    normalized = []
+    for token in found:
+        t = _clean_text(token).upper()
+        if t:
+            normalized.append(t)
+    if any(re.search(r"\d", token) for token in normalized):
+        normalized = [token for token in normalized if re.search(r"\d", token)]
+    return sorted(set(normalized))
+
+
+def extract_bems_ids_from_row(
+    row: pd.Series,
+    columns: Sequence[str] = ("Transaction ID", "bemscsc_refs", "Title", "Problem Description", "SUBJECT", "SUBJECT_C"),
+) -> List[str]:
+    """Extract canonical BEMS references from selected row columns."""
+    refs: List[str] = []
+    for col in columns:
+        if col in row.index:
+            refs.extend(extract_bems_ids_from_text(row.get(col)))
+    return sorted(set(refs))
 
 
 def _classify_case_type_text(text: str) -> str:

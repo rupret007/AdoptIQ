@@ -18,6 +18,13 @@ import app_simple as app_mod
 
 class TestCancelAnalysis:
     @pytest.mark.flask
+    def test_cancel_invalid_analysis_id_returns_400(self, client):
+        rv = client.post("/cancel/bad%20id")
+        assert rv.status_code == 400
+        data = rv.get_json()
+        assert "invalid analysis id" in data["error"].lower()
+
+    @pytest.mark.flask
     def test_cancel_nonexistent_returns_404(self, client):
         rv = client.post("/cancel/nonexistent-id")
         assert rv.status_code == 404

@@ -12,11 +12,22 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
+import secrets
 from pathlib import Path
 
+
+def _resolve_secret_key() -> str:
+    """Resolve app secret key from env or generate a dev-only ephemeral key."""
+    configured = os.environ.get('SECRET_KEY') or os.environ.get('ADOPTIQ_SECRET_KEY')
+    if configured:
+        return configured
+    # Avoid predictable hardcoded defaults in local/dev runs.
+    return secrets.token_urlsafe(48)
+
+
 class Config:
-    # Flask Configuration (SECRET_KEY from env; dev fallback for local run only)
-    SECRET_KEY = os.environ.get('SECRET_KEY') or os.environ.get('ADOPTIQ_SECRET_KEY') or 'dev-secret-key-change-in-production'
+    # Flask Configuration (SECRET_KEY from env; generated ephemeral key otherwise)
+    SECRET_KEY = _resolve_secret_key()
     DEBUG = os.environ.get('DEBUG', 'false').lower() in ('true', '1', 'yes')
     FLASK_ENV = os.environ.get('FLASK_ENV', 'development')
     

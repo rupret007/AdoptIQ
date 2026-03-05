@@ -17,7 +17,12 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.shared import OxmlElement, qn
 from risk_scoring import compute_customer_risk_profile
-from data_normalization import add_case_lifecycle_fields, detect_bems_mask, normalize_customer_name
+from data_normalization import (
+    add_case_lifecycle_fields,
+    detect_bems_mask,
+    extract_bems_ids_from_row,
+    normalize_customer_name,
+)
 from report_consistency import validate_report_consistency
 from report_utils import format_inline_source, format_metric_with_source
 
@@ -482,10 +487,7 @@ class CompactReportFormatter:
             bems_count = 0
             if not customer_csone.empty:
                 for _, row in customer_csone.iterrows():
-                    for col in ['Transaction ID', 'bemscsc_refs']:
-                        if col in row and pd.notna(row[col]):
-                            found = re.findall(r'BEMS\d+', str(row[col]), re.IGNORECASE)
-                            bems_ids.update(found)
+                    bems_ids.update(extract_bems_ids_from_row(row))
                 bems_count = len(bems_ids)
             
             # PROBLEMS section (matches example format)
@@ -891,13 +893,9 @@ class CompactReportFormatter:
                     customer_bems = bems_cases[bems_cases['customer_name'] == customer]
                     
                     # Extract actual BEMS IDs
-                    import re
                     bems_ids = set()
                     for _, row in customer_bems.iterrows():
-                        for col in ['Transaction ID', 'bemscsc_refs']:
-                            if col in row and pd.notna(row[col]):
-                                found = re.findall(r'BEMS\d+', str(row[col]), re.IGNORECASE)
-                                bems_ids.update(found)
+                        bems_ids.update(extract_bems_ids_from_row(row))
                     
                     # Format ALL BEMS IDs with brackets for citation like [BEMS01916938]
                     bems_id_list = sorted(list(bems_ids))

@@ -17,7 +17,7 @@ import numpy as np
 from typing import Dict, List, Any, Optional
 import logging
 import re
-from data_normalization import add_case_lifecycle_fields, detect_bems_mask
+from data_normalization import add_case_lifecycle_fields, detect_bems_mask, extract_bems_ids_from_row
 from report_utils import format_inline_source, format_metric_with_source
 
 logger = logging.getLogger(__name__)
@@ -416,10 +416,8 @@ class ExecutiveIntelligenceFormatter:
                 bems_by_customer = bems_cases.groupby('customer_name').size().to_dict()
                 
                 # Extract BEMS IDs
-                if 'Transaction ID' in bems_cases.columns:
-                    for tid in bems_cases['Transaction ID'].dropna():
-                        if 'BEMS' in str(tid).upper():
-                            bems_ids.append(str(tid))
+                for _, row in bems_cases.iterrows():
+                    bems_ids.extend(extract_bems_ids_from_row(row))
         
         # Summary metrics
         metrics_para = self.doc.add_paragraph()

@@ -21,12 +21,15 @@ from docx import Document
 from data_normalization import (
     add_case_lifecycle_fields,
     build_customer_lookup,
+    detect_bems_mask,
+    extract_bems_ids_from_row,
     normalize_customer_name,
     normalize_severity_label,
     normalize_status_label,
     parse_datetime_series,
 )
 from risk_scoring import compute_customer_risk_profile
+from report_utils import format_inline_source
 
 # Enhanced executive report generation
 try:
@@ -2104,7 +2107,7 @@ def compute_barrier_aging(ab_df, arr_df=None):
 
         result = {'total_open': len(open_barriers)}
         if date_col:
-            open_barriers['_parsed_date'] = pd.to_datetime(open_barriers[date_col], errors='coerce')
+            open_barriers['_parsed_date'] = parse_datetime_series(open_barriers[date_col])
             valid = open_barriers.dropna(subset=['_parsed_date'])
             if not valid.empty:
                 now = pd.Timestamp.now()
@@ -3787,18 +3790,9 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
     total_bems = 0
     bems_rate = 0.0
     if csone_df is not None and not csone_df.empty:
-        # Check BEMS in multiple columns (Transaction ID is primary source in CSOne Excel)
-        bems_mask = pd.Series([False] * len(csone_df), index=csone_df.index)
-        
-        # PRIMARY: Transaction ID column (main BEMS data location)
-        if 'Transaction ID' in csone_df.columns:
-            bems_mask |= csone_df['Transaction ID'].astype(str).str.contains('BEMS', case=False, na=False)
-        
-        # SECONDARY: bemscsc_refs column (alternate location)
-        if 'bemscsc_refs' in csone_df.columns:
-            bems_mask |= csone_df['bemscsc_refs'].notna() & (csone_df['bemscsc_refs'].astype(str) != '') & (csone_df['bemscsc_refs'].astype(str) != '[]') & csone_df['bemscsc_refs'].astype(str).str.contains('BEMS', case=False, na=False)
-        
-        bems_cases = csone_df[bems_mask]
+        csone_norm = add_case_lifecycle_fields(csone_df)
+        bems_mask = detect_bems_mask(csone_norm)
+        bems_cases = csone_norm[bems_mask]
         total_bems = len(bems_cases)
         bems_rate = (total_bems / total_csone * 100) if total_csone > 0 else 0.0
     
@@ -3814,9 +3808,18 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
     total_csconsole_adoption_barriers = len(csconsole_adoption_barriers) if not csconsole_adoption_barriers.empty else 0
     
     briefing.append("### Key Metrics:")
-    briefing.append(f"* **Adoption Barriers Found:** {total_ab}")
-    briefing.append(f"* **CSOne (TAC) Cases Found:** {total_csone}")
-    briefing.append(f"* **BEMS Escalations (Back End Engineering):** {total_bems} ({bems_rate:.1f}% of TAC cases)")
+    briefing.append(
+        f"* **Adoption Barriers Found:** {total_ab} "
+        f"{format_inline_source('Adoption Barriers', fields=['ID'])}"
+    )
+    briefing.append(
+        f"* **CSOne (TAC) Cases Found:** {total_csone} "
+        f"{format_inline_source('Support Cases (TAC)', fields=['Case Number', 'SR Number'])}"
+    )
+    briefing.append(
+        f"* **BEMS Escalations (Back End Engineering):** {total_bems} ({bems_rate:.1f}% of TAC cases) "
+        f"{format_inline_source('BEMS Escalations', fields=['Transaction ID', 'bemscsc_refs'])}"
+    )
     briefing.append(f"* **Inferred Escalation Rate (from CSOne):** {esc_rate}%")
     briefing.append("---")
     
@@ -3910,18 +3913,10 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
         briefing.append("### Complete CSOne (TAC) Case Data:")
         briefing.append(_json_lite(csone_df_display, limit=len(csone_df_display), keep=["display_id","Title","Owner Email","customer_name","bemscsc_refs"]))
         
-        # Add BEMS-specific analysis (Check Transaction ID and bemscsc_refs)
-        bems_mask = pd.Series([False] * len(csone_df), index=csone_df.index)
-        
-        # PRIMARY: Transaction ID column (main BEMS data location in CSOne Excel)
-        if 'Transaction ID' in csone_df.columns:
-            bems_mask |= csone_df['Transaction ID'].astype(str).str.contains('BEMS', case=False, na=False)
-        
-        # SECONDARY: bemscsc_refs column
-        if 'bemscsc_refs' in csone_df.columns:
-            bems_mask |= csone_df['bemscsc_refs'].notna() & (csone_df['bemscsc_refs'].astype(str) != '') & (csone_df['bemscsc_refs'].astype(str) != '[]') & csone_df['bemscsc_refs'].astype(str).str.contains('BEMS', case=False, na=False)
-        
-        bems_cases = csone_df[bems_mask]
+        # Add BEMS-specific analysis using canonical detector
+        csone_norm = add_case_lifecycle_fields(csone_df)
+        bems_mask = detect_bems_mask(csone_norm)
+        bems_cases = csone_norm[bems_mask]
         
         if not bems_cases.empty:
                 briefing.append(f"\n### BEMS Escalation Analysis ({len(bems_cases)} cases requiring Back End Engineering):")
@@ -3943,15 +3938,18 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                     # Extract actual BEMS IDs from both sources
                     bems_ids = set()
                     for ref in bems_refs:
-                        if ref and str(ref) != 'nan' and 'BEMS' in str(ref).upper():
-                            bems_ids.add(str(ref))
+                        if ref and str(ref) != 'nan':
+                            bems_ids.update(extract_bems_ids_from_row(pd.Series({"bemscsc_refs": ref})))
                     for tid in transaction_ids:
-                        if tid and str(tid) != 'nan' and 'BEMS' in str(tid).upper():
-                            bems_ids.add(str(tid))
+                        if tid and str(tid) != 'nan':
+                            bems_ids.update(extract_bems_ids_from_row(pd.Series({"Transaction ID": tid})))
                     
                     # Format BEMS IDs with brackets for consistent citation
                     bems_id_list = ', '.join([f'[{bid}]' for bid in sorted(bems_ids)]) if bems_ids else 'No specific BEMS IDs found'
-                    briefing.append(f"- **{customer}:** {count} BEMS escalation{'s' if count > 1 else ''} | **BEMS IDs:** {bems_id_list}")
+                    briefing.append(
+                        f"- **{customer}:** {count} BEMS escalation{'s' if count > 1 else ''} | **BEMS IDs:** {bems_id_list} "
+                        f"{format_inline_source('BEMS Escalations', fields=['Transaction ID', 'bemscsc_refs'])}"
+                    )
                 
                 # FIXED: Show ALL BEMS cases for complete analysis
                 briefing.append(f"\n**All BEMS Cases with Full Details (for Predictive Risk Assessment):**")
@@ -3964,10 +3962,13 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                     
                     # Show both sources of BEMS info
                     bems_info = []
-                    if transaction_id and 'BEMS' in str(transaction_id).upper():
+                    extracted_ids = extract_bems_ids_from_row(row)
+                    if extracted_ids and transaction_id:
                         bems_info.append(f"Transaction ID: {transaction_id}")
                     if bems_refs and str(bems_refs) != 'No BEMS refs':
                         bems_info.append(f"BEMS Refs: {bems_refs}")
+                    if extracted_ids:
+                        bems_info.append(f"Extracted IDs: {', '.join(extracted_ids)}")
                     
                     bems_detail = ' | '.join(bems_info) if bems_info else 'BEMS detected but ID not specified'
                     briefing.append(f"- **TAC Case: {case_number}** ({customer}): {title} | **{bems_detail}**")
@@ -4336,21 +4337,21 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
     # SECTION 2: BEMS ESCALATION ANALYSIS (CRITICAL FOR EXECUTIVE VISIBILITY)
     # =========================================================================
     if not csone_df.empty:
-        # Extract BEMS escalations from Transaction ID and bemscsc_refs columns
-        bems_mask = pd.Series([False] * len(csone_df), index=csone_df.index)
-        
-        if 'Transaction ID' in csone_df.columns:
-            bems_mask |= csone_df['Transaction ID'].astype(str).str.contains('BEMS', case=False, na=False)
-        if 'bemscsc_refs' in csone_df.columns:
-            bems_mask |= csone_df['bemscsc_refs'].astype(str).str.contains('BEMS', case=False, na=False)
-        
-        bems_cases = csone_df[bems_mask]
+        csone_norm = add_case_lifecycle_fields(csone_df)
+        bems_mask = detect_bems_mask(csone_norm)
+        bems_cases = csone_norm[bems_mask]
         total_bems = len(bems_cases)
         bems_rate = (total_bems / len(csone_df) * 100) if len(csone_df) > 0 else 0.0
         
         briefing.append("## 🔴 BEMS ESCALATION ANALYSIS (CRITICAL)")
-        briefing.append(f"- **Total BEMS Escalations:** {total_bems}")
-        briefing.append(f"- **BEMS Rate:** {bems_rate:.1f}% of all TAC cases")
+        briefing.append(
+            f"- **Total BEMS Escalations:** {total_bems} "
+            f"{format_inline_source('BEMS Escalations', fields=['Transaction ID', 'bemscsc_refs'])}"
+        )
+        briefing.append(
+            f"- **BEMS Rate:** {bems_rate:.1f}% of all TAC cases "
+            f"{format_inline_source('BEMS Escalations', fields=['Transaction ID', 'bemscsc_refs'])}"
+        )
         briefing.append("")
         
         if total_bems > 0:
@@ -4361,21 +4362,14 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
                     # Extract BEMS IDs
                     bems_ids = set()
                     for _, row in customer_bems.iterrows():
-                        if 'Transaction ID' in row and pd.notna(row['Transaction ID']):
-                            tid = str(row['Transaction ID'])
-                            if 'BEMS' in tid.upper():
-                                # Extract BEMS ID patterns
-                                import re
-                                found = re.findall(r'BEMS[- ]?\d+', tid, re.IGNORECASE)
-                                bems_ids.update(found)
-                        if 'bemscsc_refs' in row and pd.notna(row['bemscsc_refs']):
-                            refs = str(row['bemscsc_refs'])
-                            found = re.findall(r'BEMS[- ]?\d+', refs, re.IGNORECASE)
-                            bems_ids.update(found)
+                        bems_ids.update(extract_bems_ids_from_row(row))
                     
                     # Format all BEMS IDs with brackets for citation
                     bems_id_list = ', '.join([f'[{bid}]' for bid in sorted(bems_ids)]) if bems_ids else 'IDs pending extraction'
-                    briefing.append(f"- **{customer}:** {len(customer_bems)} BEMS escalation(s) - {bems_id_list}")
+                    briefing.append(
+                        f"- **{customer}:** {len(customer_bems)} BEMS escalation(s) - {bems_id_list} "
+                        f"{format_inline_source('BEMS Escalations', fields=['Transaction ID', 'bemscsc_refs'])}"
+                    )
             briefing.append("")
     
     # =========================================================================
@@ -4396,12 +4390,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
                 # Get BEMS count for this customer
                 cust_mask = csone_df['customer_name'] == customer
                 cust_cases = csone_df[cust_mask]
-                cust_bems_mask = pd.Series([False] * len(cust_cases), index=cust_cases.index)
-                if 'Transaction ID' in cust_cases.columns:
-                    cust_bems_mask |= cust_cases['Transaction ID'].astype(str).str.contains('BEMS', case=False, na=False)
-                if 'bemscsc_refs' in cust_cases.columns:
-                    cust_bems_mask |= cust_cases['bemscsc_refs'].astype(str).str.contains('BEMS', case=False, na=False)
-                cust_bems_count = cust_bems_mask.sum()
+                cust_bems_count = int(detect_bems_mask(add_case_lifecycle_fields(cust_cases)).sum())
                 
                 if cust_bems_count > 0:
                     briefing.append(f"- **{customer}**: {count} cases ({cust_bems_count} BEMS escalations)")
@@ -4445,8 +4434,9 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
             
             # Build comprehensive case line
             case_line = f"- TAC #{case_num} | Customer: {customer} | Severity: {sev} | Status: {status}"
-            if trans_id and 'BEMS' in str(trans_id).upper():
-                case_line += f" | BEMS: {trans_id}"
+            row_bems_ids = extract_bems_ids_from_row(case)
+            if row_bems_ids:
+                case_line += f" | BEMS: {', '.join(row_bems_ids)}"
             case_line += f" | Title: {title}"
             briefing.append(case_line)
             briefing.append("")

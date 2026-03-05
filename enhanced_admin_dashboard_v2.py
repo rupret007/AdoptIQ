@@ -9,6 +9,7 @@ load_dotenv()
 import os
 import sys
 import json
+import secrets
 import tempfile
 try:
     import psutil
@@ -79,7 +80,7 @@ if _admin_secret:
 elif getattr(sys, 'frozen', False):
     raise RuntimeError("ADOPTIQ_ADMIN_SECRET_KEY must be set for packaged builds.")
 else:
-    admin_app.secret_key = 'adoptiq_admin_secret_key_2025_v2_enhanced'
+    admin_app.secret_key = secrets.token_urlsafe(48)
 
 # Global variables for comprehensive monitoring
 server_process = None
