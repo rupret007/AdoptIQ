@@ -2,7 +2,7 @@
 
 **Purpose:** Technical summary of how Snowflake is used in the AdoptIQ application for sharing with colleagues.
 
-**Last updated:** February 2026
+**Last updated:** March 2026
 
 ---
 
@@ -12,9 +12,33 @@ AdoptIQ is a Flask-based executive analytics application that generates renewal 
 
 - **Team/customer scope** — Determining which subscriptions and accounts belong to the selected manager's team
 - **CSConsole data** — Adoption barriers, action plans, customer pulse, success priorities (synced from Salesforce/CSConsole into Snowflake)
-- **Support cases** — TAC case counts when no CSOne Excel file is uploaded
+- **Support cases** — Disabled by enforced table policy (see section 1.1)
 - **ARR/financial data** — Contract value, MRR, TCV for prioritization (when columns exist)
 - **Enhanced insights** — Leader reports use additional CX_DB tables for account, contract, booking, risk, and product data
+
+### 1.1 Enforced Table Policy (Hardcoded)
+
+AdoptIQ now enforces a strict Snowflake table policy in `snowflake_table_policy.py`.
+
+**Allowed tables**
+- `CX_DB.CX_SWSSBST_BR.dsm_assignment_data`
+- `CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY`
+- `CX_DB.CX_SWSSBST_BR.ACCOUNTS_EXPIRED_LAST_MONTH`
+- `CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU`
+- `EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW`
+- `EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C`
+
+**Blocked tables**
+- `CX_DB.CX_SWSSBST_BR.SUPPORT_CASES`
+- `CX_DB.CX_SWSSBST_BR.USER_DATA`
+- `CX_DB.CX_SWSSBST_BR.PRODUCT_USAGE`
+- `EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C`
+- `EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C`
+
+**Behavior**
+- Blocked-table queries are skipped in key report paths and return empty outputs for those sections.
+- Query execution is centrally guarded so blocked (or non-allowlisted) table references are rejected by policy before Snowflake execution.
+- This is intentional and reduces noisy runtime SQL errors for disallowed sources.
 
 ---
 
@@ -50,17 +74,15 @@ AdoptIQ is a Flask-based executive analytics application that generates renewal 
 | **CX_DB.CX_SWSSBST_BR.dsm_assignment_data** | Team roster, subscription-to-account mapping, CSSM assignments | `SUBSCRIPTION_ID`, `SUBSCRIPTION_ID_C`, `ACCOUNT_ID_C`, `BU_NAME`, `PRIMARY_DSM_EMAIL`, `TECHNOLOGY_C`, `SUB_TECHNOLOGY_C`, `STATUS_C`, `CSSM_EMAIL`, `CSSM_NAME`, `CSSM_MANAGER`, `CSSM_MANAGER_EMAIL`, `ANNUAL_CONTRACT_VALUE_C`, `MONTHLY_RECURRING_REVENUE_C`, `TOTAL_CONTRACT_VALUE_C`, `LICENSE_COUNT_C` |
 | **EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW** | Adoption barriers and action plans (CSConsole) | `ACCOUNT_ID_C`, `CREATED_DATE`, `OPEN_DATE_C`, `record_type_id` (`0122T000000GJfTQAW` = Adoption Barrier, `0122T000000QHBGQA4` = Action Plan) |
 | **EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C** | Customer pulse ratings (CSConsole) | `ACCOUNT__C`, `CREATEDDATE` |
-| **EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C** | Success priorities (CSConsole) | `RELATED_CUSTOMER__C`, `CREATEDDATE` |
+| **EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C** | Success priorities (CSConsole) | **Blocked by policy** |
 
 ### 4.2 Support Cases (Renewal Reports Only)
 
 | Full Table Name | Purpose | When Used |
 |-----------------|---------|-----------|
-| **CX_DB.CX_SWSSBST_BR.SUPPORT_CASES** | TAC/support case counts | When no CSOne Excel file is uploaded; fallback so renewal report still shows case counts |
+| **CX_DB.CX_SWSSBST_BR.SUPPORT_CASES** | TAC/support case counts | **Blocked by policy** |
 
-**Columns:** `CASE_ID`, `ACCOUNT_ID` or `ACCOUNT_ID_C`, `SUBJECT`, `STATUS`, `CREATED_DATE`, `SEVERITY`
-
-**Query strategy:** Tries `ACCOUNT_ID` first, then `ACCOUNT_ID_C`, then join via `dsm_assignment_data` if column names differ.
+**Note:** The historical fallback query logic remains in code paths, but runtime policy blocks execution of `SUPPORT_CASES`.
 
 ### 4.3 Enhanced Insights (Leader Reports Only)
 
@@ -74,10 +96,10 @@ Used by `EnhancedSnowflakeInsights` in `enhanced_snowflake_insights.py` for Lead
 | **CX_DB.CX_SWSSBST_BR.RENEWAL_DATA** | Renewal status and probability | `CONTRACT_NUMBER`, `RENEWAL_DATE`, `RENEWAL_STATUS`, `RENEWAL_PROBABILITY` |
 | **CX_DB.CX_SWSSBST_BR.BOOKINGS_TABLE_FOR_ACCOUNT_CHECK** | Booking/transaction data | `SUBSCRIPTION_REFERENCE_ID`, `DATE_BOOKED`, `ORDER_STATUS`, `END_CUSTOMER_NAME`, `AMOUNT` |
 | **CX_DB.CX_SWSSBST_BR.TSS_BOOKINGS_COLLAB_UPSELL_WITH_SUBS_REFERENCE_ID** | Upsell data | `SUBSCRIPTION_REFERENCE_ID`, `UPSELL_AMOUNT`, `PRODUCT`, `DATE_CREATED` |
-| **EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C** | Alternate source for action plans/adoption barriers (engagement) | `ID`, `SUBJECT_C`, `STATUS_C`, `ACCOUNT_ID_C`, `CREATED_DATE`, `record_type_id` |
-| **CX_DB.CX_SWSSBST_BR.USER_DATA** | User/login data | `USER_ID`, `ACCOUNT_ID`, `USER_NAME`, `LAST_LOGIN_DATE`, `STATUS` |
+| **EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C** | Alternate source for action plans/adoption barriers (engagement) | **Blocked by policy** |
+| **CX_DB.CX_SWSSBST_BR.USER_DATA** | User/login data | **Blocked by policy** |
 | **CX_DB.CX_SWSSBST_BR.RISK_ASSESSMENT** | Risk scores and factors | `ACCOUNT_ID`, `RISK_SCORE`, `RISK_CATEGORY`, `LAST_ASSESSED_DATE`, `RISK_FACTORS` |
-| **CX_DB.CX_SWSSBST_BR.PRODUCT_USAGE** | Product adoption/usage | `PRODUCT_ID`, `PRODUCT_NAME`, `ACCOUNT_ID`, `USAGE_LEVEL`, `ADOPTION_SCORE` |
+| **CX_DB.CX_SWSSBST_BR.PRODUCT_USAGE** | Product adoption/usage | **Blocked by policy** |
 
 ### 4.4 Advanced Renewal Analyzer (Optional)
 
@@ -89,7 +111,7 @@ Used by `AdvancedRenewalAnalyzer` for portfolio renewal analysis when that path 
 | **CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU** | Contract/renewal info by account |
 | **EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW** | Adoption barriers, action plans |
 | **EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C** | Customer pulse |
-| **EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C** | Success priorities |
+| **EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C** | **Blocked by policy** |
 
 ---
 
@@ -101,7 +123,7 @@ Used by `AdvancedRenewalAnalyzer` for portfolio renewal analysis when that path 
 2. **Account IDs** from subscriptions
 3. **ARR data:** `fetch_arr_data(ctx, account_ids)` → `dsm_assignment_data` (with ARR columns if present)
 4. **Adoption barriers:** `fetch_adoption_barriers(ctx, account_ids, days)` → `C360_CS_TASK_C_VW` (record_type_id = Adoption Barrier)
-5. **Action plans, customer pulse, success priorities:** `fetch_csconsole_*` → `C360_CS_TASK_C_VW`, `ESA_C360_CUSTOMER_PULSE__C`, `ESA_C360_SUCCESS_PRIORITY__C`
+5. **Action plans, customer pulse:** `fetch_csconsole_*` → `C360_CS_TASK_C_VW`, `ESA_C360_CUSTOMER_PULSE__C` (`ESA_C360_SUCCESS_PRIORITY__C` is blocked by policy)
 6. **CSOne Excel** (uploaded) merged with Snowflake data
 7. **Output:** Word + Excel reports with adoption barriers, cases, ARR, executive briefing
 
@@ -113,20 +135,20 @@ Same Snowflake flow as Comprehensive: team scope → adoption barriers → ARR �
 
 1. **Team scope** from `dsm_assignment_data`
 2. **Adoption barriers** from `C360_CS_TASK_C_VW`
-3. **Support cases:** From CSOne Excel if uploaded; otherwise `fetch_support_cases_snowflake(ctx, account_ids, days)` → `SUPPORT_CASES`
+3. **Support cases:** From CSOne Excel if uploaded; Snowflake `SUPPORT_CASES` fallback is blocked by policy
 4. **Output:** Renewal risk score, key findings, customer-level breakdown
 
 ### 5.4 Leader Report
 
 1. **Team scope** from `dsm_assignment_data`
-2. **Adoption barriers, action plans, customer pulse, success priorities** from EDW/SS tables
+2. **Adoption barriers, action plans, customer pulse** from EDW/SS tables (`ESA_C360_SUCCESS_PRIORITY__C` is blocked by policy)
 3. **Enhanced insights** from `EnhancedSnowflakeInsights` → COLLAB_ACCOUNT_SUMMARY, COLLAB_ARR_CON_SKU, RENEWAL_DATA, BOOKINGS_*, USER_DATA, SUPPORT_CASES, RISK_ASSESSMENT, PRODUCT_USAGE, etc.
 4. **Output:** Manager-focused report with per-customer deep dives and enhanced Snowflake insights
 
 ### 5.5 Subscription Search / Single-Subscription Analysis
 
 1. **Lookup by subscription ID:** `fetch_subscription_data()`, `search_subscriptions_by_customer()` → `dsm_assignment_data` (uses `SUBSCRIPTION_ID` or `SUBSCRIPTION_ID_C` depending on query)
-2. **By account ID:** Adoption barriers, action plans, customer pulse, success priorities from EDW/SS
+2. **By account ID:** Adoption barriers, action plans, customer pulse from EDW/SS (`ESA_C360_SUCCESS_PRIORITY__C` is blocked by policy)
 3. **Team info:** `dsm_assignment_data` → CSSM_EMAIL, CSSM_NAME, CSSM_MANAGER, CSSM_MANAGER_EMAIL
 4. **Renewal risk:** `get_subscription_renewal_risk()` calls `fetch_subscription_data()` and computes risk from adoption barriers, customer pulse, action plans
 

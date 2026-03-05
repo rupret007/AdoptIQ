@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
 import pytest
+from unittest.mock import patch
 from adoptiq_backend import (
     _extract_refs,
     _filter_tech_text,
@@ -409,7 +410,9 @@ class TestFetchSupportCasesSnowflake:
             def cursor(self):
                 return _Cursor()
 
-        df = fetch_support_cases_snowflake(_Ctx(), ["A-1", "A-2"], 90)
+        # This test validates normalization behavior only, so bypass policy block.
+        with patch("adoptiq_backend.is_table_blocked", return_value=False):
+            df = fetch_support_cases_snowflake(_Ctx(), ["A-1", "A-2"], 90)
         assert not df.empty
         by_case = df.set_index("CASE_ID")["case_priority_norm"].to_dict()
         assert by_case["C-1"] == "P1"

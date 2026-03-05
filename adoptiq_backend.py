@@ -31,6 +31,7 @@ from data_normalization import (
 )
 from risk_scoring import compute_customer_risk_profile
 from report_utils import format_inline_source
+from snowflake_table_policy import TablePolicyViolation, guard_sql, is_table_blocked
 
 # Enhanced executive report generation
 try:
@@ -81,6 +82,11 @@ class _InstrumentedSnowflakeCursor:
 
     def execute(self, sql, *args, **kwargs):
         try:
+            guard_sql(sql)
+        except TablePolicyViolation as policy_err:
+            logger.warning("Snowflake query blocked by table policy: %s", policy_err)
+            raise
+        try:
             _record_snowflake_query(sql)
         except Exception:
             # Instrumentation must never block query execution.
@@ -88,6 +94,11 @@ class _InstrumentedSnowflakeCursor:
         return self._cursor.execute(sql, *args, **kwargs)
 
     def executemany(self, sql, *args, **kwargs):
+        try:
+            guard_sql(sql)
+        except TablePolicyViolation as policy_err:
+            logger.warning("Snowflake query blocked by table policy: %s", policy_err)
+            raise
         try:
             _record_snowflake_query(sql)
         except Exception:
@@ -744,15 +755,19 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         cur.execute(cp_query, (account_id, days))
         customer_pulse = cur.fetchall()
         
-        logger.info(f"[[BULLSEYE]] Fetching success priorities...")
-        sp_query = f"""
-        SELECT *, 'Success Priority' as RECORD_SOURCE 
-        FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C 
-        WHERE RELATED_CUSTOMER__C = %s 
-        {date_filter_pulse_priority}
-        """
-        cur.execute(sp_query, (customer_name, days))
-        success_priorities = cur.fetchall()
+        success_priorities = []
+        if is_table_blocked("EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C"):
+            logger.info("[[BULLSEYE]] Success priorities query skipped by Snowflake table policy.")
+        else:
+            logger.info(f"[[BULLSEYE]] Fetching success priorities...")
+            sp_query = f"""
+            SELECT *, 'Success Priority' as RECORD_SOURCE 
+            FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C 
+            WHERE RELATED_CUSTOMER__C = %s 
+            {date_filter_pulse_priority}
+            """
+            cur.execute(sp_query, (customer_name, days))
+            success_priorities = cur.fetchall()
         
         # Get team information (CSSM_* columns may not exist in all dsm_assignment_data schemas)
         team_data = []
@@ -1192,6 +1207,10 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         )
         return normalized[expected + derived]
 
+    if is_table_blocked("CX_DB.CX_SWSSBST_BR.SUPPORT_CASES"):
+        logger.info("[[RENEWAL]] SUPPORT_CASES disabled by Snowflake table policy; returning empty support cases.")
+        return _normalize_cases_df(pd.DataFrame())
+
     # Normalize IDs and dedupe
     account_ids_clean = []
     for a in account_ids:
@@ -1410,8 +1429,12 @@ def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_
         adoption_barriers = cur.fetchall()
         cur.execute(cp_query, (account_id, days))
         customer_pulse = cur.fetchall()
-        cur.execute(sp_query, (customer_name, days))
-        success_priorities = cur.fetchall()
+        success_priorities = []
+        if is_table_blocked("EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C"):
+            logger.info("Success priorities query skipped by Snowflake table policy.")
+        else:
+            cur.execute(sp_query, (customer_name, days))
+            success_priorities = cur.fetchall()
         
         logging.info(f"Found {len(action_plans)} action plans, {len(adoption_barriers)} adoption barriers, {len(customer_pulse)} pulse records, and {len(success_priorities)} success priorities.")
 
@@ -1500,6 +1523,9 @@ def fetch_csconsole_success_priorities(ctx, customer_identifiers: List[str], day
     if ctx is None:
         return pd.DataFrame()
     if not customer_identifiers:
+        return pd.DataFrame()
+    if is_table_blocked("EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C"):
+        logger.info("Success priorities table blocked by Snowflake table policy; returning empty result.")
         return pd.DataFrame()
     
     cur = None

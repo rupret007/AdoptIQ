@@ -19,6 +19,7 @@ from docx.oxml import OxmlElement
 from adoptiq_backend import _ensure_outputs
 from enhanced_snowflake_insights import EnhancedSnowflakeInsights
 from data_normalization import detect_bems_mask, extract_bems_ids_from_row, normalize_customer_name
+from snowflake_table_policy import is_table_blocked
 
 # Optional analyzers - may not be available in all deployments
 try:
@@ -564,6 +565,9 @@ class LeaderReportGenerator:
     def _fetch_success_priorities(self, customer_names: List[str], days: int) -> pd.DataFrame:
         """Fetch Success Priorities for customer names (uses RELATED_CUSTOMER__C, not account IDs)"""
         if not customer_names:
+            return pd.DataFrame()
+        if is_table_blocked("EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C"):
+            logger.info("Policy: Skipping ESA_C360_SUCCESS_PRIORITY__C in leader report success priorities.")
             return pd.DataFrame()
         
         cur = None

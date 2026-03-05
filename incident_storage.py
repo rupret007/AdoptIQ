@@ -35,8 +35,8 @@ def _connect():
     """Yield a DB connection with WAL mode and auto-commit."""
     conn = sqlite3.connect(_db_path(), timeout=10)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     try:
+        conn.execute("PRAGMA journal_mode=WAL")
         yield conn
         conn.commit()
     except Exception:

@@ -14,6 +14,7 @@ from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
+from snowflake_table_policy import is_table_blocked
 
 logger = logging.getLogger(__name__)
 
@@ -495,7 +496,18 @@ class AdvancedRenewalAnalyzer:
     def _get_support_engagement_metrics(self, account_id: str, days: int) -> Dict:
         """Get support and engagement metrics"""
         logger.info(f"🎧 Getting support/engagement metrics for account: {account_id}")
-        
+        support_metrics = {
+            'total_priorities': 0,
+            'completed_priorities': 0,
+            'recent_priorities': 0,
+            'completion_rate': 0,
+            'avg_priority_score': 0,
+            'engagement_level': 'LOW'
+        }
+        if is_table_blocked("EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C"):
+            logger.info("Policy: Skipping ESA_C360_SUCCESS_PRIORITY__C in advanced renewal support metrics.")
+            return support_metrics
+
         cur = None
         try:
             cur = self.ctx.cursor()
@@ -517,15 +529,6 @@ class AdvancedRenewalAnalyzer:
             
             cur.execute(query, (account_id, days))
             results = cur.fetchall()
-            
-            support_metrics = {
-                'total_priorities': 0,
-                'completed_priorities': 0,
-                'recent_priorities': 0,
-                'completion_rate': 0,
-                'avg_priority_score': 0,
-                'engagement_level': 'LOW'
-            }
             
             if results:
                 row = results[0]

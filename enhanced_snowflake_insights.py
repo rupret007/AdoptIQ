@@ -13,6 +13,7 @@ from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
+from snowflake_table_policy import is_table_blocked
 
 logger = logging.getLogger(__name__)
 
@@ -337,7 +338,7 @@ class EnhancedSnowflakeInsights:
         return insights
     
     def _get_engagement_insights(self, customer_name: str, days: int) -> Dict:
-        """Get engagement and activity insights with source attribution"""
+        """Get engagement and activity insights with source attribution."""
         insights = {
             'action_plans': {},
             'adoption_barriers': {},
@@ -345,78 +346,82 @@ class EnhancedSnowflakeInsights:
             'success_priorities': {},
             'sources': []
         }
-        
+
+        block_cs_task = is_table_blocked("EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C")
+        block_success_priority = is_table_blocked("EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C")
+
+        if block_cs_task and "engagement_cs_task_policy" not in self._skip_warned:
+            self._skip_warned.add("engagement_cs_task_policy")
+            logger.info("Policy: Skipping ESA_C360_CS_TASK__C queries in enhanced engagement insights.")
+        if block_success_priority and "engagement_success_priority_policy" not in self._skip_warned:
+            self._skip_warned.add("engagement_success_priority_policy")
+            logger.info("Policy: Skipping ESA_C360_SUCCESS_PRIORITY__C queries in enhanced engagement insights.")
+
         try:
-            # Action Plans
-            ap_query = """
-            SELECT 
-                ID,
-                SUBJECT_C,
-                STATUS_C,
-                ACCOUNT_ID_C,
-                CREATED_DATE
-            FROM EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C 
-            WHERE record_type_id = '0122T000000QHBGQA4'
-            AND UPPER(ACCOUNT_ID_C) IN (
-                SELECT UPPER(ACCOUNT_ID_C) 
-                FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
-                WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
-            )
-            AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
-            LIMIT 20
-            """
-            
             cur = self.ctx.cursor()
             try:
-                cur.execute(ap_query, (f'%{customer_name}%', days))
-                ap_results = cur.fetchall()
-                
-                if ap_results:
-                    insights['action_plans'] = {
-                        'action_plans_found': len(ap_results),
-                        'action_plans': [dict(zip([col[0] for col in cur.description], row)) for row in ap_results]
-                    }
-                    insights['sources'].append({
-                        'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C',
-                        'records_found': len(ap_results),
-                        'verification_method': f"Search by ID where record_type_id = '0122T000000QHBGQA4' for accounts matching '{customer_name}'"
-                    })
-                
-                # Adoption Barriers
-                ab_query = """
-                SELECT 
-                    ID,
-                    SUBJECT_C,
-                    AB_CATEGORY_C,
-                    SEVERITY_C,
-                    ACCOUNT_ID_C,
-                    CREATED_DATE
-                FROM EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C 
-                WHERE record_type_id = '0122T000000GJfTQAW'
-                AND UPPER(ACCOUNT_ID_C) IN (
-                    SELECT UPPER(ACCOUNT_ID_C) 
-                    FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
-                    WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
-                )
-                AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
-                LIMIT 20
-                """
-                
-                cur.execute(ab_query, (f'%{customer_name}%', days))
-                ab_results = cur.fetchall()
-                
-                if ab_results:
-                    insights['adoption_barriers'] = {
-                        'adoption_barriers_found': len(ab_results),
-                        'adoption_barriers': [dict(zip([col[0] for col in cur.description], row)) for row in ab_results]
-                    }
-                    insights['sources'].append({
-                        'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C',
-                        'records_found': len(ab_results),
-                        'verification_method': f"Search by ID where record_type_id = '0122T000000GJfTQAW' for accounts matching '{customer_name}'"
-                    })
-                
-                # Customer Pulse
+                if not block_cs_task:
+                    ap_query = """
+                    SELECT 
+                        ID,
+                        SUBJECT_C,
+                        STATUS_C,
+                        ACCOUNT_ID_C,
+                        CREATED_DATE
+                    FROM EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C 
+                    WHERE record_type_id = '0122T000000QHBGQA4'
+                    AND UPPER(ACCOUNT_ID_C) IN (
+                        SELECT UPPER(ACCOUNT_ID_C) 
+                        FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
+                        WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
+                    )
+                    AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
+                    LIMIT 20
+                    """
+                    cur.execute(ap_query, (f'%{customer_name}%', days))
+                    ap_results = cur.fetchall()
+                    if ap_results:
+                        insights['action_plans'] = {
+                            'action_plans_found': len(ap_results),
+                            'action_plans': [dict(zip([col[0] for col in cur.description], row)) for row in ap_results]
+                        }
+                        insights['sources'].append({
+                            'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C',
+                            'records_found': len(ap_results),
+                            'verification_method': f"Search by ID where record_type_id = '0122T000000QHBGQA4' for accounts matching '{customer_name}'"
+                        })
+
+                    ab_query = """
+                    SELECT 
+                        ID,
+                        SUBJECT_C,
+                        AB_CATEGORY_C,
+                        SEVERITY_C,
+                        ACCOUNT_ID_C,
+                        CREATED_DATE
+                    FROM EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C 
+                    WHERE record_type_id = '0122T000000GJfTQAW'
+                    AND UPPER(ACCOUNT_ID_C) IN (
+                        SELECT UPPER(ACCOUNT_ID_C) 
+                        FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
+                        WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
+                    )
+                    AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
+                    LIMIT 20
+                    """
+                    cur.execute(ab_query, (f'%{customer_name}%', days))
+                    ab_results = cur.fetchall()
+                    if ab_results:
+                        insights['adoption_barriers'] = {
+                            'adoption_barriers_found': len(ab_results),
+                            'adoption_barriers': [dict(zip([col[0] for col in cur.description], row)) for row in ab_results]
+                        }
+                        insights['sources'].append({
+                            'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C',
+                            'records_found': len(ab_results),
+                            'verification_method': f"Search by ID where record_type_id = '0122T000000GJfTQAW' for accounts matching '{customer_name}'"
+                        })
+
                 cp_query = """
                 SELECT 
                     ID,
@@ -433,10 +438,8 @@ class EnhancedSnowflakeInsights:
                 AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
                 LIMIT 20
                 """
-                
                 cur.execute(cp_query, (f'%{customer_name}%', days))
                 cp_results = cur.fetchall()
-                
                 if cp_results:
                     insights['customer_pulse'] = {
                         'customer_pulse_found': len(cp_results),
@@ -447,45 +450,43 @@ class EnhancedSnowflakeInsights:
                         'records_found': len(cp_results),
                         'verification_method': f"Search by ID for accounts matching '{customer_name}'"
                     })
-                
-                # Success Priorities
-                sp_query = """
-                SELECT 
-                    ID,
-                    SUBJECT_C,
-                    PRIORITY_C,
-                    RELATED_CUSTOMER__C,
-                    CREATED_DATE
-                FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C 
-                WHERE UPPER(RELATED_CUSTOMER__C) IN (
-                    SELECT UPPER(ACCOUNT_ID_C) 
-                    FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
-                    WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
-                )
-                AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
-                LIMIT 20
-                """
-                
-                cur.execute(sp_query, (f'%{customer_name}%', days))
-                sp_results = cur.fetchall()
-                
-                if sp_results:
-                    insights['success_priorities'] = {
-                        'success_priorities_found': len(sp_results),
-                        'success_priorities': [dict(zip([col[0] for col in cur.description], row)) for row in sp_results]
-                    }
-                    insights['sources'].append({
-                        'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C',
-                        'records_found': len(sp_results),
-                        'verification_method': f"Search by ID for accounts matching '{customer_name}'"
-                    })
+
+                if not block_success_priority:
+                    sp_query = """
+                    SELECT 
+                        ID,
+                        SUBJECT_C,
+                        PRIORITY_C,
+                        RELATED_CUSTOMER__C,
+                        CREATED_DATE
+                    FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C 
+                    WHERE UPPER(RELATED_CUSTOMER__C) IN (
+                        SELECT UPPER(ACCOUNT_ID_C) 
+                        FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
+                        WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
+                    )
+                    AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
+                    LIMIT 20
+                    """
+                    cur.execute(sp_query, (f'%{customer_name}%', days))
+                    sp_results = cur.fetchall()
+                    if sp_results:
+                        insights['success_priorities'] = {
+                            'success_priorities_found': len(sp_results),
+                            'success_priorities': [dict(zip([col[0] for col in cur.description], row)) for row in sp_results]
+                        }
+                        insights['sources'].append({
+                            'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C',
+                            'records_found': len(sp_results),
+                            'verification_method': f"Search by ID for accounts matching '{customer_name}'"
+                        })
             finally:
                 cur.close()
-            
+
         except Exception as e:
             logger.debug(f"Error getting engagement insights: {e}")
             insights['error'] = 'Engagement insights unavailable.'
-        
+
         return insights
     
     def _get_usage_insights(self, customer_name: str, days: int) -> Dict:
@@ -496,6 +497,12 @@ class EnhancedSnowflakeInsights:
             'sources': []
         }
         
+        if is_table_blocked("CX_DB.CX_SWSSBST_BR.USER_DATA"):
+            if "usage_policy" not in self._skip_warned:
+                self._skip_warned.add("usage_policy")
+                logger.info("Policy: Skipping USER_DATA queries in enhanced usage insights.")
+            return insights
+
         try:
             # User Data
             user_query = """
@@ -547,6 +554,12 @@ class EnhancedSnowflakeInsights:
             'sources': []
         }
         
+        if is_table_blocked("CX_DB.CX_SWSSBST_BR.SUPPORT_CASES"):
+            if "support_policy" not in self._skip_warned:
+                self._skip_warned.add("support_policy")
+                logger.info("Policy: Skipping SUPPORT_CASES queries in enhanced support insights.")
+            return insights
+
         try:
             # Support Cases
             support_query = """
@@ -656,6 +669,12 @@ class EnhancedSnowflakeInsights:
             'sources': []
         }
         
+        if is_table_blocked("CX_DB.CX_SWSSBST_BR.PRODUCT_USAGE"):
+            if "product_policy" not in self._skip_warned:
+                self._skip_warned.add("product_policy")
+                logger.info("Policy: Skipping PRODUCT_USAGE queries in enhanced product insights.")
+            return insights
+
         try:
             # Product Usage
             product_query = """
