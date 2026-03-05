@@ -97,3 +97,88 @@ def test_common_problems_customers_are_theme_scoped():
     text = "\n".join(p.text for p in formatter.doc.paragraphs)
     assert "- Customers Affected: Acme Corp" in text
     assert "- Customers Affected: Acme Corp, Beta Inc" not in text
+
+
+def test_key_concerns_uses_normalized_case_priority():
+    formatter = CompactReportFormatter()
+    concerns = formatter._generate_key_concerns(
+        pd.DataFrame(),
+        pd.DataFrame(
+            [
+                {"BU_NAME": "Acme Corp", "SEVERITY": "Critical"},
+                {"BU_NAME": "Acme Corp", "SEVERITY": "P2"},
+            ]
+        ),
+    )
+    assert any("1 P1 support cases" in concern for concern in concerns)
+
+
+def test_immediate_actions_uses_normalized_case_priority():
+    formatter = CompactReportFormatter()
+    actions = formatter._generate_immediate_actions(
+        pd.DataFrame(),
+        pd.DataFrame(
+            [
+                {"BU_NAME": "Acme Corp", "SEVERITY": "Critical"},
+                {"BU_NAME": "Acme Corp", "SEVERITY": "P2"},
+            ]
+        ),
+        {},
+    )
+    assert any("1 P1 support cases" in action for action in actions)
+
+
+def test_high_risk_customer_section_supports_bu_name_fallback():
+    formatter = CompactReportFormatter()
+    risk_data = {
+        "Acme Corp": {
+            "score": 7.0,
+            "color": "Red",
+            "category": "High Risk - Urgent Attention Needed",
+            "risk_factors": [],
+        }
+    }
+    ab_data = pd.DataFrame(
+        [
+            {
+                "BU_NAME": "Acme Corp",
+                "SUBJECT_C": "Barrier from BU_NAME path",
+                "AB_STATUS_C": "Open",
+                "SEVERITY_C": "High",
+            }
+        ]
+    )
+    csone_data = pd.DataFrame(
+        [
+            {
+                "BU_NAME": "Acme Corp",
+                "Transaction ID": "BEMS12345",
+                "Severity": "P1",
+                "Title": "Escalated issue",
+                "Problem Description": "Break fix issue",
+            }
+        ]
+    )
+
+    formatter.add_high_risk_customers(ab_data, csone_data, risk_data)
+    text = "\n".join(p.text for p in formatter.doc.paragraphs)
+    assert "Barrier from BU_NAME path" in text
+    assert "1 adoption barriers" in text
+
+
+def test_critical_adoption_barriers_supports_severity_column_fallback():
+    formatter = CompactReportFormatter()
+    ab_data = pd.DataFrame(
+        [
+            {
+                "customer_name": "Acme Corp",
+                "SUBJECT_C": "Critical fallback severity",
+                "AB_STATUS_C": "Open",
+                "Severity": "Critical",
+            }
+        ]
+    )
+
+    formatter.add_critical_adoption_barriers(ab_data)
+    text = "\n".join(p.text for p in formatter.doc.paragraphs)
+    assert "Critical fallback severity" in text

@@ -493,8 +493,25 @@ class CompactReportFormatter:
                 ab_data = pd.DataFrame()
             if csone_data is None:
                 csone_data = pd.DataFrame()
-            customer_ab = ab_data[ab_data['customer_name'] == customer_name] if not ab_data.empty and 'customer_name' in ab_data.columns else pd.DataFrame()
-            customer_csone = csone_data[csone_data['customer_name'] == customer_name] if not csone_data.empty and 'customer_name' in csone_data.columns else pd.DataFrame()
+            target_customer = normalize_customer_name(customer_name)
+            ab_customer_col = next(
+                (c for c in ('customer_name', 'BU_NAME', 'Customer Name', 'CUSTOMER_NAME') if c in ab_data.columns),
+                None,
+            )
+            csone_customer_col = next(
+                (c for c in ('customer_name', 'BU_NAME', 'Customer Name', 'CUSTOMER_NAME') if c in csone_data.columns),
+                None,
+            )
+            customer_ab = (
+                ab_data[ab_data[ab_customer_col].fillna('').astype(str).apply(normalize_customer_name) == target_customer]
+                if (not ab_data.empty and ab_customer_col)
+                else pd.DataFrame()
+            )
+            customer_csone = (
+                csone_data[csone_data[csone_customer_col].fillna('').astype(str).apply(normalize_customer_name) == target_customer]
+                if (not csone_data.empty and csone_customer_col)
+                else pd.DataFrame()
+            )
             
             # Extract BEMS IDs and count from customer cases
             bems_ids = set()
@@ -587,12 +604,16 @@ class CompactReportFormatter:
                 no_ab_p.add_run('✅ No critical adoption barriers identified in this analysis period.').bold = True
                 return
             
-            # Filter for critical/high severity barriers (safe column access)
-            if 'SEVERITY_C' not in ab_data.columns:
+            sev_col = (
+                'severity_norm'
+                if 'severity_norm' in ab_data.columns
+                else next((c for c in ('SEVERITY_C', 'severity_c', 'Severity') if c in ab_data.columns), None)
+            )
+            if not sev_col:
                 critical_ab = pd.DataFrame()
             else:
                 critical_ab = ab_data[
-                    ab_data['SEVERITY_C'].astype(str).str.contains('Critical|High', case=False, na=False)
+                    ab_data[sev_col].astype(str).str.contains('Critical|High', case=False, na=False)
                 ]
             
             if critical_ab.empty:
@@ -691,13 +712,23 @@ class CompactReportFormatter:
         """Generate key concerns based on data analysis"""
         concerns = []
         
-        if not ab_data.empty and 'SEVERITY_C' in ab_data.columns:
-            critical_abs = len(ab_data[ab_data['SEVERITY_C'].astype(str).str.contains('Critical', case=False, na=False)])
+        if not ab_data.empty:
+            ab_sev_col = (
+                'severity_norm'
+                if 'severity_norm' in ab_data.columns
+                else next((c for c in ('SEVERITY_C', 'severity_c', 'Severity') if c in ab_data.columns), None)
+            )
+            critical_abs = (
+                int(ab_data[ab_sev_col].astype(str).str.contains('Critical', case=False, na=False).sum())
+                if ab_sev_col
+                else 0
+            )
             if critical_abs > 0:
                 concerns.append(f"{critical_abs} critical adoption barriers requiring immediate attention")
         
-        if not csone_data.empty and 'Severity' in csone_data.columns:
-            p1_cases = len(csone_data[csone_data['Severity'].astype(str).str.contains('P1', case=False, na=False)])
+        csone_norm = add_case_lifecycle_fields(csone_data) if csone_data is not None and not csone_data.empty else pd.DataFrame()
+        if not csone_norm.empty and 'case_priority_norm' in csone_norm.columns:
+            p1_cases = int((csone_norm['case_priority_norm'].astype(str) == 'P1').sum())
             if p1_cases > 0:
                 concerns.append(f"{p1_cases} P1 support cases indicating customer dissatisfaction")
         
@@ -714,13 +745,23 @@ class CompactReportFormatter:
         if high_risk_count > 0:
             actions.append(f"Schedule executive meetings with {high_risk_count} high-risk customers")
         
-        if not ab_data.empty and 'SEVERITY_C' in ab_data.columns:
-            critical_abs = len(ab_data[ab_data['SEVERITY_C'].astype(str).str.contains('Critical', case=False, na=False)])
+        if not ab_data.empty:
+            ab_sev_col = (
+                'severity_norm'
+                if 'severity_norm' in ab_data.columns
+                else next((c for c in ('SEVERITY_C', 'severity_c', 'Severity') if c in ab_data.columns), None)
+            )
+            critical_abs = (
+                int(ab_data[ab_sev_col].astype(str).str.contains('Critical', case=False, na=False).sum())
+                if ab_sev_col
+                else 0
+            )
             if critical_abs > 0:
                 actions.append(f"Assign dedicated CSM resources to address {critical_abs} critical adoption barriers")
         
-        if not csone_data.empty and 'Severity' in csone_data.columns:
-            p1_cases = len(csone_data[csone_data['Severity'].astype(str).str.contains('P1', case=False, na=False)])
+        csone_norm = add_case_lifecycle_fields(csone_data) if csone_data is not None and not csone_data.empty else pd.DataFrame()
+        if not csone_norm.empty and 'case_priority_norm' in csone_norm.columns:
+            p1_cases = int((csone_norm['case_priority_norm'].astype(str) == 'P1').sum())
             if p1_cases > 0:
                 actions.append(f"Escalate and prioritize resolution of {p1_cases} P1 support cases")
         
@@ -1142,11 +1183,12 @@ class CompactReportFormatter:
             
             warnings = []
             
+            csone_norm = add_case_lifecycle_fields(csone_data) if not csone_data.empty else pd.DataFrame()
+
             # Check for BEMS escalations
-            if not csone_data.empty:
-                csone_norm = add_case_lifecycle_fields(csone_data)
+            if not csone_norm.empty:
                 bems_mask = detect_bems_mask(csone_norm)
-                if bems_mask.any() and 'customer_name' in csone_data.columns:
+                if bems_mask.any() and 'customer_name' in csone_norm.columns:
                     bems_cases = csone_norm[bems_mask]
                     for customer in bems_cases['customer_name'].dropna().unique():
                         count = len(bems_cases[bems_cases['customer_name'] == customer])
@@ -1160,16 +1202,16 @@ class CompactReportFormatter:
                         })
             
             # Check for increasing case volume
-            date_col_csone = next((c for c in ['Date/Time Opened', 'CREATED_DATE', 'Created', 'Created Date'] if c in csone_data.columns), None)
-            if not csone_data.empty and 'customer_name' in csone_data.columns and date_col_csone:
+            date_col_csone = next((c for c in ['open_date', 'Date/Time Opened', 'CREATED_DATE', 'Created', 'Created Date'] if c in csone_norm.columns), None)
+            if not csone_norm.empty and 'customer_name' in csone_norm.columns and date_col_csone:
                 try:
-                    csone_copy = csone_data.copy()
+                    csone_copy = csone_norm.copy()
                     csone_copy['date_opened'] = pd.to_datetime(csone_copy[date_col_csone], errors='coerce')
                     recent_30 = csone_copy[csone_copy['date_opened'] >= (datetime.now() - timedelta(days=30))]
                     
                     for customer in recent_30['customer_name'].dropna().unique():
                         recent_count = len(recent_30[recent_30['customer_name'] == customer])
-                        total_count = len(csone_data[csone_data['customer_name'] == customer])
+                        total_count = len(csone_copy[csone_copy['customer_name'] == customer])
                         
                         if recent_count >= 5 and recent_count / max(total_count, 1) > 0.5:
                             warnings.append({

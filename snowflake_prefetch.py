@@ -12,6 +12,7 @@ from adoptiq_backend import (
     fetch_csconsole_adoption_barriers,
     fetch_support_cases_snowflake,
 )
+from data_normalization import normalize_customer_name
 
 
 _FETCHERS = {
@@ -42,8 +43,8 @@ def _normalize_customer_names(customer_names: Iterable[Any]) -> Tuple[str, ...]:
     for v in (customer_names or []):
         if v is None:
             continue
-        cleaned = str(v).strip()
-        if not cleaned or cleaned.lower() == "none":
+        cleaned = normalize_customer_name(v)
+        if not cleaned or cleaned in {"Unknown", "none", "None"}:
             continue
         values.append(cleaned)
     return tuple(sorted(set(values)))

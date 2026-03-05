@@ -292,6 +292,7 @@ app.jinja_env.globals['csrf_token'] = generate_csrf
 
 # Verbose debug mode can be enabled via env and changed at runtime through local admin APIs.
 _VERBOSE_DEBUG_RUNTIME = None
+_VERBOSE_DEBUG_LOCK = Lock()
 
 
 def _is_truthy_flag(value: Any) -> bool:
@@ -313,9 +314,10 @@ def _apply_verbose_debug_mode() -> bool:
 
 def _set_verbose_debug_mode(enabled: bool, source: str = 'runtime') -> bool:
     global _VERBOSE_DEBUG_RUNTIME
-    _VERBOSE_DEBUG_RUNTIME = bool(enabled)
-    os.environ['ADOPTIQ_VERBOSE_DEBUG'] = '1' if enabled else '0'
-    active = _apply_verbose_debug_mode()
+    with _VERBOSE_DEBUG_LOCK:
+        _VERBOSE_DEBUG_RUNTIME = bool(enabled)
+        os.environ['ADOPTIQ_VERBOSE_DEBUG'] = '1' if enabled else '0'
+        active = _apply_verbose_debug_mode()
     logging.getLogger(__name__).info("Verbose debug mode %s via %s", "enabled" if active else "disabled", source)
     return active
 
@@ -10653,6 +10655,8 @@ def run_subscription_analysis(analysis_id):
 @app.route('/download/<analysis_id>/<file_type>')
 def download_result(analysis_id, file_type):
     """Download analysis results with enhanced error handling and logging"""
+    from urllib.parse import unquote
+    analysis_id = unquote(analysis_id)
     logger.info(f"[[DOWNLOAD]] Download request: {analysis_id}/{file_type}")
     
     # Validate file_type (whitelist)

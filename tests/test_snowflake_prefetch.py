@@ -14,6 +14,16 @@ def test_run_context_normalizes_account_ids():
     assert run_ctx.account_ids == ("001", "002")
 
 
+def test_run_context_normalizes_customer_names():
+    run_ctx = sp.AnalysisRunContext.build(
+        ctx=object(),
+        account_ids=["001"],
+        days=30,
+        customer_names=[" Acme  Corp ", "Acme Corp", None, "none", "Unknown"],
+    )
+    assert run_ctx.customer_names == ("Acme Corp",)
+
+
 def test_prefetch_datasets_uses_cache(monkeypatch):
     calls = {"count": 0}
 

@@ -5337,11 +5337,23 @@ def _filter_csconsole_data_by_technology(df: pd.DataFrame, technology: str, cust
     # Filter by customer names if provided (ensures only team's customers are included)
     if customer_names:
         before_count = len(filtered_df)
-        # Check both BU_NAME and CUSTOMER_NAME columns
-        if 'BU_NAME' in filtered_df.columns:
-            filtered_df = filtered_df[filtered_df['BU_NAME'].isin(customer_names)]
-        elif 'CUSTOMER_NAME' in filtered_df.columns:
-            filtered_df = filtered_df[filtered_df['CUSTOMER_NAME'].isin(customer_names)]
+        normalized_targets = {
+            normalize_customer_name(name)
+            for name in customer_names
+            if normalize_customer_name(name) != "Unknown"
+        }
+        customer_filter_cols = (
+            'customer_name',
+            'BU_NAME',
+            'CUSTOMER_NAME',
+            'Customer Name',
+            'CUSTOMER_BU_NAME__C',
+            'RELATED_CUSTOMER__C',
+        )
+        candidate_col = next((c for c in customer_filter_cols if c in filtered_df.columns), None)
+        if candidate_col and normalized_targets:
+            customer_series = filtered_df[candidate_col].fillna('').astype(str).apply(normalize_customer_name)
+            filtered_df = filtered_df[customer_series.isin(normalized_targets)]
         
         after_count = len(filtered_df)
         logger.info(f"[[FILTER]] CSConsole filter: After customer filter: {after_count} records (removed {before_count - after_count})")

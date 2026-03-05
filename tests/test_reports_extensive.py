@@ -458,6 +458,32 @@ def test_csconsole_filter_separates_wxcc_and_wxcce():
     assert len(wxcce) == 2
 
 
+def test_csconsole_filter_customer_names_supports_success_priority_columns():
+    from adoptiq_backend import _filter_csconsole_data_by_technology
+    df = pd.DataFrame(
+        [
+            {"CUSTOMER_BU_NAME__C": "Acme Corp", "TECHNOLOGY_C": "Webex Contact Center", "SUBJECT_C": "priority alignment"},
+            {"CUSTOMER_BU_NAME__C": "Beta Inc", "TECHNOLOGY_C": "Webex Contact Center", "SUBJECT_C": "other customer"},
+        ]
+    )
+    filtered = _filter_csconsole_data_by_technology(df, "All", customer_names=["Acme  Corp"])
+    assert len(filtered) == 1
+    assert filtered.iloc[0]["CUSTOMER_BU_NAME__C"] == "Acme Corp"
+
+
+def test_csconsole_filter_customer_names_supports_related_customer_column():
+    from adoptiq_backend import _filter_csconsole_data_by_technology
+    df = pd.DataFrame(
+        [
+            {"RELATED_CUSTOMER__C": "Acme Corp", "TECHNOLOGY_C": "Webex Contact Center", "SUBJECT_C": "success priority"},
+            {"RELATED_CUSTOMER__C": "Gamma LLC", "TECHNOLOGY_C": "Webex Contact Center", "SUBJECT_C": "unrelated"},
+        ]
+    )
+    filtered = _filter_csconsole_data_by_technology(df, "All", customer_names=["Acme Corp"])
+    assert len(filtered) == 1
+    assert filtered.iloc[0]["RELATED_CUSTOMER__C"] == "Acme Corp"
+
+
 def test_customer_activity_includes_csconsole_only_data():
     from app_simple import _has_customer_activity_for_deep_dive
     empty = pd.DataFrame()
