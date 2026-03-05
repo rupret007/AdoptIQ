@@ -1,6 +1,6 @@
 # AdoptIQ Executive Analyzer - Configuration
 # All secrets and DB credentials come from environment variables (.env). No hardcoded credentials.
-# Version and build - updated by build_mac_dmg.sh
+# Version and build - updated by build scripts (macOS/Windows) before packaging.
 ADOPTIQ_VERSION = "1.0.3"
 ADOPTIQ_BUILD = "1"
 

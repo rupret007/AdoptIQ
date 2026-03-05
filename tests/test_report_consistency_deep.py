@@ -60,3 +60,19 @@ def test_other_unknown_ratio_and_defect_linkage_warnings():
     assert any("missing customer linkage" in w for w in result["warnings"])
     assert "CSCBBB222" in result["metrics"]["unlinked_defects"]
 
+
+def test_priority_metrics_use_normalized_exact_p1_p2():
+    csone = pd.DataFrame(
+        [
+            {"customer_name": "Acme", "Severity": "P1"},
+            {"customer_name": "Acme", "Severity": "P10"},
+            {"customer_name": "Acme", "Severity": "Sev-2"},
+        ]
+    )
+    result = validate_report_consistency(
+        ab_df=pd.DataFrame([{"customer_name": "Acme"}]),
+        csone_df=csone,
+    )
+    assert result["metrics"]["critical_p1"] == 1
+    assert result["metrics"]["high_p2"] == 1
+

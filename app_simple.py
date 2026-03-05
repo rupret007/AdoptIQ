@@ -280,7 +280,8 @@ elif _frozen:
 else:
     app.config['SECRET_KEY'] = secrets.token_urlsafe(48)
 app.config['UPLOAD_FOLDER'] = str(_APP_SUPPORT / 'uploads')
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
+_max_file_size_mb = int(os.environ.get('MAX_FILE_SIZE', '50'))
+app.config['MAX_CONTENT_LENGTH'] = _max_file_size_mb * 1024 * 1024
 
 # CSRF protection - enabled with extended timeout to prevent timeout issues
 app.config['WTF_CSRF_ENABLED'] = True
@@ -291,7 +292,8 @@ app.jinja_env.globals['csrf_token'] = generate_csrf
 _SENSITIVE_ENDPOINTS = {
     'start_analysis', 'start_compact_analysis', 'start_customer_renewal_analysis',
     'start_subscription_analysis', 'start_leader_report', 'cancel_analysis',
-    'download_result', 'clear_stuck_analyses', 'simple_test', 'test_generate_report',
+    'download_result', 'download_file', 'export_intel',
+    'clear_stuck_analyses', 'simple_test', 'test_generate_report',
 }
 
 _ANALYSIS_ID_RE = re.compile(r'^[A-Za-z0-9._-]{1,200}$')
@@ -606,7 +608,7 @@ def validate_file_upload(file) -> tuple[bool, str]:
     file_size = file.tell()
     file.seek(0)     # Reset to beginning
     
-    max_size = 50 * 1024 * 1024  # 50MB
+    max_size = int(app.config.get('MAX_CONTENT_LENGTH', 50 * 1024 * 1024))
     if file_size > max_size:
         return False, f"File too large. Maximum size is {max_size // (1024*1024)}MB."
     

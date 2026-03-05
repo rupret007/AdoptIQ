@@ -223,3 +223,25 @@ def test_customer_pulse_join_maps_account_id_and_customer_name(generator, monkey
     assert "ACCOUNT_ID_C" in pulse.columns
     assert "BU_NAME" in pulse.columns
     assert pulse.iloc[0]["BU_NAME"] == "Acme Corp"
+
+
+def test_validate_customer_data_consistency_counts_subscription_customers(generator):
+    team_data = {
+        "Alice": {
+            "customers": ["Acme Corp", "Beta Inc"],
+            "subscriptions": pd.DataFrame(
+                [
+                    {"BU_NAME": "Acme Corp"},
+                    {"BU_NAME": "Beta Inc"},
+                    {"BU_NAME": "Beta Inc"},
+                ]
+            ),
+            "action_plans": pd.DataFrame(),
+            "adoption_barriers": pd.DataFrame(),
+            "customer_pulse": pd.DataFrame(),
+        }
+    }
+
+    checks = generator._validate_customer_data_consistency(team_data)
+    assert checks["Alice"]["assigned_customers"] == 2
+    assert checks["Alice"]["subscription_customers"] == 2

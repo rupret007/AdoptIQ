@@ -8,6 +8,7 @@ _clean_datetime_columns_for_excel (Round 2 Fix 2 regression).
 import sys
 from pathlib import Path
 from datetime import datetime
+import io
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -21,6 +22,8 @@ from app_simple import (
     _is_valid_analysis_id,
     filter_subscriptions_by_criteria,
     _clean_datetime_columns_for_excel,
+    validate_file_upload,
+    _SENSITIVE_ENDPOINTS,
     app,
     INSIGHT_SUMMARY_MAX_CHARS,
 )
@@ -89,6 +92,30 @@ class TestAnalysisIdValidation:
 class TestSecretKeyDefaults:
     def test_app_secret_key_is_not_static_dev_literal(self):
         assert app.config["SECRET_KEY"] != "adoptiq-secret-key-2024-dev-change-in-production"
+
+
+class TestSensitiveEndpoints:
+    def test_download_routes_are_local_only(self):
+        assert "download_file" in _SENSITIVE_ENDPOINTS
+        assert "export_intel" in _SENSITIVE_ENDPOINTS
+
+
+class TestValidateFileUpload:
+    class _Upload(io.BytesIO):
+        def __init__(self, payload: bytes, filename: str):
+            super().__init__(payload)
+            self.filename = filename
+
+    def test_file_size_uses_max_content_length(self):
+        prev = app.config.get("MAX_CONTENT_LENGTH")
+        try:
+            app.config["MAX_CONTENT_LENGTH"] = 1024  # 1 KB
+            upload = self._Upload(b"PK\x03\x04" + b"A" * 2048, "sample.xlsx")
+            is_valid, message = validate_file_upload(upload)
+            assert is_valid is False
+            assert "Maximum size is 0MB" in message
+        finally:
+            app.config["MAX_CONTENT_LENGTH"] = prev
 
 
 # ── _build_insights_payload ──────────────────────────────────────────────

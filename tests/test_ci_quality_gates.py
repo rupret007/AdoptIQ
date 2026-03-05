@@ -14,3 +14,9 @@ def test_build_jobs_depend_on_quality_gate():
     workflow = PROJECT_ROOT.joinpath(".github", "workflows", "build.yml").read_text(encoding="utf-8")
     assert "build-mac:" in workflow and "needs: quality-checks" in workflow
     assert "build-windows:" in workflow and "needs: quality-checks" in workflow
+
+
+def test_build_workflow_default_version_matches_repo_version():
+    workflow = PROJECT_ROOT.joinpath(".github", "workflows", "build.yml").read_text(encoding="utf-8")
+    assert 'default: "1.0.3"' in workflow
+    assert "ADOPTIQ_VERSION: ${{ github.event.inputs.version || '1.0.3' }}" in workflow

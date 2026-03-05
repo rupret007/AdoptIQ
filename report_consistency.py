@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
-from data_normalization import detect_bems_mask, normalize_customer_name
+from data_normalization import detect_bems_mask, normalize_customer_name, normalize_priority_label
 
 
 def _safe_count(df: Optional[pd.DataFrame]) -> int:
@@ -69,14 +69,17 @@ def validate_report_consistency(
     metrics["total_customers"] = len(customer_set)
 
     if csone_df is not None and not csone_df.empty:
-        sev_col = next(
-            (c for c in ("case_priority_norm", "Severity", "Highest Priority", "Priority") if c in csone_df.columns),
-            None,
-        )
-        if sev_col:
-            sev_text = csone_df[sev_col].fillna("").astype(str)
-            metrics["critical_p1"] = int(sev_text.str.contains(r"\bP1\b|critical|sev1|priority 1|^1$", case=False, regex=True).sum())
-            metrics["high_p2"] = int(sev_text.str.contains(r"\bP2\b|high|sev2|priority 2|^2$", case=False, regex=True).sum())
+        if "case_priority_norm" in csone_df.columns:
+            sev_series = csone_df["case_priority_norm"].fillna("").astype(str)
+        else:
+            sev_col = next((c for c in ("Severity", "Highest Priority", "Priority") if c in csone_df.columns), None)
+            sev_series = (
+                csone_df[sev_col].fillna("").astype(str).apply(normalize_priority_label)
+                if sev_col
+                else pd.Series(dtype=str)
+            )
+        metrics["critical_p1"] = int((sev_series == "P1").sum())
+        metrics["high_p2"] = int((sev_series == "P2").sum())
 
     # Adoption-barrier categorization leakage
     if ab_df is not None and not ab_df.empty and "sub_technology" in ab_df.columns:

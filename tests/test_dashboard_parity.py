@@ -26,3 +26,20 @@ def test_compact_dashboard_uses_canonical_metric_counts():
     values = [table.rows[1].cells[i].text for i in range(5)]
     assert values == ["2", "3", "1", "1", "1"]
 
+
+def test_compact_dashboard_priority_counts_use_exact_p1_p2_labels():
+    formatter = CompactReportFormatter()
+    ab_data = pd.DataFrame([{"BU_NAME": "Acme Corp"}])
+    csone_data = pd.DataFrame(
+        [
+            {"customer_name": "Acme Corp", "Severity": "P1", "Transaction ID": ""},
+            {"customer_name": "Acme Corp", "Severity": "P10", "Transaction ID": ""},
+            {"customer_name": "Acme Corp", "Severity": "P2", "Transaction ID": ""},
+        ]
+    )
+
+    formatter.add_at_a_glance_dashboard(ab_data, csone_data, total_customers_override=1)
+
+    table = formatter.doc.tables[0]
+    values = [table.rows[1].cells[i].text for i in range(5)]
+    assert values == ["1", "3", "1", "1", "0"]

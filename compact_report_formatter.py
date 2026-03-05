@@ -206,7 +206,12 @@ class CompactReportFormatter:
             logger.error(f"Error creating title page: {e}")
             raise
     
-    def add_at_a_glance_dashboard(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame):
+    def add_at_a_glance_dashboard(
+        self,
+        ab_data: pd.DataFrame,
+        csone_data: pd.DataFrame,
+        total_customers_override: Optional[int] = None,
+    ):
         """Add At-a-Glance Dashboard matching the example report format"""
         from docx.shared import RGBColor  # Import for color styling
         try:
@@ -217,11 +222,20 @@ class CompactReportFormatter:
             # Calculate metrics from normalized shared fields
             csone_norm = add_case_lifecycle_fields(csone_data)
             customer_set = set()
-            if not ab_data.empty and 'customer_name' in ab_data.columns:
-                customer_set.update(ab_data['customer_name'].dropna().astype(str).apply(normalize_customer_name))
+            if not ab_data.empty:
+                ab_customer_col = next(
+                    (c for c in ('customer_name', 'BU_NAME', 'Customer Name') if c in ab_data.columns),
+                    None,
+                )
+                if ab_customer_col:
+                    customer_set.update(
+                        ab_data[ab_customer_col].dropna().astype(str).apply(normalize_customer_name)
+                    )
             if not csone_norm.empty and 'customer_name' in csone_norm.columns:
                 customer_set.update(csone_norm['customer_name'].dropna().astype(str).apply(normalize_customer_name))
             total_customers = len([c for c in customer_set if c and c != "Unknown"])
+            if total_customers_override is not None:
+                total_customers = int(total_customers_override)
             total_support_cases = len(csone_norm) if not csone_norm.empty else 0
             
             # Count P1 (Critical) cases
@@ -229,8 +243,8 @@ class CompactReportFormatter:
             high_p2 = 0
             if not csone_norm.empty:
                 sev_series = csone_norm.get('case_priority_norm', pd.Series(dtype=str)).astype(str)
-                critical_p1 = int(sev_series.str.contains(r'P1', case=False, na=False).sum())
-                high_p2 = int(sev_series.str.contains(r'P2', case=False, na=False).sum())
+                critical_p1 = int((sev_series == "P1").sum())
+                high_p2 = int((sev_series == "P2").sum())
             
             # Count BEMS escalations
             bems_count = 0
@@ -1545,7 +1559,11 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
         formatter.create_compact_title_page(manager, technology, days, analysis_id, risk_summary)
         
         # Add At-a-Glance Dashboard (NEW - matches example report format at the top)
-        formatter.add_at_a_glance_dashboard(ab_data, csone_data)
+        formatter.add_at_a_glance_dashboard(
+            ab_data,
+            csone_data,
+            total_customers_override=risk_summary.get('total_customers'),
+        )
         formatter._add_section_separator()
         
         # Add comprehensive sections matching example report quality

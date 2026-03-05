@@ -1,43 +1,29 @@
 # Building AdoptIQ for Windows
 
-**Important:** PyInstaller builds for the **current operating system**. You cannot build a Windows `.exe` on a Mac. You must build on Windows (or use CI).
+PyInstaller builds are OS-specific. Build Windows artifacts on Windows (or via CI on a Windows runner).
 
-## Option 1: Build on a Windows PC (recommended)
+## Local Windows build
 
-1. Copy the entire `AdoptIQ_PC` folder to a Windows machine.
-2. **Optional:** Create `secrets.env` from `secrets.env.template` and fill in credentials (Snowflake, CircuIT, etc.). If omitted, the build creates `secrets.env` from the template (empty) and bundles an empty stub; users can add `.env` to `%APPDATA%\AdoptIQ\` later.
-3. Open Command Prompt or PowerShell in the `AdoptIQ_PC` folder.
-4. Run:
-   ```
+1. Open Command Prompt or PowerShell in the repo root (`AdoptIQ_MAC`).
+2. Create `secrets.env` from `secrets.env.template` and populate required values.
+3. Run:
+   ```bat
    build_pc.bat
    ```
-5. When done, the output is in `OUTBOX\`:
-   - **AdoptIQ-Setup.exe** – single-file installer (if Inno Setup 6 is installed). Users click to install.
-   - **AdoptIQ.exe** – the application (fallback if Inno Setup not installed)
-   - **README.md** – user instructions
-
-6. **To create the installer:** Install [Inno Setup 6](https://jrsoftware.org/isdl.php), then run `build_pc.bat` again. The build will produce `AdoptIQ-Setup.exe` – the single file users click to install.
-
-## Option 2: GitHub Actions (automatic Windows build)
-
-1. Push the repo (including `AdoptIQ_PC` and `.github/workflows/build-windows.yml`) to GitHub.
-2. The workflow runs on push when `AdoptIQ_PC/**` changes.
-
-3. After the run completes:
-   - Go to **Actions** → select the workflow run
-   - Download the **AdoptIQ-Windows-Install** artifact (a `.zip` file)
-
-4. The zip contains:
-   - `AdoptIQ-Setup.exe` (installer) or `AdoptIQ.exe`
+4. Build outputs are written to `OUTBOX\`:
+   - `AdoptIQ.exe`
    - `README.md`
 
-5. Share with users. They run `AdoptIQ-Setup.exe` to install, then run AdoptIQ (shortcut or command line) to start the server and browse to http://localhost:5001.
+## CI build (GitHub Actions)
 
-**Note:** The GitHub build uses an empty credentials stub unless `secrets.env` is added to the repo (not recommended). Users can add `.env` to `%APPDATA%\AdoptIQ\` for Snowflake and other credentials.
+The shared workflow is `.github/workflows/build.yml` and includes both macOS and Windows jobs.
 
-## Summary
+1. Trigger the workflow with `workflow_dispatch` (optionally set version/build), or push a tag (`v*`).
+2. Ensure repository secret `SECRETS_ENV_FILE` is configured with full `secrets.env` content.
+3. Download the Windows artifact from Actions:
+   - `AdoptIQ-Windows-Build` (zip containing `AdoptIQ.exe` and `README.md`).
 
-| Method | Where | Output |
-|--------|-------|--------|
-| `build_pc.bat` | Windows PC | `OUTBOX\AdoptIQ-Setup.exe` (with Inno Setup) or `AdoptIQ.exe` + README |
-| GitHub Actions | Cloud (Windows runner) | `AdoptIQ-Windows-Install.zip` artifact |
+## Notes
+
+- Current Windows packaging output is `AdoptIQ.exe` (no installer step in the current workflow).
+- If `SECRETS_ENV_FILE` is missing, CI build steps that embed credentials will fail.

@@ -1,8 +1,8 @@
-# AdoptIQ for macOS
+# AdoptIQ Desktop (macOS and Windows)
 
 **Version 1.0.3** — Version and build are shown in the app footer (e.g. v1.0.3 build 1).
 
-AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools required. Credentials (Snowflake, CircuIT, PSIRT) are embedded in the app—no .env file needed.
+AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
 ### What's New in v1.0.3
 
@@ -86,8 +86,8 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 
 ### Run
 
-1. Double-click **AdoptIQ.app** to launch.
-2. A terminal window may open if the app is packaged with console output.
+1. Double-click **AdoptIQ.app** (macOS) or **AdoptIQ.exe** (Windows) to launch.
+2. A terminal window should not appear in standard packaged builds.
 3. Your browser will open automatically to **http://localhost:5001** (or open it manually if needed).
 4. Use AdoptIQ as needed, keeping the server window open during use.
 
@@ -114,7 +114,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 
 ## Requirements
 
-- **macOS** system
+- **macOS or Windows** system
 - **Internet access** (corporate VPN may be needed for Snowflake and CSOne)
 - **Cisco CSOne** access to export reports
 

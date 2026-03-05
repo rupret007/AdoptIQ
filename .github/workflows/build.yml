@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version (e.g. 1.0.2)"
+        description: "Version (e.g. 1.0.3)"
         required: false
-        default: "1.0.2"
+        default: "1.0.3"
       build_number:
         description: "Build number"
         required: false
@@ -16,7 +16,7 @@ on:
       - "v*"
 
 env:
-  ADOPTIQ_VERSION: ${{ github.event.inputs.version || '1.0.2' }}
+  ADOPTIQ_VERSION: ${{ github.event.inputs.version || '1.0.3' }}
   ADOPTIQ_BUILD: ${{ github.event.inputs.build_number || '1' }}
 
 jobs:
@@ -60,7 +60,12 @@ jobs:
           pip install pyinstaller
 
       - name: Create secrets.env
-        run: printenv SECRETS_ENV_FILE > secrets.env
+        run: |
+          if [ -z "${SECRETS_ENV_FILE:-}" ]; then
+            echo "::error::SECRETS_ENV_FILE is not configured"
+            exit 1
+          fi
+          printf "%s" "$SECRETS_ENV_FILE" > secrets.env
         env:
           SECRETS_ENV_FILE: ${{ secrets.SECRETS_ENV_FILE }}
 
@@ -100,7 +105,12 @@ jobs:
 
       - name: Create secrets.env
         shell: pwsh
-        run: $env:SECRETS_ENV_FILE | Set-Content -Path secrets.env -Encoding UTF8
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SECRETS_ENV_FILE)) {
+            Write-Error "SECRETS_ENV_FILE is not configured"
+            exit 1
+          }
+          Set-Content -Path secrets.env -Value $env:SECRETS_ENV_FILE -Encoding UTF8
         env:
           SECRETS_ENV_FILE: ${{ secrets.SECRETS_ENV_FILE }}
 

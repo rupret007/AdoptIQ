@@ -3631,7 +3631,24 @@ class LeaderReportGenerator:
                     return set()
             
             customers = safe_set(data.get('customers', []))
-            subscriptions = safe_set(data.get('subscriptions', []))
+            subscriptions_df = data.get('subscriptions', pd.DataFrame())
+            subscription_customers = 0
+            try:
+                if subscriptions_df is not None and not subscriptions_df.empty:
+                    if 'BU_NAME' in subscriptions_df.columns:
+                        subscription_customers = len(
+                            set(
+                                subscriptions_df['BU_NAME']
+                                .dropna()
+                                .astype(str)
+                                .apply(normalize_customer_name)
+                                .tolist()
+                            )
+                        )
+                    else:
+                        subscription_customers = len(subscriptions_df)
+            except Exception:
+                subscription_customers = 0
             
             # Check if customers in activities match assigned customers
             activity_customers = set()
@@ -3659,7 +3676,7 @@ class LeaderReportGenerator:
             
             consistency_checks[cssm_name] = {
                 'assigned_customers': len(customers),
-                'subscription_customers': len(subscriptions),
+                'subscription_customers': subscription_customers,
                 'activity_customers': len(activity_customers),
                 'customer_overlap': len(customers.intersection(activity_customers)),
                 'unexpected_customers': len(activity_customers - customers),
