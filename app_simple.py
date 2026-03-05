@@ -335,6 +335,15 @@ def _is_valid_analysis_id(value: str) -> bool:
     return isinstance(value, str) and bool(_ANALYSIS_ID_RE.fullmatch(value))
 
 
+def _sanitize_analysis_id_part(value: Any, max_len: int = 60) -> str:
+    """Sanitize dynamic analysis-id fragments to match route validator constraints."""
+    if value is None:
+        return ""
+    cleaned = str(value).replace(" ", "_").replace("&", "and")
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "", cleaned)
+    return cleaned[:max_len]
+
+
 def _client_ip_from_request(req) -> str:
     """Client IP extraction. Trust proxy headers only when explicitly enabled."""
     trust_proxy_headers = os.environ.get('ADOPTIQ_TRUST_PROXY_HEADERS', '').strip().lower() in {'1', 'true', 'yes'}
@@ -561,6 +570,7 @@ def load_analysis_status():
                                 status[key] = datetime.fromisoformat(value.replace('Z', '+00:00'))
                             except (ValueError, TypeError) as e:
                                 logger.debug(f"Could not parse datetime for {key}: {e}")  # FIXED: Proper exception handling
+                                status[key] = None
                     analysis_status[analysis_id] = status
 
                 # Clean up stuck analyses from previous runs
@@ -909,30 +919,35 @@ def start_analysis():
         
         # Generate unique analysis ID - handle case where manager might be empty for single customer renewal
         timestamp = int(time.time())
+        safe_manager = _sanitize_analysis_id_part(manager)
+        safe_tech = _sanitize_analysis_id_part(tech)
+        safe_customer = _sanitize_analysis_id_part(customer_name)
+        safe_subscription = _sanitize_analysis_id_part(subscription_id)
         if report_type in ['renewal', 'renewal_portfolio']:
             # For renewal reports, use renewal-specific ID format
             if renewal_type == 'renewal_portfolio':
                 # Portfolio renewal: use manager
-                if manager:
-                    analysis_id = f"Renewal_Portfolio_{manager.replace(' ', '_')}_{tech.replace(' ', '_').replace('&', 'and')}_{days}d_{timestamp}"
+                if safe_manager:
+                    analysis_id = f"Renewal_Portfolio_{safe_manager}_{safe_tech}_{days}d_{timestamp}"
                 else:
-                    analysis_id = f"Renewal_Portfolio_{tech.replace(' ', '_').replace('&', 'and')}_{days}d_{timestamp}"
+                    analysis_id = f"Renewal_Portfolio_{safe_tech}_{days}d_{timestamp}"
             else:
                 # Single customer renewal: use customer name or subscription ID, or manager
-                if customer_name:
-                    analysis_id = f"Renewal_{customer_name.replace(' ', '_')}_{tech.replace(' ', '_').replace('&', 'and')}_{days}d_{timestamp}"
-                elif subscription_id:
-                    analysis_id = f"Renewal_Sub_{subscription_id.replace(' ', '_')}_{tech.replace(' ', '_').replace('&', 'and')}_{days}d_{timestamp}"
-                elif manager:
-                    analysis_id = f"Renewal_{manager.replace(' ', '_')}_{tech.replace(' ', '_').replace('&', 'and')}_{days}d_{timestamp}"
+                if safe_customer:
+                    analysis_id = f"Renewal_{safe_customer}_{safe_tech}_{days}d_{timestamp}"
+                elif safe_subscription:
+                    analysis_id = f"Renewal_Sub_{safe_subscription}_{safe_tech}_{days}d_{timestamp}"
+                elif safe_manager:
+                    analysis_id = f"Renewal_{safe_manager}_{safe_tech}_{days}d_{timestamp}"
                 else:
-                    analysis_id = f"Renewal_{tech.replace(' ', '_').replace('&', 'and')}_{days}d_{timestamp}"
+                    analysis_id = f"Renewal_{safe_tech}_{days}d_{timestamp}"
         else:
             # Other report types: use manager
-            if manager:
-                analysis_id = f"{manager.replace(' ', '_')}_{tech.replace(' ', '_').replace('&', 'and')}_{days}d_{timestamp}"
+            if safe_manager:
+                analysis_id = f"{safe_manager}_{safe_tech}_{days}d_{timestamp}"
             else:
-                analysis_id = f"{report_type}_{tech.replace(' ', '_').replace('&', 'and')}_{days}d_{timestamp}"
+                safe_report_type = _sanitize_analysis_id_part(report_type)
+                analysis_id = f"{safe_report_type}_{safe_tech}_{days}d_{timestamp}"
         
         # Initialize status with enhanced messaging and timing (thread-safe)
         with analysis_status_lock:
@@ -7878,7 +7893,7 @@ def run_comprehensive_analysis(analysis_id):
                     customers_actually_analyzed += 1  # Count fallback as analyzed
                     
             except Exception as ai_error:
-                logger.error(f"  [[ERROR]] AI analysis failed for {customer_name}: {ai_error}")
+                logger.error("  [[ERROR]] AI analysis failed for %s: %s", customer_name, ai_error, exc_info=True)
                 # Add customer separator before each customer section (except the first)
                 if customers_actually_analyzed > 0:
                     report_builder._add_customer_separator()
@@ -7889,7 +7904,10 @@ def run_comprehensive_analysis(analysis_id):
                 report_builder.add_paragraph(f"CSSM: {cssm_name}", bold_sections=["CSSM:"])
                 report_builder.add_paragraph(f"Adoption Barriers: {len(cust_ab) if not cust_ab.empty else 0}", bold_sections=["Adoption Barriers:"])
                 report_builder.add_paragraph(f"TAC Cases: {len(cust_csone) if not cust_csone.empty else 0}", bold_sections=["TAC Cases:"])
-                report_builder.add_paragraph(f"Error: {str(ai_error)}", bold_sections=["Error:"])
+                report_builder.add_paragraph(
+                    "Error: AI analysis unavailable for this customer.",
+                    bold_sections=["Error:"],
+                )
                 customers_actually_analyzed += 1  # Count error fallback as analyzed
 
         # === 3. Save Final Report ===
@@ -8850,7 +8868,9 @@ def ask_ai_portfolio():
                 if technology and technology != 'All':
                     tech_col = 'TECHNOLOGY_C' if 'TECHNOLOGY_C' in team_subs_df.columns else None
                     if tech_col:
-                        team_subs_df = team_subs_df[team_subs_df[tech_col].str.contains(technology, case=False, na=False)]
+                        team_subs_df = team_subs_df[
+                            team_subs_df[tech_col].astype(str).str.contains(technology, case=False, na=False)
+                        ]
 
                 account_ids = team_subs_df['ACCOUNT_ID_C'].unique().tolist() if 'ACCOUNT_ID_C' in team_subs_df.columns else []
                 n_subs = len(team_subs_df)
@@ -9834,7 +9854,10 @@ def start_compact_analysis():
             return jsonify({'error': error_msg}), 400
         
         # Generate analysis ID
-        analysis_id = f"Compact_{manager.replace(' ', '_')}_{technology.replace(' ', '_').replace('&', 'and')}_{days}d_{int(time.time())}"
+        analysis_id = (
+            f"Compact_{_sanitize_analysis_id_part(manager)}_"
+            f"{_sanitize_analysis_id_part(technology)}_{days}d_{int(time.time())}"
+        )
         
         # Initialize status (subscription_id/customer_name allow single-customer filter)
         with analysis_status_lock:
@@ -9965,11 +9988,20 @@ def start_customer_renewal_analysis():
         
         # Generate analysis ID based on renewal type
         if renewal_type == 'renewal_portfolio':
-            analysis_id = f"Renewal_Portfolio_{manager.replace(' ', '_')}_{technology.replace(' ', '_').replace('&', 'and')}_{days}d_{int(time.time())}"
+            analysis_id = (
+                f"Renewal_Portfolio_{_sanitize_analysis_id_part(manager)}_"
+                f"{_sanitize_analysis_id_part(technology)}_{days}d_{int(time.time())}"
+            )
         elif subscription_id:
-            analysis_id = f"Renewal_Sub_{subscription_id}_{technology.replace(' ', '_').replace('&', 'and')}_{days}d_{int(time.time())}"
+            analysis_id = (
+                f"Renewal_Sub_{_sanitize_analysis_id_part(subscription_id)}_"
+                f"{_sanitize_analysis_id_part(technology)}_{days}d_{int(time.time())}"
+            )
         else:
-            analysis_id = f"Renewal_{customer_name.replace(' ', '_')}_{technology.replace(' ', '_').replace('&', 'and')}_{days}d_{int(time.time())}"
+            analysis_id = (
+                f"Renewal_{_sanitize_analysis_id_part(customer_name)}_"
+                f"{_sanitize_analysis_id_part(technology)}_{days}d_{int(time.time())}"
+            )
         # Initialize status
         with analysis_status_lock:
             analysis_status[analysis_id] = {
@@ -10768,7 +10800,10 @@ def test_generate_report():
         days = data.get('days', 30)
         
         # Create a test analysis ID
-        analysis_id = f"Test_{manager.replace(' ', '_')}_{technology}_{days}d_{int(time.time())}"
+        analysis_id = (
+            f"Test_{_sanitize_analysis_id_part(manager)}_"
+            f"{_sanitize_analysis_id_part(technology)}_{days}d_{int(time.time())}"
+        )
         
         logger.info(f"[[LIST]] Created analysis ID: {analysis_id}")
         
@@ -10886,7 +10921,7 @@ def start_leader_report():
         
         # Generate unique analysis ID
         timestamp = int(time.time())
-        analysis_id = f"Leader_{manager.replace(' ', '_')}_{days}d_{timestamp}"
+        analysis_id = f"Leader_{_sanitize_analysis_id_part(manager)}_{days}d_{timestamp}"
         
         # Initialize status
         with analysis_status_lock:

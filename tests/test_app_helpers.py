@@ -22,6 +22,7 @@ from app_simple import (
     _build_insights_payload,
     _has_customer_activity_for_deep_dive,
     _is_valid_analysis_id,
+    _sanitize_analysis_id_part,
     filter_subscriptions_by_criteria,
     _clean_datetime_columns_for_excel,
     validate_file_upload,
@@ -89,6 +90,9 @@ class TestAnalysisIdValidation:
         assert _is_valid_analysis_id("../etc/passwd") is False
         assert _is_valid_analysis_id("bad id with space") is False
         assert _is_valid_analysis_id("") is False
+
+    def test_sanitize_analysis_id_part_removes_invalid_characters(self):
+        assert _sanitize_analysis_id_part("Acme & Partners (NA)/#1") == "Acme_and_Partners_NA1"
 
 
 class TestSecretKeyDefaults:
@@ -163,6 +167,13 @@ class TestVerboseDebugApi:
         assert data["success"] is True
         assert reset_called["value"] is True
         assert data["snowflake_query_count"] == 0
+
+    @pytest.mark.flask
+    def test_post_verbose_debug_missing_enabled_returns_400(self, client):
+        rv = client.post("/api/debug/verbose", json={})
+        assert rv.status_code == 400
+        data = rv.get_json()
+        assert "enabled" in data["error"]
 
 
 class TestValidateFileUpload:

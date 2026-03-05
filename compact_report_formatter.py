@@ -22,6 +22,7 @@ from data_normalization import (
     detect_bems_mask,
     extract_bems_ids_from_row,
     normalize_customer_name,
+    normalize_priority_label,
 )
 from report_consistency import validate_report_consistency
 from report_utils import format_inline_source, format_metric_with_source
@@ -1053,6 +1054,19 @@ class CompactReportFormatter:
             canonical = {m: (s, v) for m, s, v in get_data_sources_list()}
             support_source, support_verif = canonical.get('Support Cases (TAC)', ('CSOne (TAC case data)', 'Query by Case Number in CSOne'))
             ab_source, ab_verif = canonical.get('Adoption Barriers', ('CSConsole / Snowflake C360_CS_TASK_C_VW', 'Query by Record ID in CSConsole or Snowflake'))
+            if not csone_data.empty:
+                if 'case_priority_norm' in csone_data.columns:
+                    sev_series = csone_data['case_priority_norm'].fillna('').astype(str)
+                else:
+                    sev_col = next((c for c in ('Severity', 'Highest Priority', 'Priority') if c in csone_data.columns), None)
+                    sev_series = (
+                        csone_data[sev_col].fillna('').astype(str).apply(normalize_priority_label)
+                        if sev_col
+                        else pd.Series(dtype=str)
+                    )
+                p1_critical_count = int((sev_series == 'P1').sum())
+            else:
+                p1_critical_count = 0
             
             citations_table = self.doc.add_table(rows=1, cols=5)
             citations_table.style = 'Table Grid'
@@ -1066,7 +1080,7 @@ class CompactReportFormatter:
             citations_data = [
                 ('Total Support Cases', str(len(csone_data)) if not csone_data.empty else '0', support_source, support_verif, '95%'),
                 ('Unique Customers with Cases', str(csone_data['customer_name'].nunique()) if not csone_data.empty and 'customer_name' in csone_data.columns else '0', support_source, support_verif, '95%'),
-                ('P1/Critical Cases', str(len(csone_data[csone_data['Severity'].astype(str).str.contains('1|Critical', na=False)])) if not csone_data.empty and 'Severity' in csone_data.columns else '0', support_source, support_verif, '95%'),
+                ('P1/Critical Cases', str(p1_critical_count), support_source, support_verif, '95%'),
                 ('Total Adoption Barriers', str(len(ab_data)) if not ab_data.empty else '0', ab_source, ab_verif, '90%'),
                 ('Customers with Adoption Barriers', str(ab_data['customer_name'].nunique()) if not ab_data.empty and 'customer_name' in ab_data.columns else '0', ab_source, ab_verif, '90%'),
             ]

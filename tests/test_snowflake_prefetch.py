@@ -138,3 +138,9 @@ def test_prefetch_failure_is_cached_and_not_retried(monkeypatch):
     assert first.empty and second.empty
     assert calls["count"] == 1
     assert run_ctx.metrics.get("csconsole_customer_pulse_errors") == 1
+
+
+def test_prefetch_skips_unknown_dataset_names():
+    run_ctx = sp.AnalysisRunContext.build(ctx=object(), account_ids=["001"], days=90)
+    result = sp.prefetch_datasets(run_ctx, ["unknown_dataset_name"])
+    assert result == {}
