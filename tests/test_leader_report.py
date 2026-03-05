@@ -194,3 +194,4 @@ def test_customer_matching_uses_normalized_exact_compare():
     """Guard against substring matching that can mis-attribute customers."""
     src = Path(__file__).resolve().parent.parent.joinpath("leader_report_generator.py").read_text(encoding="utf-8")
     assert "str.contains(customer, case=False, na=False)" not in src
+    assert "detect_bems_mask(" in src
