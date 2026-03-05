@@ -191,6 +191,14 @@ from adoptiq_backend import (
 # Import new compact and renewal analysis features
 from compact_report_formatter import calculate_renewal_risk_scores
 from advanced_renewal_analyzer import AdvancedRenewalAnalyzer, generate_advanced_renewal_analysis
+from data_normalization import (
+    add_case_lifecycle_fields,
+    build_customer_lookup,
+    detect_bems_mask,
+    normalize_customer_name,
+)
+from risk_scoring import compute_customer_risk_profile
+from report_consistency import validate_report_consistency
 
 # Import data source validator
 from data_source_validator import (
@@ -1010,8 +1018,9 @@ def filter_subscriptions_by_criteria(team_subs_df: pd.DataFrame, customer_name: 
 
 def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None) -> Dict[str, Any]:
     """
-    Extract software defects (BST/CSC IDs) from CSOne and Adoption Barriers data
-    Checks Transaction ID, bemscsc_refs, Title, and Problem Description
+    Extract software defects (BST/CSC IDs) and BEMS escalation IDs from CSOne
+    and Adoption Barriers data.
+    Checks Transaction ID, bemscsc_refs, Title, and Problem Description.
     
     Args:
         csone_df: DataFrame containing CSOne/TAC case data
@@ -1020,8 +1029,12 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
     Returns:
         Dictionary with defect counts, lists, and customer breakdown
     """
+    _BEMS_RE = re.compile(r'\bBEMS[- ]?\d+\b', re.IGNORECASE)
+    _CSC_RE = re.compile(r'\bCSC[a-zA-Z0-9]{6,10}\b', re.IGNORECASE)
+
     defects = {
         'csc_ids': set(),
+        'bems_ids': set(),
         'bst_defects': [],
         'defect_cases': [],
         'defect_by_customer': {},
@@ -1033,39 +1046,42 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
     # Extract from CSOne data
     if csone_df is not None and not csone_df.empty:
         for _, row in csone_df.iterrows():
-            defect_refs = []
+            csc_refs = []
+            bems_refs = []
             # Use flexible customer column lookup
             customer = 'Unknown'
             for col in ['Customer Name', 'customer_name', 'BU_NAME', 'Customer']:
                 if col in row.index and pd.notna(row.get(col, None)):
-                    customer = str(row[col]).strip() or 'Unknown'
+                    customer = normalize_customer_name(row[col])
                     break
             
-            # Check Transaction ID for CSC/BST references
+            # Check Transaction ID for CSC/BST and BEMS references
             if 'Transaction ID' in csone_df.columns and pd.notna(row.get('Transaction ID', None)):
                 tx_id = str(row['Transaction ID'])
-                # Extract CSC IDs (format: CSCxxxxxx)
-                csc_matches = re.findall(r'\bCSC[a-zA-Z0-9]{6,10}\b', tx_id, re.IGNORECASE)
-                defect_refs.extend(csc_matches)
+                csc_refs.extend(_CSC_RE.findall(tx_id))
+                bems_refs.extend(_BEMS_RE.findall(tx_id))
             
             # Check bemscsc_refs column
             if 'bemscsc_refs' in csone_df.columns and pd.notna(row.get('bemscsc_refs', None)):
                 refs_str = str(row['bemscsc_refs'])
-                # Extract CSC IDs
-                csc_matches = re.findall(r'\bCSC[a-zA-Z0-9]{6,10}\b', refs_str, re.IGNORECASE)
-                defect_refs.extend(csc_matches)
+                csc_refs.extend(_CSC_RE.findall(refs_str))
+                bems_refs.extend(_BEMS_RE.findall(refs_str))
             
-            # Check Title and Problem Description for defect references
+            # Check Title and Problem Description
             title = str(row.get('Title', '')) if 'Title' in row.index else ''
             description = str(row.get('Problem Description', '')) if 'Problem Description' in row.index else ''
             combined_text = f"{title} {description}"
-            csc_matches = re.findall(r'\bCSC[a-zA-Z0-9]{6,10}\b', combined_text, re.IGNORECASE)
-            defect_refs.extend(csc_matches)
+            csc_refs.extend(_CSC_RE.findall(combined_text))
+            bems_refs.extend(_BEMS_RE.findall(combined_text))
             
-            # Add unique defects
-            for defect_id in defect_refs:
-                defect_id_upper = defect_id.upper()
-                defects['csc_ids'].add(defect_id_upper)
+            all_refs = [(rid, 'CSC') for rid in csc_refs] + [(rid, 'BEMS') for rid in bems_refs]
+            
+            for defect_id, ref_type in all_refs:
+                defect_id_norm = re.sub(r'[- ]', '', defect_id).upper()
+                if ref_type == 'CSC':
+                    defects['csc_ids'].add(defect_id_norm)
+                else:
+                    defects['bems_ids'].add(defect_id_norm)
                 defects['customers_with_defects'].add(customer)
                 
                 case_num = row.get('SR Number', 'N/A') if 'SR Number' in row.index else (
@@ -1074,34 +1090,36 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
                 tx_id_str = str(row.get('Transaction ID', '')) if 'Transaction ID' in row.index else ''
                 
                 defects['defect_cases'].append({
-                    'defect_id': defect_id_upper,
+                    'defect_id': defect_id_norm,
                     'customer': customer,
                     'case_number': case_num,
-                    'title': title if title else 'N/A',  # FIXED: No truncation
+                    'title': title if title else 'N/A',
                     'source': 'CSOne',
-                    'transaction_id': tx_id_str
+                    'transaction_id': tx_id_str,
+                    'ref_type': ref_type
                 })
                 
                 if customer not in defects['defect_by_customer']:
                     defects['defect_by_customer'][customer] = []
-                defects['defect_by_customer'][customer].append(defect_id_upper)
+                defects['defect_by_customer'][customer].append(defect_id_norm)
     
     # Extract from Adoption Barriers data
     if ab_df is not None and not ab_df.empty:
         for _, row in ab_df.iterrows():
-            defect_refs = []
+            csc_refs = []
+            bems_refs = []
             # Use flexible customer column lookup
             customer = 'Unknown'
             for col in ['customer_name', 'Customer Name', 'BU_NAME', 'Customer']:
                 if col in row.index and pd.notna(row.get(col, None)):
-                    customer = str(row[col]).strip() or 'Unknown'
+                    customer = normalize_customer_name(row[col])
                     break
             
             # Check bemscsc_refs column
             if 'bemscsc_refs' in ab_df.columns and pd.notna(row.get('bemscsc_refs', None)):
                 refs_str = str(row['bemscsc_refs'])
-                csc_matches = re.findall(r'\bCSC[a-zA-Z0-9]{6,10}\b', refs_str, re.IGNORECASE)
-                defect_refs.extend(csc_matches)
+                csc_refs.extend(_CSC_RE.findall(refs_str))
+                bems_refs.extend(_BEMS_RE.findall(refs_str))
             
             # Check title and description
             title = row.get('title', '') if 'title' in row.index else (
@@ -1111,36 +1129,42 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
                 row.get('DESCRIPTION__C', '') if 'DESCRIPTION__C' in row.index else ''
             )
             combined_text = f"{title} {description}"
-            csc_matches = re.findall(r'\bCSC[a-zA-Z0-9]{6,10}\b', combined_text, re.IGNORECASE)
-            defect_refs.extend(csc_matches)
+            csc_refs.extend(_CSC_RE.findall(combined_text))
+            bems_refs.extend(_BEMS_RE.findall(combined_text))
             
-            # Add unique defects
-            for defect_id in defect_refs:
-                defect_id_upper = defect_id.upper()
-                defects['csc_ids'].add(defect_id_upper)
+            all_refs = [(rid, 'CSC') for rid in csc_refs] + [(rid, 'BEMS') for rid in bems_refs]
+            
+            for defect_id, ref_type in all_refs:
+                defect_id_norm = re.sub(r'[- ]', '', defect_id).upper()
+                if ref_type == 'CSC':
+                    defects['csc_ids'].add(defect_id_norm)
+                else:
+                    defects['bems_ids'].add(defect_id_norm)
                 defects['customers_with_defects'].add(customer)
                 
                 ab_id = row.get('ID', 'N/A') if 'ID' in row.index else 'N/A'
                 
                 defects['defect_cases'].append({
-                    'defect_id': defect_id_upper,
+                    'defect_id': defect_id_norm,
                     'customer': customer,
                     'case_number': f"AB-{ab_id}",
-                    'title': str(title) if title else 'N/A',  # FIXED: No truncation
-                    'source': 'AdoptionBarrier'
+                    'title': str(title) if title else 'N/A',
+                    'source': 'AdoptionBarrier',
+                    'ref_type': ref_type
                 })
                 
                 if customer not in defects['defect_by_customer']:
                     defects['defect_by_customer'][customer] = []
-                defects['defect_by_customer'][customer].append(defect_id_upper)
+                defects['defect_by_customer'][customer].append(defect_id_norm)
     
-    # Calculate totals
-    defects['total_defects'] = len(defects['csc_ids'])
-    defects['bst_defects'] = sorted(list(defects['csc_ids']))
+    # Calculate totals (CSC + BEMS combined)
+    all_ids = defects['csc_ids'] | defects['bems_ids']
+    defects['total_defects'] = len(all_ids)
+    defects['bst_defects'] = sorted(list(all_ids))
     defects['total_cases_with_defects'] = len(defects['defect_cases'])
     defects['customers_with_defects'] = sorted(list(defects['customers_with_defects']))
     
-    logger.info(f"[[DEFECTS]] Found {defects['total_defects']} unique software defects across {defects['total_cases_with_defects']} cases")
+    logger.info(f"[[DEFECTS]] Found {len(defects['csc_ids'])} CSC IDs and {len(defects['bems_ids'])} BEMS IDs across {defects['total_cases_with_defects']} cases")
     if defects['total_defects'] > 0:
         logger.info(f"[[DEFECTS]] Sample defects: {defects['bst_defects'][:5]}")
     
@@ -1179,7 +1203,7 @@ def extract_psirt_vulnerabilities(csone_df: pd.DataFrame, ab_df: pd.DataFrame = 
             customer = 'Unknown'
             for col in ['Customer Name', 'customer_name', 'BU_NAME', 'Customer']:
                 if col in row.index and pd.notna(row.get(col, None)):
-                    customer = str(row[col]).strip() or 'Unknown'
+                    customer = normalize_customer_name(row[col])
                     break
             
             # Check all text fields - use proper column checking
@@ -1236,7 +1260,7 @@ def extract_psirt_vulnerabilities(csone_df: pd.DataFrame, ab_df: pd.DataFrame = 
             customer = 'Unknown'
             for col in ['customer_name', 'Customer Name', 'BU_NAME', 'Customer']:
                 if col in row.index and pd.notna(row.get(col, None)):
-                    customer = str(row[col]).strip() or 'Unknown'
+                    customer = normalize_customer_name(row[col])
                     break
             
             # Check all text fields - use proper column checking
@@ -1293,61 +1317,20 @@ def detect_bems_escalations(csone_df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     """
     if csone_df is None or csone_df.empty:
         return pd.DataFrame(), 0
-    
-    # Create BEMS filter mask checking multiple columns
-    bems_mask = pd.Series([False] * len(csone_df), index=csone_df.index)
-    
-    # PRIMARY: Transaction ID column (main BEMS source in CSOne Excel files)
-    if 'Transaction ID' in csone_df.columns:
-        bems_mask |= csone_df['Transaction ID'].astype(str).str.contains('BEMS', case=False, na=False)
-        logger.info(f"[[BEMS]] Checking 'Transaction ID' column for BEMS references")
-    
-    # SECONDARY: bemscsc_refs column (extracted from Title/Problem Description)
-    if 'bemscsc_refs' in csone_df.columns:
-        bems_mask |= csone_df['bemscsc_refs'].notna() & (csone_df['bemscsc_refs'].astype(str) != '') & (csone_df['bemscsc_refs'].astype(str) != '[]') & csone_df['bemscsc_refs'].astype(str).str.contains('BEMS', case=False, na=False)
-        logger.info(f"[[BEMS]] Checking 'bemscsc_refs' column for BEMS references")
-    
-    # TERTIARY: Check other potential BEMS column names
-    for col in ['BEMS_REF', 'bems_ref', 'Escalation_Ref', 'Engineering_Ref', 'BEMS', 'bems']:
-        if col in csone_df.columns:
-            bems_mask |= csone_df[col].fillna('').astype(str).str.contains('BEMS', case=False, na=False)
-            logger.info(f"[[BEMS]] Checking '{col}' column for BEMS references")
-    
-    # If no exact match, search for columns containing "BEMS" or "bems"
-    if not bems_mask.any():
-        for col in csone_df.columns:
-            if ('bems' in col.lower() or 'escalation' in col.lower() or 'engineering' in col.lower()) and col not in ['Transaction ID', 'bemscsc_refs']:
-                logger.info(f"[[BEMS]] Found potential BEMS column: '{col}'")
-                bems_mask |= csone_df[col].fillna('').astype(str).str.contains('BEMS', case=False, na=False)
-    
-    # FOURTH: Search free-text columns (Title, Problem Description, Subject, etc.) for BEMS mentions
-    # Many CSOne exports put BEMS IDs or "engineering escalation" only in case text
-    if not bems_mask.any():
-        text_cols = []
-        for col in csone_df.columns:
-            c = str(col).lower()
-            if any(x in c for x in ('title', 'problem', 'description', 'subject', 'summary', 'body', 'detail')):
-                text_cols.append(col)
-        if text_cols:
-            combined = pd.Series('', index=csone_df.index)
-            for col in text_cols:
-                combined += ' ' + csone_df[col].fillna('').astype(str)
-            # Match: "BEMS", "BEMS-123", "BEMS 456", "backend escalation", "engineering escalation"
-            bems_in_text = combined.str.contains(r'\bBEMS\b|BEMS[- ]?\d+|backend\s+escalation|engineering\s+escalation', case=False, na=False, regex=True)
-            if bems_in_text.any():
-                bems_mask |= bems_in_text
-                logger.info(f"[[BEMS]] Found BEMS references in free-text columns: {text_cols}")
-    
-    # Extract BEMS cases
-    bems_cases = csone_df[bems_mask].copy() if bems_mask.any() else pd.DataFrame()
+
+    normalized_csone = add_case_lifecycle_fields(csone_df)
+    bems_mask = detect_bems_mask(normalized_csone)
+    bems_cases = normalized_csone[bems_mask].copy() if bems_mask.any() else pd.DataFrame()
     bems_count = len(bems_cases)
     
     if bems_count > 0:
         logger.info(f"[[BEMS]] Found {bems_count} BEMS escalations")
-        # Show sample BEMS values from Transaction ID if available
         if 'Transaction ID' in bems_cases.columns:
             sample_bems = bems_cases['Transaction ID'].dropna().head(3).tolist()
             logger.info(f"[[BEMS]] Sample BEMS Transaction IDs: {sample_bems}")
+        if 'case_type_class' in bems_cases.columns:
+            case_mix = bems_cases['case_type_class'].value_counts(dropna=False).to_dict()
+            logger.info(f"[[BEMS]] BEMS case type mix: {case_mix}")
         elif 'bemscsc_refs' in bems_cases.columns:
             sample_bems = bems_cases['bemscsc_refs'].dropna().head(3).tolist()
             logger.info(f"[[BEMS]] Sample BEMS references: {sample_bems}")
@@ -1406,79 +1389,68 @@ def _get_all_customers_from_all_sources(ab_norm: pd.DataFrame = None, csone_df: 
         Set of unique customer names from all sources
     """
     all_customers = set()
-    
-    # CRITICAL: Start with team subscriptions FIRST (unfiltered, most comprehensive source)
-    # This ensures we get ALL customers assigned to the manager's team
-    if team_subs_df is not None and not team_subs_df.empty:
-        if 'BU_NAME' in team_subs_df.columns:
-            all_customers.update(team_subs_df['BU_NAME'].dropna().unique())
-            logger.info(f"[[CUSTOMER_COUNT]] Team subscriptions: {len(team_subs_df['BU_NAME'].dropna().unique())} customers")
-    
-    # From adoption barriers (filtered by technology, but may have additional customers)
-    if ab_norm is not None and not ab_norm.empty:
-        if 'customer_name' in ab_norm.columns:
-            ab_customers = ab_norm['customer_name'].dropna().unique()
-            all_customers.update(ab_customers)
-            logger.info(f"[[CUSTOMER_COUNT]] Adoption barriers: {len(ab_customers)} customers")
-        elif 'BU_NAME' in ab_norm.columns:
-            ab_customers = ab_norm['BU_NAME'].dropna().unique()
-            all_customers.update(ab_customers)
-            logger.info(f"[[CUSTOMER_COUNT]] Adoption barriers (BU_NAME): {len(ab_customers)} customers")
-    
-    # From CSOne cases - check ALL possible columns (not just first match)
-    if csone_df is not None and not csone_df.empty:
-        csone_customers = set()
-        for col in ['customer_name', 'Customer Name', 'Customer', 'BU_NAME', 'Account Name', 'Account_Name']:
-            if col in csone_df.columns:
-                csone_customers.update(csone_df[col].dropna().unique())
-                # Don't break - check all columns to get customers from all sources
-        all_customers.update(csone_customers)
-        logger.info(f"[[CUSTOMER_COUNT]] CSOne cases: {len(csone_customers)} customers")
-    
-    # From CSConsole action plans - check ALL possible columns
-    if csconsole_action_plans is not None and not csconsole_action_plans.empty:
-        ap_customers = set()
-        for col in ['BU_NAME', 'CUSTOMER_NAME', 'ACCOUNT_NAME']:
-            if col in csconsole_action_plans.columns:
-                ap_customers.update(csconsole_action_plans[col].dropna().unique())
-                # Don't break - check all columns
-        all_customers.update(ap_customers)
-        logger.info(f"[[CUSTOMER_COUNT]] CSConsole action plans: {len(ap_customers)} customers")
-    
-    # From CSConsole customer pulse - check ALL possible columns
-    if csconsole_customer_pulse is not None and not csconsole_customer_pulse.empty:
-        pulse_customers = set()
-        for col in ['BU_NAME', 'CUSTOMER_NAME', 'ACCOUNT__C']:
-            if col in csconsole_customer_pulse.columns:
-                pulse_customers.update(csconsole_customer_pulse[col].dropna().unique())
-                # Don't break - check all columns
-        all_customers.update(pulse_customers)
-        logger.info(f"[[CUSTOMER_COUNT]] CSConsole customer pulse: {len(pulse_customers)} customers")
-    
-    # From CSConsole success priorities - check ALL possible columns
-    if csconsole_success_priorities is not None and not csconsole_success_priorities.empty:
-        sp_customers = set()
-        for col in ['RELATED_CUSTOMER__C', 'BU_NAME', 'CUSTOMER_NAME']:
-            if col in csconsole_success_priorities.columns:
-                sp_customers.update(csconsole_success_priorities[col].dropna().unique())
-                # Don't break - check all columns
-        all_customers.update(sp_customers)
-        logger.info(f"[[CUSTOMER_COUNT]] CSConsole success priorities: {len(sp_customers)} customers")
-    
-    # From CSConsole adoption barriers - check ALL possible columns
-    if csconsole_adoption_barriers is not None and not csconsole_adoption_barriers.empty:
-        ab_csconsole_customers = set()
-        for col in ['ACCOUNT_ID_C', 'BU_NAME', 'CUSTOMER_NAME']:
-            if col in csconsole_adoption_barriers.columns:
-                ab_csconsole_customers.update(csconsole_adoption_barriers[col].dropna().unique())
-                # Don't break - check all columns
-        all_customers.update(ab_csconsole_customers)
-        logger.info(f"[[CUSTOMER_COUNT]] CSConsole adoption barriers: {len(ab_csconsole_customers)} customers")
-    
-    # Note: External bugs and incidents typically don't contain customer names
-    # They are used for correlation and context, not for customer counting
-    # Customer counting is done from internal data sources above
-    
+    customer_lookup = build_customer_lookup(team_subs_df)
+    account_to_customer = customer_lookup.get("account_to_customer", {})
+
+    def _collect_from_df(df: pd.DataFrame, customer_cols: List[str], account_cols: List[str], label: str):
+        if df is None or df.empty:
+            return
+        before = len(all_customers)
+        for col in customer_cols:
+            if col in df.columns:
+                values = [normalize_customer_name(v) for v in df[col].dropna().tolist()]
+                all_customers.update(v for v in values if v != "Unknown")
+        for col in account_cols:
+            if col in df.columns:
+                for account_id in df[col].dropna().astype(str).tolist():
+                    mapped = account_to_customer.get(account_id.strip())
+                    if mapped:
+                        all_customers.add(normalize_customer_name(mapped))
+        logger.info(f"[[CUSTOMER_COUNT]] {label}: +{len(all_customers) - before} customers")
+
+    _collect_from_df(
+        team_subs_df,
+        customer_cols=["BU_NAME"],
+        account_cols=["ACCOUNT_ID_C"],
+        label="Team subscriptions",
+    )
+    _collect_from_df(
+        ab_norm,
+        customer_cols=["customer_name", "BU_NAME", "CUSTOMER_NAME"],
+        account_cols=["ACCOUNT_ID_C"],
+        label="Adoption barriers",
+    )
+    _collect_from_df(
+        csone_df,
+        customer_cols=["customer_name", "Customer Name", "Customer", "BU_NAME", "Account Name", "Account_Name"],
+        account_cols=["ACCOUNT_ID_C", "ACCOUNT_ID"],
+        label="CSOne cases",
+    )
+    _collect_from_df(
+        csconsole_action_plans,
+        customer_cols=["BU_NAME", "CUSTOMER_NAME", "ACCOUNT_NAME"],
+        account_cols=["ACCOUNT_ID_C"],
+        label="CSConsole action plans",
+    )
+    _collect_from_df(
+        csconsole_customer_pulse,
+        customer_cols=["BU_NAME", "CUSTOMER_NAME"],
+        account_cols=["ACCOUNT__C", "ACCOUNT_ID_C"],
+        label="CSConsole customer pulse",
+    )
+    _collect_from_df(
+        csconsole_success_priorities,
+        customer_cols=["RELATED_CUSTOMER__C", "CUSTOMER_BU_NAME__C", "BU_NAME", "CUSTOMER_NAME"],
+        account_cols=["ACCOUNT_ID_C"],
+        label="CSConsole success priorities",
+    )
+    _collect_from_df(
+        csconsole_adoption_barriers,
+        customer_cols=["BU_NAME", "CUSTOMER_NAME"],
+        account_cols=["ACCOUNT_ID_C"],
+        label="CSConsole adoption barriers",
+    )
+
     logger.info(f"[[CUSTOMER_COUNT]] TOTAL unique customers from all sources: {len(all_customers)}")
     return all_customers
 
@@ -4548,9 +4520,9 @@ def run_compact_analysis(analysis_id):
                 critical_abs = ab_norm[ab_norm[severity_col].astype(str).str.contains('Critical|High', case=False, na=False)]
                 logger.info(f"   - Critical ABs found using column '{severity_col}': {len(critical_abs)} rows")
             else:
-                # FIXED: If no severity column, use ALL records (can't filter without severity)
-                critical_abs = ab_norm
-                logger.info(f"   - No severity column found, using ALL {len(ab_norm)} ABs")
+                # Unknown severity should not be auto-treated as high.
+                critical_abs = pd.DataFrame(columns=ab_norm.columns)
+                logger.info(f"   - No severity column found, critical AB count set to 0")
         
         escalated_cases = pd.DataFrame()
         if not csone_df.empty:
@@ -4561,9 +4533,8 @@ def run_compact_analysis(analysis_id):
                 escalated_cases = csone_df[csone_df[severity_col].astype(str).str.contains('P1|P2|Critical|High', case=False, na=False)]
                 logger.info(f"   - Escalated cases found using column '{severity_col}': {len(escalated_cases)} rows")
             else:
-                # FIXED: If no severity column, use ALL records (can't filter without severity)
-                escalated_cases = csone_df
-                logger.info(f"   - No severity/priority column found, using ALL {len(csone_df)} cases")
+                escalated_cases = pd.DataFrame(columns=csone_df.columns)
+                logger.info(f"   - No severity/priority column found, escalated case count set to 0")
         
         # Create high-risk customers based on data availability
         high_risk_customers = pd.DataFrame()
@@ -4973,234 +4944,54 @@ def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame
         ext_incidents: List of service incidents from status.webex.com (optional)
     """
     logger.info(f"[RENEWAL] Calculating simple renewal risk for: {customer_name}")
-    
-    risk_score = 0
-    risk_factors = []
-    key_findings = []
-    recommendations = []
-    
-    # 1. Adoption Barriers Analysis (0-30 points)
-    ab_score = 0
-    if not customer_ab.empty:
-        ab_count = len(customer_ab)
-        key_findings.append(f"{ab_count} adoption barriers identified")
-        
-        # High severity barriers
-        if 'SEVERITY_C' in customer_ab.columns:
-            critical_abs = customer_ab[customer_ab['SEVERITY_C'].astype(str).str.contains('Critical|High', case=False, na=False)]
-            if len(critical_abs) > 0:
-                ab_score += min(len(critical_abs) * 5, 15)
-                risk_factors.append(f"{len(critical_abs)} critical/high severity adoption barriers")
-                recommendations.append("Address critical adoption barriers immediately")
-        
-        # Open barriers
-        if 'AB_STATUS_C' in customer_ab.columns:
-            open_abs = customer_ab[~customer_ab['AB_STATUS_C'].astype(str).str.contains('Closed|Resolved', case=False, na=False)]
-            if len(open_abs) > 0:
-                ab_score += min(len(open_abs) * 2, 10)
-                risk_factors.append(f"{len(open_abs)} open/unresolved adoption barriers")
-        
-        # Any barriers add base risk
-        if ab_count > 0:
-            ab_score += min(ab_count, 5)
-    else:
-        key_findings.append("No adoption barriers found - positive indicator")
-    
-    risk_score += ab_score
-    logger.info(f"[RENEWAL] Adoption barrier risk score: {ab_score}/30")
-    
-    # 2. Support Cases Analysis (0-30 points)
-    csone_score = 0
-    if not customer_csone.empty:
-        case_count = len(customer_csone)
-        key_findings.append(f"{case_count} support cases in last {days} days")
-        
-        # High case volume indicates problems
-        if case_count > 10:
-            csone_score += 15
-            risk_factors.append(f"High support volume: {case_count} cases")
-            recommendations.append("Review recurring support issues and implement proactive solutions")
-        elif case_count > 5:
-            csone_score += 10
-            risk_factors.append(f"Elevated support volume: {case_count} cases")
-        elif case_count > 0:
-            csone_score += 5
-        
-        # Priority cases
-        if 'Severity' in customer_csone.columns:
-            p1_cases = customer_csone[customer_csone['Severity'].astype(str).str.contains('P1|Critical', case=False, na=False)]
-            p2_cases = customer_csone[customer_csone['Severity'].astype(str).str.contains('P2|High', case=False, na=False)]
-            
-            if len(p1_cases) > 0:
-                csone_score += min(len(p1_cases) * 5, 10)
-                risk_factors.append(f"{len(p1_cases)} P1/Critical priority cases")
-                recommendations.append("Escalate P1 cases and ensure executive visibility")
-            
-            if len(p2_cases) > 0:
-                csone_score += min(len(p2_cases) * 2, 5)
-    else:
-        key_findings.append("No recent support cases - positive indicator")
-    
-    risk_score += csone_score
-    logger.info(f"[RENEWAL] Support case risk score: {csone_score}/30")
-    
-    # 2.5. BEMS Escalation Analysis (0-20 points) - CRITICAL for renewal risk
-    bems_score = 0
-    bems_count = 0
+    customer_subs = (
+        team_subs_df[team_subs_df['BU_NAME'] == customer_name].copy()
+        if team_subs_df is not None and not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns
+        else pd.DataFrame()
+    )
+    normalized_csone = add_case_lifecycle_fields(customer_csone)
+    profile = compute_customer_risk_profile(
+        customer_name=customer_name,
+        customer_ab=customer_ab if customer_ab is not None else pd.DataFrame(),
+        customer_csone=normalized_csone,
+        customer_pulse=pd.DataFrame(),
+        customer_action_plans=pd.DataFrame(),
+        customer_subs=customer_subs,
+        ext_incidents=ext_incidents,
+    )
+
     bems_ids = []
-    
-    if not customer_csone.empty:
-        # Check Transaction ID column (primary BEMS source)
-        if 'Transaction ID' in customer_csone.columns:
-            bems_from_tid = customer_csone[customer_csone['Transaction ID'].astype(str).str.contains('BEMS', case=False, na=False)]
-            for _, row in bems_from_tid.iterrows():
-                tid = str(row.get('Transaction ID', ''))
-                if 'BEMS' in tid.upper():
-                    bems_ids.append(tid)
-            bems_count += len(bems_from_tid)
-        
-        # Check bemscsc_refs column (secondary BEMS source)
-        if 'bemscsc_refs' in customer_csone.columns:
-            import re
-            for _, row in customer_csone.iterrows():
-                refs = str(row.get('bemscsc_refs', ''))
-                bems_matches = re.findall(r'BEMS[-]?\d+', refs, re.IGNORECASE)
-                for bems_id in bems_matches:
-                    if bems_id.upper() not in bems_ids:
-                        bems_ids.append(bems_id.upper())
-                        bems_count += 1
-    
-    if bems_count > 0:
-        # BEMS escalations are CRITICAL - each one adds significant risk
-        bems_score = min(bems_count * 10, 20)  # Max 20 points
-        risk_factors.append(f"{bems_count} BEMS escalations (Back-End Engineering) - CRITICAL")
-        # FIXED: Show ALL BEMS IDs
-        key_findings.append(f"BEMS IDs: {', '.join([f'[{bid}]' for bid in bems_ids])}")
-        recommendations.insert(0, f"URGENT: Address {bems_count} BEMS escalations requiring backend engineering attention")
-        logger.info(f"[RENEWAL] Found {bems_count} BEMS escalations: {bems_ids}")
-    
-    risk_score += bems_score
-    logger.info(f"[RENEWAL] BEMS escalation risk score: {bems_score}/20")
-    
-    # 3. Subscription/Contract Analysis (0-20 points)
-    contract_score = 0
-    if not team_subs_df.empty:
-        customer_subs = team_subs_df[team_subs_df['BU_NAME'] == customer_name] if 'BU_NAME' in team_subs_df.columns else pd.DataFrame()
-        
-        if not customer_subs.empty:
-            sub_count = len(customer_subs)
-            key_findings.append(f"{sub_count} active subscriptions")
-            
-            # Check for renewal risk indicators in subscription data
-            if 'RENEWAL_RISK_CATEGORY' in customer_subs.columns:
-                high_risk = customer_subs[customer_subs['RENEWAL_RISK_CATEGORY'].astype(str).str.contains('High|Critical', case=False, na=False)]
-                if len(high_risk) > 0:
-                    contract_score += 15
-                    risk_factors.append(f"{len(high_risk)} high-risk subscriptions")
-            
-            if 'STATUS_C' in customer_subs.columns:
-                inactive = customer_subs[customer_subs['STATUS_C'].astype(str).str.contains('Inactive|Expired', case=False, na=False)]
-                if len(inactive) > 0:
-                    contract_score += 5
-                    risk_factors.append(f"{len(inactive)} inactive/expired subscriptions")
-        else:
-            contract_score += 10  # No subscription data is concerning
-            risk_factors.append("No subscription data found for customer")
-    
-    risk_score += contract_score
-    logger.info(f"[RENEWAL] Contract risk score: {contract_score}/20")
-    
-    # 3.5. Service Incidents Analysis (0-15 points) - NEW: Factor in status.webex.com incidents
-    incident_score = 0
-    if ext_incidents and len(ext_incidents) > 0:
-        incident_count = len(ext_incidents)
-        key_findings.append(f"{incident_count} service incidents from status.webex.com during analysis period")
-        
-        # Count high-impact incidents (investigating, identified, monitoring)
-        high_impact_statuses = ['investigating', 'identified', 'monitoring']
-        high_impact_incidents = [inc for inc in ext_incidents 
-                                 if inc.get('status', '').lower() in high_impact_statuses]
-        high_impact_count = len(high_impact_incidents)
-        
-        if high_impact_count > 0:
-            # High-impact incidents significantly affect renewal risk
-            incident_score = min(high_impact_count * 3, 15)  # Max 15 points (3 per high-impact incident)
-            risk_factors.append(f"{high_impact_count} high-impact service incidents (status.webex.com)")
-            recommendations.append(f"Review {high_impact_count} service incidents and correlate with customer support cases")
-            key_findings.append(f"Service incidents can directly impact customer satisfaction and renewal probability")
-        elif incident_count > 5:
-            # Even resolved incidents indicate service instability
-            incident_score = min(incident_count, 5)  # Max 5 points for volume
-            risk_factors.append(f"{incident_count} service incidents (may indicate service instability)")
-    else:
-        key_findings.append("No service incidents from status.webex.com - positive indicator")
-    
-    risk_score += incident_score
-    logger.info(f"[RENEWAL] Service incident risk score: {incident_score}/15")
-    
-    # 4. Engagement Score (0-20 points) - based on lack of issues
-    engagement_score = 0
-    # If lots of issues, customer is engaged but struggling
-    # If no issues, could be good (adopted well) or bad (disengaged)
-    total_issues = len(customer_ab) + len(customer_csone)
-    if total_issues == 0:
-        # No issues could mean disengagement - add moderate risk
-        engagement_score = 10
-        risk_factors.append("Low engagement detected - no recent support or adoption activity")
-        recommendations.append("Schedule proactive customer health check")
-    elif total_issues > 15:
-        engagement_score = 15
-        risk_factors.append("Customer experiencing multiple issues - high churn risk")
-        recommendations.append("Executive intervention recommended")
-    
-    risk_score += engagement_score
-    logger.info(f"[RENEWAL] Engagement risk score: {engagement_score}/20")
-    
-    # Cap at 100
-    risk_score = min(risk_score, 100)
-    
-    # Determine risk category
-    if risk_score >= 70:
-        risk_category = 'CRITICAL'
-    elif risk_score >= 50:
-        risk_category = 'HIGH'
-    elif risk_score >= 30:
-        risk_category = 'MEDIUM'
-    else:
-        risk_category = 'LOW'
-    
-    # Add default recommendations if none
-    if not recommendations:
-        recommendations = [
-            "Continue regular customer engagement",
-            "Monitor adoption metrics quarterly",
-            "Schedule periodic business reviews"
-        ]
-    
-    logger.info(f"[RENEWAL] Final risk score: {risk_score}/100 ({risk_category})")
-    
-    # Calculate incident metrics for return
+    if not normalized_csone.empty:
+        bems_rows = normalized_csone[normalized_csone.get("is_bems", False)]
+        for _, row in bems_rows.iterrows():
+            tx = str(row.get("Transaction ID", "")).strip()
+            if tx and "BEMS" in tx.upper():
+                bems_ids.append(tx)
+            refs = str(row.get("bemscsc_refs", "")).strip()
+            if refs and "BEMS" in refs.upper():
+                bems_ids.append(refs)
+    bems_ids = sorted(set(bems_ids))
+
     incident_count = len(ext_incidents) if ext_incidents else 0
-    high_impact_incidents = 0
-    if ext_incidents:
-        high_impact_statuses = ['investigating', 'identified', 'monitoring']
-        high_impact_incidents = sum(1 for inc in ext_incidents 
-                                    if inc.get('status', '').lower() in high_impact_statuses)
-    
+    high_impact_incidents = profile["components"]["incidents"]["details"].get("high_impact_count", 0)
+
     return {
         'customer_name': customer_name,
-        'renewal_risk_score': risk_score,
-        'renewal_risk_category': risk_category,
+        'renewal_risk_score': profile['risk_score_0_100'],
+        'renewal_risk_score_10': profile['risk_score_0_10'],
+        'renewal_risk_category': profile['risk_band'],
         'analysis_date': datetime.now().isoformat(),
-        'key_findings': key_findings,
-        'risk_factors': risk_factors,
-        'recommendations': recommendations,
-        'adoption_barriers_count': len(customer_ab),
-        'support_cases_count': len(customer_csone),
-        'bems_escalations_count': bems_count,
+        'key_findings': profile['key_findings'],
+        'risk_factors': profile['risk_factors'],
+        'recommendations': profile['recommendations'],
+        'adoption_barriers_count': len(customer_ab) if customer_ab is not None else 0,
+        'support_cases_count': len(customer_csone) if customer_csone is not None else 0,
+        'bems_escalations_count': profile['components']['support_cases']['details'].get('bems_count', 0),
         'bems_ids': bems_ids,
         'service_incidents_count': incident_count,
         'high_impact_incidents_count': high_impact_incidents,
+        'break_fix_cases_count': profile['components']['support_cases']['details'].get('break_fix_count', 0),
+        'provisioning_cases_count': profile['components']['support_cases']['details'].get('provisioning_count', 0),
         'analysis_period_days': days
     }
 
@@ -5606,7 +5397,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             subject = _first_avail(row, ['NAME', 'SUBJECT_C', 'subject_c', 'title', 'TITLE_C', 'DESCRIPTION_C', 'description', 'Subject', 'Title'], 'N/A')
             if _is_empty(subject):
                 subject = _first_avail_by_hint(row, ['subject', 'title', 'name', 'desc', 'summary', 'issue', 'problem'])
-            severity = _first_avail(row, ['SEVERITY_C', 'severity_c', 'Severity'], 'N/A')
+            severity = _first_avail(row, ['severity_norm', 'SEVERITY_C', 'severity_c', 'Severity'], 'N/A')
             if _is_empty(severity):
                 severity = _first_avail_by_hint(row, ['severity', 'priority'])
             status = _first_avail(row, ['STATUS_C', 'AB_STATUS_C', 'ab_status_c', 'status_c', 'Status'], 'N/A')
@@ -5626,17 +5417,21 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     # Support Cases Summary – customer name in portfolio; cite source
     doc.add_heading('Support Cases Analysis', level=1)
     case_count = renewal_analysis.get('support_cases_count', 0)
+    break_fix_total = renewal_analysis.get('break_fix_cases_count', 0)
+    provisioning_total = renewal_analysis.get('provisioning_cases_count', 0)
     case_para = doc.add_paragraph()
     case_para.add_run(f'Total Support Cases ({days} days): {case_count}\n').bold = True
+    case_para.add_run(f'Case Type Split: break-fix/technical={break_fix_total}, provisioning requests={provisioning_total}\n').bold = True
     if renewal_analysis.get('support_cases_from_snowflake'):
         case_para.add_run('Source: Snowflake SUPPORT_CASES (no CSOne file provided). BEMS are only from CSOne (TAC).\n').italic = True
     else:
         case_para.add_run('Source: CSOne (TAC case data).\n').italic = True
     
-    if not customer_csone.empty:
+    customer_csone_display = add_case_lifecycle_fields(customer_csone) if customer_csone is not None and not customer_csone.empty else customer_csone
+    if customer_csone_display is not None and not customer_csone_display.empty:
         # FIXED: Show ALL support cases with customer name (portfolio), TAC case numbers, age
         doc.add_paragraph('All Support Cases (by customer where applicable):', style='Heading 3')
-        for i, (_, row) in enumerate(customer_csone.iterrows()):
+        for i, (_, row) in enumerate(customer_csone_display.iterrows()):
             p = doc.add_paragraph(style='List Number')
             cust_label = ''
             if portfolio_mode and all_customers:
@@ -5645,29 +5440,31 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                     cust_label = f'Customer: {cn} — '
             case_num = _na(row.get('Case #', row.get('SR Number', row.get('Case Number', 'N/A'))))
             title_text = _na(row.get('Title', row.get('title', 'N/A')))
-            severity = _na(row.get('Severity', row.get('Highest Priority', 'N/A')))
-            status = _na(row.get('Status', row.get('Case Status', 'N/A')))
-            age_str = ''
-            date_opened = row.get('Date/Time Opened', None)
-            if date_opened:
+            severity = _na(row.get('severity_norm', row.get('Severity', row.get('Highest Priority', 'N/A'))))
+            status = _na(row.get('case_status_norm', row.get('Status', row.get('Case Status', 'N/A'))))
+            open_dt = row.get('open_date', row.get('Date/Time Opened', None))
+            close_dt = row.get('closed_date', None)
+            open_age = row.get('open_age_days', None)
+            case_type = _na(row.get('case_type_class', 'unknown'))
+            lifecycle = []
+            if pd.notna(open_dt):
                 try:
-                    if isinstance(date_opened, str):
-                        date_opened = pd.to_datetime(date_opened, errors='coerce')
-                    if pd.notna(date_opened):
-                        days_open = (datetime.now() - date_opened).days
-                        if days_open > 30:
-                            age_str = ', open >30 days'
-                        elif days_open > 14:
-                            age_str = ', open >14 days'
-                        elif days_open > 7:
-                            age_str = ', open >7 days'
+                    lifecycle.append(f"opened {pd.to_datetime(open_dt).strftime('%Y-%m-%d')}")
                 except (TypeError, ValueError) as _age_err:
                     logger.debug(f"Case age calculation skipped: {_age_err}")
+            if pd.notna(close_dt):
+                try:
+                    lifecycle.append(f"closed {pd.to_datetime(close_dt).strftime('%Y-%m-%d')}")
+                except (TypeError, ValueError) as _age_err:
+                    logger.debug(f"Case age calculation skipped: {_age_err}")
+            if pd.notna(open_age):
+                lifecycle.append(f"{int(open_age)} days open")
+            age_str = f", {', '.join(lifecycle)}" if lifecycle else ""
             if cust_label:
                 p.add_run(cust_label).bold = True
             p.add_run(f'TAC {case_num}: ').bold = True
             p.add_run(str(title_text))
-            p.add_run(f' [Severity: {severity}, Status: {status}{age_str}]').font.size = Pt(9)
+            p.add_run(f' [Severity: {severity}, Status: {status}, Type: {case_type}{age_str}]').font.size = Pt(9)
     else:
         doc.add_paragraph('No support cases in the analysis period - this is a positive indicator.')
     
@@ -5690,6 +5487,11 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         bems_info.add_run('Unresolved engineering escalations often lead to customer churn, as customers seek vendors with more stable resolution paths. ')
         bems_info.add_run('Source: CSOne (Transaction ID, bemscsc_refs).')
         bems_info.paragraph_format.left_indent = Inches(0.25)
+        mix_para = doc.add_paragraph()
+        mix_para.add_run(
+            f"Case mix: break-fix/technical={renewal_analysis.get('break_fix_cases_count', 0)}, "
+            f"provisioning requests={renewal_analysis.get('provisioning_cases_count', 0)}"
+        ).bold = True
         
         if bems_ids:
             doc.add_paragraph()
@@ -5699,8 +5501,8 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             ids_para.add_run(', '.join([f'[{bid}]' for bid in bems_ids]))
         
         # Show BEMS cases from CSOne
-        if not customer_csone.empty and 'Transaction ID' in customer_csone.columns:
-            bems_cases = customer_csone[customer_csone['Transaction ID'].astype(str).str.contains('BEMS', case=False, na=False)]
+        bems_cases, _ = detect_bems_escalations(customer_csone_display if customer_csone_display is not None else pd.DataFrame())
+        if not bems_cases.empty:
             if not bems_cases.empty:
                 doc.add_paragraph()
                 doc.add_paragraph('All TAC Cases with BEMS Escalations:', style='Heading 3')
@@ -5710,11 +5512,13 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                     case_num = row.get('Case #', row.get('SR Number', 'N/A'))
                     title_text = row.get('Title', 'N/A')
                     trans_id = row.get('Transaction ID', 'N/A')
+                    case_type = row.get('case_type_class', 'unknown')
                     # FIXED: Don't truncate title - show full text
                     p.add_run(f'Case: {case_num} - {title_text} ')
                     tid_run = p.add_run(f'[BEMS: {trans_id}]')
                     tid_run.font.color.rgb = RGBColor(180, 0, 0)
                     tid_run.bold = True
+                    p.add_run(f" (Type: {case_type})").italic = True
     else:
         doc.add_heading('BEMS Escalation Analysis', level=1)
         no_bems = doc.add_paragraph()
@@ -5900,11 +5704,13 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             status = _first_avail(row, ['STATUS_C', 'status_c'], 'N/A')
             if _is_empty(status):
                 status = _first_avail_by_hint(row, ['status'])
+            opened_dt = _first_avail(row, ['CREATED_DATE', 'CREATEDDATE', 'OPEN_DATE_C'], 'N/A')
+            closed_dt = _first_avail(row, ['CLOSED_DATE', 'CLOSED_DATE_C', 'RESOLVED_DATE', 'LASTMODIFIEDDATE'], 'N/A')
             subject = _na(subject)
             status = _na(status)
             if cust_label:
                 p.add_run(cust_label).bold = True
-            p.add_run(f'{subject} [Status: {status}]')
+            p.add_run(f'{subject} [Status: {status}, Opened: {_na(opened_dt)}, Closed: {_na(closed_dt)}]')
     
     if customer_customer_pulse is not None and not customer_customer_pulse.empty:
         doc.add_heading('CSConsole Customer Pulse', level=1)
@@ -5932,13 +5738,15 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if _is_empty(rating):
                 rating = _first_avail_by_hint(row, ['pulse', 'rating', 'score'])
             comments = _first_avail(row, ['COMMENTS__C', 'CUSTOMER_PULSE__C', 'comments__c', 'Comments'], 'N/A')
+            opened_dt = _first_avail(row, ['CREATED_DATE', 'CREATEDDATE', 'OPEN_DATE_C'], 'N/A')
+            closed_dt = _first_avail(row, ['CLOSED_DATE', 'CLOSED_DATE_C', 'RESOLVED_DATE', 'LASTMODIFIEDDATE'], 'N/A')
             rating = _pulse_rating(rating)
             comments = _na(comments)
             if isinstance(comments, str) and len(comments) > 200:
                 comments = comments[:200] + '...'
             if cust_label:
                 p.add_run(cust_label).bold = True
-            p.add_run(f'Rating: {rating} - {comments}')
+            p.add_run(f'Rating: {rating} - {comments} [Opened: {_na(opened_dt)}, Closed: {_na(closed_dt)}]')
     
     if customer_success_priorities is not None and not customer_success_priorities.empty:
         doc.add_heading('CSConsole Success Priorities', level=1)
@@ -5964,9 +5772,11 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                     cust_label = f'Customer: {cn} — '
             subject = _na(_first_avail(row, ['SUCCESS_PRIORITY_TITLE__C', 'SUBJECT_C', 'title', 'NAME', 'TITLE_C'], 'N/A'))
             status = _na(_first_avail(row, ['STATUS__C', 'STATUS_C', 'status_c'], 'N/A'))
+            opened_dt = _na(_first_avail(row, ['CREATED_DATE', 'CREATEDDATE', 'OPEN_DATE_C'], 'N/A'))
+            closed_dt = _na(_first_avail(row, ['CLOSED_DATE', 'CLOSED_DATE_C', 'RESOLVED_DATE', 'LASTMODIFIEDDATE'], 'N/A'))
             if cust_label:
                 p.add_run(cust_label).bold = True
-            p.add_run(f'{subject} [Status: {status}]')
+            p.add_run(f'{subject} [Status: {status}, Opened: {opened_dt}, Closed: {closed_dt}]')
     
     # FIXED: Add Status.webex.com Incidents Section with Renewal Risk + Impact + Source
     if ext_incidents:
@@ -6040,6 +5850,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     # Troubled Accounts Deep Dive – portfolio only: at-risk customers with barriers, pulse, defects, BEMS, incidents, actionable steps
     if portfolio_mode and all_customers and len(all_customers) > 0:
         troubled = set()
+        all_customers_norm = {normalize_customer_name(c): c for c in (all_customers or [])}
         bems_cases = pd.DataFrame()
         if not customer_csone.empty:
             bems_cases, _ = detect_bems_escalations(customer_csone)
@@ -6050,7 +5861,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                 if r and str(r).upper() == 'RED':
                     cn = _na(row.get('BU_NAME', row.get('CUSTOMER_NAME', row.get('RELATED_CUSTOMER__C', ''))))
                     if cn and cn != 'N/A':
-                        troubled.add(cn)
+                        troubled.add(normalize_customer_name(cn))
         # "Customer Considering Competitor" or "Intent to Opt Out" barriers
         if not customer_ab.empty and 'customer_name' in customer_ab.columns:
             for _, row in customer_ab.iterrows():
@@ -6058,7 +5869,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                 if 'customer considering competitor' in subj or 'intent to opt out' in subj or 'no value fit' in subj:
                     cn = _na(row.get('customer_name', row.get('BU_NAME', '')))
                     if cn and cn != 'N/A':
-                        troubled.add(cn)
+                        troubled.add(normalize_customer_name(cn))
         # High barrier count (>=3 open barriers per customer)
         if not customer_ab.empty:
             cc = 'customer_name' if 'customer_name' in customer_ab.columns else ('BU_NAME' if 'BU_NAME' in customer_ab.columns else None)
@@ -6066,20 +5877,23 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                 for cust in all_customers:
                     cust_ab = customer_ab[customer_ab[cc] == cust]
                     if len(cust_ab) >= 3:
-                        troubled.add(cust)
+                        troubled.add(normalize_customer_name(cust))
         # Customers with linked defects
+        defect_map_norm = {}
         if software_defects and software_defects.get('defect_by_customer'):
-            for c in software_defects['defect_by_customer'].keys():
-                troubled.add(c)
+            for c, ids in software_defects['defect_by_customer'].items():
+                cn = normalize_customer_name(c)
+                troubled.add(cn)
+                defect_map_norm.setdefault(cn, []).extend(ids)
         # Customers with BEMS escalations (engineering escalations often drive churn)
         if not bems_cases.empty:
             for col in ['customer_name', 'Customer Name', 'BU_NAME']:
                 if col in bems_cases.columns:
                     for c in bems_cases[col].dropna().unique().tolist():
                         if c and str(c).strip():
-                            troubled.add(str(c).strip())
+                            troubled.add(normalize_customer_name(c))
                     break
-        troubled_list = sorted([c for c in troubled if c in (all_customers or [])]) or sorted(troubled)
+        troubled_list = sorted([c for c in troubled if c in all_customers_norm]) or sorted(troubled)
         if troubled_list:
             doc.add_heading('Troubled Accounts Deep Dive – Steps to Prevent Churn', level=1)
             intro = doc.add_paragraph()
@@ -6112,8 +5926,8 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                         p = doc.add_paragraph(style='List Bullet')
                         p.add_run('Adoption barriers: ').bold = True
                         p.add_run('; '.join(barrier_titles[:5]) + ('…' if len(cust_ab) > 5 else ''))
-                if software_defects and software_defects.get('defect_by_customer') and cust in software_defects['defect_by_customer']:
-                    ids = sorted(set(software_defects['defect_by_customer'][cust]))
+                if defect_map_norm and cust in defect_map_norm:
+                    ids = sorted(set(defect_map_norm[cust]))
                     reasons.append(f'Linked defects: {", ".join(ids)} (Source: CSOne/Adoption Barriers)')
                     p = doc.add_paragraph(style='List Bullet')
                     p.add_run('Defect IDs: ').bold = True
@@ -6476,30 +6290,52 @@ def run_customer_renewal_analysis(analysis_id):
                             customer_ab.loc[still_missing, 'customer_name'] = customer_ab.loc[still_missing, 'BU_NAME']
             
             # Portfolio: filter by all customers
+            norm_customers = {normalize_customer_name(c) for c in (all_customers or [])}
             if not csconsole_action_plans.empty and 'BU_NAME' in csconsole_action_plans.columns and all_customers:
-                customer_action_plans = csconsole_action_plans[csconsole_action_plans['BU_NAME'].isin(all_customers)]
+                customer_action_plans = csconsole_action_plans[
+                    csconsole_action_plans['BU_NAME'].fillna("").astype(str).apply(normalize_customer_name).isin(norm_customers)
+                ]
             else:
                 customer_action_plans = pd.DataFrame()
             if not csconsole_customer_pulse.empty and 'BU_NAME' in csconsole_customer_pulse.columns and all_customers:
-                customer_customer_pulse = csconsole_customer_pulse[csconsole_customer_pulse['BU_NAME'].isin(all_customers)]
+                customer_customer_pulse = csconsole_customer_pulse[
+                    csconsole_customer_pulse['BU_NAME'].fillna("").astype(str).apply(normalize_customer_name).isin(norm_customers)
+                ]
             else:
                 customer_customer_pulse = pd.DataFrame()
             if not csconsole_success_priorities.empty and 'RELATED_CUSTOMER__C' in csconsole_success_priorities.columns and all_customers:
-                customer_success_priorities = csconsole_success_priorities[csconsole_success_priorities['RELATED_CUSTOMER__C'].isin(all_customers)]
+                customer_success_priorities = csconsole_success_priorities[
+                    csconsole_success_priorities['RELATED_CUSTOMER__C'].fillna("").astype(str).apply(normalize_customer_name).isin(norm_customers)
+                ]
+            elif not csconsole_success_priorities.empty and 'CUSTOMER_BU_NAME__C' in csconsole_success_priorities.columns and all_customers:
+                customer_success_priorities = csconsole_success_priorities[
+                    csconsole_success_priorities['CUSTOMER_BU_NAME__C'].fillna("").astype(str).apply(normalize_customer_name).isin(norm_customers)
+                ]
             else:
                 customer_success_priorities = pd.DataFrame()
         else:
             # Single customer: filter by specific customer
+            norm_customer_name = normalize_customer_name(customer_name)
             if not csconsole_action_plans.empty and 'BU_NAME' in csconsole_action_plans.columns:
-                customer_action_plans = csconsole_action_plans[csconsole_action_plans['BU_NAME'] == customer_name]
+                customer_action_plans = csconsole_action_plans[
+                    csconsole_action_plans['BU_NAME'].fillna("").astype(str).apply(normalize_customer_name) == norm_customer_name
+                ]
             else:
                 customer_action_plans = pd.DataFrame()
             if not csconsole_customer_pulse.empty and 'BU_NAME' in csconsole_customer_pulse.columns:
-                customer_customer_pulse = csconsole_customer_pulse[csconsole_customer_pulse['BU_NAME'] == customer_name]
+                customer_customer_pulse = csconsole_customer_pulse[
+                    csconsole_customer_pulse['BU_NAME'].fillna("").astype(str).apply(normalize_customer_name) == norm_customer_name
+                ]
             else:
                 customer_customer_pulse = pd.DataFrame()
             if not csconsole_success_priorities.empty and 'RELATED_CUSTOMER__C' in csconsole_success_priorities.columns:
-                customer_success_priorities = csconsole_success_priorities[csconsole_success_priorities['RELATED_CUSTOMER__C'] == customer_name]
+                customer_success_priorities = csconsole_success_priorities[
+                    csconsole_success_priorities['RELATED_CUSTOMER__C'].fillna("").astype(str).apply(normalize_customer_name) == norm_customer_name
+                ]
+            elif not csconsole_success_priorities.empty and 'CUSTOMER_BU_NAME__C' in csconsole_success_priorities.columns:
+                customer_success_priorities = csconsole_success_priorities[
+                    csconsole_success_priorities['CUSTOMER_BU_NAME__C'].fillna("").astype(str).apply(normalize_customer_name) == norm_customer_name
+                ]
             else:
                 customer_success_priorities = pd.DataFrame()
         # Process CSOne data; when no file, optionally try Snowflake SUPPORT_CASES so case counts are not always 0
@@ -6716,6 +6552,12 @@ def run_customer_renewal_analysis(analysis_id):
                 'medium_risk_customers': medium_risk,
                 'low_risk_customers': [name for name, a in portfolio_renewal_analyses.items() if a.get('renewal_risk_score', a.get('overall_risk_score', 0)) < 30]
             }
+            renewal_analysis['break_fix_cases_count'] = sum(
+                a.get('break_fix_cases_count', 0) for a in portfolio_renewal_analyses.values()
+            )
+            renewal_analysis['provisioning_cases_count'] = sum(
+                a.get('provisioning_cases_count', 0) for a in portfolio_renewal_analyses.values()
+            )
             customer_name_for_report = f"{manager}'s Portfolio"
         else:
             # Single customer renewal
@@ -6736,27 +6578,15 @@ def run_customer_renewal_analysis(analysis_id):
         renewal_analysis['software_defects'] = software_defects
         renewal_analysis['psirt_vulnerabilities'] = psirt_vulns
         
-        # Enhance renewal risk score with incident impact
-        if ext_incidents and len(ext_incidents) > 0:
-            high_impact_incidents = sum(1 for inc in ext_incidents 
-                                        if inc.get('status', '').lower() in ['investigating', 'identified', 'monitoring'])
-            # Increase risk score based on high-impact incidents (max +15 points)
-            incident_risk_penalty = min(15, high_impact_incidents * 3)  # 3 points per high-impact incident, max 15
-            original_risk_score = renewal_analysis.get('renewal_risk_score', 0)
-            renewal_analysis['renewal_risk_score'] = min(100, original_risk_score + incident_risk_penalty)
-            renewal_analysis['incident_risk_penalty'] = incident_risk_penalty
-            renewal_analysis['high_impact_incidents'] = high_impact_incidents
-            
-            # Update risk category if needed
-            new_risk_score = renewal_analysis['renewal_risk_score']
-            if new_risk_score >= 70:
-                renewal_analysis['renewal_risk_category'] = 'CRITICAL'
-            elif new_risk_score >= 50:
-                renewal_analysis['renewal_risk_category'] = 'HIGH'
-            elif new_risk_score >= 30:
-                renewal_analysis['renewal_risk_category'] = 'MEDIUM'
-            else:
-                renewal_analysis['renewal_risk_category'] = 'LOW'
+        consistency_check = validate_report_consistency(
+            customer_ab,
+            add_case_lifecycle_fields(customer_csone),
+            defects=software_defects,
+        )
+        if not consistency_check["is_valid"]:
+            raise ValueError(f"Renewal consistency checks failed: {'; '.join(consistency_check['errors'])}")
+        if consistency_check["warnings"]:
+            logger.warning(f"[[CONSISTENCY]] Renewal warnings: {consistency_check['warnings']}")
         
         # Generate renewal charts
         logger.info(f"[[RENEWAL_CHARTS]] Generating renewal charts...")
@@ -7473,22 +7303,75 @@ def run_comprehensive_analysis(analysis_id):
         # Calculate portfolio metrics (defensive: ab_norm/csone_df are never None in this flow, but guard for safety)
         _ab = ab_norm if ab_norm is not None and hasattr(ab_norm, 'empty') else pd.DataFrame()
         _cs = csone_df if csone_df is not None and hasattr(csone_df, 'empty') else pd.DataFrame()
+        _cs_norm = add_case_lifecycle_fields(_cs)
+        _, canonical_bems_count = detect_bems_escalations(_cs_norm)
+
+        def _slice_customer(df: pd.DataFrame, customer: str, customer_cols: List[str]) -> pd.DataFrame:
+            if df is None or df.empty:
+                return pd.DataFrame()
+            for col in customer_cols:
+                if col in df.columns:
+                    mask = df[col].fillna("").astype(str).apply(normalize_customer_name) == normalize_customer_name(customer)
+                    if mask.any():
+                        return df[mask].copy()
+            return pd.DataFrame()
+
+        risk_profiles = {}
+        for customer in all_customers_comprehensive:
+            c_ab = _slice_customer(_ab, customer, ["customer_name", "BU_NAME", "CUSTOMER_NAME"])
+            c_cs = _slice_customer(_cs_norm, customer, ["customer_name", "Customer Name", "BU_NAME"])
+            c_pulse = _slice_customer(csconsole_customer_pulse, customer, ["BU_NAME", "CUSTOMER_NAME", "RELATED_CUSTOMER__C"])
+            c_action = _slice_customer(csconsole_action_plans, customer, ["BU_NAME", "CUSTOMER_NAME"])
+            c_subs = _slice_customer(team_subs_for_customer_counting, customer, ["BU_NAME"])
+            risk_profiles[customer] = compute_customer_risk_profile(
+                customer_name=customer,
+                customer_ab=c_ab,
+                customer_csone=c_cs,
+                customer_pulse=c_pulse,
+                customer_action_plans=c_action,
+                customer_subs=c_subs,
+                ext_incidents=ext_incidents,
+            )
+
+        high_risk_customers = sum(1 for p in risk_profiles.values() if p["risk_band"] in {"HIGH", "CRITICAL"})
+        medium_risk_customers = sum(1 for p in risk_profiles.values() if p["risk_band"] == "MEDIUM")
+        low_risk_customers = sum(1 for p in risk_profiles.values() if p["risk_band"] == "LOW")
+        healthy_customers = sum(1 for p in risk_profiles.values() if p["risk_band"] == "HEALTHY")
+
+        priority_col = "case_priority_norm" if "case_priority_norm" in _cs_norm.columns else ("Severity" if "Severity" in _cs_norm.columns else None)
+        if priority_col:
+            p1_cases = len(_cs_norm[_cs_norm[priority_col].astype(str).str.contains(r"\bP1\b|Critical", case=False, na=False)])
+            p2_cases = len(_cs_norm[_cs_norm[priority_col].astype(str).str.contains(r"\bP2\b|High", case=False, na=False)])
+            p3_cases = len(_cs_norm[_cs_norm[priority_col].astype(str).str.contains(r"\bP3\b|Medium", case=False, na=False)])
+            p4_cases = len(_cs_norm[_cs_norm[priority_col].astype(str).str.contains(r"\bP4\b|Low", case=False, na=False)])
+        else:
+            p1_cases = p2_cases = p3_cases = p4_cases = 0
+
+        break_fix_count = int((_cs_norm["case_type_class"] == "break_fix_technical").sum()) if "case_type_class" in _cs_norm.columns else 0
+        provisioning_count = int((_cs_norm["case_type_class"] == "provisioning_request").sum()) if "case_type_class" in _cs_norm.columns else 0
         portfolio_metrics = {
             'total_customers': len(all_customers_comprehensive),
             'total_barriers': len(_ab) if not _ab.empty else 0,
             'total_cases': len(_cs) if not _cs.empty else 0,
-            'bems_count': len(_cs[_cs['Case Status'].astype(str).str.contains('BEMS', case=False, na=False)]) if not _cs.empty and 'Case Status' in _cs.columns else 0,
-            'high_risk_customers': 0,  # Will be calculated by AI
-            'medium_risk_customers': 0,
-            'low_risk_customers': 0,
-            'healthy_customers': 0,
-            'p1_cases': len(_cs[_cs['Highest Priority'].astype(str).str.contains('P1', case=False, na=False)]) if not _cs.empty and 'Highest Priority' in _cs.columns else 0,
-            'p2_cases': len(_cs[_cs['Highest Priority'].astype(str).str.contains('P2', case=False, na=False)]) if not _cs.empty and 'Highest Priority' in _cs.columns else 0,
-            'p3_cases': len(_cs[_cs['Highest Priority'].astype(str).str.contains('P3', case=False, na=False)]) if not _cs.empty and 'Highest Priority' in _cs.columns else 0,
-            'p4_cases': len(_cs[_cs['Highest Priority'].astype(str).str.contains('P4', case=False, na=False)]) if not _cs.empty and 'Highest Priority' in _cs.columns else 0,
-            'health_score': 'C',  # Default, will be updated by AI
+            'bems_count': canonical_bems_count,
+            'high_risk_customers': high_risk_customers,
+            'medium_risk_customers': medium_risk_customers,
+            'low_risk_customers': low_risk_customers,
+            'healthy_customers': healthy_customers,
+            'p1_cases': p1_cases,
+            'p2_cases': p2_cases,
+            'p3_cases': p3_cases,
+            'p4_cases': p4_cases,
+            'break_fix_cases': break_fix_count,
+            'provisioning_cases': provisioning_count,
+            'health_score': 'B' if healthy_customers >= high_risk_customers else 'C',
             'trend_direction': 'Stable'  # Default
         }
+        consistency = validate_report_consistency(_ab, _cs_norm, portfolio_metrics=portfolio_metrics, risk_data=risk_profiles)
+        if not consistency["is_valid"]:
+            logger.error(f"[[CONSISTENCY]] Errors: {consistency['errors']}")
+        if consistency["warnings"]:
+            logger.warning(f"[[CONSISTENCY]] Warnings: {consistency['warnings']}")
         
         # Add professional title page
         report_builder.add_title_page(status['manager'], status['tech'], status['days'], portfolio_metrics)
@@ -7766,10 +7649,18 @@ def run_comprehensive_analysis(analysis_id):
             else:
                 cust_customer_pulse = filtered_customer_pulse[filtered_customer_pulse['BU_NAME'] == customer_name].copy() if not filtered_customer_pulse.empty and 'BU_NAME' in filtered_customer_pulse.columns else pd.DataFrame()
 
-            if not filtered_success_priorities.empty and customer_account_id_values and 'RELATED_CUSTOMER__C' in filtered_success_priorities.columns:
-                cust_success_priorities = filtered_success_priorities[filtered_success_priorities['RELATED_CUSTOMER__C'].astype(str).isin(customer_account_id_values)]
+            if not filtered_success_priorities.empty and 'RELATED_CUSTOMER__C' in filtered_success_priorities.columns:
+                cust_success_priorities = filtered_success_priorities[
+                    filtered_success_priorities['RELATED_CUSTOMER__C'].fillna("").astype(str).apply(normalize_customer_name)
+                    == normalize_customer_name(customer_name)
+                ]
+            elif not filtered_success_priorities.empty and 'CUSTOMER_BU_NAME__C' in filtered_success_priorities.columns:
+                cust_success_priorities = filtered_success_priorities[
+                    filtered_success_priorities['CUSTOMER_BU_NAME__C'].fillna("").astype(str).apply(normalize_customer_name)
+                    == normalize_customer_name(customer_name)
+                ].copy()
             else:
-                cust_success_priorities = filtered_success_priorities[filtered_success_priorities['CUSTOMER_BU_NAME__C'] == customer_name].copy() if not filtered_success_priorities.empty and 'CUSTOMER_BU_NAME__C' in filtered_success_priorities.columns else pd.DataFrame()
+                cust_success_priorities = pd.DataFrame()
 
             if not filtered_adoption_barriers.empty and customer_account_id_values and 'ACCOUNT_ID_C' in filtered_adoption_barriers.columns:
                 cust_csconsole_adoption_barriers = filtered_adoption_barriers[filtered_adoption_barriers['ACCOUNT_ID_C'].astype(str).isin(customer_account_id_values)]

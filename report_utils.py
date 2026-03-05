@@ -114,14 +114,13 @@ def format_currency(value: Union[int, float, None], decimals: int = 2) -> str:
 # --- Risk Scoring Explanation (transparent methodology) ---
 RISK_SCORING_EXPLANATION = """
 Risk Score Methodology (0–100 scale):
-• Adoption Barriers: Critical/High severity (+5 each, max 15), open barriers (+2 each, max 10), base count (+1 each, max 5). Total max: 30 points.
-• Support Cases: Volume-based (5–15 points for 1–10+ cases), P1/Critical (+5 each, max 10), P2/High (+2 each, max 5). Total max: 30 points.
-• BEMS Escalations: +10 per escalation, max 20 points. BEMS indicates engineering-level issues that often drive churn.
-• Contract/Subscription: High-risk or inactive subscriptions add 5–15 points. No subscription data: +10. Total max: 20 points.
-• Service Incidents: High-impact (investigating/identified/monitoring) add +3 each, max 15 points. Source: status.webex.com.
-• Engagement: No issues may indicate disengagement (+10); high issue volume indicates churn risk (+15). Total max: 20 points.
+• Deterministic weighted model (same across reports): Adoption Barriers 28%, Support Cases 27%, Customer Pulse 15%, Action Plans 10%, Incidents 8%, Contract 8%, Engagement 4%.
+• Adoption barriers use derived severity, open/closed state, and aging (60+ day open barriers increase risk).
+• Support cases use normalized priority (P1-P4), BEMS detection, recency, and case-type mix (break-fix vs provisioning).
+• Customer pulse uses Poor/Bad trend impact; action plans use unresolved ratio.
+• Missing fields are treated as unknown (neutral/low-confidence), not auto-promoted to high severity.
 
-Categories: CRITICAL (≥70), HIGH (50–69), MEDIUM (30–49), LOW (<30).
+Categories: CRITICAL (≥75), HIGH (55–74), MEDIUM (35–54), LOW (15–34), HEALTHY (<15).
 """
 
 

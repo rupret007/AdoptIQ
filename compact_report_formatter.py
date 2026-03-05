@@ -16,6 +16,9 @@ from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.shared import OxmlElement, qn
+from risk_scoring import compute_customer_risk_profile
+from data_normalization import add_case_lifecycle_fields, detect_bems_mask, normalize_customer_name
+from report_consistency import validate_report_consistency
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -205,38 +208,28 @@ class CompactReportFormatter:
             csone_data = csone_data if csone_data is not None else pd.DataFrame()
             self.doc.add_heading('At-a-Glance Dashboard', level=1)
             
-            # Calculate metrics
-            total_customers = 0
+            # Calculate metrics from normalized shared fields
+            csone_norm = add_case_lifecycle_fields(csone_data)
+            customer_set = set()
             if not ab_data.empty and 'customer_name' in ab_data.columns:
-                total_customers = ab_data['customer_name'].nunique()
-            if not csone_data.empty and 'customer_name' in csone_data.columns:
-                total_customers = max(total_customers, csone_data['customer_name'].nunique())
-            
-            total_support_cases = len(csone_data) if not csone_data.empty else 0
+                customer_set.update(ab_data['customer_name'].dropna().astype(str).apply(normalize_customer_name))
+            if not csone_norm.empty and 'customer_name' in csone_norm.columns:
+                customer_set.update(csone_norm['customer_name'].dropna().astype(str).apply(normalize_customer_name))
+            total_customers = len([c for c in customer_set if c and c != "Unknown"])
+            total_support_cases = len(csone_norm) if not csone_norm.empty else 0
             
             # Count P1 (Critical) cases
             critical_p1 = 0
             high_p2 = 0
-            if not csone_data.empty:
-                severity_col = None
-                for col in ['Severity', 'Highest Priority', 'Priority']:
-                    if col in csone_data.columns:
-                        severity_col = col
-                        break
-                if severity_col:
-                    sev_series = csone_data[severity_col].astype(str)
-                    critical_p1 = len(sev_series[sev_series.str.contains('1|P1|Critical', case=False, na=False)])
-                    high_p2 = len(sev_series[sev_series.str.contains('2|P2|High', case=False, na=False)])
+            if not csone_norm.empty:
+                sev_series = csone_norm.get('case_priority_norm', pd.Series(dtype=str)).astype(str)
+                critical_p1 = int(sev_series.str.contains(r'P1', case=False, na=False).sum())
+                high_p2 = int(sev_series.str.contains(r'P2', case=False, na=False).sum())
             
             # Count BEMS escalations
             bems_count = 0
-            if not csone_data.empty:
-                bems_mask = pd.Series([False] * len(csone_data), index=csone_data.index)
-                if 'Transaction ID' in csone_data.columns:
-                    bems_mask |= csone_data['Transaction ID'].astype(str).str.contains('BEMS', case=False, na=False)
-                if 'bemscsc_refs' in csone_data.columns:
-                    bems_mask |= csone_data['bemscsc_refs'].astype(str).str.contains('BEMS', case=False, na=False)
-                bems_count = bems_mask.sum()
+            if not csone_norm.empty:
+                bems_count = int(detect_bems_mask(csone_norm).sum())
             
             # Create dashboard table (matches example format)
             dashboard_table = self.doc.add_table(rows=2, cols=5)
@@ -1363,12 +1356,10 @@ class CompactReportFormatter:
             
             risk_p = self.doc.add_paragraph()
             risk_p.add_run('📊 Risk Scoring Methodology:\n').bold = True
-            risk_p.add_run('• Critical adoption barriers: +3 points\n')
-            risk_p.add_run('• High severity adoption barriers: +2 points\n')
-            risk_p.add_run('• P1/P2 support cases: +1 point each\n')
-            risk_p.add_run('• Recent cases (30 days): +0.2 points each\n')
-            risk_p.add_run('• BEMS escalations: +10 points each (max 20)\n')
-            risk_p.add_run('• Risk scores capped at 10 points maximum\n')
+            risk_p.add_run('• Deterministic weighted model reused across reports (0-100 -> displayed as /10)\n')
+            risk_p.add_run('• Inputs: adoption barriers, TAC cases, BEMS, customer pulse, action plans, incidents, contract signals\n')
+            risk_p.add_run('• TAC severity/priority and case type are normalized before scoring\n')
+            risk_p.add_run('• Missing fields are treated as unknown, not auto-escalated to high severity\n')
             
             quality_p = self.doc.add_paragraph()
             quality_p.add_run('✅ Data Quality Assurance:\n').bold = True
@@ -1387,112 +1378,41 @@ def calculate_renewal_risk_scores(ab_data: pd.DataFrame, csone_data: pd.DataFram
     try:
         ab_data = ab_data if ab_data is not None else pd.DataFrame()
         csone_data = csone_data if csone_data is not None else pd.DataFrame()
+        csone_norm = add_case_lifecycle_fields(csone_data)
         risk_data = {}
         
         customers = set()
         if not ab_data.empty and 'customer_name' in ab_data.columns:
-            customers.update(ab_data['customer_name'].dropna().unique())
-        if not csone_data.empty and 'customer_name' in csone_data.columns:
-            customers.update(csone_data['customer_name'].dropna().unique())
+            customers.update(normalize_customer_name(v) for v in ab_data['customer_name'].dropna().unique())
+        if not csone_norm.empty and 'customer_name' in csone_norm.columns:
+            customers.update(normalize_customer_name(v) for v in csone_norm['customer_name'].dropna().unique())
+        customers = {c for c in customers if c and c != "Unknown"}
         
         for customer in customers:
-            score = 0.0
-            risk_factors = []
-            
-            # Adoption barriers scoring
-            if not ab_data.empty:
-                customer_ab = ab_data[ab_data['customer_name'] == customer]
-                if not customer_ab.empty:
-                    # Base score for having adoption barriers
-                    ab_count = len(customer_ab)
-                    score += min(ab_count * 0.5, 3.0)
-                    if ab_count > 0:
-                        risk_factors.append(f"{ab_count} adoption barriers")
-                    
-                    # Critical/High severity penalty
-                    if 'SEVERITY_C' in customer_ab.columns:
-                        critical_count = len(customer_ab[
-                            customer_ab['SEVERITY_C'].astype(str).str.contains('Critical|High', case=False, na=False)
-                        ])
-                    else:
-                        critical_count = 0
-                    score += critical_count * 1.5
-                    if critical_count > 0:
-                        risk_factors.append(f"{critical_count} critical/high severity barriers")
-                    
-                    # Open barriers penalty
-                    status_col = 'AB_STATUS_C' if 'AB_STATUS_C' in customer_ab.columns else ('STATUS_C' if 'STATUS_C' in customer_ab.columns else None)
-                    if status_col:
-                        open_mask = customer_ab[status_col].astype(str).str.contains('Open|New|In Progress', case=False, na=False)
-                        open_count = open_mask.sum()
-                        score += open_count * 0.3
-                        if open_count > 0:
-                            risk_factors.append(f"{int(open_count)} open barrier(s)")
-                        
-                        # Aging barriers penalty (open 60+ days = higher renewal risk)
-                        date_col = next((c for c in ['OPEN_DATE_C', 'CREATED_DATE', 'CREATED_DATE_C'] if c in customer_ab.columns), None)
-                        if date_col and open_count > 0:
-                            try:
-                                ab_copy = customer_ab[open_mask].copy()
-                                ab_copy['_dt'] = pd.to_datetime(ab_copy[date_col], errors='coerce')
-                                aging_cutoff = datetime.now() - timedelta(days=60)
-                                aging_count = (ab_copy['_dt'] < aging_cutoff).sum()
-                                if aging_count > 0:
-                                    score += min(float(aging_count) * 0.5, 2.0)  # Cap aging penalty at 2
-                                    risk_factors.append(f"{int(aging_count)} barrier(s) open 60+ days")
-                            except Exception as _ag_err:
-                                logger.debug(f"Aging barrier calc error: {_ag_err}")
-            
-            # Support cases scoring
-            if not csone_data.empty:
-                customer_csone = csone_data[csone_data['customer_name'] == customer]
-                if not customer_csone.empty:
-                    # Base score for having support cases
-                    csone_count = len(customer_csone)
-                    score += min(csone_count * 0.2, 2.0)
-                    if csone_count > 0:
-                        risk_factors.append(f"{csone_count} support cases")
-                    
-                    # Escalated/P1-P2 cases penalty (flexible column: Severity, Highest Priority, Priority)
-                    sev_col = next((c for c in ['Severity', 'Highest Priority', 'Priority'] if c in customer_csone.columns), None)
-                    if sev_col:
-                        escalated_count = len(customer_csone[
-                            customer_csone[sev_col].astype(str).str.contains('P1|P2|Critical', case=False, na=False)
-                        ])
-                    else:
-                        escalated_count = 0
-                    score += escalated_count * 1.0
-                    if escalated_count > 0:
-                        risk_factors.append(f"{escalated_count} escalated cases")
-                    
-                    # BEMS escalations penalty (strong renewal risk signal - engineering-level issues)
-                    bems_mask = pd.Series([False] * len(customer_csone), index=customer_csone.index)
-                    if 'Transaction ID' in customer_csone.columns:
-                        bems_mask |= customer_csone['Transaction ID'].astype(str).str.contains('BEMS', case=False, na=False)
-                    if 'bemscsc_refs' in customer_csone.columns:
-                        refs = customer_csone['bemscsc_refs'].fillna('').astype(str)
-                        bems_mask |= ((refs != '') & (refs != '[]') & refs.str.contains('BEMS', case=False, na=False))
-                    bems_count = bems_mask.sum()
-                    if bems_count > 0:
-                        score += min(float(bems_count) * 2.0, 4.0)  # Cap BEMS penalty at 4
-                        risk_factors.append(f"{int(bems_count)} BEMS escalation(s)")
-                    
-                    # Recent cases penalty (within last 30 days)
-                    date_col_csone = next((c for c in ['Date/Time Opened', 'CREATED_DATE', 'Created', 'Created Date'] if c in customer_csone.columns), None)
-                    if date_col_csone:
-                        recent_cutoff = datetime.now() - timedelta(days=30)
-                        try:
-                            customer_csone_copy = customer_csone.copy()
-                            customer_csone_copy['_dt'] = pd.to_datetime(customer_csone_copy[date_col_csone], errors='coerce')
-                            recent_cases = len(customer_csone_copy[customer_csone_copy['_dt'] >= recent_cutoff])
-                            score += recent_cases * 0.2
-                            if recent_cases > 0:
-                                risk_factors.append(f"{recent_cases} recent cases (30 days)")
-                        except Exception as _rc_err:
-                            logger.debug(f"Recent cases calc error: {_rc_err}")
-            
-            # Cap the score at 10
-            final_score = min(score, 10.0)
+            customer_ab = (
+                ab_data[ab_data['customer_name'].fillna("").astype(str).apply(normalize_customer_name) == customer]
+                if not ab_data.empty and 'customer_name' in ab_data.columns
+                else pd.DataFrame()
+            )
+            customer_csone = (
+                csone_norm[csone_norm['customer_name'].fillna("").astype(str).apply(normalize_customer_name) == customer]
+                if not csone_norm.empty and 'customer_name' in csone_norm.columns
+                else pd.DataFrame()
+            )
+            profile = compute_customer_risk_profile(
+                customer_name=customer,
+                customer_ab=customer_ab,
+                customer_csone=customer_csone,
+                customer_pulse=pd.DataFrame(),
+                customer_action_plans=pd.DataFrame(),
+                customer_subs=pd.DataFrame(),
+                ext_incidents=None,
+            )
+            final_score = profile["risk_score_0_10"]
+            risk_factors = list(profile["risk_factors"])
+            aging_open = profile["components"]["adoption_barriers"]["details"].get("aging_open_count", 0)
+            if aging_open > 0:
+                risk_factors.append(f"{aging_open} barrier(s) open 60+ days")
             
             # Determine color category
             if final_score >= 8:
@@ -1515,7 +1435,9 @@ def calculate_renewal_risk_scores(ab_data: pd.DataFrame, csone_data: pd.DataFram
                 'score': final_score,
                 'color': color,
                 'category': category,
-                'risk_factors': risk_factors
+                'risk_factors': risk_factors,
+                'risk_score_0_100': profile["risk_score_0_100"],
+                'risk_band': profile["risk_band"],
             }
         
         return risk_data
@@ -1532,6 +1454,7 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
     
     ab_data = ab_data if ab_data is not None else pd.DataFrame()
     csone_data = csone_data if csone_data is not None else pd.DataFrame()
+    csone_norm = add_case_lifecycle_fields(csone_data)
     logger.info(f"Creating compact executive report for {manager}")
     
     try:
@@ -1545,36 +1468,35 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
         moderate_risk_customers = {k: v for k, v in risk_data.items() if isinstance(v, dict) and 4 <= v.get('score', 0) < 6}
         
         # Calculate BEMS count
-        total_bems = 0
-        if not csone_data.empty:
-            bems_mask = pd.Series([False] * len(csone_data), index=csone_data.index)
-            if 'Transaction ID' in csone_data.columns:
-                bems_mask |= csone_data['Transaction ID'].astype(str).str.contains('BEMS', case=False, na=False)
-            if 'bemscsc_refs' in csone_data.columns:
-                bems_mask |= csone_data['bemscsc_refs'].astype(str).str.contains('BEMS', case=False, na=False)
-            total_bems = bems_mask.sum()
+        total_bems = int(detect_bems_mask(csone_norm).sum()) if not csone_norm.empty else 0
         
         _scores = [v.get('score', 0) for v in risk_data.values() if isinstance(v, dict) and isinstance(v.get('score'), (int, float)) and not np.isnan(v.get('score', 0))] if risk_data else []
         overall_risk_score = float(np.mean(_scores)) if _scores else 0.0
         if np.isnan(overall_risk_score) or np.isinf(overall_risk_score):
             overall_risk_score = 0.0
+        if not ab_data.empty:
+            ab_sev_col = 'severity_norm' if 'severity_norm' in ab_data.columns else ('SEVERITY_C' if 'SEVERITY_C' in ab_data.columns else None)
+            critical_adoption_barriers = int(
+                ab_data[ab_sev_col].astype(str).str.contains('Critical|High', case=False, na=False).sum()
+            ) if ab_sev_col else 0
+        else:
+            critical_adoption_barriers = 0
+        escalated_cases = int(
+            csone_norm['case_priority_norm'].astype(str).str.contains('P1|P2', case=False, na=False).sum()
+        ) if not csone_norm.empty and 'case_priority_norm' in csone_norm.columns else 0
         
         risk_summary = {
             'overall_risk_score': round(overall_risk_score, 1),
             'high_risk_customers': len(high_risk_customers),
             'moderate_risk_customers': len(moderate_risk_customers),
             'total_customers': len(risk_data),
-            'critical_adoption_barriers': len(ab_data[
-                ab_data['SEVERITY_C'].astype(str).str.contains('Critical|High', case=False, na=False)
-            ]) if not ab_data.empty and 'SEVERITY_C' in ab_data.columns else 0,
-            'escalated_cases': len(csone_data[
-                csone_data['Severity'].astype(str).str.contains('P1|P2|Critical', case=False, na=False)
-            ]) if not csone_data.empty and 'Severity' in csone_data.columns else 0,
+            'critical_adoption_barriers': critical_adoption_barriers,
+            'escalated_cases': escalated_cases,
             'bems_escalations': total_bems,
             'key_concerns': [
                 f"{len(high_risk_customers)} customers at high renewal risk",
-                f"{len(ab_data[ab_data['SEVERITY_C'].astype(str).str.contains('Critical', case=False, na=False)]) if not ab_data.empty and 'SEVERITY_C' in ab_data.columns else 0} critical adoption barriers",
-                f"{len(csone_data[csone_data['Severity'].astype(str).str.contains('P1', case=False, na=False)]) if not csone_data.empty and 'Severity' in csone_data.columns else 0} P1 support cases",
+                f"{critical_adoption_barriers} critical/high adoption barriers",
+                f"{int(csone_norm['case_priority_norm'].astype(str).str.contains('P1', case=False, na=False).sum()) if not csone_norm.empty and 'case_priority_norm' in csone_norm.columns else 0} P1 support cases",
                 f"{total_bems} BEMS engineering escalations"
             ],
             'immediate_actions': [
@@ -1584,6 +1506,9 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
                 "Coordinate with engineering on BEMS escalations"
             ]
         }
+        consistency = validate_report_consistency(ab_data, csone_norm, risk_data=risk_data)
+        if consistency["warnings"]:
+            logger.warning(f"[CONSISTENCY] Compact report warnings: {consistency['warnings']}")
         
         # Create title page
         formatter.create_compact_title_page(manager, technology, days, analysis_id, risk_summary)

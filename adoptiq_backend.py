@@ -18,6 +18,15 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from pandas import to_datetime, Timestamp, Timedelta
 from docx import Document
+from data_normalization import (
+    add_case_lifecycle_fields,
+    build_customer_lookup,
+    normalize_customer_name,
+    normalize_severity_label,
+    normalize_status_label,
+    parse_datetime_series,
+)
+from risk_scoring import compute_customer_risk_profile
 
 # Enhanced executive report generation
 try:
@@ -401,11 +410,20 @@ def _normalize_category(cat: str) -> str:
 def _normalize_subtech(txt: str) -> str:
     if not txt: return "Unknown"
     t = str(txt).lower()
-    # Check in a specific order to avoid mis-categorization
-    for tech_name in ["Webex Contact Center", "Webex Calling", "Cisco UCCE", "Cisco UCCX", "Webex Meetings & Messaging"]:
+    # Check in a specific order to avoid mis-categorization.
+    for tech_name in [
+        "Webex Contact Center Enterprise",
+        "Webex Contact Center",
+        "Cisco UCCE",
+        "Cisco UCCX",
+        "Webex Calling",
+        "Webex Meetings & Messaging",
+    ]:
         for pat in TECH_FILTERS[tech_name]:
             if re.search(pat, t):
                 return tech_name
+    if "contact center" in t or "wxcc" in t:
+        return "All Contact Center"
     return "Other/Unknown"
 
 # --------------------------- IO (CSOne Excel & DB Profile) ---------------------------
@@ -802,63 +820,21 @@ def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[
         ap_df = pd.DataFrame(sub_data['action_plans']) if sub_data['action_plans'] else pd.DataFrame()
         cp_df = pd.DataFrame(sub_data['customer_pulse']) if sub_data['customer_pulse'] else pd.DataFrame()
         
-        # Calculate risk components (using existing logic)
-        risk_components = {}
-        
-        # Adoption barrier risk
-        if not ab_df.empty:
-            barrier_count = len(ab_df)
-            critical_barriers = len(ab_df[ab_df['SEVERITY_C'].astype(str).str.contains('Critical|High', case=False, na=False)]) if 'SEVERITY_C' in ab_df.columns else 0
-            open_barriers = len(ab_df[ab_df['AB_STATUS_C'].astype(str).str.contains('Open|New', case=False, na=False)]) if 'AB_STATUS_C' in ab_df.columns else 0
-            
-            ab_risk = min(barrier_count * 0.5 + critical_barriers * 1.5 + open_barriers * 0.3, 10)
-            risk_components['adoption_barriers'] = {
-                'score': ab_risk,
-                'count': barrier_count,
-                'critical_count': critical_barriers,
-                'open_count': open_barriers
-            }
-        else:
-            risk_components['adoption_barriers'] = {'score': 0, 'count': 0, 'critical_count': 0, 'open_count': 0}
-        
-        # Customer pulse risk
-        if not cp_df.empty:
-            poor_pulse = len(cp_df[cp_df['PULSE_RATING__C'].astype(str).str.contains('Poor|Bad', case=False, na=False)]) if 'PULSE_RATING__C' in cp_df.columns else 0
-            pulse_risk = min(poor_pulse * 2.0, 10)
-            risk_components['customer_pulse'] = {
-                'score': pulse_risk,
-                'count': len(cp_df),
-                'poor_count': poor_pulse
-            }
-        else:
-            risk_components['customer_pulse'] = {'score': 0, 'count': 0, 'poor_count': 0}
-        
-        # Action plan risk (unresolved plans indicate issues)
-        if not ap_df.empty:
-            unresolved_plans = len(ap_df[ap_df['STATUS_C'].astype(str).str.contains('Open|New|In Progress', case=False, na=False)]) if 'STATUS_C' in ap_df.columns else 0
-            plan_risk = min(unresolved_plans * 0.5, 10)
-            risk_components['action_plans'] = {
-                'score': plan_risk,
-                'count': len(ap_df),
-                'unresolved_count': unresolved_plans
-            }
-        else:
-            risk_components['action_plans'] = {'score': 0, 'count': 0, 'unresolved_count': 0}
-        
-        # Calculate overall risk score
-        overall_risk = (
-            risk_components['adoption_barriers']['score'] * 0.4 +
-            risk_components['customer_pulse']['score'] * 0.3 +
-            risk_components['action_plans']['score'] * 0.3
+        profile = compute_customer_risk_profile(
+            customer_name=sub_data.get("customer_name", subscription_id),
+            customer_ab=ab_df,
+            customer_csone=pd.DataFrame(),
+            customer_pulse=cp_df,
+            customer_action_plans=ap_df,
+            customer_subs=pd.DataFrame([{
+                "RENEWAL_RISK_CATEGORY": sub_data.get("summary", {}).get("renewal_risk_category", ""),
+                "STATUS_C": sub_data.get("status", ""),
+            }]),
+            ext_incidents=None,
         )
-        
-        # Determine risk level
-        if overall_risk >= 7:
-            risk_level = "HIGH"
-        elif overall_risk >= 4:
-            risk_level = "MODERATE"
-        else:
-            risk_level = "LOW"
+        risk_components = profile["components"]
+        overall_risk = profile["risk_score_0_10"]
+        risk_level = profile["risk_band"]
         
         # Generate recommendations
         recommendations = []
@@ -890,6 +866,7 @@ def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[
             'analysis_period_days': days,
             'overall_risk_score': round(overall_risk, 1),
             'risk_level': risk_level,
+            'risk_score_0_100': profile["risk_score_0_100"],
             'risk_components': risk_components,
             'recommendations': recommendations,
             'summary': sub_data['summary'],
@@ -1115,14 +1092,23 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
     limit = min(limit, 10000)
 
     def _normalize_cases_df(df: pd.DataFrame) -> pd.DataFrame:
-        expected = ['CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'SEVERITY']
+        expected = ['CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'SEVERITY']
+        derived = ['case_status_norm', 'case_priority_norm', 'open_date', 'closed_date', 'is_open', 'open_age_days']
         if df is None or df.empty:
-            return pd.DataFrame(columns=expected)
+            return pd.DataFrame(columns=expected + derived)
         normalized = df.copy()
         for col in expected:
             if col not in normalized.columns:
                 normalized[col] = None
-        return normalized[expected]
+        normalized["case_status_norm"] = normalized["STATUS"].apply(normalize_status_label)
+        normalized["case_priority_norm"] = normalized["SEVERITY"].apply(normalize_severity_label)
+        normalized["open_date"] = parse_datetime_series(normalized["CREATED_DATE"])
+        normalized["closed_date"] = parse_datetime_series(normalized["CLOSED_DATE"])
+        normalized["is_open"] = normalized["case_status_norm"].eq("Open")
+        normalized["open_age_days"] = (
+            (pd.Timestamp(datetime.utcnow()) - normalized["open_date"]).dt.days.where(normalized["is_open"], other=pd.NA)
+        )
+        return normalized[expected + derived]
 
     # Normalize IDs and dedupe
     account_ids_clean = []
@@ -1162,7 +1148,7 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
     try:
         logger.info(f"[[RENEWAL]] Attempting Snowflake support cases fetch for {len(account_ids_clean)} accounts (SUPPORT_CASES.ACCOUNT_ID)...")
         sql1 = """
-        SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE, s.SEVERITY
+        SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE, NULL AS CLOSED_DATE, s.SEVERITY
         FROM CX_DB.CX_SWSSBST_BR.SUPPORT_CASES s
         WHERE s.ACCOUNT_ID IN (""" + placeholders + """)
           AND s.CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
@@ -1172,7 +1158,7 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         cur = ctx.cursor()
         cur.execute(sql1, params)
         rows = cur.fetchall()
-        cols = [c[0] for c in cur.description] if cur.description else ['CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'SEVERITY']
+        cols = [c[0] for c in cur.description] if cur.description else ['CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'SEVERITY']
         if cur:
             cur.close()
             cur = None
@@ -1194,7 +1180,7 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
     try:
         logger.info(f"[[RENEWAL]] Trying SUPPORT_CASES.ACCOUNT_ID_C for {len(account_ids_clean)} accounts...")
         sql2 = """
-        SELECT CASE_ID, ACCOUNT_ID_C AS ACCOUNT_ID, SUBJECT, STATUS, CREATED_DATE, SEVERITY
+        SELECT CASE_ID, ACCOUNT_ID_C AS ACCOUNT_ID, SUBJECT, STATUS, CREATED_DATE, NULL AS CLOSED_DATE, SEVERITY
         FROM CX_DB.CX_SWSSBST_BR.SUPPORT_CASES
         WHERE ACCOUNT_ID_C IN (""" + placeholders + """)
           AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
@@ -1204,7 +1190,7 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         cur = ctx.cursor()
         cur.execute(sql2, params)
         rows = cur.fetchall()
-        cols = [c[0] for c in cur.description] if cur.description else ['CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'SEVERITY']
+        cols = [c[0] for c in cur.description] if cur.description else ['CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'SEVERITY']
         if cur:
             cur.close()
             cur = None
@@ -1224,7 +1210,7 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
     try:
         logger.info(f"[[RENEWAL]] Trying support cases via JOIN to dsm_assignment_data...")
         sql3 = """
-        SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE, s.SEVERITY
+        SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE, NULL AS CLOSED_DATE, s.SEVERITY
         FROM CX_DB.CX_SWSSBST_BR.SUPPORT_CASES s
         INNER JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data d ON TRIM(s.ACCOUNT_ID) = TRIM(d.ACCOUNT_ID_C)
         WHERE d.ACCOUNT_ID_C IN (""" + placeholders + """)
@@ -1235,7 +1221,7 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         cur = ctx.cursor()
         cur.execute(sql3, params)
         rows = cur.fetchall()
-        cols = [c[0] for c in cur.description] if cur.description else ['CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'SEVERITY']
+        cols = [c[0] for c in cur.description] if cur.description else ['CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'SEVERITY']
         if cur:
             cur.close()
             cur = None
@@ -3224,6 +3210,12 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             ax4.set_xlim(0, 1)
             ax4.set_ylim(0, 1)
             ax4.axis('off')
+            fig.text(
+                0.02,
+                0.01,
+                f"BEMS split: break-fix={portfolio_metrics.get('break_fix_cases', 0)} | provisioning={portfolio_metrics.get('provisioning_cases', 0)}",
+                fontsize=9,
+            )
             
             plt.tight_layout()
             
@@ -3267,8 +3259,8 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             cells = table.rows[2].cells
             cells[0].text = f"P1 Critical\n{portfolio_metrics.get('p1_cases', 0)}"
             cells[1].text = f"P2 High\n{portfolio_metrics.get('p2_cases', 0)}"
-            cells[2].text = f"Grade: {portfolio_metrics.get('health_score', 'C')}"
-            cells[3].text = f"Trend: {portfolio_metrics.get('trend_direction', 'Stable')}"
+            cells[2].text = f"Break-fix / Provisioning\n{portfolio_metrics.get('break_fix_cases', 0)} / {portfolio_metrics.get('provisioning_cases', 0)}"
+            cells[3].text = f"Grade: {portfolio_metrics.get('health_score', 'C')}\nTrend: {portfolio_metrics.get('trend_direction', 'Stable')}"
             
             # Style the table
             for row in table.rows:
@@ -4374,11 +4366,11 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
                             if 'BEMS' in tid.upper():
                                 # Extract BEMS ID patterns
                                 import re
-                                found = re.findall(r'BEMS\d+', tid, re.IGNORECASE)
+                                found = re.findall(r'BEMS[- ]?\d+', tid, re.IGNORECASE)
                                 bems_ids.update(found)
                         if 'bemscsc_refs' in row and pd.notna(row['bemscsc_refs']):
                             refs = str(row['bemscsc_refs'])
-                            found = re.findall(r'BEMS\d+', refs, re.IGNORECASE)
+                            found = re.findall(r'BEMS[- ]?\d+', refs, re.IGNORECASE)
                             bems_ids.update(found)
                     
                     # Format all BEMS IDs with brackets for citation
@@ -5390,12 +5382,38 @@ def _prepare_ab(df: pd.DataFrame, dsm_df: pd.DataFrame) -> pd.DataFrame:
         axis=1
     )
 
-    cust_col = use.get("customer_name") if "customer_name" in use.columns else use.get("ACCOUNT_ID_C")
-    use["customer_name"] = cust_col if cust_col is not None else pd.Series(["Unknown"] * len(use), index=use.index)
+    customer_lookup = build_customer_lookup(dsm_df)
+    use["customer_name"] = use.apply(lambda row: normalize_customer_name(row.get("customer_name")), axis=1)
+    use["customer_name"] = use.apply(
+        lambda row: normalize_customer_name(
+            customer_lookup.get("account_to_customer", {}).get(str(row.get("ACCOUNT_ID_C", "")).strip(), row.get("customer_name"))
+        ),
+        axis=1,
+    )
+    use["customer_name_norm"] = use["customer_name"].apply(normalize_customer_name)
     use["ab_category_final"] = use.get("AB_CATEGORY_C").apply(_normalize_category) if "AB_CATEGORY_C" in use.columns else "Uncategorized"
     _tech = lambda c: use[c].fillna("").astype(str) if c in use.columns else pd.Series([""] * len(use), index=use.index)
-    tech_txt = _tech("CSS_PRE_UNLINK_TECHNOLOGY_NAME_C") + " " + _tech("PRODUCT_NAME_C") + " " + _tech("PRODUCT_C")
+    tech_txt = (
+        _tech("SUB_TECHNOLOGY_C")
+        + " "
+        + _tech("TECHNOLOGY_C")
+        + " "
+        + _tech("CSS_PRE_UNLINK_TECHNOLOGY_NAME_C")
+        + " "
+        + _tech("PRODUCT_NAME_C")
+        + " "
+        + _tech("PRODUCT_C")
+    )
     use["sub_technology"] = tech_txt.apply(_normalize_subtech) if hasattr(tech_txt, "apply") else "Other/Unknown"
+    use["severity_norm"] = use["SEVERITY_C"].apply(normalize_severity_label)
+    use["status_norm"] = use["AB_STATUS_C"].apply(normalize_status_label)
+    date_col = next((c for c in ["OPEN_DATE_C", "CREATED_DATE", "CREATED_DATE_C", "CREATEDDATE"] if c in use.columns), None)
+    close_col = next((c for c in ["CLOSED_DATE_C", "CLOSED_DATE", "RESOLVED_DATE", "LASTMODIFIEDDATE"] if c in use.columns), None)
+    use["open_date"] = parse_datetime_series(use[date_col]) if date_col else pd.NaT
+    use["closed_date"] = parse_datetime_series(use[close_col]) if close_col else pd.NaT
+    use["open_age_days"] = (
+        (pd.Timestamp(datetime.utcnow()) - use["open_date"]).dt.days.where(use["status_norm"].eq("Open"), other=pd.NA)
+    )
     use["assignee_cssm_email"] = use.get("assignee_cssm_email")
     use["bemscsc_refs"] = (use["title"].astype(str) + " " + use["description"].astype(str)).apply(_extract_refs)
     return use
@@ -5450,6 +5468,14 @@ def _prepare_csone(df: pd.DataFrame, team_subs_df: pd.DataFrame) -> pd.DataFrame
     _title = use[title_col].fillna("").astype(str) if title_col else pd.Series([""] * len(use), index=use.index)
     _desc = use[desc_col].fillna("").astype(str) if desc_col else pd.Series([""] * len(use), index=use.index)
     use["bemscsc_refs"] = (_title + " " + _desc).apply(_extract_refs)
+    use = add_case_lifecycle_fields(use, customer_lookup=build_customer_lookup(team_subs_df))
+    # Keep compatibility columns used throughout report generation.
+    if "case_priority_norm" in use.columns and "Severity" not in use.columns:
+        use["Severity"] = use["case_priority_norm"]
+    if "case_status_norm" in use.columns and "Case Status" not in use.columns:
+        use["Case Status"] = use["case_status_norm"]
+    if "open_date" in use.columns and "Date/Time Opened" not in use.columns:
+        use["Date/Time Opened"] = use["open_date"]
     logger.debug(f"CSOne prepare: Final result: {len(use)} cases with customer names")
     return use
 

@@ -18,6 +18,7 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from adoptiq_backend import _ensure_outputs
 from enhanced_snowflake_insights import EnhancedSnowflakeInsights
+from data_normalization import normalize_customer_name
 
 # Optional analyzers - may not be available in all deployments
 try:
@@ -313,6 +314,8 @@ class LeaderReportGenerator:
                 continue
             
             account_ids = subscriptions_df['ACCOUNT_ID_C'].dropna().unique().tolist()
+            if 'BU_NAME' in subscriptions_df.columns:
+                subscriptions_df['BU_NAME'] = subscriptions_df['BU_NAME'].apply(normalize_customer_name)
             customers = subscriptions_df['BU_NAME'].dropna().unique().tolist()
             
             # Fetch all data for this CSSM
@@ -351,6 +354,11 @@ class LeaderReportGenerator:
                     )
                 else:
                     logger.warning(f"Customer Pulse data for {cssm_name} missing account ID column - using without customer names")
+            if not customer_pulse_df.empty and 'BU_NAME' in customer_pulse_df.columns:
+                customer_pulse_df['BU_NAME'] = customer_pulse_df['BU_NAME'].apply(normalize_customer_name)
+
+            if not success_priorities_df.empty and 'RELATED_CUSTOMER__C' in success_priorities_df.columns:
+                success_priorities_df['RELATED_CUSTOMER__C'] = success_priorities_df['RELATED_CUSTOMER__C'].apply(normalize_customer_name)
             
             team_data[cssm_name] = {
                 'subscriptions': subscriptions_df,
@@ -1538,9 +1546,13 @@ class LeaderReportGenerator:
                     # Count TAC cases for this customer
                     tac_count = 0
                     if 'tac_cases' in data and not data['tac_cases'].empty:
+                        customer_norm = normalize_customer_name(customer)
                         for col in data['tac_cases'].columns:
                             if 'customer' in col.lower() or 'account' in col.lower():
-                                tac_count = len(data['tac_cases'][data['tac_cases'][col].astype(str).str.contains(customer, case=False, na=False)])
+                                tac_mask = (
+                                    data['tac_cases'][col].fillna("").astype(str).apply(normalize_customer_name) == customer_norm
+                                )
+                                tac_count = int(tac_mask.sum())
                                 break
                     row_cells[4].text = str(tac_count)
                     row_cells[4].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -2486,11 +2498,13 @@ class LeaderReportGenerator:
         
         # Initialize all items list with type information
         all_items = []
+        customer_norm = normalize_customer_name(customer)
+        _name_match = lambda series: series.fillna("").astype(str).apply(normalize_customer_name) == customer_norm
         
         # Collect Action Plans
         if not data.get('action_plans', pd.DataFrame()).empty:
             customer_aps = data['action_plans'][
-                data['action_plans']['BU_NAME'].astype(str).str.contains(customer, case=False, na=False)
+                _name_match(data['action_plans']['BU_NAME'])
             ]
             for _, ap in customer_aps.iterrows():
                 # Enhanced data extraction with fallbacks
@@ -2514,7 +2528,7 @@ class LeaderReportGenerator:
         # Collect Adoption Barriers
         if not data.get('adoption_barriers', pd.DataFrame()).empty:
             customer_abs = data['adoption_barriers'][
-                data['adoption_barriers']['BU_NAME'].astype(str).str.contains(customer, case=False, na=False)
+                _name_match(data['adoption_barriers']['BU_NAME'])
             ]
             for _, ab in customer_abs.iterrows():
                 # Enhanced data extraction with fallbacks
@@ -2538,7 +2552,7 @@ class LeaderReportGenerator:
         # Collect Customer Pulse
         if not data.get('customer_pulse', pd.DataFrame()).empty:
             customer_cps = data['customer_pulse'][
-                data['customer_pulse']['BU_NAME'].astype(str).str.contains(customer, case=False, na=False)
+                _name_match(data['customer_pulse']['BU_NAME'])
             ]
             for _, cp in customer_cps.iterrows():
                 # Enhanced data extraction with fallbacks
@@ -2564,7 +2578,7 @@ class LeaderReportGenerator:
         _tac_col = 'Customer Name: Customer Name'
         if _tac_df is not None and not _tac_df.empty and _tac_col in _tac_df.columns:
             customer_tacs = _tac_df[
-                _tac_df[_tac_col].astype(str).str.contains(customer, case=False, na=False)
+                _name_match(_tac_df[_tac_col])
             ]
             for _, tac in customer_tacs.iterrows():
                 # Enhanced data extraction with fallbacks
@@ -2593,11 +2607,12 @@ class LeaderReportGenerator:
         
         # Analyze BEMS escalations for this customer
         bems_count = 0
+        customer_norm = normalize_customer_name(customer)
         try:
             # Check for BEMS references in adoption barriers
             if not data.get('adoption_barriers', pd.DataFrame()).empty:
                 customer_abs = data['adoption_barriers'][
-                    data['adoption_barriers']['BU_NAME'].astype(str).str.contains(customer, case=False, na=False)
+                    data['adoption_barriers']['BU_NAME'].fillna("").astype(str).apply(normalize_customer_name) == customer_norm
                 ]
                 for _, ab in customer_abs.iterrows():
                     # Try multiple column names for BEMS detection
@@ -2620,7 +2635,7 @@ class LeaderReportGenerator:
                 
                 if customer_col:
                     customer_tacs = data['tac_cases'][
-                        data['tac_cases'][customer_col].astype(str).str.contains(customer, case=False, na=False)
+                        data['tac_cases'][customer_col].fillna("").astype(str).apply(normalize_customer_name) == customer_norm
                     ]
                     for _, tac in customer_tacs.iterrows():
                         # PRIMARY: Check Transaction ID column (BEMS data in CSOne Excel)
@@ -3198,7 +3213,7 @@ class LeaderReportGenerator:
             try:
                 if not data.get('adoption_barriers', pd.DataFrame()).empty:
                     customer_abs = data['adoption_barriers'][
-                        data['adoption_barriers']['BU_NAME'].astype(str).str.contains(customer, case=False, na=False)
+                        data['adoption_barriers']['BU_NAME'].fillna("").astype(str).apply(normalize_customer_name) == normalize_customer_name(customer)
                     ]
                     
                     bems_items = []
@@ -3237,7 +3252,7 @@ class LeaderReportGenerator:
                 products = []
                 if not data.get('adoption_barriers', pd.DataFrame()).empty:
                     customer_abs = data['adoption_barriers'][
-                        data['adoption_barriers']['BU_NAME'].astype(str).str.contains(customer, case=False, na=False)
+                        data['adoption_barriers']['BU_NAME'].fillna("").astype(str).apply(normalize_customer_name) == normalize_customer_name(customer)
                     ]
                     products = (customer_abs['SUB_TECHNOLOGY_C'].dropna().unique().tolist()
                                 if 'SUB_TECHNOLOGY_C' in customer_abs.columns else [])
