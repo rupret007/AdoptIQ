@@ -7,7 +7,12 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
-from data_normalization import detect_bems_mask, normalize_customer_name, normalize_priority_label
+from data_normalization import (
+    ACCOUNT_COLUMN_CANDIDATES,
+    detect_bems_mask,
+    normalize_customer_name,
+    normalize_priority_label,
+)
 
 
 def _safe_count(df: Optional[pd.DataFrame]) -> int:
@@ -27,6 +32,26 @@ def _missing_inline_source_claims(factual_claims: Optional[list]) -> list:
     return missing
 
 
+def _normalize_account_id_token(value: Any) -> str:
+    token = str(value or "").strip().upper()
+    if not token or token in {"NONE", "NAN", "NULL"}:
+        return ""
+    return token
+
+
+def _account_token_sets(values: Optional[list]) -> tuple[set[str], set[str]]:
+    exact: set[str] = set()
+    sf15: set[str] = set()
+    for value in values or []:
+        token = _normalize_account_id_token(value)
+        if not token:
+            continue
+        exact.add(token)
+        if len(token) >= 15:
+            sf15.add(token[:15])
+    return exact, sf15
+
+
 def validate_report_consistency(
     ab_df: Optional[pd.DataFrame],
     csone_df: Optional[pd.DataFrame],
@@ -36,6 +61,9 @@ def validate_report_consistency(
     factual_claims: Optional[list] = None,
     customer_universe: Optional[Any] = None,
     max_other_unknown_ratio: float = 0.60,
+    customer_pulse_df: Optional[pd.DataFrame] = None,
+    expected_account_ids: Optional[list] = None,
+    pulse_coverage_warn_threshold: float = 0.50,
 ) -> Dict[str, Any]:
     """
     Validate cross-report consistency and produce actionable diagnostics.
@@ -55,6 +83,7 @@ def validate_report_consistency(
     metrics["total_customers"] = 0
     metrics["critical_p1"] = 0
     metrics["high_p2"] = 0
+    metrics["customer_pulse_records"] = _safe_count(customer_pulse_df)
 
     # Canonical dashboard metrics (customer/case-severity parity checks)
     customer_set = set()
@@ -151,6 +180,75 @@ def validate_report_consistency(
         metrics["risk_customers"] = len(risk_data)
         if len(risk_data) == 0 and (ab_count > 0 or cs_count > 0):
             warnings.append("Risk data is empty while source records exist; verify risk pipeline wiring.")
+
+    # Customer pulse account coverage diagnostics (warning-only guardrail).
+    if expected_account_ids is not None:
+        expected_exact, expected_sf15 = _account_token_sets(expected_account_ids)
+        metrics["pulse_expected_accounts"] = len(expected_exact)
+        if customer_pulse_df is not None and not customer_pulse_df.empty and expected_exact:
+            pulse_acct_col = next(
+                (c for c in ACCOUNT_COLUMN_CANDIDATES if c in customer_pulse_df.columns),
+                None,
+            )
+            if pulse_acct_col:
+                backfill_mask = pd.Series([False] * len(customer_pulse_df), index=customer_pulse_df.index)
+                if "PULSE_BACKFILL" in customer_pulse_df.columns:
+                    backfill_mask = (
+                        customer_pulse_df["PULSE_BACKFILL"]
+                        .fillna("")
+                        .astype(str)
+                        .str.strip()
+                        .str.lower()
+                        .isin({"1", "true", "yes", "on"})
+                    )
+                in_window_df = customer_pulse_df[~backfill_mask]
+                backfill_df = customer_pulse_df[backfill_mask]
+
+                observed_exact, observed_sf15 = _account_token_sets(
+                    customer_pulse_df[pulse_acct_col].dropna().astype(str).tolist()
+                )
+                observed_in_window_exact, observed_in_window_sf15 = _account_token_sets(
+                    in_window_df[pulse_acct_col].dropna().astype(str).tolist()
+                )
+                observed_backfill_exact, observed_backfill_sf15 = _account_token_sets(
+                    backfill_df[pulse_acct_col].dropna().astype(str).tolist()
+                )
+
+                matched_in_window_exact = expected_exact & observed_in_window_exact
+                matched_in_window_sf15 = {
+                    token for token in (expected_exact - matched_in_window_exact)
+                    if len(token) >= 15 and token[:15] in observed_in_window_sf15
+                }
+                matched_in_window_total = matched_in_window_exact | matched_in_window_sf15
+
+                remaining_after_in_window = expected_exact - matched_in_window_total
+                matched_backfill_exact = remaining_after_in_window & observed_backfill_exact
+                matched_backfill_sf15 = {
+                    token for token in (remaining_after_in_window - matched_backfill_exact)
+                    if len(token) >= 15 and token[:15] in observed_backfill_sf15
+                }
+                matched_backfill_total = matched_backfill_exact | matched_backfill_sf15
+                matched_total = matched_in_window_total | matched_backfill_total
+
+                in_window_coverage = len(matched_in_window_total) / max(len(expected_exact), 1)
+                total_coverage = len(matched_total) / max(len(expected_exact), 1)
+                metrics["pulse_observed_accounts"] = len(observed_exact)
+                metrics["pulse_matched_accounts"] = len(matched_total)
+                metrics["pulse_coverage"] = round(total_coverage, 4)
+                metrics["pulse_in_window_accounts_matched"] = len(matched_in_window_total)
+                metrics["pulse_backfill_accounts_matched"] = len(matched_backfill_total)
+                metrics["pulse_total_coverage"] = round(total_coverage, 4)
+                metrics["pulse_in_window_coverage"] = round(in_window_coverage, 4)
+                if total_coverage < pulse_coverage_warn_threshold:
+                    warnings.append(
+                        f"Customer Pulse account coverage is low ({total_coverage:.1%}); validate account mapping and scope filters."
+                    )
+                elif in_window_coverage < pulse_coverage_warn_threshold and len(matched_backfill_total) > 0:
+                    warnings.append(
+                        f"Customer Pulse in-window coverage is low ({in_window_coverage:.1%}) but latest-known backfill raised total coverage to {total_coverage:.1%}; review data freshness."
+                    )
+            else:
+                warnings.append("Customer Pulse data missing account ID column for coverage diagnostics.")
 
     # Defect linkage consistency
     if defects:

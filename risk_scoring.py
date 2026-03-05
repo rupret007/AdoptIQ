@@ -55,6 +55,26 @@ def _risk_band(score_0_100: float) -> str:
     return "HEALTHY"
 
 
+def _exclude_backfill_pulse_rows(customer_pulse: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if customer_pulse is None or customer_pulse.empty:
+        return pd.DataFrame()
+    use = customer_pulse.copy()
+    if "PULSE_BACKFILL" not in use.columns:
+        return use
+    backfill_series = use["PULSE_BACKFILL"]
+    if pd.api.types.is_bool_dtype(backfill_series):
+        backfill_mask = backfill_series.fillna(False)
+    else:
+        backfill_mask = (
+            backfill_series.fillna("")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .isin({"1", "true", "yes", "y", "on"})
+        )
+    return use[~backfill_mask]
+
+
 def _score_adoption_barriers(customer_ab: pd.DataFrame) -> Dict[str, Any]:
     if customer_ab is None or customer_ab.empty:
         return {"score": 0.0, "details": {"count": 0, "critical_high_count": 0, "open_count": 0, "aging_open_count": 0}}
@@ -129,12 +149,18 @@ def _score_support_cases(customer_csone: pd.DataFrame) -> Dict[str, Any]:
 
 def _score_customer_pulse(customer_pulse: pd.DataFrame) -> Dict[str, Any]:
     if customer_pulse is None or customer_pulse.empty:
-        return {"score": 0.0, "details": {"count": 0, "poor_bad_count": 0}}
+        return {"score": 0.0, "details": {"count": 0, "poor_bad_count": 0, "backfill_excluded_count": 0}}
 
-    use = customer_pulse.copy()
+    raw_count = len(customer_pulse)
+    use = _exclude_backfill_pulse_rows(customer_pulse)
+    if use.empty:
+        return {"score": 0.0, "details": {"count": 0, "poor_bad_count": 0, "backfill_excluded_count": raw_count}}
     rating_col = next((c for c in ("PULSE_RATING__C", "PULSE_RATING", "Rating", "RATING") if c in use.columns), None)
     if not rating_col:
-        return {"score": 5.0, "details": {"count": len(use), "poor_bad_count": 0}}
+        return {
+            "score": 5.0,
+            "details": {"count": len(use), "poor_bad_count": 0, "backfill_excluded_count": max(raw_count - len(use), 0)},
+        }
 
     ratings = use[rating_col].fillna("").astype(str)
     poor_bad_count = int(ratings.str.contains(r"poor|bad|red|critical|high\s*risk", case=False, regex=True).sum())
@@ -143,7 +169,14 @@ def _score_customer_pulse(customer_pulse: pd.DataFrame) -> Dict[str, Any]:
     poor_ratio = poor_bad_count / max(count, 1)
     neutral_ratio = neutral_count / max(count, 1)
     score = _clamp(poor_ratio * 100 + neutral_ratio * 30)
-    return {"score": score, "details": {"count": count, "poor_bad_count": poor_bad_count}}
+    return {
+        "score": score,
+        "details": {
+            "count": count,
+            "poor_bad_count": poor_bad_count,
+            "backfill_excluded_count": max(raw_count - count, 0),
+        },
+    }
 
 
 def _score_action_plans(action_plans: pd.DataFrame) -> Dict[str, Any]:
@@ -219,16 +252,18 @@ def compute_customer_risk_profile(
     weights: RiskWeights = RiskWeights(),
 ) -> Dict[str, Any]:
     """Compute deterministic weighted customer risk score (0-100)."""
+    pulse_input = customer_pulse if customer_pulse is not None else pd.DataFrame()
+    pulse_for_scoring = _exclude_backfill_pulse_rows(pulse_input)
     ab_component = _score_adoption_barriers(customer_ab if customer_ab is not None else pd.DataFrame())
     support_component = _score_support_cases(customer_csone if customer_csone is not None else pd.DataFrame())
-    pulse_component = _score_customer_pulse(customer_pulse if customer_pulse is not None else pd.DataFrame())
+    pulse_component = _score_customer_pulse(pulse_input)
     action_component = _score_action_plans(customer_action_plans if customer_action_plans is not None else pd.DataFrame())
     incident_component = _score_incidents(ext_incidents)
     contract_component = _score_contract(customer_subs if customer_subs is not None else pd.DataFrame())
     engagement_component = _score_engagement(
         customer_ab if customer_ab is not None else pd.DataFrame(),
         customer_csone if customer_csone is not None else pd.DataFrame(),
-        customer_pulse if customer_pulse is not None else pd.DataFrame(),
+        pulse_for_scoring,
         customer_action_plans if customer_action_plans is not None else pd.DataFrame(),
     )
 

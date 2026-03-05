@@ -29,7 +29,8 @@ This document captures the current query-reduction model, baseline instrumentati
   - compact flow CSConsole bundle
   - comprehensive flow CSConsole bundle
   - renewal flow CSConsole bundle (including reuse for adoption barrier merge)
-  - ask-ai portfolio flow support/pulse/SP/AP bundle
+  - ask-ai legacy flow via `prefetch_ask_ai(...)`
+  - ask-ai grounded flow via `prefetch_ask_ai_grounded(...)` with intent-based dataset include list
 
 ## Query Savings Model
 
@@ -64,6 +65,6 @@ For leader reports with `N` direct reports:
 
 ## Remaining Roadmap
 
-- Extend run-scoped prefetch to ask-ai and any remaining ad-hoc loops.
-- Consolidate remaining duplicated fetch paths to use shared prefetched datasets.
+- Consolidate any remaining duplicated fetch paths to use shared prefetched datasets.
 - Add more per-flow parity assertions tied to query-count baselines.
+- Add a compact runtime summary for prefetch cache hits/misses by report flow.

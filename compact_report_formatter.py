@@ -7,6 +7,7 @@ Creates focused executive summaries highlighting high-risk customers and renewal
 
 import pandas as pd
 import numpy as np
+import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 from pathlib import Path
@@ -29,6 +30,19 @@ from report_utils import format_inline_source, format_metric_with_source
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _ensure_inline_source_claim(
+    text: Any,
+    metric_name: str = "Derived Metric",
+    fields: Optional[List[str]] = None,
+) -> str:
+    claim = str(text or "").strip()
+    if not claim:
+        return ""
+    if re.search(r"\[\s*source\s*:", claim, flags=re.IGNORECASE):
+        return claim
+    return f"{claim} {format_inline_source(metric_name, fields=fields or [])}"
 
 class CompactReportFormatter:
     """Creates compact executive reports focused on renewal risk and critical issues"""
@@ -375,7 +389,9 @@ class CompactReportFormatter:
             if concerns:
                 # FIXED: Show ALL concerns
                 for i, concern in enumerate(concerns, 1):
-                    concerns_p.add_run(f'{i}. {concern}\n')
+                    concerns_p.add_run(
+                        f"{i}. {_ensure_inline_source_claim(concern, 'Derived Metric', fields=['customer_name', 'ACCOUNT_ID_C'])}\n"
+                    )
             else:
                 concerns_p.add_run('✅ No critical concerns identified in this analysis period.\n')
             
@@ -388,7 +404,9 @@ class CompactReportFormatter:
                 # FIXED: Show ALL actions with appropriate priority
                 for i, action in enumerate(actions, 1):
                     priority = "🔴 HIGH" if i <= 2 else "🟡 MEDIUM" if i <= 4 else "🟢 LOW"
-                    actions_p.add_run(f'{priority} Priority: {action}\n')
+                    actions_p.add_run(
+                        f"{priority} Priority: {_ensure_inline_source_claim(action, 'Derived Metric', fields=['risk_score', 'customer_name'])}\n"
+                    )
             else:
                 actions_p.add_run('📋 Continue monitoring current initiatives and maintain regular check-ins.\n')
             
@@ -419,7 +437,9 @@ class CompactReportFormatter:
                 # FIXED: Create a callout box for AI insights - show FULL summary
                 ai_callout = self.doc.add_paragraph()
                 ai_callout.style = 'CompactCallout'
-                ai_callout.add_run(f'"{ai_summary}"')
+                ai_callout.add_run(
+                    f"\"{_ensure_inline_source_claim(ai_summary, 'Derived Metric', fields=['customer_name', 'risk_score'])}\""
+                )
             
             # Add visual separator
             self.doc.add_paragraph('─' * 50).alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1622,12 +1642,27 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
         escalated_cases = int(
             csone_norm['case_priority_norm'].astype(str).str.contains('P1|P2', case=False, na=False).sum()
         ) if not csone_norm.empty and 'case_priority_norm' in csone_norm.columns else 0
+        customer_set = set()
+        if not ab_data.empty:
+            ab_customer_col = next(
+                (c for c in ('customer_name', 'BU_NAME', 'Customer Name') if c in ab_data.columns),
+                None,
+            )
+            if ab_customer_col:
+                customer_set.update(
+                    ab_data[ab_customer_col].dropna().astype(str).apply(normalize_customer_name)
+                )
+        if not csone_norm.empty and 'customer_name' in csone_norm.columns:
+            customer_set.update(
+                csone_norm['customer_name'].dropna().astype(str).apply(normalize_customer_name)
+            )
+        canonical_total_customers = len([c for c in customer_set if c and c != "Unknown"])
         
         risk_summary = {
             'overall_risk_score': round(overall_risk_score, 1),
             'high_risk_customers': len(high_risk_customers),
             'moderate_risk_customers': len(moderate_risk_customers),
-            'total_customers': len(risk_data),
+            'total_customers': canonical_total_customers,
             'critical_adoption_barriers': critical_adoption_barriers,
             'escalated_cases': escalated_cases,
             'bems_escalations': total_bems,
@@ -1649,6 +1684,21 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
             if isinstance(profile, dict):
                 factual_claims.extend(profile.get("risk_factors", []) or [])
                 factual_claims.extend(profile.get("key_findings", []) or [])
+        factual_claims.extend(risk_summary.get("key_concerns", []) or [])
+        factual_claims.extend(risk_summary.get("immediate_actions", []) or [])
+        ai_summary_text = ""
+        if isinstance(ai_insights, dict):
+            if 'portfolio_summary' in ai_insights:
+                ai_summary_text = (ai_insights.get('portfolio_summary') or {}).get('executive_summary', '')
+            elif 'executive_summary' in ai_insights:
+                ai_summary_text = ai_insights.get('executive_summary', '')
+            elif 'raw_response' in ai_insights:
+                ai_summary_text = ai_insights.get('raw_response', '')
+        elif isinstance(ai_insights, str):
+            ai_summary_text = ai_insights
+        if ai_summary_text:
+            factual_claims.append(ai_summary_text)
+        factual_claims = [_ensure_inline_source_claim(claim) for claim in factual_claims if str(claim or "").strip()]
         consistency = validate_report_consistency(ab_data, csone_norm, risk_data=risk_data, factual_claims=factual_claims)
         if consistency["warnings"]:
             logger.warning(f"[CONSISTENCY] Compact report warnings: {consistency['warnings']}")

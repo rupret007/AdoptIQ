@@ -117,6 +117,19 @@ LIKELY_ACCOUNT_ID_COLS = (
     "ACCOUNT_ID",
 )
 
+# Shared account-column candidates for cross-source parity/filtering.
+ACCOUNT_COLUMN_CANDIDATES = (
+    "ACCOUNT_ID_C",
+    "ACCOUNT__C",
+    "DSM_ACCOUNT_ID_C",
+    "ACCOUNT_ID",
+    "ACCOUNT",
+    "ACCOUNTID",
+    "AccountId",
+    "Account ID",
+    "Account Id",
+)
+
 
 def _clean_text(value: Any) -> str:
     if value is None:
