@@ -84,3 +84,22 @@ def test_prefetch_ask_ai_fetches_expected_datasets(monkeypatch):
         "csconsole_action_plans",
     }
     assert set(seen) == set(result.keys())
+
+
+def test_success_priorities_prefetch_uses_customer_names_when_available(monkeypatch):
+    captured = {"identifiers": None}
+
+    def _sp_fetcher(ctx, identifiers, days):
+        captured["identifiers"] = list(identifiers)
+        return pd.DataFrame([{"ok": True}])
+
+    monkeypatch.setitem(sp._FETCHERS, "csconsole_success_priorities", _sp_fetcher)
+    run_ctx = sp.AnalysisRunContext.build(
+        ctx=object(),
+        account_ids=["001", "002"],
+        days=90,
+        customer_names=["Acme Corp", "Beta Inc"],
+    )
+    result = sp.prefetch_datasets(run_ctx, ["csconsole_success_priorities"])
+    assert not result["csconsole_success_priorities"].empty
+    assert captured["identifiers"] == ["Acme Corp", "Beta Inc"]

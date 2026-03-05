@@ -663,6 +663,8 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         
         # Connect to Snowflake
         ctx = _connect_with_keeper()
+        if ctx is None:
+            raise RuntimeError("Unable to establish Snowflake connection")
         cur = ctx.cursor(snowflake.connector.DictCursor)
         
         # First, get account information from subscription (minimal columns - TECHNOLOGY_C/STATUS_C may not exist in all environments)
@@ -709,7 +711,8 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         AND ACCOUNT_ID_C = %s 
         {date_filter_task}
         """
-        adoption_barriers = cur.execute(ab_query, (account_id, days)).fetchall()
+        cur.execute(ab_query, (account_id, days))
+        adoption_barriers = cur.fetchall()
         
         logger.info(f"[[LIST]] Fetching action plans...")
         ap_query = f"""
@@ -719,7 +722,8 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         AND ACCOUNT_ID_C = %s 
         {date_filter_task}
         """
-        action_plans = cur.execute(ap_query, (account_id, days)).fetchall()
+        cur.execute(ap_query, (account_id, days))
+        action_plans = cur.fetchall()
         
         logger.info(f"[EMOJI] Fetching customer pulse...")
         cp_query = f"""
@@ -728,7 +732,8 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         WHERE ACCOUNT__C = %s 
         {date_filter_pulse_priority}
         """
-        customer_pulse = cur.execute(cp_query, (account_id, days)).fetchall()
+        cur.execute(cp_query, (account_id, days))
+        customer_pulse = cur.fetchall()
         
         logger.info(f"[[BULLSEYE]] Fetching success priorities...")
         sp_query = f"""
@@ -737,7 +742,8 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         WHERE RELATED_CUSTOMER__C = %s 
         {date_filter_pulse_priority}
         """
-        success_priorities = cur.execute(sp_query, (account_id, days)).fetchall()
+        cur.execute(sp_query, (customer_name, days))
+        success_priorities = cur.fetchall()
         
         # Get team information (CSSM_* columns may not exist in all dsm_assignment_data schemas)
         team_data = []
@@ -748,7 +754,8 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
             FROM CX_DB.CX_SWSSBST_BR.dsm_assignment_data
             WHERE SUBSCRIPTION_ID = %s
             """
-            team_data = cur.execute(team_query, (subscription_id,)).fetchall()
+            cur.execute(team_query, (subscription_id,))
+            team_data = cur.fetchall()
         except Exception as team_err:
             logger.info(f"Team/CSSM columns not available in dsm_assignment_data: {team_err}")
             team_data = []
@@ -1351,6 +1358,8 @@ def fetch_adoption_barriers(ctx, account_ids: List[str], days: int) -> pd.DataFr
 def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_data: list):
     """Load and merge CSConsole data for a specific subscription ID with proper SQL injection protection"""
     ctx = _connect_with_keeper()
+    if ctx is None:
+        return "Error", csone_data
     cur = ctx.cursor(snowflake.connector.DictCursor)
     
     try:
@@ -1361,9 +1370,14 @@ def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_
         
         # Use parameterized query to prevent SQL injection
         # Column names are hardcoded constants, so this is safe
-        account_query = "SELECT ACCOUNT_ID_C, BU_NAME FROM CX_DB.CX_SWSSBST_BR.dsm_assignment_data WHERE SUBSCRIPTION_ID_C = %s LIMIT 1"
+        account_query = "SELECT ACCOUNT_ID_C, BU_NAME FROM CX_DB.CX_SWSSBST_BR.dsm_assignment_data WHERE SUBSCRIPTION_ID = %s LIMIT 1"
         cur.execute(account_query, (subscription_id,))
         account_result = cur.fetchone()
+        if not account_result:
+            # Backward-compatible fallback for environments that still expose SUBSCRIPTION_ID_C.
+            legacy_query = "SELECT ACCOUNT_ID_C, BU_NAME FROM CX_DB.CX_SWSSBST_BR.dsm_assignment_data WHERE SUBSCRIPTION_ID_C = %s LIMIT 1"
+            cur.execute(legacy_query, (subscription_id,))
+            account_result = cur.fetchone()
         
         if not account_result:
             logging.warning(f"No account found for Subscription ID '{subscription_id}' in dsm_assignment_data. Only Excel data will be used.")
@@ -1380,10 +1394,14 @@ def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_
         cp_query = "SELECT *, 'Customer Pulse' as RECORD_SOURCE FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C WHERE ACCOUNT__C = %s AND DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())"
         sp_query = "SELECT *, 'Success Priority' as RECORD_SOURCE FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C WHERE RELATED_CUSTOMER__C = %s AND DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())"
 
-        action_plans = cur.execute(ap_query, (account_id, days)).fetchall()
-        adoption_barriers = cur.execute(ab_query, (account_id, days)).fetchall()
-        customer_pulse = cur.execute(cp_query, (account_id, days)).fetchall()
-        success_priorities = cur.execute(sp_query, (account_id, days)).fetchall()
+        cur.execute(ap_query, (account_id, days))
+        action_plans = cur.fetchall()
+        cur.execute(ab_query, (account_id, days))
+        adoption_barriers = cur.fetchall()
+        cur.execute(cp_query, (account_id, days))
+        customer_pulse = cur.fetchall()
+        cur.execute(sp_query, (customer_name, days))
+        success_priorities = cur.fetchall()
         
         logging.info(f"Found {len(action_plans)} action plans, {len(adoption_barriers)} adoption barriers, {len(customer_pulse)} pulse records, and {len(success_priorities)} success priorities.")
 

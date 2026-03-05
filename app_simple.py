@@ -3828,12 +3828,26 @@ def run_compact_analysis(analysis_id):
         if not team_subs_df.empty and ctx is not None:
             try:
                 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+                customer_names = (
+                    team_subs_df['BU_NAME'].dropna().unique().tolist()
+                    if 'BU_NAME' in team_subs_df.columns
+                    else []
+                )
                 
                 def fetch_csconsole_data():
                     """Fetch CSConsole data in a separate thread"""
+                    local_ctx = None
                     try:
                         logger.info(f"[[SEARCH]] Starting CSConsole data fetching...")
-                        prefetch_ctx = AnalysisRunContext.build(ctx, account_ids, days)
+                        local_ctx = _connect_with_keeper()
+                        if local_ctx is None:
+                            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+                        prefetch_ctx = AnalysisRunContext.build(
+                            local_ctx,
+                            account_ids,
+                            days,
+                            customer_names=customer_names,
+                        )
                         csconsole_bundle = prefetch_comprehensive(prefetch_ctx)
                         csconsole_action_plans = csconsole_bundle.get("csconsole_action_plans", pd.DataFrame())
                         csconsole_customer_pulse = csconsole_bundle.get("csconsole_customer_pulse", pd.DataFrame())
@@ -3844,6 +3858,12 @@ def run_compact_analysis(analysis_id):
                     except Exception as e:
                         logger.error(f"[[ERROR]] CSConsole data fetching failed: {e}")
                         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+                    finally:
+                        if local_ctx is not None:
+                            try:
+                                local_ctx.close()
+                            except Exception:
+                                pass
                 
                 logger.info(f"[[TIME]] Starting CSConsole fetching with 90-second timeout...")
                 
@@ -6229,8 +6249,18 @@ def run_customer_renewal_analysis(analysis_id):
                 status['customer_name'] = customer_name
         
         account_ids = team_subs_df['ACCOUNT_ID_C'].dropna().unique().tolist()
+        customer_names = (
+            team_subs_df['BU_NAME'].dropna().unique().tolist()
+            if 'BU_NAME' in team_subs_df.columns
+            else []
+        )
         try:
-            renewal_prefetch_ctx = AnalysisRunContext.build(ctx, account_ids, days)
+            renewal_prefetch_ctx = AnalysisRunContext.build(
+                ctx,
+                account_ids,
+                days,
+                customer_names=customer_names,
+            )
             renewal_csconsole_bundle = prefetch_comprehensive(renewal_prefetch_ctx)
             csconsole_action_plans = renewal_csconsole_bundle.get("csconsole_action_plans", pd.DataFrame())
             csconsole_customer_pulse = renewal_csconsole_bundle.get("csconsole_customer_pulse", pd.DataFrame())
@@ -6289,14 +6319,12 @@ def run_customer_renewal_analysis(analysis_id):
         
         # Fetch CSConsole data for renewal analysis (all data sources)
         logger.info(f"[[CSConsole]] Fetching CSConsole data for renewal analysis...")
-        try:
-            logger.info(f"[[CSConsole]] Retrieved: {len(csconsole_action_plans)} action plans, {len(csconsole_customer_pulse)} customer pulse, {len(csconsole_success_priorities)} success priorities, {len(csconsole_adoption_barriers)} adoption barriers")
-        except Exception as e:
-            logger.warning(f"[[WARNING]] CSConsole data fetching failed: {e}")
-            csconsole_action_plans = pd.DataFrame()
-            csconsole_customer_pulse = pd.DataFrame()
-            csconsole_success_priorities = pd.DataFrame()
-            csconsole_adoption_barriers = pd.DataFrame()
+        logger.info(
+            f"[[CSConsole]] Retrieved: {len(csconsole_action_plans)} action plans, "
+            f"{len(csconsole_customer_pulse)} customer pulse, "
+            f"{len(csconsole_success_priorities)} success priorities, "
+            f"{len(csconsole_adoption_barriers)} adoption barriers"
+        )
         
         # Filter CSConsole data for customer(s)
         if renewal_type == 'renewal_portfolio':
@@ -7135,7 +7163,17 @@ def run_comprehensive_analysis(analysis_id):
         })
         
         try:
-            comprehensive_prefetch_ctx = AnalysisRunContext.build(ctx, account_ids, days)
+            customer_names = (
+                team_subs_df['BU_NAME'].dropna().unique().tolist()
+                if 'BU_NAME' in team_subs_df.columns
+                else []
+            )
+            comprehensive_prefetch_ctx = AnalysisRunContext.build(
+                ctx,
+                account_ids,
+                days,
+                customer_names=customer_names,
+            )
             csconsole_bundle = prefetch_comprehensive(comprehensive_prefetch_ctx)
             csconsole_action_plans = csconsole_bundle.get("csconsole_action_plans", pd.DataFrame())
             csconsole_customer_pulse = csconsole_bundle.get("csconsole_customer_pulse", pd.DataFrame())
@@ -8832,7 +8870,19 @@ def ask_ai_portfolio():
                     sections.append("No account IDs found for detailed analysis.")
                 else:
                     acct_batch = account_ids[:100]
-                    ask_ai_prefetch_ctx = AnalysisRunContext.build(ctx, acct_batch, days)
+                    customer_batch_names = (
+                        team_subs_df[
+                            team_subs_df['ACCOUNT_ID_C'].isin(acct_batch)
+                        ]['BU_NAME'].dropna().unique().tolist()
+                        if {'ACCOUNT_ID_C', 'BU_NAME'}.issubset(set(team_subs_df.columns))
+                        else []
+                    )
+                    ask_ai_prefetch_ctx = AnalysisRunContext.build(
+                        ctx,
+                        acct_batch,
+                        days,
+                        customer_names=customer_batch_names,
+                    )
                     ask_ai_bundle = prefetch_ask_ai(ask_ai_prefetch_ctx)
                     cases_df = ask_ai_bundle.get('support_cases_snowflake', pd.DataFrame())
                     pulse_df = ask_ai_bundle.get('csconsole_customer_pulse', pd.DataFrame())
