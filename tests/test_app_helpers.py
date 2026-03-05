@@ -6,6 +6,7 @@ _clean_datetime_columns_for_excel (Round 2 Fix 2 regression).
 """
 
 import sys
+import os
 from pathlib import Path
 from datetime import datetime
 import io
@@ -15,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd
 import numpy as np
 import pytest
+import app_simple as app_mod
 from app_simple import (
     _categorize_technology,
     _build_insights_payload,
@@ -98,6 +100,69 @@ class TestSensitiveEndpoints:
     def test_download_routes_are_local_only(self):
         assert "download_file" in _SENSITIVE_ENDPOINTS
         assert "export_intel" in _SENSITIVE_ENDPOINTS
+        assert "verbose_debug_api" in _SENSITIVE_ENDPOINTS
+
+
+class TestVerboseDebugApi:
+    @pytest.mark.flask
+    def test_get_verbose_debug_state(self, client, monkeypatch):
+        monkeypatch.setattr(
+            app_mod,
+            "get_snowflake_query_metrics",
+            lambda: {"count": 7, "samples": ["SELECT 1"]},
+        )
+        rv = client.get("/api/debug/verbose")
+        assert rv.status_code == 200
+        data = rv.get_json()
+        assert data["success"] is True
+        assert "verbose_debug" in data
+        assert data["snowflake_query_count"] == 7
+        assert data["snowflake_query_samples"] == ["SELECT 1"]
+
+    @pytest.mark.flask
+    def test_post_verbose_debug_toggle(self, client):
+        prev_runtime = app_mod._VERBOSE_DEBUG_RUNTIME
+        prev_env = os.environ.get("ADOPTIQ_VERBOSE_DEBUG")
+        try:
+            on_resp = client.post("/api/debug/verbose", json={"enabled": True})
+            assert on_resp.status_code == 200
+            on_data = on_resp.get_json()
+            assert on_data["success"] is True
+            assert on_data["verbose_debug"] is True
+            assert os.environ.get("ADOPTIQ_VERBOSE_DEBUG") == "1"
+
+            off_resp = client.post("/api/debug/verbose", json={"enabled": False})
+            assert off_resp.status_code == 200
+            off_data = off_resp.get_json()
+            assert off_data["success"] is True
+            assert off_data["verbose_debug"] is False
+            assert os.environ.get("ADOPTIQ_VERBOSE_DEBUG") == "0"
+        finally:
+            app_mod._VERBOSE_DEBUG_RUNTIME = prev_runtime
+            if prev_env is None:
+                os.environ.pop("ADOPTIQ_VERBOSE_DEBUG", None)
+            else:
+                os.environ["ADOPTIQ_VERBOSE_DEBUG"] = prev_env
+
+    @pytest.mark.flask
+    def test_post_verbose_debug_can_reset_query_metrics(self, client, monkeypatch):
+        reset_called = {"value": False}
+
+        def _reset():
+            reset_called["value"] = True
+
+        monkeypatch.setattr(app_mod, "reset_snowflake_query_metrics", _reset)
+        monkeypatch.setattr(
+            app_mod,
+            "get_snowflake_query_metrics",
+            lambda: {"count": 0, "samples": []},
+        )
+        rv = client.post("/api/debug/verbose", json={"enabled": False, "reset_query_metrics": True})
+        assert rv.status_code == 200
+        data = rv.get_json()
+        assert data["success"] is True
+        assert reset_called["value"] is True
+        assert data["snowflake_query_count"] == 0
 
 
 class TestValidateFileUpload:

@@ -70,3 +70,7 @@ class TestConfigDefaults:
 
     def test_secret_key_not_static_dev_literal(self):
         assert Config.SECRET_KEY != "dev-secret-key-change-in-production"
+
+    def test_verbose_debug_from_env_flag(self):
+        expected = os.environ.get('ADOPTIQ_VERBOSE_DEBUG', 'false').lower() in ('true', '1', 'yes', 'on')
+        assert Config.VERBOSE_DEBUG is expected

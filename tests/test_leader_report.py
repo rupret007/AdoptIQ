@@ -245,3 +245,47 @@ def test_validate_customer_data_consistency_counts_subscription_customers(genera
     checks = generator._validate_customer_data_consistency(team_data)
     assert checks["Alice"]["assigned_customers"] == 2
     assert checks["Alice"]["subscription_customers"] == 2
+
+
+def test_collect_team_data_batches_shared_queries(generator, monkeypatch):
+    calls = {"subs": 0, "ap": 0, "ab": 0, "cp": 0, "sp": 0}
+
+    def _subs(emails):
+        calls["subs"] += 1
+        return pd.DataFrame(
+            [
+                {"ACCOUNT_ID_C": "001", "BU_NAME": "Acme Corp", "CSSM_EMAIL": "alice@example.com"},
+                {"ACCOUNT_ID_C": "002", "BU_NAME": "Beta Inc", "CSSM_EMAIL": "bob@example.com"},
+            ]
+        )
+
+    def _ap(account_ids, days):
+        calls["ap"] += 1
+        return pd.DataFrame([{"ACCOUNT_ID_C": "001"}])
+
+    def _ab(account_ids, days):
+        calls["ab"] += 1
+        return pd.DataFrame([{"ACCOUNT_ID_C": "002"}])
+
+    def _cp(account_ids, days):
+        calls["cp"] += 1
+        return pd.DataFrame([{"ACCOUNT__C": "001", "SCORE__C": 8.1}])
+
+    def _sp(customers, days):
+        calls["sp"] += 1
+        return pd.DataFrame([{"RELATED_CUSTOMER__C": "Beta Inc"}])
+
+    monkeypatch.setattr(generator, "_get_subscriptions_for_cssm", _subs)
+    monkeypatch.setattr(generator, "_fetch_action_plans", _ap)
+    monkeypatch.setattr(generator, "_fetch_adoption_barriers", _ab)
+    monkeypatch.setattr(generator, "_fetch_customer_pulse", _cp)
+    monkeypatch.setattr(generator, "_fetch_success_priorities", _sp)
+
+    direct_reports = [
+        {"name": "Alice", "email": "alice@example.com"},
+        {"name": "Bob", "email": "bob@example.com"},
+    ]
+    team_data = generator._collect_team_data(direct_reports=direct_reports, days=90)
+
+    assert set(team_data.keys()) == {"Alice", "Bob"}
+    assert calls == {"subs": 1, "ap": 1, "ab": 1, "cp": 1, "sp": 1}

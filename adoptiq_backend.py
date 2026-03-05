@@ -1,4 +1,4 @@
-import os, sys, json, re, time, math, logging
+import os, sys, json, re, time, math, logging, threading
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
@@ -42,6 +42,69 @@ except ImportError:
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Snowflake query metrics for query-volume baseline and optimization validation.
+_SNOWFLAKE_QUERY_METRICS = {"count": 0, "samples": []}
+_SNOWFLAKE_QUERY_METRICS_LOCK = threading.Lock()
+_SNOWFLAKE_QUERY_SAMPLES_MAX = 50
+
+
+def _record_snowflake_query(sql: Any) -> None:
+    preview = " ".join(str(sql).split())
+    if len(preview) > 220:
+        preview = preview[:220] + "..."
+    with _SNOWFLAKE_QUERY_METRICS_LOCK:
+        _SNOWFLAKE_QUERY_METRICS["count"] += 1
+        samples = _SNOWFLAKE_QUERY_METRICS["samples"]
+        if len(samples) < _SNOWFLAKE_QUERY_SAMPLES_MAX:
+            samples.append(preview)
+
+
+def reset_snowflake_query_metrics() -> None:
+    with _SNOWFLAKE_QUERY_METRICS_LOCK:
+        _SNOWFLAKE_QUERY_METRICS["count"] = 0
+        _SNOWFLAKE_QUERY_METRICS["samples"] = []
+
+
+def get_snowflake_query_metrics() -> Dict[str, Any]:
+    with _SNOWFLAKE_QUERY_METRICS_LOCK:
+        return {
+            "count": int(_SNOWFLAKE_QUERY_METRICS["count"]),
+            "samples": list(_SNOWFLAKE_QUERY_METRICS["samples"]),
+        }
+
+
+class _InstrumentedSnowflakeCursor:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def execute(self, sql, *args, **kwargs):
+        _record_snowflake_query(sql)
+        return self._cursor.execute(sql, *args, **kwargs)
+
+    def executemany(self, sql, *args, **kwargs):
+        _record_snowflake_query(sql)
+        return self._cursor.executemany(sql, *args, **kwargs)
+
+    def __getattr__(self, item):
+        return getattr(self._cursor, item)
+
+
+class _InstrumentedSnowflakeConnection:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self, *args, **kwargs):
+        return _InstrumentedSnowflakeCursor(self._conn.cursor(*args, **kwargs))
+
+    def __getattr__(self, item):
+        return getattr(self._conn, item)
+
+
+def _instrument_snowflake_connection(conn):
+    if isinstance(conn, _InstrumentedSnowflakeConnection):
+        return conn
+    return _InstrumentedSnowflakeConnection(conn)
 
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
@@ -521,7 +584,7 @@ def _connect_snowflake_direct():
             future = executor.submit(connect)
             conn = future.result(timeout=30)
         logger.info("Snowflake connection successful")
-        return conn
+        return _instrument_snowflake_connection(conn)
     except FutureTimeoutError:
         raise RuntimeError("Snowflake connection timed out after 30 seconds")
     except Exception as e:
@@ -575,7 +638,7 @@ def _connect_with_keeper():
             future = executor.submit(connect_to_snowflake)
             connection = future.result(timeout=30)
             logger.info("Snowflake connection successful")
-            return connection
+            return _instrument_snowflake_connection(connection)
     except FutureTimeoutError:
         logger.warning("Snowflake connection timed out after 30 seconds")
         raise RuntimeError("Snowflake connection timed out - database may be unavailable")

@@ -29,6 +29,7 @@ class Config:
     # Flask Configuration (SECRET_KEY from env; generated ephemeral key otherwise)
     SECRET_KEY = _resolve_secret_key()
     DEBUG = os.environ.get('DEBUG', 'false').lower() in ('true', '1', 'yes')
+    VERBOSE_DEBUG = os.environ.get('ADOPTIQ_VERBOSE_DEBUG', 'false').lower() in ('true', '1', 'yes', 'on')
     FLASK_ENV = os.environ.get('FLASK_ENV', 'development')
     
     # Analysis Configuration

@@ -91,6 +91,14 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 3. Your browser will open automatically to **http://localhost:5001** (or open it manually if needed).
 4. Use AdoptIQ as needed, keeping the server window open during use.
 
+### Verbose Debug Mode (optional)
+
+- Enable detailed runtime diagnostics with environment variable `ADOPTIQ_VERBOSE_DEBUG=1`.
+- You can also toggle verbose mode at runtime from the admin dashboard (`http://localhost:5002`) using the **Debug Controls** section.
+- The same admin section shows a Snowflake query counter and includes a reset button to baseline each report flow.
+- Verbose mode is intended for troubleshooting and query optimization validation; disable it for normal use.
+- Detailed rollout notes are in `SNOWFLAKE_OPTIMIZATION.md`.
+
 **To quit:** Use **AdoptIQ → Quit AdoptIQ** from the menu bar (or ⌘Q). Closing only the terminal window may leave the app running in the background.
 
 ### If macOS blocks the app ("cannot be opened because it is from an unidentified developer")

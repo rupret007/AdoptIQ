@@ -186,7 +186,8 @@ from adoptiq_backend import (
     fetch_csconsole_action_plans, fetch_csconsole_customer_pulse,
     fetch_arr_data, fetch_support_cases_snowflake,
     fetch_csconsole_success_priorities, fetch_csconsole_adoption_barriers,
-    _filter_csconsole_data_by_technology
+    _filter_csconsole_data_by_technology,
+    get_snowflake_query_metrics, reset_snowflake_query_metrics,
 )
 
 # Import new compact and renewal analysis features
@@ -202,6 +203,7 @@ from data_normalization import (
 )
 from risk_scoring import compute_customer_risk_profile
 from report_consistency import validate_report_consistency
+from snowflake_prefetch import AnalysisRunContext, prefetch_comprehensive, prefetch_ask_ai
 
 # Import data source validator
 from data_source_validator import (
@@ -288,12 +290,41 @@ app.config['WTF_CSRF_ENABLED'] = True
 app.config['WTF_CSRF_TIME_LIMIT'] = None  # No timeout limit for CSRF tokens
 app.jinja_env.globals['csrf_token'] = generate_csrf
 
+# Verbose debug mode can be enabled via env and changed at runtime through local admin APIs.
+_VERBOSE_DEBUG_RUNTIME = None
+
+
+def _is_truthy_flag(value: Any) -> bool:
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _is_verbose_debug_enabled() -> bool:
+    if _VERBOSE_DEBUG_RUNTIME is not None:
+        return bool(_VERBOSE_DEBUG_RUNTIME)
+    return _is_truthy_flag(os.environ.get('ADOPTIQ_VERBOSE_DEBUG', '0'))
+
+
+def _apply_verbose_debug_mode() -> bool:
+    enabled = _is_verbose_debug_enabled()
+    level = logging.DEBUG if enabled else logging.INFO
+    logging.getLogger().setLevel(level)
+    return enabled
+
+
+def _set_verbose_debug_mode(enabled: bool, source: str = 'runtime') -> bool:
+    global _VERBOSE_DEBUG_RUNTIME
+    _VERBOSE_DEBUG_RUNTIME = bool(enabled)
+    os.environ['ADOPTIQ_VERBOSE_DEBUG'] = '1' if enabled else '0'
+    active = _apply_verbose_debug_mode()
+    logging.getLogger(__name__).info("Verbose debug mode %s via %s", "enabled" if active else "disabled", source)
+    return active
+
 # Local-only protection for sensitive routes (desktop app default posture).
 _SENSITIVE_ENDPOINTS = {
     'start_analysis', 'start_compact_analysis', 'start_customer_renewal_analysis',
     'start_subscription_analysis', 'start_leader_report', 'cancel_analysis',
     'download_result', 'download_file', 'export_intel',
-    'clear_stuck_analyses', 'simple_test', 'test_generate_report',
+    'clear_stuck_analyses', 'simple_test', 'test_generate_report', 'verbose_debug_api',
 }
 
 _ANALYSIS_ID_RE = re.compile(r'^[A-Za-z0-9._-]{1,200}$')
@@ -328,6 +359,7 @@ def restrict_sensitive_routes_to_localhost():
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+_apply_verbose_debug_mode()
 
 # Version and build (from config.py, updated by build_mac_dmg.sh)
 from config import ADOPTIQ_VERSION, ADOPTIQ_BUILD, version_string, Config
@@ -3801,10 +3833,12 @@ def run_compact_analysis(analysis_id):
                     """Fetch CSConsole data in a separate thread"""
                     try:
                         logger.info(f"[[SEARCH]] Starting CSConsole data fetching...")
-                        csconsole_action_plans = fetch_csconsole_action_plans(ctx, account_ids, days)
-                        csconsole_customer_pulse = fetch_csconsole_customer_pulse(ctx, account_ids, days)
-                        csconsole_success_priorities = fetch_csconsole_success_priorities(ctx, account_ids, days)
-                        csconsole_adoption_barriers = fetch_csconsole_adoption_barriers(ctx, account_ids, days)
+                        prefetch_ctx = AnalysisRunContext.build(ctx, account_ids, days)
+                        csconsole_bundle = prefetch_comprehensive(prefetch_ctx)
+                        csconsole_action_plans = csconsole_bundle.get("csconsole_action_plans", pd.DataFrame())
+                        csconsole_customer_pulse = csconsole_bundle.get("csconsole_customer_pulse", pd.DataFrame())
+                        csconsole_success_priorities = csconsole_bundle.get("csconsole_success_priorities", pd.DataFrame())
+                        csconsole_adoption_barriers = csconsole_bundle.get("csconsole_adoption_barriers", pd.DataFrame())
                         logger.info(f"[[OK]] Retrieved CSConsole data")
                         return csconsole_action_plans, csconsole_customer_pulse, csconsole_success_priorities, csconsole_adoption_barriers
                     except Exception as e:
@@ -6195,6 +6229,19 @@ def run_customer_renewal_analysis(analysis_id):
                 status['customer_name'] = customer_name
         
         account_ids = team_subs_df['ACCOUNT_ID_C'].dropna().unique().tolist()
+        try:
+            renewal_prefetch_ctx = AnalysisRunContext.build(ctx, account_ids, days)
+            renewal_csconsole_bundle = prefetch_comprehensive(renewal_prefetch_ctx)
+            csconsole_action_plans = renewal_csconsole_bundle.get("csconsole_action_plans", pd.DataFrame())
+            csconsole_customer_pulse = renewal_csconsole_bundle.get("csconsole_customer_pulse", pd.DataFrame())
+            csconsole_success_priorities = renewal_csconsole_bundle.get("csconsole_success_priorities", pd.DataFrame())
+            csconsole_adoption_barriers = renewal_csconsole_bundle.get("csconsole_adoption_barriers", pd.DataFrame())
+        except Exception as e:
+            logger.warning(f"[[WARNING]] Renewal CSConsole prefetch failed: {e}")
+            csconsole_action_plans = pd.DataFrame()
+            csconsole_customer_pulse = pd.DataFrame()
+            csconsole_success_priorities = pd.DataFrame()
+            csconsole_adoption_barriers = pd.DataFrame()
         
         with analysis_status_lock:
             _update_progress(status, 35, 'Fetching adoption barriers...', 'Customer Data Analysis')
@@ -6209,7 +6256,6 @@ def run_customer_renewal_analysis(analysis_id):
         
         # Merge CSConsole adoption barriers so portfolio gets complete data (fix "not getting all the data")
         try:
-            csconsole_adoption_barriers = fetch_csconsole_adoption_barriers(ctx, account_ids, days)
             if not csconsole_adoption_barriers.empty and "ACCOUNT_ID_C" in csconsole_adoption_barriers.columns:
                 csab_merged = csconsole_adoption_barriers.merge(
                     team_subs_df[["ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"]].drop_duplicates(),
@@ -6244,10 +6290,6 @@ def run_customer_renewal_analysis(analysis_id):
         # Fetch CSConsole data for renewal analysis (all data sources)
         logger.info(f"[[CSConsole]] Fetching CSConsole data for renewal analysis...")
         try:
-            csconsole_action_plans = fetch_csconsole_action_plans(ctx, account_ids, days)
-            csconsole_customer_pulse = fetch_csconsole_customer_pulse(ctx, account_ids, days)
-            csconsole_success_priorities = fetch_csconsole_success_priorities(ctx, account_ids, days)
-            csconsole_adoption_barriers = fetch_csconsole_adoption_barriers(ctx, account_ids, days)
             logger.info(f"[[CSConsole]] Retrieved: {len(csconsole_action_plans)} action plans, {len(csconsole_customer_pulse)} customer pulse, {len(csconsole_success_priorities)} success priorities, {len(csconsole_adoption_barriers)} adoption barriers")
         except Exception as e:
             logger.warning(f"[[WARNING]] CSConsole data fetching failed: {e}")
@@ -7092,10 +7134,19 @@ def run_comprehensive_analysis(analysis_id):
             'current_step': 'CSConsole Data Integration'
         })
         
-        csconsole_action_plans = fetch_csconsole_action_plans(ctx, account_ids, days)
-        csconsole_customer_pulse = fetch_csconsole_customer_pulse(ctx, account_ids, days)
-        csconsole_success_priorities = fetch_csconsole_success_priorities(ctx, account_ids, days)
-        csconsole_adoption_barriers = fetch_csconsole_adoption_barriers(ctx, account_ids, days)
+        try:
+            comprehensive_prefetch_ctx = AnalysisRunContext.build(ctx, account_ids, days)
+            csconsole_bundle = prefetch_comprehensive(comprehensive_prefetch_ctx)
+            csconsole_action_plans = csconsole_bundle.get("csconsole_action_plans", pd.DataFrame())
+            csconsole_customer_pulse = csconsole_bundle.get("csconsole_customer_pulse", pd.DataFrame())
+            csconsole_success_priorities = csconsole_bundle.get("csconsole_success_priorities", pd.DataFrame())
+            csconsole_adoption_barriers = csconsole_bundle.get("csconsole_adoption_barriers", pd.DataFrame())
+        except Exception as e:
+            logger.warning(f"[[WARNING]] Comprehensive CSConsole prefetch failed: {e}")
+            csconsole_action_plans = pd.DataFrame()
+            csconsole_customer_pulse = pd.DataFrame()
+            csconsole_success_priorities = pd.DataFrame()
+            csconsole_adoption_barriers = pd.DataFrame()
         
         logger.info(f" Found {len(csconsole_action_plans)} action plans, {len(csconsole_customer_pulse)} customer pulse records, "
                     f"{len(csconsole_success_priorities)} success priorities, and {len(csconsole_adoption_barriers)} adoption barriers from CSConsole.")
@@ -8418,6 +8469,42 @@ def get_all_status():
         logger.error(f"Error fetching batch statuses: {e}", exc_info=True)
         return jsonify({'error': 'Failed to retrieve statuses', 'statuses': []}), 500
 
+
+@app.route('/api/debug/verbose', methods=['GET', 'POST'])
+def verbose_debug_api():
+    """Inspect or toggle verbose debug mode at runtime (local-only via before_request)."""
+    try:
+        if request.method == 'GET':
+            query_metrics = get_snowflake_query_metrics()
+            return jsonify({
+                'success': True,
+                'verbose_debug': _is_verbose_debug_enabled(),
+                'source': 'runtime' if _VERBOSE_DEBUG_RUNTIME is not None else 'env',
+                'snowflake_query_count': query_metrics.get('count', 0),
+                'snowflake_query_samples': query_metrics.get('samples', []),
+            })
+
+        payload = request.get_json(silent=True) or {}
+        if payload.get('reset_query_metrics') is True:
+            reset_snowflake_query_metrics()
+        enabled_val = payload.get('enabled')
+        if enabled_val is None:
+            return jsonify({'success': False, 'error': "Missing 'enabled' boolean field"}), 400
+
+        enabled = enabled_val if isinstance(enabled_val, bool) else _is_truthy_flag(enabled_val)
+        active = _set_verbose_debug_mode(enabled, source='api')
+        query_metrics = get_snowflake_query_metrics()
+        return jsonify({
+            'success': True,
+            'verbose_debug': active,
+            'source': 'runtime',
+            'snowflake_query_count': query_metrics.get('count', 0),
+            'snowflake_query_samples': query_metrics.get('samples', []),
+        })
+    except Exception as e:
+        logger.error("Verbose debug API failed: %s", e, exc_info=True)
+        return jsonify({'success': False, 'error': 'Failed to update verbose debug mode'}), 500
+
 @app.route('/previous-reports')
 def previous_reports():
     """Browse and download previous reports from the output folder"""
@@ -8692,10 +8779,6 @@ def ask_ai_portfolio():
         from adoptiq_backend import (
             _connect_with_keeper, get_subscriptions_for_team,
             fetch_adoption_barriers, fetch_arr_data,
-            fetch_support_cases_snowflake,
-            fetch_csconsole_customer_pulse,
-            fetch_csconsole_success_priorities,
-            fetch_csconsole_action_plans,
             fetch_period_comparison,
             fetch_barrier_velocity,
             calculate_arr_at_risk,
@@ -8749,6 +8832,12 @@ def ask_ai_portfolio():
                     sections.append("No account IDs found for detailed analysis.")
                 else:
                     acct_batch = account_ids[:100]
+                    ask_ai_prefetch_ctx = AnalysisRunContext.build(ctx, acct_batch, days)
+                    ask_ai_bundle = prefetch_ask_ai(ask_ai_prefetch_ctx)
+                    cases_df = ask_ai_bundle.get('support_cases_snowflake', pd.DataFrame())
+                    pulse_df = ask_ai_bundle.get('csconsole_customer_pulse', pd.DataFrame())
+                    sp_df = ask_ai_bundle.get('csconsole_success_priorities', pd.DataFrame())
+                    ap_df = ask_ai_bundle.get('csconsole_action_plans', pd.DataFrame())
 
                     # --- Section 2: ARR & Financial ---
                     arr_df = None
@@ -8806,9 +8895,7 @@ def ask_ai_portfolio():
                         logger.debug(f"Ask AI: AB fetch skipped: {e}")
 
                     # --- Section 4: Support Cases ---
-                    cases_df = None
                     try:
-                        cases_df = fetch_support_cases_snowflake(ctx, acct_batch, days)
                         if cases_df is not None and not cases_df.empty:
                             n_cases = len(cases_df)
                             sections.append(f"\n=== SUPPORT CASES ({n_cases} total) ===")
@@ -8900,9 +8987,7 @@ def ask_ai_portfolio():
                         logger.debug(f"Ask AI: Feature requests skipped: {e}")
 
                     # --- Section 5: Customer Pulse ---
-                    pulse_df = None
                     try:
-                        pulse_df = fetch_csconsole_customer_pulse(ctx, acct_batch, days)
                         if pulse_df is not None and not pulse_df.empty:
                             score_col = next((c for c in ('SCORE__C', 'SCORE_C') if c in pulse_df.columns), None)
                             if score_col:
@@ -8916,7 +9001,6 @@ def ask_ai_portfolio():
 
                     # --- Section 6: Success Priorities ---
                     try:
-                        sp_df = fetch_csconsole_success_priorities(ctx, acct_batch, days)
                         if sp_df is not None and not sp_df.empty:
                             sections.append(f"\n=== SUCCESS PRIORITIES ({len(sp_df)} total) ===")
                             for _, row in sp_df.head(10).iterrows():
@@ -8928,7 +9012,6 @@ def ask_ai_portfolio():
 
                     # --- Section 7: Action Plans ---
                     try:
-                        ap_df = fetch_csconsole_action_plans(ctx, acct_batch, days)
                         if ap_df is not None and not ap_df.empty:
                             sections.append(f"\n=== ACTION PLANS ({len(ap_df)} total) ===")
                             for _, row in ap_df.head(10).iterrows():

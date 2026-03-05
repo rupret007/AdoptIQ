@@ -276,29 +276,75 @@ class LeaderReportGenerator:
         logger.info(f"_collect_team_data called for {len(direct_reports) if direct_reports else 0} reports")
         team_data = {}
         n_total = len(direct_reports) if direct_reports else 0
-        
+        if not direct_reports:
+            return team_data
+
+        # Batch subscription fetch for all CSSMs to reduce Snowflake query volume.
+        cssm_emails = [r.get('email') for r in direct_reports if r.get('email')]
+        subscriptions_all = self._get_subscriptions_for_cssm(cssm_emails)
+        logger.info(
+            "Leader report batch mode: %d direct reports, %d subscription rows fetched in one query",
+            n_total,
+            len(subscriptions_all) if isinstance(subscriptions_all, pd.DataFrame) else 0,
+        )
+        if n_total > 0:
+            previous_query_pattern = n_total * 5
+            batched_query_pattern = 5
+            logger.info(
+                "Leader report Snowflake query pattern reduced from ~%d to ~%d queries",
+                previous_query_pattern,
+                batched_query_pattern,
+            )
+
+        if subscriptions_all is None:
+            subscriptions_all = pd.DataFrame()
+        else:
+            subscriptions_all = subscriptions_all.copy()
+
+        if not subscriptions_all.empty and 'CSSM_EMAIL' in subscriptions_all.columns:
+            subscriptions_all['CSSM_EMAIL'] = subscriptions_all['CSSM_EMAIL'].astype(str).str.strip().str.lower()
+
+        all_account_ids: List[str] = []
+        all_customers: List[str] = []
+        if not subscriptions_all.empty:
+            if 'ACCOUNT_ID_C' in subscriptions_all.columns:
+                all_account_ids = subscriptions_all['ACCOUNT_ID_C'].dropna().astype(str).unique().tolist()
+            if 'BU_NAME' in subscriptions_all.columns:
+                all_customers = subscriptions_all['BU_NAME'].dropna().astype(str).unique().tolist()
+
+        # Batch fetch each Snowflake dataset once.
+        action_plans_all = self._fetch_action_plans(all_account_ids, days)
+        adoption_barriers_all = self._fetch_adoption_barriers(all_account_ids, days)
+        customer_pulse_all = self._fetch_customer_pulse(all_account_ids, days)
+        success_priorities_all = self._fetch_success_priorities(all_customers, days)
+
+        if not customer_pulse_all.empty and 'ACCOUNT__C' in customer_pulse_all.columns:
+            customer_pulse_all = customer_pulse_all.rename(columns={'ACCOUNT__C': 'ACCOUNT_ID_C'})
+
+        if not success_priorities_all.empty and 'RELATED_CUSTOMER__C' in success_priorities_all.columns:
+            success_priorities_all = success_priorities_all.copy()
+            success_priorities_all['_RELATED_CUSTOMER_NORM'] = success_priorities_all['RELATED_CUSTOMER__C'].apply(
+                normalize_customer_name
+            )
+
         for idx, report in enumerate(direct_reports):
             cssm_name = report['name']
-            cssm_email = report['email']
-            
-            # Per-team-member progress: spread across 19-69% (this is the slowest phase)
+            cssm_email = str(report.get('email', '')).strip().lower()
+
             member_pct = 19 + int((idx / max(n_total, 1)) * 50)
             if progress_callback:
                 try:
                     progress_callback(member_pct, f'Fetching data for {cssm_name} ({idx + 1}/{n_total})...', 'Team Data Collection')
                 except Exception as _cb_err:
                     logger.debug(f"Progress callback error: {_cb_err}")
-            
+
             logger.info(f"Collecting data for {cssm_name} ({idx + 1}/{n_total})...")
-            
-            subscriptions_df = self._get_subscriptions_for_cssm([cssm_email])
-            logger.debug(f"_get_subscriptions_for_cssm() returned. Type: {type(subscriptions_df)}, is None: {subscriptions_df is None}, empty: {subscriptions_df.empty if subscriptions_df is not None else 'N/A'}")
-            
-            # Safety check: ensure subscriptions_df is never None
-            if subscriptions_df is None:
-                logger.error(f"ERROR - subscriptions_df is None for {cssm_name}! This should not happen.")
+
+            if subscriptions_all.empty or 'CSSM_EMAIL' not in subscriptions_all.columns:
                 subscriptions_df = pd.DataFrame()
-            
+            else:
+                subscriptions_df = subscriptions_all[subscriptions_all['CSSM_EMAIL'] == cssm_email].copy()
+
             if subscriptions_df.empty:
                 logger.warning(f"No subscriptions found for {cssm_name}")
                 team_data[cssm_name] = {
@@ -312,54 +358,49 @@ class LeaderReportGenerator:
                     'customers': []
                 }
                 continue
-            
-            account_ids = subscriptions_df['ACCOUNT_ID_C'].dropna().unique().tolist()
+
+            account_ids = subscriptions_df['ACCOUNT_ID_C'].dropna().astype(str).unique().tolist() if 'ACCOUNT_ID_C' in subscriptions_df.columns else []
             if 'BU_NAME' in subscriptions_df.columns:
                 subscriptions_df['BU_NAME'] = subscriptions_df['BU_NAME'].apply(normalize_customer_name)
-            customers = subscriptions_df['BU_NAME'].dropna().unique().tolist()
-            
-            # Fetch all data for this CSSM
-            action_plans_df = self._fetch_action_plans(account_ids, days)
-            adoption_barriers_df = self._fetch_adoption_barriers(account_ids, days)
-            customer_pulse_df = self._fetch_customer_pulse(account_ids, days)
-            success_priorities_df = self._fetch_success_priorities(customers, days)  # Success Priorities uses customer names, not account IDs
-            
-            # Merge with subscription data to get customer names
+            customers = subscriptions_df['BU_NAME'].dropna().unique().tolist() if 'BU_NAME' in subscriptions_df.columns else []
+            customer_set = set(customers)
+
+            action_plans_df = action_plans_all[action_plans_all['ACCOUNT_ID_C'].astype(str).isin(account_ids)].copy() if (not action_plans_all.empty and 'ACCOUNT_ID_C' in action_plans_all.columns) else pd.DataFrame()
+            adoption_barriers_df = adoption_barriers_all[adoption_barriers_all['ACCOUNT_ID_C'].astype(str).isin(account_ids)].copy() if (not adoption_barriers_all.empty and 'ACCOUNT_ID_C' in adoption_barriers_all.columns) else pd.DataFrame()
+            customer_pulse_df = customer_pulse_all[customer_pulse_all['ACCOUNT_ID_C'].astype(str).isin(account_ids)].copy() if (not customer_pulse_all.empty and 'ACCOUNT_ID_C' in customer_pulse_all.columns) else pd.DataFrame()
+
+            if not success_priorities_all.empty and '_RELATED_CUSTOMER_NORM' in success_priorities_all.columns:
+                success_priorities_df = success_priorities_all[success_priorities_all['_RELATED_CUSTOMER_NORM'].isin(customer_set)].copy()
+                success_priorities_df.drop(columns=['_RELATED_CUSTOMER_NORM'], inplace=True, errors='ignore')
+            else:
+                success_priorities_df = pd.DataFrame()
+
             if not action_plans_df.empty:
                 action_plans_df = action_plans_df.merge(
                     subscriptions_df[['ACCOUNT_ID_C', 'BU_NAME']].drop_duplicates(),
                     on='ACCOUNT_ID_C',
                     how='left'
                 )
-            
+
             if not adoption_barriers_df.empty:
                 adoption_barriers_df = adoption_barriers_df.merge(
                     subscriptions_df[['ACCOUNT_ID_C', 'BU_NAME']].drop_duplicates(),
                     on='ACCOUNT_ID_C',
                     how='left'
                 )
-            
+
             if not customer_pulse_df.empty:
-                # Customer pulse uses ACCOUNT__C instead of ACCOUNT_ID_C
-                # Fix: Check column exists before renaming
-                if 'ACCOUNT__C' in customer_pulse_df.columns:
-                    customer_pulse_df = customer_pulse_df.rename(columns={'ACCOUNT__C': 'ACCOUNT_ID_C'})
-                
-                # Only merge if we have the account ID column
-                if 'ACCOUNT_ID_C' in customer_pulse_df.columns:
-                    customer_pulse_df = customer_pulse_df.merge(
-                        subscriptions_df[['ACCOUNT_ID_C', 'BU_NAME']].drop_duplicates(),
-                        on='ACCOUNT_ID_C',
-                        how='left'
-                    )
-                else:
-                    logger.warning(f"Customer Pulse data for {cssm_name} missing account ID column - using without customer names")
-            if not customer_pulse_df.empty and 'BU_NAME' in customer_pulse_df.columns:
-                customer_pulse_df['BU_NAME'] = customer_pulse_df['BU_NAME'].apply(normalize_customer_name)
+                customer_pulse_df = customer_pulse_df.merge(
+                    subscriptions_df[['ACCOUNT_ID_C', 'BU_NAME']].drop_duplicates(),
+                    on='ACCOUNT_ID_C',
+                    how='left'
+                )
+                if 'BU_NAME' in customer_pulse_df.columns:
+                    customer_pulse_df['BU_NAME'] = customer_pulse_df['BU_NAME'].apply(normalize_customer_name)
 
             if not success_priorities_df.empty and 'RELATED_CUSTOMER__C' in success_priorities_df.columns:
                 success_priorities_df['RELATED_CUSTOMER__C'] = success_priorities_df['RELATED_CUSTOMER__C'].apply(normalize_customer_name)
-            
+
             team_data[cssm_name] = {
                 'subscriptions': subscriptions_df,
                 'action_plans': action_plans_df,
@@ -370,9 +411,9 @@ class LeaderReportGenerator:
                 'account_ids': account_ids,
                 'customers': customers
             }
-            
+
             logger.info(f"  {cssm_name}: {self.safe_len(action_plans_df)} APs, {self.safe_len(adoption_barriers_df)} ABs, {self.safe_len(customer_pulse_df)} CPs, {self.safe_len(success_priorities_df)} SPs")
-        
+
         return team_data
     
     def _get_subscriptions_for_cssm(self, cssm_emails: List[str]) -> pd.DataFrame:

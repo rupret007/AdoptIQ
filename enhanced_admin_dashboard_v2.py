@@ -1354,11 +1354,25 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
             <a href="/clear_logs" class="btn btn-warning">Clear Logs</a>
             <a href="/api/analytics" class="btn btn-success">View Analytics</a>
         </div>
+
+        <div class="table-container">
+            <h3>Debug Controls</h3>
+            <p><strong>Verbose Debug:</strong> {{ 'ON' if verbose_debug else 'OFF' }}</p>
+            <p><strong>Snowflake Queries (since reset):</strong> {{ snowflake_query_count }}</p>
+            <button class="btn btn-warning" onclick="toggleVerboseDebug()">
+                {{ 'Disable' if verbose_debug else 'Enable' }} Verbose Debug
+            </button>
+            <button class="btn btn-primary" onclick="resetSnowflakeQueryMetrics()">
+                Reset Query Counter
+            </button>
+        </div>
     </div>
     
     <button class="refresh-btn" onclick="location.reload()">🔄</button>
     
     <script>
+        const verboseDebugEnabled = {{ 'true' if verbose_debug else 'false' }};
+
         // Auto-refresh every 30 seconds
         setTimeout(function() {
             location.reload();
@@ -1374,6 +1388,42 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 }
             });
         });
+
+        async function toggleVerboseDebug() {
+            try {
+                const response = await fetch('/api/debug/verbose', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: !verboseDebugEnabled }),
+                });
+                const result = await response.json();
+                if (!response.ok || !result.success) {
+                    alert(result.error || 'Failed to toggle verbose debug mode.');
+                    return;
+                }
+                location.reload();
+            } catch (err) {
+                alert('Failed to toggle verbose debug mode.');
+            }
+        }
+
+        async function resetSnowflakeQueryMetrics() {
+            try {
+                const response = await fetch('/api/debug/verbose', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: verboseDebugEnabled, reset_query_metrics: true }),
+                });
+                const result = await response.json();
+                if (!response.ok || !result.success) {
+                    alert(result.error || 'Failed to reset Snowflake query metrics.');
+                    return;
+                }
+                location.reload();
+            } catch (err) {
+                alert('Failed to reset Snowflake query metrics.');
+            }
+        }
     </script>
 </body>
 </html>
@@ -1420,6 +1470,17 @@ def enhanced_admin_dashboard():
             running_reports = [r for r in all_reports if r.get('status') in ['running', 'starting']]
     except Exception as _fetch_err:
         logger.debug(f"Could not fetch running reports from main app: {_fetch_err}")
+
+    verbose_debug = False
+    snowflake_query_count = 0
+    try:
+        debug_resp = requests.get(f'{MAIN_APP_URL.rstrip("/")}/api/debug/verbose', timeout=2)
+        if debug_resp.status_code == 200:
+            debug_data = debug_resp.json()
+            verbose_debug = bool(debug_data.get('verbose_debug'))
+            snowflake_query_count = int(debug_data.get('snowflake_query_count', 0) or 0)
+    except Exception as _debug_err:
+        logger.debug("Could not fetch verbose debug state from main app: %s", _debug_err)
     
     return render_template_string(ENHANCED_ADMIN_TEMPLATE_V2, 
                                 server_status=server_status,
@@ -1430,7 +1491,9 @@ def enhanced_admin_dashboard():
                                 audit_history=audit_history,
                                 audit_summary=audit_summary,
                                 running_reports=running_reports,
-                                main_app_url=MAIN_APP_URL)
+                                main_app_url=MAIN_APP_URL,
+                                verbose_debug=verbose_debug,
+                                snowflake_query_count=snowflake_query_count)
 
 @admin_app.route('/start_server')
 def start_server_route():
@@ -1551,6 +1614,22 @@ def audit_report_route(analysis_id):
 def api_audit_summary():
     """Get audit summary statistics"""
     return jsonify(get_audit_summary())
+
+
+@admin_app.route('/api/debug/verbose', methods=['GET', 'POST'])
+def api_debug_verbose():
+    """Proxy verbose debug state/toggle to the main app."""
+    main_url = f'{MAIN_APP_URL.rstrip("/")}/api/debug/verbose'
+    try:
+        if request.method == 'GET':
+            resp = requests.get(main_url, timeout=3)
+            return jsonify(resp.json()), resp.status_code
+        payload = request.get_json(silent=True) or {}
+        resp = requests.post(main_url, json=payload, timeout=3)
+        return jsonify(resp.json()), resp.status_code
+    except Exception as e:
+        logger.error("Verbose debug proxy failed: %s", e)
+        return jsonify({'success': False, 'error': 'Unable to reach main app debug endpoint'}), 502
 
 _ANALYSIS_ID_RE = re.compile(r'^[A-Za-z0-9._-]{1,200}$')
 
