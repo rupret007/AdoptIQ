@@ -144,12 +144,12 @@ Link: https://csone.lightning.force.com/lightning/r/Report/00OfX000001Nnh2UAC/vi
 
 ## Where Files Are Stored
 
-| Purpose | Location |
-|--------|----------|
-| Uploads (CSOne Excel files) | `~/Library/Application Support/AdoptIQ/uploads/` |
-| Generated reports (Word, Excel) | `~/Library/Application Support/AdoptIQ/outputs/` |
-| Analysis status (progress tracking) | `~/Library/Application Support/AdoptIQ/analysis_status.json` |
-| External intelligence history | `~/Library/Application Support/AdoptIQ/external_intelligence.db` |
+| Purpose | macOS Location | Windows Location |
+|--------|------------------|------------------|
+| Uploads (CSOne Excel files) | `~/Library/Application Support/AdoptIQ/uploads/` | `%APPDATA%\AdoptIQ\uploads\` |
+| Generated reports (Word, Excel) | `~/Library/Application Support/AdoptIQ/outputs/` | `%APPDATA%\AdoptIQ\outputs\` |
+| Analysis status (progress tracking) | `~/Library/Application Support/AdoptIQ/analysis_status.json` | `%APPDATA%\AdoptIQ\analysis_status.json` |
+| External intelligence history | `~/Library/Application Support/AdoptIQ/external_intelligence.db` | `%APPDATA%\AdoptIQ\external_intelligence.db` |
 
 In Finder, use **Go -> Go to Folder...** and enter `~/Library/Application Support/AdoptIQ/outputs` to open outputs.
 

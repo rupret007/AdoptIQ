@@ -42,6 +42,11 @@ class TestDownloadFileRoute:
         assert rv.status_code in (400, 404)
 
     @pytest.mark.flask
+    def test_null_byte_filename_blocked(self, client):
+        rv = client.get("/download-file/bad%00name.docx")
+        assert rv.status_code == 400
+
+    @pytest.mark.flask
     def test_valid_file_download(self, client, tmp_path):
         """Ensure a valid .docx file in the outputs dir can be downloaded."""
         outputs_dir = tmp_path / "outputs"

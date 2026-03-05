@@ -24,6 +24,7 @@ from data_normalization import (
     detect_bems_mask,
     extract_bems_ids_from_row,
     normalize_customer_name,
+    normalize_priority_label,
     normalize_severity_label,
     normalize_status_label,
     parse_datetime_series,
@@ -1182,7 +1183,7 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
             if col not in normalized.columns:
                 normalized[col] = None
         normalized["case_status_norm"] = normalized["STATUS"].apply(normalize_status_label)
-        normalized["case_priority_norm"] = normalized["SEVERITY"].apply(normalize_severity_label)
+        normalized["case_priority_norm"] = normalized["SEVERITY"].apply(normalize_priority_label)
         normalized["open_date"] = parse_datetime_series(normalized["CREATED_DATE"])
         normalized["closed_date"] = parse_datetime_series(normalized["CLOSED_DATE"])
         normalized["is_open"] = normalized["case_status_norm"].eq("Open")

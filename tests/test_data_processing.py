@@ -28,6 +28,7 @@ from adoptiq_backend import (
     load_csone_excel,
     _apply_scope_filter_csone,
     cross_reference_refs,
+    fetch_support_cases_snowflake,
 )
 
 
@@ -376,3 +377,40 @@ class TestCrossReferenceRefs:
             pd.DataFrame(), pd.DataFrame(), []
         )
         assert len(matches) == 0
+
+
+class TestFetchSupportCasesSnowflake:
+    def test_case_priority_norm_uses_p_labels(self):
+        class _Cursor:
+            def __init__(self):
+                self.description = [
+                    ("CASE_ID",),
+                    ("ACCOUNT_ID",),
+                    ("SUBJECT",),
+                    ("STATUS",),
+                    ("CREATED_DATE",),
+                    ("CLOSED_DATE",),
+                    ("SEVERITY",),
+                ]
+
+            def execute(self, *args, **kwargs):
+                return self
+
+            def fetchall(self):
+                return [
+                    ("C-1", "A-1", "Issue 1", "Open", "2026-01-01T00:00:00", None, "Critical"),
+                    ("C-2", "A-2", "Issue 2", "Open", "2026-01-02T00:00:00", None, "High"),
+                ]
+
+            def close(self):
+                return None
+
+        class _Ctx:
+            def cursor(self):
+                return _Cursor()
+
+        df = fetch_support_cases_snowflake(_Ctx(), ["A-1", "A-2"], 90)
+        assert not df.empty
+        by_case = df.set_index("CASE_ID")["case_priority_norm"].to_dict()
+        assert by_case["C-1"] == "P1"
+        assert by_case["C-2"] == "P2"

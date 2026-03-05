@@ -452,6 +452,22 @@ def _json_default(obj):
     return str(obj)
 
 
+def _hydrate_status_datetimes(raw_status: Any) -> Dict[str, Any]:
+    """Normalize persisted status payloads so datetime fields are hydrated in-memory."""
+    if not isinstance(raw_status, dict):
+        return {}
+    status = dict(raw_status)
+    for key in STATUS_DATETIME_FIELDS:
+        value = status.get(key)
+        if isinstance(value, str):
+            try:
+                status[key] = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            except (ValueError, TypeError):
+                logger.debug(f"Could not parse datetime for {key}")
+                status[key] = None
+    return status
+
+
 def _update_progress(status, progress, message, step, save=True):
     """Update analysis status with progress, message, step tracking, and dynamic ETA.
     
@@ -562,16 +578,7 @@ def load_analysis_status():
             cleaned_any = False
             with analysis_status_lock:
                 for analysis_id, status in loaded_status.items():
-                    # Convert datetime strings back to datetime objects
-                    for key, value in status.items():
-                        if key in STATUS_DATETIME_FIELDS and isinstance(value, str):
-                            try:
-                                # Handle 'Z' suffix for UTC (Python <3.11 doesn't parse 'Z' natively)
-                                status[key] = datetime.fromisoformat(value.replace('Z', '+00:00'))
-                            except (ValueError, TypeError) as e:
-                                logger.debug(f"Could not parse datetime for {key}: {e}")  # FIXED: Proper exception handling
-                                status[key] = None
-                    analysis_status[analysis_id] = status
+                    analysis_status[analysis_id] = _hydrate_status_datetimes(status)
 
                 # Clean up stuck analyses from previous runs
                 for aid, s in analysis_status.items():
@@ -8163,9 +8170,10 @@ def progress(analysis_id):
                 with open(status_file_path, 'r', encoding='utf-8') as f:
                     loaded_status = json.load(f)
                     if analysis_id in loaded_status:
+                        loaded_entry = _hydrate_status_datetimes(loaded_status[analysis_id])
                         with analysis_status_lock:
-                            analysis_status[analysis_id] = loaded_status[analysis_id]
-                        status = analysis_status[analysis_id]
+                            analysis_status[analysis_id] = loaded_entry
+                            status = dict(analysis_status[analysis_id])
                     else:
                         # Log available IDs for debugging
                         available_ids = list(loaded_status.keys())[:5]  # First 5 for debugging
@@ -8176,7 +8184,7 @@ def progress(analysis_id):
                 # Check if analysis is in memory (might have been created but not saved yet)
                 with analysis_status_lock:
                     if analysis_id in analysis_status:
-                        status = analysis_status[analysis_id]
+                        status = dict(analysis_status[analysis_id])
                     else:
                         logger.error(f"Analysis ID '{analysis_id}' not found in memory or file. Available in memory: {list(analysis_status.keys())[:5]}")
                         return f"<h1>Analysis not found</h1><p>Analysis ID: {analysis_id_safe}</p><a href='/'>Start New Analysis</a>", 404
@@ -8185,7 +8193,7 @@ def progress(analysis_id):
             return f"<h1>Analysis not found</h1><p>The analysis could not be loaded.</p><a href='/'>Start New Analysis</a>", 404
     else:
         with analysis_status_lock:
-            status = analysis_status[analysis_id]
+            status = dict(analysis_status[analysis_id])
     html_content = f"""
     <!DOCTYPE html>
     <html>
@@ -8455,9 +8463,10 @@ def get_status(analysis_id):
                 with open(status_file_path, 'r', encoding='utf-8') as f:
                     loaded_status = json.load(f)
                     if analysis_id in loaded_status:
+                        loaded_entry = _hydrate_status_datetimes(loaded_status[analysis_id])
                         with analysis_status_lock:
                             if analysis_id not in analysis_status:
-                                analysis_status[analysis_id] = loaded_status[analysis_id]
+                                analysis_status[analysis_id] = loaded_entry
                     else:
                         logger.warning(f"Analysis ID not found in status file")
                         return jsonify({'error': 'Analysis not found'}), 404
@@ -9690,6 +9699,8 @@ def download_file(filename):
         # Validate filename to prevent path traversal
         if not filename or len(filename) > 255:
             return "Invalid filename", 400
+        if '\x00' in filename:
+            return "Invalid filename", 400
         
         # Check for path traversal attempts
         if '..' in filename or '/' in filename or '\\' in filename:
@@ -10659,8 +10670,9 @@ def download_result(analysis_id, file_type):
                 with open(status_file_path, 'r', encoding='utf-8') as f:
                     loaded_status = json.load(f)
                     if analysis_id in loaded_status:
+                        loaded_entry = _hydrate_status_datetimes(loaded_status[analysis_id])
                         with analysis_status_lock:
-                            analysis_status[analysis_id] = loaded_status[analysis_id]
+                            analysis_status[analysis_id] = loaded_entry
                             status = analysis_status[analysis_id]
             if status is None:
                 return jsonify({'error': 'Analysis not found', 'analysis_id': analysis_id}), 404
@@ -10845,20 +10857,32 @@ def clear_stuck_analyses():
             
             for analysis_id, status in list(analysis_status.items()):
                 # Clear analyses that have been running for more than 10 minutes
-                if status.get('status') == 'running':
-                    start_time_str = status.get('start_time', '')
-                    if start_time_str:
-                        try:
-                            start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-                            if (current_time - start_time).total_seconds() > 600:  # 10 minutes
-                                status['status'] = 'cancelled'
-                                status['message'] = 'Analysis cancelled - was stuck'
-                                cleared_count += 1
-                        except Exception:
-                            # If we can't parse the time, clear it anyway
+                if status.get('status') in ('running', 'starting', 'cancelling'):
+                    start_value = status.get('start_time')
+                    try:
+                        if isinstance(start_value, datetime):
+                            start_time = start_value
+                        elif isinstance(start_value, str) and start_value:
+                            start_time = datetime.fromisoformat(start_value.replace('Z', '+00:00'))
+                        else:
+                            start_time = None
+
+                        if start_time is None:
                             status['status'] = 'cancelled'
                             status['message'] = 'Analysis cancelled - was stuck'
                             cleared_count += 1
+                            continue
+
+                        now_for_age = datetime.now(start_time.tzinfo) if start_time.tzinfo else current_time
+                        if (now_for_age - start_time).total_seconds() > 600:  # 10 minutes
+                            status['status'] = 'cancelled'
+                            status['message'] = 'Analysis cancelled - was stuck'
+                            cleared_count += 1
+                    except Exception:
+                        # If we can't parse the time, clear it anyway
+                        status['status'] = 'cancelled'
+                        status['message'] = 'Analysis cancelled - was stuck'
+                        cleared_count += 1
             
             if cleared_count > 0:
                 save_analysis_status()

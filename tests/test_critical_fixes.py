@@ -2041,7 +2041,7 @@ class TestRound31Fixes:
 
     def test_l1_file_type_functional(self, client):
         """L1: Requesting an invalid file type must return 404 without echoing the type."""
-        resp = client.get('/result/test_id/invalid_type')
+        resp = client.get('/download/test_id/invalid_type')
         assert resp.status_code == 404
         body = resp.get_data(as_text=True)
         assert 'invalid_type' not in body

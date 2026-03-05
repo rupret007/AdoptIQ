@@ -62,3 +62,38 @@ def test_compact_data_citations_priority_count_uses_exact_p1_or_critical():
     p1_row = next((row for row in table.rows[1:] if row.cells[0].text == "P1/Critical Cases"), None)
     assert p1_row is not None
     assert p1_row.cells[1].text == "2"
+
+
+def test_compact_data_citations_supports_severity_and_bu_name_columns():
+    formatter = CompactReportFormatter()
+    ab_data = pd.DataFrame([{"BU_NAME": "Acme Corp"}])
+    csone_data = pd.DataFrame(
+        [
+            {"BU_NAME": "Acme Corp", "SEVERITY": "Critical"},
+            {"BU_NAME": "Beta Inc", "SEVERITY": "P2"},
+        ]
+    )
+
+    formatter.add_data_citations_section(ab_data, csone_data)
+
+    table = formatter.doc.tables[-1]
+    rows = {row.cells[0].text: row.cells[1].text for row in table.rows[1:]}
+    assert rows["Unique Customers with Cases"] == "2"
+    assert rows["P1/Critical Cases"] == "1"
+    assert rows["Customers with Adoption Barriers"] == "1"
+
+
+def test_common_problems_customers_are_theme_scoped():
+    formatter = CompactReportFormatter()
+    ab_data = pd.DataFrame(
+        [
+            {"customer_name": "Acme Corp", "SUBJECT_C": "BEMS escalation issue", "DESCRIPTION_C": ""},
+            {"customer_name": "Beta Inc", "SUBJECT_C": "General note without keyword", "DESCRIPTION_C": ""},
+        ]
+    )
+
+    formatter.add_common_problems_section(ab_data, pd.DataFrame())
+
+    text = "\n".join(p.text for p in formatter.doc.paragraphs)
+    assert "- Customers Affected: Acme Corp" in text
+    assert "- Customers Affected: Acme Corp, Beta Inc" not in text

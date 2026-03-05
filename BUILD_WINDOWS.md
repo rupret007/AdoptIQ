@@ -13,6 +13,7 @@ PyInstaller builds are OS-specific. Build Windows artifacts on Windows (or via C
 4. Build outputs are written to `OUTBOX\`:
    - `AdoptIQ.exe`
    - `README.md`
+   - `build_info.txt`
 
 ## CI build (GitHub Actions)
 
@@ -21,7 +22,7 @@ The shared workflow is `.github/workflows/build.yml` and includes both macOS and
 1. Trigger the workflow with `workflow_dispatch` (optionally set version/build), or push a tag (`v*`).
 2. Ensure repository secret `SECRETS_ENV_FILE` is configured with full `secrets.env` content.
 3. Download the Windows artifact from Actions:
-   - `AdoptIQ-Windows-Build` (zip containing `AdoptIQ.exe` and `README.md`).
+   - `AdoptIQ-Windows-v{VERSION}-build{BUILD}` (contains `AdoptIQ.exe`, `README.md`, and `build_info.txt`).
 
 ## Notes
 

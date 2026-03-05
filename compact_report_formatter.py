@@ -22,7 +22,6 @@ from data_normalization import (
     detect_bems_mask,
     extract_bems_ids_from_row,
     normalize_customer_name,
-    normalize_priority_label,
 )
 from report_consistency import validate_report_consistency
 from report_utils import format_inline_source, format_metric_with_source
@@ -1026,6 +1025,7 @@ class CompactReportFormatter:
         """Add data citations and source verification section – uses canonical data sources (same across all AdoptIQ reports)."""
         ab_data = ab_data if ab_data is not None else pd.DataFrame()
         csone_data = csone_data if csone_data is not None else pd.DataFrame()
+        csone_norm = add_case_lifecycle_fields(csone_data) if not csone_data.empty else pd.DataFrame()
         try:
             self.doc.add_heading('📑 Data Citations & Source Verification', level=1)
             
@@ -1054,19 +1054,45 @@ class CompactReportFormatter:
             canonical = {m: (s, v) for m, s, v in get_data_sources_list()}
             support_source, support_verif = canonical.get('Support Cases (TAC)', ('CSOne (TAC case data)', 'Query by Case Number in CSOne'))
             ab_source, ab_verif = canonical.get('Adoption Barriers', ('CSConsole / Snowflake C360_CS_TASK_C_VW', 'Query by Record ID in CSConsole or Snowflake'))
-            if not csone_data.empty:
-                if 'case_priority_norm' in csone_data.columns:
-                    sev_series = csone_data['case_priority_norm'].fillna('').astype(str)
+            if not csone_norm.empty:
+                if 'case_priority_norm' in csone_norm.columns:
+                    sev_series = csone_norm['case_priority_norm'].fillna('').astype(str)
                 else:
-                    sev_col = next((c for c in ('Severity', 'Highest Priority', 'Priority') if c in csone_data.columns), None)
-                    sev_series = (
-                        csone_data[sev_col].fillna('').astype(str).apply(normalize_priority_label)
-                        if sev_col
-                        else pd.Series(dtype=str)
-                    )
+                    sev_series = pd.Series(dtype=str)
                 p1_critical_count = int((sev_series == 'P1').sum())
             else:
                 p1_critical_count = 0
+
+            csone_unique_customers = (
+                int(
+                    csone_norm['customer_name']
+                    .dropna()
+                    .astype(str)
+                    .apply(normalize_customer_name)
+                    .replace("Unknown", pd.NA)
+                    .dropna()
+                    .nunique()
+                )
+                if not csone_norm.empty and 'customer_name' in csone_norm.columns
+                else 0
+            )
+            ab_customer_col = next(
+                (c for c in ('customer_name', 'BU_NAME', 'Customer Name', 'CUSTOMER_NAME') if c in ab_data.columns),
+                None,
+            )
+            ab_unique_customers = (
+                int(
+                    ab_data[ab_customer_col]
+                    .dropna()
+                    .astype(str)
+                    .apply(normalize_customer_name)
+                    .replace("Unknown", pd.NA)
+                    .dropna()
+                    .nunique()
+                )
+                if (not ab_data.empty and ab_customer_col)
+                else 0
+            )
             
             citations_table = self.doc.add_table(rows=1, cols=5)
             citations_table.style = 'Table Grid'
@@ -1078,11 +1104,11 @@ class CompactReportFormatter:
                         run.bold = True
             
             citations_data = [
-                ('Total Support Cases', str(len(csone_data)) if not csone_data.empty else '0', support_source, support_verif, '95%'),
-                ('Unique Customers with Cases', str(csone_data['customer_name'].nunique()) if not csone_data.empty and 'customer_name' in csone_data.columns else '0', support_source, support_verif, '95%'),
+                ('Total Support Cases', str(len(csone_norm)) if not csone_norm.empty else '0', support_source, support_verif, '95%'),
+                ('Unique Customers with Cases', str(csone_unique_customers), support_source, support_verif, '95%'),
                 ('P1/Critical Cases', str(p1_critical_count), support_source, support_verif, '95%'),
                 ('Total Adoption Barriers', str(len(ab_data)) if not ab_data.empty else '0', ab_source, ab_verif, '90%'),
-                ('Customers with Adoption Barriers', str(ab_data['customer_name'].nunique()) if not ab_data.empty and 'customer_name' in ab_data.columns else '0', ab_source, ab_verif, '90%'),
+                ('Customers with Adoption Barriers', str(ab_unique_customers), ab_source, ab_verif, '90%'),
             ]
             for metric, value, source, method, confidence in citations_data:
                 row = citations_table.add_row()
@@ -1219,12 +1245,22 @@ class CompactReportFormatter:
             
             # Analyze patterns across all data
             problem_themes = {}
+            affected_customers_by_theme = {}
             
             # Extract common themes from adoption barriers
             if not ab_data.empty:
-                subjects = ab_data['SUBJECT_C'].dropna().astype(str).str.lower() if 'SUBJECT_C' in ab_data.columns else pd.Series(dtype=object)
-                descriptions = ab_data['DESCRIPTION_C'].dropna().astype(str).str.lower() if 'DESCRIPTION_C' in ab_data.columns else pd.Series(dtype=object)
-                all_text = pd.concat([subjects, descriptions]) if not subjects.empty or not descriptions.empty else pd.Series(dtype=object)
+                subjects = ab_data['SUBJECT_C'].fillna('').astype(str).str.lower() if 'SUBJECT_C' in ab_data.columns else pd.Series("", index=ab_data.index)
+                descriptions = ab_data['DESCRIPTION_C'].fillna('').astype(str).str.lower() if 'DESCRIPTION_C' in ab_data.columns else pd.Series("", index=ab_data.index)
+                row_text = (subjects + " " + descriptions).str.strip()
+                customer_col = next(
+                    (c for c in ('customer_name', 'BU_NAME', 'Customer Name', 'CUSTOMER_NAME') if c in ab_data.columns),
+                    None,
+                )
+                customer_series = (
+                    ab_data[customer_col].fillna('').astype(str).apply(normalize_customer_name)
+                    if customer_col
+                    else pd.Series("Unknown", index=ab_data.index)
+                )
                 
                 # Common problem patterns
                 patterns = {
@@ -1236,9 +1272,17 @@ class CompactReportFormatter:
                 }
                 
                 for theme, keywords in patterns.items():
-                    count = sum(1 for text in all_text if any(kw in str(text) for kw in keywords))
+                    theme_mask = row_text.apply(lambda text: any(kw in str(text) for kw in keywords))
+                    count = int(theme_mask.sum())
                     if count > 0:
                         problem_themes[theme] = count
+                        affected_customers_by_theme[theme] = sorted(
+                            customer_series[theme_mask]
+                            .replace("Unknown", pd.NA)
+                            .dropna()
+                            .unique()
+                            .tolist()
+                        )
             
             # Sort by frequency - FIXED: Show ALL problem themes
             sorted_themes = sorted(problem_themes.items(), key=lambda x: x[1], reverse=True)
@@ -1257,9 +1301,7 @@ class CompactReportFormatter:
                 barrier_p.add_run('Root cause resolution delayed, requiring cross-functional coordination')
                 
                 # Customers Affected (extract from data) - FIXED: Show all affected customers
-                affected_customers = []
-                if not ab_data.empty and 'customer_name' in ab_data.columns:
-                    affected_customers = ab_data['customer_name'].dropna().unique().tolist()
+                affected_customers = affected_customers_by_theme.get(theme, [])
                 affected_p = self.doc.add_paragraph()
                 affected_p.add_run('- Customers Affected: ').bold = True
                 affected_p.add_run(', '.join(affected_customers) if affected_customers else 'Multiple customers')

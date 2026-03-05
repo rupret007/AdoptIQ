@@ -8,7 +8,7 @@ import sys
 import json
 import tempfile
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -130,6 +130,40 @@ class TestErrorStatusPersistence:
                 with app_mod.analysis_status_lock:
                     app_mod.analysis_status.clear()
                     app_mod.analysis_status.update(original)
+
+
+class TestClearStuckAnalyses:
+    @pytest.mark.flask
+    def test_clear_stuck_covers_running_starting_and_cancelling(self, client):
+        with app_mod.analysis_status_lock:
+            original = dict(app_mod.analysis_status)
+        try:
+            now = datetime.now()
+            old_iso = (now - timedelta(minutes=11)).isoformat()
+            recent_iso = (now - timedelta(minutes=2)).isoformat()
+            old_aware_dt = datetime.now(timezone.utc) - timedelta(minutes=12)
+
+            with app_mod.analysis_status_lock:
+                app_mod.analysis_status.clear()
+                app_mod.analysis_status["running-old"] = {"status": "running", "start_time": old_iso}
+                app_mod.analysis_status["starting-old"] = {"status": "starting", "start_time": old_iso}
+                app_mod.analysis_status["cancelling-old-dt"] = {"status": "cancelling", "start_time": old_aware_dt}
+                app_mod.analysis_status["running-recent"] = {"status": "running", "start_time": recent_iso}
+
+            rv = client.post("/clear_stuck_analyses")
+            assert rv.status_code == 200
+            body = rv.get_json()
+            assert body["success"] is True
+
+            with app_mod.analysis_status_lock:
+                assert app_mod.analysis_status["running-old"]["status"] == "cancelled"
+                assert app_mod.analysis_status["starting-old"]["status"] == "cancelled"
+                assert app_mod.analysis_status["cancelling-old-dt"]["status"] == "cancelled"
+                assert app_mod.analysis_status["running-recent"]["status"] == "running"
+        finally:
+            with app_mod.analysis_status_lock:
+                app_mod.analysis_status.clear()
+                app_mod.analysis_status.update(original)
 
     def test_cancelling_status_persists(self):
         """Verify cancelling status round-trips through save/load."""

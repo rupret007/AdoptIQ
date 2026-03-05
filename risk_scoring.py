@@ -152,7 +152,10 @@ def _score_action_plans(action_plans: pd.DataFrame) -> Dict[str, Any]:
     use = action_plans.copy()
     status_col = next((c for c in ("STATUS_C", "STATUS__C", "Status") if c in use.columns), None)
     if status_col:
-        unresolved_count = int(~use[status_col].fillna("").astype(str).str.contains(r"closed|resolved|complete|done", case=False, regex=True).values.sum())
+        resolved_mask = use[status_col].fillna("").astype(str).str.contains(
+            r"closed|resolved|complete|done", case=False, regex=True
+        )
+        unresolved_count = int((~resolved_mask.fillna(False)).sum())
     else:
         unresolved_count = len(use)
     count = len(use)
