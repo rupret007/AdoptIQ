@@ -79,11 +79,19 @@ class _InstrumentedSnowflakeCursor:
         self._cursor = cursor
 
     def execute(self, sql, *args, **kwargs):
-        _record_snowflake_query(sql)
+        try:
+            _record_snowflake_query(sql)
+        except Exception:
+            # Instrumentation must never block query execution.
+            pass
         return self._cursor.execute(sql, *args, **kwargs)
 
     def executemany(self, sql, *args, **kwargs):
-        _record_snowflake_query(sql)
+        try:
+            _record_snowflake_query(sql)
+        except Exception:
+            # Instrumentation must never block query execution.
+            pass
         return self._cursor.executemany(sql, *args, **kwargs)
 
     def __getattr__(self, item):
@@ -1360,9 +1368,10 @@ def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_
     ctx = _connect_with_keeper()
     if ctx is None:
         return "Error", csone_data
-    cur = ctx.cursor(snowflake.connector.DictCursor)
+    cur = None
     
     try:
+        cur = ctx.cursor(snowflake.connector.DictCursor)
         sub_id_column_dsm = 'SUBSCRIPTION_ID'
         account_id_column_dsm = 'ACCOUNT_ID_C'
         
@@ -1412,7 +1421,7 @@ def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_
         logging.error(f"Error in load_and_merge_data_for_subscription: {e}")
         return "Error", csone_data
     finally:
-        if 'cur' in locals() and cur is not None:
+        if cur is not None:
             try:
                 cur.close()
             except Exception as e:
@@ -1485,24 +1494,24 @@ def fetch_csconsole_customer_pulse(ctx, account_ids: List[str], days: int) -> pd
         if cur:
             cur.close()
 
-def fetch_csconsole_success_priorities(ctx, account_ids: List[str], days: int) -> pd.DataFrame:
-    """Fetch Success Priorities from CSConsole with proper resource management"""
+def fetch_csconsole_success_priorities(ctx, customer_identifiers: List[str], days: int) -> pd.DataFrame:
+    """Fetch Success Priorities from CSConsole (RELATED_CUSTOMER__C) with proper resource management."""
     if ctx is None:
         return pd.DataFrame()
-    if not account_ids: 
+    if not customer_identifiers:
         return pd.DataFrame()
     
     cur = None
     try:
         cur = ctx.cursor()
-        placeholders = ','.join(['%s'] * len(account_ids))
+        placeholders = ','.join(['%s'] * len(customer_identifiers))
         sql = f"""
         SELECT *, 'Success Priority' as RECORD_SOURCE
         FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C 
         WHERE RELATED_CUSTOMER__C IN ({placeholders})
           AND DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())
         """
-        cur.execute(sql, [*account_ids, days])
+        cur.execute(sql, [*customer_identifiers, days])
         rows = cur.fetchall()
         if not rows: 
             return pd.DataFrame()
@@ -5672,7 +5681,7 @@ def main():
         print("Fetching CSConsole data (Action Plans, Customer Pulse, Success Priorities)...")
         csconsole_action_plans = fetch_csconsole_action_plans(ctx, account_ids, days)
         csconsole_customer_pulse = fetch_csconsole_customer_pulse(ctx, account_ids, days)
-        csconsole_success_priorities = fetch_csconsole_success_priorities(ctx, account_ids, days)
+        csconsole_success_priorities = fetch_csconsole_success_priorities(ctx, team_customer_names, days)
         csconsole_adoption_barriers = fetch_csconsole_adoption_barriers(ctx, account_ids, days)
         
         print(f"Found {len(csconsole_action_plans)} action plans, {len(csconsole_customer_pulse)} customer pulse records, "

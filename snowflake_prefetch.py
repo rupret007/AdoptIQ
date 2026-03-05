@@ -84,7 +84,8 @@ class AnalysisRunContext:
                 raise ValueError(f"Unknown dataset: {dataset_name}")
             fetcher = _FETCHERS[dataset_name]
             if dataset_name == "csconsole_success_priorities":
-                identifiers = list(self.customer_names) if self.customer_names else list(self.account_ids)
+                # Success priorities are keyed by customer identifiers, not account IDs.
+                identifiers = list(self.customer_names)
             else:
                 identifiers = list(self.account_ids)
             df = fetcher(self.ctx, identifiers, self.days)
@@ -105,7 +106,11 @@ def prefetch_datasets(run_ctx: AnalysisRunContext, dataset_names: Iterable[str])
             results[name] = run_ctx.get_or_fetch(name)
         except Exception as e:
             logger.warning("Snowflake prefetch failed for %s: %s", name, e)
-            results[name] = pd.DataFrame()
+            empty = pd.DataFrame()
+            with run_ctx._lock:
+                run_ctx.cache[name] = empty
+                run_ctx.metrics[f"{name}_errors"] = run_ctx.metrics.get(f"{name}_errors", 0) + 1
+            results[name] = empty
     return results
 
 

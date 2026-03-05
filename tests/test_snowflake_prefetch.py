@@ -103,3 +103,38 @@ def test_success_priorities_prefetch_uses_customer_names_when_available(monkeypa
     result = sp.prefetch_datasets(run_ctx, ["csconsole_success_priorities"])
     assert not result["csconsole_success_priorities"].empty
     assert captured["identifiers"] == ["Acme Corp", "Beta Inc"]
+
+
+def test_success_priorities_prefetch_uses_empty_identifiers_without_customer_names(monkeypatch):
+    captured = {"identifiers": None}
+
+    def _sp_fetcher(ctx, identifiers, days):
+        captured["identifiers"] = list(identifiers)
+        return pd.DataFrame()
+
+    monkeypatch.setitem(sp._FETCHERS, "csconsole_success_priorities", _sp_fetcher)
+    run_ctx = sp.AnalysisRunContext.build(
+        ctx=object(),
+        account_ids=["001", "002"],
+        days=90,
+    )
+    sp.prefetch_datasets(run_ctx, ["csconsole_success_priorities"])
+    assert captured["identifiers"] == []
+
+
+def test_prefetch_failure_is_cached_and_not_retried(monkeypatch):
+    calls = {"count": 0}
+
+    def _failing_fetcher(ctx, identifiers, days):
+        calls["count"] += 1
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(sp._FETCHERS, "csconsole_customer_pulse", _failing_fetcher)
+    run_ctx = sp.AnalysisRunContext.build(ctx=object(), account_ids=["001"], days=90)
+
+    first = sp.prefetch_datasets(run_ctx, ["csconsole_customer_pulse"])["csconsole_customer_pulse"]
+    second = sp.prefetch_datasets(run_ctx, ["csconsole_customer_pulse"])["csconsole_customer_pulse"]
+
+    assert first.empty and second.empty
+    assert calls["count"] == 1
+    assert run_ctx.metrics.get("csconsole_customer_pulse_errors") == 1
