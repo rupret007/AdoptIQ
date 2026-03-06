@@ -4249,6 +4249,10 @@ def run_compact_analysis(analysis_id):
         # Validate data sources before report generation
         logger.info(f"[[VALIDATION]] Validating data sources for compact report...")
         try:
+            # Single-customer compact reports should still generate when scoped data is empty.
+            validation_required_sources = ['snowflake', 'team_subscriptions'] if single_customer_mode else None
+            if validation_required_sources:
+                logger.info("[[VALIDATION]] Compact single-customer mode: treating adoption barriers and CSOne as optional")
             raise_validation_error_if_invalid(
                 report_type='compact',
                 snowflake_ctx=ctx,
@@ -4258,7 +4262,8 @@ def run_compact_analysis(analysis_id):
                 csconsole_action_plans=csconsole_action_plans if 'csconsole_action_plans' in locals() else None,
                 csconsole_customer_pulse=csconsole_customer_pulse if 'csconsole_customer_pulse' in locals() else None,
                 csconsole_success_priorities=csconsole_success_priorities if 'csconsole_success_priorities' in locals() else None,
-                arr_data=arr_data
+                arr_data=arr_data,
+                required_sources=validation_required_sources
             )
             logger.info(f"[[VALIDATION]] All required data sources validated successfully")
         except DataSourceValidationError as e:
@@ -4502,7 +4507,10 @@ def run_compact_analysis(analysis_id):
                 'Support_Cases': len(csone_df[csone_df['customer_name'] == customer]) if not csone_df.empty else 0
             })
         
-        risk_summary_df = pd.DataFrame(risk_summary_data)
+        risk_summary_df = pd.DataFrame(
+            risk_summary_data,
+            columns=['Customer', 'Risk_Score', 'Risk_Level', 'Adoption_Barriers', 'Support_Cases']
+        )
         logger.info(f"[[DATA]] Risk summary DataFrame created with {len(risk_summary_df)} rows")
         
         # Create high-risk customers DataFrame
@@ -6582,28 +6590,44 @@ def run_customer_renewal_analysis(analysis_id):
             tot_cases = len(customer_csone)
             tot_bems = sum(a.get('bems_escalations_count', 0) for a in portfolio_renewal_analyses.values())
             key_findings_list = []
+            ab_source = "[Source: CSConsole / Snowflake C360_CS_TASK_C_VW; Verification: Query scoped adoption barrier records by ID]"
+            tac_source = "[Source: CSOne (TAC case data); Verification: Query scoped TAC case IDs / SR numbers in CSOne]"
+            bems_source = "[Source: CSOne (Transaction ID, bemscsc_refs); Verification: Confirm escalation references for scoped TAC cases]"
+            derived_source = "[Source: Normalized AdoptIQ portfolio aggregation; Verification: Recompute from scoped adoption barrier and TAC case datasets]"
             if tot_ab > 0:
-                key_findings_list.append(f"Portfolio total: {tot_ab} adoption barriers across {len(all_customers)} customers (Source: CSConsole/Snowflake C360_CS_TASK_C_VW)")
+                key_findings_list.append(
+                    f"Portfolio total: {tot_ab} adoption barriers across {len(all_customers)} customers {ab_source}"
+                )
             if tot_cases > 0:
-                key_findings_list.append(f"Portfolio total: {tot_cases} support cases in last {days} days (Source: CSOne TAC)")
+                key_findings_list.append(
+                    f"Portfolio total: {tot_cases} support cases in last {days} days {tac_source}"
+                )
             if tot_bems > 0:
-                key_findings_list.append(f"Portfolio total: {tot_bems} BEMS escalations require attention (Source: CSOne; unresolved engineering escalations often drive churn)")
+                key_findings_list.append(
+                    f"Portfolio total: {tot_bems} BEMS escalations require attention {bems_source}"
+                )
             # At-risk detail: customers with 3+ barriers, or "Customer Considering Competitor"/"Intent to Opt Out"
             cust_col = 'customer_name' if not customer_ab.empty and 'customer_name' in customer_ab.columns else ('BU_NAME' if not customer_ab.empty and 'BU_NAME' in customer_ab.columns else None)
             if cust_col and not customer_ab.empty:
                 by_cust = customer_ab[cust_col].value_counts()
                 high_barrier_cust = (by_cust >= 3).sum()
                 if high_barrier_cust > 0:
-                    key_findings_list.append(f"{high_barrier_cust} customer(s) have 3+ adoption barriers — see Troubled Accounts Deep Dive for recommended actions")
+                    key_findings_list.append(
+                        f"{high_barrier_cust} customer(s) have 3+ adoption barriers - see Troubled Accounts Deep Dive for recommended actions {ab_source}"
+                    )
                 subj_col = next((c for c in ['SUBJECT_C', 'subject_c', 'NAME', 'title', 'TITLE_C'] if c in customer_ab.columns), None)
                 if subj_col:
                     comp = customer_ab[customer_ab[subj_col].astype(str).str.lower().str.contains('customer considering competitor|intent to opt out|no value fit', na=False)]
                     if not comp.empty and cust_col in comp.columns:
                         at_risk_from_barrier = comp[cust_col].nunique()
                         if at_risk_from_barrier > 0:
-                            key_findings_list.append(f"{at_risk_from_barrier} customer(s) have \"Customer Considering Competitor\" or \"Intent to Opt Out\" barriers — immediate retention focus")
+                            key_findings_list.append(
+                                f"{at_risk_from_barrier} customer(s) have \"Customer Considering Competitor\" or \"Intent to Opt Out\" barriers - immediate retention focus {ab_source}"
+                            )
             if not key_findings_list:
-                key_findings_list.append("No adoption barriers or support cases in analysis period for portfolio")
+                key_findings_list.append(
+                    f"No adoption barriers or support cases in analysis period for portfolio {derived_source}"
+                )
             # Build portfolio-level recommendations (was missing, caused "Recommendations" heading with no content)
             high_risk = [name for name, a in portfolio_renewal_analyses.items() if a.get('renewal_risk_score', a.get('overall_risk_score', 0)) >= 70]
             medium_risk = [name for name, a in portfolio_renewal_analyses.items() if 30 <= a.get('renewal_risk_score', a.get('overall_risk_score', 0)) < 70]
@@ -7338,6 +7362,10 @@ def run_comprehensive_analysis(analysis_id):
         # Validate data sources before report generation
         logger.info(f"[[VALIDATION]] Validating data sources for comprehensive report...")
         try:
+            # Single-customer comprehensive reports should not fail solely because scoped AB/CSOne is empty.
+            validation_required_sources = ['snowflake', 'team_subscriptions'] if single_customer_mode else None
+            if validation_required_sources:
+                logger.info("[[VALIDATION]] Comprehensive single-customer mode: treating adoption barriers and CSOne as optional")
             raise_validation_error_if_invalid(
                 report_type='comprehensive',
                 snowflake_ctx=ctx,
@@ -7346,7 +7374,8 @@ def run_comprehensive_analysis(analysis_id):
                 csone_data=csone_df,
                 csconsole_action_plans=csconsole_action_plans,
                 csconsole_customer_pulse=csconsole_customer_pulse,
-                csconsole_success_priorities=csconsole_success_priorities
+                csconsole_success_priorities=csconsole_success_priorities,
+                required_sources=validation_required_sources
             )
             logger.info(f"[[VALIDATION]] All required data sources validated successfully")
         except DataSourceValidationError as e:
@@ -7363,16 +7392,21 @@ def run_comprehensive_analysis(analysis_id):
         # Integrity checks (additional validation)
         reason = _integrity_checks(ab_norm, csone_df)
         if reason:
-            error_msg = f"Data integrity check failed: {reason}"
-            logger.error(f"[[ERROR]] {error_msg}")
-            update_analysis_status(analysis_id, {
-                'status': 'error',
-                'progress': 0,
-                'message': f' Data integrity check failed',
-                'error': error_msg,
-                'current_step': 'Integrity Check Failed'
-            })
-            return
+            if single_customer_mode and reason == "No Adoption Barriers or CSOne cases found in scope.":
+                logger.warning(
+                    "[[INTEGRITY]] Comprehensive single-customer run has no scoped AB/CSOne records; proceeding with available subscription context"
+                )
+            else:
+                error_msg = f"Data integrity check failed: {reason}"
+                logger.error(f"[[ERROR]] {error_msg}")
+                update_analysis_status(analysis_id, {
+                    'status': 'error',
+                    'progress': 0,
+                    'message': f' Data integrity check failed',
+                    'error': error_msg,
+                    'current_step': 'Integrity Check Failed'
+                })
+                return
         
         # Generate reports
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -8202,6 +8236,7 @@ def progress(analysis_id):
     else:
         with analysis_status_lock:
             status = dict(analysis_status[analysis_id])
+    csrf_token_value = generate_csrf() if app.config.get('WTF_CSRF_ENABLED', True) else ""
     html_content = f"""
     <!DOCTYPE html>
     <html>
@@ -8247,6 +8282,7 @@ def progress(analysis_id):
         </style>
         <script>
             const ANALYSIS_ID = {json.dumps(analysis_id)};
+            const CSRF_TOKEN = {json.dumps(csrf_token_value)};
             const START_TS = Date.now();
             function fmtElapsed(ms) {{
                 const s = Math.floor(ms / 1000);
@@ -8345,7 +8381,8 @@ def progress(analysis_id):
             }}
             function cancelAnalysis() {{
                 if (confirm('Are you sure you want to cancel this analysis?')) {{
-                    fetch('/cancel/' + ANALYSIS_ID, {{method: 'POST'}})
+                    const headers = CSRF_TOKEN ? {{'X-CSRFToken': CSRF_TOKEN}} : {{}};
+                    fetch('/cancel/' + ANALYSIS_ID, {{method: 'POST', headers}})
                         .then(r => {{ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }})
                         .then(d => {{
                             if (d.success) {{
@@ -9808,15 +9845,18 @@ def cancel_analysis(analysis_id):
         return jsonify({'error': 'Invalid analysis ID'}), 400
     if app.config.get('WTF_CSRF_ENABLED', True):
         try:
-            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
+            validate_csrf(
+                request.headers.get('X-CSRFToken')
+                or request.headers.get('X-CSRF-Token')
+                or request.form.get('csrf_token')
+            )
         except Exception:
             return jsonify({'error': 'CSRF validation failed'}), 403
     with analysis_status_lock:
-        if analysis_id not in analysis_status:
+        live = analysis_status.get(analysis_id)
+        if live is None:
             return jsonify({'error': 'Analysis not found'}), 404
-        
-        status = analysis_status[analysis_id]
-        if status.get('status') not in ['starting', 'running', 'cancelling']:
+        if live and live.get('status') not in ['starting', 'running', 'cancelling']:
             return jsonify({'error': 'Analysis is not running'}), 400
     
     # Set cancellation flag (thread-safe)
@@ -10401,10 +10441,26 @@ def run_subscription_analysis(analysis_id):
             
             # Risk Components
             doc.add_heading('Risk Components', level=2)
-            for component, data in renewal_analysis.get('risk_components', {}).items():
+            risk_components = renewal_analysis.get('risk_components', {})
+            if not isinstance(risk_components, dict):
+                logger.warning("Subscription analysis risk_components has unexpected type; defaulting to empty set")
+                risk_components = {}
+            for component, data in risk_components.items():
+                score_value = 0.0
+                count_value = 0
+                if isinstance(data, dict):
+                    try:
+                        score_value = float(data.get('score', 0) or 0)
+                    except (TypeError, ValueError):
+                        score_value = 0.0
+                    raw_count = data.get('count', data.get('total', data.get('value', 0)))
+                    try:
+                        count_value = int(raw_count or 0)
+                    except (TypeError, ValueError):
+                        count_value = 0
                 comp_p = doc.add_paragraph()
                 comp_p.add_run(f'{component.replace("_", " ").title()}: ').bold = True
-                comp_p.add_run(f'{data["score"]:.1f}/10 - Count: {data["count"]}')
+                comp_p.add_run(f'{score_value:.1f}/10 - Count: {count_value}')
             
             # Recommendations
             doc.add_heading('Recommendations', level=1)
@@ -10537,6 +10593,41 @@ def run_subscription_analysis(analysis_id):
         excel_path = output_dir / excel_filename
         
         try:
+            def _excel_safe_df(df: pd.DataFrame) -> pd.DataFrame:
+                if df is None or df.empty:
+                    return df
+                safe_df = df.copy()
+                for col in safe_df.columns:
+                    series = safe_df[col]
+                    try:
+                        if pd.api.types.is_datetime64tz_dtype(series):
+                            safe_df[col] = series.dt.tz_localize(None)
+                            continue
+                    except Exception:
+                        pass
+                    if series.dtype == object:
+                        try:
+                            safe_df[col] = series.apply(
+                                lambda v: (
+                                    v.tz_localize(None)
+                                    if isinstance(v, pd.Timestamp) and v.tz is not None
+                                    else (
+                                        v.replace(tzinfo=None)
+                                        if isinstance(v, datetime) and v.tzinfo is not None
+                                        else v
+                                    )
+                                )
+                            )
+                        except Exception:
+                            continue
+                return safe_df
+
+            # Excel engines do not support timezone-aware datetimes.
+            ab_df = _excel_safe_df(ab_df)
+            ap_df = _excel_safe_df(ap_df)
+            cp_df = _excel_safe_df(cp_df)
+            sp_df = _excel_safe_df(sp_df)
+
             with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
                 workbook = writer.book
                 
@@ -10570,11 +10661,27 @@ def run_subscription_analysis(analysis_id):
                 
                 # Risk Components sheet
                 risk_data = []
-                for component, data in renewal_analysis.get('risk_components', {}).items():
+                risk_components = renewal_analysis.get('risk_components', {})
+                if not isinstance(risk_components, dict):
+                    logger.warning("Subscription analysis risk_components has unexpected type; defaulting to empty set")
+                    risk_components = {}
+                for component, data in risk_components.items():
+                    score_value = 0.0
+                    count_value = 0
+                    if isinstance(data, dict):
+                        try:
+                            score_value = float(data.get('score', 0) or 0)
+                        except (TypeError, ValueError):
+                            score_value = 0.0
+                        raw_count = data.get('count', data.get('total', data.get('value', 0)))
+                        try:
+                            count_value = int(raw_count or 0)
+                        except (TypeError, ValueError):
+                            count_value = 0
                     risk_data.append({
                         'Component': component.replace('_', ' ').title(),
-                        'Score': data['score'],
-                        'Count': data['count']
+                        'Score': score_value,
+                        'Count': count_value
                     })
                 risk_df = pd.DataFrame(risk_data)
                 risk_df.to_excel(writer, sheet_name='Risk_Components', index=False)
