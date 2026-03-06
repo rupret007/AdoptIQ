@@ -2175,3 +2175,27 @@ class TestSchemaAwareDsmFallbacks:
 
         result = backend.get_subscriptions_for_team(FakeCtx(), ["foo@example.com"])
         assert result.empty
+
+
+class TestEnhancedInsightsTimestampColumns:
+    """Guard Snowflake timestamp column names for engagement queries."""
+
+    def test_customer_pulse_query_uses_createddate(self):
+        with open(os.path.join(_PROJECT_ROOT, 'enhanced_snowflake_insights.py'), encoding='utf-8') as f:
+            src = f.read()
+        marker = "FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C"
+        idx = src.find(marker)
+        assert idx != -1
+        section = src[max(0, idx - 260):idx + 260]
+        assert "CREATEDDATE" in section
+        assert "CREATED_DATE" not in section
+
+    def test_success_priority_query_uses_createddate(self):
+        with open(os.path.join(_PROJECT_ROOT, 'enhanced_snowflake_insights.py'), encoding='utf-8') as f:
+            src = f.read()
+        marker = "FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C"
+        idx = src.find(marker)
+        assert idx != -1
+        section = src[max(0, idx - 260):idx + 260]
+        assert "CREATEDDATE" in section
+        assert "CREATED_DATE" not in section

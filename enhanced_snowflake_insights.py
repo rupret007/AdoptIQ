@@ -453,14 +453,14 @@ class EnhancedSnowflakeInsights:
                     SUBJECT_C,
                     STATUS_C,
                     ACCOUNT__C,
-                    CREATED_DATE
+                    CREATEDDATE
                 FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C 
                 WHERE UPPER(ACCOUNT__C) IN (
                     SELECT UPPER(ACCOUNT_ID_C) 
                     FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
                     WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
                 )
-                AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
+                AND CREATEDDATE >= DATEADD(day, -%s, CURRENT_DATE())
                 LIMIT 20
                 """
                 cur.execute(cp_query, (f'%{customer_name}%', days))
@@ -483,14 +483,14 @@ class EnhancedSnowflakeInsights:
                         SUBJECT_C,
                         PRIORITY_C,
                         RELATED_CUSTOMER__C,
-                        CREATED_DATE
+                        CREATEDDATE
                     FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C 
                     WHERE UPPER(RELATED_CUSTOMER__C) IN (
                         SELECT UPPER(ACCOUNT_ID_C) 
                         FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
                         WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
                     )
-                    AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
+                    AND CREATEDDATE >= DATEADD(day, -%s, CURRENT_DATE())
                     LIMIT 20
                     """
                     cur.execute(sp_query, (f'%{customer_name}%', days))
