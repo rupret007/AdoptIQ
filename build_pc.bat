@@ -8,6 +8,7 @@ cd /d "%~dp0"
 set ADOPTIQ_VERSION=1.0.3
 set ADOPTIQ_BUILD=1
 set STAGING_DIR=C:\Users\jestory\OneDrive - Cisco\AI Projects\Staging\AdoptIQ_PC
+set MAC_OUTBOX_STAGING_DIR=C:\Users\jestory\OneDrive - Cisco\AI Projects\Staging\AdoptIQ_MAC\OUTBOX
 
 echo ==============================================
 echo   AdoptIQ - Build Windows .exe
@@ -123,9 +124,33 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
+REM Also sync the same payload into Mac OUTBOX staging without deleting other files.
+echo Syncing Mac OUTBOX staging payload...
+if not exist "%MAC_OUTBOX_STAGING_DIR%" mkdir "%MAC_OUTBOX_STAGING_DIR%"
+copy /Y "OUTBOX\AdoptIQ.exe" "%MAC_OUTBOX_STAGING_DIR%\AdoptIQ.exe" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to sync AdoptIQ.exe to Mac OUTBOX staging.
+    echo        Close any running AdoptIQ.exe from "%MAC_OUTBOX_STAGING_DIR%" and retry.
+    pause
+    exit /b 1
+)
+copy /Y "OUTBOX\README.md" "%MAC_OUTBOX_STAGING_DIR%\README.md" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to sync README.md to Mac OUTBOX staging.
+    pause
+    exit /b 1
+)
+copy /Y "OUTBOX\build_info.txt" "%MAC_OUTBOX_STAGING_DIR%\build_info.txt" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to sync build_info.txt to Mac OUTBOX staging.
+    pause
+    exit /b 1
+)
+
 REM Unblock built files so SmartScreen allows the app
 powershell -NoProfile -Command "Get-ChildItem -Path OUTBOX -File | Unblock-File -ErrorAction SilentlyContinue"
 powershell -NoProfile -Command "Get-ChildItem -Path \"%STAGING_DIR%\" -File | Unblock-File -ErrorAction SilentlyContinue"
+powershell -NoProfile -Command "Get-ChildItem -Path \"%MAC_OUTBOX_STAGING_DIR%\" -File | Unblock-File -ErrorAction SilentlyContinue"
 
 echo.
 echo ==============================================
