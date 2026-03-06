@@ -3411,6 +3411,14 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             
             # Add space after chart
             doc.add_paragraph()
+
+            unknown_priority_cases = int(portfolio_metrics.get('unknown_priority_cases', 0) or 0)
+            if unknown_priority_cases > 0:
+                note = doc.add_paragraph()
+                note.add_run('Severity Mapping Note: ').bold = True
+                note.add_run(
+                    f'{unknown_priority_cases} TAC case(s) had unknown or non-standard priority labels and are excluded from P1/P2/P3/P4 buckets.'
+                )
             
             return True
             
@@ -3453,6 +3461,14 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                             run.font.size = Pt(11)
                             run.font.bold = True
             
+            unknown_priority_cases = int(portfolio_metrics.get('unknown_priority_cases', 0) or 0)
+            if unknown_priority_cases > 0:
+                note = doc.add_paragraph()
+                note.add_run('Severity Mapping Note: ').bold = True
+                note.add_run(
+                    f'{unknown_priority_cases} TAC case(s) had unknown or non-standard priority labels and are excluded from P1/P2/P3/P4 buckets.'
+                )
+
             doc.add_paragraph()
             return True
             

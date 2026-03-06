@@ -31,6 +31,7 @@ from adoptiq_backend import (
     cross_reference_refs,
     fetch_support_cases_snowflake,
 )
+from data_normalization import normalize_priority_label
 
 
 # ── _extract_refs ────────────────────────────────────────────────────────
@@ -341,6 +342,32 @@ class TestApplyScopeFilterCsone:
         result = _apply_scope_filter_csone(None, "All", 90, [], [])
         assert isinstance(result, pd.DataFrame)
         assert result.empty
+
+
+class TestNormalizePriorityLabel:
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("1", "P1"),
+            ("2", "P2"),
+            ("3", "P3"),
+            ("4", "P4"),
+            ("P1", "P1"),
+            ("P 1", "P1"),
+            ("sev1", "P1"),
+            ("sev-2", "P2"),
+            ("priority 2", "P2"),
+            ("Critical - P1", "P1"),
+            ("High (P2)", "P2"),
+            ("Moderate / P3", "P3"),
+            ("Low P4", "P4"),
+        ],
+    )
+    def test_maps_priority_variants(self, raw, expected):
+        assert normalize_priority_label(raw) == expected
+
+    def test_unknown_stays_unknown(self):
+        assert normalize_priority_label("unclassified") == "Unknown"
 
     def test_empty_returns_empty_df(self):
         result = _apply_scope_filter_csone(pd.DataFrame(), "All", 90, [], [])

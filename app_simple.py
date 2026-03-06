@@ -7677,12 +7677,14 @@ def run_comprehensive_analysis(analysis_id):
 
         priority_col = "case_priority_norm" if "case_priority_norm" in _cs_norm.columns else ("Severity" if "Severity" in _cs_norm.columns else None)
         if priority_col:
-            p1_cases = len(_cs_norm[_cs_norm[priority_col].astype(str).str.contains(r"\bP1\b|Critical", case=False, na=False)])
-            p2_cases = len(_cs_norm[_cs_norm[priority_col].astype(str).str.contains(r"\bP2\b|High", case=False, na=False)])
-            p3_cases = len(_cs_norm[_cs_norm[priority_col].astype(str).str.contains(r"\bP3\b|Medium", case=False, na=False)])
-            p4_cases = len(_cs_norm[_cs_norm[priority_col].astype(str).str.contains(r"\bP4\b|Low", case=False, na=False)])
+            sev_series = _cs_norm[priority_col].fillna("").astype(str).str.upper().str.strip()
+            p1_cases = int((sev_series == "P1").sum())
+            p2_cases = int((sev_series == "P2").sum())
+            p3_cases = int((sev_series == "P3").sum())
+            p4_cases = int((sev_series == "P4").sum())
+            unknown_priority_cases = int((sev_series == "UNKNOWN").sum())
         else:
-            p1_cases = p2_cases = p3_cases = p4_cases = 0
+            p1_cases = p2_cases = p3_cases = p4_cases = unknown_priority_cases = 0
 
         break_fix_count = int((_cs_norm["case_type_class"] == "break_fix_technical").sum()) if "case_type_class" in _cs_norm.columns else 0
         provisioning_count = int((_cs_norm["case_type_class"] == "provisioning_request").sum()) if "case_type_class" in _cs_norm.columns else 0
@@ -7699,6 +7701,7 @@ def run_comprehensive_analysis(analysis_id):
             'p2_cases': p2_cases,
             'p3_cases': p3_cases,
             'p4_cases': p4_cases,
+            'unknown_priority_cases': unknown_priority_cases,
             'break_fix_cases': break_fix_count,
             'provisioning_cases': provisioning_count,
             'health_score': 'B' if healthy_customers >= high_risk_customers else 'C',
