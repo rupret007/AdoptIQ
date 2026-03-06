@@ -194,6 +194,7 @@ from adoptiq_backend import (
 from compact_report_formatter import calculate_renewal_risk_scores
 from advanced_renewal_analyzer import AdvancedRenewalAnalyzer, generate_advanced_renewal_analysis
 from data_normalization import (
+    ACCOUNT_COLUMN_CANDIDATES,
     add_case_lifecycle_fields,
     build_customer_lookup,
     detect_bems_mask,
@@ -203,6 +204,7 @@ from data_normalization import (
 )
 from risk_scoring import compute_customer_risk_profile
 from report_consistency import validate_report_consistency
+from report_utils import format_inline_source
 from snowflake_prefetch import AnalysisRunContext, prefetch_comprehensive, prefetch_ask_ai
 from ask_ai_grounded import (
     AskAIRequest,
@@ -273,6 +275,159 @@ def validate_days_input(days: int) -> tuple[bool, str]:
         return False, "Days must be between 1 and 365"
     
     return True, "Valid"
+
+
+def _ensure_inline_source_claim(text: Any, metric_name: str = "Derived Metric", fields: List[str] = None) -> str:
+    claim = str(text or "").strip()
+    if not claim:
+        return ""
+    if re.search(r"\[\s*source\s*:", claim, flags=re.IGNORECASE):
+        return claim
+    return f"{claim} {format_inline_source(metric_name, fields=fields or [])}"
+
+
+def _normalized_account_ids(df: pd.DataFrame) -> List[str]:
+    if df is None or df.empty or "ACCOUNT_ID_C" not in df.columns:
+        return []
+    values = (
+        df["ACCOUNT_ID_C"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+    values = values[(values != "") & (values.str.lower() != "none")]
+    return sorted(set(values.tolist()))
+
+
+def _normalize_account_id_for_parity(value: Any) -> str:
+    token = str(value or "").strip().upper()
+    if not token or token in {"NONE", "NAN", "NULL"}:
+        return ""
+    return token
+
+
+def _account_tokens_for_parity(values: List[Any]) -> tuple[set[str], set[str]]:
+    exact: set[str] = set()
+    sf15: set[str] = set()
+    for value in values or []:
+        token = _normalize_account_id_for_parity(value)
+        if not token:
+            continue
+        exact.add(token)
+        if len(token) >= 15:
+            sf15.add(token[:15])
+    return exact, sf15
+
+
+def _log_customer_pulse_parity(team_subs_df: pd.DataFrame, pulse_df: pd.DataFrame, scope_label: str) -> None:
+    if pulse_df is None or pulse_df.empty:
+        logger.info(f"[[PULSE_PARITY]] {scope_label}: no customer pulse rows returned")
+        return
+    expected_ids_raw = _normalized_account_ids(team_subs_df)
+    expected_exact, expected_sf15 = _account_tokens_for_parity(expected_ids_raw)
+    pulse_acct_col = next((c for c in ACCOUNT_COLUMN_CANDIDATES if c in pulse_df.columns), None)
+    if not pulse_acct_col:
+        logger.warning(f"[[PULSE_PARITY]] {scope_label}: pulse data missing account ID column")
+        return
+    backfill_mask = pd.Series([False] * len(pulse_df), index=pulse_df.index)
+    if "PULSE_BACKFILL" in pulse_df.columns:
+        backfill_mask = (
+            pulse_df["PULSE_BACKFILL"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .isin({"1", "true", "yes", "on"})
+        )
+
+    in_window_df = pulse_df[~backfill_mask]
+    backfill_df = pulse_df[backfill_mask]
+
+    observed_total_exact, observed_total_sf15 = _account_tokens_for_parity(
+        pulse_df[pulse_acct_col].dropna().astype(str).tolist()
+    )
+    observed_window_exact, observed_window_sf15 = _account_tokens_for_parity(
+        in_window_df[pulse_acct_col].dropna().astype(str).tolist()
+    )
+    observed_backfill_exact, observed_backfill_sf15 = _account_tokens_for_parity(
+        backfill_df[pulse_acct_col].dropna().astype(str).tolist()
+    )
+
+    matched_window_exact = expected_exact & observed_window_exact
+    matched_window_sf15 = {
+        token for token in (expected_exact - matched_window_exact)
+        if len(token) >= 15 and token[:15] in observed_window_sf15
+    }
+    matched_window_total = matched_window_exact | matched_window_sf15
+
+    remaining_after_window = expected_exact - matched_window_total
+    matched_backfill_exact = remaining_after_window & observed_backfill_exact
+    matched_backfill_sf15 = {
+        token for token in (remaining_after_window - matched_backfill_exact)
+        if len(token) >= 15 and token[:15] in observed_backfill_sf15
+    }
+    matched_backfill_total = matched_backfill_exact | matched_backfill_sf15
+    matched_total = matched_window_total | matched_backfill_total
+
+    in_window_coverage = (len(matched_window_total) / len(expected_exact)) if expected_exact else 1.0
+    total_coverage = (len(matched_total) / len(expected_exact)) if expected_exact else 1.0
+    missing_expected = sorted(expected_exact - matched_total)
+    unexpected_observed = sorted(
+        token for token in observed_total_exact
+        if token not in expected_exact and (len(token) < 15 or token[:15] not in expected_sf15)
+    )
+    logger.info(
+        "[[PULSE_PARITY]] %s: expected_accounts=%d observed_accounts=%d in_window_matched=%d backfill_matched=%d total_matched=%d in_window_coverage=%.2f total_coverage=%.2f (sf15_matches=%d)",
+        scope_label,
+        len(expected_exact),
+        len(observed_total_exact),
+        len(matched_window_total),
+        len(matched_backfill_total),
+        len(matched_total),
+        in_window_coverage,
+        total_coverage,
+        len(matched_window_sf15) + len(matched_backfill_sf15),
+    )
+    if total_coverage < 0.5:
+        logger.warning(
+            "[[PULSE_PARITY]] %s: low pulse-account total coverage %.2f (in_window=%.2f); missing_expected_sample=%s unexpected_observed_sample=%s",
+            scope_label,
+            total_coverage,
+            in_window_coverage,
+            missing_expected[:5],
+            unexpected_observed[:5],
+        )
+    elif in_window_coverage < 0.5 and len(matched_backfill_total) > 0:
+        logger.warning(
+            "[[PULSE_PARITY]] %s: in-window pulse coverage %.2f is low but backfill increased total coverage to %.2f; review data freshness before treating as true recent sentiment",
+            scope_label,
+            in_window_coverage,
+            total_coverage,
+        )
+
+
+def _apply_subtech_scope_fallback(ab_df: pd.DataFrame, technology: str) -> pd.DataFrame:
+    if ab_df is None or ab_df.empty or "sub_technology" not in ab_df.columns:
+        return ab_df
+    canonical = str(technology or "").strip()
+    if canonical == "Contact Center":
+        canonical = "All Contact Center"
+    allowed = {
+        "All Contact Center",
+        "Webex Contact Center",
+        "Webex Contact Center Enterprise",
+        "Cisco UCCE",
+        "Cisco UCCX",
+    }
+    if canonical not in allowed:
+        return ab_df
+    normalized = ab_df.copy()
+    unknown_mask = normalized["sub_technology"].fillna("").astype(str).str.contains(
+        r"^unknown$|other/unknown", case=False, regex=True
+    )
+    if unknown_mask.any():
+        normalized.loc[unknown_mask, "sub_technology"] = canonical
+    return normalized
 
 app = Flask(
     __name__,
@@ -3400,7 +3555,7 @@ def _categorize_technology(product_name: str) -> str:
     elif any(keyword in product_lower for keyword in ['cisco uccx', 'uccx', 'unified contact center express']):
         return 'Cisco UCCX'
     elif any(keyword in product_lower for keyword in ['contact center']):
-        return 'Contact Center'
+        return 'All Contact Center'
     elif any(keyword in product_lower for keyword in ['messaging', 'teams']):
         return 'Messaging'
     elif any(keyword in product_lower for keyword in ['device', 'endpoint', 'desk', 'phone', 'deskpro', 'desk pro']):
@@ -5505,6 +5660,15 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         case_para.add_run('Source: Snowflake SUPPORT_CASES (no CSOne file provided). BEMS are only from CSOne (TAC).\n').italic = True
     else:
         case_para.add_run('Source: CSOne (TAC case data).\n').italic = True
+    doc.add_paragraph('TAC Case Type Breakdown', style='Heading 3')
+    split_table = doc.add_table(rows=3, cols=2)
+    split_table.style = 'Light Grid Accent 1'
+    split_table.rows[0].cells[0].text = 'Case Type'
+    split_table.rows[0].cells[1].text = 'Count'
+    split_table.rows[1].cells[0].text = 'Break-fix / Technical'
+    split_table.rows[1].cells[1].text = str(break_fix_total)
+    split_table.rows[2].cells[0].text = 'Provisioning Request'
+    split_table.rows[2].cells[1].text = str(provisioning_total)
     
     customer_csone_display = add_case_lifecycle_fields(customer_csone) if customer_csone is not None and not customer_csone.empty else customer_csone
     if customer_csone_display is not None and not customer_csone_display.empty:
@@ -5725,6 +5889,18 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                 for cust in sorted(defect_by_customer.keys()):
                     ids = sorted(set(defect_by_customer[cust]))
                     defect_para.add_run(f'  • Customer: {cust} — Defect IDs: {", ".join([f"[{x}]" for x in ids])}\n')
+            if defect_by_customer:
+                doc.add_paragraph('Defect-to-Customer Linkage', style='Heading 3')
+                defect_table = doc.add_table(rows=len(defect_by_customer) + 1, cols=3)
+                defect_table.style = 'Light Grid Accent 1'
+                defect_table.rows[0].cells[0].text = 'Customer Name'
+                defect_table.rows[0].cells[1].text = 'Defect Count'
+                defect_table.rows[0].cells[2].text = 'Defect IDs'
+                for idx, cust in enumerate(sorted(defect_by_customer.keys()), 1):
+                    ids = sorted(set(defect_by_customer.get(cust) or []))
+                    defect_table.rows[idx].cells[0].text = str(cust)
+                    defect_table.rows[idx].cells[1].text = str(len(ids))
+                    defect_table.rows[idx].cells[2].text = ", ".join([f"[{x}]" for x in ids])
         
         # External bugs from help.webex.com
         if ext_bugs:
@@ -7615,10 +7791,11 @@ def run_comprehensive_analysis(analysis_id):
         # This ensures these variables are always available for customer deep dives below
         # These filtered datasets are used both in portfolio analysis AND customer-specific analysis
         logger.info(f"[[FILTER]] Filtering CSConsole data by technology: {status['tech']}")
-        filtered_action_plans = _filter_csconsole_data_by_technology(csconsole_action_plans, status['tech'], team_customer_names)
-        filtered_customer_pulse = _filter_csconsole_data_by_technology(csconsole_customer_pulse, status['tech'], team_customer_names)
-        filtered_success_priorities = _filter_csconsole_data_by_technology(csconsole_success_priorities, status['tech'], team_customer_names)
-        filtered_adoption_barriers = _filter_csconsole_data_by_technology(csconsole_adoption_barriers, status['tech'], team_customer_names)
+        filtered_action_plans = _filter_csconsole_data_by_technology(csconsole_action_plans, status['tech'], team_customer_names, account_ids=account_ids)
+        filtered_customer_pulse = _filter_csconsole_data_by_technology(csconsole_customer_pulse, status['tech'], team_customer_names, account_ids=account_ids)
+        filtered_success_priorities = _filter_csconsole_data_by_technology(csconsole_success_priorities, status['tech'], team_customer_names, account_ids=account_ids)
+        filtered_adoption_barriers = _filter_csconsole_data_by_technology(csconsole_adoption_barriers, status['tech'], team_customer_names, account_ids=account_ids)
+        _log_customer_pulse_parity(team_subs_df, filtered_customer_pulse, f"{status['manager']}::{status['tech']}")
         
         logger.info(f"[[FILTER]] CSConsole data after filtering - Action Plans: {len(filtered_action_plans)}, "
                     f"Customer Pulse: {len(filtered_customer_pulse)}, "

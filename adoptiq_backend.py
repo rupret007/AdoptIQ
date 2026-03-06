@@ -19,6 +19,7 @@ from docx.oxml import OxmlElement
 from pandas import to_datetime, Timestamp, Timedelta
 from docx import Document
 from data_normalization import (
+    ACCOUNT_COLUMN_CANDIDATES,
     add_case_lifecycle_fields,
     build_customer_lookup,
     detect_bems_mask,
@@ -5444,7 +5445,12 @@ def _apply_scope_filter_csone_inclusive(csone_df, technology, days):
     logger.debug(f"CSOne inclusive filter: Final result: {len(filtered_df)} cases")
     return filtered_df
 
-def _filter_csconsole_data_by_technology(df: pd.DataFrame, technology: str, customer_names: List[str] = None) -> pd.DataFrame:
+def _filter_csconsole_data_by_technology(
+    df: pd.DataFrame,
+    technology: str,
+    customer_names: List[str] = None,
+    account_ids: List[str] = None,
+) -> pd.DataFrame:
     """
     Filter CSConsole data (Action Plans, Customer Pulse, etc.) by technology and customer names.
     This ensures CSConsole data matches the technology scope selected by the user.
@@ -5462,15 +5468,54 @@ def _filter_csconsole_data_by_technology(df: pd.DataFrame, technology: str, cust
         return df
     
     logger.info(f"[[FILTER]] CSConsole filter: Starting with {len(df)} records for technology '{technology}'")
-    
+
     filtered_df = df.copy()
-    
+
+    def _normalize_account_id_token(value: Any) -> str:
+        token = str(value or "").strip().upper()
+        if not token or token in {"NONE", "NAN", "NULL"}:
+            return ""
+        return token
+
+    def _expand_account_id_tokens(values: List[Any]) -> tuple[set[str], set[str]]:
+        exact: set[str] = set()
+        sf15: set[str] = set()
+        for value in values or []:
+            token = _normalize_account_id_token(value)
+            if not token:
+                continue
+            exact.add(token)
+            if len(token) >= 15:
+                sf15.add(token[:15])
+        return exact, sf15
+
+    scoped_exact, scoped_sf15 = _expand_account_id_tokens(account_ids or [])
+
+    def _account_scope_mask(frame: pd.DataFrame) -> pd.Series | None:
+        if frame is None or frame.empty:
+            return None
+        if not scoped_exact:
+            return None
+        account_col = next((c for c in ACCOUNT_COLUMN_CANDIDATES if c in frame.columns), None)
+        if not account_col:
+            return None
+        normalized = (
+            frame[account_col]
+            .fillna("")
+            .astype(str)
+            .apply(_normalize_account_id_token)
+        )
+        mask = normalized.isin(scoped_exact)
+        if scoped_sf15:
+            mask = mask | normalized.str[:15].isin(scoped_sf15)
+        return mask
+
     # Filter by customer names if provided (ensures only team's customers are included)
-    if customer_names:
+    if customer_names or scoped_exact:
         before_count = len(filtered_df)
         normalized_targets = {
             normalize_customer_name(name)
-            for name in customer_names
+            for name in (customer_names or [])
             if normalize_customer_name(name) != "Unknown"
         }
         customer_filter_cols = (
@@ -5482,10 +5527,18 @@ def _filter_csconsole_data_by_technology(df: pd.DataFrame, technology: str, cust
             'RELATED_CUSTOMER__C',
         )
         candidate_col = next((c for c in customer_filter_cols if c in filtered_df.columns), None)
+        account_mask = _account_scope_mask(filtered_df)
+        customer_mask = None
         if candidate_col and normalized_targets:
             customer_series = filtered_df[candidate_col].fillna('').astype(str).apply(normalize_customer_name)
-            filtered_df = filtered_df[customer_series.isin(normalized_targets)]
-        
+            customer_mask = customer_series.isin(normalized_targets)
+        if customer_mask is not None and account_mask is not None:
+            filtered_df = filtered_df[customer_mask | account_mask]
+        elif customer_mask is not None:
+            filtered_df = filtered_df[customer_mask]
+        elif account_mask is not None:
+            filtered_df = filtered_df[account_mask]
+
         after_count = len(filtered_df)
         logger.info(f"[[FILTER]] CSConsole filter: After customer filter: {after_count} records (removed {before_count - after_count})")
     
@@ -5534,6 +5587,14 @@ def _filter_csconsole_data_by_technology(df: pd.DataFrame, technology: str, cust
                                 mask = mask | col_mask
                             except Exception as _filter_err:
                                 logger.debug(f"Column filter '{col}' skipped: {_filter_err}")
+                    if not mask.any():
+                        fallback_mask = _account_scope_mask(filtered_df)
+                        if fallback_mask is not None and fallback_mask.any():
+                            logger.warning(
+                                "[[FILTER]] CSConsole filter: no technology text matches; using account-scope fallback for %d rows",
+                                int(fallback_mask.sum()),
+                            )
+                            mask = fallback_mask
 
                 filtered_df = filtered_df[mask]
                 after_count = len(filtered_df)
