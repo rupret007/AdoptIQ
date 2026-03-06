@@ -15,8 +15,28 @@ Or, if already cloned:
 
 ```cmd
 cd AdoptIQ
-git pull origin master
+git fetch origin
 ```
+
+## 1b) Use a PC machine branch (recommended)
+
+For cross-machine development, do daily work on a branch like `pc-sync-YYYY-MM-DD` (not directly on `master`).
+
+If creating a new branch:
+
+```cmd
+git checkout -b pc-sync-YYYY-MM-DD origin/master
+git push -u origin pc-sync-YYYY-MM-DD
+```
+
+If branch already exists:
+
+```cmd
+git checkout pc-sync-YYYY-MM-DD
+git pull
+```
+
+If you also work on Mac, follow `BRANCH_WORKFLOW.md` for cherry-pick/merge sync patterns.
 
 ## 2) Create Python environment
 
