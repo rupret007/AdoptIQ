@@ -7,6 +7,7 @@ cd /d "%~dp0"
 
 set ADOPTIQ_VERSION=1.0.3
 set ADOPTIQ_BUILD=1
+set STAGING_DIR=C:\Users\jestory\OneDrive - Cisco\AI Projects\Staging\AdoptIQ_PC
 
 echo ==============================================
 echo   AdoptIQ - Build Windows .exe
@@ -54,7 +55,15 @@ echo   -^> Version %ADOPTIQ_VERSION% (Build %ADOPTIQ_BUILD%)
 
 echo.
 echo Running PyInstaller (this may take a few minutes)...
+if exist build\adoptiq_pc rmdir /S /Q build\adoptiq_pc
+if exist dist\AdoptIQ.exe del /F /Q dist\AdoptIQ.exe
 "%PYTHON%" -m PyInstaller --clean --noconfirm adoptiq_pc.spec
+if %ERRORLEVEL% neq 0 (
+    echo.
+    echo ERROR: PyInstaller failed.
+    pause
+    exit /b 1
+)
 
 if not exist dist\AdoptIQ.exe (
     echo Build failed: dist\AdoptIQ.exe not found.
@@ -66,13 +75,30 @@ REM Create OUTBOX with standalone exe, readme, and build info
 echo.
 echo Creating OUTBOX...
 if not exist OUTBOX mkdir OUTBOX
-copy /Y dist\AdoptIQ.exe OUTBOX\
-copy README.md OUTBOX\
+
+REM Keep OUTBOX deterministic: exactly three files.
+for %%F in (OUTBOX\*) do (
+    if /I not "%%~nxF"=="AdoptIQ.exe" if /I not "%%~nxF"=="README.md" if /I not "%%~nxF"=="build_info.txt" del /Q "%%~fF" >nul 2>nul
+)
+
+copy /Y dist\AdoptIQ.exe "OUTBOX\AdoptIQ.exe" >nul
+copy /Y README.md "OUTBOX\README.md" >nul
 echo AdoptIQ v%ADOPTIQ_VERSION% build %ADOPTIQ_BUILD% > OUTBOX\build_info.txt
 echo Built: %date% %time% >> OUTBOX\build_info.txt
 
+REM Mirror release payload to staging folder with the same 3-file contract.
+echo Syncing staging folder...
+if not exist "%STAGING_DIR%" mkdir "%STAGING_DIR%"
+for %%F in ("%STAGING_DIR%\*") do (
+    if /I not "%%~nxF"=="AdoptIQ.exe" if /I not "%%~nxF"=="README.md" if /I not "%%~nxF"=="build_info.txt" del /Q "%%~fF" >nul 2>nul
+)
+copy /Y "OUTBOX\AdoptIQ.exe" "%STAGING_DIR%\AdoptIQ.exe" >nul
+copy /Y "OUTBOX\README.md" "%STAGING_DIR%\README.md" >nul
+copy /Y "OUTBOX\build_info.txt" "%STAGING_DIR%\build_info.txt" >nul
+
 REM Unblock built files so SmartScreen allows the app
 powershell -NoProfile -Command "Get-ChildItem -Path OUTBOX -File | Unblock-File -ErrorAction SilentlyContinue"
+powershell -NoProfile -Command "Get-ChildItem -Path \"%STAGING_DIR%\" -File | Unblock-File -ErrorAction SilentlyContinue"
 
 echo.
 echo ==============================================
