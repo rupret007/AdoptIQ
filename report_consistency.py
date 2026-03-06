@@ -34,6 +34,7 @@ def validate_report_consistency(
     risk_data: Optional[Dict[str, Dict[str, Any]]] = None,
     defects: Optional[Dict[str, Any]] = None,
     factual_claims: Optional[list] = None,
+    customer_universe: Optional[Any] = None,
     max_other_unknown_ratio: float = 0.60,
 ) -> Dict[str, Any]:
     """
@@ -57,14 +58,28 @@ def validate_report_consistency(
 
     # Canonical dashboard metrics (customer/case-severity parity checks)
     customer_set = set()
-    for frame in (ab_df, csone_df):
-        if frame is None or frame.empty:
-            continue
-        for col in ("customer_name", "BU_NAME", "Customer Name"):
-            if col in frame.columns:
-                customer_set.update(
-                    normalize_customer_name(v) for v in frame[col].dropna().astype(str).tolist()
-                )
+    if customer_universe is not None:
+        if isinstance(customer_universe, pd.DataFrame):
+            for col in ("customer_name", "BU_NAME", "Customer Name"):
+                if col in customer_universe.columns:
+                    customer_set.update(
+                        normalize_customer_name(v) for v in customer_universe[col].dropna().astype(str).tolist()
+                    )
+        else:
+            try:
+                for value in customer_universe:
+                    customer_set.add(normalize_customer_name(value))
+            except TypeError:
+                customer_set.add(normalize_customer_name(customer_universe))
+    else:
+        for frame in (ab_df, csone_df):
+            if frame is None or frame.empty:
+                continue
+            for col in ("customer_name", "BU_NAME", "Customer Name"):
+                if col in frame.columns:
+                    customer_set.update(
+                        normalize_customer_name(v) for v in frame[col].dropna().astype(str).tolist()
+                    )
     customer_set = {c for c in customer_set if c and c != "Unknown"}
     metrics["total_customers"] = len(customer_set)
 
@@ -89,9 +104,32 @@ def validate_report_consistency(
         metrics["other_unknown_count"] = unknown_count
         metrics["other_unknown_ratio"] = round(unknown_ratio, 4)
         if unknown_ratio > max_other_unknown_ratio:
-            warnings.append(
-                f"Adoption barrier Other/Unknown ratio is high ({unknown_ratio:.1%}); update technology mapping."
-            )
+            tech_signal_cols = [
+                col
+                for col in (
+                    "SUB_TECHNOLOGY_C",
+                    "TECHNOLOGY_C",
+                    "CSS_PRE_UNLINK_TECHNOLOGY_NAME_C",
+                    "PRODUCT_NAME_C",
+                    "PRODUCT_C",
+                )
+                if col in ab_df.columns
+            ]
+            if tech_signal_cols:
+                signal_mask = pd.Series(False, index=ab_df.index)
+                for col in tech_signal_cols:
+                    signal_mask = signal_mask | ab_df[col].fillna("").astype(str).str.strip().ne("")
+                signal_ratio = float(signal_mask.mean()) if len(signal_mask) else 0.0
+                metrics["technology_signal_ratio"] = round(signal_ratio, 4)
+                # When source technology columns are mostly empty, this warning is noisy and non-actionable.
+                if signal_ratio >= 0.25:
+                    warnings.append(
+                        f"Adoption barrier Other/Unknown ratio is high ({unknown_ratio:.1%}); update technology mapping."
+                    )
+            else:
+                warnings.append(
+                    f"Adoption barrier Other/Unknown ratio is high ({unknown_ratio:.1%}); update technology mapping."
+                )
 
     # Portfolio metric mismatch
     if portfolio_metrics:

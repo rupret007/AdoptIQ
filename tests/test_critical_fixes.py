@@ -2054,3 +2054,81 @@ class TestRound31Fixes:
         assert idx != -1
         func_body = src[idx:idx + 300]
         assert 'unquote(analysis_id)' in func_body
+
+
+class TestSchemaAwareDsmFallbacks:
+    """Schema-aware DSM query building should avoid identifier failures."""
+
+    def test_fetch_arr_data_uses_defaults_when_optional_columns_missing(self, monkeypatch):
+        import adoptiq_backend as backend
+
+        monkeypatch.setattr(
+            backend,
+            "_get_table_columns",
+            lambda _ctx, _table: {"ACCOUNT_ID_C", "BU_NAME", "SUBSCRIPTION_ID", "STATUS_C"},
+        )
+
+        class FakeCursor:
+            def __init__(self):
+                self.last_sql = ""
+                self.description = []
+                self._rows = []
+
+            def execute(self, sql, _params=None):
+                self.last_sql = sql
+                self.description = [
+                    ("ACCOUNT_ID_C",),
+                    ("BU_NAME",),
+                    ("SUBSCRIPTION_ID",),
+                    ("TECHNOLOGY_C",),
+                    ("SUB_TECHNOLOGY_C",),
+                    ("STATUS_C",),
+                    ("CSSM_EMAIL",),
+                    ("CSSM_NAME",),
+                    ("CSSM_MANAGER",),
+                    ("ANNUAL_CONTRACT_VALUE",),
+                    ("MRR",),
+                    ("TCV",),
+                    ("LICENSE_COUNT",),
+                ]
+                self._rows = [
+                    ("A1", "Acme", "Sub1", "Unknown", "Unknown", "ACTIVE", "", "", "", 0, 0, 0, 0),
+                ]
+
+            def fetchall(self):
+                return self._rows
+
+            def close(self):
+                return None
+
+        class FakeCtx:
+            def __init__(self):
+                self._cursor = FakeCursor()
+
+            def cursor(self):
+                return self._cursor
+
+        ctx = FakeCtx()
+        result = backend.fetch_arr_data(ctx, ["A1"])
+
+        assert not result.empty
+        assert result.iloc[0]["TECHNOLOGY_C"] == "Unknown"
+        assert result.iloc[0]["CSSM_EMAIL"] == ""
+        assert "COALESCE(TECHNOLOGY_C" not in ctx._cursor.last_sql
+        assert "COALESCE(SUB_TECHNOLOGY_C" not in ctx._cursor.last_sql
+
+    def test_get_subscriptions_for_team_returns_empty_when_no_email_columns(self, monkeypatch):
+        import adoptiq_backend as backend
+
+        monkeypatch.setattr(
+            backend,
+            "_get_table_columns",
+            lambda _ctx, _table: {"SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME"},
+        )
+
+        class FakeCtx:
+            def cursor(self):
+                raise AssertionError("cursor should not be requested when no email columns are available")
+
+        result = backend.get_subscriptions_for_team(FakeCtx(), ["foo@example.com"])
+        assert result.empty

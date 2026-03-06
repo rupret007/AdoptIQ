@@ -76,3 +76,61 @@ def test_priority_metrics_use_normalized_exact_p1_p2():
     assert result["metrics"]["critical_p1"] == 1
     assert result["metrics"]["high_p2"] == 1
 
+
+def test_customer_universe_override_aligns_total_customer_metric():
+    csone = add_case_lifecycle_fields(
+        pd.DataFrame(
+            [
+                {"customer_name": "Acme", "Severity": "P2"},
+            ]
+        )
+    )
+    ab = pd.DataFrame([{"customer_name": "Acme", "sub_technology": "Cisco UCCE"}])
+    provided_universe = {"Acme", "Beta", "Gamma"}
+    result = validate_report_consistency(
+        ab_df=ab,
+        csone_df=csone,
+        portfolio_metrics={
+            "total_barriers": 1,
+            "total_cases": 1,
+            "bems_count": 0,
+            "total_customers": 3,
+            "critical_p1": 0,
+            "high_p2": 1,
+        },
+        customer_universe=provided_universe,
+    )
+    assert result["is_valid"] is True
+    assert result["metrics"]["total_customers"] == 3
+    assert not any("total_customers" in err for err in result["errors"])
+
+
+def test_other_unknown_warning_suppressed_when_tech_signal_sparse():
+    ab = pd.DataFrame(
+        [
+            {
+                "customer_name": "Acme",
+                "sub_technology": "Other/Unknown",
+                "SUB_TECHNOLOGY_C": "",
+                "TECHNOLOGY_C": "",
+                "CSS_PRE_UNLINK_TECHNOLOGY_NAME_C": "",
+                "PRODUCT_NAME_C": "",
+                "PRODUCT_C": "",
+            },
+            {
+                "customer_name": "Beta",
+                "sub_technology": "Unknown",
+                "SUB_TECHNOLOGY_C": "",
+                "TECHNOLOGY_C": "",
+                "CSS_PRE_UNLINK_TECHNOLOGY_NAME_C": "",
+                "PRODUCT_NAME_C": "",
+                "PRODUCT_C": "",
+            },
+        ]
+    )
+    csone = add_case_lifecycle_fields(pd.DataFrame([{"customer_name": "Acme"}]))
+    result = validate_report_consistency(ab_df=ab, csone_df=csone)
+    assert result["is_valid"] is True
+    assert not any("Other/Unknown ratio is high" in w for w in result["warnings"])
+    assert result["metrics"]["technology_signal_ratio"] == 0.0
+

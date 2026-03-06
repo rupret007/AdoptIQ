@@ -7516,12 +7516,15 @@ def run_comprehensive_analysis(analysis_id):
             if isinstance(profile, dict):
                 factual_claims.extend(profile.get("key_findings", []) or [])
                 factual_claims.extend(profile.get("risk_factors", []) or [])
+        consistency_unknown_threshold = 1.01 if status.get('tech') == 'All Contact Center' else 0.60
         consistency = validate_report_consistency(
             _ab,
             _cs_norm,
             portfolio_metrics=portfolio_metrics,
             risk_data=risk_profiles,
             factual_claims=factual_claims,
+            customer_universe=all_customers_comprehensive,
+            max_other_unknown_ratio=consistency_unknown_threshold,
         )
         if not consistency["is_valid"]:
             logger.error(f"[[CONSISTENCY]] Errors: {consistency['errors']}")

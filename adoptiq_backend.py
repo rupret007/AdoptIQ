@@ -574,6 +574,60 @@ def load_db_profile() -> Optional[dict]:
 DSM_TABLE = "CX_DB.CX_SWSSBST_BR.dsm_assignment_data"
 AB_TABLE  = "EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW"
 
+_TABLE_COLUMN_CACHE: Dict[str, set[str]] = {}
+_TABLE_COLUMN_CACHE_LOCK = threading.Lock()
+
+
+def _normalize_table_name(table_name: str) -> str:
+    return str(table_name or "").replace('"', "").strip().upper()
+
+
+def _get_table_columns(ctx, table_name: str) -> set[str]:
+    """
+    Get table columns using a lightweight preview query.
+    This avoids exception-driven probing for optional columns.
+    """
+    if ctx is None:
+        return set()
+    cache_key = _normalize_table_name(table_name)
+    with _TABLE_COLUMN_CACHE_LOCK:
+        cached = _TABLE_COLUMN_CACHE.get(cache_key)
+    if cached is not None:
+        return set(cached)
+
+    cur = None
+    try:
+        cur = ctx.cursor()
+        cur.execute(f"SELECT * FROM {table_name} LIMIT 1")
+        cols = set()
+        for meta in (cur.description or []):
+            if not meta:
+                continue
+            col_name = str(meta[0] or "").strip().upper()
+            if col_name:
+                cols.add(col_name)
+        with _TABLE_COLUMN_CACHE_LOCK:
+            _TABLE_COLUMN_CACHE[cache_key] = set(cols)
+        return cols
+    except Exception as schema_err:
+        logger.warning("Could not introspect columns for %s: %s", table_name, schema_err)
+        return set()
+    finally:
+        if cur:
+            cur.close()
+
+
+def _column_or_default_expr(available_columns: set[str], column_name: str, default_sql: Optional[str], alias: Optional[str] = None) -> Optional[str]:
+    col = str(column_name or "").strip().upper()
+    if not col:
+        return None
+    out_alias = (alias or col).strip().upper()
+    if col in available_columns:
+        return f"{col} AS {out_alias}" if out_alias != col else col
+    if default_sql is None:
+        return None
+    return f"{default_sql} AS {out_alias}"
+
 def _connect_snowflake_direct():
     """Connect to Snowflake using user/password from env (no Keeper). Used when credentials are embedded."""
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -687,11 +741,21 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
             raise RuntimeError("Unable to establish Snowflake connection")
         cur = ctx.cursor(snowflake.connector.DictCursor)
         
-        # First, get account information from subscription (minimal columns - TECHNOLOGY_C/STATUS_C may not exist in all environments)
+        dsm_columns = _get_table_columns(ctx, DSM_TABLE)
+
+        # First, get account information from subscription (schema-aware column selection)
         logger.info(f"[[LIST]] Looking up account information for subscription: {subscription_id}")
-        account_query = """
-        SELECT ACCOUNT_ID_C, BU_NAME, SUBSCRIPTION_ID
-        FROM CX_DB.CX_SWSSBST_BR.dsm_assignment_data
+        account_select_exprs = [
+            _column_or_default_expr(dsm_columns, "ACCOUNT_ID_C", "NULL"),
+            _column_or_default_expr(dsm_columns, "BU_NAME", "'Unknown Customer'"),
+            _column_or_default_expr(dsm_columns, "SUBSCRIPTION_ID", "NULL"),
+            _column_or_default_expr(dsm_columns, "TECHNOLOGY_C", "'Unknown'"),
+            _column_or_default_expr(dsm_columns, "SUB_TECHNOLOGY_C", "'Unknown'"),
+            _column_or_default_expr(dsm_columns, "STATUS_C", "'Unknown'"),
+        ]
+        account_query = f"""
+        SELECT {", ".join(e for e in account_select_exprs if e)}
+        FROM {DSM_TABLE}
         WHERE SUBSCRIPTION_ID = %s
         LIMIT 1
         """
@@ -769,20 +833,21 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
             cur.execute(sp_query, (customer_name, days))
             success_priorities = cur.fetchall()
         
-        # Get team information (CSSM_* columns may not exist in all dsm_assignment_data schemas)
-        team_data = []
-        try:
-            logger.info(f"[EMOJI] Fetching team information...")
-            team_query = """
-            SELECT CSSM_EMAIL, CSSM_NAME, CSSM_MANAGER, CSSM_MANAGER_EMAIL
-            FROM CX_DB.CX_SWSSBST_BR.dsm_assignment_data
-            WHERE SUBSCRIPTION_ID = %s
-            """
-            cur.execute(team_query, (subscription_id,))
-            team_data = cur.fetchall()
-        except Exception as team_err:
-            logger.info(f"Team/CSSM columns not available in dsm_assignment_data: {team_err}")
-            team_data = []
+        # Get team information using schema-aware select expressions.
+        logger.info(f"[EMOJI] Fetching team information...")
+        team_select_exprs = [
+            _column_or_default_expr(dsm_columns, "CSSM_EMAIL", "NULL"),
+            _column_or_default_expr(dsm_columns, "CSSM_NAME", "NULL"),
+            _column_or_default_expr(dsm_columns, "CSSM_MANAGER", "NULL"),
+            _column_or_default_expr(dsm_columns, "CSSM_MANAGER_EMAIL", "NULL"),
+        ]
+        team_query = f"""
+        SELECT {", ".join(e for e in team_select_exprs if e)}
+        FROM {DSM_TABLE}
+        WHERE SUBSCRIPTION_ID = %s
+        """
+        cur.execute(team_query, (subscription_id,))
+        team_data = cur.fetchall()
 
         # Compile results (include cssm_email for single-customer renewal manager fallback)
         subscription_data = {
@@ -994,17 +1059,41 @@ def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
     cur = None
     try:
         cur = ctx.cursor()
-        email_col = "PRIMARY_DSM_EMAIL" # Based on previous discovery
-        
+        available_columns = _get_table_columns(ctx, DSM_TABLE)
+        email_col = next(
+            (
+                col for col in (
+                    "PRIMARY_DSM_EMAIL",
+                    "CSSM_EMAIL",
+                    "ASSIGNEE_EMAIL",
+                    "OWNER_EMAIL",
+                )
+                if col in available_columns
+            ),
+            None,
+        )
+        if not email_col:
+            logger.warning("No CSSM/owner email columns found in %s; returning empty team subscription set", DSM_TABLE)
+            return pd.DataFrame(columns=["SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"])
+
         # Use proper parameterized query to prevent SQL injection
         placeholders = ','.join(['%s'] * len(emails))
-        sql = f"""SELECT DISTINCT SUBSCRIPTION_ID, ACCOUNT_ID_C, BU_NAME, {email_col} AS CSSM_EMAIL
+        select_exprs = [
+            _column_or_default_expr(available_columns, "SUBSCRIPTION_ID", "NULL"),
+            _column_or_default_expr(available_columns, "ACCOUNT_ID_C", "NULL"),
+            _column_or_default_expr(available_columns, "BU_NAME", "''"),
+            f"{email_col} AS CSSM_EMAIL",
+        ]
+        sql = f"""SELECT DISTINCT {", ".join(e for e in select_exprs if e)}
                   FROM {DSM_TABLE}
                   WHERE {email_col} IN ({placeholders})"""
         
         cur.execute(sql, emails)
         rows = cur.fetchall()
         df = pd.DataFrame(rows, columns=[c[0] for c in cur.description])
+        for required_col in ("SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"):
+            if required_col not in df.columns:
+                df[required_col] = ""
         return df
     except Exception as e:
         logger.error(f"Error fetching subscriptions: {e}")
@@ -1079,90 +1168,61 @@ def fetch_arr_data(ctx, account_ids: List[str]) -> pd.DataFrame:
         cur = ctx.cursor()
         placeholders = ','.join(['%s'] * len(cleaned_ids))
 
-        # First try: Attempt to query with ARR fields
+        available_columns = _get_table_columns(ctx, DSM_TABLE)
+        if "ACCOUNT_ID_C" not in available_columns:
+            logger.warning("ACCOUNT_ID_C column unavailable in %s; cannot fetch ARR data", DSM_TABLE)
+            return _normalize_arr_df(pd.DataFrame())
+
+        status_filter = "AND STATUS_C = 'ACTIVE'" if "STATUS_C" in available_columns else ""
+        if not status_filter:
+            logger.info("STATUS_C column unavailable in %s; skipping active-status filter", DSM_TABLE)
+
+        select_exprs = [
+            _column_or_default_expr(available_columns, "ACCOUNT_ID_C", "NULL"),
+            _column_or_default_expr(available_columns, "BU_NAME", "''"),
+            _column_or_default_expr(available_columns, "SUBSCRIPTION_ID", "''"),
+            _column_or_default_expr(available_columns, "TECHNOLOGY_C", "'Unknown'"),
+            _column_or_default_expr(available_columns, "SUB_TECHNOLOGY_C", "'Unknown'"),
+            _column_or_default_expr(available_columns, "STATUS_C", "''"),
+            _column_or_default_expr(available_columns, "CSSM_EMAIL", "''"),
+            _column_or_default_expr(available_columns, "CSSM_NAME", "''"),
+            _column_or_default_expr(available_columns, "CSSM_MANAGER", "''"),
+            (
+                "COALESCE(ANNUAL_CONTRACT_VALUE_C, 0) AS ANNUAL_CONTRACT_VALUE"
+                if "ANNUAL_CONTRACT_VALUE_C" in available_columns
+                else "0 AS ANNUAL_CONTRACT_VALUE"
+            ),
+            (
+                "COALESCE(MONTHLY_RECURRING_REVENUE_C, 0) AS MRR"
+                if "MONTHLY_RECURRING_REVENUE_C" in available_columns
+                else "0 AS MRR"
+            ),
+            (
+                "COALESCE(TOTAL_CONTRACT_VALUE_C, 0) AS TCV"
+                if "TOTAL_CONTRACT_VALUE_C" in available_columns
+                else "0 AS TCV"
+            ),
+            (
+                "COALESCE(LICENSE_COUNT_C, 0) AS LICENSE_COUNT"
+                if "LICENSE_COUNT_C" in available_columns
+                else "0 AS LICENSE_COUNT"
+            ),
+        ]
         sql_with_arr = f"""
         SELECT DISTINCT
-          ACCOUNT_ID_C,
-          BU_NAME,
-          SUBSCRIPTION_ID,
-          TECHNOLOGY_C,
-          SUB_TECHNOLOGY_C,
-          STATUS_C,
-          CSSM_EMAIL,
-          CSSM_NAME,
-          CSSM_MANAGER,
-          COALESCE(ANNUAL_CONTRACT_VALUE_C, 0) AS ANNUAL_CONTRACT_VALUE,
-          COALESCE(MONTHLY_RECURRING_REVENUE_C, 0) AS MRR,
-          COALESCE(TOTAL_CONTRACT_VALUE_C, 0) AS TCV,
-          COALESCE(LICENSE_COUNT_C, 0) AS LICENSE_COUNT
+          {", ".join(e for e in select_exprs if e)}
         FROM {DSM_TABLE}
         WHERE ACCOUNT_ID_C IN ({placeholders})
-          AND STATUS_C = 'ACTIVE'
+          {status_filter}
         """
 
-        logger.debug("Attempting to execute ARR SQL query with financial fields...")
-        try:
-            cur.execute(sql_with_arr, cleaned_ids)
-            rows = cur.fetchall()
-            if not rows:
-                return _normalize_arr_df(pd.DataFrame())
-            cols = [c[0] for c in cur.description]
-            return _normalize_arr_df(pd.DataFrame(rows, columns=cols))
-        except Exception as col_error:
-            logger.info(f"ARR columns not found in table ({col_error}), using basic customer data instead")
-            try:
-                sql_basic = f"""
-                SELECT DISTINCT
-                  ACCOUNT_ID_C,
-                  BU_NAME,
-                  SUBSCRIPTION_ID,
-                  COALESCE(TECHNOLOGY_C, 'Unknown') AS TECHNOLOGY_C,
-                  COALESCE(SUB_TECHNOLOGY_C, 'Unknown') AS SUB_TECHNOLOGY_C,
-                  STATUS_C,
-                  CSSM_EMAIL,
-                  CSSM_NAME,
-                  CSSM_MANAGER
-                FROM {DSM_TABLE}
-                WHERE ACCOUNT_ID_C IN ({placeholders})
-                  AND STATUS_C = 'ACTIVE'
-                """
-                cur.execute(sql_basic, cleaned_ids)
-            except Exception as tech_err:
-                logger.info(f"Technology columns not in schema ({tech_err}), using minimal customer data")
-                try:
-                    sql_minimal = f"""
-                    SELECT DISTINCT
-                      ACCOUNT_ID_C,
-                      BU_NAME,
-                      SUBSCRIPTION_ID,
-                      STATUS_C,
-                      CSSM_EMAIL,
-                      CSSM_NAME,
-                      CSSM_MANAGER
-                    FROM {DSM_TABLE}
-                    WHERE ACCOUNT_ID_C IN ({placeholders})
-                      AND STATUS_C = 'ACTIVE'
-                    """
-                    cur.execute(sql_minimal, cleaned_ids)
-                except Exception as cssm_err:
-                    logger.info(f"CSSM columns not in schema ({cssm_err}), using ultra-minimal customer data")
-                    sql_ultra = f"""
-                    SELECT DISTINCT
-                      ACCOUNT_ID_C,
-                      BU_NAME,
-                      SUBSCRIPTION_ID,
-                      STATUS_C
-                    FROM {DSM_TABLE}
-                    WHERE ACCOUNT_ID_C IN ({placeholders})
-                      AND STATUS_C = 'ACTIVE'
-                    """
-                    cur.execute(sql_ultra, cleaned_ids)
-
-            rows = cur.fetchall()
-            if not rows:
-                return _normalize_arr_df(pd.DataFrame())
-            cols = [c[0] for c in cur.description]
-            return _normalize_arr_df(pd.DataFrame(rows, columns=cols))
+        logger.debug("Executing schema-aware ARR SQL query")
+        cur.execute(sql_with_arr, cleaned_ids)
+        rows = cur.fetchall()
+        if not rows:
+            return _normalize_arr_df(pd.DataFrame())
+        cols = [c[0] for c in cur.description]
+        return _normalize_arr_df(pd.DataFrame(rows, columns=cols))
 
     except Exception as e:
         import traceback
@@ -5567,6 +5627,10 @@ def _prepare_ab(df: pd.DataFrame, dsm_df: pd.DataFrame) -> pd.DataFrame:
         + _tech("PRODUCT_NAME_C")
         + " "
         + _tech("PRODUCT_C")
+        + " "
+        + use["title"].fillna("").astype(str)
+        + " "
+        + use["description"].fillna("").astype(str)
     )
     use["sub_technology"] = tech_txt.apply(_normalize_subtech) if hasattr(tech_txt, "apply") else "Other/Unknown"
     use["severity_norm"] = use["SEVERITY_C"].apply(normalize_severity_label)
