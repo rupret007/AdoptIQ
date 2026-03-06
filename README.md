@@ -136,6 +136,12 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 
 ---
 
+## Developer Branch Workflow (PC + Mac)
+
+If you are actively coding on both machines, use the branch-first process in `BRANCH_WORKFLOW.md` to avoid collisions and keep `master` stable.
+
+---
+
 ## CSOne Report
 
 **Required report:** **AdoptIQ Enhanced/Premium Collab Summary** (Cases with Case Engagement)  
