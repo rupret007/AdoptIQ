@@ -81,8 +81,19 @@ for %%F in (OUTBOX\*) do (
     if /I not "%%~nxF"=="AdoptIQ.exe" if /I not "%%~nxF"=="README.md" if /I not "%%~nxF"=="build_info.txt" del /Q "%%~fF" >nul 2>nul
 )
 
-copy /Y dist\AdoptIQ.exe "OUTBOX\AdoptIQ.exe" >nul
-copy /Y README.md "OUTBOX\README.md" >nul
+copy /Y dist\AdoptIQ.exe "OUTBOX\AdoptIQ.exe" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to copy dist\AdoptIQ.exe into OUTBOX.
+    echo        Ensure the file is not locked and retry.
+    pause
+    exit /b 1
+)
+copy /Y README.md "OUTBOX\README.md" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to copy README.md into OUTBOX.
+    pause
+    exit /b 1
+)
 echo AdoptIQ v%ADOPTIQ_VERSION% build %ADOPTIQ_BUILD% > OUTBOX\build_info.txt
 echo Built: %date% %time% >> OUTBOX\build_info.txt
 
@@ -92,9 +103,25 @@ if not exist "%STAGING_DIR%" mkdir "%STAGING_DIR%"
 for %%F in ("%STAGING_DIR%\*") do (
     if /I not "%%~nxF"=="AdoptIQ.exe" if /I not "%%~nxF"=="README.md" if /I not "%%~nxF"=="build_info.txt" del /Q "%%~fF" >nul 2>nul
 )
-copy /Y "OUTBOX\AdoptIQ.exe" "%STAGING_DIR%\AdoptIQ.exe" >nul
-copy /Y "OUTBOX\README.md" "%STAGING_DIR%\README.md" >nul
-copy /Y "OUTBOX\build_info.txt" "%STAGING_DIR%\build_info.txt" >nul
+copy /Y "OUTBOX\AdoptIQ.exe" "%STAGING_DIR%\AdoptIQ.exe" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to sync AdoptIQ.exe to staging.
+    echo        Close any running AdoptIQ.exe from "%STAGING_DIR%" and retry.
+    pause
+    exit /b 1
+)
+copy /Y "OUTBOX\README.md" "%STAGING_DIR%\README.md" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to sync README.md to staging.
+    pause
+    exit /b 1
+)
+copy /Y "OUTBOX\build_info.txt" "%STAGING_DIR%\build_info.txt" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to sync build_info.txt to staging.
+    pause
+    exit /b 1
+)
 
 REM Unblock built files so SmartScreen allows the app
 powershell -NoProfile -Command "Get-ChildItem -Path OUTBOX -File | Unblock-File -ErrorAction SilentlyContinue"

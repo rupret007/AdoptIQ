@@ -524,13 +524,6 @@
 .focus-scale:focus-within {
     transform: scale(1.02);
 }
-.form-floating-animation {
-    animation: float 3s ease-in-out infinite;
-}
-@keyframes float {
-    0%, 100% { transform: translateY(0px); }
-    50% { transform: translateY(-5px); }
-}
 .btn-interactive {
     transition: transform 0.1s ease;
 }
@@ -1110,12 +1103,10 @@ const AnalysisFormManager = (() => {
     const setupUIEnhancements = () => {
         // Use more efficient batch DOM operations
         const cards = document.querySelectorAll('.card');
-        const icons = document.querySelectorAll('.fa-lg');
         
         // Apply classes in batches to reduce reflows
         requestAnimationFrame(() => {
             cards.forEach(card => card.classList.add('hover-lift'));
-            icons.forEach(icon => icon.classList.add('form-floating-animation'));
             
             // Add focus effects to form controls
             if (elements.formControls) {
