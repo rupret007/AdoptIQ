@@ -32,7 +32,7 @@ from data_normalization import (
 )
 from risk_scoring import compute_customer_risk_profile
 from report_utils import format_inline_source
-from snowflake_table_policy import TablePolicyViolation, guard_sql, is_table_blocked
+from snowflake_table_policy import TablePolicyViolation, guard_sql, guard_table, is_table_blocked
 from config import Config
 
 # Enhanced executive report generation
@@ -626,6 +626,7 @@ def _get_table_columns(ctx, table_name: str) -> set[str]:
 
     cur = None
     try:
+        guard_table(table_name)
         cur = ctx.cursor()
         cur.execute(f"SELECT * FROM {table_name} LIMIT 1")
         cols = set()

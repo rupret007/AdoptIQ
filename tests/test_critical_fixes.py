@@ -2199,3 +2199,23 @@ class TestEnhancedInsightsTimestampColumns:
         section = src[max(0, idx - 260):idx + 260]
         assert "CREATEDDATE" in section
         assert "CREATED_DATE" not in section
+
+
+class TestTablePolicyIntrospectionGuard:
+    """Ensure schema introspection does not query unapproved tables."""
+
+    def test_get_table_columns_blocks_non_allowlisted_table_before_cursor(self):
+        import adoptiq_backend as backend
+
+        class FakeCtx:
+            def __init__(self):
+                self.cursor_called = False
+
+            def cursor(self):
+                self.cursor_called = True
+                raise AssertionError("cursor() should not be called for blocked/unallowlisted table")
+
+        ctx = FakeCtx()
+        cols = backend._get_table_columns(ctx, "UNLISTED_DB.UNLISTED_SCHEMA.UNLISTED_TABLE")
+        assert cols == set()
+        assert ctx.cursor_called is False
