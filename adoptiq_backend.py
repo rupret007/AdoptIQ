@@ -5268,7 +5268,14 @@ def _apply_scope_filter_ab(df: pd.DataFrame, tech: str, days: int) -> pd.DataFra
     logger.debug(f"AB filter: Final result: {len(use)} adoption barriers")
     return use
 
-def _apply_scope_filter_csone(df: pd.DataFrame, tech: str, days: int, sub_ids: List[str], team_customer_names: List[str]) -> pd.DataFrame:
+def _apply_scope_filter_csone(
+    df: pd.DataFrame,
+    tech: str,
+    days: int,
+    sub_ids: List[str],
+    team_customer_names: List[str],
+    include_all_cases: bool = True,
+) -> pd.DataFrame:
     if df is None or df.empty: 
         logger.debug("CSOne filter: Input DataFrame is empty or None")
         return pd.DataFrame()
@@ -5322,17 +5329,22 @@ def _apply_scope_filter_csone(df: pd.DataFrame, tech: str, days: int, sub_ids: L
     logger.debug(f"CSOne filter: After team filtering: {len(use)} cases")
 
     # date filter
-    date_cols = [c for c in use.columns if c in LIKELY_DATE_COLS]
-    if date_cols:
-        logger.debug(f"CSOne filter: Applying date filter using column '{date_cols[0]}'")
-        use["__date"] = pd.to_datetime(use[date_cols[0]], errors="coerce", utc=True)
-        cutoff = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days=days)
-        logger.debug(f"CSOne filter: Date cutoff: {cutoff}")
-        before_date_filter = len(use)
-        use = use[use["__date"] >= cutoff]
-        logger.debug(f"CSOne filter: After date filter: {len(use)} cases (removed {before_date_filter - len(use)})")
+    # Product decision: CSOne should show all TAC cases regardless of open/closed age.
+    # Keep optional support for strict date windows via include_all_cases=False.
+    if include_all_cases:
+        logger.debug("CSOne filter: include_all_cases=True, skipping date filter")
     else:
-        logger.debug("CSOne filter: No date columns found, skipping date filter")
+        date_cols = [c for c in use.columns if c in LIKELY_DATE_COLS]
+        if date_cols:
+            logger.debug(f"CSOne filter: Applying date filter using column '{date_cols[0]}'")
+            use["__date"] = pd.to_datetime(use[date_cols[0]], errors="coerce", utc=True)
+            cutoff = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days=days)
+            logger.debug(f"CSOne filter: Date cutoff: {cutoff}")
+            before_date_filter = len(use)
+            use = use[use["__date"] >= cutoff]
+            logger.debug(f"CSOne filter: After date filter: {len(use)} cases (removed {before_date_filter - len(use)})")
+        else:
+            logger.debug("CSOne filter: No date columns found, skipping date filter")
         
     # tech filter
     if tech != "All":
@@ -5382,7 +5394,7 @@ def _apply_scope_filter_csone(df: pd.DataFrame, tech: str, days: int, sub_ids: L
     logger.debug(f"CSOne filter: Final result: {len(use)} cases")
     return use
 
-def _apply_scope_filter_csone_inclusive(csone_df, technology, days):
+def _apply_scope_filter_csone_inclusive(csone_df, technology, days, include_all_cases: bool = True):
     """Apply inclusive filtering to CSOne data for executive analysis - only technology and date filters"""
     if csone_df is None or csone_df.empty:
         return pd.DataFrame() if csone_df is None else csone_df
@@ -5392,8 +5404,8 @@ def _apply_scope_filter_csone_inclusive(csone_df, technology, days):
     
     filtered_df = csone_df.copy()
     
-    # Apply date filter only
-    if 'Date/Time Opened' in filtered_df.columns:
+    # Apply date filter only when strict mode is requested.
+    if not include_all_cases and 'Date/Time Opened' in filtered_df.columns:
         logger.debug("CSOne inclusive filter: Applying date filter using column 'Date/Time Opened'")
         cutoff_date = datetime.now() - timedelta(days=days)
         cutoff_date = cutoff_date.replace(tzinfo=None)  # Remove timezone for comparison

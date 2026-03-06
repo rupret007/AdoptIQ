@@ -347,6 +347,45 @@ class TestApplyScopeFilterCsone:
         assert isinstance(result, pd.DataFrame)
         assert result.empty
 
+    def test_includes_older_cases_when_include_all_cases_enabled(self):
+        old_date = (datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d")
+        df = pd.DataFrame([
+            {
+                "Subscription ID": "Sub1001",
+                "customer_name": "Acme Corp",
+                "Date/Time Opened": old_date,
+                "Title": "Legacy TAC case",
+            }
+        ])
+        result = _apply_scope_filter_csone(
+            df,
+            "All",
+            90,
+            ["Sub1001"],
+            ["Acme Corp"],
+        )
+        assert len(result) == 1
+
+    def test_can_still_apply_strict_date_window_when_requested(self):
+        old_date = (datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d")
+        df = pd.DataFrame([
+            {
+                "Subscription ID": "Sub1001",
+                "customer_name": "Acme Corp",
+                "Date/Time Opened": old_date,
+                "Title": "Legacy TAC case",
+            }
+        ])
+        result = _apply_scope_filter_csone(
+            df,
+            "All",
+            90,
+            ["Sub1001"],
+            ["Acme Corp"],
+            include_all_cases=False,
+        )
+        assert result.empty
+
 
 # ── cross_reference_refs ─────────────────────────────────────────────────
 

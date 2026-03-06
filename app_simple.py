@@ -7474,7 +7474,14 @@ def run_comprehensive_analysis(analysis_id):
             logger.info(f"[[FILE]] No CSOne file provided - proceeding with Adoption Barriers data only")
             csone_df_raw = pd.DataFrame()
         csone_df_prepared = _prepare_csone(csone_df_raw, team_subs_df)
-        csone_df = _apply_scope_filter_csone(csone_df_prepared, tech, days, sub_ids, team_customer_names)
+        csone_df = _apply_scope_filter_csone(
+            csone_df_prepared,
+            tech,
+            days,
+            sub_ids,
+            team_customer_names,
+            include_all_cases=True,
+        )
         
         # Update CSOne import status with results (thread-safe)
         if not csone_df.empty:
@@ -7484,9 +7491,14 @@ def run_comprehensive_analysis(analysis_id):
             })
             logger.info(f"[[OK]] CSOne data processed successfully: {len(csone_df)} cases")
         else:
+            raw_count = len(csone_df_raw) if csone_df_raw is not None else 0
+            prepared_count = len(csone_df_prepared) if csone_df_prepared is not None else 0
             update_analysis_status(analysis_id, {
                 'csone_import_status': 'warning',
-                'csone_import_message': '️ CSOne data processed but no cases found in scope'
+                'csone_import_message': (
+                    f'️ CSOne data loaded ({raw_count} raw / {prepared_count} prepared) '
+                    f'but no cases matched team + technology scope'
+                )
             })
             logger.warning(f"[[WARNING]] CSOne data processed but no cases found in scope")
         
@@ -7538,10 +7550,15 @@ def run_comprehensive_analysis(analysis_id):
         # Validate data sources before report generation
         logger.info(f"[[VALIDATION]] Validating data sources for comprehensive report...")
         try:
-            # Single-customer comprehensive reports should not fail solely because scoped AB/CSOne is empty.
-            validation_required_sources = ['snowflake', 'team_subscriptions'] if single_customer_mode else None
+            # CSOne is optional for comprehensive reports; continue with warning if scoped TAC cases are zero.
+            # Single-customer mode also treats adoption barriers as optional.
+            validation_required_sources = (
+                ['snowflake', 'team_subscriptions']
+                if single_customer_mode
+                else ['snowflake', 'team_subscriptions', 'adoption_barriers']
+            )
             if validation_required_sources:
-                logger.info("[[VALIDATION]] Comprehensive single-customer mode: treating adoption barriers and CSOne as optional")
+                logger.info("[[VALIDATION]] Comprehensive mode: CSOne is optional; validating required core sources only")
             raise_validation_error_if_invalid(
                 report_type='comprehensive',
                 snowflake_ctx=ctx,
