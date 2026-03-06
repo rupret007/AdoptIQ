@@ -49,6 +49,7 @@ def test_other_unknown_ratio_and_defect_linkage_warnings():
     csone = add_case_lifecycle_fields(pd.DataFrame([{"customer_name": "Acme"}]))
     defects = {
         "csc_ids": ["CSCAAA111", "CSCBBB222"],
+        "bems_ids": ["BEMS777777"],
         "defect_by_customer": {
             "Unmapped Customer": ["CSCAAA111"],
         },
@@ -59,6 +60,7 @@ def test_other_unknown_ratio_and_defect_linkage_warnings():
     assert any("not in normalized customer set" in w for w in result["warnings"])
     assert any("missing customer linkage" in w for w in result["warnings"])
     assert "CSCBBB222" in result["metrics"]["unlinked_defects"]
+    assert "BEMS777777" in result["metrics"]["unlinked_defects"]
 
 
 def test_priority_metrics_use_normalized_exact_p1_p2():
@@ -133,4 +135,44 @@ def test_other_unknown_warning_suppressed_when_tech_signal_sparse():
     assert result["is_valid"] is True
     assert not any("Other/Unknown ratio is high" in w for w in result["warnings"])
     assert result["metrics"]["technology_signal_ratio"] == 0.0
+
+
+def test_legacy_priority_keys_are_checked_for_parity():
+    csone = add_case_lifecycle_fields(
+        pd.DataFrame(
+            [
+                {"customer_name": "Acme", "Severity": "P1"},
+                {"customer_name": "Acme", "Severity": "P2"},
+            ]
+        )
+    )
+    result = validate_report_consistency(
+        ab_df=pd.DataFrame([{"customer_name": "Acme"}]),
+        csone_df=csone,
+        portfolio_metrics={
+            "total_barriers": 1,
+            "total_cases": 2,
+            "bems_count": 0,
+            "p1_cases": 0,
+            "p2_cases": 0,
+        },
+    )
+    assert result["is_valid"] is False
+    assert any("critical_p1" in err for err in result["errors"])
+    assert any("high_p2" in err for err in result["errors"])
+
+
+def test_strict_mode_raises_on_consistency_errors():
+    csone = add_case_lifecycle_fields(pd.DataFrame([{"customer_name": "Acme", "Severity": "P1"}]))
+    ab = pd.DataFrame([{"customer_name": "Acme", "sub_technology": "Cisco UCCE"}])
+    try:
+        validate_report_consistency(
+            ab_df=ab,
+            csone_df=csone,
+            portfolio_metrics={"total_barriers": 0, "total_cases": 1, "bems_count": 0},
+            strict_mode=True,
+        )
+        assert False, "strict_mode should raise when errors exist"
+    except ValueError as exc:
+        assert "total_barriers" in str(exc)
 

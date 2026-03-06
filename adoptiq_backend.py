@@ -33,6 +33,7 @@ from data_normalization import (
 from risk_scoring import compute_customer_risk_profile
 from report_utils import format_inline_source
 from snowflake_table_policy import TablePolicyViolation, guard_sql, is_table_blocked
+from config import Config
 
 # Enhanced executive report generation
 try:
@@ -497,6 +498,9 @@ def _normalize_category(cat: str) -> str:
 def _normalize_subtech(txt: str) -> str:
     if not txt: return "Unknown"
     t = str(txt).lower()
+    for pattern, mapped_value in getattr(Config, "SUB_TECHNOLOGY_MAPPINGS", {}).items():
+        if re.search(pattern, t):
+            return mapped_value
     # Check in a specific order to avoid mis-categorization.
     for tech_name in [
         "Webex Contact Center Enterprise",
@@ -3356,11 +3360,15 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             # Chart 3: Case Severity Distribution (Bottom Left)
             ax3 = plt.subplot(2, 2, 3)
             severity_labels = ['P1 Critical', 'P2 High', 'P3 Medium', 'P4+ Low']
+            p1_cases = int(portfolio_metrics.get('critical_p1', portfolio_metrics.get('p1_cases', 0)) or 0)
+            p2_cases = int(portfolio_metrics.get('high_p2', portfolio_metrics.get('p2_cases', 0)) or 0)
+            p3_cases = int(portfolio_metrics.get('p3_cases', 0) or 0)
+            p4_cases = int(portfolio_metrics.get('p4_cases', 0) or 0)
             severity_values = [
-                portfolio_metrics.get('p1_cases', 0),
-                portfolio_metrics.get('p2_cases', 0),
-                portfolio_metrics.get('p3_cases', 0),
-                portfolio_metrics.get('p4_cases', 0)
+                p1_cases,
+                p2_cases,
+                p3_cases,
+                p4_cases,
             ]
             severity_colors = ['#FF0000', '#FF6B6B', '#FFB81C', '#5DBCD2']
             bars = ax3.bar(severity_labels, severity_values, color=severity_colors)
@@ -3446,8 +3454,10 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             
             # Row 3: Severity
             cells = table.rows[2].cells
-            cells[0].text = f"P1 Critical\n{portfolio_metrics.get('p1_cases', 0)}"
-            cells[1].text = f"P2 High\n{portfolio_metrics.get('p2_cases', 0)}"
+            p1_cases = int(portfolio_metrics.get('critical_p1', portfolio_metrics.get('p1_cases', 0)) or 0)
+            p2_cases = int(portfolio_metrics.get('high_p2', portfolio_metrics.get('p2_cases', 0)) or 0)
+            cells[0].text = f"P1 Critical\n{p1_cases}"
+            cells[1].text = f"P2 High\n{p2_cases}"
             cells[2].text = f"Break-fix / Provisioning\n{portfolio_metrics.get('break_fix_cases', 0)} / {portfolio_metrics.get('provisioning_cases', 0)}"
             cells[3].text = f"Grade: {portfolio_metrics.get('health_score', 'C')}\nTrend: {portfolio_metrics.get('trend_direction', 'Stable')}"
             

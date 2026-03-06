@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
+from data_contracts import ConsistencyResultContract, DefectsContract, PortfolioMetricsContract
 from data_normalization import (
     ACCOUNT_COLUMN_CANDIDATES,
     detect_bems_mask,
@@ -55,16 +56,17 @@ def _account_token_sets(values: Optional[list]) -> tuple[set[str], set[str]]:
 def validate_report_consistency(
     ab_df: Optional[pd.DataFrame],
     csone_df: Optional[pd.DataFrame],
-    portfolio_metrics: Optional[Dict[str, Any]] = None,
+    portfolio_metrics: Optional[PortfolioMetricsContract] = None,
     risk_data: Optional[Dict[str, Dict[str, Any]]] = None,
-    defects: Optional[Dict[str, Any]] = None,
+    defects: Optional[DefectsContract] = None,
     factual_claims: Optional[list] = None,
     customer_universe: Optional[Any] = None,
     max_other_unknown_ratio: float = 0.60,
     customer_pulse_df: Optional[pd.DataFrame] = None,
     expected_account_ids: Optional[list] = None,
     pulse_coverage_warn_threshold: float = 0.50,
-) -> Dict[str, Any]:
+    strict_mode: bool = False,
+) -> ConsistencyResultContract:
     """
     Validate cross-report consistency and produce actionable diagnostics.
     This does not mutate inputs; callers can use returned canonical metrics.
@@ -170,9 +172,11 @@ def validate_report_consistency(
             errors.append("Portfolio metric mismatch: bems_count does not match canonical BEMS detection.")
         if "total_customers" in portfolio_metrics and int(portfolio_metrics.get("total_customers", 0)) != metrics["total_customers"]:
             errors.append("Portfolio metric mismatch: total_customers does not match normalized customer universe.")
-        if "critical_p1" in portfolio_metrics and int(portfolio_metrics.get("critical_p1", 0)) != metrics["critical_p1"]:
+        reported_p1 = portfolio_metrics.get("critical_p1", portfolio_metrics.get("p1_cases", None))
+        if reported_p1 is not None and int(reported_p1) != metrics["critical_p1"]:
             errors.append("Portfolio metric mismatch: critical_p1 does not match canonical severity counting.")
-        if "high_p2" in portfolio_metrics and int(portfolio_metrics.get("high_p2", 0)) != metrics["high_p2"]:
+        reported_p2 = portfolio_metrics.get("high_p2", portfolio_metrics.get("p2_cases", None))
+        if reported_p2 is not None and int(reported_p2) != metrics["high_p2"]:
             errors.append("Portfolio metric mismatch: high_p2 does not match canonical severity counting.")
 
     # Risk data/customer totals coherence
@@ -252,7 +256,14 @@ def validate_report_consistency(
 
     # Defect linkage consistency
     if defects:
-        defect_ids = set(str(x).strip().upper() for x in (defects.get("csc_ids", []) or []) if str(x).strip())
+        csc_ids = defects.get("csc_ids", []) or []
+        bems_ids = defects.get("bems_ids", []) or []
+        combined_defect_ids = list(csc_ids) + list(bems_ids)
+        defect_ids = set(
+            str(x).strip().upper()
+            for x in combined_defect_ids
+            if str(x).strip()
+        )
         defect_by_customer = defects.get("defect_by_customer", {}) or {}
         known_customers = set()
         for frame in (ab_df, csone_df):
@@ -295,10 +306,13 @@ def validate_report_consistency(
         )
         metrics["missing_inline_sources_samples"] = missing_sources[:5]
 
-    return {
+    result = {
         "is_valid": len(errors) == 0,
         "errors": errors,
         "warnings": warnings,
         "metrics": metrics,
     }
+    if strict_mode and errors:
+        raise ValueError("; ".join(errors))
+    return result
 

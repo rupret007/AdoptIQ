@@ -208,6 +208,9 @@ class TestNormalizeSubtech:
     def test_unknown(self):
         assert _normalize_subtech("xyzzy") == "Other/Unknown"
 
+    def test_subtech_mapping_reduces_unknown_leakage(self):
+        assert _normalize_subtech("WXCC Enterprise migration task") == "Webex Contact Center Enterprise"
+
 
 # ── _portfolio_grade ─────────────────────────────────────────────────────
 

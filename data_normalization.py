@@ -430,6 +430,9 @@ def add_case_lifecycle_fields(
     use["case_type_class"] = use.apply(classify_case_type, axis=1)
     bems_mask = detect_bems_mask(use)
     use["is_bems"] = bems_mask.astype(bool)
+    use["case_classification"] = use["is_bems"].map(
+        lambda flagged: "bems_escalation" if bool(flagged) else "tac_case"
+    )
 
     return use
 

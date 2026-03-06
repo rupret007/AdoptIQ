@@ -202,7 +202,7 @@ from data_normalization import (
     extract_bems_ids_from_text,
     normalize_customer_name,
 )
-from risk_scoring import compute_customer_risk_profile
+from risk_scoring import compute_customer_risk_profile, compute_portfolio_risk_summary
 from report_consistency import validate_report_consistency
 from report_utils import format_inline_source
 from snowflake_prefetch import AnalysisRunContext, prefetch_comprehensive, prefetch_ask_ai
@@ -1386,8 +1386,30 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
                     defects['defect_by_customer'][customer] = []
                 defects['defect_by_customer'][customer].append(defect_id_norm)
     
+    # Normalize customer keys and guarantee linkage for every extracted ID.
+    normalized_linkage: Dict[str, set[str]] = {}
+    for customer_name, defect_ids in defects['defect_by_customer'].items():
+        customer_key = normalize_customer_name(customer_name)
+        bucket = normalized_linkage.setdefault(customer_key, set())
+        for defect_id in defect_ids or []:
+            token = str(defect_id or "").strip().upper()
+            if token:
+                bucket.add(token)
+
     # Calculate totals (CSC + BEMS combined)
     all_ids = defects['csc_ids'] | defects['bems_ids']
+    linked_ids = set()
+    for values in normalized_linkage.values():
+        linked_ids.update(values)
+    unlinked_ids = all_ids - linked_ids
+    if unlinked_ids:
+        unknown_bucket = normalized_linkage.setdefault("Unknown", set())
+        unknown_bucket.update(unlinked_ids)
+
+    defects['defect_by_customer'] = {
+        customer: sorted(ids)
+        for customer, ids in normalized_linkage.items()
+    }
     defects['total_defects'] = len(all_ids)
     defects['bst_defects'] = sorted(list(all_ids))
     defects['total_cases_with_defects'] = len(defects['defect_cases'])
@@ -7670,10 +7692,11 @@ def run_comprehensive_analysis(analysis_id):
                 ext_incidents=ext_incidents,
             )
 
-        high_risk_customers = sum(1 for p in risk_profiles.values() if p["risk_band"] in {"HIGH", "CRITICAL"})
-        medium_risk_customers = sum(1 for p in risk_profiles.values() if p["risk_band"] == "MEDIUM")
-        low_risk_customers = sum(1 for p in risk_profiles.values() if p["risk_band"] == "LOW")
-        healthy_customers = sum(1 for p in risk_profiles.values() if p["risk_band"] == "HEALTHY")
+        portfolio_risk_summary = compute_portfolio_risk_summary(risk_profiles)
+        high_risk_customers = int(portfolio_risk_summary.get("high_risk_customers", 0))
+        medium_risk_customers = int(portfolio_risk_summary.get("medium_risk_customers", 0))
+        low_risk_customers = int(portfolio_risk_summary.get("low_risk_customers", 0))
+        healthy_customers = int(portfolio_risk_summary.get("healthy_customers", 0))
 
         priority_col = "case_priority_norm" if "case_priority_norm" in _cs_norm.columns else ("Severity" if "Severity" in _cs_norm.columns else None)
         if priority_col:
@@ -7701,6 +7724,8 @@ def run_comprehensive_analysis(analysis_id):
             'p2_cases': p2_cases,
             'p3_cases': p3_cases,
             'p4_cases': p4_cases,
+            'critical_p1': p1_cases,
+            'high_p2': p2_cases,
             'unknown_priority_cases': unknown_priority_cases,
             'break_fix_cases': break_fix_count,
             'provisioning_cases': provisioning_count,
@@ -7713,14 +7738,17 @@ def run_comprehensive_analysis(analysis_id):
                 factual_claims.extend(profile.get("key_findings", []) or [])
                 factual_claims.extend(profile.get("risk_factors", []) or [])
         consistency_unknown_threshold = 1.01 if status.get('tech') == 'All Contact Center' else 0.60
+        strict_consistency = str(os.getenv("ADOPTIQ_STRICT_CONSISTENCY", "0")).strip().lower() in {"1", "true", "yes", "on"}
         consistency = validate_report_consistency(
             _ab,
             _cs_norm,
             portfolio_metrics=portfolio_metrics,
             risk_data=risk_profiles,
+            defects=software_defects,
             factual_claims=factual_claims,
             customer_universe=all_customers_comprehensive,
             max_other_unknown_ratio=consistency_unknown_threshold,
+            strict_mode=strict_consistency,
         )
         if not consistency["is_valid"]:
             logger.error(f"[[CONSISTENCY]] Errors: {consistency['errors']}")

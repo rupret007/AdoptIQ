@@ -368,3 +368,51 @@ def compute_customer_risk_profile(
         "recommendations": recommendations,
     }
 
+
+def compute_portfolio_risk_summary(
+    risk_profiles: Optional[Dict[str, Dict[str, Any]]],
+) -> Dict[str, Any]:
+    """Aggregate customer risk profiles into canonical portfolio-level metrics."""
+    profiles = risk_profiles or {}
+    if not profiles:
+        return {
+            "total_customers": 0,
+            "average_risk_score_0_100": 0.0,
+            "highest_risk_score_0_100": 0.0,
+            "high_risk_customers": 0,
+            "medium_risk_customers": 0,
+            "low_risk_customers": 0,
+            "healthy_customers": 0,
+            "risk_band_counts": {
+                "CRITICAL": 0,
+                "HIGH": 0,
+                "MEDIUM": 0,
+                "LOW": 0,
+                "HEALTHY": 0,
+            },
+        }
+
+    scores: List[float] = []
+    band_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "HEALTHY": 0}
+    for profile in profiles.values():
+        score = float(profile.get("risk_score_0_100", 0.0) or 0.0)
+        band = str(profile.get("risk_band", _risk_band(score))).upper().strip()
+        if band not in band_counts:
+            band = _risk_band(score)
+        band_counts[band] += 1
+        scores.append(score)
+
+    high_risk = band_counts["CRITICAL"] + band_counts["HIGH"]
+    avg_score = round(sum(scores) / max(len(scores), 1), 1)
+    max_score = round(max(scores) if scores else 0.0, 1)
+    return {
+        "total_customers": len(profiles),
+        "average_risk_score_0_100": avg_score,
+        "highest_risk_score_0_100": max_score,
+        "high_risk_customers": high_risk,
+        "medium_risk_customers": band_counts["MEDIUM"],
+        "low_risk_customers": band_counts["LOW"],
+        "healthy_customers": band_counts["HEALTHY"],
+        "risk_band_counts": band_counts,
+    }
+

@@ -9,7 +9,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from data_normalization import add_case_lifecycle_fields, detect_bems_mask, extract_bems_ids_from_row
 from report_consistency import validate_report_consistency
-from risk_scoring import compute_customer_risk_profile
+from risk_scoring import compute_customer_risk_profile, compute_portfolio_risk_summary
 
 
 def test_case_lifecycle_and_type_classification():
@@ -38,6 +38,9 @@ def test_case_lifecycle_and_type_classification():
     normalized = add_case_lifecycle_fields(csone)
     assert "open_age_days" in normalized.columns
     assert int(normalized["is_bems"].sum()) == 1
+    assert "case_classification" in normalized.columns
+    assert "bems_escalation" in normalized["case_classification"].tolist()
+    assert "tac_case" in normalized["case_classification"].tolist()
     assert "provisioning_request" in normalized["case_type_class"].tolist()
     assert "break_fix_technical" in normalized["case_type_class"].tolist()
 
@@ -127,4 +130,22 @@ def test_extract_bems_ids_from_row_normalizes_multiple_sources():
     ids = extract_bems_ids_from_row(row)
     assert "BEMS-12345" in ids
     assert "BEMS67890" in ids
+
+
+def test_portfolio_risk_summary_rolls_up_band_counts_and_scores():
+    profiles = {
+        "Acme": {"risk_score_0_100": 81, "risk_band": "CRITICAL"},
+        "Beta": {"risk_score_0_100": 61, "risk_band": "HIGH"},
+        "Gamma": {"risk_score_0_100": 44, "risk_band": "MEDIUM"},
+        "Delta": {"risk_score_0_100": 21, "risk_band": "LOW"},
+        "Epsilon": {"risk_score_0_100": 8, "risk_band": "HEALTHY"},
+    }
+    summary = compute_portfolio_risk_summary(profiles)
+    assert summary["total_customers"] == 5
+    assert summary["high_risk_customers"] == 2
+    assert summary["medium_risk_customers"] == 1
+    assert summary["low_risk_customers"] == 1
+    assert summary["healthy_customers"] == 1
+    assert summary["highest_risk_score_0_100"] == 81.0
+    assert summary["average_risk_score_0_100"] == 43.0
 
