@@ -19,6 +19,30 @@ from snowflake_table_policy import is_table_blocked
 logger = logging.getLogger(__name__)
 
 
+def _is_snowflake_access_issue(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return any(
+        token in message
+        for token in (
+            "invalid identifier",
+            "sql compilation error",
+            "object does not exist",
+            "does not exist or not authorized",
+            "not authorized",
+            "insufficient privileges",
+            "permission denied",
+            "access denied",
+        )
+    )
+
+
+def _log_query_fallback(context: str, exc: Exception) -> None:
+    if _is_snowflake_access_issue(exc):
+        logger.warning("%s skipped due to Snowflake access/schema limitations: %s", context, str(exc).strip())
+    else:
+        logger.error("%s failed: %s", context, exc)
+
+
 def _safe_num(val, default=0):
     """Return val if it is a finite number, otherwise default."""
     if val is None:
@@ -141,7 +165,7 @@ class AdvancedRenewalAnalyzer:
             return analysis_results
             
         except Exception as e:
-            logger.error(f"❌ Error in renewal analysis for {customer_name}: {e}")
+            _log_query_fallback(f"Renewal analysis for {customer_name}", e)
             analysis_results['error'] = 'Renewal analysis encountered an error. See logs for details.'
             analysis_results['renewal_risk_category'] = 'ERROR'
             return analysis_results
@@ -207,7 +231,7 @@ class AdvancedRenewalAnalyzer:
                 return {}
                 
         except Exception as e:
-            logger.error(f"❌ Error getting account info for {customer_name}: {e}")
+            _log_query_fallback(f"Account info query for {customer_name}", e)
             return {}
         finally:
             if cur:
@@ -306,7 +330,7 @@ class AdvancedRenewalAnalyzer:
             return contract_info
             
         except Exception as e:
-            logger.error(f"❌ Error getting contract info for {customer_name}: {e}")
+            _log_query_fallback(f"Contract info query for {customer_name}", e)
             return {}
         finally:
             if cur:
@@ -377,7 +401,7 @@ class AdvancedRenewalAnalyzer:
             return financial_metrics
             
         except Exception as e:
-            logger.error(f"❌ Error getting financial metrics for {customer_name}: {e}")
+            _log_query_fallback(f"Financial metrics query for {customer_name}", e)
             return {}
         finally:
             if cur:
@@ -487,7 +511,7 @@ class AdvancedRenewalAnalyzer:
             return usage_metrics
             
         except Exception as e:
-            logger.error(f"❌ Error getting usage metrics for account {account_id}: {e}")
+            _log_query_fallback(f"Usage metrics query for account {account_id}", e)
             return {}
         finally:
             if cur:
@@ -553,7 +577,7 @@ class AdvancedRenewalAnalyzer:
             return support_metrics
             
         except Exception as e:
-            logger.error(f"❌ Error getting support metrics for account {account_id}: {e}")
+            _log_query_fallback(f"Support metrics query for account {account_id}", e)
             return {}
         finally:
             if cur:
@@ -644,7 +668,7 @@ class AdvancedRenewalAnalyzer:
             return adoption_metrics
             
         except Exception as e:
-            logger.error(f"❌ Error getting adoption metrics for account {account_id}: {e}")
+            _log_query_fallback(f"Adoption metrics query for account {account_id}", e)
             return {}
         finally:
             if cur:
@@ -1233,5 +1257,5 @@ def generate_advanced_renewal_analysis(customer_name: str, days: int, ctx) -> Tu
         return filepath, success_msg
         
     except Exception as e:
-        logger.error(f"Error generating advanced renewal analysis: {e}", exc_info=True)
+        _log_query_fallback("Advanced renewal analysis generation", e)
         raise RuntimeError("Error generating advanced renewal analysis. See logs for details.")

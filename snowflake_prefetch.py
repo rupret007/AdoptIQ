@@ -6,7 +6,6 @@ from typing import Any, Dict, Iterable, List, Tuple
 import pandas as pd
 
 from adoptiq_backend import (
-    fetch_arr_data,
     fetch_barrier_velocity,
     fetch_enhanced_account_insights,
     fetch_period_comparison,
@@ -18,10 +17,6 @@ from adoptiq_backend import (
     fetch_support_cases_snowflake,
 )
 from data_normalization import normalize_customer_name
-
-
-def _fetch_arr_data(ctx: Any, account_ids: List[str], _days: int) -> pd.DataFrame:
-    return fetch_arr_data(ctx, account_ids)
 
 
 def _fetch_adoption_barriers(ctx: Any, account_ids: List[str], days: int) -> pd.DataFrame:
@@ -41,7 +36,6 @@ def _fetch_enhanced_account_insights(ctx: Any, account_ids: List[str], days: int
 
 
 _FETCHERS = {
-    "arr_data": _fetch_arr_data,
     "adoption_barriers": _fetch_adoption_barriers,
     "period_comparison": _fetch_period_comparison,
     "barrier_velocity": _fetch_barrier_velocity,
@@ -182,7 +176,6 @@ def prefetch_ask_ai_grounded(
         "csconsole_customer_pulse",
         "csconsole_success_priorities",
         "csconsole_action_plans",
-        "arr_data",
         "adoption_barriers",
         "period_comparison",
         "barrier_velocity",

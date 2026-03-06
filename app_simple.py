@@ -184,7 +184,7 @@ from adoptiq_backend import (
     append_to_word_report, write_excel_workbook,
     TEAM_ROSTER, MANAGERS, TECH_CHOICES, _integrity_checks,
     fetch_csconsole_action_plans, fetch_csconsole_customer_pulse,
-    fetch_arr_data, fetch_support_cases_snowflake,
+    fetch_support_cases_snowflake,
     fetch_csconsole_success_priorities, fetch_csconsole_adoption_barriers,
     _filter_csconsole_data_by_technology,
     get_snowflake_query_metrics, reset_snowflake_query_metrics,
@@ -1869,200 +1869,135 @@ def _parse_markdown_for_fallback(doc, ai_text: str):
             else:
                 doc.add_paragraph(line)
 
-def create_executive_charts(ab_norm: pd.DataFrame, arr_data: pd.DataFrame, arr_impact: Dict, csone_df: pd.DataFrame = None, feature_requests: Dict = None) -> List[str]:
-    """Create executive-ready charts and save as images"""
-    chart_paths = []
-    
-    # Initialize feature_requests if not provided
-    if feature_requests is None:
-        feature_requests = {'total_requests': 0, 'top_features': [], 'customer_examples': [], 'total_arr_impact': 0}
-    
+def create_executive_charts(
+    ab_norm: pd.DataFrame,
+    arr_data: pd.DataFrame,
+    arr_impact: Dict,
+    csone_df: pd.DataFrame = None,
+    feature_requests: Dict = None,
+) -> List[str]:
+    """Create executive-ready non-financial charts and save as images."""
+    chart_paths: List[str] = []
+    feature_requests = feature_requests or {'total_requests': 0, 'top_features': [], 'customer_examples': []}
+
     try:
         import matplotlib
-        matplotlib.use('Agg')  # Use non-interactive backend for server
+        matplotlib.use('Agg')
         import matplotlib.pyplot as plt
-        import matplotlib.patches as patches
-        from matplotlib.patches import Wedge
-        import numpy as np
-        
-        # Set style for executive reports - use fallback if seaborn not available
+
         try:
             plt.style.use('seaborn-v0_8-whitegrid')
         except Exception:
-            try:
-                plt.style.use('seaborn-whitegrid')
-            except Exception as _e:
-                logger.debug("matplotlib seaborn style unavailable, using default: %s", _e)
-        
-        plt.rcParams['figure.facecolor'] = 'white'
-        plt.rcParams['axes.facecolor'] = 'white'
-        plt.rcParams['font.size'] = 10
-        plt.rcParams['axes.titlesize'] = 12
-        plt.rcParams['axes.labelsize'] = 10
-        
-        # Initialize arr_impact if None
-        if arr_impact is None:
-            arr_impact = {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}
-        
-        # Initialize csone_df if None
-        if csone_df is None:
-            csone_df = pd.DataFrame()
-        
-        # Customer column: _prepare_csone outputs customer_name; raw CSOne may have Customer Name
-        cust_col = next((c for c in ['customer_name', 'Customer Name', 'BU_NAME', 'Customer'] if c in csone_df.columns), None) if not csone_df.empty else None
-        
-        # Chart 1: ARR Impact by Issue Category (if adoption barriers data available)
-        if arr_impact and arr_impact.get('top_issues') and len(arr_impact['top_issues']) > 0:
+            logger.debug("matplotlib seaborn style unavailable, using default")
+
+        csone_df = csone_df if isinstance(csone_df, pd.DataFrame) else pd.DataFrame()
+        cust_col = next(
+            (c for c in ['customer_name', 'Customer Name', 'BU_NAME', 'Customer'] if c in csone_df.columns),
+            None,
+        )
+
+        # Chart 1: Support Case Trends
+        if not csone_df.empty and 'Date/Time Opened' in csone_df.columns:
             fig, ax = plt.subplots(figsize=(10, 6))
-            issues = [issue[0] for issue in arr_impact['top_issues']]
-            arr_values = [issue[1]['arr'] for issue in arr_impact['top_issues']]
-            
-            bars = ax.bar(issues, arr_values, color=['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd'])
-            ax.set_title('ARR Impact by Issue Category', fontsize=14, fontweight='bold')
-            ax.set_ylabel('ARR ($)', fontsize=12)
-            ax.set_xlabel('Issue Category', fontsize=12)
-            
-            # Add value labels on bars
-            for bar, value in zip(bars, arr_values):
-                height = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
-                        f'${value:,.0f}', ha='center', va='bottom', fontweight='bold')
-            
-            plt.xticks(rotation=45, ha='right')
-            plt.tight_layout()
-            chart_path = f"outputs/arr_impact_chart_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-            plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            chart_paths.append(chart_path)
-        
-        # Chart 2: Support Case Trends (from CSOne data)
-        elif not csone_df.empty and 'Date/Time Opened' in csone_df.columns:
-            fig, ax = plt.subplots(figsize=(10, 6))
-            
-            # Convert date column and group by month
-            csone_df['Date/Time Opened'] = pd.to_datetime(csone_df['Date/Time Opened'], errors='coerce')
-            monthly_cases = csone_df.groupby(csone_df['Date/Time Opened'].dt.to_period('M')).size()
-            
+            date_series = pd.to_datetime(csone_df['Date/Time Opened'], errors='coerce')
+            monthly_cases = csone_df.groupby(date_series.dt.to_period('M')).size()
             if len(monthly_cases) > 0:
                 months = [str(period) for period in monthly_cases.index]
-                case_counts = monthly_cases.values
-                
-                bars = ax.bar(months, case_counts, color=['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd'])
+                bars = ax.bar(months, monthly_cases.values, color='#1f77b4')
                 ax.set_title('Support Cases by Month', fontsize=14, fontweight='bold')
                 ax.set_ylabel('Number of Cases', fontsize=12)
                 ax.set_xlabel('Month', fontsize=12)
-                
-                # Add value labels on bars
-                for bar, value in zip(bars, case_counts):
-                    height = bar.get_height()
-                    ax.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
-                            f'{int(value)}', ha='center', va='bottom', fontweight='bold')
-                
+                for bar, value in zip(bars, monthly_cases.values):
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2.0,
+                        bar.get_height() + 0.1,
+                        f'{int(value)}',
+                        ha='center',
+                        va='bottom',
+                        fontweight='bold',
+                    )
                 plt.xticks(rotation=45, ha='right')
                 plt.tight_layout()
                 chart_path = f"outputs/support_cases_trend_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
                 plt.savefig(chart_path, dpi=300, bbox_inches='tight')
                 plt.close()
                 chart_paths.append(chart_path)
-        
-        # Chart 3: Support Case Severity Distribution (from CSOne data)
+
+        # Chart 2: Case Severity Distribution
         if not csone_df.empty and 'Severity' in csone_df.columns:
             fig, ax = plt.subplots(figsize=(10, 8))
             severity_counts = csone_df['Severity'].value_counts()
-            
-            # Use executive color scheme: Red (P1), Orange (P2), Yellow (P3), Green (P4)
-            color_map = {'P1': '#d62728', '1': '#d62728', 'Critical': '#d62728',
-                         'P2': '#ff7f0e', '2': '#ff7f0e', 'High': '#ff7f0e',
-                         'P3': '#ffd700', '3': '#ffd700', 'Medium': '#ffd700',
-                         'P4': '#2ca02c', '4': '#2ca02c', 'Low': '#2ca02c'}
+            color_map = {
+                'P1': '#d62728', '1': '#d62728', 'Critical': '#d62728',
+                'P2': '#ff7f0e', '2': '#ff7f0e', 'High': '#ff7f0e',
+                'P3': '#ffd700', '3': '#ffd700', 'Medium': '#ffd700',
+                'P4': '#2ca02c', '4': '#2ca02c', 'Low': '#2ca02c',
+            }
             colors = [color_map.get(str(sev), '#1f77b4') for sev in severity_counts.index]
-            
-            wedges, texts, autotexts = ax.pie(severity_counts.values, 
-                                              labels=[f'{sev} ({count})' for sev, count in zip(severity_counts.index, severity_counts.values)],
-                                              autopct='%1.1f%%',
-                                              colors=colors,
-                                              startangle=90,
-                                              textprops={'fontsize': 11, 'weight': 'bold'})
-            
-            ax.set_title('Case Severity Distribution\n(Red=Critical, Orange=High Priority)', 
-                         fontsize=14, fontweight='bold', pad=20)
+            ax.pie(
+                severity_counts.values,
+                labels=[f'{sev} ({count})' for sev, count in zip(severity_counts.index, severity_counts.values)],
+                autopct='%1.1f%%',
+                colors=colors,
+                startangle=90,
+                textprops={'fontsize': 11, 'weight': 'bold'},
+            )
+            ax.set_title('Case Severity Distribution', fontsize=14, fontweight='bold', pad=20)
             plt.tight_layout()
             chart_path = f"outputs/severity_distribution_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
             plt.savefig(chart_path, dpi=300, bbox_inches='tight')
             plt.close()
             chart_paths.append(chart_path)
-        
-        # Chart 4: Top Customers by Case Volume with ARR (from CSOne data)
-        if csone_df is not None and not csone_df.empty and cust_col:
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 12))
-            
-            # Top subplot: Case volume
+
+        # Chart 3: Top Customers by Case Volume
+        if not csone_df.empty and cust_col:
+            fig, ax = plt.subplots(figsize=(12, 8))
             customer_cases = csone_df[cust_col].value_counts().head(10)
-            colors = ['#d62728' if count > 20 else '#ff7f0e' if count > 10 else '#2ca02c' 
-                      for count in customer_cases.values]
-            
-            bars = ax1.barh(range(len(customer_cases)), customer_cases.values, color=colors)
-            ax1.set_title('Top 10 Customers by Support Case Volume\n(Red=High Risk, Orange=Moderate, Green=Normal)', 
-                          fontsize=14, fontweight='bold', pad=15)
-            ax1.set_xlabel('Number of Cases', fontsize=12, fontweight='bold')
-            ax1.set_ylabel('Customer', fontsize=12, fontweight='bold')
-            
-            # Add value labels on bars
-            for i, (bar, value) in enumerate(zip(bars, customer_cases.values)):
-                width = bar.get_width()
-                ax1.text(width + 0.5, bar.get_y() + bar.get_height()/2.,
-                         f'{int(value)} cases', ha='left', va='center', fontweight='bold', fontsize=10)
-            
-            # Set customer names as y-axis labels
-            ax1.set_yticks(range(len(customer_cases)))
-            ax1.set_yticklabels(customer_cases.index, fontsize=10)
-            ax1.invert_yaxis()  # Highest at top
-            ax1.grid(axis='x', alpha=0.3)
-            
-            # Bottom subplot: ARR if available
-            if 'Customer_ARR' in csone_df.columns:
-                customer_arr = csone_df.groupby(cust_col)['Customer_ARR'].mean().sort_values(ascending=False).head(10)
-                colors_arr = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
-                              '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
-                
-                bars2 = ax2.barh(range(len(customer_arr)), customer_arr.values, color=colors_arr)
-                ax2.set_title('Top 10 Customers by ARR Value', fontsize=14, fontweight='bold', pad=15)
-                ax2.set_xlabel('Estimated ARR ($)', fontsize=12, fontweight='bold')
-                ax2.set_ylabel('Customer', fontsize=12, fontweight='bold')
-                
-                for i, (bar, value) in enumerate(zip(bars2, customer_arr.values)):
-                    width = bar.get_width()
-                    ax2.text(width + width*0.01, bar.get_y() + bar.get_height()/2.,
-                             f'${value:,.0f}', ha='left', va='center', fontweight='bold', fontsize=10)
-                
-                ax2.set_yticks(range(len(customer_arr)))
-                ax2.set_yticklabels(customer_arr.index, fontsize=10)
-                ax2.invert_yaxis()
-                ax2.grid(axis='x', alpha=0.3)
-            
+            colors = ['#d62728' if count > 20 else '#ff7f0e' if count > 10 else '#2ca02c' for count in customer_cases.values]
+            bars = ax.barh(range(len(customer_cases)), customer_cases.values, color=colors)
+            ax.set_title('Top 10 Customers by Support Case Volume', fontsize=14, fontweight='bold', pad=15)
+            ax.set_xlabel('Number of Cases', fontsize=12, fontweight='bold')
+            ax.set_ylabel('Customer', fontsize=12, fontweight='bold')
+            for bar, value in zip(bars, customer_cases.values):
+                ax.text(
+                    bar.get_width() + 0.5,
+                    bar.get_y() + bar.get_height() / 2.0,
+                    f'{int(value)} cases',
+                    ha='left',
+                    va='center',
+                    fontweight='bold',
+                    fontsize=10,
+                )
+            ax.set_yticks(range(len(customer_cases)))
+            ax.set_yticklabels(customer_cases.index, fontsize=10)
+            ax.invert_yaxis()
+            ax.grid(axis='x', alpha=0.3)
             plt.tight_layout()
             chart_path = f"outputs/top_customers_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
             plt.savefig(chart_path, dpi=300, bbox_inches='tight')
             plt.close()
             chart_paths.append(chart_path)
-        
-        # Chart 5: BEMS Escalations by Customer (if available)
-        # Use comprehensive BEMS detection that checks Transaction ID column
-        bems_cases, bems_count = detect_bems_escalations(csone_df)
+
+        # Chart 4: BEMS Escalations by Customer
+        bems_cases, _ = detect_bems_escalations(csone_df)
         bems_cust_col = next((c for c in ['customer_name', 'Customer Name', 'BU_NAME', 'Customer'] if c in bems_cases.columns), None) if not bems_cases.empty else None
         if not bems_cases.empty and bems_cust_col:
             fig, ax = plt.subplots(figsize=(12, 8))
             bems_by_customer = bems_cases[bems_cust_col].value_counts().head(10)
-            bars = ax.barh(range(len(bems_by_customer)), bems_by_customer.values,
-                           color='#d62728')  # Red for critical escalations
-            ax.set_title('BEMS Escalations by Customer\n(Engineering-Level Issues)',
-                         fontsize=14, fontweight='bold', color='#d62728', pad=15)
+            bars = ax.barh(range(len(bems_by_customer)), bems_by_customer.values, color='#d62728')
+            ax.set_title('BEMS Escalations by Customer', fontsize=14, fontweight='bold', pad=15)
             ax.set_xlabel('Number of BEMS Cases', fontsize=12, fontweight='bold')
             ax.set_ylabel('Customer', fontsize=12, fontweight='bold')
-            for i, (bar, value) in enumerate(zip(bars, bems_by_customer.values)):
-                width = bar.get_width()
-                ax.text(width + 0.1, bar.get_y() + bar.get_height()/2.,
-                        f'{int(value)} BEMS', ha='left', va='center', fontweight='bold', fontsize=10)
+            for bar, value in zip(bars, bems_by_customer.values):
+                ax.text(
+                    bar.get_width() + 0.1,
+                    bar.get_y() + bar.get_height() / 2.0,
+                    f'{int(value)} BEMS',
+                    ha='left',
+                    va='center',
+                    fontweight='bold',
+                    fontsize=10,
+                )
             ax.set_yticks(range(len(bems_by_customer)))
             ax.set_yticklabels(bems_by_customer.index, fontsize=10)
             ax.invert_yaxis()
@@ -2072,229 +2007,47 @@ def create_executive_charts(ab_norm: pd.DataFrame, arr_data: pd.DataFrame, arr_i
             plt.savefig(chart_path, dpi=300, bbox_inches='tight')
             plt.close()
             chart_paths.append(chart_path)
-        
-        # Chart 6: Product/Technology Issues (if available)
-        if csone_df is not None and not csone_df.empty and 'Product' in csone_df.columns:
+
+        # Chart 5: Feature Request Volume by Customer
+        if feature_requests.get('customer_examples'):
             fig, ax = plt.subplots(figsize=(12, 8))
-            product_cases = csone_df['Product'].value_counts().head(8)
-            
-            colors = plt.cm.Set3(range(len(product_cases)))
-            bars = ax.bar(range(len(product_cases)), product_cases.values, color=colors)
-            ax.set_title('Support Cases by Product/Technology', fontsize=14, fontweight='bold', pad=15)
-            ax.set_ylabel('Number of Cases', fontsize=12, fontweight='bold')
-            ax.set_xlabel('Product/Technology', fontsize=12, fontweight='bold')
-            
-            for i, (bar, value) in enumerate(zip(bars, product_cases.values)):
-                height = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
-                        f'{int(value)}', ha='center', va='bottom', fontweight='bold', fontsize=10)
-            
-            ax.set_xticks(range(len(product_cases)))
-            ax.set_xticklabels(product_cases.index, rotation=45, ha='right', fontsize=9)
-            ax.grid(axis='y', alpha=0.3)
-            plt.tight_layout()
-            chart_path = f"outputs/product_issues_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-            plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            chart_paths.append(chart_path)
-        
-        # Chart 3: Customer ARR Distribution
-        if arr_data is not None and not arr_data.empty and 'ANNUAL_CONTRACT_VALUE' in arr_data.columns:
-            fig, ax = plt.subplots(figsize=(10, 6))
-            arr_values = arr_data['ANNUAL_CONTRACT_VALUE'].fillna(0)
-            arr_values = arr_values[arr_values > 0]  # Only positive values
-            
-            if len(arr_values) > 0:
-                # Create bins for ARR ranges
-                bins = [0, 100000, 500000, 1000000, 5000000, float('inf')]
-                labels = ['<$100K', '$100K-$500K', '$500K-$1M', '$1M-$5M', '>$5M']
-                
-                hist, bin_edges = np.histogram(arr_values, bins=bins)
-                
-                bars = ax.bar(labels, hist, color=['#2ca02c', '#1f77b4', '#ff7f0e', '#d62728', '#9467bd'])
-                ax.set_title('Customer ARR Distribution', fontsize=14, fontweight='bold')
-                ax.set_ylabel('Number of Customers', fontsize=12)
-                ax.set_xlabel('ARR Range', fontsize=12)
-                
-                # Add value labels
-                for bar, value in zip(bars, hist):
-                    if value > 0:
-                        height = bar.get_height()
-                        ax.text(bar.get_x() + bar.get_width()/2., height + 0.1,
-                                f'{int(value)}', ha='center', va='bottom', fontweight='bold')
-                
-                plt.tight_layout()
-                chart_path = f"outputs/arr_distribution_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-                plt.close()
-                chart_paths.append(chart_path)
-        
-        # Chart 7: Executive Summary Dashboard - ARR at Risk
-        if csone_df is not None and not csone_df.empty and 'Customer_ARR' in csone_df.columns:
-            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
-            fig.suptitle('Executive Risk Dashboard - Financial Impact Analysis', 
-                         fontsize=16, fontweight='bold', y=0.995)
-            
-            # Panel 1: Total ARR by Risk Category
-            if 'Severity' in csone_df.columns:
-                risk_arr = csone_df.groupby('Severity')['Customer_ARR'].sum()
-                colors_risk = {'P1': '#d62728', '1': '#d62728', 'P2': '#ff7f0e', '2': '#ff7f0e',
-                               'P3': '#ffd700', '3': '#ffd700', 'P4': '#2ca02c', '4': '#2ca02c'}
-                colors = [colors_risk.get(str(sev), '#1f77b4') for sev in risk_arr.index]
-                
-                wedges, texts, autotexts = ax1.pie(risk_arr.values, 
-                                                   labels=[f'{sev}\n${val:,.0f}' for sev, val in zip(risk_arr.index, risk_arr.values)],
-                                                   autopct='%1.1f%%',
-                                                   colors=colors,
-                                                   startangle=90)
-                ax1.set_title('ARR Distribution by Case Severity\n(Financial Exposure)', fontweight='bold')
-            
-            # Panel 2: Top 5 Customers - ARR vs Case Count
-            if cust_col:
-                case_col = next((c for c in ['SR Number', 'Case Number', 'SR_Number', 'Case_Number'] if c in csone_df.columns), cust_col)
-                agg_dict = {'Customer_ARR': 'mean', case_col: 'count'}
-                top_customers = csone_df.groupby(cust_col).agg(agg_dict).sort_values('Customer_ARR', ascending=False).head(5)
-                top_customers = top_customers.rename(columns={case_col: 'Case_Count'})
-            else:
-                top_customers = pd.DataFrame()
-            
-            if not top_customers.empty:
-                ax2_twin = ax2.twinx()
-                x_pos = range(len(top_customers))
-                bars1 = ax2.bar(x_pos, top_customers['Customer_ARR'], color='#1f77b4', alpha=0.7, label='ARR')
-                ax2_twin.plot(x_pos, top_customers['Case_Count'], color='#d62728', marker='o', linewidth=3, markersize=10, label='Cases')
-                ax2.set_xlabel('Customer', fontweight='bold')
-                ax2.set_ylabel('ARR ($)', color='#1f77b4', fontweight='bold')
-                ax2_twin.set_ylabel('Number of Cases', color='#d62728', fontweight='bold')
-                ax2.set_title('Top 5 Customers: ARR vs Case Volume', fontweight='bold')
-                ax2.set_xticks(x_pos)
-                ax2.set_xticklabels(top_customers.index, rotation=45, ha='right', fontsize=8)
-                ax2.tick_params(axis='y', labelcolor='#1f77b4')
-                ax2_twin.tick_params(axis='y', labelcolor='#d62728')
-            else:
-                ax2.text(0.5, 0.5, 'No customer data available', ha='center', va='center', transform=ax2.transAxes)
-            
-            # Panel 3: ARR Impact - BEMS Escalations
-            # Use comprehensive BEMS detection that checks Transaction ID column
-            bems_cases, _ = detect_bems_escalations(csone_df)
-            if not bems_cases.empty:
-                total_bems_arr = bems_cases['Customer_ARR'].sum()
-                total_arr = csone_df['Customer_ARR'].sum()
-                no_bems_arr = total_arr - total_bems_arr
-                sizes = [total_bems_arr, no_bems_arr]
-                labels = [f'Customers with\nBEMS Escalations\n${total_bems_arr:,.0f}',
-                          f'No BEMS\n${no_bems_arr:,.0f}']
-                colors_bems = ['#d62728', '#2ca02c']
-                wedges, texts, autotexts = ax3.pie(sizes, labels=labels, autopct='%1.1f%%',
-                                                   colors=colors_bems, startangle=90)
-                ax3.set_title('ARR at Risk - Engineering Escalations\n(Red = Critical Attention Needed)', fontweight='bold')
-            
-            # Panel 4: Key Metrics Summary
-            ax4.axis('off')
-            metrics_text = []
-            
-            total_arr = csone_df['Customer_ARR'].sum()
-            total_customers = csone_df[cust_col].nunique() if cust_col else len(csone_df)
-            total_cases = len(csone_df)
-            
-            if 'Severity' in csone_df.columns:
-                critical_cases = len(csone_df[csone_df['Severity'].isin(['P1', '1', 'Critical'])])
-                critical_arr = csone_df[csone_df['Severity'].isin(['P1', '1', 'Critical'])]['Customer_ARR'].sum()
-            else:
-                critical_cases = 0
-                critical_arr = 0
-            
-            # Use comprehensive BEMS detection that checks Transaction ID column
-            bems_cases, bems_count = detect_bems_escalations(csone_df)
-            bems_arr = bems_cases['Customer_ARR'].sum() if not bems_cases.empty and 'Customer_ARR' in bems_cases.columns else 0
-            
-            metrics = [
-                ("TOTAL PORTFOLIO ARR", f"${total_arr:,.0f}", "black"),
-                ("", "", "white"),
-                ("CRITICAL CASES (P1)", f"{critical_cases} cases", "red"),
-                ("ARR at Critical Risk", f"${critical_arr:,.0f}", "red"),
-                ("", "", "white"),
-                ("BEMS ESCALATIONS", f"{bems_count} cases", "darkred"),
-                ("ARR with BEMS Issues", f"${bems_arr:,.0f}", "darkred"),
-                ("", "", "white"),
-                ("AVG ARR per Customer", f"${total_arr/total_customers:,.0f}" if total_customers > 0 else "$0", "blue"),
-                ("Cases per Customer", f"{total_cases/total_customers:.1f}" if total_customers > 0 else "0", "blue"),
-            ]
-            
-            y_pos = 0.95
-            ax4.text(0.5, y_pos, "KEY FINANCIAL METRICS", ha='center', fontsize=14, fontweight='bold', 
-                     transform=ax4.transAxes)
-            y_pos -= 0.08
-            
-            for label, value, color in metrics:
-                if label:  # Skip empty lines
-                    ax4.text(0.1, y_pos, label, ha='left', fontsize=11, fontweight='bold',
-                             color=color, transform=ax4.transAxes)
-                    ax4.text(0.9, y_pos, value, ha='right', fontsize=12, fontweight='bold',
-                             color=color, transform=ax4.transAxes)
-                y_pos -= 0.08
-            
-            plt.tight_layout()
-            chart_path = f"outputs/executive_risk_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-            plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            chart_paths.append(chart_path)
-        
-        # Chart 8: Feature Requests - ARR Impact
-        if feature_requests and feature_requests.get('customer_examples'):
-            fig, ax = plt.subplots(figsize=(14, 8))
-            
-            # FIXED: Get ALL requesting customers with ARR
-            customers_with_arr = [c for c in feature_requests['customer_examples'] if c.get('arr', 0) > 0]
-            
-            if customers_with_arr:
-                # FIXED: No truncation for customer names
-                customer_names = [c['customer_name'] for c in customers_with_arr]
-                arr_values = [c['arr'] for c in customers_with_arr]
-                request_counts = [c['request_count'] for c in customers_with_arr]
-                
-                # Create bar chart colored by ARR size
-                colors = ['#d62728' if arr > 1000000 else '#ff7f0e' if arr > 500000 else '#2ca02c' 
-                          for arr in arr_values]
-                
-                bars = ax.barh(range(len(customer_names)), arr_values, color=colors)
-                ax.set_title('Feature Requests - ARR Impact Analysis\n(Customers Requesting New Features)', 
-                             fontsize=14, fontweight='bold', pad=15)
-                ax.set_xlabel('Customer ARR ($)', fontsize=12, fontweight='bold')
+            examples = sorted(
+                [c for c in feature_requests['customer_examples'] if c.get('request_count', 0) > 0],
+                key=lambda row: row.get('request_count', 0),
+                reverse=True,
+            )[:10]
+            if examples:
+                customer_names = [c['customer_name'] for c in examples]
+                request_counts = [c.get('request_count', 0) for c in examples]
+                bars = ax.barh(range(len(customer_names)), request_counts, color='#1f77b4')
+                ax.set_title('Feature Requests by Customer', fontsize=14, fontweight='bold', pad=15)
+                ax.set_xlabel('Number of Requests', fontsize=12, fontweight='bold')
                 ax.set_ylabel('Customer', fontsize=12, fontweight='bold')
-                
-                # Add request counts as labels
-                for i, (bar, arr_val, req_count) in enumerate(zip(bars, arr_values, request_counts)):
-                    width = bar.get_width()
-                    ax.text(width + width*0.02, bar.get_y() + bar.get_height()/2.,
-                            f'${arr_val:,.0f} | {req_count} requests', 
-                            ha='left', va='center', fontweight='bold', fontsize=9)
-                
+                for bar, req_count in zip(bars, request_counts):
+                    ax.text(
+                        bar.get_width() + 0.1,
+                        bar.get_y() + bar.get_height() / 2.0,
+                        f'{int(req_count)}',
+                        ha='left',
+                        va='center',
+                        fontweight='bold',
+                        fontsize=9,
+                    )
                 ax.set_yticks(range(len(customer_names)))
                 ax.set_yticklabels(customer_names, fontsize=10)
                 ax.invert_yaxis()
                 ax.grid(axis='x', alpha=0.3)
-                
-                # Add total ARR at bottom
-                total_feature_arr = sum(arr_values)
-                ax.text(0.5, -0.08, f'Total ARR Requesting Features: ${total_feature_arr:,.0f}',
-                        ha='center', va='top', transform=ax.transAxes, 
-                        fontsize=12, fontweight='bold', color='#d62728',
-                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-                
                 plt.tight_layout()
-                chart_path = f"outputs/feature_request_arr_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                chart_path = f"outputs/feature_request_volume_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
                 plt.savefig(chart_path, dpi=300, bbox_inches='tight')
                 plt.close()
                 chart_paths.append(chart_path)
-    
+
     except ImportError:
         logger.warning("[[WARNING]] Matplotlib not available - charts will be skipped")
     except Exception as e:
-        logger.error(f"[[ERROR]] Chart generation failed: {e}")
-        import traceback
-        logger.error(f"[[ERROR]] Traceback: {traceback.format_exc()}")
-    
+        logger.warning("[[WARNING]] Chart generation skipped: %s", e)
+
     return chart_paths
 
 
@@ -2967,8 +2720,8 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             run.bold = True
         doc.add_paragraph()  # Spacing
     
-    # Add Financial Impact Summary Box (if ARR data available)
-    if not csone_df.empty and 'Customer_ARR' in csone_df.columns:
+    # Financial ARR sections intentionally disabled.
+    if False:
         from docx.oxml.ns import qn
         from docx.oxml import OxmlElement
         
@@ -3126,7 +2879,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         doc.add_heading('All Customers by Support Cases', level=2)
         
         customer_cases = csone_df[customer_col].value_counts()  # Show ALL customers
-        has_arr = 'Customer_ARR' in csone_df.columns
+        has_arr = False
         
         # Create table
         table = doc.add_table(rows=len(customer_cases) + 1, cols=4 if has_arr else 3)
@@ -3390,10 +3143,10 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                         doc.add_heading('Case Severity Distribution', level=2)
                     elif 'top_customers' in chart_path:
                         doc.add_heading('Top Customers by Case Volume', level=2)
-                    elif 'arr_impact' in chart_path:
-                        doc.add_heading('ARR Impact by Issue', level=2)
-                    elif 'arr_distribution' in chart_path:
-                        doc.add_heading('Customer ARR Distribution', level=2)
+                    elif 'bems_escalations' in chart_path:
+                        doc.add_heading('BEMS Escalations by Customer', level=2)
+                    elif 'feature_request_volume' in chart_path:
+                        doc.add_heading('Feature Requests by Customer', level=2)
                     
                     doc.add_picture(chart_path, width=Inches(6.5))
                     doc.add_paragraph()  # Spacing
@@ -3419,7 +3172,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         para.add_run(f"Total Feature Requests: ").bold = True
         para.add_run(f"{feature_requests['total_requests']}")
         
-        if feature_requests.get('total_arr_impact', 0) > 0:
+        if False and feature_requests.get('total_arr_impact', 0) > 0:
             arr_para = doc.add_paragraph()
             arr_para.add_run(f"Combined ARR Impact: ").bold = True
             arr_para.add_run(f"${feature_requests['total_arr_impact']:,.0f}")
@@ -3436,7 +3189,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                 para = doc.add_paragraph()
                 para.add_run(f"{customer_info['customer_name']}").bold = True
                 para.add_run(f" - {customer_info['request_count']} requests")
-                if customer_info.get('arr', 0) > 0:
+                if False and customer_info.get('arr', 0) > 0:
                     para.add_run(f" (ARR: ${customer_info['arr']:,.0f})")
     
     # Footer
@@ -3949,28 +3702,10 @@ def run_compact_analysis(analysis_id):
         # Only fetch real data if we have team subscriptions AND database connection
         if not team_subs_df.empty and ctx is not None:
             with analysis_status_lock:
-                _update_progress(status, 30, 'Fetching adoption barriers and ARR data...', 'Adoption Barriers Analysis')
-            
-            # Fetch ARR data for executive insights
-            try:
-                logger.info(f"[[DEBUG]] About to fetch ARR data for {len(account_ids)} accounts...")
-                
-                # Use timeout for ARR data query
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(fetch_arr_data, ctx, account_ids)
-                    try:
-                        arr_data = future.result(timeout=30)  # 30 second timeout
-                        logger.info(f"[[DEBUG]] ARR data query completed, got {len(arr_data)} rows")
-                    except FutureTimeoutError:
-                        logger.warning(f"[[TIMEOUT]] ARR data query timed out after 30 seconds")
-                        arr_data = pd.DataFrame()
-                    except Exception as e:
-                        logger.error(f"[[ERROR]] Failed to fetch ARR data: {e}")
-                        arr_data = pd.DataFrame()
-            except Exception as e:
-                logger.error(f"[[ERROR]] ARR data fetch error: {e}")
-                arr_data = pd.DataFrame()
-            
+                _update_progress(status, 30, 'Fetching adoption barrier data...', 'Adoption Barriers Analysis')
+
+            arr_data = pd.DataFrame()
+
             # Fetch adoption barriers
             try:
                 logger.info(f"[[DEBUG]] About to fetch adoption barriers for {len(account_ids)} accounts...")
@@ -4000,17 +3735,9 @@ def run_compact_analysis(analysis_id):
                 ab_norm = _prepare_ab(ab_scoped, team_subs_df)
                 logger.info(f"[[OK]] Retrieved {len(ab_norm)} adoption barriers")
                 
-                # Calculate ARR impact for executive insights
-                if not ab_norm.empty and not arr_data.empty:
-                    logger.info(f"[[DEBUG]] Calculating ARR impact for issues...")
-                    arr_impact = calculate_arr_impact_for_issues(ab_norm, arr_data)
-                    logger.info(f"[[OK]] ARR Impact Analysis: ${arr_impact['total_arr']:,.0f} total ARR at risk")
-                else:
-                    arr_impact = {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}
+                arr_impact = {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}
             except Exception as e:
-                logger.error(f"[[ERROR]] Failed to fetch adoption barriers: {e}")
-                import traceback
-                logger.error(f"[[ERROR]] Traceback: {traceback.format_exc()}")
+                logger.warning(f"[[WARNING]] Adoption barriers fetch skipped: {e}")
                 ab_norm = pd.DataFrame()
                 arr_impact = {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}
         else:
@@ -4227,26 +3954,15 @@ def run_compact_analysis(analysis_id):
             logger.error(f"[[ERROR]] CSOne data processing failed: {e}")
             csone_df = pd.DataFrame()
         
-        # CRITICAL FIX: Now enrich CSOne data with ARR AFTER processing
-        # This ensures csone_df is populated before enrichment
-        try:
-            if csone_df is not None and not csone_df.empty and 'arr_data' in locals() and arr_data is not None and not arr_data.empty:
-                logger.info(f"[[DEBUG]] Enriching CSOne data with ARR information...")
-                csone_df = enrich_csone_with_arr(csone_df, arr_data)
-                logger.info(f"[[OK]] CSOne data enriched with ARR")
-            else:
-                logger.info(f"[[DEBUG]] Skipping CSOne ARR enrichment - no CSOne data or ARR data available")
-        except Exception as e:
-            logger.error(f"[[ERROR]] CSOne ARR enrichment failed: {e}")
-            # Keep csone_df as-is if enrichment fails
-            if csone_df is None:
-                csone_df = pd.DataFrame()
+        # ARR is intentionally excluded from report data pipelines.
+        if csone_df is None:
+            csone_df = pd.DataFrame()
         
         # Analyze feature requests (only if csone_df exists and is not empty)
         try:
             if csone_df is not None and not csone_df.empty:
                 logger.info(f"[[DEBUG]] Analyzing feature requests...")
-                feature_requests = analyze_feature_requests(csone_df, arr_data if 'arr_data' in locals() else pd.DataFrame())
+                feature_requests = analyze_feature_requests(csone_df, pd.DataFrame())
                 logger.info(f"[[OK]] Found {feature_requests['total_requests']} feature requests")
             else:
                 logger.info(f"[[DEBUG]] Skipping feature request analysis - no CSOne data available")
@@ -4259,17 +3975,15 @@ def run_compact_analysis(analysis_id):
         try:
             logger.info(f"[[DEBUG]] Generating executive charts...")
             chart_paths = create_executive_charts(
-                ab_norm, 
-                arr_data if 'arr_data' in locals() else pd.DataFrame(), 
-                arr_impact if 'arr_impact' in locals() else {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}, 
-                csone_df if csone_df is not None else pd.DataFrame(), 
-                feature_requests if 'feature_requests' in locals() else {'total_requests': 0, 'top_features': [], 'customer_examples': [], 'total_arr_impact': 0}
+                ab_norm,
+                arr_data,
+                arr_impact,
+                csone_df if csone_df is not None else pd.DataFrame(),
+                feature_requests if 'feature_requests' in locals() else {'total_requests': 0, 'top_features': [], 'customer_examples': [], 'total_arr_impact': 0},
             )
             logger.info(f"[[OK]] Generated {len(chart_paths)} charts")
         except Exception as e:
-            logger.error(f"[[ERROR]] Chart generation failed: {e}")
-            import traceback
-            logger.error(f"[[ERROR]] Traceback: {traceback.format_exc()}")
+            logger.warning(f"[[WARNING]] Chart generation skipped: {e}")
             chart_paths = []
         
         with analysis_status_lock:
@@ -4311,8 +4025,8 @@ def run_compact_analysis(analysis_id):
             # Include CSOne data summary and optional enrichment (ARR, feature requests, defects, PSIRT)
             briefing_book = _create_executive_briefing_book_with_csone(
                 manager, ab_norm, csone_df, team_subs_df, technology,
-                arr_data=arr_data if 'arr_data' in locals() else None,
-                arr_impact=arr_impact if 'arr_impact' in locals() else None,
+                arr_data=None,
+                arr_impact=None,
                 feature_requests=feature_requests if 'feature_requests' in locals() else None,
                 software_defects=software_defects if 'software_defects' in locals() else None,
                 psirt_vulns=psirt_vulns if 'psirt_vulns' in locals() else None,
@@ -4540,8 +4254,8 @@ def run_compact_analysis(analysis_id):
                             ext_bugs, ext_incidents,
                             risk_scores, risk_summary, 
                             f"{base}.docx",
-                            arr_data=arr_data,
-                            arr_impact=arr_impact,
+                            arr_data=None,
+                            arr_impact=None,
                             chart_paths=chart_paths,
                             feature_requests=feature_requests,
                             team_subs_df=team_subs_for_counting,  # Use UNFILTERED for customer counting
@@ -4556,7 +4270,7 @@ def run_compact_analysis(analysis_id):
                         logger.warning("[EXEC-REPORT] Executive formatter not available, using enhanced compact report fallback")
                         result = _create_enhanced_compact_report(
                             base, manager, technology, days, ai_insights,
-                            csone_df, ab_norm, arr_data, arr_impact, chart_paths, feature_requests,
+                            csone_df, ab_norm, pd.DataFrame(), {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}, chart_paths, feature_requests,
                             team_subs_df=team_subs_for_counting,
                             csconsole_action_plans=csconsole_action_plans if 'csconsole_action_plans' in locals() else pd.DataFrame(),
                             csconsole_customer_pulse=csconsole_customer_pulse if 'csconsole_customer_pulse' in locals() else pd.DataFrame(),
@@ -4594,7 +4308,7 @@ def run_compact_analysis(analysis_id):
                 team_subs_for_counting = team_subs_for_customer_counting
                 exec_report_path = _create_enhanced_compact_report(
                     base, manager, technology, days, ai_insights,
-                    csone_df, ab_norm, arr_data, arr_impact, chart_paths, feature_requests,
+                    csone_df, ab_norm, pd.DataFrame(), {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}, chart_paths, feature_requests,
                     team_subs_df=team_subs_for_counting,  # Use UNFILTERED for customer counting
                     csconsole_action_plans=csconsole_action_plans if 'csconsole_action_plans' in locals() else pd.DataFrame(),
                     csconsole_customer_pulse=csconsole_customer_pulse if 'csconsole_customer_pulse' in locals() else pd.DataFrame(),
@@ -5402,7 +5116,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     sources_para.add_run(get_data_sources_paragraph_text())
     scope_note = doc.add_paragraph()
     scope_note.add_run('Report scope: ').bold = True
-    scope_note.add_run('This renewal report focuses on renewal risk and analyzes all renewal-relevant data: adoption barriers, support cases (CSOne or Snowflake when available), BEMS (from CSOne), service incidents, and software defects. It runs faster than the Comprehensive report because it does not include the full Enhanced Snowflake Insights suite (ARR, engagement/usage/risk/product from CX_DB) or the longer narrative—all key renewal metrics above are still included.')
+    scope_note.add_run('This renewal report focuses on renewal risk and analyzes all renewal-relevant data: adoption barriers, support cases (CSOne or Snowflake when available), BEMS (from CSOne), service incidents, and software defects. It runs faster than the Comprehensive report because it does not include the full Enhanced Snowflake insights suite or the longer narrative—all key renewal metrics above are still included.')
     scope_note.paragraph_format.space_before = Pt(6)
     doc.add_paragraph()
     
@@ -7018,7 +6732,7 @@ def run_customer_renewal_analysis(analysis_id):
                 risk_components_data.append({
                     'Risk_Component': 'Financial Health',
                     'Score': 5,
-                    'Details': 'Based on ARR and contract data',
+                    'Details': 'Based on contract and portfolio context',
                     'Trend': 'Stable'
                 })
             if renewal_analysis.get('usage_metrics'):
@@ -7531,23 +7245,8 @@ def run_comprehensive_analysis(analysis_id):
             'current_step': 'External Intelligence Gathering'
         })
         
-        # Fetch ARR data for charts and enrichment (required for comprehensive report)
-        try:
-            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(fetch_arr_data, ctx, account_ids)
-                try:
-                    arr_data = future.result(timeout=30)
-                    logger.info(f"[[ARR]] Fetched {len(arr_data)} ARR records for comprehensive report")
-                except FutureTimeoutError:
-                    logger.warning(f"[[TIMEOUT]] ARR data query timed out")
-                    arr_data = pd.DataFrame()
-                except Exception as e:
-                    logger.warning(f"[[ARR]] Failed to fetch ARR data: {e}")
-                    arr_data = pd.DataFrame()
-        except Exception as e:
-            logger.warning(f"[[ARR]] ARR fetch error: {e}")
-            arr_data = pd.DataFrame()
+        # ARR is intentionally excluded from report generation.
+        arr_data = pd.DataFrame()
         
         # External intelligence
         try:
@@ -7767,15 +7466,9 @@ def run_comprehensive_analysis(analysis_id):
         arr_impact = {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}
         feature_requests = {'total_requests': 0, 'top_features': [], 'customer_examples': [], 'total_arr_impact': 0}
         try:
-            # Calculate ARR impact for chart generation
-            if not ab_norm.empty and not arr_data.empty:
-                arr_impact = calculate_arr_impact_for_issues(ab_norm, arr_data)
-            else:
-                arr_impact = {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}
-            
             # Analyze feature requests
             if csone_df is not None and not csone_df.empty:
-                feature_requests = analyze_feature_requests(csone_df, arr_data if arr_data is not None and not arr_data.empty else pd.DataFrame())
+                feature_requests = analyze_feature_requests(csone_df, pd.DataFrame())
             else:
                 feature_requests = {'total_requests': 0, 'top_features': [], 'customer_examples': [], 'total_arr_impact': 0}
             
@@ -7804,14 +7497,10 @@ def run_comprehensive_analysis(analysis_id):
                                 report_builder.add_heading('Case Severity Distribution', level=2)
                             elif 'top_customers' in chart_path:
                                 report_builder.add_heading('Top Customers by Case Volume', level=2)
-                            elif 'arr_impact' in chart_path:
-                                report_builder.add_heading('ARR Impact by Issue', level=2)
-                            elif 'arr_distribution' in chart_path:
-                                report_builder.add_heading('Customer ARR Distribution', level=2)
                             elif 'bems_escalations' in chart_path:
                                 report_builder.add_heading('BEMS Escalations by Customer', level=2)
-                            elif 'executive_risk_dashboard' in chart_path:
-                                report_builder.add_heading('Executive Risk Dashboard', level=2)
+                            elif 'feature_request_volume' in chart_path:
+                                report_builder.add_heading('Feature Requests by Customer', level=2)
                             
                             report_builder.doc.add_picture(chart_path, width=Inches(6.5))
                             report_builder.doc.add_paragraph()  # Spacing
@@ -7888,8 +7577,8 @@ def run_comprehensive_analysis(analysis_id):
                 'customer_pulse': filtered_customer_pulse,
                 'success_priorities': filtered_success_priorities,
                 'adoption_barriers': filtered_adoption_barriers
-            }, arr_data=arr_data if arr_data is not None and not arr_data.empty else None,
-                arr_impact=arr_impact if arr_impact and arr_impact.get('top_issues') else None,
+            }, arr_data=None,
+                arr_impact=None,
                 feature_requests=feature_requests if feature_requests and feature_requests.get('total_requests', 0) > 0 else None,
                 software_defects=_sw_defects if _sw_defects.get('total_defects', 0) > 0 else None,
                 psirt_vulns=_psirt if _psirt.get('total_vulnerabilities', 0) > 0 else None)
@@ -8107,41 +7796,6 @@ def run_comprehensive_analysis(analysis_id):
                     })
                     if not specific_technology:
                         specific_technology = 'Contact Center'  # Fallback
-                
-                # Add ARR and sentiment analysis to briefing
-                try:
-                    from arr_sentiment_analyzer import ARRSentimentAnalyzer
-                    arr_sentiment_analyzer = ARRSentimentAnalyzer(ctx)
-                    
-                    # Get ARR data
-                    arr_data = arr_sentiment_analyzer.get_customer_arr_data(customer_name)
-                    
-                    # Get sentiment analysis
-                    sentiment_data = arr_sentiment_analyzer.analyze_customer_sentiment(customer_name, customer_csconsole_data)
-                    
-                    # Add to briefing
-                    arr_context = ""
-                    if arr_data.get('total_arr', 0) > 0:
-                        arr_context = f"\n\n**CUSTOMER VALUE & STRATEGIC CONTEXT:**\n"
-                        arr_context += f"• ARR: ${arr_data['total_arr']:,.0f} ({arr_data['arr_tier']} tier)\n"
-                        arr_context += f"• Strategic Priority: {arr_data['strategic_priority']}\n"
-                        arr_context += f"• Voice Weight: {arr_data['voice_weight']:.1f}x\n"
-                    
-                    sentiment_context = f"\n• Customer Sentiment: {sentiment_data.get('overall_sentiment', 'Unknown')} ({sentiment_data.get('confidence_level', 'Low')} confidence)\n"
-                    
-                    # FIXED: Show ALL key indicators
-                    if sentiment_data.get('key_indicators'):
-                        sentiment_context += f"• Key Indicators: {', '.join(sentiment_data['key_indicators'])}\n"
-                    
-                    # FIXED: Show ALL recommendations
-                    if sentiment_data.get('recommendations'):
-                        sentiment_context += f"• Recommendations: {', '.join(sentiment_data['recommendations'])}\n"
-                    
-                    customer_briefing += arr_context + sentiment_context
-                    
-                except Exception as e:
-                    logger.debug(f"Error adding ARR/sentiment to briefing for {customer_name}: {e}")
-                    pass
                 
                 customer_prompt = PROMPT_CUSTOMER_TEMPLATE.format(CUSTOMER_NAME=customer_name, CSSM_NAME=cssm_name, TECHNOLOGY=specific_technology, MANAGER=status['manager'])
                 customer_storyboard = generate_llm_response(customer_prompt, customer_briefing)
@@ -9143,13 +8797,11 @@ def ask_ai_portfolio():
 
         from adoptiq_backend import (
             _connect_with_keeper, get_subscriptions_for_team,
-            fetch_adoption_barriers, fetch_arr_data,
+            fetch_adoption_barriers,
             fetch_period_comparison,
             fetch_barrier_velocity,
-            calculate_arr_at_risk,
             scan_historical_reports,
             fetch_enhanced_account_insights,
-            derive_portfolio_intelligence,
             build_cross_report_trends,
             compute_barrier_aging,
             generate_llm_response,
@@ -9218,24 +8870,7 @@ def ask_ai_portfolio():
                     sp_df = ask_ai_bundle.get('csconsole_success_priorities', pd.DataFrame())
                     ap_df = ask_ai_bundle.get('csconsole_action_plans', pd.DataFrame())
 
-                    # --- Section 2: ARR & Financial ---
-                    arr_df = None
-                    try:
-                        arr_df = fetch_arr_data(ctx, acct_batch)
-                        if arr_df is not None and not arr_df.empty:
-                            total_arr = arr_df['ANNUAL_CONTRACT_VALUE'].sum() if 'ANNUAL_CONTRACT_VALUE' in arr_df.columns else 0
-                            sections.append(f"\n=== FINANCIAL DATA ===\nTotal Active ARR: ${total_arr:,.0f}")
-                            if 'BU_NAME' in arr_df.columns and 'ANNUAL_CONTRACT_VALUE' in arr_df.columns:
-                                arr_by_cust = arr_df.groupby('BU_NAME')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False).head(10)
-                                arr_lines = [f"  - {c}: ${v:,.0f}" for c, v in arr_by_cust.items()]
-                                sections.append("Top 10 customers by ARR:\n" + "\n".join(arr_lines))
-                            if 'TECHNOLOGY_C' in arr_df.columns:
-                                arr_by_tech = arr_df.groupby('TECHNOLOGY_C')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False)
-                                tech_lines = [f"  - {t}: ${v:,.0f}" for t, v in arr_by_tech.head(8).items()]
-                                sections.append("ARR by technology:\n" + "\n".join(tech_lines))
-                            context_summary_parts.append(f"ARR: ${total_arr:,.0f}")
-                    except Exception as e:
-                        logger.debug(f"Ask AI: ARR fetch skipped: {e}")
+                    arr_df = pd.DataFrame()
 
                     # --- Section 3: Adoption Barriers (detailed) ---
                     ab_df = None
@@ -9435,20 +9070,6 @@ def ask_ai_portfolio():
                     except Exception as e:
                         logger.debug(f"Ask AI: Velocity skipped: {e}")
 
-                    # --- Section 10: ARR AT RISK (NEW) ---
-                    try:
-                        risk = calculate_arr_at_risk(arr_df, ab_df, cases_df)
-                        if risk:
-                            sections.append(f"\n=== ARR AT RISK ===")
-                            sections.append(f"Total portfolio ARR: ${risk.get('total_portfolio_arr', 0):,.0f}")
-                            sections.append(f"ARR at risk (accounts with barriers/cases): ${risk.get('arr_at_risk', 0):,.0f} ({risk.get('pct_at_risk', 0)}%)")
-                            sections.append(f"ARR critical (accounts with P1/Critical issues): ${risk.get('arr_critical', 0):,.0f} ({risk.get('pct_critical', 0)}%)")
-                            sections.append(f"Healthy ARR: ${risk.get('arr_healthy', 0):,.0f}")
-                            sections.append(f"Troubled accounts: {risk.get('troubled_account_count', 0)} | Critical: {risk.get('critical_account_count', 0)}")
-                            context_summary_parts.append(f"${risk.get('arr_at_risk', 0):,.0f} at risk")
-                    except Exception as e:
-                        logger.debug(f"Ask AI: ARR risk skipped: {e}")
-
                     # --- Section 13: ENHANCED ACCOUNT INSIGHTS (NEW) ---
                     try:
                         enhanced = fetch_enhanced_account_insights(ctx, acct_batch, days)
@@ -9467,11 +9088,11 @@ def ask_ai_portfolio():
                                 c = enhanced['contracts']
                                 sections.append(f"\n=== CONTRACT EXPIRATIONS ===")
                                 sections.append(f"Active contracts: {c.get('active_contracts', 0)}")
-                                sections.append(f"Expiring within 90 days: {c.get('expiring_within_90d', 0)} (ARR: ${float(c.get('expiring_arr') or 0):,.0f})")
+                                sections.append(f"Expiring within 90 days: {c.get('expiring_within_90d', 0)}")
                                 if c.get('upcoming_expirations'):
                                     sections.append("Upcoming expirations:")
                                     for exp in c['upcoming_expirations']:
-                                        sections.append(f"  - {exp.get('contract','')} | Ends: {exp.get('end_date','')} | ARR: ${float(exp.get('arr') or 0):,.0f}")
+                                        sections.append(f"  - {exp.get('contract','')} | Ends: {exp.get('end_date','')}")
                             if 'recently_expired' in enhanced:
                                 r = enhanced['recently_expired']
                                 sections.append(f"\n=== RECENTLY EXPIRED ({r.get('count', 0)}) ===")
@@ -9491,36 +9112,9 @@ def ask_ai_portfolio():
                     except Exception as e:
                         logger.debug(f"Ask AI: Enhanced accounts skipped: {e}")
 
-                    # --- Section 14: PORTFOLIO INTELLIGENCE (NEW) ---
-                    try:
-                        portfolio_intel = derive_portfolio_intelligence(arr_df, ab_df, cases_df, team_subs_df)
-                        if portfolio_intel:
-                            sections.append(f"\n=== DERIVED PORTFOLIO INTELLIGENCE ===")
-                            if 'concentration' in portfolio_intel:
-                                c = portfolio_intel['concentration']
-                                sections.append(f"Customer concentration: Top 5 = {c.get('top5_pct', 0)}% of ARR, Top 10 = {c.get('top10_pct', 0)}% of ARR")
-                                sections.append(f"HHI concentration index: {c.get('hhi_index', 0)} (>2500=highly concentrated, <1500=diversified)")
-                            if 'cssm_workload' in portfolio_intel:
-                                w = portfolio_intel['cssm_workload']
-                                sections.append(f"CSSM workload: max={w.get('max_barriers',0)} barriers, min={w.get('min_barriers',0)}, avg={w.get('avg_barriers',0)}, std_dev={w.get('std_dev',0)}")
-                                if w.get('top_loaded'):
-                                    sections.append("Most loaded CSSMs: " + ", ".join(f"{k}: {v}" for k, v in w['top_loaded'].items()))
-                            if 'tech_hotspots' in portfolio_intel:
-                                sections.append("Technology risk density (barriers per $1M ARR):")
-                                for th in portfolio_intel['tech_hotspots']:
-                                    sections.append(f"  - {th['technology']}: {th.get('risk_density', 0)} barriers/$1M (ARR: ${float(th.get('arr') or 0):,.0f}, {th.get('barriers', 0)} barriers)")
-                            if 'repeat_offenders' in portfolio_intel:
-                                ro = portfolio_intel['repeat_offenders']
-                                sections.append(f"Repeat offenders (barriers + cases): {ro.get('count',0)} accounts, ${float(ro.get('combined_arr') or 0):,.0f} ARR ({ro.get('pct_of_portfolio',0)}% of portfolio)")
-                                if ro.get('customers'):
-                                    sections.append("  Customers: " + ", ".join(ro['customers'][:10]))
-                            context_summary_parts.append("Portfolio intelligence")
-                    except Exception as e:
-                        logger.debug(f"Ask AI: Portfolio intelligence skipped: {e}")
-
                     # --- Section 15: BARRIER AGING ANALYSIS ---
                     try:
-                        aging = compute_barrier_aging(ab_df, arr_df)
+                        aging = compute_barrier_aging(ab_df, pd.DataFrame())
                         if aging and aging.get('total_open', 0) > 0:
                             sections.append(f"\n=== BARRIER AGING ANALYSIS ===")
                             sections.append(f"Total open barriers: {aging['total_open']}")
@@ -9533,38 +9127,10 @@ def ask_ai_portfolio():
                                 sections.append("Longest-standing open barriers:")
                                 for sb in aging['stale_barriers']:
                                     line = f"  - {sb.get('days_open', 0)}d open: [{sb.get('severity', '')}] {sb.get('customer', '')}: {sb.get('subject', '')} (ID: {sb.get('id', '')})"
-                                    if sb.get('account_arr'):
-                                        line += f" | Account ARR: ${float(sb['account_arr']):,.0f}"
                                     sections.append(line)
                             context_summary_parts.append("Barrier aging")
                     except Exception as e:
                         logger.debug(f"Ask AI: Barrier aging skipped: {e}")
-
-                    # --- Section 16: PULSE-REVENUE CORRELATION ---
-                    try:
-                        if (pulse_df is not None and not pulse_df.empty
-                                and arr_df is not None and not arr_df.empty):
-                            score_col = next((c for c in ('SCORE__C', 'SCORE_C') if c in pulse_df.columns), None)
-                            pulse_acct_col = next((c for c in ('ACCOUNT__C', 'ACCOUNT_ID_C') if c in pulse_df.columns), None)
-                            if score_col and pulse_acct_col and 'ACCOUNT_ID_C' in arr_df.columns:
-                                acct_pulse = pulse_df.groupby(pulse_acct_col)[score_col].mean()
-                                low_pulse_accts = set(acct_pulse[acct_pulse < 5].index)
-                                if low_pulse_accts:
-                                    low_pulse_arr = arr_df[arr_df['ACCOUNT_ID_C'].isin(low_pulse_accts)]
-                                    if not low_pulse_arr.empty and 'ANNUAL_CONTRACT_VALUE' in low_pulse_arr.columns:
-                                        silent_risk_arr = float(low_pulse_arr['ANNUAL_CONTRACT_VALUE'].sum())
-                                        total_arr_val = float(arr_df['ANNUAL_CONTRACT_VALUE'].sum())
-                                        sections.append(f"\n=== PULSE-REVENUE CORRELATION (Silent Risk) ===")
-                                        sections.append(f"Accounts with low pulse (<5): {len(low_pulse_accts)}")
-                                        sections.append(f"Combined ARR of low-pulse accounts: ${silent_risk_arr:,.0f} ({round(silent_risk_arr / total_arr_val * 100, 1) if total_arr_val > 0 else 0}% of portfolio)")
-                                        if 'BU_NAME' in low_pulse_arr.columns:
-                                            top_silent = low_pulse_arr.groupby('BU_NAME')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False).head(5)
-                                            for cname, carr in top_silent.items():
-                                                pscore = acct_pulse.get(low_pulse_arr[low_pulse_arr['BU_NAME'] == cname]['ACCOUNT_ID_C'].iloc[0], 0) if len(low_pulse_arr[low_pulse_arr['BU_NAME'] == cname]) > 0 else 0
-                                                sections.append(f"  - {cname}: ${float(carr):,.0f} ARR | Pulse: {float(pscore):.1f}")
-                                        context_summary_parts.append("Silent risk analysis")
-                    except Exception as e:
-                        logger.debug(f"Ask AI: Pulse correlation skipped: {e}")
 
         finally:
             try:
@@ -9601,16 +9167,12 @@ def ask_ai_portfolio():
                         parts = [f"Sheet '{sheet}': {m.get('rows', 0)} rows"]
                         if 'unique_customers' in m:
                             parts.append(f"{m['unique_customers']} customers")
-                        if 'total_arr' in m:
-                            parts.append(f"ARR: ${m['total_arr']:,.0f}")
                         if 'severity_distribution' in m:
                             parts.append(f"Severity: {m['severity_distribution']}")
                         if 'category_distribution' in m:
                             parts.append(f"Categories: {m['category_distribution']}")
                         sections.append("  " + " | ".join(parts))
-                        if m.get('top_customers_by_arr'):
-                            sections.append("    Top customers: " + ", ".join(f"{c}: ${float(v or 0):,.0f}" for c, v in list(m['top_customers_by_arr'].items())[:5]))
-                        elif m.get('top_customers_by_count'):
+                        if m.get('top_customers_by_count'):
                             sections.append("    Top customers: " + ", ".join(f"{c}: {v}" for c, v in list(m['top_customers_by_count'].items())[:5]))
                         if m.get('sample_subjects'):
                             sections.append("    Sample issues: " + " | ".join(m['sample_subjects'][:5]))
@@ -9630,9 +9192,6 @@ def ask_ai_portfolio():
                         if 'customer_trend' in cross_trends:
                             ct = cross_trends['customer_trend']
                             sections.append(f"Customer scope: {ct['oldest']} -> {ct['newest']} customers ({ct['change']:+d})")
-                        if 'arr_trend' in cross_trends:
-                            at = cross_trends['arr_trend']
-                            sections.append(f"ARR trend: ${at['oldest']:,.0f} -> ${at['newest']:,.0f} ({at['pct_change']:+.1f}%)")
                         if 'severity_trend' in cross_trends:
                             sections.append("Severity evolution:")
                             for sev, vals in cross_trends['severity_trend'].items():
@@ -9649,8 +9208,6 @@ def ask_ai_portfolio():
         if len(briefing) > 80000:
             priority_headers = [
                 '=== PORTFOLIO OVERVIEW ===',
-                '=== FINANCIAL DATA ===',
-                '=== ARR AT RISK ===',
                 '=== BEMS ESCALATIONS REFERENCED',
                 '=== SOFTWARE DEFECTS REFERENCED',
                 '=== ADOPTION BARRIERS',
@@ -9658,10 +9215,8 @@ def ask_ai_portfolio():
                 '=== ACTIVE SERVICE INCIDENTS',
                 '=== BARRIER VELOCITY ===',
                 '=== BARRIER AGING ANALYSIS ===',
-                '=== PULSE-REVENUE CORRELATION',
                 '=== ACCOUNT HEALTH',
                 '=== CONTRACT EXPIRATIONS ===',
-                '=== DERIVED PORTFOLIO INTELLIGENCE ===',
                 '=== CUSTOMER PULSE ===',
                 '=== TREND ANALYSIS',
                 '=== CROSS-REPORT TRENDS ===',
@@ -9709,24 +9264,24 @@ def ask_ai_portfolio():
 
         system_prompt = (
             "You are AdoptIQ, a senior portfolio intelligence analyst for Cisco Webex Customer Success. "
-            "You combine financial data, operational metrics, customer health signals, and external "
+            "You combine operational metrics, customer health signals, and external "
             "intelligence to produce insights that no single data source could reveal alone.\n\n"
             "ANALYTICAL FRAMEWORK:\n"
             "1. THINK step by step: first understand the question, then identify relevant data sections, "
             "then cross-reference across domains, then synthesize findings.\n"
-            "2. CROSS-CORRELATE: Connect ARR data with barrier data to find revenue at risk. "
-            "Connect customer pulse trends with contract expirations to predict churn. "
+            "2. CROSS-CORRELATE: Connect adoption barriers, support cases, pulse trends, and contract timelines "
+            "to identify concentrated risk and urgency. "
             "Connect external incidents with customer cases to identify systemic issues.\n"
-            "3. QUANTIFY everything: specific dollar amounts, percentages, counts, and trends.\n"
+            "3. QUANTIFY everything: specific percentages, counts, and trends.\n"
             "4. COMPARE: current vs historical baselines, period-over-period changes, "
             "barrier velocity vs creation rate, team workload distribution.\n"
             "5. SURFACE HIDDEN PATTERNS:\n"
             "   - Customers appearing across multiple risk dimensions (barriers + cases + low pulse)\n"
-            "   - Technology segments with disproportionate issues relative to ARR\n"
+            "   - Technology segments with disproportionate issue density\n"
             "   - CSSM workload imbalances that may indicate coverage gaps\n"
             "   - Contract expirations coinciding with unresolved customer issues\n"
             "   - Repeat offenders: accounts that keep generating new barriers\n"
-            "6. PRIORITIZE by revenue impact: always lead with the highest-ARR findings.\n"
+            "6. PRIORITIZE by urgency and customer impact: always lead with the highest-risk findings.\n"
             "7. CITE sources: ALWAYS reference specific identifiers when available. Use AB-IDs for adoption barriers, "
             "SP-IDs for success priorities, AP-IDs for action plans, Case IDs for support cases, "
             "CSC IDs for software defects, BEMS IDs for escalations, and incident IDs for service disruptions. "
@@ -9734,11 +9289,11 @@ def ask_ai_portfolio():
             "8. RECOMMEND: provide specific, actionable next steps ranked by urgency and impact.\n"
             "9. FLAG GAPS: if data is missing or insufficient, state what's needed and why it matters.\n\n"
             "ANALYTICAL EXAMPLES (follow this depth of cross-correlation):\n"
-            "- Revenue-Risk: 'Acme Corp has $2.1M ARR with 4 critical barriers and 2 P1 cases about the same "
+            "- Risk-Correlation: 'Acme Corp has 4 critical barriers and 2 P1 cases about the same "
             "Webex Calling feature. Combined with a pulse score of 3.2 and contract expiring in 60 days, "
-            "this represents the highest churn risk in the portfolio at $2.1M.'\n"
+            "this represents the highest churn risk in the portfolio.'\n"
             "- Incident-Impact: 'The status.webex.com incident affecting Webex Meetings (ID: INC-2024-0145) "
-            "correlates with 3 P1 cases opened this week by customers representing $4.5M combined ARR. "
+            "correlates with 3 P1 cases opened this week across multiple accounts. "
             "This is not isolated - it is a systemic platform issue affecting your largest accounts.'\n"
             "- Pattern-Detection: 'Six customers filed barriers mentioning \"SSO integration\" in the last "
             "30 days (up from 1 in the previous period). Four of these customers also have open TAC cases "

@@ -1443,8 +1443,8 @@ class CompactReportFormatter:
                 bems_count = int(detect_bems_mask(add_case_lifecycle_fields(csone_data)).sum())
             
             risk_p = self.doc.add_paragraph()
-            risk_p.add_run('- ARR At Risk: ').bold = True
-            risk_p.add_run(f'Estimated ${red_customers * 5}M+ (Top {red_customers} high-risk customers)\n')
+            risk_p.add_run('- High-Risk Customers: ').bold = True
+            risk_p.add_run(f'{red_customers} customers currently in red-risk status\n')
             
             risk_p.add_run('- Escalation Probability: ').bold = True
             if bems_count > 0:

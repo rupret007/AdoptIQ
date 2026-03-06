@@ -17,6 +17,31 @@ from snowflake_table_policy import is_table_blocked
 
 logger = logging.getLogger(__name__)
 
+
+def _is_snowflake_access_issue(exc: Exception) -> bool:
+    msg = str(exc or "").lower()
+    return any(
+        token in msg
+        for token in (
+            "invalid identifier",
+            "sql compilation error",
+            "object does not exist",
+            "does not exist or not authorized",
+            "not authorized",
+            "insufficient privileges",
+            "permission denied",
+            "access denied",
+        )
+    )
+
+
+def _log_query_fallback(context: str, exc: Exception) -> None:
+    if _is_snowflake_access_issue(exc):
+        logger.warning("%s skipped due to Snowflake access/schema limitations: %s", context, str(exc).strip())
+    else:
+        logger.error("%s failed: %s", context, exc)
+
+
 class EnhancedSnowflakeInsights:
     """Enhanced insights system using all discovered Snowflake tables"""
     
@@ -86,7 +111,7 @@ class EnhancedSnowflakeInsights:
             return insights
             
         except Exception as e:
-            logger.error(f"ERROR: Error generating insights for {customer_name}: {e}")
+            _log_query_fallback(f"Enhanced insights generation for {customer_name}", e)
             return self._get_mock_insights(customer_name, days)
     
     def _get_account_insights(self, customer_name: str) -> Dict:
@@ -332,7 +357,7 @@ class EnhancedSnowflakeInsights:
                     self._skip_warned.add("booking")
                     logger.info("Optional: Booking insights table/column not available; skipping for all customers.")
             else:
-                logger.error(f"Error getting booking insights: {e}")
+                _log_query_fallback("Booking insights query", e)
             insights['error'] = 'Booking insights unavailable.'
         
         return insights
@@ -656,7 +681,7 @@ class EnhancedSnowflakeInsights:
                     self._skip_warned.add("risk")
                     logger.info("Optional: RISK_ASSESSMENT table not available or not authorized; skipping for all customers.")
             else:
-                logger.error(f"Error getting risk insights: {e}")
+                _log_query_fallback("Risk insights query", e)
             insights['error'] = 'Risk insights unavailable.'
         
         return insights

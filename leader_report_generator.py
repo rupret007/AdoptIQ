@@ -95,7 +95,8 @@ class LeaderReportGenerator:
         self.enhanced_insights = EnhancedSnowflakeInsights(ctx)
         self.defect_analyzer = EnhancedDefectAnalyzer() if EnhancedDefectAnalyzer else None
         self.bems_analyzer = BEMSEscalationAnalyzer() if BEMSEscalationAnalyzer else None
-        self.arr_sentiment_analyzer = ARRSentimentAnalyzer(ctx) if ARRSentimentAnalyzer else None
+        # ARR is intentionally excluded from reporting outputs.
+        self.arr_sentiment_analyzer = None
         self._setup_document_settings()
     
     def _setup_document_settings(self):
@@ -1580,52 +1581,8 @@ class LeaderReportGenerator:
         
         logger.debug(f"Data sizes - ABs: {len(adoption_barriers)}, APs: {len(action_plans)}, CPs: {len(customer_pulse)}, TACs: {len(tac_cases)}")
         
-        # Also collect customers from activity data for ARR/sentiment analysis (but don't use for count)
-        activity_customers = set()
-        for df, col_name in [(adoption_barriers, 'BU_NAME'), (action_plans, 'BU_NAME'), 
-                            (customer_pulse, 'BU_NAME')]:
-            if not df.empty and col_name in df.columns:
-                activity_customers.update(df[col_name].dropna().unique())
-        
-        if not tac_cases.empty:
-            for col in tac_cases.columns:
-                if 'customer' in col.lower() or 'account' in col.lower():
-                    activity_customers.update(tac_cases[col].dropna().unique())
-                    break
-        
-        # Use activity customers for ARR/sentiment analysis, but primary list for count
-        customers_for_analysis = list(activity_customers) if activity_customers else customers
-        
-        # Analyze ARR and sentiment for strategic context
-        # FIXED: Use EXACT same calculation method as summary table for consistency
-        total_arr = 0
-        high_value_customers = 0
+        # Sentiment remains optional and is independent from ARR reporting.
         sentiment_summary = "Unknown"
-        
-        if customers and self.arr_sentiment_analyzer:
-            # FIXED: Calculate ARR for ALL customers from PRIMARY list (EXACT same method as summary table)
-            logger.debug(f"Calculating ARR for {len(customers)} customers from PRIMARY list")
-            for customer in customers:
-                try:
-                    arr_data = self.arr_sentiment_analyzer.get_customer_arr_data(customer)
-                    if arr_data.get('total_arr', 0) > 0:
-                        total_arr += arr_data['total_arr']
-                        if arr_data['total_arr'] >= 100000:  # $100K+ ARR
-                            high_value_customers += 1
-                        logger.debug(f"  {customer}: ${arr_data.get('total_arr', 0):,.0f} ARR")
-                except Exception as e:
-                    logger.debug(f"Error getting ARR for customer {customer}: {e}")
-                    continue
-            logger.debug(f"Total ARR calculated: ${total_arr:,.0f} for {cssm_name}")
-            
-            # FIXED: Use SAME sentiment analysis method as summary table (analyze entire portfolio)
-            # This ensures sentiment matches between table and individual summary
-            try:
-                sentiment_data = self.arr_sentiment_analyzer.analyze_customer_sentiment(cssm_name, data)
-                sentiment_summary = sentiment_data.get('overall_sentiment', 'Unknown')
-            except Exception as e:
-                logger.debug(f"Error analyzing sentiment for {cssm_name}: {e}")
-                sentiment_summary = "Unknown"
         
         if total_customers == 0:
             summary_para = self.doc.add_paragraph()
@@ -1659,35 +1616,23 @@ class LeaderReportGenerator:
         # Create comprehensive summary paragraph
         summary_para = self.doc.add_paragraph()
         
-        # Start with portfolio overview including ARR and sentiment context
-        arr_context = ""
-        if total_arr > 0:
-            arr_context = f" representing ${total_arr:,.0f} in ARR"
-            if high_value_customers > 0:
-                arr_context += f" with {high_value_customers} high-value customers ($100K+ ARR)"
-        else:
-            arr_context = " (ARR data not available)"
-        
+        # Start with portfolio overview and sentiment context
         sentiment_context = f" with {sentiment_summary.lower()} customer sentiment"
-        
-        summary_text = f"{cssm_name} manages {total_customers} customer accounts{arr_context}{sentiment_context}. "
+
+        summary_text = f"{cssm_name} manages {total_customers} customer accounts{sentiment_context}. "
         summary_text += f"Portfolio shows {total_barriers} adoption barriers, {total_action_plans} action plans, and {total_tac_cases} TAC cases recorded over the last {days} days. "
         
-        # Add health assessment with ARR and sentiment context
+        # Add health assessment and sentiment context
         if total_barriers == 0 and total_tac_cases == 0:
             summary_text += "The portfolio demonstrates excellent health with no significant barriers or technical issues requiring attention. "
             if sentiment_summary == "Positive":
                 summary_text += "Strong customer sentiment further validates the health of these relationships. "
         elif total_barriers <= total_customers * 0.5 and total_tac_cases <= total_customers * 0.3:
             summary_text += "The portfolio shows generally healthy customer relationships with manageable levels of adoption challenges. "
-            if total_arr >= 500000 and sentiment_summary == "Negative":
-                summary_text += "URGENT: High-value portfolio showing negative sentiment requires immediate executive attention and dedicated recovery plan. "
-            elif sentiment_summary == "Positive":
+            if sentiment_summary == "Positive":
                 summary_text += "Positive customer sentiment indicates strong relationship management despite some challenges. "
         elif total_barriers > total_customers or total_tac_cases > total_customers * 0.5:
             summary_text += "The portfolio requires immediate attention with high volumes of adoption barriers and technical issues across multiple accounts. "
-            if total_arr >= 100000:
-                summary_text += f"Given the ${total_arr:,.0f} ARR at risk, this represents a critical business priority requiring escalated intervention. "
         else:
             summary_text += "The portfolio shows mixed health with some accounts requiring focused intervention and support. "
             if sentiment_summary == "Negative":
@@ -1710,15 +1655,8 @@ class LeaderReportGenerator:
             else:
                 summary_text += f"Customer pulse feedback indicates concerns with an average score of {avg_pulse_score:.1f}/5.0, requiring immediate customer engagement. "
         
-        # Add actionable recommendations with ARR and sentiment prioritization
+        # Add actionable recommendations
         summary_text += "\n\nActionable Recommendations: "
-        
-        # High-value customer recommendations
-        if total_arr >= 500000:
-            summary_text += "CRITICAL PRIORITY: High-value portfolio requires executive-level attention and dedicated resources. "
-            if sentiment_summary == "Negative":
-                summary_text += "Implement immediate executive escalation and customer recovery plan for at-risk high-value accounts. "
-            summary_text += "Consider dedicated customer success manager assignment for accounts over $100K ARR. "
         
         # Barrier resolution recommendations
         if total_barriers > total_customers * 0.8:
@@ -1733,8 +1671,8 @@ class LeaderReportGenerator:
         # Sentiment-based recommendations
         if sentiment_summary == "Negative":
             summary_text += "Implement proactive customer engagement strategy to address negative sentiment indicators. "
-        elif sentiment_summary == "Positive" and total_arr >= 100000:
-            summary_text += "Leverage positive sentiment for upsell and expansion opportunities with satisfied high-value customers. "
+        elif sentiment_summary == "Positive":
+            summary_text += "Leverage positive sentiment to amplify adoption and customer advocacy outcomes. "
         
         # Pulse score recommendations
         if avg_pulse_score is not None and avg_pulse_score < 3.5:
@@ -1744,11 +1682,7 @@ class LeaderReportGenerator:
         if total_customers > 20:
             summary_text += f"Consider workload distribution review as managing {total_customers} accounts may impact service quality and customer satisfaction. "
         
-        # ARR-specific recommendations
-        if total_arr == 0:
-            summary_text += "Investigate ARR data availability to better understand customer value and prioritize engagement efforts. "
-        
-        summary_text += "Regular one-on-one meetings should focus on account health reviews, ARR growth opportunities, barrier resolution progress, and customer success strategy alignment."
+        summary_text += "Regular one-on-one meetings should focus on account health reviews, barrier resolution progress, and customer success strategy alignment."
         
         # Add the summary text
         summary_para.add_run(summary_text)
@@ -1769,23 +1703,23 @@ class LeaderReportGenerator:
         # Description
         desc_para = self.doc.add_paragraph()
         desc_para.add_run(
-            f'Overview of Action Plans (AP), Adoption Barriers (AB), Customer Pulse (CP), BEMS escalations, '
-            f'Total ARR, and Customer Sentiment per team member over the last {days} days.\n\n'
+            f'Overview of Action Plans (AP), Adoption Barriers (AB), Customer Pulse (CP), '
+            f'BEMS escalations, and Customer Sentiment per team member over the last {days} days.\n\n'
         )
         
         # NEW: Add CSS to Customer Ratio Chart
         self._add_css_to_customer_ratio_chart(team_data)
         
-        # Create enhanced summary table with ARR and sentiment
-        # Header: Person | APs | ABs | CPs | BEMS | Total ARR | Sentiment | Total Activities
+        # Create enhanced summary table with sentiment
+        # Header: Person | APs | ABs | CPs | BEMS | Sentiment | Total Activities
         num_rows = self.safe_len(team_data) + 2  # +1 for header, +1 for totals
-        table = self.doc.add_table(rows=num_rows, cols=8)
+        table = self.doc.add_table(rows=num_rows, cols=7)
         table.style = 'Light Grid Accent 1'
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         
         # Header row
         header_cells = table.rows[0].cells
-        headers = ['Team Member', 'Action Plans', 'Adoption Barriers', 'Customer Pulse', 'BEMS', 'Total ARR', 'Sentiment', 'Total Activities']
+        headers = ['Team Member', 'Action Plans', 'Adoption Barriers', 'Customer Pulse', 'BEMS', 'Sentiment', 'Total Activities']
         
         for i, header_text in enumerate(headers):
             cell = header_cells[i]
@@ -1806,14 +1740,11 @@ class LeaderReportGenerator:
         total_abs = 0
         total_cps = 0
         total_bems = 0
-        total_arr = 0
-        
         row_idx = 1
         for cssm_name in sorted(team_data.keys()):
             data = team_data[cssm_name]
             
-            # Calculate ARR and sentiment for this team member
-            team_arr = 0
+            # Calculate sentiment for this team member
             team_sentiment = "Unknown"
             
             # FIXED: Use PRIMARY customer list from subscriptions (same as CSS to Customer Ratio table)
@@ -1823,23 +1754,8 @@ class LeaderReportGenerator:
                 customers = list(customers) if customers else []
             customers = [c for c in customers if c and str(c).strip()]
             
-            logger.debug(f"  {cssm_name}: Using PRIMARY customer list ({len(customers)} customers) for ARR calculation")
-            
-            # FIXED: Calculate ARR for ALL customers from PRIMARY list (EXACT same method as individual summary)
+            logger.debug(f"  {cssm_name}: Using PRIMARY customer list ({len(customers)} customers)")
             if self.arr_sentiment_analyzer:
-                logger.debug(f"[Summary Table] Calculating ARR for {len(customers)} customers from PRIMARY list")
-                for customer in customers:
-                    try:
-                        arr_data = self.arr_sentiment_analyzer.get_customer_arr_data(customer)
-                        if arr_data.get('total_arr', 0) > 0:
-                            team_arr += arr_data['total_arr']
-                            logger.debug(f"  [Summary Table] {customer}: ${arr_data.get('total_arr', 0):,.0f} ARR")
-                    except Exception as e:
-                        logger.debug(f"Could not get ARR for {customer}: {e}")
-                        continue
-                logger.debug(f"[Summary Table] Total ARR calculated: ${team_arr:,.0f} for {cssm_name}")
-                
-                # Analyze sentiment
                 try:
                     sentiment_data = self.arr_sentiment_analyzer.analyze_customer_sentiment(cssm_name, data)
                     team_sentiment = sentiment_data.get('overall_sentiment', 'Unknown')
@@ -1859,7 +1775,6 @@ class LeaderReportGenerator:
             total_abs += num_abs
             total_cps += num_cps
             total_bems += num_bems
-            total_arr += team_arr
             
             row_cells = table.rows[row_idx].cells
             row_cells[0].text = cssm_name
@@ -1867,24 +1782,23 @@ class LeaderReportGenerator:
             row_cells[2].text = str(num_abs)
             row_cells[3].text = str(num_cps)
             row_cells[4].text = str(num_bems)
-            row_cells[5].text = f"${team_arr:,.0f}" if team_arr > 0 else "N/A"
-            row_cells[6].text = team_sentiment
-            row_cells[7].text = str(num_total)
+            row_cells[5].text = team_sentiment
+            row_cells[6].text = str(num_total)
             
-            # Center align numeric cells and format ARR
-            for i in range(1, 8):
+            # Center align numeric cells
+            for i in range(1, 7):
                 if row_cells[i].paragraphs:
                     row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             
             # Color-code sentiment
-            if row_cells[6].paragraphs and row_cells[6].paragraphs[0].runs:
-                if row_cells[6].paragraphs and row_cells[6].paragraphs[0].runs:
+            if row_cells[5].paragraphs and row_cells[5].paragraphs[0].runs:
+                if row_cells[5].paragraphs and row_cells[5].paragraphs[0].runs:
                     if team_sentiment == "Positive":
-                        row_cells[6].paragraphs[0].runs[0].font.color.rgb = RGBColor(0, 128, 0)  # Green
+                        row_cells[5].paragraphs[0].runs[0].font.color.rgb = RGBColor(0, 128, 0)  # Green
                     elif team_sentiment == "Negative":
-                        row_cells[6].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 0, 0)  # Red
+                        row_cells[5].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 0, 0)  # Red
                     else:
-                        row_cells[6].paragraphs[0].runs[0].font.color.rgb = RGBColor(128, 128, 128)  # Gray
+                        row_cells[5].paragraphs[0].runs[0].font.color.rgb = RGBColor(128, 128, 128)  # Gray
             
             # Highlight BEMS if > 0
             if num_bems > 0:
@@ -1922,12 +1836,11 @@ class LeaderReportGenerator:
         totals_cells[2].text = str(total_abs)
         totals_cells[3].text = str(total_cps)
         totals_cells[4].text = str(total_bems)
-        totals_cells[5].text = f"${total_arr:,.0f}" if total_arr > 0 else "N/A"
-        totals_cells[6].text = "Team Avg"
-        totals_cells[7].text = str(total_aps + total_abs + total_cps + total_bems)
+        totals_cells[5].text = "Team Avg"
+        totals_cells[6].text = str(total_aps + total_abs + total_cps + total_bems)
         
         # Bold totals row
-        for i in range(8):
+        for i in range(7):
             if totals_cells[i].paragraphs and totals_cells[i].paragraphs[0].runs:
                 totals_cells[i].paragraphs[0].runs[0].font.bold = True
             if i > 0:
@@ -2406,7 +2319,7 @@ class LeaderReportGenerator:
         # Determine specific technology for this customer
         customer_technology = self._get_customer_specific_technology(customer, data)
         
-        # Customer heading with technology, ARR and sentiment context
+        # Customer heading with technology context
         if customer_technology and customer_technology != 'Contact Center':
             customer_heading = self.doc.add_heading(f'Account: {customer} ({customer_technology})', level=4)
         else:
@@ -2414,12 +2327,10 @@ class LeaderReportGenerator:
         if customer_heading.runs:
             customer_heading.runs[0].font.color.rgb = CISCO_BLUE
         
-        # Add ARR and sentiment summary for this customer
+        # Add sentiment summary for this customer
         try:
             if not self.arr_sentiment_analyzer:
-                raise ValueError("ARR/sentiment analyzer not available")
-            # Get ARR data
-            arr_data = self.arr_sentiment_analyzer.get_customer_arr_data(customer)
+                raise ValueError("sentiment analyzer not available")
             
             # Get customer-specific data for sentiment analysis
             customer_data = {
@@ -2439,30 +2350,16 @@ class LeaderReportGenerator:
             
             sentiment_data = self.arr_sentiment_analyzer.analyze_customer_sentiment(customer, customer_data)
             
-            # Add ARR and sentiment summary
+            # Add sentiment summary
             summary_para = self.doc.add_paragraph()
-            arr_text = ""
-            if arr_data.get('total_arr', 0) > 0:
-                arr_text = f"ARR: ${arr_data['total_arr']:,.0f} ({arr_data.get('arr_tier', 'N/A')} tier, {arr_data.get('strategic_priority', 'N/A')} priority)"
-            else:
-                arr_text = "ARR: Not available"
-            
             sentiment_text = f"Sentiment: {sentiment_data.get('overall_sentiment', 'Unknown')} ({sentiment_data.get('confidence_level', 'Low')} confidence)"
             
-            summary_para.add_run(f"{arr_text} | {sentiment_text}")
+            summary_para.add_run(sentiment_text)
             if summary_para.runs:
                 summary_para.runs[0].font.italic = True
-            
-            # Add strategic recommendations if applicable
-            if arr_data.get('total_arr', 0) >= 500000 and sentiment_data.get('overall_sentiment') == "Negative":
-                alert_para = self.doc.add_paragraph()
-                alert_para.add_run("⚠️ URGENT: High-value customer showing negative sentiment - immediate executive attention required!")
-                if alert_para.runs:
-                    alert_para.runs[0].font.color.rgb = RGBColor(255, 0, 0)  # Red
-                    alert_para.runs[0].font.bold = True
                 
         except Exception as e:
-            logger.debug(f"Error adding ARR/sentiment context for {customer}: {e}")
+            logger.debug(f"Error adding sentiment context for {customer}: {e}")
             pass
         
         # Initialize all items list with type information
@@ -3151,10 +3048,9 @@ class LeaderReportGenerator:
                         contract_data = customer_insights.get('insights', {}).get('contract', {})
                         if contract_data and contract_data.get('contract_data'):
                             contract_info = contract_data.get('contract_data', {})
-                            if contract_info.get('total_arr'):
+                            if contract_info.get('contracts_found'):
                                 contract_para = self.doc.add_paragraph()
-                                contract_para.add_run('💰 Financial Data: ').font.bold = True
-                                contract_para.add_run(f"Total ARR: ${contract_info.get('total_arr', 0):,.2f}, ")
+                                contract_para.add_run('📄 Contract Data: ').font.bold = True
                                 contract_para.add_run(f"Active Contracts: {contract_info.get('contracts_found', 0)}")
             except Exception as e:
                 logger.warning(f"Could not retrieve enhanced Snowflake insights for {customer}: {e}")
@@ -3942,7 +3838,7 @@ class LeaderReportGenerator:
         # Add data rows
         insights_data = [
             ('Account & Customer Data', '15 tables', 'Account status, expiration, tier ranking', 'Search by ACCOUNT_ID_C in COLLAB_ACCOUNT_SUMMARY'),
-            ('Contract & Financial Data', '12 tables', 'ARR, renewal status, contract terms', 'Search by CONTRACT_NUMBER in COLLAB_ARR_CON_SKU'),
+            ('Contract Lifecycle Data', '12 tables', 'Renewal status, contract terms, expiration windows', 'Search by CONTRACT_NUMBER in COLLAB_ARR_CON_SKU'),
             ('Booking & Transaction Data', '8 tables', 'Recent bookings, upsell opportunities', 'Search by SUBSCRIPTION_REFERENCE_ID in BOOKINGS_TABLE'),
             ('Engagement & Activity Data', '25 tables', 'Action plans, barriers, customer pulse', 'Search by ID in ESA_C360_CS_TASK__C'),
             ('User & Usage Data', '10 tables', 'User activity, login patterns, adoption', 'Search by USER_ID in USER_DATA'),
@@ -3986,7 +3882,6 @@ class LeaderReportGenerator:
                     if insights.get('contract', {}).get('contract_data'):
                         contract_data = insights['contract']['contract_data']
                         self.doc.add_paragraph(f"• Contracts: {contract_data.get('contracts_found', 0)}")
-                        self.doc.add_paragraph(f"• Total ARR: ${contract_data.get('total_arr', 0):,.2f}")
                         if insights['contract'].get('sources'):
                             source = insights['contract']['sources'][0]
                             self.doc.add_paragraph(f"  Source: {source['table']} ({source['records_found']} records)")
@@ -4038,7 +3933,7 @@ class LeaderReportGenerator:
         # Add key data sources
         key_sources = [
             ('CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY', 'Account information and risk categories', 'ACCOUNT_ID_C, BU_ACCOUNT_NAME, RENEWAL_RISK_CATEGORY'),
-            ('CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU', 'Contract and ARR data', 'CONTRACT_NUMBER, ARR_AMOUNT, SERVICE_END_DATE'),
+            ('CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU', 'Contract lifecycle data', 'CONTRACT_NUMBER, SERVICE_END_DATE, CONTRACT_STATUS'),
             ('CX_DB.CX_SWSSBST_BR.BOOKINGS_TABLE_FOR_ACCOUNT_CHECK', 'Booking and transaction data', 'SUBSCRIPTION_REFERENCE_ID, DATE_BOOKED, END_CUSTOMER_NAME'),
             ('EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C', 'Action plans and adoption barriers', 'ID, SUBJECT_C, STATUS_C, ACCOUNT_ID_C'),
             ('EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C', 'Customer pulse and sentiment', 'ID, SUBJECT_C, STATUS_C, ACCOUNT__C'),

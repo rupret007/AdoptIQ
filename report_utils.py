@@ -24,7 +24,6 @@ DATA_SOURCES_CANONICAL: List[Tuple[str, str, str]] = [
     ('Customer Pulse', 'CSConsole', 'Pulse ratings by customer in CSConsole'),
     ('Action Plans', 'CSConsole', 'Action plans by customer in CSConsole'),
     ('Success Priorities', 'CSConsole', 'Success priorities by customer in CSConsole'),
-    ('ARR / Financial', 'Snowflake CX_DB (when available)', 'Contract and ARR data from CX_DB'),
 ]
 
 

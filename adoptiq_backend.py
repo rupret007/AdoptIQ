@@ -78,6 +78,30 @@ def get_snowflake_query_metrics() -> Dict[str, Any]:
         }
 
 
+def _is_snowflake_access_issue(exc: Exception) -> bool:
+    """Identify schema/permission failures that should downgrade to warnings."""
+    msg = str(exc or "").lower()
+    patterns = (
+        "invalid identifier",
+        "sql compilation error",
+        "object does not exist",
+        "does not exist or not authorized",
+        "not authorized",
+        "insufficient privileges",
+        "permission denied",
+        "access denied",
+    )
+    return any(p in msg for p in patterns)
+
+
+def _log_snowflake_fallback(context: str, exc: Exception) -> None:
+    """Log concise warning-level fallback for expected Snowflake access issues."""
+    if _is_snowflake_access_issue(exc):
+        logger.warning("%s skipped due to Snowflake access/schema limitations: %s", context, str(exc).strip())
+    else:
+        logger.error("%s failed: %s", context, exc)
+
+
 class _InstrumentedSnowflakeCursor:
     def __init__(self, cursor):
         self._cursor = cursor
@@ -1101,7 +1125,7 @@ def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
                 df[required_col] = ""
         return df
     except Exception as e:
-        logger.error(f"Error fetching subscriptions: {e}")
+        _log_snowflake_fallback("Team subscriptions query", e)
         return pd.DataFrame()
     finally:
         if cur:
@@ -1230,8 +1254,7 @@ def fetch_arr_data(ctx, account_ids: List[str]) -> pd.DataFrame:
         return _normalize_arr_df(pd.DataFrame(rows, columns=cols))
 
     except Exception as e:
-        import traceback
-        logger.error(f"Error fetching ARR data: {e}\n{traceback.format_exc()}")
+        _log_snowflake_fallback("ARR data query", e)
         return _normalize_arr_df(pd.DataFrame())
     finally:
         if cur:
@@ -1441,8 +1464,7 @@ def fetch_adoption_barriers(ctx, account_ids: List[str], days: int) -> pd.DataFr
         cols = [c[0] for c in cur.description]
         return pd.DataFrame(rows, columns=cols)
     except Exception as e:
-        import traceback
-        logger.error(f"Error fetching adoption barriers: {e}\n{traceback.format_exc()}")
+        _log_snowflake_fallback("Adoption barriers query", e)
         return pd.DataFrame()
     finally:
         if cur:
@@ -1546,7 +1568,7 @@ def fetch_csconsole_action_plans(ctx, account_ids: List[str], days: int) -> pd.D
         cols = [c[0] for c in cur.description]
         return pd.DataFrame(rows, columns=cols)
     except Exception as e:
-        logger.error(f"Error fetching action plans: {e}")
+        _log_snowflake_fallback("CSConsole action plans query", e)
         return pd.DataFrame()
     finally:
         if cur:
@@ -1577,7 +1599,7 @@ def fetch_csconsole_customer_pulse(ctx, account_ids: List[str], days: int) -> pd
         cols = [c[0] for c in cur.description]
         return pd.DataFrame(rows, columns=cols)
     except Exception as e:
-        logger.error(f"Error fetching customer pulse: {e}")
+        _log_snowflake_fallback("CSConsole customer pulse query", e)
         return pd.DataFrame()
     finally:
         if cur:
@@ -1610,7 +1632,7 @@ def fetch_csconsole_success_priorities(ctx, customer_identifiers: List[str], day
         cols = [c[0] for c in cur.description]
         return pd.DataFrame(rows, columns=cols)
     except Exception as e:
-        logger.error(f"Error fetching success priorities: {e}")
+        _log_snowflake_fallback("CSConsole success priorities query", e)
         return pd.DataFrame()
     finally:
         if cur:
@@ -1641,7 +1663,7 @@ def fetch_csconsole_adoption_barriers(ctx, account_ids: List[str], days: int) ->
         cols = [c[0] for c in cur.description]
         return pd.DataFrame(rows, columns=cols)
     except Exception as e:
-        logger.error(f"Error fetching adoption barriers: {e}")
+        _log_snowflake_fallback("CSConsole adoption barriers query", e)
         return pd.DataFrame()
     finally:
         if cur:

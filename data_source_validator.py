@@ -48,7 +48,7 @@ def validate_data_sources_for_report(
         csconsole_action_plans: CSConsole action plans DataFrame (optional)
         csconsole_customer_pulse: CSConsole customer pulse DataFrame (optional)
         csconsole_success_priorities: CSConsole success priorities DataFrame (optional)
-        arr_data: ARR data DataFrame (optional)
+        arr_data: Reserved for backward compatibility (ignored)
         required_sources: List of required data sources (if None, uses defaults for report_type)
     
     Returns:
@@ -157,11 +157,6 @@ def validate_data_sources_for_report(
     if csconsole_success_priorities is not None:
         if csconsole_success_priorities.empty:
             logger.warning("CSConsole success priorities data is empty (optional)")
-    
-    # Validate ARR data (optional but checked if provided)
-    if arr_data is not None:
-        if arr_data.empty:
-            logger.warning("ARR data is empty (optional but recommended for comprehensive reports)")
     
     is_valid = len(missing_sources) == 0
     
@@ -301,14 +296,6 @@ def get_data_source_summary(
             'available': not csconsole_success_priorities.empty,
             'row_count': len(csconsole_success_priorities),
             'status': 'available' if not csconsole_success_priorities.empty else 'empty'
-        }
-    
-    # ARR (optional)
-    if arr_data is not None:
-        summary['arr_data'] = {
-            'available': not arr_data.empty,
-            'row_count': len(arr_data),
-            'status': 'available' if not arr_data.empty else 'empty'
         }
     
     return summary

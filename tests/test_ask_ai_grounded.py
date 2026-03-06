@@ -11,13 +11,13 @@ import ask_ai_grounded as grounded
 
 def test_retrieval_plan_enables_domains_from_question():
     plan = grounded.build_retrieval_plan(
-        "Which customers have ARR at risk, rising barrier velocity, and open incidents tied to CSC defects?"
+        "Which customers have contract risk, rising barrier velocity, and open incidents tied to CSC defects?"
     )
     assert "core" in plan["domains"]
-    assert "finance" in plan["domains"]
+    assert "contracts" in plan["domains"]
     assert "trends" in plan["domains"]
     assert "intel" in plan["domains"]
-    assert "arr_data" in plan["datasets"]
+    assert "enhanced_account_insights" in plan["datasets"]
     assert "period_comparison" in plan["datasets"]
 
 

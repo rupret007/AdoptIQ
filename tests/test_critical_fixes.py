@@ -1634,12 +1634,12 @@ class TestRound26Fixes:
         assert "'SEVERITY_C' in abs_df.columns" in src
         assert "'STATUS_C' in abs_df.columns" in src
 
-    def test_leader_dict_get_for_arr(self):
-        """leader_report_generator.py should use .get() for arr_tier and strategic_priority."""
+    def test_leader_arr_removed_from_output_paths(self):
+        """leader_report_generator.py should disable ARR output context."""
         with open(os.path.join(_PROJECT_ROOT, 'leader_report_generator.py'), encoding='utf-8') as f:
             src = f.read()
-        assert "arr_data.get('arr_tier'" in src
-        assert "arr_data.get('strategic_priority'" in src
+        assert "self.arr_sentiment_analyzer = None" in src
+        assert "ARR: $" not in src
 
     def test_renewal_nan_guard_completion_rate(self):
         """advanced_renewal_analyzer.py should guard completion_rate against NaN before formatting."""

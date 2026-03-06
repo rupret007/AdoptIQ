@@ -39,7 +39,7 @@ _CLAIM_ID_RE = re.compile(
 )
 
 _QUESTION_DOMAIN_RULES: Dict[str, Tuple[str, ...]] = {
-    "finance": ("arr", "revenue", "renewal", "contract", "churn", "risk", "at risk", "dollar"),
+    "contracts": ("renewal", "contract", "churn", "risk", "at risk"),
     "barriers": ("barrier", "adoption", "severity", "customer pulse", "friction"),
     "cases": ("case", "tac", "sr", "p1", "p2", "escalation", "bems"),
     "trends": ("trend", "velocity", "week", "change", "compare", "historical"),
@@ -55,7 +55,7 @@ _DATASETS_BY_DOMAIN: Dict[str, Set[str]] = {
         "csconsole_action_plans",
         "adoption_barriers",
     },
-    "finance": {"arr_data", "enhanced_account_insights"},
+    "contracts": {"enhanced_account_insights"},
     "trends": {"period_comparison", "barrier_velocity"},
 }
 
@@ -316,27 +316,6 @@ def _portfolio_records_from_payload(payload: Dict[str, Any]) -> Tuple[List[Evide
         records.extend(subset)
         ids.update(subset_ids)
 
-    arr_df = payload.get("arr_data")
-    if isinstance(arr_df, pd.DataFrame) and not arr_df.empty and {"BU_NAME", "ANNUAL_CONTRACT_VALUE"}.issubset(set(arr_df.columns)):
-        by_customer = (
-            arr_df.groupby("BU_NAME")["ANNUAL_CONTRACT_VALUE"]
-            .sum()
-            .sort_values(ascending=False)
-            .head(40)
-        )
-        for customer, value in by_customer.items():
-            records.append(
-                EvidenceRecord(
-                    source_type="ARR",
-                    source_id=f"ARR-{str(customer).strip()[:24]}",
-                    customer=str(customer).strip() or "Unknown",
-                    timestamp="",
-                    text=f"Annual contract value: ${float(value or 0):,.0f}",
-                    confidence=0.75,
-                )
-            )
-            ids.add(_normalize_claim_id(f"ARR-{str(customer).strip()[:24]}"))
-
     for incident in (payload.get("incidents") or [])[:60]:
         incident_id = str(incident.get("id") or "").strip() or "INC-UNSPECIFIED"
         records.append(
@@ -381,9 +360,7 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         TEAM_ROSTER,
         _connect_with_keeper,
         build_cross_report_trends,
-        calculate_arr_at_risk,
         compute_barrier_aging,
-        derive_portfolio_intelligence,
         generate_llm_json_response,
         get_subscriptions_for_team,
         scan_historical_reports,
@@ -428,19 +405,12 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         bundle = prefetch_ask_ai_grounded(run_ctx, include_datasets=retrieval_plan["datasets"])
         bundle["support_cases_snowflake"] = bundle.get("support_cases_snowflake", pd.DataFrame())
         bundle["adoption_barriers"] = bundle.get("adoption_barriers", pd.DataFrame())
-        bundle["arr_data"] = bundle.get("arr_data", pd.DataFrame())
         bundle["csconsole_customer_pulse"] = bundle.get("csconsole_customer_pulse", pd.DataFrame())
         bundle["csconsole_success_priorities"] = bundle.get("csconsole_success_priorities", pd.DataFrame())
         bundle["csconsole_action_plans"] = bundle.get("csconsole_action_plans", pd.DataFrame())
 
         # Derived analytics reuse fetched datasets to avoid redundant Snowflake round-trips.
-        bundle["arr_risk"] = calculate_arr_at_risk(
-            bundle.get("arr_data"), bundle.get("adoption_barriers"), bundle.get("support_cases_snowflake")
-        )
-        bundle["portfolio_intelligence"] = derive_portfolio_intelligence(
-            bundle.get("arr_data"), bundle.get("adoption_barriers"), bundle.get("support_cases_snowflake"), team_subs_df
-        )
-        bundle["barrier_aging"] = compute_barrier_aging(bundle.get("adoption_barriers"), bundle.get("arr_data"))
+        bundle["barrier_aging"] = compute_barrier_aging(bundle.get("adoption_barriers"), pd.DataFrame())
 
         intel = get_all_external_intel(days_back=365)
         bundle["incidents"] = intel.get("incidents", [])
