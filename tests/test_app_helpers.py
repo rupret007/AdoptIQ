@@ -60,7 +60,7 @@ class TestCategorizeTechnology:
         assert _categorize_technology("Cisco UCCX") == "Cisco UCCX"
 
     def test_contact_center_generic(self):
-        assert _categorize_technology("Contact Center") == "Contact Center"
+        assert _categorize_technology("Contact Center") == "All Contact Center"
 
     def test_messaging(self):
         assert _categorize_technology("Messaging Platform") == "Messaging"

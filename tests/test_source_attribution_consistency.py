@@ -49,6 +49,27 @@ def test_risk_profile_outputs_source_backed_facts():
     assert all("[Source:" in finding for finding in profile["key_findings"])
 
 
+def test_risk_profile_excludes_backfilled_pulse_from_scoring():
+    profile = compute_customer_risk_profile(
+        customer_name="Acme Corp",
+        customer_ab=pd.DataFrame(),
+        customer_csone=pd.DataFrame(),
+        customer_pulse=pd.DataFrame(
+            [
+                {"PULSE_RATING__C": "Poor", "PULSE_BACKFILL": True},
+            ]
+        ),
+        customer_action_plans=pd.DataFrame(),
+        customer_subs=pd.DataFrame(),
+        ext_incidents=None,
+    )
+    pulse_component = profile["components"]["customer_pulse"]
+    engagement_component = profile["components"]["engagement"]
+    assert pulse_component["details"]["count"] == 0
+    assert pulse_component["details"]["backfill_excluded_count"] == 1
+    assert engagement_component["details"]["total_activity"] == 0
+
+
 def test_consistency_validator_flags_missing_inline_sources():
     result = validate_report_consistency(
         ab_df=pd.DataFrame(),
@@ -65,3 +86,18 @@ def test_report_files_include_metric_source_backing_sections():
     exec_src = root.joinpath("executive_intelligence_formatter.py").read_text(encoding="utf-8")
     assert "Metric source backing" in compact_src
     assert "Metric source backing" in exec_src
+
+
+def test_compact_formatter_enforces_inline_source_for_summary_claims():
+    root = Path(__file__).resolve().parent.parent
+    compact_src = root.joinpath("compact_report_formatter.py").read_text(encoding="utf-8")
+    assert "_ensure_inline_source_claim(concern" in compact_src
+    assert "_ensure_inline_source_claim(action" in compact_src
+
+
+def test_app_and_executive_paths_wrap_factual_claims_with_sources():
+    root = Path(__file__).resolve().parent.parent
+    app_src = root.joinpath("app_simple.py").read_text(encoding="utf-8")
+    exec_src = root.joinpath("executive_intelligence_formatter.py").read_text(encoding="utf-8")
+    assert "_ensure_inline_source_claim(" in app_src
+    assert "validate_report_consistency(" in exec_src

@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import os
 import tempfile
+import logging
 
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
@@ -288,6 +289,48 @@ class TestCtxNoneGuards:
         from adoptiq_backend import fetch_csconsole_action_plans
         result = fetch_csconsole_action_plans(None, ['ACC123'], 90)
         assert result.empty
+
+
+class TestCustomerPulseParityDiagnostics:
+    def test_pulse_parity_counts_sf15_match(self, caplog):
+        from app_simple import _log_customer_pulse_parity
+        team_subs = pd.DataFrame({"ACCOUNT_ID_C": ["001ABCDEF123456AAA"]})
+        pulse_df = pd.DataFrame({"ACCOUNT__C": ["001ABCDEF123456"]})
+        with caplog.at_level(logging.INFO):
+            _log_customer_pulse_parity(team_subs, pulse_df, "unit_scope")
+        messages = [rec.getMessage() for rec in caplog.records if "[[PULSE_PARITY]] unit_scope:" in rec.getMessage()]
+        assert any("total_coverage=1.00" in message for message in messages)
+        assert any("sf15_matches=1" in message for message in messages)
+
+    def test_pulse_parity_warns_with_samples_when_low_coverage(self, caplog):
+        from app_simple import _log_customer_pulse_parity
+        team_subs = pd.DataFrame({"ACCOUNT_ID_C": ["001ABCDEF123456AAA", "001ZZZDEF123456AAA", "001YYYDEF123456AAA"]})
+        pulse_df = pd.DataFrame({"ACCOUNT__C": ["001ABCDEF123456", "001QQQDEF123456AAA"]})
+        with caplog.at_level(logging.INFO):
+            _log_customer_pulse_parity(team_subs, pulse_df, "unit_scope")
+        messages = [rec.getMessage() for rec in caplog.records if "[[PULSE_PARITY]] unit_scope:" in rec.getMessage()]
+        assert any("low pulse-account total coverage" in message for message in messages)
+        assert any("missing_expected_sample=" in message for message in messages)
+        assert any("unexpected_observed_sample=" in message for message in messages)
+
+    def test_pulse_parity_tracks_in_window_vs_backfill_coverage(self, caplog):
+        from app_simple import _log_customer_pulse_parity
+
+        team_subs = pd.DataFrame(
+            {"ACCOUNT_ID_C": ["001ABCDEF123456AAA", "001ZZZDEF123456AAA", "001YYYDEF123456AAA"]}
+        )
+        pulse_df = pd.DataFrame(
+            {
+                "ACCOUNT__C": ["001ABCDEF123456", "001ZZZDEF123456", "001YYYDEF123456"],
+                "PULSE_BACKFILL": [False, True, True],
+            }
+        )
+        with caplog.at_level(logging.INFO, logger="app_simple"):
+            _log_customer_pulse_parity(team_subs, pulse_df, "unit_scope")
+        full_log = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "in_window_matched=1" in full_log
+        assert "backfill_matched=2" in full_log
+        assert "in-window pulse coverage" in full_log
 
 
 class TestAdvancedAnalytics:

@@ -152,6 +152,12 @@ Same Snowflake flow as Comprehensive: team scope → adoption barriers → ARR �
 3. **Team info:** `dsm_assignment_data` → CSSM_EMAIL, CSSM_NAME, CSSM_MANAGER, CSSM_MANAGER_EMAIL
 4. **Renewal risk:** `get_subscription_renewal_risk()` calls `fetch_subscription_data()` and computes risk from adoption barriers, customer pulse, action plans
 
+### 5.6 Ask AI (Legacy + Grounded)
+
+1. **Run-scoped prefetch context:** `AnalysisRunContext` captures account scope and day window once.
+2. **Legacy Ask AI:** Uses `prefetch_ask_ai(...)` for a shared support/pulse/success-priority/action-plan bundle.
+3. **Grounded Ask AI:** Uses `prefetch_ask_ai_grounded(...)` with intent-based dataset gating to fetch only datasets needed for the user question.
+
 ---
 
 ## 6. Query Patterns
@@ -161,6 +167,7 @@ Same Snowflake flow as Comprehensive: team scope → adoption barriers → ARR �
 - **Record type filtering:** `record_type_id = '0122T000000GJfTQAW'` (Adoption Barrier) or `'0122T000000QHBGQA4'` (Action Plan).
 - **Status filtering:** `STATUS_C = 'ACTIVE'` for DSM/ARR queries where applicable.
 - **Graceful fallback:** ARR query tries financial columns first; if missing, falls back to basic customer columns. Enhanced insights tables fail quietly if unavailable.
+- **Run-scoped prefetch/caching:** Report and Ask AI flows use `snowflake_prefetch.py` to reduce repeated Snowflake queries within a single analysis run.
 
 ---
 
@@ -171,7 +178,7 @@ Same Snowflake flow as Comprehensive: team scope → adoption barriers → ARR �
 | **Team subscriptions** | Define which customers/subscriptions are in scope for the selected manager |
 | **Adoption barriers** | Count, list, and summarize barriers; feed into renewal risk scoring; include in Word/Excel reports |
 | **Action plans** | Count and list; include in reports |
-| **Customer pulse** | Include in reports; factor into customer health view |
+| **Customer pulse** | Include in reports; factor into customer health view. Backfilled pulse rows improve account coverage visibility but are excluded from scoring/trend semantics. |
 | **Success priorities** | Include in reports |
 | **Support cases** | Case counts and lists in renewal reports when CSOne not provided |
 | **ARR/MRR/TCV** | Prioritize customers by revenue; show in reports; enrich briefing |
@@ -190,6 +197,8 @@ AdoptIQ performs **read-only** queries. No `INSERT`, `UPDATE`, or `DELETE` state
 | Module | Functions / Classes |
 |--------|---------------------|
 | `adoptiq_backend.py` | `_connect_snowflake_direct`, `_connect_with_keeper`, `fetch_subscription_data`, `search_subscriptions_by_customer`, `get_subscription_renewal_risk`, `get_subscriptions_for_team`, `fetch_arr_data`, `fetch_support_cases_snowflake`, `fetch_adoption_barriers`, `load_and_merge_data_for_subscription`, `fetch_csconsole_action_plans`, `fetch_csconsole_customer_pulse`, `fetch_csconsole_success_priorities`, `fetch_csconsole_adoption_barriers` |
+| `snowflake_prefetch.py` | `AnalysisRunContext`, `prefetch_comprehensive`, `prefetch_ask_ai`, `prefetch_ask_ai_grounded` |
+| `risk_scoring.py` | `_exclude_backfill_pulse_rows`, `compute_customer_risk_profile` (coverage-only backfill handling) |
 | `leader_report_generator.py` | `_get_subscriptions_for_cssm`, `_fetch_action_plans`, `_fetch_adoption_barriers`, `_fetch_customer_pulse`, `_fetch_success_priorities`; uses `EnhancedSnowflakeInsights` |
 | `enhanced_snowflake_insights.py` | `EnhancedSnowflakeInsights` — `_get_account_insights`, `_get_contract_insights`, `_get_booking_insights`, `_get_engagement_insights`, `_get_usage_insights`, `_get_support_insights`, `_get_risk_insights`, `_get_product_insights` |
 | `advanced_renewal_analyzer.py` | `_get_customer_account_info`, `_get_contract_renewal_info`, `_get_usage_adoption_metrics`, `_get_support_engagement_metrics`, `_get_adoption_success_metrics`; queries COLLAB_ACCOUNT_SUMMARY, COLLAB_ARR_CON_SKU, C360_CS_TASK_C_VW, ESA_C360_* |

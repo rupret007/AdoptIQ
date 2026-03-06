@@ -8,6 +8,27 @@ Use this folder as the Mac build source package. The app code is synced from the
    - `~/OneDrive - Cisco/AI Projects/Staging/AdoptIQ_MAC`
 2. Open it in Cursor.
 
+## 1b) Use a Mac machine branch (recommended)
+
+For cross-machine development, do daily work on a branch like `mac-sync-YYYY-MM-DD` (not directly on `master`).
+
+If creating a new branch:
+
+```bash
+git fetch origin
+git checkout -b mac-sync-YYYY-MM-DD origin/master
+git push -u origin mac-sync-YYYY-MM-DD
+```
+
+If branch already exists:
+
+```bash
+git checkout mac-sync-YYYY-MM-DD
+git pull
+```
+
+If you also work on PC, follow `BRANCH_WORKFLOW.md` for cherry-pick/merge sync patterns.
+
 ## 2) Create Python environment
 
 ```bash

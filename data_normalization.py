@@ -117,6 +117,19 @@ LIKELY_ACCOUNT_ID_COLS = (
     "ACCOUNT_ID",
 )
 
+# Shared account-column candidates for cross-source parity/filtering.
+ACCOUNT_COLUMN_CANDIDATES = (
+    "ACCOUNT_ID_C",
+    "ACCOUNT__C",
+    "DSM_ACCOUNT_ID_C",
+    "ACCOUNT_ID",
+    "ACCOUNT",
+    "ACCOUNTID",
+    "AccountId",
+    "Account ID",
+    "Account Id",
+)
+
 
 def _clean_text(value: Any) -> str:
     if value is None:
@@ -225,13 +238,18 @@ def normalize_priority_label(value: Any) -> str:
     text = _clean_text(value).lower()
     if not text:
         return "Unknown"
-    if re.search(r"\bp1\b|critical|sev[ -]?1", text):
+
+    # Common numeric-only encodings from CSOne exports.
+    if text in {"1", "2", "3", "4"}:
+        return {"1": "P1", "2": "P2", "3": "P3", "4": "P4"}[text]
+
+    if re.search(r"\bp[\s\-_:]*1\b|\bsev(?:erity)?[\s\-_:]*1\b|\bpriority[\s\-_:]*1\b|\bcritical\b", text):
         return "P1"
-    if re.search(r"\bp2\b|high|sev[ -]?2", text):
+    if re.search(r"\bp[\s\-_:]*2\b|\bsev(?:erity)?[\s\-_:]*2\b|\bpriority[\s\-_:]*2\b|\bhigh\b", text):
         return "P2"
-    if re.search(r"\bp3\b|medium|moderate|sev[ -]?3", text):
+    if re.search(r"\bp[\s\-_:]*3\b|\bsev(?:erity)?[\s\-_:]*3\b|\bpriority[\s\-_:]*3\b|\bmedium\b|\bmoderate\b", text):
         return "P3"
-    if re.search(r"\bp4\b|low|sev[ -]?4", text):
+    if re.search(r"\bp[\s\-_:]*4\b|\bsev(?:erity)?[\s\-_:]*4\b|\bpriority[\s\-_:]*4\b|\blow\b", text):
         return "P4"
     return "Unknown"
 
@@ -412,6 +430,9 @@ def add_case_lifecycle_fields(
     use["case_type_class"] = use.apply(classify_case_type, axis=1)
     bems_mask = detect_bems_mask(use)
     use["is_bems"] = bems_mask.astype(bool)
+    use["case_classification"] = use["is_bems"].map(
+        lambda flagged: "bems_escalation" if bool(flagged) else "tac_case"
+    )
 
     return use
 

@@ -19,6 +19,7 @@ from docx.oxml import OxmlElement
 from pandas import to_datetime, Timestamp, Timedelta
 from docx import Document
 from data_normalization import (
+    ACCOUNT_COLUMN_CANDIDATES,
     add_case_lifecycle_fields,
     build_customer_lookup,
     detect_bems_mask,
@@ -32,6 +33,7 @@ from data_normalization import (
 from risk_scoring import compute_customer_risk_profile
 from report_utils import format_inline_source
 from snowflake_table_policy import TablePolicyViolation, guard_sql, is_table_blocked
+from config import Config
 
 # Enhanced executive report generation
 try:
@@ -496,6 +498,9 @@ def _normalize_category(cat: str) -> str:
 def _normalize_subtech(txt: str) -> str:
     if not txt: return "Unknown"
     t = str(txt).lower()
+    for pattern, mapped_value in getattr(Config, "SUB_TECHNOLOGY_MAPPINGS", {}).items():
+        if re.search(pattern, t):
+            return mapped_value
     # Check in a specific order to avoid mis-categorization.
     for tech_name in [
         "Webex Contact Center Enterprise",
@@ -3355,11 +3360,15 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             # Chart 3: Case Severity Distribution (Bottom Left)
             ax3 = plt.subplot(2, 2, 3)
             severity_labels = ['P1 Critical', 'P2 High', 'P3 Medium', 'P4+ Low']
+            p1_cases = int(portfolio_metrics.get('critical_p1', portfolio_metrics.get('p1_cases', 0)) or 0)
+            p2_cases = int(portfolio_metrics.get('high_p2', portfolio_metrics.get('p2_cases', 0)) or 0)
+            p3_cases = int(portfolio_metrics.get('p3_cases', 0) or 0)
+            p4_cases = int(portfolio_metrics.get('p4_cases', 0) or 0)
             severity_values = [
-                portfolio_metrics.get('p1_cases', 0),
-                portfolio_metrics.get('p2_cases', 0),
-                portfolio_metrics.get('p3_cases', 0),
-                portfolio_metrics.get('p4_cases', 0)
+                p1_cases,
+                p2_cases,
+                p3_cases,
+                p4_cases,
             ]
             severity_colors = ['#FF0000', '#FF6B6B', '#FFB81C', '#5DBCD2']
             bars = ax3.bar(severity_labels, severity_values, color=severity_colors)
@@ -3410,6 +3419,14 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             
             # Add space after chart
             doc.add_paragraph()
+
+            unknown_priority_cases = int(portfolio_metrics.get('unknown_priority_cases', 0) or 0)
+            if unknown_priority_cases > 0:
+                note = doc.add_paragraph()
+                note.add_run('Severity Mapping Note: ').bold = True
+                note.add_run(
+                    f'{unknown_priority_cases} TAC case(s) had unknown or non-standard priority labels and are excluded from P1/P2/P3/P4 buckets.'
+                )
             
             return True
             
@@ -3437,8 +3454,10 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             
             # Row 3: Severity
             cells = table.rows[2].cells
-            cells[0].text = f"P1 Critical\n{portfolio_metrics.get('p1_cases', 0)}"
-            cells[1].text = f"P2 High\n{portfolio_metrics.get('p2_cases', 0)}"
+            p1_cases = int(portfolio_metrics.get('critical_p1', portfolio_metrics.get('p1_cases', 0)) or 0)
+            p2_cases = int(portfolio_metrics.get('high_p2', portfolio_metrics.get('p2_cases', 0)) or 0)
+            cells[0].text = f"P1 Critical\n{p1_cases}"
+            cells[1].text = f"P2 High\n{p2_cases}"
             cells[2].text = f"Break-fix / Provisioning\n{portfolio_metrics.get('break_fix_cases', 0)} / {portfolio_metrics.get('provisioning_cases', 0)}"
             cells[3].text = f"Grade: {portfolio_metrics.get('health_score', 'C')}\nTrend: {portfolio_metrics.get('trend_direction', 'Stable')}"
             
@@ -3452,6 +3471,14 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                             run.font.size = Pt(11)
                             run.font.bold = True
             
+            unknown_priority_cases = int(portfolio_metrics.get('unknown_priority_cases', 0) or 0)
+            if unknown_priority_cases > 0:
+                note = doc.add_paragraph()
+                note.add_run('Severity Mapping Note: ').bold = True
+                note.add_run(
+                    f'{unknown_priority_cases} TAC case(s) had unknown or non-standard priority labels and are excluded from P1/P2/P3/P4 buckets.'
+                )
+
             doc.add_paragraph()
             return True
             
@@ -5267,7 +5294,14 @@ def _apply_scope_filter_ab(df: pd.DataFrame, tech: str, days: int) -> pd.DataFra
     logger.debug(f"AB filter: Final result: {len(use)} adoption barriers")
     return use
 
-def _apply_scope_filter_csone(df: pd.DataFrame, tech: str, days: int, sub_ids: List[str], team_customer_names: List[str]) -> pd.DataFrame:
+def _apply_scope_filter_csone(
+    df: pd.DataFrame,
+    tech: str,
+    days: int,
+    sub_ids: List[str],
+    team_customer_names: List[str],
+    include_all_cases: bool = True,
+) -> pd.DataFrame:
     if df is None or df.empty: 
         logger.debug("CSOne filter: Input DataFrame is empty or None")
         return pd.DataFrame()
@@ -5321,17 +5355,22 @@ def _apply_scope_filter_csone(df: pd.DataFrame, tech: str, days: int, sub_ids: L
     logger.debug(f"CSOne filter: After team filtering: {len(use)} cases")
 
     # date filter
-    date_cols = [c for c in use.columns if c in LIKELY_DATE_COLS]
-    if date_cols:
-        logger.debug(f"CSOne filter: Applying date filter using column '{date_cols[0]}'")
-        use["__date"] = pd.to_datetime(use[date_cols[0]], errors="coerce", utc=True)
-        cutoff = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days=days)
-        logger.debug(f"CSOne filter: Date cutoff: {cutoff}")
-        before_date_filter = len(use)
-        use = use[use["__date"] >= cutoff]
-        logger.debug(f"CSOne filter: After date filter: {len(use)} cases (removed {before_date_filter - len(use)})")
+    # Product decision: CSOne should show all TAC cases regardless of open/closed age.
+    # Keep optional support for strict date windows via include_all_cases=False.
+    if include_all_cases:
+        logger.debug("CSOne filter: include_all_cases=True, skipping date filter")
     else:
-        logger.debug("CSOne filter: No date columns found, skipping date filter")
+        date_cols = [c for c in use.columns if c in LIKELY_DATE_COLS]
+        if date_cols:
+            logger.debug(f"CSOne filter: Applying date filter using column '{date_cols[0]}'")
+            use["__date"] = pd.to_datetime(use[date_cols[0]], errors="coerce", utc=True)
+            cutoff = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days=days)
+            logger.debug(f"CSOne filter: Date cutoff: {cutoff}")
+            before_date_filter = len(use)
+            use = use[use["__date"] >= cutoff]
+            logger.debug(f"CSOne filter: After date filter: {len(use)} cases (removed {before_date_filter - len(use)})")
+        else:
+            logger.debug("CSOne filter: No date columns found, skipping date filter")
         
     # tech filter
     if tech != "All":
@@ -5381,7 +5420,7 @@ def _apply_scope_filter_csone(df: pd.DataFrame, tech: str, days: int, sub_ids: L
     logger.debug(f"CSOne filter: Final result: {len(use)} cases")
     return use
 
-def _apply_scope_filter_csone_inclusive(csone_df, technology, days):
+def _apply_scope_filter_csone_inclusive(csone_df, technology, days, include_all_cases: bool = True):
     """Apply inclusive filtering to CSOne data for executive analysis - only technology and date filters"""
     if csone_df is None or csone_df.empty:
         return pd.DataFrame() if csone_df is None else csone_df
@@ -5391,8 +5430,8 @@ def _apply_scope_filter_csone_inclusive(csone_df, technology, days):
     
     filtered_df = csone_df.copy()
     
-    # Apply date filter only
-    if 'Date/Time Opened' in filtered_df.columns:
+    # Apply date filter only when strict mode is requested.
+    if not include_all_cases and 'Date/Time Opened' in filtered_df.columns:
         logger.debug("CSOne inclusive filter: Applying date filter using column 'Date/Time Opened'")
         cutoff_date = datetime.now() - timedelta(days=days)
         cutoff_date = cutoff_date.replace(tzinfo=None)  # Remove timezone for comparison
@@ -5444,7 +5483,12 @@ def _apply_scope_filter_csone_inclusive(csone_df, technology, days):
     logger.debug(f"CSOne inclusive filter: Final result: {len(filtered_df)} cases")
     return filtered_df
 
-def _filter_csconsole_data_by_technology(df: pd.DataFrame, technology: str, customer_names: List[str] = None) -> pd.DataFrame:
+def _filter_csconsole_data_by_technology(
+    df: pd.DataFrame,
+    technology: str,
+    customer_names: List[str] = None,
+    account_ids: List[str] = None,
+) -> pd.DataFrame:
     """
     Filter CSConsole data (Action Plans, Customer Pulse, etc.) by technology and customer names.
     This ensures CSConsole data matches the technology scope selected by the user.
@@ -5462,15 +5506,54 @@ def _filter_csconsole_data_by_technology(df: pd.DataFrame, technology: str, cust
         return df
     
     logger.info(f"[[FILTER]] CSConsole filter: Starting with {len(df)} records for technology '{technology}'")
-    
+
     filtered_df = df.copy()
-    
+
+    def _normalize_account_id_token(value: Any) -> str:
+        token = str(value or "").strip().upper()
+        if not token or token in {"NONE", "NAN", "NULL"}:
+            return ""
+        return token
+
+    def _expand_account_id_tokens(values: List[Any]) -> tuple[set[str], set[str]]:
+        exact: set[str] = set()
+        sf15: set[str] = set()
+        for value in values or []:
+            token = _normalize_account_id_token(value)
+            if not token:
+                continue
+            exact.add(token)
+            if len(token) >= 15:
+                sf15.add(token[:15])
+        return exact, sf15
+
+    scoped_exact, scoped_sf15 = _expand_account_id_tokens(account_ids or [])
+
+    def _account_scope_mask(frame: pd.DataFrame) -> pd.Series | None:
+        if frame is None or frame.empty:
+            return None
+        if not scoped_exact:
+            return None
+        account_col = next((c for c in ACCOUNT_COLUMN_CANDIDATES if c in frame.columns), None)
+        if not account_col:
+            return None
+        normalized = (
+            frame[account_col]
+            .fillna("")
+            .astype(str)
+            .apply(_normalize_account_id_token)
+        )
+        mask = normalized.isin(scoped_exact)
+        if scoped_sf15:
+            mask = mask | normalized.str[:15].isin(scoped_sf15)
+        return mask
+
     # Filter by customer names if provided (ensures only team's customers are included)
-    if customer_names:
+    if customer_names or scoped_exact:
         before_count = len(filtered_df)
         normalized_targets = {
             normalize_customer_name(name)
-            for name in customer_names
+            for name in (customer_names or [])
             if normalize_customer_name(name) != "Unknown"
         }
         customer_filter_cols = (
@@ -5482,10 +5565,18 @@ def _filter_csconsole_data_by_technology(df: pd.DataFrame, technology: str, cust
             'RELATED_CUSTOMER__C',
         )
         candidate_col = next((c for c in customer_filter_cols if c in filtered_df.columns), None)
+        account_mask = _account_scope_mask(filtered_df)
+        customer_mask = None
         if candidate_col and normalized_targets:
             customer_series = filtered_df[candidate_col].fillna('').astype(str).apply(normalize_customer_name)
-            filtered_df = filtered_df[customer_series.isin(normalized_targets)]
-        
+            customer_mask = customer_series.isin(normalized_targets)
+        if customer_mask is not None and account_mask is not None:
+            filtered_df = filtered_df[customer_mask | account_mask]
+        elif customer_mask is not None:
+            filtered_df = filtered_df[customer_mask]
+        elif account_mask is not None:
+            filtered_df = filtered_df[account_mask]
+
         after_count = len(filtered_df)
         logger.info(f"[[FILTER]] CSConsole filter: After customer filter: {after_count} records (removed {before_count - after_count})")
     
@@ -5534,6 +5625,14 @@ def _filter_csconsole_data_by_technology(df: pd.DataFrame, technology: str, cust
                                 mask = mask | col_mask
                             except Exception as _filter_err:
                                 logger.debug(f"Column filter '{col}' skipped: {_filter_err}")
+                    if not mask.any():
+                        fallback_mask = _account_scope_mask(filtered_df)
+                        if fallback_mask is not None and fallback_mask.any():
+                            logger.warning(
+                                "[[FILTER]] CSConsole filter: no technology text matches; using account-scope fallback for %d rows",
+                                int(fallback_mask.sum()),
+                            )
+                            mask = fallback_mask
 
                 filtered_df = filtered_df[mask]
                 after_count = len(filtered_df)

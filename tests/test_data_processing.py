@@ -31,6 +31,7 @@ from adoptiq_backend import (
     cross_reference_refs,
     fetch_support_cases_snowflake,
 )
+from data_normalization import normalize_priority_label
 
 
 # ── _extract_refs ────────────────────────────────────────────────────────
@@ -207,6 +208,9 @@ class TestNormalizeSubtech:
     def test_unknown(self):
         assert _normalize_subtech("xyzzy") == "Other/Unknown"
 
+    def test_subtech_mapping_reduces_unknown_leakage(self):
+        assert _normalize_subtech("WXCC Enterprise migration task") == "Webex Contact Center Enterprise"
+
 
 # ── _portfolio_grade ─────────────────────────────────────────────────────
 
@@ -342,9 +346,74 @@ class TestApplyScopeFilterCsone:
         assert isinstance(result, pd.DataFrame)
         assert result.empty
 
+
+class TestNormalizePriorityLabel:
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("1", "P1"),
+            ("2", "P2"),
+            ("3", "P3"),
+            ("4", "P4"),
+            ("P1", "P1"),
+            ("P 1", "P1"),
+            ("sev1", "P1"),
+            ("sev-2", "P2"),
+            ("priority 2", "P2"),
+            ("Critical - P1", "P1"),
+            ("High (P2)", "P2"),
+            ("Moderate / P3", "P3"),
+            ("Low P4", "P4"),
+        ],
+    )
+    def test_maps_priority_variants(self, raw, expected):
+        assert normalize_priority_label(raw) == expected
+
+    def test_unknown_stays_unknown(self):
+        assert normalize_priority_label("unclassified") == "Unknown"
+
     def test_empty_returns_empty_df(self):
         result = _apply_scope_filter_csone(pd.DataFrame(), "All", 90, [], [])
         assert isinstance(result, pd.DataFrame)
+        assert result.empty
+
+    def test_includes_older_cases_when_include_all_cases_enabled(self):
+        old_date = (datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d")
+        df = pd.DataFrame([
+            {
+                "Subscription ID": "Sub1001",
+                "customer_name": "Acme Corp",
+                "Date/Time Opened": old_date,
+                "Title": "Legacy TAC case",
+            }
+        ])
+        result = _apply_scope_filter_csone(
+            df,
+            "All",
+            90,
+            ["Sub1001"],
+            ["Acme Corp"],
+        )
+        assert len(result) == 1
+
+    def test_can_still_apply_strict_date_window_when_requested(self):
+        old_date = (datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d")
+        df = pd.DataFrame([
+            {
+                "Subscription ID": "Sub1001",
+                "customer_name": "Acme Corp",
+                "Date/Time Opened": old_date,
+                "Title": "Legacy TAC case",
+            }
+        ])
+        result = _apply_scope_filter_csone(
+            df,
+            "All",
+            90,
+            ["Sub1001"],
+            ["Acme Corp"],
+            include_all_cases=False,
+        )
         assert result.empty
 
 

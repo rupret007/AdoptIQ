@@ -95,6 +95,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 
 - Enable detailed runtime diagnostics with environment variable `ADOPTIQ_VERBOSE_DEBUG=1`.
 - You can also toggle verbose mode at runtime from the admin dashboard (`http://localhost:5002`) using the **Debug Controls** section.
+- Runtime API is also available at `GET/POST /api/debug/verbose` (localhost app/admin surface) for scripted troubleshooting.
 - The same admin section shows a Snowflake query counter and includes a reset button to baseline each report flow.
 - Verbose mode is intended for troubleshooting and query optimization validation; disable it for normal use.
 - Detailed rollout notes are in `SNOWFLAKE_OPTIMIZATION.md`.
@@ -105,6 +106,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - Source-backed claims include explicit source IDs (for example AB IDs, Case IDs, incident IDs, bug IDs, BEMS/CSC IDs).
 - Claims without verifiable citations are moved to an "Evidence Gaps" section instead of being presented as facts.
 - Retrieval is intent-aware: Ask AI fetches only relevant dataset bundles for the question to reduce unnecessary Snowflake queries.
+- Grounded retrieval reuses run-scoped prefetch context to avoid repeating the same Snowflake fetches in a single analysis run.
 - Rollback toggle: set `ADOPTIQ_ASK_AI_V2=0` to force legacy Ask AI behavior.
 
 **To quit:** Use **AdoptIQ → Quit AdoptIQ** from the menu bar (or ⌘Q). Closing only the terminal window may leave the app running in the background.

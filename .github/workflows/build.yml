@@ -139,5 +139,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: AdoptIQ-Windows-v${{ env.ADOPTIQ_VERSION }}-build${{ env.ADOPTIQ_BUILD }}
-          path: OUTBOX/AdoptIQ.exe
+          path: |
+            OUTBOX/AdoptIQ.exe
+            OUTBOX/README.md
+            OUTBOX/build_info.txt
           if-no-files-found: error

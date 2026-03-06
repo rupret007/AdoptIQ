@@ -636,6 +636,69 @@ const AnalysisFormManager = (() => {
         }
     };
     
+    // Stores the latest validation failures for user feedback.
+    let lastValidationIssues = [];
+
+    const getFieldFriendlyName = (field) => {
+        if (!field) return 'Required field';
+        const directLabel = field.id ? document.querySelector(`label[for="${field.id}"]`) : null;
+        if (directLabel) {
+            return directLabel.textContent.replace(/\s+/g, ' ').trim();
+        }
+        if (field.name === 'days') return 'Analysis Time Range';
+        if (field.name === 'manager') return 'Select Manager';
+        if (field.name === 'technology') return 'Technology Focus';
+        if (field.name === 'customer_name') return 'Customer Name';
+        if (field.name === 'csone_file') return 'CSOne Excel File';
+        return field.name || 'Required field';
+    };
+
+    const isFieldActiveForValidation = (field) => {
+        if (!field) return false;
+        if (field.disabled) return false;
+        if (field.type === 'hidden' && !field.required) return false;
+        if (!field.checkValidity || typeof field.checkValidity !== 'function') return false;
+
+        const isVisible = !!(
+            field.offsetParent ||
+            field.getClientRects().length ||
+            field === document.activeElement
+        );
+        return isVisible;
+    };
+
+    const syncReportTypeRequirements = () => {
+        const selectedType = document.querySelector('input[name="report_type"]:checked')?.value || 'comprehensive';
+        const customerNameSection = document.getElementById('customer-name-section');
+        const customerNameInput = document.getElementById('customer_name');
+        const managerSection = document.getElementById('manager-section');
+        const managerSelect = document.querySelector('select[name="manager"]');
+
+        if (!customerNameInput || !managerSelect || !customerNameSection || !managerSection) {
+            return;
+        }
+
+        if (selectedType === 'renewal') {
+            customerNameSection.style.display = 'block';
+            customerNameInput.required = true;
+            managerSection.style.display = 'none';
+            managerSelect.required = false;
+            managerSelect.value = '';
+        } else if (selectedType === 'renewal_portfolio') {
+            customerNameSection.style.display = 'none';
+            customerNameInput.required = false;
+            customerNameInput.value = '';
+            managerSection.style.display = 'block';
+            managerSelect.required = true;
+        } else {
+            customerNameSection.style.display = 'none';
+            customerNameInput.required = false;
+            customerNameInput.value = '';
+            managerSection.style.display = 'block';
+            managerSelect.required = true;
+        }
+    };
+
     /**
      * Enhanced field validation with accessibility
      * @param {HTMLElement} field - The form field to validate
@@ -669,10 +732,14 @@ const AnalysisFormManager = (() => {
         
         let isValid = true;
         let firstInvalidField = null;
+        lastValidationIssues = [];
         
-        elements.formControls.forEach(control => {
+        const activeControls = Array.from(elements.formControls).filter(isFieldActiveForValidation);
+
+        activeControls.forEach(control => {
             if (!validateField(control)) {
                 isValid = false;
+                lastValidationIssues.push(getFieldFriendlyName(control));
                 if (!firstInvalidField) {
                     firstInvalidField = control;
                 }
@@ -836,9 +903,14 @@ const AnalysisFormManager = (() => {
         }
         
         // Validate form
+        syncReportTypeRequirements();
+        checkSubscriptionFieldStates();
         const isValid = validateForm();
         if (!isValid) {
-            showNotification('Please fix the errors above before submitting.', 'error');
+            const uniqueIssues = [...new Set(lastValidationIssues)].slice(0, 2);
+            const details = uniqueIssues.length ? ` (${uniqueIssues.join(', ')})` : '';
+            console.warn('Validation blocked submission. Invalid fields:', [...new Set(lastValidationIssues)]);
+            showNotification(`Please fix the errors above before submitting${details}.`, 'error');
             return;
         }
         
@@ -1198,53 +1270,15 @@ const AnalysisFormManager = (() => {
      */
     const setupReportTypeHandling = () => {
         const reportTypeRadios = document.querySelectorAll('input[name="report_type"]');
-        const customerNameSection = document.getElementById('customer-name-section');
-        const customerNameInput = document.getElementById('customer_name');
-        const managerSection = document.getElementById('manager-section');
-        const managerSelect = document.querySelector('select[name="manager"]');
-        
-        const updateFieldsForRenewalType = (renewalType) => {
-            if (renewalType === 'renewal') {
-                // Single customer renewal: show customer name, hide manager
-                customerNameSection.style.display = 'block';
-                customerNameInput.required = true;
-                managerSection.style.display = 'none';
-                if (managerSelect) {
-                    managerSelect.required = false;
-                    managerSelect.value = '';
-                }
-            } else if (renewalType === 'renewal_portfolio') {
-                // Portfolio renewal: show manager, hide customer name
-                customerNameSection.style.display = 'none';
-                customerNameInput.required = false;
-                customerNameInput.value = '';
-                managerSection.style.display = 'block';
-                if (managerSelect) {
-                    managerSelect.required = true;
-                }
-            } else {
-                // Other report types: show manager, hide customer name
-                customerNameSection.style.display = 'none';
-                customerNameInput.required = false;
-                customerNameInput.value = '';
-                managerSection.style.display = 'block';
-                if (managerSelect) {
-                    managerSelect.required = true;
-                }
-            }
-        };
         
         reportTypeRadios.forEach(radio => {
             radio.addEventListener('change', function() {
-                updateFieldsForRenewalType(this.value);
+                syncReportTypeRequirements();
             });
         });
         
         // Initialize on page load
-        const selectedType = document.querySelector('input[name="report_type"]:checked');
-        if (selectedType) {
-            updateFieldsForRenewalType(selectedType.value);
-        }
+        syncReportTypeRequirements();
     };
     
     /**

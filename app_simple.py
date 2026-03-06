@@ -194,6 +194,7 @@ from adoptiq_backend import (
 from compact_report_formatter import calculate_renewal_risk_scores
 from advanced_renewal_analyzer import AdvancedRenewalAnalyzer, generate_advanced_renewal_analysis
 from data_normalization import (
+    ACCOUNT_COLUMN_CANDIDATES,
     add_case_lifecycle_fields,
     build_customer_lookup,
     detect_bems_mask,
@@ -201,8 +202,9 @@ from data_normalization import (
     extract_bems_ids_from_text,
     normalize_customer_name,
 )
-from risk_scoring import compute_customer_risk_profile
+from risk_scoring import compute_customer_risk_profile, compute_portfolio_risk_summary
 from report_consistency import validate_report_consistency
+from report_utils import format_inline_source
 from snowflake_prefetch import AnalysisRunContext, prefetch_comprehensive, prefetch_ask_ai
 from ask_ai_grounded import (
     AskAIRequest,
@@ -273,6 +275,159 @@ def validate_days_input(days: int) -> tuple[bool, str]:
         return False, "Days must be between 1 and 365"
     
     return True, "Valid"
+
+
+def _ensure_inline_source_claim(text: Any, metric_name: str = "Derived Metric", fields: List[str] = None) -> str:
+    claim = str(text or "").strip()
+    if not claim:
+        return ""
+    if re.search(r"\[\s*source\s*:", claim, flags=re.IGNORECASE):
+        return claim
+    return f"{claim} {format_inline_source(metric_name, fields=fields or [])}"
+
+
+def _normalized_account_ids(df: pd.DataFrame) -> List[str]:
+    if df is None or df.empty or "ACCOUNT_ID_C" not in df.columns:
+        return []
+    values = (
+        df["ACCOUNT_ID_C"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+    values = values[(values != "") & (values.str.lower() != "none")]
+    return sorted(set(values.tolist()))
+
+
+def _normalize_account_id_for_parity(value: Any) -> str:
+    token = str(value or "").strip().upper()
+    if not token or token in {"NONE", "NAN", "NULL"}:
+        return ""
+    return token
+
+
+def _account_tokens_for_parity(values: List[Any]) -> tuple[set[str], set[str]]:
+    exact: set[str] = set()
+    sf15: set[str] = set()
+    for value in values or []:
+        token = _normalize_account_id_for_parity(value)
+        if not token:
+            continue
+        exact.add(token)
+        if len(token) >= 15:
+            sf15.add(token[:15])
+    return exact, sf15
+
+
+def _log_customer_pulse_parity(team_subs_df: pd.DataFrame, pulse_df: pd.DataFrame, scope_label: str) -> None:
+    if pulse_df is None or pulse_df.empty:
+        logger.info(f"[[PULSE_PARITY]] {scope_label}: no customer pulse rows returned")
+        return
+    expected_ids_raw = _normalized_account_ids(team_subs_df)
+    expected_exact, expected_sf15 = _account_tokens_for_parity(expected_ids_raw)
+    pulse_acct_col = next((c for c in ACCOUNT_COLUMN_CANDIDATES if c in pulse_df.columns), None)
+    if not pulse_acct_col:
+        logger.warning(f"[[PULSE_PARITY]] {scope_label}: pulse data missing account ID column")
+        return
+    backfill_mask = pd.Series([False] * len(pulse_df), index=pulse_df.index)
+    if "PULSE_BACKFILL" in pulse_df.columns:
+        backfill_mask = (
+            pulse_df["PULSE_BACKFILL"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .isin({"1", "true", "yes", "on"})
+        )
+
+    in_window_df = pulse_df[~backfill_mask]
+    backfill_df = pulse_df[backfill_mask]
+
+    observed_total_exact, observed_total_sf15 = _account_tokens_for_parity(
+        pulse_df[pulse_acct_col].dropna().astype(str).tolist()
+    )
+    observed_window_exact, observed_window_sf15 = _account_tokens_for_parity(
+        in_window_df[pulse_acct_col].dropna().astype(str).tolist()
+    )
+    observed_backfill_exact, observed_backfill_sf15 = _account_tokens_for_parity(
+        backfill_df[pulse_acct_col].dropna().astype(str).tolist()
+    )
+
+    matched_window_exact = expected_exact & observed_window_exact
+    matched_window_sf15 = {
+        token for token in (expected_exact - matched_window_exact)
+        if len(token) >= 15 and token[:15] in observed_window_sf15
+    }
+    matched_window_total = matched_window_exact | matched_window_sf15
+
+    remaining_after_window = expected_exact - matched_window_total
+    matched_backfill_exact = remaining_after_window & observed_backfill_exact
+    matched_backfill_sf15 = {
+        token for token in (remaining_after_window - matched_backfill_exact)
+        if len(token) >= 15 and token[:15] in observed_backfill_sf15
+    }
+    matched_backfill_total = matched_backfill_exact | matched_backfill_sf15
+    matched_total = matched_window_total | matched_backfill_total
+
+    in_window_coverage = (len(matched_window_total) / len(expected_exact)) if expected_exact else 1.0
+    total_coverage = (len(matched_total) / len(expected_exact)) if expected_exact else 1.0
+    missing_expected = sorted(expected_exact - matched_total)
+    unexpected_observed = sorted(
+        token for token in observed_total_exact
+        if token not in expected_exact and (len(token) < 15 or token[:15] not in expected_sf15)
+    )
+    logger.info(
+        "[[PULSE_PARITY]] %s: expected_accounts=%d observed_accounts=%d in_window_matched=%d backfill_matched=%d total_matched=%d in_window_coverage=%.2f total_coverage=%.2f (sf15_matches=%d)",
+        scope_label,
+        len(expected_exact),
+        len(observed_total_exact),
+        len(matched_window_total),
+        len(matched_backfill_total),
+        len(matched_total),
+        in_window_coverage,
+        total_coverage,
+        len(matched_window_sf15) + len(matched_backfill_sf15),
+    )
+    if total_coverage < 0.5:
+        logger.warning(
+            "[[PULSE_PARITY]] %s: low pulse-account total coverage %.2f (in_window=%.2f); missing_expected_sample=%s unexpected_observed_sample=%s",
+            scope_label,
+            total_coverage,
+            in_window_coverage,
+            missing_expected[:5],
+            unexpected_observed[:5],
+        )
+    elif in_window_coverage < 0.5 and len(matched_backfill_total) > 0:
+        logger.warning(
+            "[[PULSE_PARITY]] %s: in-window pulse coverage %.2f is low but backfill increased total coverage to %.2f; review data freshness before treating as true recent sentiment",
+            scope_label,
+            in_window_coverage,
+            total_coverage,
+        )
+
+
+def _apply_subtech_scope_fallback(ab_df: pd.DataFrame, technology: str) -> pd.DataFrame:
+    if ab_df is None or ab_df.empty or "sub_technology" not in ab_df.columns:
+        return ab_df
+    canonical = str(technology or "").strip()
+    if canonical == "Contact Center":
+        canonical = "All Contact Center"
+    allowed = {
+        "All Contact Center",
+        "Webex Contact Center",
+        "Webex Contact Center Enterprise",
+        "Cisco UCCE",
+        "Cisco UCCX",
+    }
+    if canonical not in allowed:
+        return ab_df
+    normalized = ab_df.copy()
+    unknown_mask = normalized["sub_technology"].fillna("").astype(str).str.contains(
+        r"^unknown$|other/unknown", case=False, regex=True
+    )
+    if unknown_mask.any():
+        normalized.loc[unknown_mask, "sub_technology"] = canonical
+    return normalized
 
 app = Flask(
     __name__,
@@ -1231,8 +1386,30 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
                     defects['defect_by_customer'][customer] = []
                 defects['defect_by_customer'][customer].append(defect_id_norm)
     
+    # Normalize customer keys and guarantee linkage for every extracted ID.
+    normalized_linkage: Dict[str, set[str]] = {}
+    for customer_name, defect_ids in defects['defect_by_customer'].items():
+        customer_key = normalize_customer_name(customer_name)
+        bucket = normalized_linkage.setdefault(customer_key, set())
+        for defect_id in defect_ids or []:
+            token = str(defect_id or "").strip().upper()
+            if token:
+                bucket.add(token)
+
     # Calculate totals (CSC + BEMS combined)
     all_ids = defects['csc_ids'] | defects['bems_ids']
+    linked_ids = set()
+    for values in normalized_linkage.values():
+        linked_ids.update(values)
+    unlinked_ids = all_ids - linked_ids
+    if unlinked_ids:
+        unknown_bucket = normalized_linkage.setdefault("Unknown", set())
+        unknown_bucket.update(unlinked_ids)
+
+    defects['defect_by_customer'] = {
+        customer: sorted(ids)
+        for customer, ids in normalized_linkage.items()
+    }
     defects['total_defects'] = len(all_ids)
     defects['bst_defects'] = sorted(list(all_ids))
     defects['total_cases_with_defects'] = len(defects['defect_cases'])
@@ -3400,7 +3577,7 @@ def _categorize_technology(product_name: str) -> str:
     elif any(keyword in product_lower for keyword in ['cisco uccx', 'uccx', 'unified contact center express']):
         return 'Cisco UCCX'
     elif any(keyword in product_lower for keyword in ['contact center']):
-        return 'Contact Center'
+        return 'All Contact Center'
     elif any(keyword in product_lower for keyword in ['messaging', 'teams']):
         return 'Messaging'
     elif any(keyword in product_lower for keyword in ['device', 'endpoint', 'desk', 'phone', 'deskpro', 'desk pro']):
@@ -5505,6 +5682,15 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         case_para.add_run('Source: Snowflake SUPPORT_CASES (no CSOne file provided). BEMS are only from CSOne (TAC).\n').italic = True
     else:
         case_para.add_run('Source: CSOne (TAC case data).\n').italic = True
+    doc.add_paragraph('TAC Case Type Breakdown', style='Heading 3')
+    split_table = doc.add_table(rows=3, cols=2)
+    split_table.style = 'Light Grid Accent 1'
+    split_table.rows[0].cells[0].text = 'Case Type'
+    split_table.rows[0].cells[1].text = 'Count'
+    split_table.rows[1].cells[0].text = 'Break-fix / Technical'
+    split_table.rows[1].cells[1].text = str(break_fix_total)
+    split_table.rows[2].cells[0].text = 'Provisioning Request'
+    split_table.rows[2].cells[1].text = str(provisioning_total)
     
     customer_csone_display = add_case_lifecycle_fields(customer_csone) if customer_csone is not None and not customer_csone.empty else customer_csone
     if customer_csone_display is not None and not customer_csone_display.empty:
@@ -5725,6 +5911,18 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                 for cust in sorted(defect_by_customer.keys()):
                     ids = sorted(set(defect_by_customer[cust]))
                     defect_para.add_run(f'  • Customer: {cust} — Defect IDs: {", ".join([f"[{x}]" for x in ids])}\n')
+            if defect_by_customer:
+                doc.add_paragraph('Defect-to-Customer Linkage', style='Heading 3')
+                defect_table = doc.add_table(rows=len(defect_by_customer) + 1, cols=3)
+                defect_table.style = 'Light Grid Accent 1'
+                defect_table.rows[0].cells[0].text = 'Customer Name'
+                defect_table.rows[0].cells[1].text = 'Defect Count'
+                defect_table.rows[0].cells[2].text = 'Defect IDs'
+                for idx, cust in enumerate(sorted(defect_by_customer.keys()), 1):
+                    ids = sorted(set(defect_by_customer.get(cust) or []))
+                    defect_table.rows[idx].cells[0].text = str(cust)
+                    defect_table.rows[idx].cells[1].text = str(len(ids))
+                    defect_table.rows[idx].cells[2].text = ", ".join([f"[{x}]" for x in ids])
         
         # External bugs from help.webex.com
         if ext_bugs:
@@ -7298,7 +7496,14 @@ def run_comprehensive_analysis(analysis_id):
             logger.info(f"[[FILE]] No CSOne file provided - proceeding with Adoption Barriers data only")
             csone_df_raw = pd.DataFrame()
         csone_df_prepared = _prepare_csone(csone_df_raw, team_subs_df)
-        csone_df = _apply_scope_filter_csone(csone_df_prepared, tech, days, sub_ids, team_customer_names)
+        csone_df = _apply_scope_filter_csone(
+            csone_df_prepared,
+            tech,
+            days,
+            sub_ids,
+            team_customer_names,
+            include_all_cases=True,
+        )
         
         # Update CSOne import status with results (thread-safe)
         if not csone_df.empty:
@@ -7308,9 +7513,14 @@ def run_comprehensive_analysis(analysis_id):
             })
             logger.info(f"[[OK]] CSOne data processed successfully: {len(csone_df)} cases")
         else:
+            raw_count = len(csone_df_raw) if csone_df_raw is not None else 0
+            prepared_count = len(csone_df_prepared) if csone_df_prepared is not None else 0
             update_analysis_status(analysis_id, {
                 'csone_import_status': 'warning',
-                'csone_import_message': '️ CSOne data processed but no cases found in scope'
+                'csone_import_message': (
+                    f'️ CSOne data loaded ({raw_count} raw / {prepared_count} prepared) '
+                    f'but no cases matched team + technology scope'
+                )
             })
             logger.warning(f"[[WARNING]] CSOne data processed but no cases found in scope")
         
@@ -7362,10 +7572,15 @@ def run_comprehensive_analysis(analysis_id):
         # Validate data sources before report generation
         logger.info(f"[[VALIDATION]] Validating data sources for comprehensive report...")
         try:
-            # Single-customer comprehensive reports should not fail solely because scoped AB/CSOne is empty.
-            validation_required_sources = ['snowflake', 'team_subscriptions'] if single_customer_mode else None
+            # CSOne is optional for comprehensive reports; continue with warning if scoped TAC cases are zero.
+            # Single-customer mode also treats adoption barriers as optional.
+            validation_required_sources = (
+                ['snowflake', 'team_subscriptions']
+                if single_customer_mode
+                else ['snowflake', 'team_subscriptions', 'adoption_barriers']
+            )
             if validation_required_sources:
-                logger.info("[[VALIDATION]] Comprehensive single-customer mode: treating adoption barriers and CSOne as optional")
+                logger.info("[[VALIDATION]] Comprehensive mode: CSOne is optional; validating required core sources only")
             raise_validation_error_if_invalid(
                 report_type='comprehensive',
                 snowflake_ctx=ctx,
@@ -7477,19 +7692,22 @@ def run_comprehensive_analysis(analysis_id):
                 ext_incidents=ext_incidents,
             )
 
-        high_risk_customers = sum(1 for p in risk_profiles.values() if p["risk_band"] in {"HIGH", "CRITICAL"})
-        medium_risk_customers = sum(1 for p in risk_profiles.values() if p["risk_band"] == "MEDIUM")
-        low_risk_customers = sum(1 for p in risk_profiles.values() if p["risk_band"] == "LOW")
-        healthy_customers = sum(1 for p in risk_profiles.values() if p["risk_band"] == "HEALTHY")
+        portfolio_risk_summary = compute_portfolio_risk_summary(risk_profiles)
+        high_risk_customers = int(portfolio_risk_summary.get("high_risk_customers", 0))
+        medium_risk_customers = int(portfolio_risk_summary.get("medium_risk_customers", 0))
+        low_risk_customers = int(portfolio_risk_summary.get("low_risk_customers", 0))
+        healthy_customers = int(portfolio_risk_summary.get("healthy_customers", 0))
 
         priority_col = "case_priority_norm" if "case_priority_norm" in _cs_norm.columns else ("Severity" if "Severity" in _cs_norm.columns else None)
         if priority_col:
-            p1_cases = len(_cs_norm[_cs_norm[priority_col].astype(str).str.contains(r"\bP1\b|Critical", case=False, na=False)])
-            p2_cases = len(_cs_norm[_cs_norm[priority_col].astype(str).str.contains(r"\bP2\b|High", case=False, na=False)])
-            p3_cases = len(_cs_norm[_cs_norm[priority_col].astype(str).str.contains(r"\bP3\b|Medium", case=False, na=False)])
-            p4_cases = len(_cs_norm[_cs_norm[priority_col].astype(str).str.contains(r"\bP4\b|Low", case=False, na=False)])
+            sev_series = _cs_norm[priority_col].fillna("").astype(str).str.upper().str.strip()
+            p1_cases = int((sev_series == "P1").sum())
+            p2_cases = int((sev_series == "P2").sum())
+            p3_cases = int((sev_series == "P3").sum())
+            p4_cases = int((sev_series == "P4").sum())
+            unknown_priority_cases = int((sev_series == "UNKNOWN").sum())
         else:
-            p1_cases = p2_cases = p3_cases = p4_cases = 0
+            p1_cases = p2_cases = p3_cases = p4_cases = unknown_priority_cases = 0
 
         break_fix_count = int((_cs_norm["case_type_class"] == "break_fix_technical").sum()) if "case_type_class" in _cs_norm.columns else 0
         provisioning_count = int((_cs_norm["case_type_class"] == "provisioning_request").sum()) if "case_type_class" in _cs_norm.columns else 0
@@ -7506,6 +7724,9 @@ def run_comprehensive_analysis(analysis_id):
             'p2_cases': p2_cases,
             'p3_cases': p3_cases,
             'p4_cases': p4_cases,
+            'critical_p1': p1_cases,
+            'high_p2': p2_cases,
+            'unknown_priority_cases': unknown_priority_cases,
             'break_fix_cases': break_fix_count,
             'provisioning_cases': provisioning_count,
             'health_score': 'B' if healthy_customers >= high_risk_customers else 'C',
@@ -7517,14 +7738,17 @@ def run_comprehensive_analysis(analysis_id):
                 factual_claims.extend(profile.get("key_findings", []) or [])
                 factual_claims.extend(profile.get("risk_factors", []) or [])
         consistency_unknown_threshold = 1.01 if status.get('tech') == 'All Contact Center' else 0.60
+        strict_consistency = str(os.getenv("ADOPTIQ_STRICT_CONSISTENCY", "0")).strip().lower() in {"1", "true", "yes", "on"}
         consistency = validate_report_consistency(
             _ab,
             _cs_norm,
             portfolio_metrics=portfolio_metrics,
             risk_data=risk_profiles,
+            defects=software_defects,
             factual_claims=factual_claims,
             customer_universe=all_customers_comprehensive,
             max_other_unknown_ratio=consistency_unknown_threshold,
+            strict_mode=strict_consistency,
         )
         if not consistency["is_valid"]:
             logger.error(f"[[CONSISTENCY]] Errors: {consistency['errors']}")
@@ -7615,10 +7839,11 @@ def run_comprehensive_analysis(analysis_id):
         # This ensures these variables are always available for customer deep dives below
         # These filtered datasets are used both in portfolio analysis AND customer-specific analysis
         logger.info(f"[[FILTER]] Filtering CSConsole data by technology: {status['tech']}")
-        filtered_action_plans = _filter_csconsole_data_by_technology(csconsole_action_plans, status['tech'], team_customer_names)
-        filtered_customer_pulse = _filter_csconsole_data_by_technology(csconsole_customer_pulse, status['tech'], team_customer_names)
-        filtered_success_priorities = _filter_csconsole_data_by_technology(csconsole_success_priorities, status['tech'], team_customer_names)
-        filtered_adoption_barriers = _filter_csconsole_data_by_technology(csconsole_adoption_barriers, status['tech'], team_customer_names)
+        filtered_action_plans = _filter_csconsole_data_by_technology(csconsole_action_plans, status['tech'], team_customer_names, account_ids=account_ids)
+        filtered_customer_pulse = _filter_csconsole_data_by_technology(csconsole_customer_pulse, status['tech'], team_customer_names, account_ids=account_ids)
+        filtered_success_priorities = _filter_csconsole_data_by_technology(csconsole_success_priorities, status['tech'], team_customer_names, account_ids=account_ids)
+        filtered_adoption_barriers = _filter_csconsole_data_by_technology(csconsole_adoption_barriers, status['tech'], team_customer_names, account_ids=account_ids)
+        _log_customer_pulse_parity(team_subs_df, filtered_customer_pulse, f"{status['manager']}::{status['tech']}")
         
         logger.info(f"[[FILTER]] CSConsole data after filtering - Action Plans: {len(filtered_action_plans)}, "
                     f"Customer Pulse: {len(filtered_customer_pulse)}, "

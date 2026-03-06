@@ -18,6 +18,7 @@ from typing import Dict, List, Any, Optional
 import logging
 import re
 from data_normalization import add_case_lifecycle_fields, detect_bems_mask, extract_bems_ids_from_row
+from report_consistency import validate_report_consistency
 from report_utils import format_inline_source, format_metric_with_source
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,19 @@ SUCCESS_GREEN = RGBColor(0x28, 0xA7, 0x45)
 WARNING_ORANGE = RGBColor(0xFF, 0x8C, 0x00)
 DANGER_RED = RGBColor(0xDC, 0x14, 0x3C)
 CRITICAL_RED = RGBColor(0x8B, 0x00, 0x00)
+
+
+def _ensure_inline_source_claim(
+    text: Any,
+    metric_name: str = "Derived Metric",
+    fields: Optional[List[str]] = None,
+) -> str:
+    claim = str(text or "").strip()
+    if not claim:
+        return ""
+    if re.search(r"\[\s*source\s*:", claim, flags=re.IGNORECASE):
+        return claim
+    return f"{claim} {format_inline_source(metric_name, fields=fields or [])}"
 
 
 class ExecutiveIntelligenceFormatter:
@@ -291,6 +305,14 @@ class ExecutiveIntelligenceFormatter:
         else:
             para = self.doc.add_paragraph()
             para.add_run("AI-generated insights are being processed. Please check back shortly.")
+        provenance = self.doc.add_paragraph()
+        provenance.add_run(
+            "Severity provenance: TAC severity comes from CSOne case priority/severity fields; "
+            "Customer Pulse uses CSConsole pulse ratings (Red/Amber/Green) and recency, not TAC severity."
+        )
+        provenance.add_run(
+            f" {format_inline_source('Derived Metric', fields=['Severity', 'PULSE_RATING__C', 'CREATEDDATE'])}"
+        )
     
     def _parse_and_add_content(self, text: str):
         """Parse text content and add to document with proper formatting"""
@@ -322,7 +344,13 @@ class ExecutiveIntelligenceFormatter:
                 elif line.startswith(('•', '-', '*')):
                     bullet_text = line.lstrip('•-* ')
                     para = self.doc.add_paragraph(style='List Bullet')
-                    run = para.add_run(bullet_text)
+                    run = para.add_run(
+                        _ensure_inline_source_claim(
+                            bullet_text,
+                            "Derived Metric",
+                            fields=["customer_name", "Case #", "ID"],
+                        )
+                    )
                     run.font.name = 'Segoe UI'
                     run.font.size = Pt(11)
                 
@@ -330,14 +358,26 @@ class ExecutiveIntelligenceFormatter:
                 elif re.match(r'^\d+[\.\)]\s', line):
                     number_text = re.sub(r'^\d+[\.\)]\s*', '', line)
                     para = self.doc.add_paragraph(style='List Number')
-                    run = para.add_run(number_text)
+                    run = para.add_run(
+                        _ensure_inline_source_claim(
+                            number_text,
+                            "Derived Metric",
+                            fields=["customer_name", "Case #", "ID"],
+                        )
+                    )
                     run.font.name = 'Segoe UI'
                     run.font.size = Pt(11)
                 
                 # Regular paragraph
                 else:
                     para = self.doc.add_paragraph()
-                    run = para.add_run(line)
+                    run = para.add_run(
+                        _ensure_inline_source_claim(
+                            line,
+                            "Derived Metric",
+                            fields=["customer_name", "Case #", "ID"],
+                        )
+                    )
                     run.font.name = 'Segoe UI'
                     run.font.size = Pt(11)
     
@@ -404,12 +444,18 @@ class ExecutiveIntelligenceFormatter:
         total_bems = 0
         bems_by_customer = {}
         bems_ids = []
+        break_fix_total = 0
+        provisioning_total = 0
+        csone_norm = pd.DataFrame()
         
         if csone_data is not None and not csone_data.empty:
             csone_norm = add_case_lifecycle_fields(csone_data)
             bems_mask = detect_bems_mask(csone_norm)
             bems_cases = csone_norm[bems_mask]
             total_bems = len(bems_cases)
+            if 'case_type_class' in csone_norm.columns:
+                break_fix_total = int((csone_norm['case_type_class'] == 'break_fix_technical').sum())
+                provisioning_total = int((csone_norm['case_type_class'] == 'provisioning_request').sum())
             
             # Group by customer
             if not bems_cases.empty and 'customer_name' in bems_cases.columns:
@@ -431,6 +477,36 @@ class ExecutiveIntelligenceFormatter:
             f" {format_inline_source('BEMS Escalations', fields=['Transaction ID', 'bemscsc_refs'])}"
         )
         metrics_para.add_run(f'\n• Customers Affected: {len(bems_by_customer)}\n')
+        metrics_para.add_run(
+            f"• TAC Case Type Split: break-fix/technical={break_fix_total}, provisioning requests={provisioning_total} "
+            f"{format_inline_source('Support Cases (TAC)', fields=['Case #', 'Title', 'Status'])}\n"
+        )
+        self.doc.add_paragraph('TAC Case Type Breakdown', style='Heading 3')
+        split_table = self.doc.add_table(rows=3, cols=2)
+        split_table.style = 'Light Grid Accent 1'
+        split_table.rows[0].cells[0].text = "Case Type"
+        split_table.rows[0].cells[1].text = "Count"
+        split_table.rows[1].cells[0].text = "Break-fix / Technical"
+        split_table.rows[1].cells[1].text = str(break_fix_total)
+        split_table.rows[2].cells[0].text = "Provisioning Request"
+        split_table.rows[2].cells[1].text = str(provisioning_total)
+
+        if not csone_norm.empty:
+            self.doc.add_paragraph('TAC Lifecycle Snapshot (Opened / Closed / Days Open)', style='Heading 3')
+            sample = csone_norm.head(20)
+            lifecycle_table = self.doc.add_table(rows=len(sample) + 1, cols=7)
+            lifecycle_table.style = 'Light Grid Accent 1'
+            headers = ["Case #", "Customer", "Status", "Opened", "Closed", "Days Open", "Type"]
+            for idx, header_text in enumerate(headers):
+                lifecycle_table.rows[0].cells[idx].text = header_text
+            for ridx, (_, row) in enumerate(sample.iterrows(), 1):
+                lifecycle_table.rows[ridx].cells[0].text = str(row.get('Case #', row.get('SR Number', 'N/A')))
+                lifecycle_table.rows[ridx].cells[1].text = str(row.get('customer_name', row.get('Customer Name', 'N/A')))
+                lifecycle_table.rows[ridx].cells[2].text = str(row.get('case_status_norm', row.get('Status', 'N/A')))
+                lifecycle_table.rows[ridx].cells[3].text = str(row.get('open_date', row.get('Date/Time Opened', 'N/A')))
+                lifecycle_table.rows[ridx].cells[4].text = str(row.get('closed_date', 'N/A'))
+                lifecycle_table.rows[ridx].cells[5].text = str(row.get('open_age_days', 'N/A'))
+                lifecycle_table.rows[ridx].cells[6].text = str(row.get('case_type_class', 'unknown'))
         
         if bems_ids:
             metrics_para.add_run(f'• BEMS IDs: ')
@@ -470,11 +546,21 @@ class ExecutiveIntelligenceFormatter:
         defect_by_customer = software_defects.get('defect_by_customer', {})
         if defect_by_customer:
             self.doc.add_paragraph()
-            for customer, defects in defect_by_customer.items():
-                defect_list = sorted(set(defects))
-                customer_para = self.doc.add_paragraph()
-                customer_para.add_run(f'• {customer}: ').bold = True
-                customer_para.add_run(', '.join([f'[{d}]' for d in defect_list]))
+            table = self.doc.add_table(rows=len(defect_by_customer) + 1, cols=3)
+            table.style = 'Light Grid Accent 1'
+            headers = table.rows[0].cells
+            headers[0].text = "Customer Name"
+            headers[1].text = "Defect Count"
+            headers[2].text = "Defect IDs"
+            for cell in headers:
+                if cell.paragraphs and cell.paragraphs[0].runs:
+                    cell.paragraphs[0].runs[0].bold = True
+            for idx, (customer, defects) in enumerate(sorted(defect_by_customer.items()), 1):
+                defect_list = sorted(set(defects or []))
+                row = table.rows[idx].cells
+                row[0].text = str(customer)
+                row[1].text = str(len(defect_list))
+                row[2].text = ", ".join([f"[{d}]" for d in defect_list])
     
     def add_psirt_vulnerabilities_section(self, psirt_vulns: Dict):
         """Add PSIRT Vulnerabilities section - CVEs and PSIRT advisories extracted from data"""
@@ -737,6 +823,46 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
     
     # Add Data Citations section (NEW - enables data verification)
     formatter.add_data_citations_section(ab_data, csone_data)
+
+    # Enforce source-backed factual claims before saving.
+    factual_claims: List[str] = []
+    if isinstance(risk_scores, dict):
+        for profile in risk_scores.values():
+            if isinstance(profile, dict):
+                factual_claims.extend(profile.get("risk_factors", []) or [])
+                factual_claims.extend(profile.get("key_findings", []) or [])
+    ai_claim = ""
+    if isinstance(ai_insights, dict):
+        ai_claim = (
+            ai_insights.get("executive_summary")
+            or (ai_insights.get("portfolio_summary") or {}).get("executive_summary")
+            or ai_insights.get("raw_response")
+            or ""
+        )
+    elif isinstance(ai_insights, str):
+        ai_claim = ai_insights
+    if ai_claim:
+        factual_claims.append(ai_claim)
+    factual_claims = [
+        _ensure_inline_source_claim(
+            claim,
+            "Derived Metric",
+            fields=["customer_name", "Case #", "ID", "Severity", "Status"],
+        )
+        for claim in factual_claims
+        if str(claim or "").strip()
+    ]
+    consistency = validate_report_consistency(
+        ab_data if ab_data is not None else pd.DataFrame(),
+        add_case_lifecycle_fields(csone_data if csone_data is not None else pd.DataFrame()),
+        risk_data=risk_scores if isinstance(risk_scores, dict) else {},
+        defects=software_defects if isinstance(software_defects, dict) else {},
+        factual_claims=factual_claims,
+    )
+    if not consistency["is_valid"]:
+        raise ValueError(f"Executive consistency checks failed: {'; '.join(consistency['errors'])}")
+    if consistency["warnings"]:
+        logger.warning("[[CONSISTENCY]] Executive report warnings: %s", consistency["warnings"])
     
     # Save and return
     return formatter.save(output_path)

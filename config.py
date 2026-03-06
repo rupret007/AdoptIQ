@@ -191,6 +191,17 @@ class Config:
             r'contact\s*center\s*express'
         ],
     }
+
+    # Sub-technology normalization assists to reduce "Other/Unknown" leakage.
+    SUB_TECHNOLOGY_MAPPINGS = {
+        r"\bwebex\s*contact\s*center\s*enterprise\b|\bwxcc\s*enterprise\b|\bwebex\s*cce\b": "Webex Contact Center Enterprise",
+        r"\bwebex\s*contact\s*center\b|\bwxcc\b": "Webex Contact Center",
+        r"\bunified\s*contact\s*center\s*enterprise\b|\bucce\b": "Cisco UCCE",
+        r"\bunified\s*contact\s*center\s*express\b|\buccx\b": "Cisco UCCX",
+        r"\bwebex\s*calling\b|\bdedicated\s*instance\b|\bdi\b": "Webex Calling",
+        r"\bwebex\s*meetings?\b|\bwebex\s*messag(ing|e)\b|\bwebex\s*app\b|\bcollaboration\b": "Webex Meetings & Messaging",
+        r"\bcontact\s*center\s*software\b|\bcontact\s*center\b": "All Contact Center",
+    }
     
     # Official Categories
     OFFICIAL_CATEGORIES = {

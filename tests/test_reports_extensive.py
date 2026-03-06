@@ -16,6 +16,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import pandas as pd
 import pytest
 from datetime import datetime, timedelta
+from docx import Document
 
 
 def _make_ab_df(rows=None):
@@ -97,6 +98,22 @@ def test_simple_renewal_risk_calculation():
     )
     assert empty_result["renewal_risk_score"] >= 0
     assert any("adoption" in str(f).lower() for f in empty_result["key_findings"])
+
+
+def test_subtech_scope_fallback_relabels_unknown_contact_center_rows():
+    from app_simple import _apply_subtech_scope_fallback
+
+    df = pd.DataFrame(
+        [
+            {"sub_technology": "Other/Unknown"},
+            {"sub_technology": "Unknown"},
+            {"sub_technology": "Cisco UCCX"},
+        ]
+    )
+    out = _apply_subtech_scope_fallback(df, "Contact Center")
+    assert out.loc[0, "sub_technology"] == "All Contact Center"
+    assert out.loc[1, "sub_technology"] == "All Contact Center"
+    assert out.loc[2, "sub_technology"] == "Cisco UCCX"
 
 
 @pytest.mark.slow
@@ -197,6 +214,76 @@ def test_renewal_report_no_data():
 
 
 @pytest.mark.slow
+def test_renewal_report_includes_case_type_split_and_defect_linkage_table():
+    from app_simple import _create_simple_renewal_report
+
+    renewal_analysis = {
+        "renewal_risk_score": 55,
+        "renewal_risk_category": "HIGH",
+        "adoption_barriers_count": 1,
+        "support_cases_count": 2,
+        "break_fix_cases_count": 1,
+        "provisioning_cases_count": 1,
+        "bems_escalations_count": 1,
+        "support_cases_from_snowflake": False,
+        "key_findings": [],
+        "recommendations": [],
+        "risk_factors": [],
+    }
+    csone = pd.DataFrame(
+        [
+            {
+                "customer_name": "Acme Corp",
+                "SR Number": "TAC001",
+                "Title": "Break fix issue",
+                "Severity": "P1",
+                "Status": "Open",
+                "Transaction ID": "BEMS01916938",
+                "Date/Time Opened": (datetime.now() - timedelta(days=4)).isoformat(),
+            },
+            {
+                "customer_name": "Acme Corp",
+                "SR Number": "TAC002",
+                "Title": "Provisioning request",
+                "Severity": "P3",
+                "Status": "Closed",
+                "Transaction ID": "",
+                "Date/Time Opened": (datetime.now() - timedelta(days=8)).isoformat(),
+            },
+        ]
+    )
+    software_defects = {
+        "total_defects": 2,
+        "total_cases_with_defects": 2,
+        "defect_by_customer": {"Acme Corp": ["CSCaa11111", "CSCbb22222"]},
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        base = os.path.join(tmp, "renewal_case_type_defect_linkage")
+        path = _create_simple_renewal_report(
+            base_path=base,
+            customer_name="Acme Corp",
+            technology="All Contact Center",
+            days=90,
+            renewal_analysis=renewal_analysis,
+            customer_ab=_make_ab_df([{"customer_name": "Acme Corp", "SUBJECT_C": "Barrier", "SEVERITY_C": "High", "AB_STATUS_C": "Open", "ID": "AB01"}]),
+            customer_csone=csone,
+            software_defects=software_defects,
+            portfolio_mode=False,
+        )
+        doc = Document(path)
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert "TAC Case Type Breakdown" in text
+        assert "Defect-to-Customer Linkage" in text
+        table_headers = {
+            tuple(cell.text for cell in table.rows[0].cells)
+            for table in doc.tables
+            if table.rows
+        }
+        assert ("Case Type", "Count") in table_headers
+        assert ("Customer Name", "Defect Count", "Defect IDs") in table_headers
+
+
+@pytest.mark.slow
 def test_compact_report_formatter():
     from compact_report_formatter import create_compact_executive_report, calculate_renewal_risk_scores
     ab = _make_ab_df()
@@ -222,6 +309,51 @@ def test_compact_report_formatter():
         )
         assert os.path.exists(path)
         assert os.path.getsize(path) > 2000
+
+
+@pytest.mark.slow
+def test_compact_report_total_customers_consistent_between_dashboard_and_summary():
+    from compact_report_formatter import create_compact_executive_report
+
+    ab = pd.DataFrame(
+        [
+            {"customer_name": "Acme Corp", "SUBJECT_C": "Barrier 1", "SEVERITY_C": "High", "AB_STATUS_C": "Open", "ID": "AB001"},
+        ]
+    )
+    csone = pd.DataFrame(
+        [
+            {"customer_name": "Acme Corp", "SR Number": "TAC001", "Title": "Issue 1", "Severity": "P1", "Transaction ID": ""},
+            {"customer_name": "Beta Inc", "SR Number": "TAC002", "Title": "Issue 2", "Severity": "P2", "Transaction ID": ""},
+            {"customer_name": "Beta Inc", "SR Number": "TAC003", "Title": "Issue 3", "Severity": "P3", "Transaction ID": ""},
+        ]
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "compact_customer_parity.docx")
+        path = create_compact_executive_report(
+            analysis_id="test-parity",
+            manager="Jane Doe",
+            technology="All Contact Center",
+            days=90,
+            ab_data=ab,
+            csone_data=csone,
+            ai_insights={"executive_summary": "Portfolio summary"},
+            output_path=out,
+        )
+        doc = Document(path)
+        dashboard_table = next(
+            (
+                table
+                for table in doc.tables
+                if table.rows
+                and any("Total Customers" in cell.text for cell in table.rows[0].cells)
+            ),
+            None,
+        )
+        assert dashboard_table is not None
+        dashboard_values = [dashboard_table.rows[1].cells[i].text for i in range(5)]
+        assert dashboard_values[0] == "2"
+        full_text = "\n".join(p.text for p in doc.paragraphs)
+        assert "Total customers analyzed: 2" in full_text
 
 
 @pytest.mark.slow
@@ -482,6 +614,59 @@ def test_csconsole_filter_customer_names_supports_related_customer_column():
     filtered = _filter_csconsole_data_by_technology(df, "All", customer_names=["Acme Corp"])
     assert len(filtered) == 1
     assert filtered.iloc[0]["RELATED_CUSTOMER__C"] == "Acme Corp"
+
+
+def test_csconsole_filter_customer_pulse_account_scope_fallback_uses_sf15():
+    from adoptiq_backend import _filter_csconsole_data_by_technology
+    df = pd.DataFrame(
+        [
+            {"ACCOUNT__C": "001ABCDEF123456", "BU_NAME": "", "TECHNOLOGY_C": "Webex Contact Center"},
+            {"ACCOUNT__C": "001ZZZDEF123456", "BU_NAME": "", "TECHNOLOGY_C": "Webex Contact Center"},
+        ]
+    )
+    filtered = _filter_csconsole_data_by_technology(
+        df,
+        "All Contact Center",
+        customer_names=["Does Not Match"],
+        account_ids=["001ABCDEF123456AAA"],
+    )
+    assert len(filtered) == 1
+    assert filtered.iloc[0]["ACCOUNT__C"] == "001ABCDEF123456"
+
+
+def test_csconsole_filter_tech_falls_back_to_account_scope_when_text_missing():
+    from adoptiq_backend import _filter_csconsole_data_by_technology
+    df = pd.DataFrame(
+        [
+            {"ACCOUNT__C": "001ABCDEF123456", "SUBJECT_C": "General customer pulse update"},
+            {"ACCOUNT__C": "001ZZZDEF123456", "SUBJECT_C": "General customer pulse update"},
+        ]
+    )
+    filtered = _filter_csconsole_data_by_technology(
+        df,
+        "Webex Contact Center",
+        account_ids=["001ABCDEF123456AAA"],
+    )
+    assert len(filtered) == 1
+    assert filtered.iloc[0]["ACCOUNT__C"] == "001ABCDEF123456"
+
+
+def test_csconsole_filter_account_scope_supports_account_column_variant():
+    from adoptiq_backend import _filter_csconsole_data_by_technology
+
+    df = pd.DataFrame(
+        [
+            {"ACCOUNT": "001ABCDEF123456", "SUBJECT_C": "General customer pulse update"},
+            {"ACCOUNT": "001ZZZDEF123456", "SUBJECT_C": "General customer pulse update"},
+        ]
+    )
+    filtered = _filter_csconsole_data_by_technology(
+        df,
+        "Webex Contact Center",
+        account_ids=["001ABCDEF123456AAA"],
+    )
+    assert len(filtered) == 1
+    assert filtered.iloc[0]["ACCOUNT"] == "001ABCDEF123456"
 
 
 def test_customer_activity_includes_csconsole_only_data():
