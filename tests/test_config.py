@@ -60,6 +60,10 @@ class TestConfigDefaults:
         for key in ('client_id', 'client_secret', 'app_key', 'model_name'):
             assert key in cc
 
+    def test_circuit_model_default(self):
+        expected = os.environ.get('CIRCUIT_MODEL_NAME', 'gpt-5-nano')
+        assert Config.CIRCUIT_CONFIG['model_name'] == expected
+
     def test_no_hardcoded_secrets_in_snowflake(self):
         """Snowflake config values should come from env, never hardcoded credentials."""
         sc = Config.SNOWFLAKE_CONFIG

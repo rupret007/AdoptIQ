@@ -3237,7 +3237,7 @@ class CircuitChatClient:
     OKTA_TOKEN_URL = "https://id.cisco.com/oauth2/default/v1/token"
     AZURE_ENDPOINT = "https://chat-ai.cisco.com"
 
-    def __init__(self, client_id: str, client_secret: str, app_key: str, model_name: str = "gpt-4o-mini"):
+    def __init__(self, client_id: str, client_secret: str, app_key: str, model_name: str = "gpt-5-nano"):
         self.client_id = client_id
         self.client_secret = client_secret
         self.app_key = app_key

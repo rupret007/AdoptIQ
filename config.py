@@ -84,7 +84,7 @@ class Config:
         "client_id": os.environ.get('CIRCUIT_CLIENT_ID') or '',
         "client_secret": os.environ.get('CIRCUIT_CLIENT_SECRET') or '',
         "app_key": os.environ.get('CIRCUIT_APP_KEY') or '',
-        "model_name": os.environ.get('CIRCUIT_MODEL_NAME', 'gpt-4.1')
+        "model_name": os.environ.get('CIRCUIT_MODEL_NAME', 'gpt-5-nano')
     }
     
     # Database Table Names

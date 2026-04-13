@@ -25,6 +25,7 @@ from app_simple import (
     _sanitize_analysis_id_part,
     filter_subscriptions_by_criteria,
     _clean_datetime_columns_for_excel,
+    _validate_excel_output,
     validate_file_upload,
     _SENSITIVE_ENDPOINTS,
     app,
@@ -358,3 +359,18 @@ class TestCleanDatetimeColumnsForExcel:
         result = _clean_datetime_columns_for_excel(df)
         assert df["created"].dt.tz is not None
         assert result["created"].dt.tz is None
+
+
+class TestValidateExcelOutput:
+    def test_returns_true_for_closed_workbook(self, tmp_path):
+        result_path = tmp_path / "valid.xlsx"
+        with pd.ExcelWriter(result_path, engine="xlsxwriter") as writer:
+            pd.DataFrame({"Metric": ["A"], "Value": [1]}).to_excel(writer, sheet_name="Data", index=False)
+
+        assert _validate_excel_output(result_path) is True
+
+    def test_returns_false_for_empty_file(self, tmp_path):
+        result_path = tmp_path / "empty.xlsx"
+        result_path.write_bytes(b"")
+
+        assert _validate_excel_output(result_path) is False

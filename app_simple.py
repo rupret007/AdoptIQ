@@ -1617,6 +1617,29 @@ def _clean_datetime_columns_for_excel(df):
         # Return original dataframe if cleaning fails
         return df
 
+
+def _validate_excel_output(excel_path) -> bool:
+    """Validate a completed Excel workbook after the writer context has closed."""
+    if not excel_path or not os.path.exists(excel_path):
+        logger.error("[[DATA]] Excel file does not exist after creation!")
+        return False
+
+    try:
+        file_size = os.path.getsize(excel_path)
+        logger.info(f"[[DATA]] Excel file size: {file_size} bytes")
+        if file_size <= 0:
+            logger.error("[[SEARCH]] DEBUGGING - Excel validation: FAILED - workbook is empty after creation.")
+            return False
+
+        test_read = pd.read_excel(excel_path, sheet_name=None, nrows=1, engine='openpyxl')
+        logger.info(f"[[SEARCH]] DEBUGGING - Excel validation: SUCCESS - {len(test_read)} sheets")
+        for sheet_name in test_read.keys():
+            logger.info(f"   - Sheet: {sheet_name}")
+        return True
+    except Exception as e:
+        logger.error(f"[[SEARCH]] DEBUGGING - Excel validation: FAILED - {e}")
+        return False
+
 def _get_all_customers_from_all_sources(ab_norm: pd.DataFrame = None, csone_df: pd.DataFrame = None, 
                                         team_subs_df: pd.DataFrame = None,
                                         csconsole_action_plans: pd.DataFrame = None,
@@ -4823,22 +4846,9 @@ def run_compact_analysis(analysis_id):
                     logger.info(f"   - Written sheet: {sheet_name}")
             
                 logger.info(f"[[OK]] Excel file created successfully: {excel_path}")
-            
-                # DEBUGGING - Validate Excel file
-                if os.path.exists(excel_path):
-                    file_size = os.path.getsize(excel_path)
-                    logger.info(f"[[DATA]] Excel file size: {file_size} bytes")
-                
-                    # Try to read the file to verify it's valid
-                    try:
-                        test_read = pd.read_excel(excel_path, sheet_name=None, nrows=1)
-                        logger.info(f"[[SEARCH]] DEBUGGING - Excel validation: SUCCESS - {len(test_read)} sheets")
-                        for sheet_name in test_read.keys():
-                            logger.info(f"   - Sheet: {sheet_name}")
-                    except Exception as e:
-                        logger.error(f"[[SEARCH]] DEBUGGING - Excel validation: FAILED - {e}")
-                else:
-                    logger.error(f"[[DATA]] Excel file does not exist after creation!")
+
+            # Validate only after ExcelWriter closes and flushes the workbook to disk.
+            _validate_excel_output(excel_path)
             
         except Exception as excel_error:
             logger.error(f"[[ERROR]] Error creating Excel file: {excel_error}")
