@@ -7,32 +7,29 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 ### What's New in v1.0.3
 
 #### New Features
-- **Ask AI (Enhanced):** Ask natural-language questions about your portfolio with dramatically richer context. The AI now receives 16 data sections including live Snowflake data, period-over-period trend analysis, barrier creation/resolution velocity, ARR at risk calculations, historical report baselines, portfolio intelligence, barrier aging analysis, pulse-revenue correlation, and active service incidents — producing insights that combine financial, operational, and external data in ways never seen before.
+- **Ask AI (Enhanced):** Ask natural-language questions about your portfolio with dramatically richer context. The AI now receives live Snowflake data, period-over-period trend analysis, barrier creation/resolution velocity, historical report baselines, portfolio intelligence, barrier aging analysis, and active service incidents — producing insights that combine operational and external data in ways that are easier to ground and validate.
 - **External Intelligence:** Live incidents, bugs, and maintenances from status.webex.com and help.webex.com are fetched, stored historically in a local database, and displayed with search, export, and import capabilities. Ask the AI questions about any tracked intelligence.
 - **Graceful shutdown:** Analysis status is automatically saved when the app exits, preventing data loss.
 
 #### AI Intelligence Engine
 - **Trend Analysis:** Compares current period metrics (barriers, pulse, action plans) against the previous period to show whether things are improving or worsening.
 - **Barrier Velocity:** Tracks weekly barrier creation vs resolution rates to show if the team is keeping up with new issues.
-- **ARR at Risk:** Calculates exactly how much revenue is tied to accounts with active barriers or support cases, broken down by severity tier.
 - **Historical Baselines:** Scans past report Excel files to establish historical context, so the AI can identify significant changes from previous baselines.
 - **External Intelligence Fusion:** Active service incidents and known bugs are automatically included in Ask AI context, enabling cross-domain insights (e.g., "Which customers are affected by the current outage?").
-- **Enhanced Snowflake Intelligence:** Ask AI now queries additional Snowflake tables (COLLAB_ACCOUNT_SUMMARY, COLLAB_ARR_CON_SKU, ACCOUNTS_EXPIRED_LAST_MONTH) for renewal risk categories, contract expirations, customer tiers, and recently expired accounts.
-- **Portfolio Intelligence Engine:** Computes derived analytics including customer concentration risk (HHI index), CSSM workload distribution, technology risk density (barriers per $1M ARR), and repeat offender identification (accounts with both barriers AND cases).
-- **Cross-Report Trend Analysis:** Compares metrics across multiple past reports to surface trends in data volume, customer scope, and ARR over time.
-- **Barrier Aging Analysis:** Computes how long each open barrier has been active, groups into aging buckets (0-30d, 30-60d, 60-90d, 90-180d, 180+d), and identifies the longest-standing stale barriers with their ARR exposure.
-- **Pulse-Revenue Correlation (Silent Risk):** Identifies high-ARR accounts with critically low pulse scores — "silent risk" customers that may churn without obvious warning signs.
-- **Renewal Probability Intelligence:** Queries RENEWAL_DATA for contract renewal probabilities and flags at-risk renewals below 70% confidence.
+- **Enhanced Snowflake Intelligence:** Ask AI uses additional Snowflake context and schema-aware retrieval to improve grounded customer, engagement, and activity analysis.
+- **Portfolio Intelligence Engine:** Computes derived analytics including customer concentration risk (HHI index), CSSM workload distribution, and repeat offender identification (accounts with both barriers and cases).
+- **Cross-Report Trend Analysis:** Compares metrics across multiple past reports to surface trends in data volume, customer scope, and issue patterns over time.
+- **Barrier Aging Analysis:** Computes how long each open barrier has been active, groups issues into aging buckets (0-30d, 30-60d, 60-90d, 90-180d, 180+d), and identifies the longest-standing stale barriers.
 - **Severity Evolution Tracking:** Cross-report trends now track how severity distributions change over time (e.g., are P1 barriers increasing?).
 - **Customer Recurrence Detection:** Identifies customers appearing in every historical report — chronic problem accounts requiring intervention.
-- **Deeper Historical Mining:** Reports now extract individual barrier subjects, customer-level ARR breakdowns, and category distributions from past Excel files.
-- **Enhanced System Prompt:** The AI uses a chain-of-thought analytical framework with cross-domain correlation, hidden pattern detection, and revenue-based prioritization.
+- **Deeper Historical Mining:** Reports now extract individual barrier subjects and category distributions from past Excel files.
+- **Enhanced System Prompt:** The AI uses a chain-of-thought analytical framework with cross-domain correlation, hidden pattern detection, and operational prioritization.
 - **Software Defect & BEMS Extraction:** Ask AI automatically scans support cases and adoption barriers for CSC defect IDs and BEMS escalation IDs, groups them by customer, and surfaces them to the AI for correlation analysis.
 - **Feature Request Detection:** Barrier categories and subjects are scanned for feature request patterns, surfacing product feedback themes across the portfolio.
 - **Portfolio-Aware External Intelligence:** When asking about incidents or bugs, the AI receives portfolio context (customer names, technologies, active cases) so it can correlate external disruptions with internal customer impact.
 - **Citation-Ready Data:** All briefing data now includes record identifiers (AB-IDs, SP-IDs, AP-IDs, Case IDs, incident IDs, CSC IDs, BEMS IDs) so the AI can cite specific sources in its analysis, making reports verifiable and actionable.
-- **Smart Briefing Truncation:** When briefing data exceeds the LLM context window, a priority-based truncation system preserves the most critical sections (financial data, BEMS escalations, software defects) rather than blindly cutting from the end.
-- **Few-Shot Analytical Examples:** Prompt templates include example analyses demonstrating the expected depth of cross-correlation (revenue-risk, incident-impact, pattern-detection).
+- **Smart Briefing Truncation:** When briefing data exceeds the LLM context window, a priority-based truncation system preserves the most critical sections (BEMS escalations, software defects, and high-signal operational context) rather than blindly cutting from the end.
+- **Few-Shot Analytical Examples:** Prompt templates include example analyses demonstrating the expected depth of cross-correlation (incident impact, pattern detection, and issue concentration).
 
 #### Stability & Robustness
 - **Leader Report Excel fix:** Leader report Excel downloads now work correctly (filename sanitization was causing 404s).
@@ -76,13 +73,19 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 
 ## Quick Start
 
-**Recommended:** Install from the **DMG** for the best experience. No additional development tools are required for end users.
+Use the packaged app for your platform. No Python or development tools are required for end users.
 
 ### Install
 
+#### macOS
 1. Open the **AdoptIQ** DMG (e.g. `AdoptIQ-v1.0.3-build1.dmg`).
 2. Drag **AdoptIQ.app** to **Applications**.
 3. Eject the DMG. Launch **AdoptIQ** from Applications (or Spotlight).
+
+#### Windows
+1. Open the folder containing `AdoptIQ.exe`, `README.md`, and `build_info.txt`.
+2. Double-click **AdoptIQ.exe**.
+3. If Windows SmartScreen appears, click **More info** and then **Run anyway**.
 
 ### Run
 
@@ -125,7 +128,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 - **Dashboard / Run Analysis** — Start here; run new analyses from the dashboard buttons.
 - **History** — Lists previous portfolio analyses. Use **View** to open the progress page for an analysis and download Word/Excel reports when completed.
 - **Intel** — View tracked incidents, bugs, and maintenances from Webex status and help pages. Search, export/import historical data, and ask AI questions about intelligence.
-- **Ask AI** — Ask natural-language questions powered by grounded retrieval and source-validated answers across portfolio, ARR, adoption barriers, support cases, pulse, priorities, action plans, trends, external intelligence, and historical context.
+- **Ask AI** — Ask natural-language questions powered by grounded retrieval and source-validated answers across portfolio, adoption barriers, support cases, pulse, priorities, action plans, trends, external intelligence, and historical context.
 - **Help** — Links and usage notes.
 
 ---
@@ -185,5 +188,6 @@ Thank you for your feedback and for helping us improve AdoptIQ!
 
 - **Port 5001 in use:** If you launch AdoptIQ while another instance is running, the app will show a dialog asking whether to quit the other instance and start, or cancel. From Terminal you can also run `lsof -i :5001` to find and stop the process.
 - **App closes immediately:** Launch from Terminal to see startup errors.
+- **Windows SmartScreen warning:** Click **More info** and then **Run anyway** if you trust the packaged build source.
 - **Connection errors:** You may need to be on **corporate VPN**.
 - **Snowflake/credential errors:** The app has embedded credentials. If you see credential errors, the build may have been created without a complete `secrets.env`. Contact your administrator for a properly configured build.
