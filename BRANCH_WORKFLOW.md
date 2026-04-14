@@ -75,7 +75,7 @@ git merge origin/<other-machine-branch>
 Only integrate after validation passes on the integration branch:
 
 1. `pytest -q`
-2. Platform build (`build_pc.bat` on Windows or `./build_mac_dmg.sh` on macOS)
+2. Platform build (`build_pc.bat` on Windows or `./build_mac.sh` on macOS; optionally `./build_mac_dmg.sh` for a DMG)
 3. Confirm artifacts and runtime smoke check
 
 Then merge to `master`:

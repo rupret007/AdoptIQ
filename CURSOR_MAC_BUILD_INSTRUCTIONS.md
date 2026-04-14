@@ -44,6 +44,8 @@ pip install pyinstaller
 
 1. Create `secrets.env` from `secrets.env.template`.
 2. Fill required values (Snowflake, CircuIT, PSIRT, and **ADOPTIQ_ADMIN_SECRET_KEY** for packaged builds—the app will not start without it).
+3. If you want the packaged Mac build to use the latest faster CircuIT default, set:
+   - `CIRCUIT_MODEL_NAME=gemini-3.1-flash-lite`
 3. Generate bundled secrets:
 
 ```bash
@@ -63,14 +65,20 @@ Apply all required parity updates from MIGRATION_TO_MAC.md to this codebase, inc
 
 ## 5) Build on Mac
 
-If your Mac repo already has a script, run it (example names):
-- `build_mac_dmg.sh`
-- `build_mac.sh`
+Preferred scripts:
+- `./build_mac.sh` for the `.app` bundle payload in `OUTBOX/`
+- `./build_mac_dmg.sh` if you also want a drag-to-install DMG
 
-Example:
+Examples:
 
 ```bash
-chmod +x build_mac_dmg.sh
+chmod +x build_mac.sh build_mac_dmg.sh
+./build_mac.sh
+```
+
+Optional DMG packaging:
+
+```bash
 ./build_mac_dmg.sh
 ```
 
@@ -82,11 +90,13 @@ Create a macOS build script equivalent to build_pc.bat that installs deps, runs 
 
 ## 6) Verify build outputs
 
-Primary deliverable for end users: **DMG** in `OUTBOX/` (e.g. `OUTBOX/AdoptIQ-v1.0.2-build1.dmg`). The DMG contains AdoptIQ.app, an Applications shortcut, and README.md for drag-to-install.
-
-Also confirm:
+`build_mac.sh` should produce:
 - `OUTBOX/AdoptIQ.app`
 - `OUTBOX/README.md`
+- `OUTBOX/build_info.txt`
+
+If you run `build_mac_dmg.sh`, also confirm:
+- `OUTBOX/AdoptIQ-v<version>-build<build>.dmg`
 
 Also verify:
 - App starts and opens `http://localhost:5001`
@@ -106,8 +116,8 @@ Also verify:
 ```text
 You are in the AdoptIQ_MAC staging codebase. Please:
 1) Implement all parity items from MIGRATION_TO_MAC.md.
-2) Confirm build prerequisites and secrets setup.
-3) Build a macOS artifact (.app and/or .dmg) using the project build script (or create one if missing).
+2) Confirm build prerequisites and secrets setup, including `CIRCUIT_MODEL_NAME=gemini-3.1-flash-lite` if the packaged app should use Gemini by default.
+3) Build a macOS artifact using `./build_mac.sh` and optionally `./build_mac_dmg.sh`.
 4) Run tests and provide a concise validation report with output paths.
 ```
 

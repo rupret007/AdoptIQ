@@ -44,6 +44,7 @@ pip install pyinstaller
 Credentials are embedded at build time from `secrets.env`:
 
 - Copy `secrets.env.template` to `secrets.env` and fill in values (Snowflake/Keeper, CircuIT, PSIRT, and **ADOPTIQ_ADMIN_SECRET_KEY**)
+- Set `CIRCUIT_MODEL_NAME=gemini-3.1-flash-lite` if the packaged build should use the current Gemini default
 - Or copy an existing `secrets.env` from a previous build
 - The build runs `embed_credentials.py` and embeds them into the app (no .env needed at runtime)
 
@@ -136,7 +137,8 @@ AdoptIQ/
 ├── adoptiq_pc.spec            # PyInstaller spec (Windows)
 ├── adoptiq_mac.spec           # PyInstaller spec (macOS)
 ├── build_pc.bat               # Windows build script
-├── build_mac_dmg.sh           # macOS build script
+├── build_mac.sh               # macOS .app build script
+├── build_mac_dmg.sh           # macOS DMG wrapper script
 ├── embed_credentials.py       # Embeds secrets.env into _bundled_secrets.py
 ├── update_version_pc.py       # Stamps version into config.py
 ├── requirements.txt
@@ -144,7 +146,7 @@ AdoptIQ/
 ├── team_config.json
 ├── templates/
 ├── static/
-├── tests/                     # pytest suite (551 tests)
+├── tests/                     # pytest suite (currently 661 tests)
 ├── OUTBOX/                    # Build output folder
 │   ├── AdoptIQ.exe            # (Windows, after build)
 │   └── README.md
