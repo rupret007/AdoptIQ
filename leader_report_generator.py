@@ -8,7 +8,7 @@ import logging
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Any, Tuple, Optional
+from typing import Dict, List, Any, Tuple, Optional, Iterable
 import pandas as pd
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
@@ -68,15 +68,134 @@ class LeaderReportGenerator:
             return False
     
     def safe_set(self, obj):
-        """Safely convert object to set, handling None and DataFrames"""
+        """Safely convert an iterable to a set.
+
+        Contract:
+        - ``None`` -> empty set
+        - pandas DataFrames -> empty set (DataFrames iterate column names, which
+          is almost never the caller's intent; pass a column Series instead)
+        - any other iterable -> ``set(iterable)``
+        - unsupported types -> empty set
+        """
         if obj is None:
             return set()
-        try:
-            if hasattr(obj, 'empty') and not obj.empty:
-                return set()  # Return empty set for non-empty DataFrames
-            return set(obj)
-        except (TypeError, AttributeError):
+        if hasattr(obj, 'empty') and hasattr(obj, 'columns'):
+            # pandas DataFrame: reject to avoid silently iterating column names
             return set()
+        try:
+            return set(obj)
+        except (TypeError, AttributeError, ValueError):
+            return set()
+
+    @staticmethod
+    def _derive_sentiment_summary(
+        customer_pulse: Optional[pd.DataFrame],
+        adoption_barriers: Optional[pd.DataFrame],
+    ) -> str:
+        """Rules-based sentiment classification based on pulse scores and
+        high-severity adoption barrier volume.
+
+        Returns one of: ``Positive``, ``Neutral``, ``Negative``, ``Unknown``.
+
+        The thresholds are intentionally conservative so this signal can be
+        used in narratives without requiring an LLM. If both inputs are empty
+        or unusable, we return ``Unknown`` so downstream prose stays honest.
+        """
+        pulse_signal: Optional[str] = None
+        if customer_pulse is not None and not getattr(customer_pulse, 'empty', True):
+            score_col = next(
+                (col for col in ('SCORE__C', 'SCORE') if col in customer_pulse.columns),
+                None,
+            )
+            if score_col is not None:
+                scores = pd.to_numeric(customer_pulse[score_col], errors='coerce').dropna()
+                if not scores.empty:
+                    avg = float(scores.mean())
+                    if avg >= 7.5:
+                        pulse_signal = 'Positive'
+                    elif avg <= 5.0:
+                        pulse_signal = 'Negative'
+                    else:
+                        pulse_signal = 'Neutral'
+
+        barrier_pressure: Optional[str] = None
+        if adoption_barriers is not None and not getattr(adoption_barriers, 'empty', True):
+            severity_col = next(
+                (col for col in ('SEVERITY_C', 'SEVERITY') if col in adoption_barriers.columns),
+                None,
+            )
+            if severity_col is not None:
+                severities = adoption_barriers[severity_col].astype(str).str.lower()
+                high_count = int(severities.str.contains('high|critical|urgent', na=False).sum())
+                if high_count >= 5:
+                    barrier_pressure = 'Negative'
+                elif high_count >= 1:
+                    barrier_pressure = 'Neutral'
+                else:
+                    barrier_pressure = 'Positive'
+
+        # Combine: barrier pressure can downgrade pulse, and vice versa. When
+        # only one signal is present, use it directly.
+        signals = [s for s in (pulse_signal, barrier_pressure) if s]
+        if not signals:
+            return 'Unknown'
+        if 'Negative' in signals:
+            return 'Negative'
+        if 'Neutral' in signals:
+            return 'Neutral'
+        return 'Positive'
+
+    @staticmethod
+    def _row_creator_cell(row: Any, cssm_owner: str = '') -> str:
+        """Return a compact creator cell value for rendered tables.
+
+        - Uses ``_CREATOR_NAME`` (preferred), then ``_CREATOR_EMAIL`` as a
+          fallback.
+        - Suffixes ``" (external)"`` when ``_EXTERNAL_ACCOUNT`` is truthy so
+          readers can distinguish collaborator-authored records on accounts
+          outside the team member's primary portfolio.
+        - Falls back to the CSSM's own name so the cell is never blank.
+        """
+        if row is None:
+            return str(cssm_owner or '')
+        getter = row.get if hasattr(row, 'get') else (lambda _k, _d='': _d)
+        try:
+            name = str(getter('_CREATOR_NAME', '') or '').strip()
+            email = str(getter('_CREATOR_EMAIL', '') or '').strip()
+            external = bool(getter('_EXTERNAL_ACCOUNT', False))
+        except Exception:
+            name = email = ''
+            external = False
+        label = name or email or str(cssm_owner or '')
+        if external and label and label.lower() != str(cssm_owner or '').lower():
+            return f"{label} (external)"
+        return label
+
+    def _format_external_note(self, row: Any, cssm_name: str) -> str:
+        """Return a short italic annotation for records captured via owner-based
+        attribution on an account outside the CSSM's primary subscription list.
+
+        The returned text is intended for rendering after a record's main line,
+        so the reader can see who created it and that the account belongs to a
+        different DSM. Empty string when no annotation is needed.
+        """
+        try:
+            external = bool(row.get('_EXTERNAL_ACCOUNT', False)) if hasattr(row, 'get') else False
+        except Exception:
+            external = False
+        try:
+            creator_name = str(row.get('_CREATOR_NAME', '') or '').strip() if hasattr(row, 'get') else ''
+            creator_email = str(row.get('_CREATOR_EMAIL', '') or '').strip() if hasattr(row, 'get') else ''
+        except Exception:
+            creator_name = creator_email = ''
+        note_parts: List[str] = []
+        if creator_name and creator_name != cssm_name:
+            note_parts.append(f"created by {creator_name}")
+        elif not creator_name and creator_email and creator_email not in ('', 'nan'):
+            note_parts.append(f"created by {creator_email}")
+        if external:
+            note_parts.append("external account")
+        return f"[{'; '.join(note_parts)}]" if note_parts else ""
     
     def __init__(self, ctx, team_roster: List[Tuple[str, str, str]]):
         """
@@ -169,9 +288,14 @@ class LeaderReportGenerator:
         
         _cb(71, 'Building team summary table...', 'Document Generation')
         self._create_summary_table(team_data, days)
-        
+
         self._add_section_separator()
-        
+
+        _cb(72, 'Computing team insights (aging, leaderboard, coverage)...', 'Document Generation')
+        self._add_team_insights_section(team_data, days)
+
+        self._add_section_separator()
+
         _cb(73, 'Writing per-person AdoptIQ summaries...', 'Document Generation')
         self._create_adoptiq_summaries_per_person(team_data, days)
         
@@ -314,20 +438,101 @@ class LeaderReportGenerator:
             if 'BU_NAME' in subscriptions_all.columns:
                 all_customers = subscriptions_all['BU_NAME'].dropna().astype(str).unique().tolist()
 
-        # Batch fetch each Snowflake dataset once.
-        action_plans_all = self._fetch_action_plans(all_account_ids, days)
-        adoption_barriers_all = self._fetch_adoption_barriers(all_account_ids, days)
-        customer_pulse_all = self._fetch_customer_pulse(all_account_ids, days)
+        # Batch fetch each Snowflake dataset once. The fetchers are owner-aware so
+        # they will also return records authored by direct reports on accounts
+        # owned by a different DSM (e.g. Brandon creating APs for an account
+        # whose PRIMARY_DSM is Mario). Results are deduplicated by ID to avoid
+        # double-counting when an owner is also the account DSM.
+        normalized_roster_emails = [str(email).strip().lower() for email in cssm_emails if email]
+        logger.info(
+            "Leader report owner-aware fetch: %d direct reports, %d roster emails for task/pulse expansion",
+            n_total,
+            len(normalized_roster_emails),
+        )
+        action_plans_all = self._fetch_action_plans(
+            all_account_ids, days, owner_emails=normalized_roster_emails
+        )
+        adoption_barriers_all = self._fetch_adoption_barriers(
+            all_account_ids, days, owner_emails=normalized_roster_emails
+        )
+        customer_pulse_all = self._fetch_customer_pulse(
+            all_account_ids, days, owner_emails=normalized_roster_emails
+        )
         success_priorities_all = self._fetch_success_priorities(all_customers, days)
 
         if not customer_pulse_all.empty and 'ACCOUNT__C' in customer_pulse_all.columns:
             customer_pulse_all = customer_pulse_all.rename(columns={'ACCOUNT__C': 'ACCOUNT_ID_C'})
+
+        # Tag an "external" marker for rows whose ACCOUNT_ID_C is NOT owned by any of
+        # the direct reports' PRIMARY_DSM assignments. These are the records that
+        # would previously have been missed by the account-only filter. We also
+        # fill BU_NAME from the DSM join when the subscription table lacks it.
+        primary_account_set = {str(a).strip() for a in all_account_ids if a}
+
+        def _enrich_external(df: pd.DataFrame, aid_col: str = 'ACCOUNT_ID_C') -> pd.DataFrame:
+            if df is None or df.empty:
+                return df
+            df = df.copy()
+            if aid_col in df.columns:
+                account_series = df[aid_col].fillna('').astype(str).str.strip()
+                df['_EXTERNAL_ACCOUNT'] = ~account_series.isin(primary_account_set)
+            else:
+                df['_EXTERNAL_ACCOUNT'] = False
+            if 'DSM_BU_NAME' in df.columns:
+                bu = df['BU_NAME'] if 'BU_NAME' in df.columns else pd.Series([None] * len(df), index=df.index)
+                bu = bu.where(bu.astype(str).str.strip() != '', df['DSM_BU_NAME'])
+                df['BU_NAME'] = bu
+            return df
+
+        action_plans_all = _enrich_external(action_plans_all)
+        adoption_barriers_all = _enrich_external(adoption_barriers_all)
+        customer_pulse_all = _enrich_external(customer_pulse_all)
 
         if not success_priorities_all.empty and 'RELATED_CUSTOMER__C' in success_priorities_all.columns:
             success_priorities_all = success_priorities_all.copy()
             success_priorities_all['_RELATED_CUSTOMER_NORM'] = success_priorities_all['RELATED_CUSTOMER__C'].apply(
                 normalize_customer_name
             )
+
+        # Pre-compute lowercase owner columns once so the per-CSSM slicing loop
+        # below can do fast creator-vs-account attribution.
+        def _first_present(df: pd.DataFrame, candidates: Iterable[str]) -> Optional[str]:
+            if df is None or df.empty:
+                return None
+            for c in candidates:
+                if c in df.columns:
+                    return c
+            return None
+
+        try:
+            from adoptiq_backend import TASK_OWNER_EMAIL_COLUMNS, PULSE_OWNER_EMAIL_COLUMNS
+        except ImportError:
+            TASK_OWNER_EMAIL_COLUMNS = ("OWNER_EMAIL", "CREATEDBYEMAIL", "ASSIGNEE_EMAIL")
+            PULSE_OWNER_EMAIL_COLUMNS = ("OWNER_EMAIL", "CREATEDBYEMAIL")
+
+        def _creator_email_series(df: pd.DataFrame, candidates: Iterable[str]) -> pd.Series:
+            if df is None or df.empty:
+                return pd.Series([], dtype=str)
+            series = pd.Series([''] * len(df), index=df.index, dtype=object)
+            for col in candidates:
+                if col not in df.columns:
+                    continue
+                col_vals = df[col].fillna('').astype(str).str.strip().str.lower()
+                is_email = col_vals.str.contains('@', na=False)
+                empty = series.astype(str).str.len() == 0
+                fill_mask = is_email & empty
+                series = series.where(~fill_mask, col_vals)
+            return series
+
+        ap_creator_emails = _creator_email_series(action_plans_all, TASK_OWNER_EMAIL_COLUMNS)
+        ab_creator_emails = _creator_email_series(adoption_barriers_all, TASK_OWNER_EMAIL_COLUMNS)
+        cp_creator_emails = _creator_email_series(customer_pulse_all, PULSE_OWNER_EMAIL_COLUMNS)
+
+        # Build an email -> display name map for "created by X" annotations.
+        roster_email_to_name: Dict[str, str] = {}
+        for _mgr, _name, _email in self.team_roster:
+            if _email:
+                roster_email_to_name[str(_email).strip().lower()] = _name
 
         for idx, report in enumerate(direct_reports):
             cssm_name = report['name']
@@ -347,8 +552,51 @@ class LeaderReportGenerator:
             else:
                 subscriptions_df = subscriptions_all[subscriptions_all['CSSM_EMAIL'] == cssm_email].copy()
 
-            if subscriptions_df.empty:
-                logger.warning(f"No subscriptions found for {cssm_name}")
+            account_ids = (
+                subscriptions_df['ACCOUNT_ID_C'].dropna().astype(str).unique().tolist()
+                if (not subscriptions_df.empty and 'ACCOUNT_ID_C' in subscriptions_df.columns)
+                else []
+            )
+            if not subscriptions_df.empty and 'BU_NAME' in subscriptions_df.columns:
+                subscriptions_df['BU_NAME'] = subscriptions_df['BU_NAME'].apply(normalize_customer_name)
+            customers = (
+                subscriptions_df['BU_NAME'].dropna().unique().tolist()
+                if (not subscriptions_df.empty and 'BU_NAME' in subscriptions_df.columns)
+                else []
+            )
+            customer_set = set(customers)
+
+            # Creator-first attribution: a record belongs to this CSSM if they
+            # authored it (any owner-like column matches their email) OR the
+            # account is part of their subscription footprint. External-only
+            # matches are preserved and flagged so display code can annotate
+            # them as "created by X on Mario's account" and avoid double-counts.
+            def _slice_by_owner_or_account(
+                df: pd.DataFrame,
+                creator_series: pd.Series,
+                aid_col: str = 'ACCOUNT_ID_C',
+            ) -> pd.DataFrame:
+                if df is None or df.empty:
+                    return pd.DataFrame()
+                owner_mask = creator_series.eq(cssm_email) if cssm_email else pd.Series([False] * len(df), index=df.index)
+                if aid_col in df.columns and account_ids:
+                    account_mask = df[aid_col].fillna('').astype(str).str.strip().isin(account_ids)
+                else:
+                    account_mask = pd.Series([False] * len(df), index=df.index)
+                keep = owner_mask | account_mask
+                if not keep.any():
+                    return pd.DataFrame()
+                sliced = df.loc[keep].copy()
+                sliced['_ATTRIBUTED_BY_OWNER'] = owner_mask.loc[keep].values
+                sliced['_ATTRIBUTED_BY_ACCOUNT'] = account_mask.loc[keep].values
+                return sliced
+
+            action_plans_df = _slice_by_owner_or_account(action_plans_all, ap_creator_emails)
+            adoption_barriers_df = _slice_by_owner_or_account(adoption_barriers_all, ab_creator_emails)
+            customer_pulse_df = _slice_by_owner_or_account(customer_pulse_all, cp_creator_emails)
+
+            if subscriptions_df.empty and action_plans_df.empty and adoption_barriers_df.empty and customer_pulse_df.empty:
+                logger.warning(f"No subscriptions or owned records found for {cssm_name}")
                 team_data[cssm_name] = {
                     'subscriptions': pd.DataFrame(),
                     'action_plans': pd.DataFrame(),
@@ -361,44 +609,56 @@ class LeaderReportGenerator:
                 }
                 continue
 
-            account_ids = subscriptions_df['ACCOUNT_ID_C'].dropna().astype(str).unique().tolist() if 'ACCOUNT_ID_C' in subscriptions_df.columns else []
-            if 'BU_NAME' in subscriptions_df.columns:
-                subscriptions_df['BU_NAME'] = subscriptions_df['BU_NAME'].apply(normalize_customer_name)
-            customers = subscriptions_df['BU_NAME'].dropna().unique().tolist() if 'BU_NAME' in subscriptions_df.columns else []
-            customer_set = set(customers)
-
-            action_plans_df = action_plans_all[action_plans_all['ACCOUNT_ID_C'].astype(str).isin(account_ids)].copy() if (not action_plans_all.empty and 'ACCOUNT_ID_C' in action_plans_all.columns) else pd.DataFrame()
-            adoption_barriers_df = adoption_barriers_all[adoption_barriers_all['ACCOUNT_ID_C'].astype(str).isin(account_ids)].copy() if (not adoption_barriers_all.empty and 'ACCOUNT_ID_C' in adoption_barriers_all.columns) else pd.DataFrame()
-            customer_pulse_df = customer_pulse_all[customer_pulse_all['ACCOUNT_ID_C'].astype(str).isin(account_ids)].copy() if (not customer_pulse_all.empty and 'ACCOUNT_ID_C' in customer_pulse_all.columns) else pd.DataFrame()
-
             if not success_priorities_all.empty and '_RELATED_CUSTOMER_NORM' in success_priorities_all.columns:
                 success_priorities_df = success_priorities_all[success_priorities_all['_RELATED_CUSTOMER_NORM'].isin(customer_set)].copy()
                 success_priorities_df.drop(columns=['_RELATED_CUSTOMER_NORM'], inplace=True, errors='ignore')
             else:
                 success_priorities_df = pd.DataFrame()
 
-            if not action_plans_df.empty:
-                action_plans_df = action_plans_df.merge(
-                    subscriptions_df[['ACCOUNT_ID_C', 'BU_NAME']].drop_duplicates(),
-                    on='ACCOUNT_ID_C',
-                    how='left'
-                )
+            def _merge_bu_name(df: pd.DataFrame) -> pd.DataFrame:
+                """Ensure BU_NAME is populated for both primary and external account rows.
 
-            if not adoption_barriers_df.empty:
-                adoption_barriers_df = adoption_barriers_df.merge(
-                    subscriptions_df[['ACCOUNT_ID_C', 'BU_NAME']].drop_duplicates(),
-                    on='ACCOUNT_ID_C',
-                    how='left'
-                )
+                Merge order: prefer the CSSM's subscription BU_NAME when present, else
+                fall back to the DSM-join BU_NAME (external accounts), else existing
+                BU_NAME column from the task table.
+                """
+                if df is None or df.empty or 'ACCOUNT_ID_C' not in df.columns:
+                    return df
+                merged = df
+                if not subscriptions_df.empty and 'ACCOUNT_ID_C' in subscriptions_df.columns and 'BU_NAME' in subscriptions_df.columns:
+                    merged = merged.merge(
+                        subscriptions_df[['ACCOUNT_ID_C', 'BU_NAME']]
+                            .drop_duplicates()
+                            .rename(columns={'BU_NAME': '_SUB_BU_NAME'}),
+                        on='ACCOUNT_ID_C',
+                        how='left',
+                    )
+                bu_values = pd.Series([''] * len(merged), index=merged.index, dtype=object)
+                for col in ('_SUB_BU_NAME', 'BU_NAME', 'DSM_BU_NAME'):
+                    if col in merged.columns:
+                        candidate = merged[col].fillna('').astype(str).str.strip()
+                        empty = bu_values.astype(str).str.len() == 0
+                        bu_values = bu_values.where(~(empty & (candidate != '')), candidate)
+                merged['BU_NAME'] = bu_values.where(bu_values.astype(str).str.len() > 0, None)
+                merged.drop(columns=['_SUB_BU_NAME'], inplace=True, errors='ignore')
+                return merged
 
-            if not customer_pulse_df.empty:
-                customer_pulse_df = customer_pulse_df.merge(
-                    subscriptions_df[['ACCOUNT_ID_C', 'BU_NAME']].drop_duplicates(),
-                    on='ACCOUNT_ID_C',
-                    how='left'
+            def _attach_creator_annotation(df: pd.DataFrame, candidates: Iterable[str]) -> pd.DataFrame:
+                if df is None or df.empty:
+                    return df
+                email_series = _creator_email_series(df, candidates)
+                df = df.copy()
+                df['_CREATOR_EMAIL'] = email_series.values if len(email_series) == len(df) else ''
+                df['_CREATOR_NAME'] = df['_CREATOR_EMAIL'].map(
+                    lambda e: roster_email_to_name.get(str(e or '').strip().lower(), '')
                 )
-                if 'BU_NAME' in customer_pulse_df.columns:
-                    customer_pulse_df['BU_NAME'] = customer_pulse_df['BU_NAME'].apply(normalize_customer_name)
+                return df
+
+            action_plans_df = _attach_creator_annotation(_merge_bu_name(action_plans_df), TASK_OWNER_EMAIL_COLUMNS)
+            adoption_barriers_df = _attach_creator_annotation(_merge_bu_name(adoption_barriers_df), TASK_OWNER_EMAIL_COLUMNS)
+            customer_pulse_df = _attach_creator_annotation(_merge_bu_name(customer_pulse_df), PULSE_OWNER_EMAIL_COLUMNS)
+            if not customer_pulse_df.empty and 'BU_NAME' in customer_pulse_df.columns:
+                customer_pulse_df['BU_NAME'] = customer_pulse_df['BU_NAME'].apply(normalize_customer_name)
 
             if not success_priorities_df.empty and 'RELATED_CUSTOMER__C' in success_priorities_df.columns:
                 success_priorities_df['RELATED_CUSTOMER__C'] = success_priorities_df['RELATED_CUSTOMER__C'].apply(normalize_customer_name)
@@ -462,32 +722,96 @@ class LeaderReportGenerator:
                 cur.close()
                 logger.debug(f"Cursor closed")
     
-    def _fetch_action_plans(self, account_ids: List[str], days: int) -> pd.DataFrame:
-        """Fetch Action Plans for account IDs"""
-        if not account_ids:
+    def _build_task_owner_clause(self, owner_emails: List[str], alias: Optional[str] = None):
+        """Build a parameterized owner-match clause for C360_CS_TASK_C_VW.
+
+        Returns (fragment_or_empty, params). Uses the cached schema helper so
+        we only reference columns present in the table.
+        """
+        try:
+            from adoptiq_backend import (
+                _get_table_columns,
+                _build_owner_match_clause,
+                _normalize_owner_emails,
+                TASK_OWNER_EMAIL_COLUMNS,
+            )
+        except ImportError:
+            return "", []
+        cleaned = _normalize_owner_emails(owner_emails)
+        if not cleaned:
+            return "", []
+        cols = _get_table_columns(self.ctx, "EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW")
+        return _build_owner_match_clause(cols, cleaned, TASK_OWNER_EMAIL_COLUMNS, table_alias=alias)
+
+    def _build_pulse_owner_clause(self, owner_emails: List[str], alias: Optional[str] = None):
+        """Build a parameterized owner-match clause for ESA_C360_CUSTOMER_PULSE__C."""
+        try:
+            from adoptiq_backend import (
+                _get_table_columns,
+                _build_owner_match_clause,
+                _normalize_owner_emails,
+                PULSE_OWNER_EMAIL_COLUMNS,
+            )
+        except ImportError:
+            return "", []
+        cleaned = _normalize_owner_emails(owner_emails)
+        if not cleaned:
+            return "", []
+        cols = _get_table_columns(self.ctx, "EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C")
+        return _build_owner_match_clause(cols, cleaned, PULSE_OWNER_EMAIL_COLUMNS, table_alias=alias)
+
+    def _fetch_action_plans(
+        self,
+        account_ids: List[str],
+        days: int,
+        owner_emails: Optional[List[str]] = None,
+    ) -> pd.DataFrame:
+        """Fetch Action Plans for account IDs and/or owner emails.
+
+        When ``owner_emails`` is provided, Action Plans authored/owned by any
+        of those users are included even for accounts that are not in the
+        provided ``account_ids`` (i.e. accounts owned by a different DSM).
+        Results are joined with DSM_ASSIGNMENT_DATA so ``BU_NAME`` is populated
+        for external accounts too. Deduplicated by ID.
+        """
+        owner_emails = owner_emails or []
+        if not account_ids and not owner_emails:
             return pd.DataFrame()
-        
+
         cur = None
         try:
             cur = self.ctx.cursor()
-            placeholders = ','.join(['%s'] * len(account_ids))
+            predicates: List[str] = []
+            params: List[Any] = []
+            if account_ids:
+                placeholders = ','.join(['%s'] * len(account_ids))
+                predicates.append(f"t.ACCOUNT_ID_C IN ({placeholders})")
+                params.extend(account_ids)
+            owner_sql, owner_params = self._build_task_owner_clause(owner_emails, alias="t")
+            if owner_sql:
+                predicates.append(owner_sql)
+                params.extend(owner_params)
+            if not predicates:
+                return pd.DataFrame()
+            where_clause = " OR ".join(predicates)
             sql = f"""
-            SELECT *
-            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW 
-            WHERE record_type_id = '0122T000000QHBGQA4' 
-              AND ACCOUNT_ID_C IN ({placeholders})
-              AND DATE(CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())
+            SELECT t.*, dsm.BU_NAME AS DSM_BU_NAME
+            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW t
+            LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm
+                   ON t.ACCOUNT_ID_C = dsm.ACCOUNT_ID_C
+            WHERE t.record_type_id = '0122T000000QHBGQA4'
+              AND ({where_clause})
+              AND DATE(t.CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())
             """
-            
-            cur.execute(sql, [*account_ids, days])
+            params.append(days)
+            cur.execute(sql, params)
             rows = cur.fetchall()
-            
             if not rows:
                 return pd.DataFrame()
-            
             cols = [c[0] for c in cur.description]
             df = pd.DataFrame(rows, columns=cols)
-            
+            if 'ID' in df.columns:
+                df = df.drop_duplicates(subset=['ID'], keep='first').reset_index(drop=True)
             return df
         except Exception as e:
             logger.error(f"Error fetching action plans: {e}")
@@ -495,33 +819,56 @@ class LeaderReportGenerator:
         finally:
             if cur:
                 cur.close()
-    
-    def _fetch_adoption_barriers(self, account_ids: List[str], days: int) -> pd.DataFrame:
-        """Fetch Adoption Barriers for account IDs"""
-        if not account_ids:
+
+    def _fetch_adoption_barriers(
+        self,
+        account_ids: List[str],
+        days: int,
+        owner_emails: Optional[List[str]] = None,
+    ) -> pd.DataFrame:
+        """Fetch Adoption Barriers for account IDs and/or owner emails.
+
+        Owner-aware variant mirrors :meth:`_fetch_action_plans` so barriers
+        created by teammates on other DSMs' accounts are still captured.
+        """
+        owner_emails = owner_emails or []
+        if not account_ids and not owner_emails:
             return pd.DataFrame()
-        
+
         cur = None
         try:
             cur = self.ctx.cursor()
-            placeholders = ','.join(['%s'] * len(account_ids))
+            predicates: List[str] = []
+            params: List[Any] = []
+            if account_ids:
+                placeholders = ','.join(['%s'] * len(account_ids))
+                predicates.append(f"t.ACCOUNT_ID_C IN ({placeholders})")
+                params.extend(account_ids)
+            owner_sql, owner_params = self._build_task_owner_clause(owner_emails, alias="t")
+            if owner_sql:
+                predicates.append(owner_sql)
+                params.extend(owner_params)
+            if not predicates:
+                return pd.DataFrame()
+            where_clause = " OR ".join(predicates)
             sql = f"""
-            SELECT *
-            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW 
-            WHERE record_type_id = '0122T000000GJfTQAW' 
-              AND ACCOUNT_ID_C IN ({placeholders})
-              AND DATE(CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())
+            SELECT t.*, dsm.BU_NAME AS DSM_BU_NAME
+            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW t
+            LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm
+                   ON t.ACCOUNT_ID_C = dsm.ACCOUNT_ID_C
+            WHERE t.record_type_id = '0122T000000GJfTQAW'
+              AND ({where_clause})
+              AND DATE(t.CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())
             """
-            
-            cur.execute(sql, [*account_ids, days])
+            params.append(days)
+            cur.execute(sql, params)
             rows = cur.fetchall()
-            
             if not rows:
                 return pd.DataFrame()
-            
             cols = [c[0] for c in cur.description]
             df = pd.DataFrame(rows, columns=cols)
-            
+            if 'ID' in df.columns:
+                df = df.drop_duplicates(subset=['ID'], keep='first').reset_index(drop=True)
             return df
         except Exception as e:
             logger.error(f"Error fetching adoption barriers: {e}")
@@ -529,32 +876,55 @@ class LeaderReportGenerator:
         finally:
             if cur:
                 cur.close()
-    
-    def _fetch_customer_pulse(self, account_ids: List[str], days: int) -> pd.DataFrame:
-        """Fetch Customer Pulse records for account IDs"""
-        if not account_ids:
+
+    def _fetch_customer_pulse(
+        self,
+        account_ids: List[str],
+        days: int,
+        owner_emails: Optional[List[str]] = None,
+    ) -> pd.DataFrame:
+        """Fetch Customer Pulse records for account IDs and/or owner emails.
+
+        Owner-aware variant. Joins DSM assignments so external-account pulse
+        records carry a ``BU_NAME`` for rendering.
+        """
+        owner_emails = owner_emails or []
+        if not account_ids and not owner_emails:
             return pd.DataFrame()
-        
+
         cur = None
         try:
             cur = self.ctx.cursor()
-            placeholders = ','.join(['%s'] * len(account_ids))
+            predicates: List[str] = []
+            params: List[Any] = []
+            if account_ids:
+                placeholders = ','.join(['%s'] * len(account_ids))
+                predicates.append(f"cp.ACCOUNT__C IN ({placeholders})")
+                params.extend(account_ids)
+            owner_sql, owner_params = self._build_pulse_owner_clause(owner_emails, alias="cp")
+            if owner_sql:
+                predicates.append(owner_sql)
+                params.extend(owner_params)
+            if not predicates:
+                return pd.DataFrame()
+            where_clause = " OR ".join(predicates)
             sql = f"""
-            SELECT *
-            FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C 
-            WHERE ACCOUNT__C IN ({placeholders})
-              AND DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())
+            SELECT cp.*, dsm.BU_NAME AS DSM_BU_NAME
+            FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C cp
+            LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm
+                   ON cp.ACCOUNT__C = dsm.ACCOUNT_ID_C
+            WHERE ({where_clause})
+              AND DATE(cp.CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())
             """
-            
-            cur.execute(sql, [*account_ids, days])
+            params.append(days)
+            cur.execute(sql, params)
             rows = cur.fetchall()
-            
             if not rows:
                 return pd.DataFrame()
-            
             cols = [c[0] for c in cur.description]
             df = pd.DataFrame(rows, columns=cols)
-            
+            if 'ID' in df.columns:
+                df = df.drop_duplicates(subset=['ID'], keep='first').reset_index(drop=True)
             return df
         except Exception as e:
             logger.error(f"Error fetching customer pulse: {e}")
@@ -611,8 +981,9 @@ class LeaderReportGenerator:
         if csone_df is None or csone_df.empty:
             logger.warning("No CSOne data provided for TAC cases")
             return
-        
-        # Apply date filtering to TAC cases with validation
+
+        csone_df = csone_df.copy()
+
         logger.info(f"\n{'='*60}")
         logger.info(f"TAC CASE MATCHING VALIDATION")
         logger.info(f"{'='*60}")
@@ -1166,9 +1537,11 @@ class LeaderReportGenerator:
     
     def _add_bems_escalation_section(self, team_data: Dict[str, Dict]):
         """Add dedicated BEMS Escalation section (relocated from summary for better TAC context)"""
-        # Count total BEMS escalations
-        total_bems = self._count_bems_escalations(team_data)
-        
+        total_bems = sum(
+            self._count_bems_escalations(member_data)
+            for member_data in (team_data or {}).values()
+        )
+
         if total_bems == 0:
             return  # No BEMS escalations to report
         
@@ -1176,7 +1549,7 @@ class LeaderReportGenerator:
         self.doc.add_page_break()
         
         # Add section heading
-        section_heading = self.doc.add_heading('WARN:️ BEMS Escalation Analysis', level=1)
+        section_heading = self.doc.add_heading('Warning: BEMS Escalation Analysis', level=1)
         if section_heading.runs:
             section_heading.runs[0].font.color.rgb = RGBColor(255, 0, 0)
         
@@ -1286,7 +1659,7 @@ class LeaderReportGenerator:
         
         # Warning paragraph
         warning_para = self.doc.add_paragraph()
-        warning_run = warning_para.add_run('WARN:️ CRITICAL: BEMS (Back-End Engineering Management System) escalations detected!\n')
+        warning_run = warning_para.add_run('Warning: CRITICAL: BEMS (Back-End Engineering Management System) escalations detected!\n')
         warning_run.font.bold = True
         warning_run.font.size = Pt(11)
         warning_run.font.color.rgb = RGBColor(255, 0, 0)
@@ -1373,188 +1746,18 @@ class LeaderReportGenerator:
         self.doc.add_paragraph()
     
     def _add_individual_team_member_summaries(self, team_data: Dict[str, Dict], days: int):
+        """Deprecated: per-team-member rendering is handled by
+        ``_create_adoptiq_summaries_per_person``. Retained only as a
+        backwards-compatible no-op for any external caller that may still
+        reference this method; scheduled for removal.
         """
-        Add comprehensive individual team member account summaries for manager review.
-        Shows per-CSS breakdown of accounts, defects, barriers, pulse, action plans, and health scores.
-        """
-        if not team_data:
-            return
-        
-        # Add page break and section heading
-        self.doc.add_page_break()
-        heading = self.doc.add_heading('Individual Team Member Account Summaries', level=1)
-        if heading.runs:
-            heading.runs[0].font.color.rgb = CISCO_BLUE
-        
-        # Add section description
-        desc_para = self.doc.add_paragraph()
-        desc_para.add_run(
-            'This section provides detailed per-team-member breakdowns of assigned accounts, '
-            'including adoption barriers, customer pulse ratings, action plans, defects, and TAC cases. '
-            'Use this information to understand each team member\'s portfolio health and areas requiring attention.\n\n'
-        ).font.italic = True
-        
-        # Iterate through each team member
-        for cssm_name, data in sorted(team_data.items()):
-            logger.debug(f"Processing team member {cssm_name}")
-            
-            # Team member heading
-            member_heading = self.doc.add_heading(f'{cssm_name}', level=2)
-            if member_heading.runs:
-                member_heading.runs[0].font.color.rgb = CISCO_GRAY
-            
-            # Add detailed paragraph summary for this individual
-            try:
-                self._add_individual_summary_paragraph(cssm_name, data, days)
-                logger.debug(f"Successfully added summary paragraph for {cssm_name}")
-            except Exception as e:
-                logger.error(f"Error adding summary paragraph for {cssm_name}: {e}")
-                # Continue with other team members
-            
-            # Get unique customers for this CSS
-            customers = set()
-            
-            # Collect customers from different sources
-            if 'adoption_barriers' in data and not data['adoption_barriers'].empty:
-                if 'BU_NAME' in data['adoption_barriers'].columns:
-                    customers.update(data['adoption_barriers']['BU_NAME'].dropna().unique())
-            
-            if 'tac_cases' in data and not data['tac_cases'].empty:
-                for col in data['tac_cases'].columns:
-                    if 'customer' in col.lower() or 'account' in col.lower():
-                        customers.update(data['tac_cases'][col].dropna().unique())
-                        break
-            
-            if 'action_plans' in data and not data['action_plans'].empty:
-                if 'BU_NAME' in data['action_plans'].columns:
-                    customers.update(data['action_plans']['BU_NAME'].dropna().unique())
-            
-            if 'customer_pulse' in data and not data['customer_pulse'].empty:
-                if 'BU_NAME' in data['customer_pulse'].columns:
-                    customers.update(data['customer_pulse']['BU_NAME'].dropna().unique())
-            
-            customers = sorted([c for c in customers if c and str(c).strip()])
-            
-            if not customers:
-                no_data_para = self.doc.add_paragraph()
-                no_data_para.add_run('No customer data available for this team member.').font.italic = True
-                self.doc.add_paragraph()  # spacing
-                continue
-            
-            # Summary statistics
-            stats_para = self.doc.add_paragraph()
-            stats_para.add_run(f'Total Assigned Accounts: {len(customers)}\n').font.bold = True
-            
-            total_abs = self.safe_len(data.get('adoption_barriers'))
-            total_aps = self.safe_len(data.get('action_plans'))
-            total_cps = self.safe_len(data.get('customer_pulse'))
-            total_tacs = self.safe_len(data.get('tac_cases'))
-            
-            stats_para.add_run(f'Total Activities: {total_abs + total_aps + total_cps + total_tacs}\n')
-            stats_para.add_run(f'  • Adoption Barriers: {total_abs}\n')
-            stats_para.add_run(f'  • Action Plans: {total_aps}\n')
-            stats_para.add_run(f'  • Customer Pulse: {total_cps}\n')
-            stats_para.add_run(f'  • TAC Cases: {total_tacs}\n\n')
-            
-            # Create detailed table for each account - FIXED: Show ALL customers
-            if len(customers) > 0:
-                display_customers = customers  # Show ALL customers
-                
-                table = self.doc.add_table(rows=len(display_customers) + 1, cols=6)
-                table.style = 'Light Grid Accent 1'
-                
-                # Header row
-                header_cells = table.rows[0].cells
-                headers = ['Customer', 'Barriers', 'Action Plans', 'Pulse', 'TAC Cases', 'Status']
-                for i, header_text in enumerate(headers):
-                    cell = header_cells[i]
-                    cell.text = header_text
-                    if cell.paragraphs and cell.paragraphs[0].runs:
-                        cell.paragraphs[0].runs[0].font.bold = True
-                        cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
-                    cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    # Add blue background
-                    shading_elm = OxmlElement('w:shd')
-                    shading_elm.set(qn('w:fill'), '0076CE')
-                    cell._element.get_or_add_tcPr().append(shading_elm)
-                
-                # Data rows
-                for idx, customer in enumerate(display_customers, 1):
-                    row_cells = table.rows[idx].cells
-                    
-                    # Customer name - FIXED: No truncation
-                    row_cells[0].text = str(customer)
-                    
-                    # Count barriers for this customer
-                    barrier_count = 0
-                    if 'adoption_barriers' in data and not data['adoption_barriers'].empty:
-                        if 'BU_NAME' in data['adoption_barriers'].columns:
-                            barrier_count = len(data['adoption_barriers'][data['adoption_barriers']['BU_NAME'] == customer])
-                    row_cells[1].text = str(barrier_count)
-                    row_cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    
-                    # Count action plans for this customer
-                    ap_count = 0
-                    if 'action_plans' in data and not data['action_plans'].empty:
-                        if 'BU_NAME' in data['action_plans'].columns:
-                            ap_count = len(data['action_plans'][data['action_plans']['BU_NAME'] == customer])
-                    row_cells[2].text = str(ap_count)
-                    row_cells[2].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    
-                    # Get pulse rating for this customer
-                    pulse_rating = 'N/A'
-                    if 'customer_pulse' in data and not data['customer_pulse'].empty:
-                        if 'BU_NAME' in data['customer_pulse'].columns:
-                            customer_pulses = data['customer_pulse'][data['customer_pulse']['BU_NAME'] == customer]
-                            if not customer_pulses.empty and 'SCORE__C' in customer_pulses.columns:
-                                avg_score = customer_pulses['SCORE__C'].mean()
-                                if not pd.isna(avg_score):
-                                    pulse_rating = f'{avg_score:.1f}'
-                    row_cells[3].text = pulse_rating
-                    row_cells[3].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    
-                    # Count TAC cases for this customer
-                    tac_count = 0
-                    if 'tac_cases' in data and not data['tac_cases'].empty:
-                        customer_norm = normalize_customer_name(customer)
-                        for col in data['tac_cases'].columns:
-                            if 'customer' in col.lower() or 'account' in col.lower():
-                                tac_mask = (
-                                    data['tac_cases'][col].fillna("").astype(str).apply(normalize_customer_name) == customer_norm
-                                )
-                                tac_count = int(tac_mask.sum())
-                                break
-                    row_cells[4].text = str(tac_count)
-                    row_cells[4].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    
-                    # Determine overall status
-                    if barrier_count > 3 or tac_count > 2:
-                        status = 'WARN:️ Needs Attention'
-                        status_color = RGBColor(255, 0, 0)  # Red
-                    elif barrier_count > 1 or tac_count > 0:
-                        status = '⚡ Monitor'
-                        status_color = RGBColor(255, 140, 0)  # Orange
-                    else:
-                        status = '✅ Healthy'
-                        status_color = RGBColor(0, 128, 0)  # Green
-                    
-                    row_cells[5].text = status
-                    row_cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    if row_cells[5].paragraphs and row_cells[5].paragraphs[0].runs:
-                        row_cells[5].paragraphs[0].runs[0].font.color.rgb = status_color
-                        row_cells[5].paragraphs[0].runs[0].font.bold = True
-                
-                # FIXED: Removed limit message - now showing ALL customers
-            
-            self.doc.add_paragraph()  # spacing between team members
-        
-        # Add legend
-        legend_para = self.doc.add_paragraph()
-        legend_para.add_run('\nStatus Legend:\n').font.bold = True
-        legend_para.add_run('  ✅ Healthy: 0-1 barriers, 0 TAC cases - account in good standing\n')
-        legend_para.add_run('  ⚡ Monitor: 2-3 barriers or 1+ TAC cases - watch closely\n')
-        legend_para.add_run('  WARN:️ Needs Attention: 4+ barriers or 3+ TAC cases - requires immediate action\n')
-    
+        logger.warning(
+            "_add_individual_team_member_summaries is deprecated and is now a "
+            "no-op; per-team-member rendering is in "
+            "_create_adoptiq_summaries_per_person."
+        )
+        return
+
     def _add_individual_summary_paragraph(self, cssm_name: str, data: Dict, days: int):
         """
         Add a comprehensive paragraph summary for an individual team member.
@@ -1580,10 +1783,12 @@ class LeaderReportGenerator:
         tac_cases = data.get('tac_cases', pd.DataFrame())
         
         logger.debug(f"Data sizes - ABs: {len(adoption_barriers)}, APs: {len(action_plans)}, CPs: {len(customer_pulse)}, TACs: {len(tac_cases)}")
-        
-        # Sentiment remains optional and is independent from ARR reporting.
-        sentiment_summary = "Unknown"
-        
+
+        sentiment_summary = self._derive_sentiment_summary(
+            customer_pulse=customer_pulse,
+            adoption_barriers=adoption_barriers,
+        )
+
         if total_customers == 0:
             summary_para = self.doc.add_paragraph()
             summary_para.add_run(f'{cssm_name} currently has no assigned customer accounts or data available for the selected {days}-day period. This may indicate a new team member assignment or a data synchronization issue that requires verification with the customer success management system.').font.italic = True
@@ -1600,12 +1805,16 @@ class LeaderReportGenerator:
         if not adoption_barriers.empty and 'PRIORITY' in adoption_barriers.columns:
             high_priority_barriers = len(adoption_barriers[adoption_barriers['PRIORITY'].astype(str).str.contains('High|Critical|Urgent', case=False, na=False)])
         
-        # Calculate average pulse score if available
         avg_pulse_score = None
-        if not customer_pulse.empty and 'SCORE' in customer_pulse.columns:
-            scores = customer_pulse['SCORE'].dropna()
-            if not scores.empty:
-                avg_pulse_score = scores.mean()
+        if not customer_pulse.empty:
+            score_col = next(
+                (col for col in ('SCORE__C', 'SCORE') if col in customer_pulse.columns),
+                None,
+            )
+            if score_col is not None:
+                scores = pd.to_numeric(customer_pulse[score_col], errors='coerce').dropna()
+                if not scores.empty:
+                    avg_pulse_score = scores.mean()
         
         # Identify top issues
         top_barrier_categories = []
@@ -1744,21 +1953,24 @@ class LeaderReportGenerator:
         for cssm_name in sorted(team_data.keys()):
             data = team_data[cssm_name]
             
-            # Calculate sentiment for this team member
-            team_sentiment = "Unknown"
-            
-            # FIXED: Use PRIMARY customer list from subscriptions (same as CSS to Customer Ratio table)
-            # This ensures consistency between table ARR and individual summary ARR
+            # Rules-based sentiment derived from pulse scores and AB severity.
+            # The optional ARR-based analyzer still wins when available so
+            # richer signals are not discarded.
+            team_sentiment = self._derive_sentiment_summary(
+                customer_pulse=data.get('customer_pulse'),
+                adoption_barriers=data.get('adoption_barriers'),
+            )
+
             customers = data.get('customers', [])
             if not isinstance(customers, list):
                 customers = list(customers) if customers else []
             customers = [c for c in customers if c and str(c).strip()]
-            
+
             logger.debug(f"  {cssm_name}: Using PRIMARY customer list ({len(customers)} customers)")
             if self.arr_sentiment_analyzer:
                 try:
                     sentiment_data = self.arr_sentiment_analyzer.analyze_customer_sentiment(cssm_name, data)
-                    team_sentiment = sentiment_data.get('overall_sentiment', 'Unknown')
+                    team_sentiment = sentiment_data.get('overall_sentiment', team_sentiment)
                 except Exception as e:
                     logger.debug(f"Sentiment analysis failed for {cssm_name}: {e}")
             
@@ -1820,13 +2032,12 @@ class LeaderReportGenerator:
                 fallback_para = self.doc.add_paragraph()
                 fallback_para.add_run(f"Summary for {cssm_name}: Portfolio analysis temporarily unavailable.").font.italic = True
             
-            # Add a clean separator line between team member sections (except for the last one)
-            if row_idx < len(team_data) - 1:  # Don't add separator after the last team member
+            if row_idx < self.safe_len(team_data):
                 separator_para = self.doc.add_paragraph()
                 separator_para.add_run("_" * 80).font.color.rgb = CISCO_GRAY
                 separator_para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-                self.doc.add_paragraph()  # Add extra spacing after separator
-            
+                self.doc.add_paragraph()
+
             row_idx += 1
         
         # Totals row
@@ -1881,7 +2092,604 @@ class LeaderReportGenerator:
         # NOTE: BEMS Summary moved to TAC Cases section for better context
         
         self.doc.add_page_break()
-    
+
+    # ------------------------------------------------------------------
+    # Team insights: leaderboards, aging, coverage gaps, period deltas
+    # These helpers surface signals that live in the already-fetched data
+    # but aren't otherwise rendered.
+    # ------------------------------------------------------------------
+
+    _AGING_BUCKETS: Tuple[Tuple[str, int, Optional[int]], ...] = (
+        ("0-7 days", 0, 7),
+        ("8-30 days", 8, 30),
+        ("31-60 days", 31, 60),
+        ("60+ days", 61, None),
+    )
+
+    _CLOSED_STATUS_TOKENS: Tuple[str, ...] = (
+        "closed", "resolved", "complete", "completed", "done", "cancelled", "canceled"
+    )
+
+    def _collect_creator_counts(self, team_data: Dict[str, Dict]) -> Dict[str, Dict[str, Any]]:
+        """Aggregate creator activity across AP/AB/CP for the leaderboard.
+
+        Returns a mapping ``creator_label -> {"total": int, "AP": int,
+        "AB": int, "CP": int, "external": int}``. Rows without a creator
+        label (the CSSM's own records where ``_CREATOR_NAME`` is empty) fall
+        back to the CSSM key so the tallies still add up.
+        """
+        aggregates: Dict[str, Dict[str, Any]] = {}
+
+        def _bump(label: str, kind: str, external: bool) -> None:
+            bucket = aggregates.setdefault(
+                label,
+                {"total": 0, "AP": 0, "AB": 0, "CP": 0, "external": 0},
+            )
+            bucket["total"] += 1
+            bucket[kind] += 1
+            if external:
+                bucket["external"] += 1
+
+        kinds = (("action_plans", "AP"), ("adoption_barriers", "AB"), ("customer_pulse", "CP"))
+
+        for cssm_name, data in (team_data or {}).items():
+            for key, label in kinds:
+                df = data.get(key)
+                if df is None or getattr(df, "empty", True):
+                    continue
+                if "_CREATOR_NAME" in df.columns:
+                    names = df["_CREATOR_NAME"].fillna("").astype(str).str.strip()
+                else:
+                    names = pd.Series([""] * len(df))
+                emails = (
+                    df["_CREATOR_EMAIL"].fillna("").astype(str).str.strip()
+                    if "_CREATOR_EMAIL" in df.columns
+                    else pd.Series([""] * len(df))
+                )
+                ext_flags = (
+                    df["_EXTERNAL_ACCOUNT"].fillna(False).astype(bool)
+                    if "_EXTERNAL_ACCOUNT" in df.columns
+                    else pd.Series([False] * len(df))
+                )
+                for i in range(len(df)):
+                    name = names.iloc[i] if i < len(names) else ""
+                    email = emails.iloc[i] if i < len(emails) else ""
+                    creator_label = name or email or cssm_name
+                    _bump(creator_label, label, bool(ext_flags.iloc[i]) if i < len(ext_flags) else False)
+
+        return aggregates
+
+    def _add_collaboration_leaderboard(self, team_data: Dict[str, Dict]) -> bool:
+        """Render a top-creator leaderboard using ``_CREATOR_NAME`` across
+        AP/AB/CP frames. Returns True if a section was written.
+        """
+        aggregates = self._collect_creator_counts(team_data)
+        if not aggregates:
+            return False
+
+        ranked = sorted(
+            aggregates.items(),
+            key=lambda kv: (-kv[1]["total"], kv[0]),
+        )[:10]
+
+        heading = self.doc.add_heading('Collaboration Leaderboard', level=2)
+        if heading.runs:
+            heading.runs[0].font.color.rgb = CISCO_BLUE
+
+        desc = self.doc.add_paragraph()
+        desc.add_run(
+            'Top creators across Action Plans, Adoption Barriers, and Customer Pulse in this window. '
+            'External-account contributions are counted separately; they represent collaboration on '
+            'accounts outside the creator\'s primary DSM portfolio.\n'
+        ).font.italic = True
+
+        table = self.doc.add_table(rows=len(ranked) + 1, cols=6)
+        table.style = 'Light Grid Accent 1'
+        headers = ['Creator', 'Total', 'Action Plans', 'Adoption Barriers', 'Customer Pulse', 'External-Account']
+        header_cells = table.rows[0].cells
+        for i, text in enumerate(headers):
+            header_cells[i].text = text
+            if header_cells[i].paragraphs and header_cells[i].paragraphs[0].runs:
+                header_cells[i].paragraphs[0].runs[0].font.bold = True
+                header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+            shading = OxmlElement('w:shd')
+            shading.set(qn('w:fill'), '007BC7')
+            header_cells[i]._element.get_or_add_tcPr().append(shading)
+
+        for row_idx, (creator, counts) in enumerate(ranked, start=1):
+            row_cells = table.rows[row_idx].cells
+            row_cells[0].text = str(creator or 'Unknown')
+            row_cells[1].text = str(counts["total"])
+            row_cells[2].text = str(counts["AP"])
+            row_cells[3].text = str(counts["AB"])
+            row_cells[4].text = str(counts["CP"])
+            row_cells[5].text = str(counts["external"])
+            for idx in (1, 2, 3, 4, 5):
+                if row_cells[idx].paragraphs:
+                    row_cells[idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        self.doc.add_paragraph()
+        return True
+
+    @staticmethod
+    def _is_status_open(status_value: Any) -> bool:
+        if status_value is None:
+            return True
+        try:
+            text = str(status_value).strip().lower()
+        except Exception:
+            return True
+        if not text:
+            return True
+        return not any(token in text for token in LeaderReportGenerator._CLOSED_STATUS_TOKENS)
+
+    def _compute_aging_buckets(self, df: Optional[pd.DataFrame]) -> Dict[str, int]:
+        """Bucket ``df`` rows by age of their primary date column, filtering to
+        open records where a STATUS-like column exists. Missing dates fall
+        into the 60+ bucket so they can't silently disappear.
+        """
+        buckets: Dict[str, int] = {name: 0 for name, _, _ in self._AGING_BUCKETS}
+        if df is None or df.empty:
+            return buckets
+
+        date_col = None
+        for candidate in ('CREATED_DATE', 'CREATEDDATE', 'OPEN_DATE_C', 'OPENED_DATE'):
+            if candidate in df.columns:
+                date_col = candidate
+                break
+        if date_col is None:
+            return buckets
+
+        status_col = None
+        for candidate in ('STATUS_C', 'STATUS', 'STATE'):
+            if candidate in df.columns:
+                status_col = candidate
+                break
+
+        if status_col is not None:
+            open_mask = df[status_col].apply(self._is_status_open)
+            working = df[open_mask]
+        else:
+            working = df
+
+        if working.empty:
+            return buckets
+
+        created = pd.to_datetime(working[date_col], errors='coerce', utc=True)
+        now = pd.Timestamp.utcnow()
+        ages = (now - created).dt.days
+        for label, lower, upper in self._AGING_BUCKETS:
+            if upper is None:
+                mask = ages.isna() | (ages >= lower)
+            else:
+                mask = (ages >= lower) & (ages <= upper)
+            buckets[label] = int(mask.sum())
+        return buckets
+
+    def _add_aging_section(self, team_data: Dict[str, Dict]) -> bool:
+        """Render 0-7 / 8-30 / 31-60 / 60+ aging tables for open APs and ABs."""
+        rendered = False
+        for key, label in (("action_plans", "Action Plans"), ("adoption_barriers", "Adoption Barriers")):
+            any_rows = any(
+                (data.get(key) is not None and not data[key].empty)
+                for data in (team_data or {}).values()
+            )
+            if not any_rows:
+                continue
+
+            heading = self.doc.add_heading(f'Aging of Open {label}', level=2)
+            if heading.runs:
+                heading.runs[0].font.color.rgb = CISCO_BLUE
+
+            note = self.doc.add_paragraph()
+            note.add_run(
+                f'Open {label.lower()} by age. Records whose status matches Closed/Resolved/'
+                'Complete are excluded. Records with missing dates are counted in the oldest bucket.\n'
+            ).font.italic = True
+
+            table = self.doc.add_table(rows=len(team_data) + 2, cols=len(self._AGING_BUCKETS) + 2)
+            table.style = 'Light Grid Accent 1'
+
+            header_cells = table.rows[0].cells
+            header_cells[0].text = 'Team Member'
+            for i, (bucket_label, _, _) in enumerate(self._AGING_BUCKETS, start=1):
+                header_cells[i].text = bucket_label
+            header_cells[len(self._AGING_BUCKETS) + 1].text = 'Total Open'
+            for cell in header_cells:
+                if cell.paragraphs and cell.paragraphs[0].runs:
+                    cell.paragraphs[0].runs[0].font.bold = True
+                    cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+                shading = OxmlElement('w:shd')
+                shading.set(qn('w:fill'), '007BC7')
+                cell._element.get_or_add_tcPr().append(shading)
+
+            totals = {bucket: 0 for bucket, _, _ in self._AGING_BUCKETS}
+            for row_idx, cssm_name in enumerate(sorted(team_data.keys()), start=1):
+                data = team_data[cssm_name]
+                buckets = self._compute_aging_buckets(data.get(key))
+                row_cells = table.rows[row_idx].cells
+                row_cells[0].text = cssm_name
+                row_total = 0
+                for col_idx, (bucket_label, _, _) in enumerate(self._AGING_BUCKETS, start=1):
+                    count = buckets.get(bucket_label, 0)
+                    row_cells[col_idx].text = str(count)
+                    if row_cells[col_idx].paragraphs:
+                        row_cells[col_idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    totals[bucket_label] += count
+                    row_total += count
+                row_cells[len(self._AGING_BUCKETS) + 1].text = str(row_total)
+                if row_cells[len(self._AGING_BUCKETS) + 1].paragraphs:
+                    row_cells[len(self._AGING_BUCKETS) + 1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+            totals_row = table.rows[len(team_data) + 1].cells
+            totals_row[0].text = 'TOTAL'
+            grand_total = 0
+            for col_idx, (bucket_label, _, _) in enumerate(self._AGING_BUCKETS, start=1):
+                count = totals[bucket_label]
+                totals_row[col_idx].text = str(count)
+                grand_total += count
+                if totals_row[col_idx].paragraphs:
+                    totals_row[col_idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            totals_row[len(self._AGING_BUCKETS) + 1].text = str(grand_total)
+            for cell in totals_row:
+                if cell.paragraphs and cell.paragraphs[0].runs:
+                    cell.paragraphs[0].runs[0].font.bold = True
+                shading = OxmlElement('w:shd')
+                shading.set(qn('w:fill'), 'E8E8E8')
+                cell._element.get_or_add_tcPr().append(shading)
+
+            self.doc.add_paragraph()
+            rendered = True
+        return rendered
+
+    def _compute_coverage_gaps(self, data: Dict) -> List[str]:
+        """Return a sorted list of subscription customers with zero AP/AB/CP
+        activity in the current window for a single CSSM."""
+        subs = data.get('subscriptions')
+        if subs is None or subs.empty or 'BU_NAME' not in subs.columns:
+            return []
+        subscribed = {
+            str(name).strip()
+            for name in subs['BU_NAME'].dropna().astype(str)
+            if str(name).strip()
+        }
+        if not subscribed:
+            return []
+
+        def _names(df: Optional[pd.DataFrame]) -> set:
+            if df is None or df.empty or 'BU_NAME' not in df.columns:
+                return set()
+            return {
+                str(name).strip()
+                for name in df['BU_NAME'].dropna().astype(str)
+                if str(name).strip()
+            }
+
+        active = set()
+        for key in ('action_plans', 'adoption_barriers', 'customer_pulse'):
+            active |= _names(data.get(key))
+        return sorted(subscribed - active)
+
+    def _add_coverage_gap_section(self, team_data: Dict[str, Dict], days: int) -> bool:
+        """List subscription customers with zero AP/AB/CP activity in window."""
+        gaps = {
+            cssm_name: self._compute_coverage_gaps(data)
+            for cssm_name, data in (team_data or {}).items()
+        }
+        if not any(gaps.values()):
+            return False
+
+        heading = self.doc.add_heading('Coverage Gaps (Zero-Activity Customers)', level=2)
+        if heading.runs:
+            heading.runs[0].font.color.rgb = CISCO_BLUE
+
+        note = self.doc.add_paragraph()
+        note.add_run(
+            f'Customers in each team member\'s primary subscription list with NO Action Plans, '
+            f'Adoption Barriers, or Customer Pulse activity in the last {days} days. '
+            'Review for re-engagement opportunities.\n'
+        ).font.italic = True
+
+        for cssm_name in sorted(gaps.keys()):
+            names = gaps[cssm_name]
+            if not names:
+                continue
+            subheading = self.doc.add_heading(f'{cssm_name} ({len(names)})', level=3)
+            if subheading.runs:
+                subheading.runs[0].font.size = Pt(12)
+            bullet = self.doc.add_paragraph()
+            for name in names:
+                bullet.add_run(f'• {name}\n')
+
+        return True
+
+    def _compute_period_deltas(
+        self, team_data: Dict[str, Dict], days: int
+    ) -> Optional[Dict[str, Dict[str, int]]]:
+        """Split each frame's rows into 'current' and 'prior' halves based on
+        the primary date column. The prior window is the preceding ``days``
+        period. Returns ``None`` when no dateable rows exist.
+        """
+        if days is None or days <= 0:
+            return None
+
+        now = pd.Timestamp.utcnow()
+        current_start = now - pd.Timedelta(days=days)
+        prior_start = current_start - pd.Timedelta(days=days)
+
+        per_member: Dict[str, Dict[str, int]] = {}
+        found_any = False
+
+        kinds = (
+            ("action_plans", ("CREATED_DATE", "CREATEDDATE", "OPEN_DATE_C")),
+            ("adoption_barriers", ("CREATED_DATE", "CREATEDDATE", "OPEN_DATE_C")),
+            ("customer_pulse", ("CREATED_DATE", "CREATEDDATE", "SURVEY_DATE_C", "RESPONSE_DATE_C")),
+        )
+
+        for cssm_name, data in (team_data or {}).items():
+            entry = per_member.setdefault(
+                cssm_name,
+                {"AP_curr": 0, "AP_prior": 0, "AB_curr": 0, "AB_prior": 0, "CP_curr": 0, "CP_prior": 0},
+            )
+            for key, date_candidates in kinds:
+                df = data.get(key)
+                if df is None or df.empty:
+                    continue
+                date_col = next((c for c in date_candidates if c in df.columns), None)
+                if date_col is None:
+                    continue
+                dates = pd.to_datetime(df[date_col], errors='coerce', utc=True)
+                valid = dates.dropna()
+                if valid.empty:
+                    continue
+                found_any = True
+                curr_mask = (dates >= current_start) & (dates <= now)
+                prior_mask = (dates >= prior_start) & (dates < current_start)
+                prefix = {"action_plans": "AP", "adoption_barriers": "AB", "customer_pulse": "CP"}[key]
+                entry[f"{prefix}_curr"] += int(curr_mask.sum())
+                entry[f"{prefix}_prior"] += int(prior_mask.sum())
+
+        return per_member if found_any else None
+
+    def _add_period_delta_section(
+        self, team_data: Dict[str, Dict], days: int
+    ) -> bool:
+        """Render a small delta table (current window vs. prior window) for
+        AP/AB/CP creation counts per team member."""
+        per_member = self._compute_period_deltas(team_data, days)
+        if not per_member:
+            return False
+
+        heading = self.doc.add_heading(
+            f'Period-over-Period Deltas (last {days} days vs. prior {days} days)',
+            level=2,
+        )
+        if heading.runs:
+            heading.runs[0].font.color.rgb = CISCO_BLUE
+
+        note = self.doc.add_paragraph()
+        note.add_run(
+            'Activity created in the current window vs. the immediately preceding window of the same '
+            'length. Deltas are rendered as signed integers (green positive, red negative).\n'
+        ).font.italic = True
+
+        table = self.doc.add_table(rows=len(per_member) + 1, cols=7)
+        table.style = 'Light Grid Accent 1'
+
+        header_cells = table.rows[0].cells
+        headers = ['Team Member', 'APs now', 'AP delta', 'ABs now', 'AB delta', 'CPs now', 'CP delta']
+        for i, text in enumerate(headers):
+            header_cells[i].text = text
+            if header_cells[i].paragraphs and header_cells[i].paragraphs[0].runs:
+                header_cells[i].paragraphs[0].runs[0].font.bold = True
+                header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+            shading = OxmlElement('w:shd')
+            shading.set(qn('w:fill'), '007BC7')
+            header_cells[i]._element.get_or_add_tcPr().append(shading)
+
+        for row_idx, cssm_name in enumerate(sorted(per_member.keys()), start=1):
+            counts = per_member[cssm_name]
+            row_cells = table.rows[row_idx].cells
+            row_cells[0].text = cssm_name
+            pairs = (
+                ("AP_curr", "AP_prior"),
+                ("AB_curr", "AB_prior"),
+                ("CP_curr", "CP_prior"),
+            )
+            col = 1
+            for curr_key, prior_key in pairs:
+                now_val = int(counts[curr_key])
+                prior_val = int(counts[prior_key])
+                delta = now_val - prior_val
+                row_cells[col].text = str(now_val)
+                if row_cells[col].paragraphs:
+                    row_cells[col].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                col += 1
+                row_cells[col].text = (f'+{delta}' if delta > 0 else str(delta))
+                if row_cells[col].paragraphs:
+                    row_cells[col].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                if row_cells[col].paragraphs and row_cells[col].paragraphs[0].runs:
+                    run = row_cells[col].paragraphs[0].runs[0]
+                    if delta > 0:
+                        run.font.color.rgb = RGBColor(0, 128, 0)
+                    elif delta < 0:
+                        run.font.color.rgb = RGBColor(200, 0, 0)
+                col += 1
+
+        self.doc.add_paragraph()
+        return True
+
+    def _compute_customer_health(self, data: Dict) -> List[Dict[str, Any]]:
+        """Build per-customer health rows for one CSSM: oldest open AB age,
+        stalled-AP count, CP score trajectory. Customers with no dateable
+        activity are skipped."""
+        ap = data.get('action_plans')
+        ab = data.get('adoption_barriers')
+        cp = data.get('customer_pulse')
+        rows: Dict[str, Dict[str, Any]] = {}
+
+        now = pd.Timestamp.utcnow()
+
+        def _date(series: pd.Series) -> pd.Series:
+            return pd.to_datetime(series, errors='coerce', utc=True)
+
+        if ap is not None and not ap.empty and 'BU_NAME' in ap.columns:
+            status_col = next((c for c in ('STATUS_C', 'STATUS') if c in ap.columns), None)
+            date_col = next((c for c in ('LAST_MODIFIED_DATE', 'LASTMODIFIEDDATE', 'CREATED_DATE', 'CREATEDDATE') if c in ap.columns), None)
+            if status_col and date_col:
+                open_ap = ap[ap[status_col].apply(self._is_status_open)]
+                ages = (now - _date(open_ap[date_col])).dt.days
+                stalled = open_ap[ages > 30]
+                for name, count in stalled['BU_NAME'].dropna().astype(str).value_counts().items():
+                    rows.setdefault(name, {"customer": name}).update({"stalled_aps": int(count)})
+
+        if ab is not None and not ab.empty and 'BU_NAME' in ab.columns:
+            status_col = next((c for c in ('STATUS_C', 'STATUS') if c in ab.columns), None)
+            date_col = next((c for c in ('CREATED_DATE', 'CREATEDDATE', 'OPEN_DATE_C') if c in ab.columns), None)
+            if date_col:
+                open_mask = ab[status_col].apply(self._is_status_open) if status_col else pd.Series([True] * len(ab))
+                open_ab = ab[open_mask]
+                if not open_ab.empty:
+                    open_ab = open_ab.copy()
+                    open_ab['_age_days'] = (now - _date(open_ab[date_col])).dt.days
+                    oldest = (
+                        open_ab.dropna(subset=['_age_days'])
+                        .sort_values('_age_days', ascending=False)
+                        .groupby(open_ab['BU_NAME'].fillna('Unknown').astype(str))
+                        .head(1)
+                    )
+                    for _, ab_row in oldest.iterrows():
+                        name = str(ab_row.get('BU_NAME', 'Unknown'))
+                        entry = rows.setdefault(name, {"customer": name})
+                        entry["oldest_open_ab_days"] = int(ab_row['_age_days'])
+                        entry["oldest_open_ab_severity"] = str(ab_row.get('SEVERITY_C', '') or '')
+
+        if cp is not None and not cp.empty and 'BU_NAME' in cp.columns:
+            score_col = next((c for c in ('SCORE__C', 'SCORE') if c in cp.columns), None)
+            if score_col:
+                cp_work = cp[['BU_NAME', score_col]].copy()
+                cp_work[score_col] = pd.to_numeric(cp_work[score_col], errors='coerce')
+                cp_work = cp_work.dropna(subset=[score_col])
+                if not cp_work.empty:
+                    grouped = cp_work.groupby(cp_work['BU_NAME'].fillna('Unknown').astype(str))[score_col]
+                    for name, stats in grouped.agg(['min', 'max', 'last']).iterrows():
+                        entry = rows.setdefault(name, {"customer": name})
+                        entry["cp_min"] = float(stats['min'])
+                        entry["cp_max"] = float(stats['max'])
+                        entry["cp_last"] = float(stats['last'])
+
+        def _risk(entry: Dict[str, Any]) -> str:
+            sev = str(entry.get('oldest_open_ab_severity', '')).lower()
+            age = entry.get('oldest_open_ab_days', 0) or 0
+            stalled = entry.get('stalled_aps', 0) or 0
+            cp_last = entry.get('cp_last')
+            if ('high' in sev or 'critical' in sev) and age >= 30:
+                return 'High'
+            if stalled >= 3 or age >= 60:
+                return 'High'
+            if stalled >= 1 or age >= 30 or (cp_last is not None and cp_last < 5):
+                return 'Medium'
+            return 'Low'
+
+        out: List[Dict[str, Any]] = []
+        for name, entry in rows.items():
+            entry['risk'] = _risk(entry)
+            out.append(entry)
+        out.sort(key=lambda e: ({'High': 0, 'Medium': 1, 'Low': 2}.get(e['risk'], 3), -(e.get('oldest_open_ab_days') or 0), e['customer']))
+        return out
+
+    def _add_customer_health_section(self, team_data: Dict[str, Dict]) -> bool:
+        """Render a per-CSSM customer health table with stalled APs, oldest
+        open AB age, CP trajectory, and an overall risk badge."""
+        any_rendered = False
+        for cssm_name in sorted(team_data.keys()):
+            rows = self._compute_customer_health(team_data[cssm_name])
+            if not rows:
+                continue
+            if not any_rendered:
+                heading = self.doc.add_heading('Customer Health Signals', level=2)
+                if heading.runs:
+                    heading.runs[0].font.color.rgb = CISCO_BLUE
+                note = self.doc.add_paragraph()
+                note.add_run(
+                    'Per-customer risk signals derived from stalled Action Plans (open >30 days), '
+                    'oldest open Adoption Barrier, and Customer Pulse score trajectory. '
+                    'Risk: High (severe AB or 3+ stalled APs), Medium (moderate signal), Low.\n'
+                ).font.italic = True
+                any_rendered = True
+
+            sub = self.doc.add_heading(f'{cssm_name}', level=3)
+            if sub.runs:
+                sub.runs[0].font.size = Pt(12)
+
+            table = self.doc.add_table(rows=len(rows) + 1, cols=6)
+            table.style = 'Light Grid Accent 1'
+            headers = ['Customer', 'Risk', 'Stalled APs', 'Oldest Open AB', 'AB Severity', 'CP (min/max/last)']
+            header_cells = table.rows[0].cells
+            for i, text in enumerate(headers):
+                header_cells[i].text = text
+                if header_cells[i].paragraphs and header_cells[i].paragraphs[0].runs:
+                    header_cells[i].paragraphs[0].runs[0].font.bold = True
+                    header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+                shading = OxmlElement('w:shd')
+                shading.set(qn('w:fill'), '007BC7')
+                header_cells[i]._element.get_or_add_tcPr().append(shading)
+
+            for row_idx, entry in enumerate(rows, start=1):
+                row_cells = table.rows[row_idx].cells
+                row_cells[0].text = str(entry.get('customer', 'Unknown'))
+                row_cells[1].text = str(entry.get('risk', 'Low'))
+                if entry.get('risk') == 'High' and row_cells[1].paragraphs and row_cells[1].paragraphs[0].runs:
+                    row_cells[1].paragraphs[0].runs[0].font.color.rgb = RGBColor(200, 0, 0)
+                    row_cells[1].paragraphs[0].runs[0].font.bold = True
+                elif entry.get('risk') == 'Medium' and row_cells[1].paragraphs and row_cells[1].paragraphs[0].runs:
+                    row_cells[1].paragraphs[0].runs[0].font.color.rgb = RGBColor(224, 128, 0)
+                row_cells[2].text = str(entry.get('stalled_aps', 0) or '—')
+                days_val = entry.get('oldest_open_ab_days')
+                row_cells[3].text = f'{int(days_val)}d' if days_val is not None else '—'
+                row_cells[4].text = str(entry.get('oldest_open_ab_severity', '') or '—')
+                if entry.get('cp_last') is not None:
+                    row_cells[5].text = (
+                        f"{entry.get('cp_min', 0):.1f} / {entry.get('cp_max', 0):.1f} / {entry.get('cp_last', 0):.1f}"
+                    )
+                else:
+                    row_cells[5].text = '—'
+                for idx in (1, 2, 3):
+                    if row_cells[idx].paragraphs:
+                        row_cells[idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+            self.doc.add_paragraph()
+        return any_rendered
+
+    def _add_team_insights_section(self, team_data: Dict[str, Dict], days: int) -> None:
+        """Umbrella section that ties together leaderboard, aging, coverage
+        gaps, period deltas, and per-customer health signals. Individual
+        helpers return False when there is nothing to render so empty
+        subsections don't clutter the doc.
+        """
+        intro = self.doc.add_heading('Team Insights', level=1)
+        if intro.runs:
+            intro.runs[0].font.color.rgb = CISCO_BLUE
+
+        blurb = self.doc.add_paragraph()
+        blurb.add_run(
+            'Cross-cutting analytics derived from the data already collected above: who is '
+            'contributing, how old the open workload is, which accounts are quiet, how momentum '
+            'compares to the prior window, and which customers need attention now.\n'
+        ).font.italic = True
+
+        rendered_any = False
+        rendered_any |= self._add_collaboration_leaderboard(team_data)
+        rendered_any |= self._add_period_delta_section(team_data, days)
+        rendered_any |= self._add_aging_section(team_data)
+        rendered_any |= self._add_coverage_gap_section(team_data, days)
+        rendered_any |= self._add_customer_health_section(team_data)
+
+        if not rendered_any:
+            self.doc.add_paragraph('No insight signals are available for this window.').runs[0].font.italic = True
+
+        self.doc.add_page_break()
+
     def _create_adoptiq_summaries_per_person(self, team_data: Dict[str, Dict], days: int):
         """Create AdoptIQ summaries for each direct report"""
         heading = self.doc.add_heading('AdoptIQ Summaries by Team Member', level=1)
@@ -1978,6 +2786,9 @@ class LeaderReportGenerator:
                             
                             barrier_para.add_run(f'{customer} - {subject} ').font.italic = True
                             barrier_para.add_run(f'(Severity: {severity})')
+                            note = self._format_external_note(barrier, cssm_name)
+                            if note:
+                                barrier_para.add_run(f' {note}').font.italic = True
             
             # Recent Action Plans - FIXED: Show ALL action plans
             if not data['action_plans'].empty:
@@ -1994,7 +2805,37 @@ class LeaderReportGenerator:
                     
                     ap_para.add_run(f'{customer} - {subject} ').font.italic = True
                     ap_para.add_run(f'(Status: {status})')
-            
+                    note = self._format_external_note(ap, cssm_name)
+                    if note:
+                        ap_para.add_run(f' {note}').font.italic = True
+
+            # Recent Customer Pulse - surface owner-captured CP and annotate externals
+            if 'customer_pulse' in data and not data['customer_pulse'].empty:
+                cp_heading = self.doc.add_heading('All Customer Pulse', level=3)
+                if cp_heading.runs:
+                    cp_heading.runs[0].font.size = Pt(12)
+
+                for _, cp in data['customer_pulse'].iterrows():
+                    cp_para = self.doc.add_paragraph(style='List Bullet')
+
+                    customer = cp.get('BU_NAME', 'Unknown')
+                    subject = (
+                        cp.get('SUBJECT_C')
+                        or cp.get('SUBJECT')
+                        or cp.get('TITLE')
+                        or cp.get('NAME')
+                        or 'Customer Pulse'
+                    )
+                    score = cp.get('SCORE__C') if 'SCORE__C' in cp.index else cp.get('SCORE')
+                    status = cp.get('STATUS_C') or cp.get('STATUS') or 'Active'
+                    detail = f'(Score: {score})' if score not in (None, '', float('nan')) and pd.notna(score) else f'(Status: {status})'
+
+                    cp_para.add_run(f'{customer} - {subject} ').font.italic = True
+                    cp_para.add_run(detail)
+                    note = self._format_external_note(cp, cssm_name)
+                    if note:
+                        cp_para.add_run(f' {note}').font.italic = True
+
             # TAC Cases for this team member
             if 'tac_cases' in data and not data['tac_cases'].empty:
                 tac_count = self.safe_len(data["tac_cases"])
@@ -2083,26 +2924,19 @@ class LeaderReportGenerator:
                         row_cells[5].text = date_str
                         row_cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                     
-                    # Add some spacing after table
                     self.doc.add_paragraph()
-                    
+
                     tac_count = self.safe_len(tac_cases)
-                    if tac_count > 20:
-                        self.doc.add_paragraph(f'(Showing 20 of {tac_count} total TAC cases)')
-            
-        # Add comprehensive source verification section
-        self._add_source_verification_section(cssm_name, data)
-        
-        # Add enhanced Snowflake insights
-        self._add_enhanced_snowflake_insights(cssm_name, data)
-        
-        # Add enhanced defect analysis
-        self._add_defect_analysis_section(cssm_name, data)
-            
-        # Add page break between team members (except last one)
-        if idx < len(team_data) - 1:
-            self.doc.add_page_break()
-        
+                    if tac_count > 0:
+                        self.doc.add_paragraph(f'(Showing all {tac_count} TAC cases)')
+
+            self._add_source_verification_section(cssm_name, data)
+            self._add_enhanced_snowflake_insights(cssm_name, data)
+            self._add_defect_analysis_section(cssm_name, data)
+
+            if idx < len(team_data) - 1:
+                self.doc.add_page_break()
+
         self.doc.add_page_break()
     
     def _create_detailed_ab_list(self, team_data: Dict[str, Dict]):
@@ -2157,10 +2991,9 @@ class LeaderReportGenerator:
         if detail_heading.runs:
             detail_heading.runs[0].font.color.rgb = CISCO_BLUE
         
-        # Define columns to show
         columns_to_show = []
         column_headers = []
-        
+
         col_mappings = [
             ('CSSM', 'Team Member'),
             ('BU_NAME', 'Customer'),
@@ -2169,11 +3002,18 @@ class LeaderReportGenerator:
             ('AB_CATEGORY_C', 'Category'),
             ('SEVERITY_C', 'Severity'),
             ('LAST_MODIFIED_DATE', 'Last Updated'),
-            ('STATUS_C', 'Status')
+            ('STATUS_C', 'Status'),
+            # Virtual columns - always shown so external/collaborator records
+            # are obvious to the reader; values are derived per-row below.
+            ('_CREATOR_DISPLAY', 'Creator'),
         ]
-        
+
         for db_col, display_col in col_mappings:
-            if db_col in combined_abs.columns:
+            if db_col.startswith('_'):
+                # Synthetic columns are always shown; populated via ``_row_creator_cell``.
+                columns_to_show.append(db_col)
+                column_headers.append(display_col)
+            elif db_col in combined_abs.columns:
                 columns_to_show.append(db_col)
                 column_headers.append(display_col)
         
@@ -2195,22 +3035,22 @@ class LeaderReportGenerator:
             shading_elm.set(qn('w:fill'), '007BC7')
             cell._element.get_or_add_tcPr().append(shading_elm)
         
-        # FIXED: Show adoption barriers - limited to 100 to match table row count
-        for row_idx, (_, ab) in enumerate(list(combined_abs.iterrows())[:100], start=1):
+        # Use .head(n).iterrows() so we don't materialize every row into a list.
+        for row_idx, (_, ab) in enumerate(combined_abs.head(100).iterrows(), start=1):
             row_cells = table.rows[row_idx].cells
-            
+
             for col_idx, col_name in enumerate(columns_to_show):
-                value = ab.get(col_name, '')
-                
-                # Format value
-                if pd.isna(value):
-                    value = ''
-                elif isinstance(value, (datetime, pd.Timestamp)):
-                    value = value.strftime('%Y-%m-%d')
+                if col_name == '_CREATOR_DISPLAY':
+                    value = self._row_creator_cell(ab, cssm_owner=ab.get('CSSM', ''))
                 else:
-                    value = str(value)
-                
-                # No truncation - show full text for data verification
+                    value = ab.get(col_name, '')
+                    if pd.isna(value):
+                        value = ''
+                    elif isinstance(value, (datetime, pd.Timestamp)):
+                        value = value.strftime('%Y-%m-%d')
+                    else:
+                        value = str(value)
+
                 row_cells[col_idx].text = value
                 if row_cells[col_idx].paragraphs and row_cells[col_idx].paragraphs[0].runs:
                     row_cells[col_idx].paragraphs[0].runs[0].font.size = Pt(8)
@@ -2388,7 +3228,10 @@ class LeaderReportGenerator:
                     'category': category,
                     'severity': severity,
                     'date': str(ap.get('CREATED_DATE', 'N/A') if pd.notna(ap.get('CREATED_DATE')) else 'N/A'),
-                    'source': 'CSConsole'
+                    'source': 'CSConsole',
+                    'creator': str(ap.get('_CREATOR_NAME', '') or ap.get('_CREATOR_EMAIL', '') or ''),
+                    'external_account': bool(ap.get('_EXTERNAL_ACCOUNT', False)),
+                    'note': self._format_external_note(ap, ''),
                 })
         
         # Collect Adoption Barriers
@@ -2412,7 +3255,10 @@ class LeaderReportGenerator:
                     'category': category,
                     'severity': severity,
                     'date': str(ab.get('CREATED_DATE', 'N/A') if pd.notna(ab.get('CREATED_DATE')) else 'N/A'),
-                    'source': 'CSConsole'
+                    'source': 'CSConsole',
+                    'creator': str(ab.get('_CREATOR_NAME', '') or ab.get('_CREATOR_EMAIL', '') or ''),
+                    'external_account': bool(ab.get('_EXTERNAL_ACCOUNT', False)),
+                    'note': self._format_external_note(ab, ''),
                 })
         
         # Collect Customer Pulse
@@ -2436,7 +3282,10 @@ class LeaderReportGenerator:
                     'category': category,
                     'severity': severity,
                     'date': str(cp.get('CREATED_DATE', 'N/A') if pd.notna(cp.get('CREATED_DATE')) else 'N/A'),
-                    'source': 'CSConsole'
+                    'source': 'CSConsole',
+                    'creator': str(cp.get('_CREATOR_NAME', '') or cp.get('_CREATOR_EMAIL', '') or ''),
+                    'external_account': bool(cp.get('_EXTERNAL_ACCOUNT', False)),
+                    'note': self._format_external_note(cp, ''),
                 })
         
         # Collect TAC Cases
@@ -2505,7 +3354,7 @@ class LeaderReportGenerator:
         
         # Add BEMS indicator if found
         if bems_count > 0:
-            summary_para.add_run(f' | WARN:️ BEMS Escalations: {bems_count}')
+            summary_para.add_run(f' | Warning: BEMS Escalations: {bems_count}')
             summary_para.runs[-1].font.color.rgb = RGBColor(255, 140, 0)  # Orange color
             summary_para.runs[-1].font.bold = True
         
@@ -2533,12 +3382,12 @@ class LeaderReportGenerator:
             return
         
         # Create comprehensive table with all activity types
-        table = self.doc.add_table(rows=1, cols=7)
+        table = self.doc.add_table(rows=1, cols=8)
         table.style = 'Light Grid Accent 1'
-        
+
         # Header row with clear, concise headers
         header_cells = table.rows[0].cells
-        headers = ['Type', 'Record ID', 'Subject/Title', 'Status', 'Category/Priority', 'Severity', 'Date']
+        headers = ['Type', 'Record ID', 'Subject/Title', 'Status', 'Category/Priority', 'Severity', 'Date', 'Creator']
         for i, header_text in enumerate(headers):
             header_cells[i].text = header_text
             if header_cells[i].paragraphs and header_cells[i].paragraphs[0].runs:
@@ -2591,8 +3440,18 @@ class LeaderReportGenerator:
                 actual_id = record_id_str.split('-', 1)[1] if '-' in record_id_str else record_id_str
                 if actual_id != 'N/A':
                     try:
-                        # Create CSConsole hyperlink
-                        csconsole_url = f"https://ciscosales.lightning.force.com/lightning/r/C360_CS_Task__c/{actual_id}/view"
+                        # Customer Pulse lives on a different Salesforce object
+                        # (``ESA_C360_Customer_Pulse__c``); APs and ABs both
+                        # live on ``C360_CS_Task__c``. Using the Task URL for
+                        # CP produced 404s in Salesforce.
+                        if item['type'] == 'CP':
+                            sf_object = 'ESA_C360_Customer_Pulse__c'
+                        else:
+                            sf_object = 'C360_CS_Task__c'
+                        csconsole_url = (
+                            f"https://ciscosales.lightning.force.com/lightning/r/{sf_object}/"
+                            f"{actual_id}/view"
+                        )
                         self.add_hyperlink(row_cells[1].paragraphs[0], csconsole_url, record_id_str, font_size=8)
                     except Exception:
                         # Fallback to plain text if hyperlink fails
@@ -2651,7 +3510,20 @@ class LeaderReportGenerator:
             if row_cells[6].paragraphs and row_cells[6].paragraphs[0].runs:
                 row_cells[6].paragraphs[0].runs[0].font.size = Pt(8)
             row_cells[6].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+
+            creator_label = str(item.get('creator') or '').strip()
+            if item.get('external_account') and creator_label:
+                row_cells[7].text = f"{creator_label} (external)"
+            elif creator_label:
+                row_cells[7].text = creator_label
+            else:
+                row_cells[7].text = '-'
+            if row_cells[7].paragraphs and row_cells[7].paragraphs[0].runs:
+                row_cells[7].paragraphs[0].runs[0].font.size = Pt(8)
+                if item.get('external_account'):
+                    row_cells[7].paragraphs[0].runs[0].font.italic = True
+            row_cells[7].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
         # FIXED: Removed limit message - now showing ALL items
         
         # Add legend for type colors
@@ -2839,17 +3711,36 @@ class LeaderReportGenerator:
             bems_count = self._count_bems_escalations(data)
             total_bems += bems_count
             
-            # Calculate health metrics
             high_severity_count = 0
             open_ab_count = 0
-            
+            resolved_ab_count = 0
+            completed_ap_count = 0
+
             if not data.get('adoption_barriers', pd.DataFrame()).empty:
                 abs_df = data['adoption_barriers']
                 if 'SEVERITY_C' in abs_df.columns:
                     high_severity_count = len(abs_df[abs_df['SEVERITY_C'].isin(['High', 'Critical'])])
                 if 'STATUS_C' in abs_df.columns:
-                    open_ab_count = len(abs_df[abs_df['STATUS_C'].isin(['Open', 'New'])])
-            
+                    status_values = abs_df['STATUS_C'].astype(str)
+                    open_ab_count = len(abs_df[status_values.isin(['Open', 'New'])])
+                    resolved_ab_count = int(
+                        status_values.str.contains('closed|resolved|complete', case=False, na=False).sum()
+                    )
+
+            if not data.get('action_plans', pd.DataFrame()).empty:
+                ap_df = data['action_plans']
+                if 'STATUS_C' in ap_df.columns:
+                    completed_ap_count = int(
+                        ap_df['STATUS_C']
+                        .astype(str)
+                        .str.contains('complete|closed|done', case=False, na=False)
+                        .sum()
+                    )
+
+            # Blended impact: resolved work + completed plans, lightly
+            # discounted by currently-open high-severity load.
+            impact_score = (resolved_ab_count * 3) + (completed_ap_count * 2) - max(0, high_severity_count)
+
             team_summary_data.append({
                 'cssm_name': cssm_name,
                 'customers': num_customers,
@@ -2860,6 +3751,9 @@ class LeaderReportGenerator:
                 'bems': bems_count,
                 'high_severity': high_severity_count,
                 'open_abs': open_ab_count,
+                'resolved_abs': resolved_ab_count,
+                'completed_aps': completed_ap_count,
+                'impact_score': impact_score,
                 'total_activities': num_aps + num_abs + num_cps + num_tac
             })
         
@@ -2965,17 +3859,33 @@ class LeaderReportGenerator:
         if insights_heading.runs:
             insights_heading.runs[0].font.color.rgb = CISCO_BLUE
         
-        # Top performers
-        top_performer = max(team_summary_data, key=lambda x: x['total_activities'])
+        # Activity and impact leaders (separated so volume is not confused
+        # with outcomes). "Most Active" is by raw activity counts; "Top Impact"
+        # is a blended outcome score (resolved ABs + completed APs, lightly
+        # discounted by open high-severity load).
+        most_active = max(team_summary_data, key=lambda x: x['total_activities'])
+        top_impact = max(team_summary_data, key=lambda x: x.get('impact_score', 0))
+
         insights_para = self.doc.add_paragraph()
-        insights_para.add_run('🏆 Top Performer: ').font.bold = True
-        insights_para.add_run(f"{top_performer['cssm_name']} with {top_performer['total_activities']} total activities ")
-        insights_para.add_run(f"({top_performer['aps']} APs, {top_performer['abs']} ABs, {top_performer['cps']} CPs, {top_performer['tac_cases']} TAC cases)\n")
+        insights_para.add_run('Most Active (by volume): ').font.bold = True
+        insights_para.add_run(
+            f"{most_active['cssm_name']} with {most_active['total_activities']} total activities "
+            f"({most_active['aps']} APs, {most_active['abs']} ABs, {most_active['cps']} CPs, "
+            f"{most_active['tac_cases']} TAC cases)\n"
+        )
+
+        impact_para = self.doc.add_paragraph()
+        impact_para.add_run('Top Impact (blended outcome): ').font.bold = True
+        impact_para.add_run(
+            f"{top_impact['cssm_name']} — {top_impact.get('resolved_abs', 0)} ABs resolved, "
+            f"{top_impact.get('completed_aps', 0)} APs completed, "
+            f"impact score {top_impact.get('impact_score', 0)}\n"
+        )
         
         # BEMS attention
         if total_bems > 0:
             bems_para = self.doc.add_paragraph()
-            bems_para.add_run('WARN:️ BEMS Escalations: ').font.bold = True
+            bems_para.add_run('Warning: BEMS Escalations: ').font.bold = True
             bems_para.add_run(f"Total of {total_bems} backend engineering escalations require immediate attention across the team.\n")
         
         # High severity issues
@@ -3077,7 +3987,7 @@ class LeaderReportGenerator:
                     if bems_items:
                         insights_added = True
                         bems_para = self.doc.add_paragraph()
-                        bems_para.add_run('WARN:️ BEMS Escalations Detected: ').font.bold = True
+                        bems_para.add_run('Warning: BEMS Escalations Detected: ').font.bold = True
                         if bems_para.runs:
                             bems_para.runs[0].font.color.rgb = RGBColor(255, 140, 0)  # Orange
                         bems_para.add_run(f"{len(bems_items)} backend engineering escalation(s)")
@@ -3556,22 +4466,9 @@ class LeaderReportGenerator:
         logger.info("Validating customer data consistency...")
         
         consistency_checks = {}
-        
+
         for cssm_name, data in team_data.items():
-            # Safe set creation with None handling
-            def safe_set(obj):
-                if obj is None:
-                    return set()
-                try:
-                    # Handle pandas DataFrames
-                    if hasattr(obj, 'empty'):
-                        return set()
-                    # Handle lists and other iterables
-                    return set(obj) if obj else set()
-                except (TypeError, AttributeError, ValueError):
-                    return set()
-            
-            customers = safe_set(data.get('customers', []))
+            customers = self.safe_set(data.get('customers', []))
             subscriptions_df = data.get('subscriptions', pd.DataFrame())
             subscription_customers = 0
             try:
@@ -3591,10 +4488,14 @@ class LeaderReportGenerator:
             except Exception:
                 subscription_customers = 0
             
-            # Check if customers in activities match assigned customers
+            # Check if customers in activities match assigned customers. We now
+            # distinguish records attributed via owner/creator on external
+            # accounts (legitimate collaboration) from truly unexpected
+            # assignments, so the latter count doesn't spike for accounts the
+            # CSSM worked on outside their primary subscriptions.
             activity_customers = set()
-            
-            # Safe DataFrame check function
+            external_activity_customers: set = set()
+
             def safe_df_check(df, col_name):
                 if df is None:
                     return False
@@ -3602,30 +4503,40 @@ class LeaderReportGenerator:
                     return not df.empty and col_name in df.columns
                 except (AttributeError, TypeError):
                     return False
-            
-            # Extract customers from action plans
-            if safe_df_check(data.get('action_plans'), 'BU_NAME'):
-                activity_customers.update(data['action_plans']['BU_NAME'].dropna().unique())
-            
-            # Extract customers from adoption barriers
-            if safe_df_check(data.get('adoption_barriers'), 'BU_NAME'):
-                activity_customers.update(data['adoption_barriers']['BU_NAME'].dropna().unique())
-            
-            # Extract customers from customer pulse
-            if safe_df_check(data.get('customer_pulse'), 'BU_NAME'):
-                activity_customers.update(data['customer_pulse']['BU_NAME'].dropna().unique())
-            
+
+            def _extract_activity(df: pd.DataFrame) -> None:
+                if not safe_df_check(df, 'BU_NAME'):
+                    return
+                bu_series = df['BU_NAME'].dropna()
+                activity_customers.update(bu_series.unique())
+                if '_EXTERNAL_ACCOUNT' in df.columns:
+                    ext_mask = df['_EXTERNAL_ACCOUNT'].fillna(False).astype(bool)
+                    if ext_mask.any():
+                        external_activity_customers.update(
+                            df.loc[ext_mask, 'BU_NAME'].dropna().unique()
+                        )
+
+            _extract_activity(data.get('action_plans'))
+            _extract_activity(data.get('adoption_barriers'))
+            _extract_activity(data.get('customer_pulse'))
+
+            unexpected_set = (activity_customers - customers) - external_activity_customers
+
             consistency_checks[cssm_name] = {
                 'assigned_customers': len(customers),
                 'subscription_customers': subscription_customers,
                 'activity_customers': len(activity_customers),
+                'external_activity_customers': len(external_activity_customers),
                 'customer_overlap': len(customers.intersection(activity_customers)),
-                'unexpected_customers': len(activity_customers - customers),
+                'unexpected_customers': len(unexpected_set),
                 'missing_customers': len(customers - activity_customers)
             }
-            
-            logger.info(f"  {cssm_name}: Assigned={len(customers)}, Activity={len(activity_customers)}, Overlap={len(customers.intersection(activity_customers))}")
-        
+
+            logger.info(
+                f"  {cssm_name}: Assigned={len(customers)}, Activity={len(activity_customers)}, "
+                f"External={len(external_activity_customers)}, Overlap={len(customers.intersection(activity_customers))}"
+            )
+
         return consistency_checks
     
     def _validate_tac_cases(self, team_data: Dict[str, Dict], days: int) -> Dict:
@@ -3982,7 +4893,7 @@ class LeaderReportGenerator:
         
         # Add classification warning
         warning_para = self.doc.add_paragraph()
-        warning_run = warning_para.add_run("WARN:️ CISCO INTERNAL DATA CLASSIFICATION WARNING WARN:️")
+        warning_run = warning_para.add_run("Warning: CISCO INTERNAL DATA CLASSIFICATION WARNING Warning:")
         warning_run.font.bold = True
         warning_run.font.color.rgb = RGBColor(0xDC, 0x35, 0x45)  # Cisco Red
         

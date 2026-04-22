@@ -3790,7 +3790,15 @@ def run_compact_analysis(analysis_id):
                     if 'BU_NAME' in team_subs_df.columns
                     else []
                 )
-                
+                # Include CSSM emails as owner filters so Action Plans / Adoption
+                # Barriers / Customer Pulse created by team members on accounts
+                # whose PRIMARY_DSM is a different DSM are still captured.
+                team_owner_emails = (
+                    team_subs_df['CSSM_EMAIL'].dropna().astype(str).str.strip().str.lower().unique().tolist()
+                    if 'CSSM_EMAIL' in team_subs_df.columns
+                    else []
+                )
+
                 def fetch_csconsole_data():
                     """Fetch CSConsole data in a separate thread"""
                     local_ctx = None
@@ -3804,6 +3812,7 @@ def run_compact_analysis(analysis_id):
                             account_ids,
                             days,
                             customer_names=customer_names,
+                            owner_emails=team_owner_emails,
                         )
                         csconsole_bundle = prefetch_comprehensive(prefetch_ctx)
                         csconsole_action_plans = csconsole_bundle.get("csconsole_action_plans", pd.DataFrame())
@@ -6215,11 +6224,17 @@ def run_customer_renewal_analysis(analysis_id):
             else []
         )
         try:
+            renewal_owner_emails = (
+                team_subs_df['CSSM_EMAIL'].dropna().astype(str).str.strip().str.lower().unique().tolist()
+                if 'CSSM_EMAIL' in team_subs_df.columns
+                else []
+            )
             renewal_prefetch_ctx = AnalysisRunContext.build(
                 ctx,
                 account_ids,
                 days,
                 customer_names=customer_names,
+                owner_emails=renewal_owner_emails,
             )
             renewal_csconsole_bundle = prefetch_comprehensive(renewal_prefetch_ctx)
             csconsole_action_plans = renewal_csconsole_bundle.get("csconsole_action_plans", pd.DataFrame())
@@ -7144,11 +7159,17 @@ def run_comprehensive_analysis(analysis_id):
                 if 'BU_NAME' in team_subs_df.columns
                 else []
             )
+            comprehensive_owner_emails = (
+                team_subs_df['CSSM_EMAIL'].dropna().astype(str).str.strip().str.lower().unique().tolist()
+                if 'CSSM_EMAIL' in team_subs_df.columns
+                else []
+            )
             comprehensive_prefetch_ctx = AnalysisRunContext.build(
                 ctx,
                 account_ids,
                 days,
                 customer_names=customer_names,
+                owner_emails=comprehensive_owner_emails,
             )
             csconsole_bundle = prefetch_comprehensive(comprehensive_prefetch_ctx)
             csconsole_action_plans = csconsole_bundle.get("csconsole_action_plans", pd.DataFrame())
@@ -8868,11 +8889,17 @@ def ask_ai_portfolio():
                         if {'ACCOUNT_ID_C', 'BU_NAME'}.issubset(set(team_subs_df.columns))
                         else []
                     )
+                    ask_ai_owner_emails = (
+                        team_subs_df['CSSM_EMAIL'].dropna().astype(str).str.strip().str.lower().unique().tolist()
+                        if 'CSSM_EMAIL' in team_subs_df.columns
+                        else []
+                    )
                     ask_ai_prefetch_ctx = AnalysisRunContext.build(
                         ctx,
                         acct_batch,
                         days,
                         customer_names=customer_batch_names,
+                        owner_emails=ask_ai_owner_emails,
                     )
                     ask_ai_bundle = prefetch_ask_ai(ask_ai_prefetch_ctx)
                     cases_df = ask_ai_bundle.get('support_cases_snowflake', pd.DataFrame())

@@ -53,7 +53,9 @@ _DATASETS_BY_DOMAIN: Dict[str, Set[str]] = {
         "csconsole_customer_pulse",
         "csconsole_success_priorities",
         "csconsole_action_plans",
-        "adoption_barriers",
+        # Owner-aware barrier fetcher so collaborator-authored ABs on
+        # non-primary accounts are captured (parity with manager report).
+        "csconsole_adoption_barriers",
     },
     "contracts": {"enhanced_account_insights"},
     "trends": {"period_comparison", "barrier_velocity"},
@@ -401,15 +403,27 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             else []
         )
 
-        run_ctx = AnalysisRunContext.build(ctx, account_batch, req.days, customer_names=customer_batch_names)
+        ask_owner_emails = (
+            team_subs_df["CSSM_EMAIL"].dropna().astype(str).str.strip().str.lower().unique().tolist()
+            if "CSSM_EMAIL" in team_subs_df.columns else []
+        )
+        run_ctx = AnalysisRunContext.build(
+            ctx,
+            account_batch,
+            req.days,
+            customer_names=customer_batch_names,
+            owner_emails=ask_owner_emails,
+        )
         bundle = prefetch_ask_ai_grounded(run_ctx, include_datasets=retrieval_plan["datasets"])
         bundle["support_cases_snowflake"] = bundle.get("support_cases_snowflake", pd.DataFrame())
-        bundle["adoption_barriers"] = bundle.get("adoption_barriers", pd.DataFrame())
+        bundle["csconsole_adoption_barriers"] = bundle.get("csconsole_adoption_barriers", pd.DataFrame())
+        # Backward-compatible alias: downstream evidence builders key off
+        # ``adoption_barriers``; point it at the owner-aware frame.
+        bundle["adoption_barriers"] = bundle["csconsole_adoption_barriers"]
         bundle["csconsole_customer_pulse"] = bundle.get("csconsole_customer_pulse", pd.DataFrame())
         bundle["csconsole_success_priorities"] = bundle.get("csconsole_success_priorities", pd.DataFrame())
         bundle["csconsole_action_plans"] = bundle.get("csconsole_action_plans", pd.DataFrame())
 
-        # Derived analytics reuse fetched datasets to avoid redundant Snowflake round-trips.
         bundle["barrier_aging"] = compute_barrier_aging(bundle.get("adoption_barriers"), pd.DataFrame())
 
         intel = get_all_external_intel(days_back=365)

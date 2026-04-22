@@ -74,12 +74,53 @@ def _normalize_customer_names(customer_names: Iterable[Any]) -> Tuple[str, ...]:
     return tuple(sorted(set(values)))
 
 
+def _normalize_owner_emails(owner_emails: Iterable[Any]) -> Tuple[str, ...]:
+    """Return a sorted, de-duplicated tuple of email addresses.
+
+    Delegates normalization (lowercase, strip, ``@`` required) to the canonical
+    implementation in ``adoptiq_backend._normalize_owner_emails`` so the backend
+    and the run-context stay byte-identical.
+    """
+    try:
+        from adoptiq_backend import _normalize_owner_emails as _canonical_normalize_owner_emails
+    except Exception:
+        _canonical_normalize_owner_emails = None
+
+    if _canonical_normalize_owner_emails is not None:
+        cleaned = _canonical_normalize_owner_emails(owner_emails)
+    else:
+        # Fallback mirrors the backend contract so behavior stays consistent
+        # even if the import cycle breaks at startup.
+        cleaned = []
+        for v in (owner_emails or []):
+            if v is None:
+                continue
+            try:
+                text = str(v).strip().lower()
+            except Exception:
+                continue
+            if not text or "@" not in text:
+                continue
+            cleaned.append(text)
+    return tuple(sorted(set(cleaned)))
+
+
+# Datasets that accept an optional ``owner_emails`` kwarg to capture records
+# created by team members on accounts they do not primarily own.
+_OWNER_AWARE_DATASETS: Tuple[str, ...] = (
+    "csconsole_action_plans",
+    "csconsole_customer_pulse",
+    "csconsole_adoption_barriers",
+)
+
+
 @dataclass
 class AnalysisRunContext:
     ctx: Any
     account_ids: Tuple[str, ...]
     days: int
     customer_names: Tuple[str, ...] = field(default_factory=tuple)
+    owner_emails: Tuple[str, ...] = field(default_factory=tuple)
     cache: Dict[str, Any] = field(default_factory=dict)
     metrics: Dict[str, int] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
@@ -91,12 +132,14 @@ class AnalysisRunContext:
         account_ids: Iterable[Any],
         days: int,
         customer_names: Iterable[Any] = (),
+        owner_emails: Iterable[Any] = (),
     ) -> "AnalysisRunContext":
         return cls(
             ctx=ctx,
             account_ids=_normalize_account_ids(account_ids),
             days=int(days),
             customer_names=_normalize_customer_names(customer_names),
+            owner_emails=_normalize_owner_emails(owner_emails),
         )
 
     def get_or_fetch(self, dataset_name: str) -> Any:
@@ -113,7 +156,10 @@ class AnalysisRunContext:
                 identifiers = list(self.customer_names)
             else:
                 identifiers = list(self.account_ids)
-            df = fetcher(self.ctx, identifiers, self.days)
+            if dataset_name in _OWNER_AWARE_DATASETS and self.owner_emails:
+                df = fetcher(self.ctx, identifiers, self.days, owner_emails=list(self.owner_emails))
+            else:
+                df = fetcher(self.ctx, identifiers, self.days)
             if df is None:
                 df = pd.DataFrame()
             self.cache[dataset_name] = df
@@ -171,12 +217,16 @@ def prefetch_ask_ai_grounded(
     Grounded Ask AI bundle with optional dataset gating.
     The optional include list enables intent-based retrieval planning to reduce query volume.
     """
+    # NOTE: we intentionally use ``csconsole_adoption_barriers`` (owner-aware)
+    # rather than the legacy ``adoption_barriers`` (account-only) so that
+    # collaborator-authored ABs on accounts outside a CSSM's primary portfolio
+    # are captured here too (mirrors the manager-report Brandon/Mario fix).
     base = (
         "support_cases_snowflake",
         "csconsole_customer_pulse",
         "csconsole_success_priorities",
         "csconsole_action_plans",
-        "adoption_barriers",
+        "csconsole_adoption_barriers",
         "period_comparison",
         "barrier_velocity",
         "enhanced_account_insights",

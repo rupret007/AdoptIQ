@@ -161,7 +161,7 @@ def test_prefetch_ask_ai_grounded_respects_include_datasets(monkeypatch):
 
     monkeypatch.setitem(sp._FETCHERS, "support_cases_snowflake", _factory("support_cases_snowflake"))
     monkeypatch.setitem(sp._FETCHERS, "enhanced_account_insights", _factory("enhanced_account_insights"))
-    monkeypatch.setitem(sp._FETCHERS, "adoption_barriers", _factory("adoption_barriers"))
+    monkeypatch.setitem(sp._FETCHERS, "csconsole_adoption_barriers", _factory("csconsole_adoption_barriers"))
 
     run_ctx = sp.AnalysisRunContext.build(ctx=object(), account_ids=["001"], days=90)
     result = sp.prefetch_ask_ai_grounded(
@@ -172,7 +172,68 @@ def test_prefetch_ask_ai_grounded_respects_include_datasets(monkeypatch):
     assert set(seen) == {"support_cases_snowflake", "enhanced_account_insights"}
 
 
+def test_prefetch_ask_ai_grounded_uses_owner_aware_adoption_barriers(monkeypatch):
+    """Regression guard for the Brandon/Mario class of bug in the grounded
+    Ask-AI bundle: the barrier fetcher must be the owner-aware CSConsole
+    variant (which receives ``owner_emails``) rather than the legacy
+    account-only ``adoption_barriers`` fetcher.
+    """
+    captured = {"csc_owner_emails": None, "legacy_called": False}
+
+    def _csc_fetcher(ctx, identifiers, days, owner_emails=None):
+        captured["csc_owner_emails"] = list(owner_emails or [])
+        return pd.DataFrame([{"ID": "AB_OWNED"}])
+
+    def _legacy_fetcher(ctx, identifiers, days):
+        captured["legacy_called"] = True
+        return pd.DataFrame()
+
+    monkeypatch.setitem(sp._FETCHERS, "csconsole_adoption_barriers", _csc_fetcher)
+    monkeypatch.setitem(sp._FETCHERS, "adoption_barriers", _legacy_fetcher)
+
+    run_ctx = sp.AnalysisRunContext.build(
+        ctx=object(),
+        account_ids=["NYU_ACC"],
+        days=90,
+        owner_emails=["brandon@example.com"],
+    )
+    result = sp.prefetch_ask_ai_grounded(
+        run_ctx,
+        include_datasets=("csconsole_adoption_barriers",),
+    )
+    assert "csconsole_adoption_barriers" in result
+    assert captured["csc_owner_emails"] == ["brandon@example.com"]
+    assert captured["legacy_called"] is False
+
+
 def test_prefetch_skips_unknown_dataset_names():
     run_ctx = sp.AnalysisRunContext.build(ctx=object(), account_ids=["001"], days=90)
     result = sp.prefetch_datasets(run_ctx, ["unknown_dataset_name"])
     assert result == {}
+
+
+def test_prefetch_ask_ai_grounded_respects_owner_emails(monkeypatch):
+    """owner_emails must reach owner-aware fetchers when prefetch_ask_ai_grounded
+    is used, so the grounded Ask-AI bundle picks up collaborator-authored APs/ABs/CPs."""
+    captured = {}
+
+    def _ap_fetcher(ctx, identifiers, days, owner_emails=None):
+        captured["account_ids"] = list(identifiers)
+        captured["owner_emails"] = list(owner_emails or [])
+        return pd.DataFrame([{"ID": "AP_OWNED"}])
+
+    monkeypatch.setitem(sp._FETCHERS, "csconsole_action_plans", _ap_fetcher)
+
+    run_ctx = sp.AnalysisRunContext.build(
+        ctx=object(),
+        account_ids=["001"],
+        days=90,
+        owner_emails=["brandon@example.com", "mario@example.com"],
+    )
+    result = sp.prefetch_ask_ai_grounded(
+        run_ctx,
+        include_datasets=("csconsole_action_plans",),
+    )
+    assert set(result.keys()) == {"csconsole_action_plans"}
+    assert captured["account_ids"] == ["001"]
+    assert captured["owner_emails"] == ["brandon@example.com", "mario@example.com"]

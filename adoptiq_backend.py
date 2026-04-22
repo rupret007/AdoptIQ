@@ -1,7 +1,7 @@
 import os, sys, json, re, time, math, logging, threading
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Iterable, Tuple
 import warnings
 import pandas as pd
 import openpyxl
@@ -603,26 +603,47 @@ def load_db_profile() -> Optional[dict]:
 DSM_TABLE = "CX_DB.CX_SWSSBST_BR.dsm_assignment_data"
 AB_TABLE  = "EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW"
 
-_TABLE_COLUMN_CACHE: Dict[str, set[str]] = {}
+# Cache stores (columns, fetched_at_monotonic). TTL bounds staleness so that
+# schema additions (e.g. a new owner-email column) are picked up within an hour
+# without requiring a process restart.
+_TABLE_COLUMN_CACHE: Dict[str, Tuple[set[str], float]] = {}
 _TABLE_COLUMN_CACHE_LOCK = threading.Lock()
+_TABLE_COLUMN_CACHE_TTL_SECONDS = int(os.environ.get("ADOPTIQ_TABLE_COLUMN_CACHE_TTL", "3600"))
 
 
 def _normalize_table_name(table_name: str) -> str:
     return str(table_name or "").replace('"', "").strip().upper()
 
 
+def invalidate_table_column_cache(table_name: Optional[str] = None) -> None:
+    """Drop cached schema info for one table (or all tables when ``None``)."""
+    with _TABLE_COLUMN_CACHE_LOCK:
+        if table_name is None:
+            _TABLE_COLUMN_CACHE.clear()
+            return
+        _TABLE_COLUMN_CACHE.pop(_normalize_table_name(table_name), None)
+
+
 def _get_table_columns(ctx, table_name: str) -> set[str]:
     """
     Get table columns using a lightweight preview query.
     This avoids exception-driven probing for optional columns.
+
+    The result is cached per table with a TTL (``ADOPTIQ_TABLE_COLUMN_CACHE_TTL``
+    seconds, default 3600) so long-running processes pick up schema additions
+    without needing a restart.
     """
     if ctx is None:
         return set()
     cache_key = _normalize_table_name(table_name)
+    now = time.monotonic()
     with _TABLE_COLUMN_CACHE_LOCK:
-        cached = _TABLE_COLUMN_CACHE.get(cache_key)
-    if cached is not None:
-        return set(cached)
+        entry = _TABLE_COLUMN_CACHE.get(cache_key)
+        if entry is not None:
+            cached_cols, cached_at = entry
+            if now - cached_at < _TABLE_COLUMN_CACHE_TTL_SECONDS:
+                return set(cached_cols)
+            # Expired — fall through and refresh.
 
     cur = None
     try:
@@ -637,7 +658,7 @@ def _get_table_columns(ctx, table_name: str) -> set[str]:
             if col_name:
                 cols.add(col_name)
         with _TABLE_COLUMN_CACHE_LOCK:
-            _TABLE_COLUMN_CACHE[cache_key] = set(cols)
+            _TABLE_COLUMN_CACHE[cache_key] = (set(cols), time.monotonic())
         return cols
     except Exception as schema_err:
         logger.warning("Could not introspect columns for %s: %s", table_name, schema_err)
@@ -657,6 +678,100 @@ def _column_or_default_expr(available_columns: set[str], column_name: str, defau
     if default_sql is None:
         return None
     return f"{default_sql} AS {out_alias}"
+
+
+# Columns likely to identify the creator/owner of a task (Action Plan / Adoption Barrier)
+# row in EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW. We match the first that exists in the
+# physical table schema to keep queries resilient to Snowflake view changes.
+TASK_OWNER_EMAIL_COLUMNS: Tuple[str, ...] = (
+    "OWNER_EMAIL",
+    "OWNEREMAIL",
+    "CREATEDBYEMAIL",
+    "CREATEDBY_EMAIL",
+    "LASTMODIFIEDBYEMAIL",
+    "LAST_MODIFIED_BY_EMAIL",
+    "ASSIGNEE_EMAIL",
+    "ASSIGNEE_C",
+    "PLAN_OWNER_C",
+    "PLAN_OWNER_NAME_FORMULA_C",
+    "PLAN_OWNER_NAME_C",
+    "OWNER_NAME",
+    "OWNER",
+)
+
+# Same intent for the Customer Pulse table (ESA_C360_CUSTOMER_PULSE__C).
+PULSE_OWNER_EMAIL_COLUMNS: Tuple[str, ...] = (
+    "OWNER_EMAIL",
+    "OWNEREMAIL",
+    "CREATEDBYEMAIL",
+    "CREATEDBY_EMAIL",
+    "LASTMODIFIEDBYEMAIL",
+    "LAST_MODIFIED_BY_EMAIL",
+    "ASSIGNEE_EMAIL",
+    "OWNER_NAME",
+    "OWNER",
+)
+
+
+def _normalize_owner_emails(owner_emails: Optional[Iterable[Any]]) -> List[str]:
+    """Normalize a collection of owner emails to a de-duplicated lowercase list.
+
+    Input is treated as untrusted; we strip whitespace, lowercase, and discard any
+    value that does not look like an email address (must contain '@').
+    """
+    if not owner_emails:
+        return []
+    seen: set = set()
+    cleaned: List[str] = []
+    for raw in owner_emails:
+        if raw is None:
+            continue
+        try:
+            txt = str(raw).strip().lower()
+        except Exception:
+            continue
+        if not txt or "@" not in txt:
+            continue
+        if txt in seen:
+            continue
+        seen.add(txt)
+        cleaned.append(txt)
+    return cleaned
+
+
+def _build_owner_match_clause(
+    available_columns: set[str],
+    owner_emails: List[str],
+    candidate_columns: Iterable[str],
+    table_alias: Optional[str] = None,
+) -> Tuple[str, List[Any]]:
+    """Build a SQL fragment matching rows where any candidate email column matches
+    any of the provided owner_emails (case-insensitive, trimmed).
+
+    Returns (sql_fragment_or_empty_string, params).
+
+    The fragment intentionally does not include a leading AND/OR; callers decide
+    how to combine it with other predicates. If no matching columns are present
+    in the table schema, returns ("", []) so callers can safely skip.
+    """
+    if not owner_emails:
+        return "", []
+    available_upper = {str(c or "").strip().upper() for c in (available_columns or set())}
+    alias_prefix = f"{table_alias}." if table_alias else ""
+    col_exprs: List[str] = []
+    for col in candidate_columns:
+        col_u = str(col or "").strip().upper()
+        if col_u and col_u in available_upper:
+            col_exprs.append(f"LOWER(TRIM({alias_prefix}{col_u}))")
+    if not col_exprs:
+        return "", []
+    placeholders = ",".join(["%s"] * len(owner_emails))
+    ors = [f"{expr} IN ({placeholders})" for expr in col_exprs]
+    fragment = "(" + " OR ".join(ors) + ")"
+    params: List[Any] = []
+    for _ in col_exprs:
+        params.extend(owner_emails)
+    return fragment, params
 
 def _connect_snowflake_direct():
     """Connect to Snowflake using user/password from env (no Keeper). Used when credentials are embedded."""
@@ -1543,31 +1658,71 @@ def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_
         except Exception as e:
             logger.debug(f"Error closing connection: {e}")
 
-def fetch_csconsole_action_plans(ctx, account_ids: List[str], days: int) -> pd.DataFrame:
-    """Fetch Action Plans from CSConsole with proper resource management"""
+def fetch_csconsole_action_plans(
+    ctx,
+    account_ids: List[str],
+    days: int,
+    owner_emails: Optional[Iterable[Any]] = None,
+) -> pd.DataFrame:
+    """Fetch Action Plans from CSConsole with proper resource management.
+
+    When ``owner_emails`` is provided, rows created/owned by any of those users
+    are also returned even if the account is not in ``account_ids`` (e.g. a CSSM
+    collaborating on another team's account). Results are de-duplicated by row ID.
+    """
     if ctx is None:
         return pd.DataFrame()
-    if not account_ids: 
+    normalized_owners = _normalize_owner_emails(owner_emails)
+    if not account_ids and not normalized_owners:
         return pd.DataFrame()
-    
+
     cur = None
     try:
         cur = ctx.cursor()
-        placeholders = ','.join(['%s'] * len(account_ids))
+        predicates: List[str] = []
+        params: List[Any] = []
+
+        if account_ids:
+            placeholders = ','.join(['%s'] * len(account_ids))
+            predicates.append(f"ap.ACCOUNT_ID_C IN ({placeholders})")
+            params.extend(account_ids)
+
+        if normalized_owners:
+            task_cols = _get_table_columns(ctx, "EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW")
+            owner_sql, owner_params = _build_owner_match_clause(
+                task_cols, normalized_owners, TASK_OWNER_EMAIL_COLUMNS, table_alias="ap"
+            )
+            if owner_sql:
+                predicates.append(owner_sql)
+                params.extend(owner_params)
+            else:
+                logger.info(
+                    "Action Plans: no owner-like columns available in task view; "
+                    "skipping owner-based expansion."
+                )
+
+        if not predicates:
+            return pd.DataFrame()
+
+        where_clause = " OR ".join(predicates)
         sql = f"""
         SELECT ap.*, dsm.BU_NAME, 'Action Plan' as RECORD_SOURCE
         FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW ap
         LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm ON ap.ACCOUNT_ID_C = dsm.ACCOUNT_ID_C
-        WHERE ap.record_type_id = '0122T000000QHBGQA4' 
-          AND ap.ACCOUNT_ID_C IN ({placeholders})
+        WHERE ap.record_type_id = '0122T000000QHBGQA4'
+          AND ({where_clause})
           AND DATE(ap.CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())
         """
-        cur.execute(sql, [*account_ids, days])
+        params.append(days)
+        cur.execute(sql, params)
         rows = cur.fetchall()
-        if not rows: 
+        if not rows:
             return pd.DataFrame()
         cols = [c[0] for c in cur.description]
-        return pd.DataFrame(rows, columns=cols)
+        df = pd.DataFrame(rows, columns=cols)
+        if "ID" in df.columns:
+            df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
+        return df
     except Exception as e:
         _log_snowflake_fallback("CSConsole action plans query", e)
         return pd.DataFrame()
@@ -1575,30 +1730,70 @@ def fetch_csconsole_action_plans(ctx, account_ids: List[str], days: int) -> pd.D
         if cur:
             cur.close()
 
-def fetch_csconsole_customer_pulse(ctx, account_ids: List[str], days: int) -> pd.DataFrame:
-    """Fetch Customer Pulse records from CSConsole with proper resource management"""
+def fetch_csconsole_customer_pulse(
+    ctx,
+    account_ids: List[str],
+    days: int,
+    owner_emails: Optional[Iterable[Any]] = None,
+) -> pd.DataFrame:
+    """Fetch Customer Pulse records from CSConsole with proper resource management.
+
+    When ``owner_emails`` is provided, pulse records created/owned by any of the
+    given users are also returned regardless of account ownership, to cover
+    collaborators who are not on the account's primary team. Deduplicated by ID.
+    """
     if ctx is None:
         return pd.DataFrame()
-    if not account_ids: 
+    normalized_owners = _normalize_owner_emails(owner_emails)
+    if not account_ids and not normalized_owners:
         return pd.DataFrame()
-    
+
     cur = None
     try:
         cur = ctx.cursor()
-        placeholders = ','.join(['%s'] * len(account_ids))
+        predicates: List[str] = []
+        params: List[Any] = []
+
+        if account_ids:
+            placeholders = ','.join(['%s'] * len(account_ids))
+            predicates.append(f"cp.ACCOUNT__C IN ({placeholders})")
+            params.extend(account_ids)
+
+        if normalized_owners:
+            pulse_cols = _get_table_columns(ctx, "EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C")
+            owner_sql, owner_params = _build_owner_match_clause(
+                pulse_cols, normalized_owners, PULSE_OWNER_EMAIL_COLUMNS, table_alias="cp"
+            )
+            if owner_sql:
+                predicates.append(owner_sql)
+                params.extend(owner_params)
+            else:
+                logger.info(
+                    "Customer Pulse: no owner-like columns available in pulse table; "
+                    "skipping owner-based expansion."
+                )
+
+        if not predicates:
+            return pd.DataFrame()
+
+        where_clause = " OR ".join(predicates)
         sql = f"""
         SELECT cp.*, dsm.BU_NAME, 'Customer Pulse' as RECORD_SOURCE
         FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C cp
         LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm ON cp.ACCOUNT__C = dsm.ACCOUNT_ID_C
-        WHERE cp.ACCOUNT__C IN ({placeholders})
+        WHERE ({where_clause})
           AND DATE(cp.CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())
         """
-        cur.execute(sql, [*account_ids, days])
+        params.append(days)
+        cur.execute(sql, params)
         rows = cur.fetchall()
-        if not rows: 
+        if not rows:
             return pd.DataFrame()
         cols = [c[0] for c in cur.description]
-        return pd.DataFrame(rows, columns=cols)
+        df = pd.DataFrame(rows, columns=cols)
+        if "ID" in df.columns:
+            df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
+        return df
     except Exception as e:
         _log_snowflake_fallback("CSConsole customer pulse query", e)
         return pd.DataFrame()
@@ -1639,30 +1834,70 @@ def fetch_csconsole_success_priorities(ctx, customer_identifiers: List[str], day
         if cur:
             cur.close()
 
-def fetch_csconsole_adoption_barriers(ctx, account_ids: List[str], days: int) -> pd.DataFrame:
-    """Fetch Adoption Barriers from CSConsole with proper resource management"""
+def fetch_csconsole_adoption_barriers(
+    ctx,
+    account_ids: List[str],
+    days: int,
+    owner_emails: Optional[Iterable[Any]] = None,
+) -> pd.DataFrame:
+    """Fetch Adoption Barriers from CSConsole with proper resource management.
+
+    When ``owner_emails`` is provided, barriers created/owned by those users are
+    also returned regardless of account team, so collaborators outside the
+    active working team are captured. Results are de-duplicated by row ID.
+    """
     if ctx is None:
         return pd.DataFrame()
-    if not account_ids: 
+    normalized_owners = _normalize_owner_emails(owner_emails)
+    if not account_ids and not normalized_owners:
         return pd.DataFrame()
-    
+
     cur = None
     try:
         cur = ctx.cursor()
-        placeholders = ','.join(['%s'] * len(account_ids))
+        predicates: List[str] = []
+        params: List[Any] = []
+
+        if account_ids:
+            placeholders = ','.join(['%s'] * len(account_ids))
+            predicates.append(f"ACCOUNT_ID_C IN ({placeholders})")
+            params.extend(account_ids)
+
+        if normalized_owners:
+            task_cols = _get_table_columns(ctx, "EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW")
+            owner_sql, owner_params = _build_owner_match_clause(
+                task_cols, normalized_owners, TASK_OWNER_EMAIL_COLUMNS, table_alias=None
+            )
+            if owner_sql:
+                predicates.append(owner_sql)
+                params.extend(owner_params)
+            else:
+                logger.info(
+                    "Adoption Barriers: no owner-like columns available in task view; "
+                    "skipping owner-based expansion."
+                )
+
+        if not predicates:
+            return pd.DataFrame()
+
+        where_clause = " OR ".join(predicates)
         sql = f"""
         SELECT *, 'Adoption Barrier' as RECORD_SOURCE
-        FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW 
-        WHERE record_type_id = '0122T000000GJfTQAW' 
-          AND ACCOUNT_ID_C IN ({placeholders})
+        FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
+        WHERE record_type_id = '0122T000000GJfTQAW'
+          AND ({where_clause})
           AND DATE(CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())
         """
-        cur.execute(sql, [*account_ids, days])
+        params.append(days)
+        cur.execute(sql, params)
         rows = cur.fetchall()
-        if not rows: 
+        if not rows:
             return pd.DataFrame()
         cols = [c[0] for c in cur.description]
-        return pd.DataFrame(rows, columns=cols)
+        df = pd.DataFrame(rows, columns=cols)
+        if "ID" in df.columns:
+            df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
+        return df
     except Exception as e:
         _log_snowflake_fallback("CSConsole adoption barriers query", e)
         return pd.DataFrame()
