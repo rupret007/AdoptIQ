@@ -202,7 +202,7 @@
                     <div id="errorDetailsContent" class="small text-muted"></div>
                 </div>
                 
-                <div class="bg-info bg-opacity-10 p-3 rounded">
+                <div class="bg-info bg-opacity-10 p-3 rounded mb-3">
                     <h6 class="fw-bold text-info mb-2">
                         <i class="fas fa-lightbulb me-2"></i>What to do next?
                     </h6>
@@ -211,6 +211,17 @@
                         <li>Verify your analysis parameters are correct</li>
                         <li>If the problem persists, contact support</li>
                     </ul>
+                </div>
+
+                <div class="bg-warning bg-opacity-10 p-3 rounded">
+                    <h6 class="fw-bold mb-2">
+                        <i class="fas fa-stethoscope me-2"></i>Keeper / Snowflake connectivity self-test
+                    </h6>
+                    <p class="small mb-2">Runs DNS, TLS, Keeper AppRole login, secret read, and Snowflake SELECT NOW(). Helps pinpoint which stage is failing. No secrets are returned.</p>
+                    <button id="runDiagBtn" class="btn btn-sm btn-outline-primary" type="button" onclick="runAnalysisDiag()">
+                        <i class="fas fa-play me-1"></i>Run self-test
+                    </button>
+                    <div id="runDiagResult" class="mt-2 small" style="display:none;"></div>
                 </div>
             </div>
             <div class="modal-footer">
@@ -472,19 +483,56 @@ document.addEventListener('DOMContentLoaded', function() {
         const errorDetailsContent = document.getElementById('errorDetailsContent');
         const errorDetails = document.getElementById('errorDetails');
 
-        if (data.message) {
-            errorTitle.textContent = data.message;
-            errorMessage.textContent = data.message;
+        const primary = data.error || data.message;
+        if (primary) {
+            errorTitle.textContent = data.error_kind ? ('Analysis failed [' + data.error_kind + ']') : 'Analysis failed';
+            errorMessage.textContent = primary;
         }
 
-        if (data.details) {
-            errorDetailsContent.textContent = data.details;
+        const detailText = data.error_detail || data.details;
+        if (detailText) {
+            errorDetailsContent.textContent = detailText;
             errorDetails.style.display = 'block';
         } else {
             errorDetails.style.display = 'none';
         }
         modal.show();
     }
+
+    window.runAnalysisDiag = async function () {
+        const btn = document.getElementById('runDiagBtn');
+        const out = document.getElementById('runDiagResult');
+        if (!btn || !out) { return; }
+        const origHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Running...';
+        out.style.display = 'block';
+        out.innerHTML = '<span class="text-muted">Running (up to ~30s)...</span>';
+        try {
+            const resp = await fetch('/api/diag/connectivity', { method: 'GET' });
+            const data = await resp.json();
+            let html = '<div class="p-2 rounded ' + (data.ok ? 'bg-success-subtle' : 'bg-danger-subtle') + '">';
+            html += '<div class="fw-bold mb-1">' + (data.ok ? 'All checks passed' : 'One or more checks failed') + '</div>';
+            html += '<ul class="list-unstyled mb-1">';
+            (data.checks || []).forEach(function (c) {
+                const ico = c.status === 'ok' ? 'check-circle text-success' :
+                            (c.status === 'skipped' ? 'minus-circle text-muted' : 'times-circle text-danger');
+                html += '<li><i class="fas fa-' + ico + ' me-1"></i><code>' + c.name + '</code> - ' + c.status;
+                if (c.error_kind) { html += ' (' + c.error_kind + ')'; }
+                if (c.detail) { html += '<div class="ms-4 text-muted">' + c.detail + '</div>'; }
+                html += '</li>';
+            });
+            html += '</ul>';
+            if (data.hint) { html += '<div><strong>Hint:</strong> ' + data.hint + '</div>'; }
+            html += '</div>';
+            out.innerHTML = html;
+        } catch (err) {
+            out.innerHTML = '<span class="text-danger">Self-test failed: ' + err + '</span>';
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = origHtml;
+        }
+    };
     
     // Cleanup on page unload
     window.addEventListener('beforeunload', function() {

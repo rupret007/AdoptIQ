@@ -29,6 +29,18 @@ if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
     sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
     sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
+# Round 5 hotfix: prefer the OS trust store (macOS Keychain / Windows cert
+# store / Linux system CAs) over certifi's bundle so Cisco corporate TLS
+# inspection no longer breaks Keeper / Snowflake calls with
+# "CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain".
+# Must run before any module creates an SSLContext (urllib3, requests, hvac).
+try:  # pragma: no cover - platform / version dependent
+    import truststore as _truststore
+    _truststore.inject_into_ssl()
+    os.environ.setdefault("ADOPTIQ_TRUSTSTORE_INJECTED", "1")
+except Exception:
+    pass
+
 from flask import Flask, request, jsonify, redirect, url_for, send_file, render_template, Response
 from werkzeug.utils import secure_filename
 from flask_wtf import FlaskForm
@@ -8355,17 +8367,26 @@ def run_comprehensive_analysis(analysis_id):
             logger.error(f"[[ERROR]] Failed to get status: {status_error}")
             status = {}
         
-        error_message = str(e)
-        if "is not allowed to access Snowflake" in error_message or "Failed to connect to DB" in error_message:
-            status['error'] = "Database Connection Error: Please connect to the Cisco VPN and retry the analysis."
-        elif "keeper.cisco.com" in error_message and "Read timed out" in error_message:
-            status['error'] = "Network Connection Error: Unable to reach Cisco Keeper. Please check your VPN connection."
-        elif "keeper.cisco.com" in error_message:
-            status['error'] = "Cisco Keeper Connection Error: Please ensure you are connected to the Cisco VPN."
-        elif "CircuIT" in error_message or "AzureOpenAI" in error_message:
-            status['error'] = "AI Service Error: CircuIT AI service may be unavailable. Please try again in a few minutes."
-        else:
-            status['error'] = "An unexpected error occurred during analysis. Please check the Admin page for details."
+        # Round 5 hotfix: typed error classifier replaces the substring cascade
+        # that always blamed "VPN not connected" for any message mentioning
+        # keeper.cisco.com. The new helper distinguishes DNS / TLS cert /
+        # AppRole-401 / secret-path-404 / Snowflake auth / timeout so users
+        # see the real cause and support can pinpoint failures. See
+        # error_classifier.py for the full decision table.
+        try:
+            from error_classifier import classify_analysis_error
+            _classification = classify_analysis_error(e)
+            status['error'] = _classification.user_message
+            status['error_kind'] = _classification.kind
+            status['error_detail'] = _classification.detail_tail
+        except Exception as _cls_err:  # pragma: no cover - defensive
+            logger.warning("error_classifier failed (%s); using legacy message", _cls_err)
+            status['error'] = (
+                "An unexpected error occurred during analysis. "
+                "Please check the Admin page for details."
+            )
+            status['error_kind'] = 'unknown'
+            status['error_detail'] = f"{type(e).__name__}: {e}"[:240]
         
         status['status'] = 'error'
         status['progress'] = 0
@@ -8824,6 +8845,48 @@ def verbose_debug_api():
     except Exception as e:
         logger.error("Verbose debug API failed: %s", e, exc_info=True)
         return jsonify({'success': False, 'error': 'Failed to update verbose debug mode'}), 500
+
+
+@app.route('/api/diag/connectivity', methods=['GET'])
+def api_diag_connectivity():
+    """Run the DNS -> TLS -> AppRole -> secret-read -> Snowflake self-test.
+
+    Round 5 hotfix: lets users (and support) see *which* stage of the Keeper /
+    Snowflake chain is actually failing instead of the old blanket "Please
+    ensure you are connected to the Cisco VPN" banner. Returns JSON; never
+    echoes secret material.
+    """
+    try:
+        from connectivity_diagnostics import run_connectivity_diagnostics
+
+        secrets: Dict[str, str] = {}
+        try:
+            from _bundled_secrets import get_secrets as _get_bundled_secrets
+            secrets.update(_get_bundled_secrets() or {})
+        except Exception as _bs_err:
+            logger.debug("No bundled secrets for diag: %s", _bs_err)
+
+        for key in (
+            'KEEPER_URL', 'KEEPER_NAMESPACE', 'KEEPER_ROLE_ID',
+            'KEEPER_SECRET_ID', 'KEEPER_SECRET_PATH',
+            'SNOWFLAKE_USER', 'SNOWFLAKE_ACCOUNT',
+            'SNOWFLAKE_ROLE', 'SNOWFLAKE_WAREHOUSE',
+        ):
+            env_val = os.environ.get(key)
+            if env_val:
+                secrets[key] = env_val
+
+        result = run_connectivity_diagnostics(secrets)
+        status_code = 200 if result.get('ok') else 503
+        return jsonify(result), status_code
+    except Exception as e:
+        logger.error("Connectivity diagnostics endpoint failed: %s", e, exc_info=True)
+        return jsonify({
+            'ok': False,
+            'error': 'Connectivity diagnostics harness itself failed',
+            'detail': f'{type(e).__name__}: {e}'[:240],
+        }), 500
+
 
 @app.route('/previous-reports')
 def previous_reports():

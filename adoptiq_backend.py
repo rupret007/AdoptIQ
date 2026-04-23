@@ -3,6 +3,22 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Iterable, Tuple
 import warnings
+
+# Prefer the OS trust store (macOS Keychain, Windows cert store, Linux system
+# CAs) over certifi's bundle. This resolves the common "on VPN but still fails"
+# symptom where Cisco corporate TLS inspection re-signs keeper.cisco.com with
+# an internal CA that certifi does not ship. Must happen before urllib3 /
+# requests / hvac / snowflake-connector create any SSLContext.
+try:  # pragma: no cover - platform / version dependent
+    import truststore as _truststore  # type: ignore
+    _truststore.inject_into_ssl()
+    os.environ.setdefault("ADOPTIQ_TRUSTSTORE_INJECTED", "1")
+except Exception as _ts_err:  # noqa: BLE001 - best-effort, fall back to certifi
+    logging.getLogger(__name__).debug(
+        "truststore not available (%s); falling back to certifi bundle",
+        _ts_err,
+    )
+
 import pandas as pd
 import openpyxl
 import hvac

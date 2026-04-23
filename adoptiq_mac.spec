@@ -31,6 +31,7 @@ hidden_imports = [
     'snowflake.connector', 'snowflake.connector.snow_logging', 'sqlalchemy',
     'hvac', 'cryptography',
     'openai', 'dotenv',
+    'truststore',
     'adoptiq_backend', 'config', 'executive_report_builder',
     'compact_report_formatter', 'advanced_renewal_analyzer', 'report_utils',
     'data_source_validator', 'leader_report_generator', 'enhanced_snowflake_insights',
@@ -39,6 +40,7 @@ hidden_imports = [
     'incident_storage',
     'cisco_internal_integrations',
     '_bundled_secrets',
+    'error_classifier', 'connectivity_diagnostics',
 ]
 
 a = Analysis(

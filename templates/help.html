@@ -210,9 +210,59 @@ CIRCUIT_CLIENT_SECRET=your_client_secret</code></pre>
                     
                     <div class="alert alert-warning hover-lift">
                         <h6 class="fw-bold"><i class="fas fa-exclamation-triangle me-2"></i>Database Connection Issues</h6>
-                        <p class="mb-2"><strong>Symptom:</strong> "Connection failed" or timeout errors</p>
-                        <p class="mb-0"><strong>Solution:</strong> Verify Keeper credentials and network connectivity</p>
+                        <p class="mb-2"><strong>Symptom:</strong> "Connection failed", "Keeper Connection Error", or timeout errors</p>
+                        <p class="mb-2"><strong>Solution:</strong> Verify Keeper credentials and network connectivity</p>
+                        <button id="adoptiq-diag-btn" class="btn btn-sm btn-outline-primary" type="button"
+                                onclick="runConnectivityDiagnostics()">
+                            <i class="fas fa-stethoscope me-1"></i>Run connectivity self-test
+                        </button>
+                        <div id="adoptiq-diag-result" class="mt-3" style="display: none;"></div>
                     </div>
+
+                    <script>
+                    async function runConnectivityDiagnostics() {
+                        const btn = document.getElementById('adoptiq-diag-btn');
+                        const out = document.getElementById('adoptiq-diag-result');
+                        const originalHtml = btn.innerHTML;
+                        btn.disabled = true;
+                        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Running...';
+                        out.style.display = 'block';
+                        out.innerHTML = '<div class="text-muted small">Running DNS -> TLS -> AppRole -> secret-read -> Snowflake. This can take up to 30 seconds.</div>';
+
+                        try {
+                            const resp = await fetch('/api/diag/connectivity', { method: 'GET' });
+                            const data = await resp.json();
+                            let html = '<div class="p-2 rounded ' + (data.ok ? 'bg-success-subtle border border-success' : 'bg-danger-subtle border border-danger') + '">';
+                            html += '<div class="fw-bold mb-2">' + (data.ok ? 'All checks passed' : 'One or more checks failed') + '</div>';
+                            html += '<table class="table table-sm mb-2"><thead><tr><th>Step</th><th>Status</th><th>ms</th><th>Detail</th></tr></thead><tbody>';
+                            (data.checks || []).forEach(function (c) {
+                                const badgeCls = c.status === 'ok' ? 'bg-success' : (c.status === 'skipped' ? 'bg-secondary' : 'bg-danger');
+                                html += '<tr>';
+                                html += '<td><code>' + c.name + '</code></td>';
+                                html += '<td><span class="badge ' + badgeCls + '">' + c.status + '</span></td>';
+                                html += '<td class="small">' + (c.ms != null ? c.ms : '') + '</td>';
+                                html += '<td class="small"><code style="white-space: normal;">' + (c.detail || c.error_kind || '') + '</code></td>';
+                                html += '</tr>';
+                            });
+                            html += '</tbody></table>';
+                            if (data.hint) {
+                                html += '<div class="small"><strong>Hint:</strong> ' + data.hint + '</div>';
+                            }
+                            if (data.truststore_active) {
+                                html += '<div class="small text-muted mt-1">truststore (system keychain) is active.</div>';
+                            } else {
+                                html += '<div class="small text-muted mt-1">truststore not active - using certifi bundle (may miss Cisco corporate CA).</div>';
+                            }
+                            html += '</div>';
+                            out.innerHTML = html;
+                        } catch (err) {
+                            out.innerHTML = '<div class="alert alert-danger small">Self-test harness failed: ' + err + '</div>';
+                        } finally {
+                            btn.disabled = false;
+                            btn.innerHTML = originalHtml;
+                        }
+                    }
+                    </script>
                     
                     <div class="alert alert-warning hover-lift">
                         <h6 class="fw-bold"><i class="fas fa-exclamation-triangle me-2"></i>File Upload Problems</h6>

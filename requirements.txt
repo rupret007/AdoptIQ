@@ -24,6 +24,10 @@ WTForms>=3.0.0
 hvac>=1.0.0
 cryptography>=41.0.0
 
+# TLS trust store integration (lets urllib3/requests/hvac/snowflake use the
+# OS keychain so Cisco corporate TLS inspection no longer breaks keeper.cisco.com)
+truststore>=0.9.0
+
 # AI and machine learning
 openai>=1.0.0
 

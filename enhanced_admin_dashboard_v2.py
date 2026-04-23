@@ -1680,6 +1680,28 @@ def api_debug_verbose():
         logger.error("Verbose debug proxy failed: %s", e)
         return jsonify({'success': False, 'error': 'Unable to reach main app debug endpoint'}), 502
 
+
+@admin_app.route('/api/diag/connectivity', methods=['GET'])
+def api_diag_connectivity_proxy():
+    """Proxy the Keeper / Snowflake connectivity self-test to the main app.
+
+    Round 5 hotfix. Support can run the self-test from the admin dashboard
+    without needing to hit the main app URL directly. Uses a longer timeout
+    (45s) because the full chain can legitimately take ~25s when Snowflake
+    login is slow.
+    """
+    main_url = f'{MAIN_APP_URL.rstrip("/")}/api/diag/connectivity'
+    try:
+        resp = requests.get(main_url, timeout=45)
+        return jsonify(resp.json()), resp.status_code
+    except Exception as e:
+        logger.error("Connectivity diag proxy failed: %s", e)
+        return jsonify({
+            'ok': False,
+            'error': 'Unable to reach main app /api/diag/connectivity',
+            'detail': f'{type(e).__name__}: {e}'[:240],
+        }), 502
+
 _ANALYSIS_ID_RE = re.compile(r'^[A-Za-z0-9._-]{1,200}$')
 
 
