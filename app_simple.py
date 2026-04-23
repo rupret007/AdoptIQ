@@ -1663,70 +1663,33 @@ def _get_all_customers_from_all_sources(ab_norm: pd.DataFrame = None, csone_df: 
     Returns:
         Set of unique customer names from all sources
     """
-    all_customers = set()
+    # Round 3 hardening: route the entire customer-set computation
+    # through ``cm.list_customers`` so EI's dashboard, Compact's
+    # at-a-glance, ``build_portfolio_metrics``'s ``total_customers`` and
+    # the report-consistency validator all use the SAME definition.
+    # ``cm.list_customers`` accepts (a) the same multi-source frames and
+    # (b) an ``account_to_customer`` map for the ACCOUNT_ID → BU_NAME
+    # backfill the dashboard previously did inline. Behavior is
+    # therefore preserved bit-for-bit while eliminating the two-source
+    # drift documented in round 3 finding #12.
     customer_lookup = build_customer_lookup(team_subs_df)
-    account_to_customer = customer_lookup.get("account_to_customer", {})
+    account_to_customer = customer_lookup.get("account_to_customer", {}) or {}
 
-    def _collect_from_df(df: pd.DataFrame, customer_cols: List[str], account_cols: List[str], label: str):
-        if df is None or df.empty:
-            return
-        before = len(all_customers)
-        for col in customer_cols:
-            if col in df.columns:
-                values = [normalize_customer_name(v) for v in df[col].dropna().tolist()]
-                all_customers.update(v for v in values if v != "Unknown")
-        for col in account_cols:
-            if col in df.columns:
-                for account_id in df[col].dropna().astype(str).tolist():
-                    mapped = account_to_customer.get(account_id.strip())
-                    if mapped:
-                        all_customers.add(normalize_customer_name(mapped))
-        logger.info(f"[[CUSTOMER_COUNT]] {label}: +{len(all_customers) - before} customers")
+    canonical_names = cm.list_customers(
+        ab_df=ab_norm,
+        csone_df=csone_df,
+        subs_df=team_subs_df,
+        action_plans_df=csconsole_action_plans,
+        pulse_df=csconsole_customer_pulse,
+        extra_frames=[csconsole_success_priorities, csconsole_adoption_barriers],
+        account_to_customer=account_to_customer,
+    )
+    all_customers = set(canonical_names)
 
-    _collect_from_df(
-        team_subs_df,
-        customer_cols=["BU_NAME"],
-        account_cols=["ACCOUNT_ID_C"],
-        label="Team subscriptions",
+    logger.info(
+        f"[[CUSTOMER_COUNT]] TOTAL unique customers from all sources (canonical): "
+        f"{len(all_customers)}"
     )
-    _collect_from_df(
-        ab_norm,
-        customer_cols=["customer_name", "BU_NAME", "CUSTOMER_NAME"],
-        account_cols=["ACCOUNT_ID_C"],
-        label="Adoption barriers",
-    )
-    _collect_from_df(
-        csone_df,
-        customer_cols=["customer_name", "Customer Name", "Customer", "BU_NAME", "Account Name", "Account_Name"],
-        account_cols=["ACCOUNT_ID_C", "ACCOUNT_ID"],
-        label="CSOne cases",
-    )
-    _collect_from_df(
-        csconsole_action_plans,
-        customer_cols=["BU_NAME", "CUSTOMER_NAME", "ACCOUNT_NAME"],
-        account_cols=["ACCOUNT_ID_C"],
-        label="CSConsole action plans",
-    )
-    _collect_from_df(
-        csconsole_customer_pulse,
-        customer_cols=["BU_NAME", "CUSTOMER_NAME"],
-        account_cols=["ACCOUNT__C", "ACCOUNT_ID_C"],
-        label="CSConsole customer pulse",
-    )
-    _collect_from_df(
-        csconsole_success_priorities,
-        customer_cols=["RELATED_CUSTOMER__C", "CUSTOMER_BU_NAME__C", "BU_NAME", "CUSTOMER_NAME"],
-        account_cols=["ACCOUNT_ID_C"],
-        label="CSConsole success priorities",
-    )
-    _collect_from_df(
-        csconsole_adoption_barriers,
-        customer_cols=["BU_NAME", "CUSTOMER_NAME"],
-        account_cols=["ACCOUNT_ID_C"],
-        label="CSConsole adoption barriers",
-    )
-
-    logger.info(f"[[CUSTOMER_COUNT]] TOTAL unique customers from all sources: {len(all_customers)}")
     return all_customers
 
 
@@ -1774,30 +1737,41 @@ def _generate_comprehensive_fallback_insights(ab_norm, csone_df, manager, techno
     insights.append(f"Portfolio Analysis for {manager} - {technology} Technology Focus")
     insights.append(f"This comprehensive analysis covers {total_customers} customers with {ab_count} adoption barriers and {case_count} support cases identified over the analysis period.")
     
-    # Risk assessment
+    # Risk assessment (Round 3: route via canonical severity normalization
+    # so that "Critical" and "High" counts agree with the leader/EI/compact
+    # reports and the Critical Adoption Barriers section).
     if not ab_norm.empty:
-        if 'SEVERITY_C' in ab_norm.columns:
-            severity_col = ab_norm['SEVERITY_C'].astype(str)
-            critical_abs = len(ab_norm[severity_col.str.contains('Critical', case=False, na=False)])
-            high_abs = len(ab_norm[severity_col.str.contains('High', case=False, na=False)])
-        else:
+        try:
+            critical_abs = int(cm.count_critical_barriers(
+                ab_norm, mode=cm.CRITICAL_AB_MODE_CRITICAL_ONLY,
+            ))
+            critical_or_high = int(cm.count_critical_barriers(
+                ab_norm, mode=cm.CRITICAL_AB_MODE_CRITICAL_OR_HIGH,
+            ))
+            high_abs = max(critical_or_high - critical_abs, 0)
+        except Exception:
             critical_abs = 0
             high_abs = 0
-        
+
         if critical_abs > 0:
             insights.append(f"CRITICAL ATTENTION REQUIRED: {critical_abs} critical adoption barriers identified that pose immediate risk to customer success and renewal likelihood.")
-        
+
         if high_abs > 0:
             insights.append(f"HIGH PRIORITY: {high_abs} high-severity adoption barriers require focused intervention within the next 30 days.")
-    
+
     # Support case analysis (canonical priority counts)
     if not csone_df.empty:
         p1_cases = cm.count_p1(csone_df)
 
-        if 'Status' in csone_df.columns:
-            status_col = csone_df['Status'].astype(str)
-            escalated_cases = len(csone_df[status_col.str.contains('Escalated', case=False, na=False)])
-        else:
+        # Use canonical P1+P2 priority count as the "escalated" signal
+        # (cm.count_escalated). The previous code used
+        # ``Status.str.contains('Escalated')`` which silently matched
+        # "De-escalated" / "Re-escalated" labels and disagreed with the
+        # leader/EI/compact reports. Tying "escalated" to canonical P1+P2
+        # gives a single, auditable definition across all reports.
+        try:
+            escalated_cases = int(cm.count_escalated(csone_df))
+        except Exception:
             escalated_cases = 0
         
         if p1_cases > 0:
@@ -2163,8 +2137,14 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         if not customer_csone.empty and 'Date/Time Opened' in customer_csone.columns:
             fig, ax = plt.subplots(figsize=(12, 6))
             
+            # Round 3: track how many cases we drop because the open date
+            # is missing/unparseable so the chart subtitle can disclose
+            # the gap. Without this the bars sum to less than the headline
+            # support_cases_count and looks like missing data.
+            _total_before_dt_filter = len(customer_csone)
             customer_csone['Date/Time Opened'] = pd.to_datetime(customer_csone['Date/Time Opened'], errors='coerce')
             customer_csone = customer_csone.dropna(subset=['Date/Time Opened'])
+            _dropped_no_date = _total_before_dt_filter - len(customer_csone)
             
             if len(customer_csone) > 0:
                 # Group by week
@@ -2180,8 +2160,14 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                               for count in case_counts]
                     
                     bars = ax.bar(weeks, case_counts, color=colors)
-                    ax.set_title('Support Cases Trend Over Time\n(Last {} Days)'.format(days), 
-                                 fontsize=14, fontweight='bold')
+                    _disclosure = (
+                        f' • {_dropped_no_date} case(s) without a valid open date are excluded'
+                        if _dropped_no_date > 0 else ''
+                    )
+                    ax.set_title(
+                        'Support Cases Trend Over Time\n(Last {} Days{})'.format(days, _disclosure),
+                        fontsize=14, fontweight='bold'
+                    )
                     ax.set_ylabel('Number of Cases', fontsize=12, fontweight='bold')
                     ax.set_xlabel('Week', fontsize=12, fontweight='bold')
                     
@@ -2235,8 +2221,17 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                         colors.append('#d62728' if high_impact > 0 else '#ff7f0e' if len(week_incidents) > 2 else '#2ca02c')
                     
                     bars = ax.bar(weeks, incident_counts, color=colors)
-                    ax.set_title('Service Incidents Timeline (status.webex.com)\n(Red=High Impact, Orange=Moderate, Green=Low)', 
-                                 fontsize=14, fontweight='bold')
+                    # Round 3: title now describes status-based coloring
+                    # honestly. The previous "High Impact" label was
+                    # misleading because the red bars are picked when
+                    # at least one incident is in an *active investigation*
+                    # status (investigating / identified / monitoring),
+                    # not from any actual impact field.
+                    ax.set_title(
+                        'Service Incidents Timeline (status.webex.com)\n'
+                        '(Red = ≥1 active investigation, Orange = >2 incidents/week, Green = quiet week)',
+                        fontsize=14, fontweight='bold'
+                    )
                     ax.set_ylabel('Number of Incidents', fontsize=12, fontweight='bold')
                     ax.set_xlabel('Week', fontsize=12, fontweight='bold')
                     
@@ -2281,20 +2276,39 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                 startangle=90)
         ax2.set_title('Risk Category', fontweight='bold')
         
-        # Panel 3: Case Severity Distribution (if CSOne data available)
-        if not customer_csone.empty and 'Severity' in customer_csone.columns:
-            severity_counts = customer_csone['Severity'].value_counts()
-            color_map = {'P1': '#d62728', '1': '#d62728', 'Critical': '#d62728',
-                         'P2': '#ff7f0e', '2': '#ff7f0e', 'High': '#ff7f0e',
-                         'P3': '#ffd700', '3': '#ffd700', 'Medium': '#ffd700',
-                         'P4': '#2ca02c', '4': '#2ca02c', 'Low': '#2ca02c'}
-            colors = [color_map.get(str(sev), '#1f77b4') for sev in severity_counts.index]
-            ax3.pie(severity_counts.values, labels=[f'{sev} ({count})' for sev, count in 
-                    zip(severity_counts.index, severity_counts.values)],
-                    autopct='%1.1f%%', colors=colors, startangle=90)
-            ax3.set_title('Case Severity Distribution', fontweight='bold')
-        else:
-            ax3.text(0.5, 0.5, 'No Case Data Available', ha='center', va='center', 
+        # Panel 3: Case Severity Distribution (if CSOne data available).
+        # Round 3 hardening: collapse all P1/1/Critical-style synonyms via
+        # ``case_priority_norm`` so the pie matches the executive severity
+        # pie and ``cm.count_p1/p2/p3/p4`` to the row.
+        _renewal_pie_built = False
+        if not customer_csone.empty:
+            try:
+                _renewal_csone_norm = add_case_lifecycle_fields(customer_csone)
+            except Exception:
+                _renewal_csone_norm = customer_csone
+            if 'case_priority_norm' in _renewal_csone_norm.columns:
+                _sev_series = (
+                    _renewal_csone_norm['case_priority_norm'].fillna('Unknown').astype(str)
+                )
+                _ordered = ['P1', 'P2', 'P3', 'P4', 'Unknown']
+                _raw = _sev_series.value_counts()
+                _slices = [(k, int(_raw.get(k, 0))) for k in _ordered if int(_raw.get(k, 0)) > 0]
+                if _slices:
+                    color_map = {
+                        'P1': '#d62728',
+                        'P2': '#ff7f0e',
+                        'P3': '#ffd700',
+                        'P4': '#2ca02c',
+                        'Unknown': '#9aa0a6',
+                    }
+                    labels = [f'{k} ({v})' for k, v in _slices]
+                    sizes = [v for _, v in _slices]
+                    colors = [color_map[k] for k, _ in _slices]
+                    ax3.pie(sizes, labels=labels, autopct='%1.1f%%', colors=colors, startangle=90)
+                    ax3.set_title('Case Severity Distribution', fontweight='bold')
+                    _renewal_pie_built = True
+        if not _renewal_pie_built:
+            ax3.text(0.5, 0.5, 'No Case Data Available', ha='center', va='center',
                      transform=ax3.transAxes, fontsize=12)
             ax3.set_title('Case Severity Distribution', fontweight='bold')
         
@@ -2370,13 +2384,22 @@ def enrich_csone_with_arr(csone_df: pd.DataFrame, arr_data: pd.DataFrame) -> pd.
             # count toward the P1 tier consistently with dashboards.
             def estimate_arr(customer_name, customer_cases):
                 case_count = len(customer_cases)
-                if 'case_priority_norm' in customer_cases.columns:
-                    sev_series = customer_cases['case_priority_norm'].astype(str)
-                    p1_count = int((sev_series == 'P1').sum())
-                    p2_count = int((sev_series == 'P2').sum())
-                else:
-                    p1_count = 0
-                    p2_count = 0
+                # Round 3: route P1/P2 counts through canonical_metrics so
+                # this estimator agrees byte-for-byte with the dashboards
+                # / report-consistency validator. Avoids the in-line
+                # ``(sev_series == 'P1').sum()`` drifting when the
+                # normalization rules change.
+                try:
+                    p1_count = int(cm.count_p1(customer_cases))
+                    p2_count = int(cm.count_p2(customer_cases))
+                except Exception:
+                    if 'case_priority_norm' in customer_cases.columns:
+                        sev_series = customer_cases['case_priority_norm'].astype(str)
+                        p1_count = int((sev_series == 'P1').sum())
+                        p2_count = int((sev_series == 'P2').sum())
+                    else:
+                        p1_count = 0
+                        p2_count = 0
 
                 # Rough estimation logic:
                 # High case volume + high severity = enterprise customer (high ARR)
@@ -2681,25 +2704,24 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             logger.info(f"[[DEBUG]] CSOne DataFrame sample (first 3 rows): {csone_df.head(3).to_dict('records') if not csone_df.empty else 'EMPTY'}")
         total_cases = len(csone_df) if not csone_df.empty else 0
         
-        # Try different severity and customer column variations (only if CSOne is not empty)
-        severity_col = None
+        # Try to detect a customer column for downstream BEMS-customer counting.
+        # Round 3 hardening: do NOT gate P1/P2 counts on raw-severity-column
+        # presence — ``cm.count_p1/p2`` already normalizes any of the known
+        # raw columns (Severity / Priority / Case_Priority / case_priority_norm)
+        # and returns 0 cleanly when none exist. The previous gate caused
+        # silent zeros when the input was already normalized to
+        # ``case_priority_norm`` but lacked the raw legacy columns.
         customer_col = None
         if not csone_df.empty:
-            for col in ['Severity', 'severity', 'Priority', 'priority', 'Case_Priority']:
-                if col in csone_df.columns:
-                    severity_col = col
-                    break
             for col in ['Customer Name', 'customer_name', 'Customer', 'BU_NAME', 'Account Name']:
                 if col in csone_df.columns:
                     customer_col = col
                     break
-            
-        if severity_col:
-            # Canonical priority counting via case_priority_norm; agrees with
-            # Leader / Compact / EI to the row.
+
+        if not csone_df.empty:
             p1_count = cm.count_p1(csone_df)
             p2_count = cm.count_p2(csone_df)
-            logger.info(f"[[DEBUG]] Found {p1_count} P1 cases and {p2_count} P2 cases using canonical priority normalization (severity_col='{severity_col}')")
+            logger.info(f"[[DEBUG]] Found {p1_count} P1 cases and {p2_count} P2 cases via canonical priority normalization")
         else:
             p1_count = 0
             p2_count = 0
@@ -2767,16 +2789,11 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         
         overview_para.add_run(f'• Total Customers: {total_customers}\n')
         overview_para.add_run(f'• Total Support Cases: {total_cases}\n')
-        
-        # Use robust severity detection
-        severity_col = None
+
+        # Round 3: derive P1/P2 directly from canonical helpers without
+        # gating on raw column names; cm.count_p1/p2 already normalizes
+        # whichever priority column is present.
         if not csone_df.empty:
-            for col in ['Severity', 'severity', 'Priority', 'priority', 'Case_Priority']:
-                if col in csone_df.columns:
-                    severity_col = col
-                    break
-            
-        if severity_col:
             p1_count = cm.count_p1(csone_df)
             p2_count = cm.count_p2(csone_df)
             overview_para.add_run(f'• Critical Cases (P1): {p1_count}\n')
@@ -2825,7 +2842,10 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             else:
                 insights_para.add_run(f'• NORMAL SUPPORT LOAD: Average {avg_cases_per_customer:.1f} cases per customer indicates healthy adoption\n')
         
-        if severity_col:
+        # Round 3: drop the raw-column gate; p1_count/p2_count are
+        # already derived canonically and are safe to render regardless
+        # of which raw severity column happens to be present.
+        if total_cases > 0:
             p1_pct = (p1_count / total_cases * 100) if total_cases > 0 else 0
             p2_pct = (p2_count / total_cases * 100) if total_cases > 0 else 0
             
@@ -2935,27 +2955,48 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         doc.add_paragraph()
     
     # Table 2: Case Severity Breakdown
-    if not csone_df.empty and 'Severity' in csone_df.columns:
-        doc.add_heading('Case Severity Distribution', level=2)
-        
-        severity_counts = csone_df['Severity'].value_counts()
-        table = doc.add_table(rows=len(severity_counts) + 1, cols=2)
-        table.style = 'Light Grid Accent 1'
-        
-        hdr_cells = table.rows[0].cells
-        hdr_cells[0].text = 'Severity'
-        hdr_cells[1].text = 'Count'
-        for cell in hdr_cells:
-            for paragraph in cell.paragraphs:
-                for run in paragraph.runs:
-                    run.font.bold = True
-        
-        for i, (severity, count) in enumerate(severity_counts.items(), 1):
-            row_cells = table.rows[i].cells
-            row_cells[0].text = str(severity)
-            row_cells[1].text = str(count)
-        
-        doc.add_paragraph()
+    # Round 3 hardening: build the table from canonical
+    # ``case_priority_norm`` so that it reconciles row-for-row with the
+    # severity pie chart and the executive headline counts (P1/P2 etc.).
+    # Previously this used the raw ``Severity`` column which produced
+    # separate "P1" / "1" / "Critical" rows, dropped null severities, and
+    # disagreed with cm.count_p1/cm.count_p2 used elsewhere.
+    if not csone_df.empty:
+        try:
+            _csone_norm_for_sev_table = add_case_lifecycle_fields(csone_df)
+        except Exception:
+            _csone_norm_for_sev_table = csone_df
+        if 'case_priority_norm' in _csone_norm_for_sev_table.columns:
+            doc.add_heading('Case Severity Distribution', level=2)
+
+            sev_series = (
+                _csone_norm_for_sev_table['case_priority_norm']
+                .fillna('Unknown')
+                .astype(str)
+            )
+            ordered = ['P1', 'P2', 'P3', 'P4', 'Unknown']
+            raw_counts = sev_series.value_counts()
+            severity_counts = [
+                (k, int(raw_counts.get(k, 0))) for k in ordered if int(raw_counts.get(k, 0)) > 0
+            ]
+
+            table = doc.add_table(rows=len(severity_counts) + 1, cols=2)
+            table.style = 'Light Grid Accent 1'
+
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].text = 'Severity'
+            hdr_cells[1].text = 'Count'
+            for cell in hdr_cells:
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        run.font.bold = True
+
+            for i, (severity, count) in enumerate(severity_counts, 1):
+                row_cells = table.rows[i].cells
+                row_cells[0].text = str(severity)
+                row_cells[1].text = str(count)
+
+            doc.add_paragraph()
     
     # === BEMS ESCALATIONS TABLE ===
     # Use comprehensive BEMS detection that checks Transaction ID column
@@ -4488,18 +4529,42 @@ def run_compact_analysis(analysis_id):
             logger.warning(f"[[WARNING]] CSConsole Customer Pulse data is empty (optional data source)")
 
         # Create more robust data filtering with better fallbacks
+        # Round 3 hardening: derive the critical-AB filter from canonical
+        # severity normalization so it matches ``cm.count_critical_barriers``
+        # and the dashboards. The previous "first column that name-matches
+        # /sev/" picker silently flipped between subtly different fields
+        # (e.g. ``severity_score_c`` numeric vs ``SEVERITY_C`` text) and
+        # caused mismatches with the headline counts.
         critical_abs = pd.DataFrame()
         if not ab_norm.empty:
-            # Try different column names for severity
-            severity_cols = [col for col in ab_norm.columns if 'severity' in col.lower() or 'sev' in col.lower()]
-            if severity_cols:
-                severity_col = severity_cols[0]
-                critical_abs = ab_norm[ab_norm[severity_col].astype(str).str.contains('Critical|High', case=False, na=False)]
-                logger.info(f"   - Critical ABs found using column '{severity_col}': {len(critical_abs)} rows")
-            else:
-                # Unknown severity should not be auto-treated as high.
+            try:
+                from data_normalization import normalize_severity_label as _norm_sev_label
+                if 'severity_norm' in ab_norm.columns:
+                    _sev_series = ab_norm['severity_norm'].fillna('').astype(str)
+                else:
+                    _sev_picked_col = next(
+                        (c for c in ('SEVERITY_C', 'severity_c', 'Severity', 'PRIORITY')
+                         if c in ab_norm.columns),
+                        None,
+                    )
+                    if _sev_picked_col is None:
+                        _sev_series = pd.Series([], dtype=str)
+                    else:
+                        _sev_series = (
+                            ab_norm[_sev_picked_col].apply(_norm_sev_label).fillna('').astype(str)
+                        )
+                if not _sev_series.empty:
+                    critical_abs = ab_norm[_sev_series.isin(['Critical', 'High'])]
+                    logger.info(
+                        f"   - Critical/High ABs found via canonical severity normalization: "
+                        f"{len(critical_abs)} rows"
+                    )
+                else:
+                    critical_abs = pd.DataFrame(columns=ab_norm.columns)
+                    logger.info("   - No severity column found, critical AB count set to 0")
+            except Exception as _critical_ab_err:
+                logger.debug(f"   - Critical AB normalization failed: {_critical_ab_err}")
                 critical_abs = pd.DataFrame(columns=ab_norm.columns)
-                logger.info(f"   - No severity column found, critical AB count set to 0")
         
         escalated_cases = pd.DataFrame()
         if not csone_df.empty:
@@ -5180,9 +5245,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     dashboard_table = doc.add_table(rows=8, cols=2)
     dashboard_table.style = 'Table Grid'
     
-    # Populate table
+    # Populate table — Round 3: label uses ``days`` so the dashboard
+    # row matches the subtitle's analysis period (was hardcoded "Last
+    # 90 Days" regardless of the user's selected window).
+    _support_cases_label = f'Support Cases (Last {days} Days)'
     dashboard_data = [
-        ('Support Cases (Last 90 Days)', str(case_count)),
+        (_support_cases_label, str(case_count)),
         ('Active Adoption Barriers', str(ab_count)),
         ('BEMS Escalations', str(bems_count)),
         ('Service Incidents (status.webex.com)', str(incident_count)),
@@ -5203,7 +5271,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         # Color code risk category
         if label == 'Risk Category':
             pass  # handled below
-        elif label == 'Support Cases (Last 90 Days)' and case_count == 0 and bems_count == 0:
+        elif label == _support_cases_label and case_count == 0 and bems_count == 0:
             # Add footnote in next row would require table resize; add paragraph after table instead
             pass
     # When Support Cases and BEMS are both 0, explain why and how to get full data (improved messaging)
@@ -5769,6 +5837,15 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         
         # Show top success priorities; in portfolio mode prefix customer name (RELATED_CUSTOMER__C)
         doc.add_paragraph('Recent Success Priorities (by customer where applicable):', style='Heading 3')
+        # Round 3: surface "10 of N" disclosure to match the pattern
+        # already established for Action Plans / Customer Pulse so the
+        # leader does not assume the table is the entire universe.
+        if len(customer_success_priorities) > 10:
+            _trunc_para = doc.add_paragraph()
+            _trunc_para.add_run(
+                f"Showing 10 of {len(customer_success_priorities)} (table truncated; "
+                "see source CSConsole export for the full list)."
+            ).italic = True
         for i, (_, row) in enumerate(customer_success_priorities.head(10).iterrows(), 1):
             p = doc.add_paragraph(style='List Number')
             cust_label = ''
@@ -6535,11 +6612,16 @@ def run_customer_renewal_analysis(analysis_id):
             # Use renewal_risk_score (0-100) from each customer; _calculate_simple_renewal_risk returns that, not overall_risk_score
             cust_scores = [a.get('renewal_risk_score', a.get('overall_risk_score', 0)) for a in portfolio_renewal_analyses.values()]
             avg_risk_score = sum(cust_scores) / len(cust_scores) if cust_scores else 0
-            # Derive category from 0-100 scale
-            if avg_risk_score >= 70:   port_category = 'CRITICAL'
-            elif avg_risk_score >= 50: port_category = 'HIGH'
-            elif avg_risk_score >= 30: port_category = 'MEDIUM'
-            else:                     port_category = 'LOW'
+            # Derive category from canonical 0-100 risk-band thresholds so
+            # this label always matches the renewal donut / EI band cut.
+            # Previous code used 70/50/30 which silently disagreed with
+            # ``risk_scoring.RISK_BAND_THRESHOLDS`` (75/55/35/15) — a score
+            # of 72 was CRITICAL here but HIGH in the donut.
+            from risk_scoring import RISK_BAND_THRESHOLDS as _RBT
+            if avg_risk_score >= _RBT['CRITICAL']:   port_category = 'CRITICAL'
+            elif avg_risk_score >= _RBT['HIGH']:     port_category = 'HIGH'
+            elif avg_risk_score >= _RBT['MEDIUM']:   port_category = 'MEDIUM'
+            else:                                    port_category = 'LOW'
             # Aggregate counts and key findings so report shows real data (fix "not getting all the data")
             tot_ab = len(customer_ab)
             tot_cases = len(customer_csone)
@@ -6584,8 +6666,17 @@ def run_customer_renewal_analysis(analysis_id):
                     f"No adoption barriers or support cases in analysis period for portfolio {derived_source}"
                 )
             # Build portfolio-level recommendations (was missing, caused "Recommendations" heading with no content)
-            high_risk = [name for name, a in portfolio_renewal_analyses.items() if a.get('renewal_risk_score', a.get('overall_risk_score', 0)) >= 70]
-            medium_risk = [name for name, a in portfolio_renewal_analyses.items() if 30 <= a.get('renewal_risk_score', a.get('overall_risk_score', 0)) < 70]
+            # Round 3: route the high/medium-risk lists through the same
+            # canonical thresholds as the donut + EI band cut so a score
+            # of 72 cannot be CRITICAL here while HIGH elsewhere.
+            high_risk = [
+                name for name, a in portfolio_renewal_analyses.items()
+                if a.get('renewal_risk_score', a.get('overall_risk_score', 0)) >= _RBT['HIGH']
+            ]
+            medium_risk = [
+                name for name, a in portfolio_renewal_analyses.items()
+                if _RBT['MEDIUM'] <= a.get('renewal_risk_score', a.get('overall_risk_score', 0)) < _RBT['HIGH']
+            ]
             portfolio_recs = []
             if high_risk:
                 portfolio_recs.append(f"Prioritize executive intervention for {len(high_risk)} high-risk customer(s): {', '.join(high_risk[:5])}{'...' if len(high_risk) > 5 else ''}")
@@ -8891,7 +8982,19 @@ def ask_ai_portfolio():
 
                 account_ids = team_subs_df['ACCOUNT_ID_C'].unique().tolist() if 'ACCOUNT_ID_C' in team_subs_df.columns else []
                 n_subs = len(team_subs_df)
-                n_customers = team_subs_df['BU_NAME'].nunique() if 'BU_NAME' in team_subs_df.columns else n_subs
+                # Round 3: route customer counting through the canonical
+                # helper so the LLM-grounded context agrees with the
+                # dashboard / Compact / EI numbers. Raw ``BU_NAME.nunique``
+                # would miss case-insensitive duplicates and account-only
+                # rows present in CSConsole frames.
+                try:
+                    n_customers = int(cm.count_customers(
+                        ab_df=None,
+                        csone_df=None,
+                        extra_frames=[team_subs_df],
+                    ))
+                except Exception:
+                    n_customers = team_subs_df['BU_NAME'].nunique() if 'BU_NAME' in team_subs_df.columns else n_subs
                 context_summary_parts.append(f"{n_subs} subs, {n_customers} customers")
 
                 # --- Section 1: Portfolio Overview ---
@@ -8944,8 +9047,13 @@ def ask_ai_portfolio():
                             context_summary_parts.append(f"{n_abs} barriers")
 
                             if 'SEVERITY_C' in ab_df.columns:
-                                sev_dist = ab_df['SEVERITY_C'].value_counts()
-                                sections.append("By severity: " + ", ".join(f"{s}: {c}" for s, c in sev_dist.items()))
+                                # Round 3: normalize so that synonyms like
+                                # "Critical"/"Sev-1"/"P1" collapse the same
+                                # way they do everywhere else.
+                                from data_normalization import normalize_severity_label as _norm_sev
+                                _sev_norm_series = ab_df['SEVERITY_C'].astype(str).map(_norm_sev)
+                                _sev_dist = _sev_norm_series.value_counts()
+                                sections.append("By severity: " + ", ".join(f"{s}: {c}" for s, c in _sev_dist.items()))
                             if 'STATUS_C' in ab_df.columns:
                                 status_dist = ab_df['STATUS_C'].value_counts()
                                 open_count = sum(c for s, c in status_dist.items() if str(s).upper() not in ('CLOSED', 'RESOLVED', 'COMPLETED'))
@@ -8978,7 +9086,25 @@ def ask_ai_portfolio():
                             context_summary_parts.append(f"{n_cases} cases")
                             sev_col = next((c for c in ('SEVERITY', 'SEVERITY_C') if c in cases_df.columns), None)
                             if sev_col:
-                                sev_counts = cases_df[sev_col].value_counts()
+                                # Round 3: ground the LLM in canonical
+                                # priority buckets (P1/P2/P3/P4/Unknown)
+                                # so its evidence agrees with the
+                                # dashboard tile, not raw severity strings
+                                # that vary case-by-case ("1" vs "P1" vs
+                                # "Critical").
+                                try:
+                                    from data_normalization import add_case_lifecycle_fields as _enrich_cases
+                                    _enriched_cases = _enrich_cases(cases_df)
+                                    if 'case_priority_norm' in _enriched_cases.columns:
+                                        sev_counts = (
+                                            _enriched_cases['case_priority_norm']
+                                            .fillna('Unknown')
+                                            .value_counts()
+                                        )
+                                    else:
+                                        sev_counts = cases_df[sev_col].value_counts()
+                                except Exception:
+                                    sev_counts = cases_df[sev_col].value_counts()
                                 sections.append("By severity: " + ", ".join(f"{s}: {c}" for s, c in sev_counts.items()))
                             for _, row in cases_df.head(25).iterrows():
                                 subj = row.get('SUBJECT', 'N/A')
@@ -9079,6 +9205,13 @@ def ask_ai_portfolio():
                     try:
                         if sp_df is not None and not sp_df.empty:
                             sections.append(f"\n=== SUCCESS PRIORITIES ({len(sp_df)} total) ===")
+                            # Round 3: explicit "10 of N" disclosure so the
+                            # LLM doesn't treat the listed sample as the
+                            # full universe.
+                            if len(sp_df) > 10:
+                                sections.append(
+                                    f"(Listing 10 of {len(sp_df)}; sample only — full set summarized in totals above.)"
+                                )
                             for _, row in sp_df.head(10).iterrows():
                                 subj = row.get('SUBJECT_C', row.get('NAME', 'N/A'))
                                 sp_id = row.get('ID', row.get('SP_ID', ''))
@@ -9090,6 +9223,10 @@ def ask_ai_portfolio():
                     try:
                         if ap_df is not None and not ap_df.empty:
                             sections.append(f"\n=== ACTION PLANS ({len(ap_df)} total) ===")
+                            if len(ap_df) > 10:
+                                sections.append(
+                                    f"(Listing 10 of {len(ap_df)}; sample only — full set summarized in totals above.)"
+                                )
                             for _, row in ap_df.head(10).iterrows():
                                 subj = row.get('SUBJECT_C', row.get('NAME', 'N/A'))
                                 status = row.get('STATUS_C', '')
@@ -9136,6 +9273,18 @@ def ask_ai_portfolio():
                     try:
                         enhanced = fetch_enhanced_account_insights(ctx, acct_batch, days)
                         if enhanced:
+                            # Round 3: surface portfolio-level batch
+                            # truncation so the LLM (and reader) knows
+                            # this section reflects only the first N
+                            # account ids when a portfolio has more.
+                            _meta = enhanced.get('_meta') or {}
+                            if _meta.get('account_batch_truncated'):
+                                sections.append(
+                                    f"\n[NOTE] Account-level insights below cover the first "
+                                    f"{_meta.get('account_batch_size')} of {_meta.get('account_batch_total')} "
+                                    f"account ids (limit={_meta.get('account_batch_limit')}); "
+                                    f"counts under-report at the portfolio level."
+                                )
                             if 'account_summary' in enhanced:
                                 s = enhanced['account_summary']
                                 sections.append(f"\n=== ACCOUNT HEALTH & RENEWAL RISK ===")
@@ -9151,6 +9300,12 @@ def ask_ai_portfolio():
                                 sections.append(f"\n=== CONTRACT EXPIRATIONS ===")
                                 sections.append(f"Active contracts: {c.get('active_contracts', 0)}")
                                 sections.append(f"Expiring within 90 days: {c.get('expiring_within_90d', 0)}")
+                                # Round 3: contracts truncation flag.
+                                if c.get('was_truncated'):
+                                    sections.append(
+                                        f"[NOTE] Contract list capped at {c.get('fetch_limit')}; "
+                                        f"active_contracts and expiring_arr may under-report."
+                                    )
                                 if c.get('upcoming_expirations'):
                                     sections.append("Upcoming expirations:")
                                     for exp in c['upcoming_expirations']:
@@ -9158,12 +9313,22 @@ def ask_ai_portfolio():
                             if 'recently_expired' in enhanced:
                                 r = enhanced['recently_expired']
                                 sections.append(f"\n=== RECENTLY EXPIRED ({r.get('count', 0)}) ===")
+                                if r.get('was_truncated'):
+                                    sections.append(
+                                        f"[NOTE] Recently-expired list capped at {r.get('fetch_limit')}; "
+                                        f"count under-reports."
+                                    )
                                 for a in r.get('accounts', []):
                                     sections.append(f"  - {a.get('name','')} expired {a.get('expired','')}")
                             if 'renewals' in enhanced:
                                 ren = enhanced['renewals']
                                 sections.append(f"\n=== RENEWAL PROBABILITY ===")
                                 sections.append(f"Contracts analyzed: {ren.get('count', 0)} | Avg probability: {ren.get('avg_probability', 0)}% | Min: {ren.get('min_probability', 0)}%")
+                                if ren.get('was_truncated'):
+                                    sections.append(
+                                        f"[NOTE] Renewal probability list capped at "
+                                        f"{ren.get('fetch_limit')}; aggregate stats are partial."
+                                    )
                                 if ren.get('status_distribution'):
                                     sections.append("Renewal status: " + ", ".join(f"{k}: {v}" for k, v in ren['status_distribution'].items()))
                                 if ren.get('at_risk'):
@@ -9474,6 +9639,17 @@ def ask_intel():
         if not question or len(question) > 2000:
             return jsonify({'ok': False, 'error': 'Please provide a question (max 2000 characters).'}), 400
 
+        # Round 3: thread the requested analysis window into both
+        # external-intel lookups and the inline TAC fetch so Ask-Intel
+        # narrative cannot say "(90d)" while a 30-day or 365-day run
+        # was actually requested. Default 90 if not provided; clamp to
+        # documented max of 365 to keep storage / Snowflake bounded.
+        try:
+            _ai_days_raw = int(data.get('days') or 90)
+        except (TypeError, ValueError):
+            _ai_days_raw = 90
+        _ai_days = max(1, min(_ai_days_raw, 365))
+
         if is_grounded_ask_ai_enabled():
             grounded_result = run_intel_grounded_ask_ai(question)
             if grounded_result.get('ok'):
@@ -9495,7 +9671,7 @@ def ask_intel():
                 }), status_code
 
         from incident_storage import get_all_external_intel
-        intel = get_all_external_intel(days_back=365)
+        intel = get_all_external_intel(days_back=_ai_days)
 
         context_parts = []
         if intel['incidents']:
@@ -9543,14 +9719,14 @@ def ask_intel():
                             context_parts.append("Technologies: " + ", ".join(f"{t} ({c})" for t, c in techs.items()))
                         acct_ids = _subs['ACCOUNT_ID_C'].unique().tolist() if 'ACCOUNT_ID_C' in _subs.columns else []
                         if acct_ids:
-                            _cases = fetch_support_cases_snowflake(_ctx, acct_ids[:80], 90)
+                            _cases = fetch_support_cases_snowflake(_ctx, acct_ids[:80], _ai_days)
                             if _cases is not None and not _cases.empty:
                                 # Canonical priority counts so Ask-Intel agrees with the rest of the app.
                                 p1_count = cm.count_p1(_cases)
                                 p2_count = cm.count_p2(_cases)
                                 p1p2_total = p1_count + p2_count
                                 context_parts.append(
-                                    f"Active support cases (90d): {len(_cases)} total, {p1p2_total} P1/P2"
+                                    f"Active support cases ({_ai_days}d): {len(_cases)} total, {p1p2_total} P1/P2"
                                 )
                                 for _, row in _cases.head(10).iterrows():
                                     c_id = row.get('CASE_ID', row.get('ID', ''))
@@ -10348,14 +10524,21 @@ def run_subscription_analysis(analysis_id):
                 if not critical_ab.empty:
                     ab_p.add_run(f' {len(critical_ab)} critical/high severity barriers requiring immediate attention.')
                 
-                # Show recent barriers
+                # Show recent barriers — Round 3: use the run's analysis
+                # window (``days``) so this sentence matches the report's
+                # subtitle. The previous hardcoded 30 silently disagreed
+                # with the rest of the document for any non-30-day run.
                 if 'CREATED_DATE' in ab_df.columns:
                     try:
                         ab_df['CREATED_DATE'] = pd.to_datetime(ab_df['CREATED_DATE'], errors='coerce')
-                        recent_cutoff = datetime.now() - timedelta(days=30)
+                        try:
+                            _recent_window = int(days)
+                        except (TypeError, NameError, ValueError):
+                            _recent_window = 30
+                        recent_cutoff = datetime.now() - timedelta(days=_recent_window)
                         recent_ab = ab_df[ab_df['CREATED_DATE'] >= recent_cutoff]
                         if not recent_ab.empty:
-                            ab_p.add_run(f' {len(recent_ab)} barriers created in the last 30 days.')
+                            ab_p.add_run(f' {len(recent_ab)} barriers created in the last {_recent_window} days.')
                     except Exception as _dt_err:
                         logger.debug(f"Subscription AB date parse error: {_dt_err}")
             else:

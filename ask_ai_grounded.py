@@ -426,7 +426,16 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
 
         bundle["barrier_aging"] = compute_barrier_aging(bundle.get("adoption_barriers"), pd.DataFrame())
 
-        intel = get_all_external_intel(days_back=365)
+        # Round 3: thread the request's analysis window into external
+        # intel so the LLM sees the same window as the rest of the
+        # report. Clamped to a documented max of 365 days to keep the
+        # context payload bounded.
+        try:
+            _intel_days = int(getattr(req, "days", 90) or 90)
+        except (TypeError, ValueError):
+            _intel_days = 90
+        _intel_days = max(1, min(_intel_days, 365))
+        intel = get_all_external_intel(days_back=_intel_days)
         bundle["incidents"] = intel.get("incidents", [])
         bundle["bugs"] = intel.get("bugs", [])
         hist = scan_historical_reports(str(Path.cwd() / "outputs"), manager=req.manager, technology=req.technology, limit=4)
@@ -500,12 +509,21 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             pass
 
 
-def run_intel_grounded_ask_ai(question: str) -> Dict[str, Any]:
-    """Grounded Ask AI path for external intelligence questions."""
+def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
+    """Grounded Ask AI path for external intelligence questions.
+
+    Round 3: ``days`` is now a parameter (default 365 to preserve prior
+    behavior for callers that do not pass it). Clamped to [1, 365].
+    """
     from adoptiq_backend import generate_llm_json_response
     from incident_storage import get_all_external_intel
 
-    intel = get_all_external_intel(days_back=365)
+    try:
+        _intel_days = int(days or 365)
+    except (TypeError, ValueError):
+        _intel_days = 365
+    _intel_days = max(1, min(_intel_days, 365))
+    intel = get_all_external_intel(days_back=_intel_days)
     records: List[EvidenceRecord] = []
     ids: Set[str] = set()
 

@@ -1826,9 +1826,22 @@ class LeaderReportGenerator:
         total_tac_cases = len(tac_cases) if not tac_cases.empty else 0
         
         # Calculate health metrics
+        # Round 3 hardening: derive high-priority barriers from canonical
+        # ``cm.count_critical_barriers`` so the count agrees with the
+        # leader's own "Critical Adoption Barriers Requiring Action"
+        # section and the EI/Compact dashboards. The previous matcher
+        # only inspected ``PRIORITY``, ignored ``SEVERITY_C`` (which is
+        # what every other report uses), and over-matched on the literal
+        # string "Urgent" that is not part of the canonical ladder.
         high_priority_barriers = 0
-        if not adoption_barriers.empty and 'PRIORITY' in adoption_barriers.columns:
-            high_priority_barriers = len(adoption_barriers[adoption_barriers['PRIORITY'].astype(str).str.contains('High|Critical|Urgent', case=False, na=False)])
+        if not adoption_barriers.empty:
+            try:
+                high_priority_barriers = int(cm.count_critical_barriers(
+                    adoption_barriers,
+                    mode=cm.CRITICAL_AB_MODE_CRITICAL_OR_HIGH,
+                ))
+            except Exception:
+                high_priority_barriers = 0
         
         avg_pulse_score = None
         if not customer_pulse.empty:
@@ -1936,8 +1949,13 @@ class LeaderReportGenerator:
         elif sentiment_summary == "Positive":
             summary_text += "Leverage positive sentiment to amplify adoption and customer advocacy outcomes. "
         
-        # Pulse score recommendations
-        if avg_pulse_score is not None and avg_pulse_score < 3.5:
+        # Pulse score recommendations — Round 3: gate on the same
+        # canonical sentiment label used by the paragraph above so we
+        # never tell a leader to "prioritize outreach" while the
+        # narrative classifies the pulse as Neutral. (Previously this
+        # fired any time avg_pulse_score < 3.5 even though canonical
+        # negative sentiment on the 0-5 scale is <= 2.5.)
+        if sentiment_summary == "Negative":
             summary_text += "Prioritize direct customer outreach to understand satisfaction concerns and develop improvement plans for affected accounts. "
         
         # Workload recommendations
@@ -2287,7 +2305,7 @@ class LeaderReportGenerator:
     def _compute_aging_buckets(self, df: Optional[pd.DataFrame]) -> Dict[str, int]:
         """Bucket ``df`` rows by age of their primary date column, filtering to
         open records where a STATUS-like column exists. Missing dates fall
-        into the 60+ bucket so they can't silently disappear.
+        into the 61+ bucket so they can't silently disappear.
         """
         buckets: Dict[str, int] = {name: 0 for name, _, _ in self._AGING_BUCKETS}
         if df is None or df.empty:
@@ -2328,7 +2346,7 @@ class LeaderReportGenerator:
         return buckets
 
     def _add_aging_section(self, team_data: Dict[str, Dict]) -> bool:
-        """Render 0-7 / 8-30 / 31-60 / 60+ aging tables for open APs and ABs."""
+        """Render 0-7 / 8-30 / 31-60 / 61+ aging tables for open APs and ABs."""
         rendered = False
         for key, label in (("action_plans", "Action Plans"), ("adoption_barriers", "Adoption Barriers")):
             any_rows = any(
@@ -4920,30 +4938,52 @@ class LeaderReportGenerator:
                 if enhanced_data and enhanced_data.get('insights'):
                     insights = enhanced_data['insights']
                     
-                    # Account insights
+                    # Round 3: surface was_truncated/fetch_limit so the
+                    # leader sees "Showing N of capped" instead of
+                    # treating the displayed totals as the universe.
+                    def _trunc_suffix(block: Optional[Dict]) -> str:
+                        if not block:
+                            return ''
+                        if block.get('was_truncated') and block.get('fetch_limit'):
+                            return f" (capped at {block['fetch_limit']}; data may be truncated)"
+                        return ''
+
                     if insights.get('account', {}).get('account_summary'):
                         account_data = insights['account']['account_summary']
-                        self.doc.add_paragraph(f"• Accounts found: {account_data.get('total_accounts_found', 0)}")
+                        self.doc.add_paragraph(
+                            f"• Accounts found: {account_data.get('total_accounts_found', 0)}"
+                            f"{_trunc_suffix(account_data)}"
+                        )
                         if insights['account'].get('sources'):
                             source = insights['account']['sources'][0]
                             self.doc.add_paragraph(f"  Source: {source['table']} ({source['records_found']} records)")
-                    
-                    # Contract insights
+
                     if insights.get('contract', {}).get('contract_data'):
                         contract_data = insights['contract']['contract_data']
-                        self.doc.add_paragraph(f"• Contracts: {contract_data.get('contracts_found', 0)}")
+                        self.doc.add_paragraph(
+                            f"• Contracts: {contract_data.get('contracts_found', 0)}"
+                            f"{_trunc_suffix(contract_data)}"
+                        )
                         if insights['contract'].get('sources'):
                             source = insights['contract']['sources'][0]
                             self.doc.add_paragraph(f"  Source: {source['table']} ({source['records_found']} records)")
-                    
-                    # Engagement insights
+
                     engagement = insights.get('engagement', {})
                     if engagement.get('action_plans'):
-                        self.doc.add_paragraph(f"• Action Plans: {engagement['action_plans'].get('action_plans_found', 0)}")
+                        self.doc.add_paragraph(
+                            f"• Action Plans: {engagement['action_plans'].get('action_plans_found', 0)}"
+                            f"{_trunc_suffix(engagement.get('action_plans'))}"
+                        )
                     if engagement.get('adoption_barriers'):
-                        self.doc.add_paragraph(f"• Adoption Barriers: {engagement['adoption_barriers'].get('adoption_barriers_found', 0)}")
+                        self.doc.add_paragraph(
+                            f"• Adoption Barriers: {engagement['adoption_barriers'].get('adoption_barriers_found', 0)}"
+                            f"{_trunc_suffix(engagement.get('adoption_barriers'))}"
+                        )
                     if engagement.get('customer_pulse'):
-                        self.doc.add_paragraph(f"• Customer Pulse: {engagement['customer_pulse'].get('customer_pulse_found', 0)}")
+                        self.doc.add_paragraph(
+                            f"• Customer Pulse: {engagement['customer_pulse'].get('customer_pulse_found', 0)}"
+                            f"{_trunc_suffix(engagement.get('customer_pulse'))}"
+                        )
                     
                     # Add source attribution
                     if engagement.get('sources'):
@@ -5043,6 +5083,15 @@ class LeaderReportGenerator:
         self.doc.add_paragraph("• CISCO_CONFIDENTIAL: Strict confidentiality required")
         
         # FIXED: Analyze defects for ALL customers
+        # Round 3: thread the run's analysis window into the per-customer
+        # defect lookup so this section matches the rest of the report's
+        # date scope. Previously hardcoded to 90, which silently disagreed
+        # with a 30-day or 180-day analysis run.
+        _resolved_days = data.get('analysis_days') or getattr(self, '_analysis_days', 90)
+        try:
+            _resolved_days = int(_resolved_days) if _resolved_days else 90
+        except (TypeError, ValueError):
+            _resolved_days = 90
         for customer in customers:
             self.doc.add_heading(f'Defect Analysis: {customer}', level=3)
             
@@ -5054,7 +5103,7 @@ class LeaderReportGenerator:
                 analysis = self.defect_analyzer.analyze_defects_for_customer(
                     customer_name=customer,
                     product_terms=product_terms,
-                    days_back=90
+                    days_back=_resolved_days
                 )
                 
                 # Add classification summary

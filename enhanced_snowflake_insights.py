@@ -144,9 +144,16 @@ class EnhancedSnowflakeInsights:
                 account_results = cur.fetchall()
                 
                 if account_results:
+                    # Round 3: surface truncation flags so downstream
+                    # consumers (Leader/EI report, Ask AI) can label
+                    # "Showing N of capped" instead of treating
+                    # ``total_accounts_found`` as the universe.
+                    _ACCOUNT_LIMIT = 10
                     insights['account_summary'] = {
                         'total_accounts_found': len(account_results),
-                        'accounts': [dict(zip([col[0] for col in cur.description], row)) for row in account_results]
+                        'accounts': [dict(zip([col[0] for col in cur.description], row)) for row in account_results],
+                        'fetch_limit': _ACCOUNT_LIMIT,
+                        'was_truncated': len(account_results) >= _ACCOUNT_LIMIT,
                     }
                     insights['sources'].append({
                         'table': 'CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY',
@@ -170,9 +177,12 @@ class EnhancedSnowflakeInsights:
                 expiration_results = cur.fetchall()
                 
                 if expiration_results:
+                    _EXPIRATION_LIMIT = 5
                     insights['account_expiration'] = {
                         'expired_accounts_found': len(expiration_results),
-                        'expired_accounts': [dict(zip([col[0] for col in cur.description], row)) for row in expiration_results]
+                        'expired_accounts': [dict(zip([col[0] for col in cur.description], row)) for row in expiration_results],
+                        'fetch_limit': _EXPIRATION_LIMIT,
+                        'was_truncated': len(expiration_results) >= _EXPIRATION_LIMIT,
                     }
                     insights['sources'].append({
                         'table': 'CX_DB.CX_SWSSBST_BR.ACCOUNTS_EXPIRED_LAST_MONTH',
@@ -222,10 +232,13 @@ class EnhancedSnowflakeInsights:
                 contract_results = cur.fetchall()
                 
                 if contract_results:
+                    _CONTRACT_LIMIT = 20
                     insights['contract_data'] = {
                         'contracts_found': len(contract_results),
                         'contracts': [dict(zip([col[0] for col in cur.description], row)) for row in contract_results],
-                        'total_arr': sum(row[3] for row in contract_results if row[3] and not (isinstance(row[3], float) and (row[3] != row[3])))
+                        'total_arr': sum(row[3] for row in contract_results if row[3] and not (isinstance(row[3], float) and (row[3] != row[3]))),
+                        'fetch_limit': _CONTRACT_LIMIT,
+                        'was_truncated': len(contract_results) >= _CONTRACT_LIMIT,
                     }
                     insights['sources'].append({
                         'table': 'CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU',
@@ -257,9 +270,12 @@ class EnhancedSnowflakeInsights:
                 renewal_results = cur.fetchall()
                 
                 if renewal_results:
+                    _RENEWAL_LIMIT = 10
                     insights['renewal_data'] = {
                         'renewals_found': len(renewal_results),
-                        'renewals': [dict(zip([col[0] for col in cur.description], row)) for row in renewal_results]
+                        'renewals': [dict(zip([col[0] for col in cur.description], row)) for row in renewal_results],
+                        'fetch_limit': _RENEWAL_LIMIT,
+                        'was_truncated': len(renewal_results) >= _RENEWAL_LIMIT,
                     }
                     insights['sources'].append({
                         'table': 'CX_DB.CX_SWSSBST_BR.RENEWAL_DATA',
@@ -304,10 +320,13 @@ class EnhancedSnowflakeInsights:
                 booking_results = cur.fetchall()
                 
                 if booking_results:
+                    _BOOKING_LIMIT = 20
                     insights['booking_data'] = {
                         'bookings_found': len(booking_results),
                         'bookings': [dict(zip([col[0] for col in cur.description], row)) for row in booking_results],
-                        'total_booking_amount': sum(row[4] for row in booking_results if row[4] and not (isinstance(row[4], float) and (row[4] != row[4])))
+                        'total_booking_amount': sum(row[4] for row in booking_results if row[4] and not (isinstance(row[4], float) and (row[4] != row[4]))),
+                        'fetch_limit': _BOOKING_LIMIT,
+                        'was_truncated': len(booking_results) >= _BOOKING_LIMIT,
                     }
                     insights['sources'].append({
                         'table': 'CX_DB.CX_SWSSBST_BR.BOOKINGS_TABLE_FOR_ACCOUNT_CHECK',
@@ -335,10 +354,13 @@ class EnhancedSnowflakeInsights:
                 upsell_results = cur.fetchall()
                 
                 if upsell_results:
+                    _UPSELL_LIMIT = 10
                     insights['upsell_data'] = {
                         'upsells_found': len(upsell_results),
                         'upsells': [dict(zip([col[0] for col in cur.description], row)) for row in upsell_results],
-                        'total_upsell_amount': sum(row[1] for row in upsell_results if row[1] and not (isinstance(row[1], float) and (row[1] != row[1])))
+                        'total_upsell_amount': sum(row[1] for row in upsell_results if row[1] and not (isinstance(row[1], float) and (row[1] != row[1]))),
+                        'fetch_limit': _UPSELL_LIMIT,
+                        'was_truncated': len(upsell_results) >= _UPSELL_LIMIT,
                     }
                     insights['sources'].append({
                         'table': 'CX_DB.CX_SWSSBST_BR.TSS_BOOKINGS_COLLAB_UPSELL_WITH_SUBS_REFERENCE_ID',
@@ -406,9 +428,12 @@ class EnhancedSnowflakeInsights:
                     cur.execute(ap_query, (f'%{customer_name}%', days))
                     ap_results = cur.fetchall()
                     if ap_results:
+                        _AP_LIMIT = 20
                         insights['action_plans'] = {
                             'action_plans_found': len(ap_results),
-                            'action_plans': [dict(zip([col[0] for col in cur.description], row)) for row in ap_results]
+                            'action_plans': [dict(zip([col[0] for col in cur.description], row)) for row in ap_results],
+                            'fetch_limit': _AP_LIMIT,
+                            'was_truncated': len(ap_results) >= _AP_LIMIT,
                         }
                         insights['sources'].append({
                             'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C',
@@ -437,9 +462,12 @@ class EnhancedSnowflakeInsights:
                     cur.execute(ab_query, (f'%{customer_name}%', days))
                     ab_results = cur.fetchall()
                     if ab_results:
+                        _AB_LIMIT = 20
                         insights['adoption_barriers'] = {
                             'adoption_barriers_found': len(ab_results),
-                            'adoption_barriers': [dict(zip([col[0] for col in cur.description], row)) for row in ab_results]
+                            'adoption_barriers': [dict(zip([col[0] for col in cur.description], row)) for row in ab_results],
+                            'fetch_limit': _AB_LIMIT,
+                            'was_truncated': len(ab_results) >= _AB_LIMIT,
                         }
                         insights['sources'].append({
                             'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C',
@@ -466,9 +494,12 @@ class EnhancedSnowflakeInsights:
                 cur.execute(cp_query, (f'%{customer_name}%', days))
                 cp_results = cur.fetchall()
                 if cp_results:
+                    _CP_LIMIT = 20
                     insights['customer_pulse'] = {
                         'customer_pulse_found': len(cp_results),
-                        'customer_pulse': [dict(zip([col[0] for col in cur.description], row)) for row in cp_results]
+                        'customer_pulse': [dict(zip([col[0] for col in cur.description], row)) for row in cp_results],
+                        'fetch_limit': _CP_LIMIT,
+                        'was_truncated': len(cp_results) >= _CP_LIMIT,
                     }
                     insights['sources'].append({
                         'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C',
@@ -506,9 +537,12 @@ class EnhancedSnowflakeInsights:
                     cur.execute(sp_query, (f'%{customer_name}%', f'%{customer_name}%', days))
                     sp_results = cur.fetchall()
                     if sp_results:
+                        _SP_LIMIT = 20
                         insights['success_priorities'] = {
                             'success_priorities_found': len(sp_results),
-                            'success_priorities': [dict(zip([col[0] for col in cur.description], row)) for row in sp_results]
+                            'success_priorities': [dict(zip([col[0] for col in cur.description], row)) for row in sp_results],
+                            'fetch_limit': _SP_LIMIT,
+                            'was_truncated': len(sp_results) >= _SP_LIMIT,
                         }
                         insights['sources'].append({
                             'table': 'EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C',
@@ -563,9 +597,12 @@ class EnhancedSnowflakeInsights:
                 user_results = cur.fetchall()
                 
                 if user_results:
+                    _USER_LIMIT = 50
                     insights['user_data'] = {
                         'users_found': len(user_results),
-                        'users': [dict(zip([col[0] for col in cur.description], row)) for row in user_results]
+                        'users': [dict(zip([col[0] for col in cur.description], row)) for row in user_results],
+                        'fetch_limit': _USER_LIMIT,
+                        'was_truncated': len(user_results) >= _USER_LIMIT,
                     }
                     insights['sources'].append({
                         'table': 'CX_DB.CX_SWSSBST_BR.USER_DATA',
@@ -621,9 +658,12 @@ class EnhancedSnowflakeInsights:
                 support_results = cur.fetchall()
                 
                 if support_results:
+                    _SUPPORT_LIMIT = 20
                     insights['support_cases'] = {
                         'support_cases_found': len(support_results),
-                        'support_cases': [dict(zip([col[0] for col in cur.description], row)) for row in support_results]
+                        'support_cases': [dict(zip([col[0] for col in cur.description], row)) for row in support_results],
+                        'fetch_limit': _SUPPORT_LIMIT,
+                        'was_truncated': len(support_results) >= _SUPPORT_LIMIT,
                     }
                     insights['sources'].append({
                         'table': 'CX_DB.CX_SWSSBST_BR.SUPPORT_CASES',
@@ -671,9 +711,12 @@ class EnhancedSnowflakeInsights:
                 risk_results = cur.fetchall()
                 
                 if risk_results:
+                    _RISK_LIMIT = 10
                     insights['risk_assessment'] = {
                         'risk_assessments_found': len(risk_results),
-                        'risk_assessments': [dict(zip([col[0] for col in cur.description], row)) for row in risk_results]
+                        'risk_assessments': [dict(zip([col[0] for col in cur.description], row)) for row in risk_results],
+                        'fetch_limit': _RISK_LIMIT,
+                        'was_truncated': len(risk_results) >= _RISK_LIMIT,
                     }
                     insights['sources'].append({
                         'table': 'CX_DB.CX_SWSSBST_BR.RISK_ASSESSMENT',
@@ -734,9 +777,12 @@ class EnhancedSnowflakeInsights:
                 product_results = cur.fetchall()
                 
                 if product_results:
+                    _PRODUCT_LIMIT = 20
                     insights['product_usage'] = {
                         'products_found': len(product_results),
-                        'products': [dict(zip([col[0] for col in cur.description], row)) for row in product_results]
+                        'products': [dict(zip([col[0] for col in cur.description], row)) for row in product_results],
+                        'fetch_limit': _PRODUCT_LIMIT,
+                        'was_truncated': len(product_results) >= _PRODUCT_LIMIT,
                     }
                     insights['sources'].append({
                         'table': 'CX_DB.CX_SWSSBST_BR.PRODUCT_USAGE',

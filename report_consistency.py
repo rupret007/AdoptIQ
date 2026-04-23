@@ -88,47 +88,42 @@ def validate_report_consistency(
     metrics["customer_pulse_records"] = _safe_count(customer_pulse_df)
 
     # Canonical dashboard metrics (customer/case-severity parity checks)
-    customer_set = set()
+    # Round 3: route through canonical_metrics so the validator and the
+    # reports it validates use IDENTICAL counting rules. Previously the
+    # validator scanned only ("customer_name","BU_NAME","Customer Name")
+    # and added ad-hoc "" / "UNKNOWN" buckets to unknown-priority,
+    # producing spurious mismatches against the canonical helpers.
+    import canonical_metrics as _cm  # local import to avoid cycle
+
     if customer_universe is not None:
         if isinstance(customer_universe, pd.DataFrame):
-            for col in ("customer_name", "BU_NAME", "Customer Name"):
-                if col in customer_universe.columns:
-                    customer_set.update(
-                        normalize_customer_name(v) for v in customer_universe[col].dropna().astype(str).tolist()
-                    )
+            metrics["total_customers"] = _cm.count_customers(
+                ab_df=customer_universe, csone_df=None
+            )
         else:
+            customer_set: set = set()
             try:
                 for value in customer_universe:
                     customer_set.add(normalize_customer_name(value))
             except TypeError:
                 customer_set.add(normalize_customer_name(customer_universe))
+            customer_set = {c for c in customer_set if c and c != "Unknown"}
+            metrics["total_customers"] = len(customer_set)
     else:
-        for frame in (ab_df, csone_df):
-            if frame is None or frame.empty:
-                continue
-            for col in ("customer_name", "BU_NAME", "Customer Name"):
-                if col in frame.columns:
-                    customer_set.update(
-                        normalize_customer_name(v) for v in frame[col].dropna().astype(str).tolist()
-                    )
-    customer_set = {c for c in customer_set if c and c != "Unknown"}
-    metrics["total_customers"] = len(customer_set)
+        metrics["total_customers"] = _cm.count_customers(
+            ab_df=ab_df, csone_df=csone_df
+        )
 
     if csone_df is not None and not csone_df.empty:
-        if "case_priority_norm" in csone_df.columns:
-            sev_series = csone_df["case_priority_norm"].fillna("").astype(str)
-        else:
-            sev_col = next((c for c in ("Severity", "Highest Priority", "Priority") if c in csone_df.columns), None)
-            sev_series = (
-                csone_df[sev_col].fillna("").astype(str).apply(normalize_priority_label)
-                if sev_col
-                else pd.Series(dtype=str)
-            )
-        metrics["critical_p1"] = int((sev_series == "P1").sum())
-        metrics["high_p2"] = int((sev_series == "P2").sum())
-        metrics["p3_cases"] = int((sev_series == "P3").sum())
-        metrics["p4_cases"] = int((sev_series == "P4").sum())
-        metrics["unknown_priority_cases"] = int((sev_series == "Unknown").sum() + (sev_series == "UNKNOWN").sum() + (sev_series == "").sum())
+        # Single source of truth for P1/P2/P3/P4/Unknown counts so the
+        # validator cannot disagree with the same numbers rendered into
+        # report tables / dashboards.
+        metrics["critical_p1"] = _cm.count_p1(csone_df)
+        metrics["high_p2"] = _cm.count_p2(csone_df)
+        priority_buckets = _cm.count_priority_breakdown(csone_df)
+        metrics["p3_cases"] = priority_buckets["P3"]
+        metrics["p4_cases"] = priority_buckets["P4"]
+        metrics["unknown_priority_cases"] = priority_buckets["Unknown"]
 
         # Case type classification (break/fix vs provisioning) - canonical.
         # If the caller did not pre-enrich the DataFrame, we enrich on the

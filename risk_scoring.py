@@ -43,6 +43,86 @@ def _priority_weight(value: Any) -> int:
     return {"P1": 4, "P2": 3, "P3": 2, "P4": 1}.get(pri, 0)
 
 
+def _canonicalize_renewal_category(value: Any) -> str:
+    """Map a free-text renewal-risk category to a canonical bucket
+    among {"critical","high","medium","low","healthy",""}.
+
+    Round 3: replaces the previous ``str.contains(r"high|critical")``
+    regex which over-matched (e.g. "Highest Quality" → high) and
+    under-matched common abbreviations.
+    """
+    text = "" if value is None else str(value).strip().lower()
+    if not text or text in {"nan", "none", "null"}:
+        return ""
+    if text.startswith("crit") or text in {"crt", "p1"}:
+        return "critical"
+    if text.startswith("high") and not text.startswith("highest"):
+        return "high"
+    # "Highest" treated as a literal extreme of high, not as "high quality".
+    if text == "highest":
+        return "critical"
+    if text.startswith("med") or text in {"moderate", "amber"}:
+        return "medium"
+    if text.startswith("low") or text in {"minor"}:
+        return "low"
+    if text in {"healthy", "green", "good"}:
+        return "healthy"
+    return ""
+
+
+def _canonicalize_subscription_status(value: Any) -> str:
+    """Map a free-text subscription status into
+    {"active","inactive","expired","cancelled","suspended",""}.
+
+    Replaces a substring regex that would match "active-cancellation"
+    as both active and cancellation simultaneously.
+    """
+    text = "" if value is None else str(value).strip().lower()
+    if not text or text in {"nan", "none", "null"}:
+        return ""
+    if "cancel" in text:
+        return "cancelled"
+    if "expir" in text:
+        return "expired"
+    if "suspend" in text:
+        return "suspended"
+    if text == "inactive" or "inactive" in text:
+        return "inactive"
+    if text == "active" or text.startswith("active"):
+        return "active"
+    return ""
+
+
+def _canonicalize_pulse_rating(value: Any) -> str:
+    """Map a free-text pulse rating to {"poor","neutral","positive",""}.
+
+    Round 3: replaces the previous substring regex inside
+    ``_score_customer_pulse`` so the poor/neutral counts here always
+    align with the canonical narrative bucketing used elsewhere.
+    """
+    text = "" if value is None else str(value).strip().lower()
+    if not text or text in {"nan", "none", "null"}:
+        return ""
+    poor_tokens = (
+        "poor", "very poor", "bad", "very bad", "red", "critical",
+        "high risk", "high-risk", "needs improvement", "negative",
+    )
+    if any(tok in text for tok in poor_tokens):
+        return "poor"
+    neutral_tokens = (
+        "neutral", "fair", "amber", "yellow", "moderate", "average",
+    )
+    if any(tok in text for tok in neutral_tokens):
+        return "neutral"
+    positive_tokens = (
+        "good", "great", "green", "excellent", "positive", "strong",
+        "healthy",
+    )
+    if any(tok in text for tok in positive_tokens):
+        return "positive"
+    return ""
+
+
 # Canonical 0-100 risk-band thresholds. Exposed so chart code (e.g. the
 # renewal donut) can pick wedge colors from the same numbers as the
 # textual band label below — preventing a score of 72 from being drawn
@@ -177,9 +257,17 @@ def _score_customer_pulse(customer_pulse: pd.DataFrame) -> Dict[str, Any]:
             "details": {"count": len(use), "poor_bad_count": 0, "backfill_excluded_count": max(raw_count - len(use), 0)},
         }
 
+    # Round 3: classify pulse ratings via canonical buckets so the
+    # poor/neutral counts agree with ``cm.pulse_sentiment`` and the
+    # narrative paragraphs the leader report shows. The previous
+    # substring regex flagged "high risk" as poor but missed common
+    # synonyms like "very poor" / "needs improvement" that the canonical
+    # bucket recognizes (and conversely matched "fair-condition" as
+    # neutral when it should be ignored).
     ratings = use[rating_col].fillna("").astype(str)
-    poor_bad_count = int(ratings.str.contains(r"poor|bad|red|critical|high\s*risk", case=False, regex=True).sum())
-    neutral_count = int(ratings.str.contains(r"neutral|fair|amber|yellow", case=False, regex=True).sum())
+    _norm_buckets = ratings.map(_canonicalize_pulse_rating)
+    poor_bad_count = int((_norm_buckets == "poor").sum())
+    neutral_count = int((_norm_buckets == "neutral").sum())
     count = len(use)
     poor_ratio = poor_bad_count / max(count, 1)
     neutral_ratio = neutral_count / max(count, 1)
@@ -231,10 +319,16 @@ def _score_contract(customer_subs: pd.DataFrame) -> Dict[str, Any]:
     use = customer_subs.copy()
     high_risk_subs = 0
     inactive_subs = 0
+    # Round 3: classify renewal risk via a canonical category lookup
+    # rather than free-text regex. The previous substring match would
+    # match "Highest Quality" as "high" (false positive) and miss
+    # "CRT" / "CRIT" abbreviations (false negative).
     if "RENEWAL_RISK_CATEGORY" in use.columns:
-        high_risk_subs = int(use["RENEWAL_RISK_CATEGORY"].fillna("").astype(str).str.contains(r"high|critical", case=False, regex=True).sum())
+        _cats = use["RENEWAL_RISK_CATEGORY"].fillna("").astype(str).map(_canonicalize_renewal_category)
+        high_risk_subs = int(_cats.isin({"high", "critical"}).sum())
     if "STATUS_C" in use.columns:
-        inactive_subs = int(use["STATUS_C"].fillna("").astype(str).str.contains(r"inactive|expired|cancel", case=False, regex=True).sum())
+        _statuses = use["STATUS_C"].fillna("").astype(str).map(_canonicalize_subscription_status)
+        inactive_subs = int(_statuses.isin({"inactive", "expired", "cancelled"}).sum())
     count = len(use)
     score = _clamp((high_risk_subs / max(count, 1)) * 70 + (inactive_subs / max(count, 1)) * 40)
     return {"score": score, "details": {"count": count, "high_risk_subs": high_risk_subs, "inactive_subs": inactive_subs}}

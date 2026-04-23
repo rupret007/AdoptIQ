@@ -2135,10 +2135,22 @@ def calculate_arr_at_risk(arr_df, ab_df, cases_df=None):
 
         if not ab_df.empty and 'ACCOUNT_ID_C' in ab_df.columns:
             troubled_accounts.update(ab_df['ACCOUNT_ID_C'].dropna().unique())
-            sev_col = 'SEVERITY_C' if 'SEVERITY_C' in ab_df.columns else None
-            if sev_col:
-                crit_mask = ab_df[sev_col].str.contains('Critical|P1|Sev-1|High', case=False, na=False)
-                critical_accounts.update(ab_df.loc[crit_mask, 'ACCOUNT_ID_C'].dropna().unique())
+            try:
+                from data_normalization import normalize_severity_label as _norm_sev
+                sev_col = next(
+                    (c for c in ('severity_norm', 'SEVERITY_C', 'severity_c', 'Severity', 'PRIORITY')
+                     if c in ab_df.columns),
+                    None,
+                )
+                if sev_col:
+                    if sev_col == 'severity_norm':
+                        sev_norm = ab_df[sev_col].fillna('').astype(str)
+                    else:
+                        sev_norm = ab_df[sev_col].apply(_norm_sev).fillna('').astype(str)
+                    crit_mask = sev_norm.isin(['Critical', 'High'])
+                    critical_accounts.update(ab_df.loc[crit_mask, 'ACCOUNT_ID_C'].dropna().unique())
+            except Exception:
+                pass
 
         if not cases_df.empty:
             case_acct = 'ACCOUNT_ID' if 'ACCOUNT_ID' in cases_df.columns else 'ACCOUNT_ID_C' if 'ACCOUNT_ID_C' in cases_df.columns else None
@@ -2214,11 +2226,40 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
 
             for sheet in sheet_names:
                 try:
-                    df = pd.read_excel(xl, sheet_name=sheet, nrows=200)
+                    # Round 3: ``nrows=200`` previously caused
+                    # ``build_cross_report_trends`` to compute a phony
+                    # percent-change against a capped row count for
+                    # large sheets. We now ALSO probe the true row
+                    # count via openpyxl ``max_row`` (header-aware) so
+                    # callers can rely on ``rows_total`` for trends and
+                    # treat ``rows_scanned`` as a sample size only.
+                    _SCAN_ROW_LIMIT = 200
+                    df = pd.read_excel(xl, sheet_name=sheet, nrows=_SCAN_ROW_LIMIT)
                     if df.empty:
                         continue
 
-                    metrics = {'sheet': sheet, 'rows': len(df), 'columns': list(df.columns[:10])}
+                    _rows_total = None
+                    try:
+                        _wb_sheet = xl.book[sheet] if hasattr(xl, 'book') else None
+                        if _wb_sheet is not None and getattr(_wb_sheet, 'max_row', None):
+                            _rows_total = max(int(_wb_sheet.max_row) - 1, 0)
+                    except Exception as _row_err:
+                        logger.debug("True row-count probe failed for %s: %s", sheet, _row_err)
+                        _rows_total = None
+
+                    _was_truncated = bool(_rows_total is not None and _rows_total > len(df))
+
+                    metrics = {
+                        'sheet': sheet,
+                        'rows_scanned': len(df),
+                        'rows_total': _rows_total if _rows_total is not None else len(df),
+                        'was_truncated': _was_truncated,
+                        'fetch_limit': _SCAN_ROW_LIMIT,
+                        # Backward compat: existing callers read ``rows``;
+                        # keep it pointing at the canonical total when known.
+                        'rows': _rows_total if _rows_total is not None else len(df),
+                        'columns': list(df.columns[:10]),
+                    }
 
                     cust_col_name = None
                     arr_col_name = None
@@ -2291,8 +2332,26 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
         return {}
 
     result = {}
-    placeholders = ", ".join(["%s"] * min(len(account_ids), 100))
-    batch = account_ids[:100]
+    # Round 3: surface truncation flag so callers (Ask AI, briefings)
+    # know the displayed counts are restricted to the first 100
+    # account ids when a portfolio has more.
+    _ACCOUNT_BATCH_LIMIT = 100
+    placeholders = ", ".join(["%s"] * min(len(account_ids), _ACCOUNT_BATCH_LIMIT))
+    batch = account_ids[:_ACCOUNT_BATCH_LIMIT]
+    _account_batch_truncated = len(account_ids) > _ACCOUNT_BATCH_LIMIT
+    if _account_batch_truncated:
+        logger.warning(
+            "[[TRUNCATION]] fetch_enhanced_account_insights restricted to first %d of %d account ids; "
+            "downstream counts are a partial sample.",
+            _ACCOUNT_BATCH_LIMIT,
+            len(account_ids),
+        )
+    result['_meta'] = {
+        'account_batch_size': len(batch),
+        'account_batch_total': len(account_ids),
+        'account_batch_limit': _ACCOUNT_BATCH_LIMIT,
+        'account_batch_truncated': _account_batch_truncated,
+    }
     cur = None
     try:
         cur = ctx.cursor()
@@ -2375,21 +2434,34 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
 
         # 3. Recently expired accounts
         try:
+            _EXPIRED_FETCH_LIMIT = 20
             cur.execute(f"""
                 SELECT NAME, EXPIRED_DATE, RENEWAL_ACCOUNT
                 FROM CX_DB.CX_SWSSBST_BR.ACCOUNTS_EXPIRED_LAST_MONTH
                 WHERE ACCOUNT_ID_C IN ({placeholders})
-                LIMIT 20
+                LIMIT {_EXPIRED_FETCH_LIMIT}
             """, tuple(batch))
             rows = cur.fetchall()
             if rows:
                 cols = [d[0] for d in cur.description]
                 expired = [dict(zip(cols, r)) for r in rows]
+                # Round 3: surface truncation flag so consumers don't
+                # render ``count`` as the universe.
+                _was_truncated = len(rows) >= _EXPIRED_FETCH_LIMIT
+                if _was_truncated:
+                    logger.warning(
+                        "[[TRUNCATION]] ACCOUNTS_EXPIRED_LAST_MONTH fetch hit limit=%d for batch of %d "
+                        "account ids; recently_expired count under-reports.",
+                        _EXPIRED_FETCH_LIMIT,
+                        len(batch),
+                    )
                 result['recently_expired'] = {
                     'count': len(expired),
                     'accounts': [{'name': e.get('NAME', ''),
                                   'expired': str(e.get('EXPIRED_DATE', ''))[:10]}
                                  for e in expired],
+                    'was_truncated': _was_truncated,
+                    'fetch_limit': _EXPIRED_FETCH_LIMIT,
                 }
         except Exception as e:
             logger.debug(f"Enhanced expired accounts skipped: {e}")
@@ -3660,15 +3732,35 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                 ax1.text(value, i, f'  {int(value)}', va='center', fontweight='bold')
             
             # Chart 2: Risk Distribution (Top Right)
+            # Round 3: split the legacy "High Risk" wedge — which was
+            # actually CRITICAL + HIGH — into two distinct slices so the
+            # pie always agrees with the canonical band cut from
+            # ``risk_scoring.RISK_BAND_THRESHOLDS``. If split bands are
+            # not available we fall back to a clearly labeled
+            # "Critical + High" wedge so users are not misled by a
+            # rolled-up category labeled simply "High Risk".
             ax2 = plt.subplot(2, 2, 2)
-            risk_labels = ['High Risk', 'Medium Risk', 'Low Risk', 'Healthy']
-            risk_values = [
-                portfolio_metrics.get('high_risk_customers', 0),
-                portfolio_metrics.get('medium_risk_customers', 0),
-                portfolio_metrics.get('low_risk_customers', 0),
-                portfolio_metrics.get('healthy_customers', 0)
-            ]
-            risk_colors = ['#FF6B6B', '#FFB81C', '#5DBCD2', '#28B463']
+            _critical_count = portfolio_metrics.get('critical_risk_customers')
+            _high_only_count = portfolio_metrics.get('high_only_risk_customers')
+            if _critical_count is not None and _high_only_count is not None:
+                risk_labels = ['Critical Risk', 'High Risk', 'Medium Risk', 'Low Risk', 'Healthy']
+                risk_values = [
+                    int(_critical_count),
+                    int(_high_only_count),
+                    portfolio_metrics.get('medium_risk_customers', 0),
+                    portfolio_metrics.get('low_risk_customers', 0),
+                    portfolio_metrics.get('healthy_customers', 0),
+                ]
+                risk_colors = ['#C0392B', '#FF6B6B', '#FFB81C', '#5DBCD2', '#28B463']
+            else:
+                risk_labels = ['Critical + High', 'Medium Risk', 'Low Risk', 'Healthy']
+                risk_values = [
+                    portfolio_metrics.get('high_risk_customers', 0),
+                    portfolio_metrics.get('medium_risk_customers', 0),
+                    portfolio_metrics.get('low_risk_customers', 0),
+                    portfolio_metrics.get('healthy_customers', 0),
+                ]
+                risk_colors = ['#FF6B6B', '#FFB81C', '#5DBCD2', '#28B463']
             wedges, texts, autotexts = ax2.pie(risk_values, labels=risk_labels, colors=risk_colors, 
                                                 autopct='%1.0f%%', startangle=90)
             for text in texts:
@@ -4646,6 +4738,13 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
         briefing.append(f"* **All Matched Public Bugs in Portfolio:** {', '.join(matches)}")
     if matched_df is not None and not matched_df.empty:
         briefing.append("\n### Records with Matched Public Bugs:")
+        # Round 3: surface truncation explicitly so the LLM (and human
+        # reader) sees that "10 sample rows" does not equal the total.
+        _matched_total = len(matched_df)
+        if _matched_total > 10:
+            briefing.append(
+                f"(first 10 of {_matched_total} rows; sample only — full list available in source data)"
+            )
         briefing.append(_json_lite(matched_df, limit=10))
     
     # Add detailed external intelligence analysis - FIXED: Show ALL bugs and incidents
@@ -4752,11 +4851,17 @@ def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
                 briefing.append(f"- **{sev}**: {count} barriers")
             briefing.append("")
         
-        # Recent barriers (last 30 days)
+        # Recent barriers (short-horizon spotlight). Round 3: this 30-day
+        # window is intentional — it surfaces *new momentum* regardless
+        # of the broader analysis window. Rename the heading to make
+        # that explicit so readers don't assume it tracks the run's
+        # configured ``days``.
         if 'open_date_c' in ab_norm.columns:
             try:
                 recent_barriers = ab_norm[ab_norm['open_date_c'] >= (datetime.now() - timedelta(days=30))]
-                briefing.append(f"### Recent Barriers (Last 30 Days): {len(recent_barriers)}")
+                briefing.append(
+                    f"### Recent Barriers (last 30 days, short-horizon spotlight): {len(recent_barriers)}"
+                )
                 if len(recent_barriers) > 0:
                     briefing.append("- Recent barriers indicate ongoing challenges requiring immediate attention")
                 briefing.append("")
@@ -5022,8 +5127,16 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
                 briefing.append(f"- **{sev}**: {count} barriers")
             briefing.append("")
         
-            # Highlight HIGH/CRITICAL barriers
-            high_sev = ab_norm[ab_norm[sev_col].astype(str).str.contains('High|Critical', case=False, na=False)]
+            # Highlight HIGH/CRITICAL barriers using canonical severity
+            # normalization to keep parity with leader/EI/compact reports
+            # and avoid substring false positives like "Highest" or
+            # "Critical-but-resolved" labels.
+            try:
+                from data_normalization import normalize_severity_label as _norm_sev
+                _sev_series = ab_norm[sev_col].apply(_norm_sev).fillna('').astype(str)
+                high_sev = ab_norm[_sev_series.isin(['Critical', 'High'])]
+            except Exception:
+                high_sev = ab_norm.iloc[0:0]
             if not high_sev.empty:
                 briefing.append("### HIGH/CRITICAL Severity Barriers - REQUIRES ATTENTION:")
                 for _hi_idx, barrier in high_sev.iterrows():
@@ -6146,19 +6259,27 @@ def _portfolio_grade(total_ab: int, esc_rate: float, chronic_rate: float) -> str
     return "B"
 
 def _calc_rates(csone_df: pd.DataFrame):
-    if csone_df is None or csone_df.empty: return 0.0, 0.0
-    
-    # Get title and description columns safely (use LIKELY_* for robustness)
-    title_col = next((c for c in LIKELY_TITLE_COLS if c in csone_df.columns), None)
-    desc_col = next((c for c in LIKELY_DESC_COLS if c in csone_df.columns), None)
-    title_str = csone_df[title_col].fillna("").astype(str) if title_col else pd.Series([""] * len(csone_df), index=csone_df.index)
-    desc_str = csone_df[desc_col].fillna("").astype(str) if desc_col else pd.Series([""] * len(csone_df), index=csone_df.index)
-    txt = (title_str + " " + desc_str).str.lower()
-    
-    escal = int(txt.str.contains(r"\bescalat|sev[-\s]?1|urgent|executive").sum())
+    """Return (escalation_rate_pct, chronic_rate_pct) for a CSOne frame.
+
+    Round 3 hardening: escalation rate is now derived from canonical
+    ``case_priority_norm`` (P1+P2) instead of free-text title/description
+    regex which produced false positives for any case whose subject
+    contained "urgent" / "executive" / "escalated" without actually being
+    an escalated severity.
+    """
+    if csone_df is None or csone_df.empty:
+        return 0.0, 0.0
+    try:
+        import canonical_metrics as _cm
+        escal = int(_cm.count_escalated(csone_df))
+    except Exception:
+        escal = 0
     chronic = 0
     total = len(csone_df)
-    return round(100*escal/total,1) if total else 0.0, round(100*chronic/total,1) if total else 0.0
+    return (
+        round(100 * escal / total, 1) if total else 0.0,
+        round(100 * chronic / total, 1) if total else 0.0,
+    )
 
 def _integrity_checks(ab_df: pd.DataFrame, csone_df: pd.DataFrame) -> Optional[str]:
     if (ab_df is None or ab_df.empty) and (csone_df is None or csone_df.empty):

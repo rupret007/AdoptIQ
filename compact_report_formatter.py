@@ -226,24 +226,46 @@ class CompactReportFormatter:
         ab_data: pd.DataFrame,
         csone_data: pd.DataFrame,
         total_customers_override: Optional[int] = None,
+        *,
+        extra_customer_frames: Optional[List[pd.DataFrame]] = None,
+        account_to_customer: Optional[Dict[str, str]] = None,
     ):
-        """Add At-a-Glance Dashboard matching the example report format"""
+        """Add At-a-Glance Dashboard matching the example report format.
+
+        Round 3 hardening: accepts ``extra_customer_frames`` /
+        ``account_to_customer`` so the Compact at-a-glance customer
+        tile can be computed from the SAME multi-source universe that
+        EI's dashboard uses (team subs, action plans, pulse, success
+        priorities, csconsole adoption barriers). Without these, the
+        previous implementation under-reported any subscription-only
+        customer.
+        """
         from docx.shared import RGBColor  # Import for color styling
         try:
             ab_data = ab_data if ab_data is not None else pd.DataFrame()
             csone_data = csone_data if csone_data is not None else pd.DataFrame()
             self.doc.add_heading('At-a-Glance Dashboard', level=1)
-            
+
             # All five tile values are produced by canonical_metrics so
             # this dashboard always agrees with the EI / Leader / Admin
             # views and with the cross-report consistency contract.
             csone_norm = add_case_lifecycle_fields(csone_data)
-            total_customers = cm.count_customers(ab_df=ab_data, csone_df=csone_norm)
+            _extra_frames_clean = [
+                f for f in (extra_customer_frames or [])
+                if f is not None and not (hasattr(f, 'empty') and f.empty)
+            ]
+            total_customers = cm.count_customers(
+                ab_df=ab_data,
+                csone_df=csone_norm,
+                extra_frames=_extra_frames_clean or None,
+                account_to_customer=account_to_customer,
+            )
             # ``total_customers_override`` (typically risk_summary['total_customers'])
-            # is honored only when it agrees with the canonical count. If it
-            # disagrees we keep the canonical value and log a warning instead
-            # of silently shadowing the SSoT — this prevents the same portfolio
-            # from rendering different headline tiles in Compact vs EI.
+            # is honored only when it agrees with the canonical multi-source
+            # count. If it disagrees we keep the canonical value and log a
+            # warning instead of silently shadowing the SSoT — this prevents
+            # the same portfolio from rendering different headline tiles in
+            # Compact vs EI.
             if total_customers_override is not None:
                 try:
                     _override_int = int(total_customers_override)
@@ -563,7 +585,18 @@ class CompactReportFormatter:
                 # FIXED: Show all BEMS IDs for full verification
                 bems_id_examples = ', '.join([f'[{bid}]' for bid in sorted(list(bems_ids))])
                 barriers_text_parts.append(f'{bems_count} BEMS escalations ({bems_id_examples})')
-            barriers_text_parts.append(f'{len(customer_csone)} open TAC cases')
+            # Round 3 hardening: the previous label "{N} open TAC cases" used
+            # ``len(customer_csone)`` which counted ALL TAC rows (including
+            # closed) and disagreed with the leader/EI dashboards' canonical
+            # open-TAC count. Use ``cm.count_open_tac`` so this reconciles
+            # with every other report.
+            try:
+                _open_tac = int(cm.count_open_tac(customer_csone))
+                _total_tac = int(cm.count_total_tac(customer_csone))
+            except Exception:
+                _open_tac = len(customer_csone) if customer_csone is not None else 0
+                _total_tac = _open_tac
+            barriers_text_parts.append(f'{_open_tac} open TAC cases (of {_total_tac} total)')
             barriers_text_parts.append(f'{len(customer_ab)} adoption barriers')
             barriers_p.add_run(', '.join(barriers_text_parts))
             
@@ -624,17 +657,33 @@ class CompactReportFormatter:
                 no_ab_p.add_run('✅ No critical adoption barriers identified in this analysis period.').bold = True
                 return
             
-            sev_col = (
-                'severity_norm'
-                if 'severity_norm' in ab_data.columns
-                else next((c for c in ('SEVERITY_C', 'severity_c', 'Severity') if c in ab_data.columns), None)
-            )
-            if not sev_col:
+            # Round 3 hardening: route severity through canonical
+            # ``normalize_severity_label`` so that "Critical/High" matches the
+            # leader/EI definitions and ``cm.count_critical_barriers``
+            # exactly. The previous ``str.contains`` heuristic over-matched
+            # on labels like "Highly recurring" and "Critical-but-resolved".
+            try:
+                from data_normalization import normalize_severity_label as _norm_sev_label
+                if 'severity_norm' in ab_data.columns:
+                    _sev_series = ab_data['severity_norm'].fillna('').astype(str)
+                else:
+                    _sev_picked_col = next(
+                        (c for c in ('SEVERITY_C', 'severity_c', 'Severity', 'PRIORITY')
+                         if c in ab_data.columns),
+                        None,
+                    )
+                    if _sev_picked_col is None:
+                        _sev_series = pd.Series([], dtype=str)
+                    else:
+                        _sev_series = (
+                            ab_data[_sev_picked_col].apply(_norm_sev_label).fillna('').astype(str)
+                        )
+                if _sev_series.empty:
+                    critical_ab = pd.DataFrame()
+                else:
+                    critical_ab = ab_data[_sev_series.isin(['Critical', 'High'])]
+            except Exception:
                 critical_ab = pd.DataFrame()
-            else:
-                critical_ab = ab_data[
-                    ab_data[sev_col].astype(str).str.contains('Critical|High', case=False, na=False)
-                ]
             
             if critical_ab.empty:
                 no_critical_p = self.doc.add_paragraph()
@@ -1063,10 +1112,35 @@ class CompactReportFormatter:
             critical_heading = self.doc.add_paragraph()
             critical_heading.add_run('Critical Adoption Barriers Requiring Attention\n').bold = True
             
-            sev_col = 'SEVERITY_C' if 'SEVERITY_C' in ab_data.columns else ('severity_c' if 'severity_c' in ab_data.columns else None)
+            # Round 3 hardening: route severity through canonical
+            # normalization so this matches ``cm.count_critical_barriers``
+            # and the Compact "Critical Adoption Barriers Requiring Action"
+            # section above. The previous substring matcher disagreed when
+            # the source had labels like "Highest" or "Critical-Resolved".
+            try:
+                from data_normalization import normalize_severity_label as _norm_sev_label
+                _sev_picked_col = next(
+                    (c for c in ('severity_norm', 'SEVERITY_C', 'severity_c', 'Severity', 'PRIORITY')
+                     if c in ab_data.columns),
+                    None,
+                )
+                if _sev_picked_col == 'severity_norm':
+                    _sev_series = ab_data[_sev_picked_col].fillna('').astype(str)
+                elif _sev_picked_col is not None:
+                    _sev_series = (
+                        ab_data[_sev_picked_col].apply(_norm_sev_label).fillna('').astype(str)
+                    )
+                else:
+                    _sev_series = pd.Series([], dtype=str)
+                if _sev_series.empty:
+                    critical_barriers = ab_data.iloc[0:0]
+                else:
+                    critical_barriers = ab_data[_sev_series.isin(['Critical', 'High'])]
+                sev_col = _sev_picked_col  # preserved so downstream display still works
+            except Exception:
+                critical_barriers = ab_data.iloc[0:0]
+                sev_col = None
             if sev_col:
-                critical_mask = ab_data[sev_col].astype(str).str.contains('Critical|High', case=False, na=False)
-                critical_barriers = ab_data[critical_mask]
                 
                 if not critical_barriers.empty:
                     # FIXED: Show ALL critical barriers
@@ -1193,7 +1267,15 @@ class CompactReportFormatter:
             raise
     
     def add_early_warning_section(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame, risk_data: Dict):
-        """Add early warning indicators section for proactive risk identification"""
+        """Add early warning indicators section for proactive risk identification.
+
+        Round 3 note: the "increasing case volume" check uses a fixed
+        30-day momentum window regardless of the analysis ``days``
+        configured on the run. This is intentional — a short-horizon
+        spotlight is more sensitive to *new* spikes than a long
+        analysis window — but the narrative below now explicitly
+        labels it as a 30-day spotlight to avoid surprising readers.
+        """
         try:
             if ab_data is None:
                 ab_data = pd.DataFrame()
@@ -1203,7 +1285,11 @@ class CompactReportFormatter:
             
             intro_p = self.doc.add_paragraph()
             intro_p.add_run('These indicators identify at-risk customers BEFORE issues escalate. ')
-            intro_p.add_run('This predictive analysis enables proactive intervention to prevent escalations.\n\n').italic = True
+            intro_p.add_run(
+                'This predictive analysis enables proactive intervention to prevent escalations. '
+                'The case-volume check below uses a 30-day short-horizon spotlight regardless of the '
+                'overall analysis window so new momentum is surfaced quickly.\n\n'
+            ).italic = True
             
             warnings = []
             
@@ -1613,12 +1699,36 @@ def calculate_renewal_risk_scores(ab_data: pd.DataFrame, csone_data: pd.DataFram
 
 def create_compact_executive_report(analysis_id: str, manager: str, technology: str, days: int,
                                   ab_data: pd.DataFrame, csone_data: pd.DataFrame, 
-                                  ai_insights: Dict, output_path: str) -> str:
-    """Create COMPREHENSIVE compact executive report focused on renewal risk with full data detail"""
+                                  ai_insights: Dict, output_path: str,
+                                  *,
+                                  team_subs_df: Optional[pd.DataFrame] = None,
+                                  csconsole_action_plans: Optional[pd.DataFrame] = None,
+                                  csconsole_customer_pulse: Optional[pd.DataFrame] = None,
+                                  csconsole_success_priorities: Optional[pd.DataFrame] = None,
+                                  csconsole_adoption_barriers: Optional[pd.DataFrame] = None,
+                                  account_to_customer: Optional[Dict[str, str]] = None) -> str:
+    """Create COMPREHENSIVE compact executive report focused on renewal risk with full data detail.
+
+    Round 3 hardening: optional ``team_subs_df`` / CSConsole frames /
+    ``account_to_customer`` are threaded through so the Compact at-a-glance
+    customer tile and portfolio metrics use the SAME multi-source customer
+    universe that EI / Admin Dashboard use. Without these, Compact would
+    under-report any customer that exists only in subscription / pulse /
+    action-plan data.
+    """
     
     ab_data = ab_data if ab_data is not None else pd.DataFrame()
     csone_data = csone_data if csone_data is not None else pd.DataFrame()
     csone_norm = add_case_lifecycle_fields(csone_data)
+    _extra_customer_frames = [
+        f for f in (
+            team_subs_df,
+            csconsole_action_plans,
+            csconsole_customer_pulse,
+            csconsole_success_priorities,
+            csconsole_adoption_barriers,
+        ) if f is not None and not (hasattr(f, 'empty') and f.empty)
+    ]
     logger.info(f"Creating compact executive report for {manager}")
     
     try:
@@ -1707,7 +1817,24 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
             csone_df=csone_norm,
             risk_profiles=risk_data,
             risk_scale=cm.RISK_SCALE_0_TO_10,
+            extra_customer_frames=_extra_customer_frames or None,
+            account_to_customer=account_to_customer,
         )
+        # Force the headline total_customers to use the full multi-source
+        # universe so Compact always agrees with EI / Admin Dashboard.
+        try:
+            portfolio_metrics["total_customers"] = cm.count_customers(
+                ab_df=ab_data,
+                csone_df=csone_norm,
+                extra_frames=_extra_customer_frames or None,
+                account_to_customer=account_to_customer,
+            )
+        except Exception as _tc_err:
+            logger.debug(
+                "Compact total_customers recompute failed; falling back to "
+                "build_portfolio_metrics value: %s",
+                _tc_err,
+            )
         consistency = validate_report_consistency(
             ab_data,
             csone_norm,
@@ -1728,6 +1855,8 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
             ab_data,
             csone_data,
             total_customers_override=risk_summary.get('total_customers'),
+            extra_customer_frames=_extra_customer_frames or None,
+            account_to_customer=account_to_customer,
         )
         formatter._add_section_separator()
         

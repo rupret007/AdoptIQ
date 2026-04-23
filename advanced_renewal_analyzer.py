@@ -631,8 +631,18 @@ class AdvancedRenewalAnalyzer:
                 if status == 'Resolved':
                     adoption_metrics['resolved_barriers'] += count
                 
-                if severity and 'HIGH' in str(severity).upper():
-                    adoption_metrics['high_severity_barriers'] += count
+                # Round 3 hardening: route severity through canonical
+                # ``normalize_severity_label`` so this counter agrees with
+                # ``cm.count_critical_barriers`` and the leader/EI/compact
+                # reports. The previous "HIGH in str(severity).upper()" matched
+                # "HIGHEST" / "HIGHLY-REPORTED" labels and undercounted "P2".
+                try:
+                    from data_normalization import normalize_severity_label as _norm_sev
+                    if _norm_sev(severity) in ('Critical', 'High'):
+                        adoption_metrics['high_severity_barriers'] += count
+                except Exception:
+                    if severity and 'HIGH' in str(severity).upper():
+                        adoption_metrics['high_severity_barriers'] += count
                 
                 if category not in adoption_metrics['barrier_categories']:
                     adoption_metrics['barrier_categories'][category] = {

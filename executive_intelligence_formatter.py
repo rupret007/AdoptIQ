@@ -402,8 +402,15 @@ class ExecutiveIntelligenceFormatter:
         if header.runs:
             header.runs[0].font.color.rgb = CISCO_BLUE
         
-        # High-risk customers
-        high_risk = {k: v for k, v in risk_scores.items() if isinstance(v, dict) and v.get('score', 0) >= 6}
+        # High-risk customers — Round 3: route through the canonical
+        # predicate so the table contents always match the headline /
+        # dashboard count produced by ``cm.compute_high_risk_count``.
+        # This catches rows that were classified red/CRITICAL/HIGH via
+        # band override but whose raw ``score`` is below 6.
+        high_risk = {
+            k: v for k, v in (risk_scores or {}).items()
+            if cm.is_high_risk_profile(v, scale=cm.RISK_SCALE_0_TO_10)
+        }
         
         if high_risk:
             subheader = self.doc.add_heading('High-Risk Customers Requiring Immediate Attention', level=2)
@@ -882,12 +889,47 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
     csone_for_check = add_case_lifecycle_fields(
         csone_data if csone_data is not None else pd.DataFrame()
     )
+    # Round 3 hardening: pass ALL the same multi-source frames the EI
+    # dashboard tile uses so ``portfolio_metrics["total_customers"]``
+    # matches the headline tile bit-for-bit. Previously this call only
+    # passed (ab_df, csone_df) and so subscription-only customers were
+    # counted in the dashboard but not in the validator/portfolio total.
+    try:
+        from app_simple import build_customer_lookup as _build_cust_lookup
+        _cust_lookup = _build_cust_lookup(team_subs_df)
+        _account_to_customer = _cust_lookup.get("account_to_customer", {}) or {}
+    except Exception:
+        _account_to_customer = {}
+    _ei_extra_frames = [
+        f for f in (
+            team_subs_df,
+            csconsole_action_plans,
+            csconsole_customer_pulse,
+            csconsole_success_priorities,
+            csconsole_adoption_barriers,
+        )
+        if f is not None and not (hasattr(f, 'empty') and f.empty)
+    ]
     portfolio_metrics = cm.build_portfolio_metrics(
         ab_df=ab_for_check,
         csone_df=csone_for_check,
         risk_profiles=risk_scores if isinstance(risk_scores, dict) else {},
         risk_scale=cm.RISK_SCALE_0_TO_10,
+        extra_customer_frames=_ei_extra_frames,
     )
+    # Re-run total_customers via cm.count_customers with the account map
+    # because build_portfolio_metrics' count_customers call doesn't
+    # expose account_to_customer; route this single value through the
+    # canonical helper directly to ensure parity with the dashboard.
+    try:
+        portfolio_metrics["total_customers"] = cm.count_customers(
+            ab_df=ab_for_check,
+            csone_df=csone_for_check,
+            extra_frames=_ei_extra_frames,
+            account_to_customer=_account_to_customer,
+        )
+    except Exception:
+        pass
     consistency = validate_report_consistency(
         ab_for_check,
         csone_for_check,

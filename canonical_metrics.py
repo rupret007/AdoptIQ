@@ -101,6 +101,12 @@ def _customer_names_from_frame(df: Optional[pd.DataFrame]) -> Iterable[str]:
         "CUSTOMER_NAME",
         "Customer",
         "ACCOUNT_NAME",
+        # Round 3: CSConsole pulse / success-priority frames carry the
+        # customer name in ``RELATED_CUSTOMER__C`` (and sometimes a
+        # ``CUSTOMER_BU_NAME__C``); include them so subscription-only
+        # / pulse-only customers are part of the canonical universe.
+        "RELATED_CUSTOMER__C",
+        "CUSTOMER_BU_NAME__C",
     )
     out: List[str] = []
     for col in cols_in_priority:
@@ -121,6 +127,62 @@ def _customer_names_from_frame(df: Optional[pd.DataFrame]) -> Iterable[str]:
 # ---------------------------------------------------------------------------
 
 
+_ACCOUNT_ID_COLS = (
+    "ACCOUNT_ID_C",
+    "ACCOUNT_ID",
+    "ACCOUNT__C",
+    "ACCOUNT__C_ID",
+)
+
+
+def _account_ids_from_frame(df: Optional[pd.DataFrame]) -> Iterable[str]:
+    if _is_empty(df):
+        return []
+    out: List[str] = []
+    for col in _ACCOUNT_ID_COLS:
+        if col in df.columns:
+            out.extend(
+                str(v).strip()
+                for v in df[col].dropna().tolist()
+                if str(v).strip()
+            )
+    return out
+
+
+def _collect_customer_names(
+    frames: Sequence[Optional[pd.DataFrame]],
+    extra_frames: Optional[Sequence[pd.DataFrame]],
+    extra_names: Optional[Sequence[str]],
+    account_to_customer: Optional[Dict[str, str]],
+    drop_unknown: bool,
+) -> set:
+    """Internal: union of normalized customer names across all sources.
+
+    Adds account-id backfill via ``account_to_customer`` so any frame
+    that lacks a customer-name column but does carry an ``ACCOUNT_ID``-
+    style column (TAC support cases, success priorities, etc.) still
+    contributes its accounts when a subscription mapping is provided.
+    """
+    seen: set = set()
+    all_frames: List[Optional[pd.DataFrame]] = list(frames)
+    if extra_frames:
+        all_frames.extend(extra_frames)
+    for frame in all_frames:
+        for name in _customer_names_from_frame(frame):
+            seen.add(name)
+        if account_to_customer:
+            for acct in _account_ids_from_frame(frame):
+                mapped = account_to_customer.get(acct)
+                if mapped:
+                    seen.add(normalize_customer_name(mapped))
+    for raw in extra_names or ():
+        seen.add(normalize_customer_name(raw))
+    if drop_unknown:
+        seen.discard("Unknown")
+        seen.discard("")
+    return seen
+
+
 def count_customers(
     *,
     ab_df: Optional[pd.DataFrame] = None,
@@ -130,6 +192,7 @@ def count_customers(
     pulse_df: Optional[pd.DataFrame] = None,
     extra_frames: Optional[Sequence[pd.DataFrame]] = None,
     extra_names: Optional[Sequence[str]] = None,
+    account_to_customer: Optional[Dict[str, str]] = None,
     drop_unknown: bool = True,
 ) -> int:
     """Count unique customers across every supplied source.
@@ -137,21 +200,23 @@ def count_customers(
     The canonical universe is the union of normalized customer names
     found in any provided DataFrame. ``Unknown`` is excluded by default
     so that header tiles and per-customer sections agree.
+
+    Round 3 hardening: ``account_to_customer`` enables
+    ACCOUNT_ID → BU_NAME backfill so frames that only carry an account
+    identifier (renewal/contract/Snowflake exports) still contribute to
+    the headline count, matching what the dashboard's
+    ``_get_all_customers_from_all_sources`` does.
     """
 
-    seen = set()
-    for frame in (ab_df, csone_df, subs_df, action_plans_df, pulse_df):
-        for name in _customer_names_from_frame(frame):
-            seen.add(name)
-    for frame in extra_frames or ():
-        for name in _customer_names_from_frame(frame):
-            seen.add(name)
-    for raw in extra_names or ():
-        seen.add(normalize_customer_name(raw))
-    if drop_unknown:
-        seen.discard("Unknown")
-        seen.discard("")
-    return len(seen)
+    return len(
+        _collect_customer_names(
+            (ab_df, csone_df, subs_df, action_plans_df, pulse_df),
+            extra_frames,
+            extra_names,
+            account_to_customer,
+            drop_unknown,
+        )
+    )
 
 
 def list_customers(
@@ -163,23 +228,20 @@ def list_customers(
     pulse_df: Optional[pd.DataFrame] = None,
     extra_frames: Optional[Sequence[pd.DataFrame]] = None,
     extra_names: Optional[Sequence[str]] = None,
+    account_to_customer: Optional[Dict[str, str]] = None,
     drop_unknown: bool = True,
 ) -> List[str]:
     """Return the sorted canonical customer universe as a list."""
 
-    seen = set()
-    for frame in (ab_df, csone_df, subs_df, action_plans_df, pulse_df):
-        for name in _customer_names_from_frame(frame):
-            seen.add(name)
-    for frame in extra_frames or ():
-        for name in _customer_names_from_frame(frame):
-            seen.add(name)
-    for raw in extra_names or ():
-        seen.add(normalize_customer_name(raw))
-    if drop_unknown:
-        seen.discard("Unknown")
-        seen.discard("")
-    return sorted(seen)
+    return sorted(
+        _collect_customer_names(
+            (ab_df, csone_df, subs_df, action_plans_df, pulse_df),
+            extra_frames,
+            extra_names,
+            account_to_customer,
+            drop_unknown,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -654,6 +716,59 @@ def compute_high_risk_count(
     return count
 
 
+def is_high_risk_profile(
+    profile: Optional[Dict[str, Any]],
+    *,
+    scale: str = RISK_SCALE_0_TO_100,
+    high_threshold_0_to_10: float = 6.0,
+) -> bool:
+    """Return True when ``profile`` matches the canonical high-risk
+    definition used by :func:`compute_high_risk_count`.
+
+    Use this to filter rows shown in narrative tables so that the
+    headline count and the row list stay in lockstep. Without this,
+    callers tend to use ad-hoc ``score >= 6`` filters that miss the
+    ``color == "red"`` short-circuit / band overrides and so produce
+    a "dashboard says 12, but the table only shows 9" mismatch.
+    """
+
+    if not profile or not isinstance(profile, dict):
+        return False
+
+    if scale == RISK_SCALE_0_TO_100:
+        band = str(profile.get("risk_band", "")).upper().strip()
+        if band in {"CRITICAL", "HIGH"}:
+            return True
+        score = profile.get("risk_score_0_100")
+        if score is None:
+            score10 = profile.get("risk_score_0_10")
+            if score10 is None:
+                return False
+            try:
+                score = float(score10) * 10.0
+            except (TypeError, ValueError):
+                return False
+        try:
+            return float(score) >= 55.0
+        except (TypeError, ValueError):
+            return False
+
+    # 0-10 legacy scale
+    color = str(profile.get("color", "")).strip().lower()
+    if color == "red":
+        return True
+    score = profile.get("risk_score_0_10", profile.get("score"))
+    if score is None and "risk_score_0_100" in profile:
+        try:
+            score = float(profile["risk_score_0_100"]) / 10.0
+        except (TypeError, ValueError):
+            score = None
+    try:
+        return score is not None and float(score) >= float(high_threshold_0_to_10)
+    except (TypeError, ValueError):
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Customer Pulse sentiment
 # ---------------------------------------------------------------------------
@@ -753,6 +868,7 @@ def build_portfolio_metrics(
     risk_profiles: Optional[Dict[str, Dict[str, Any]]] = None,
     extra_customer_frames: Optional[Sequence[pd.DataFrame]] = None,
     extra_customer_names: Optional[Sequence[str]] = None,
+    account_to_customer: Optional[Dict[str, str]] = None,
     risk_scale: str = RISK_SCALE_0_TO_100,
     defects: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -773,6 +889,7 @@ def build_portfolio_metrics(
             csone_df=csone_df,
             extra_frames=extra_customer_frames,
             extra_names=extra_customer_names,
+            account_to_customer=account_to_customer,
         ),
         "total_barriers": count_total_barriers(ab_df),
         "total_cases": count_total_tac(csone_df),
@@ -805,6 +922,13 @@ def build_portfolio_metrics(
                 band = str(profile.get("risk_band", "")).upper().strip()
                 if band in band_counts:
                     band_counts[band] += 1
+            # Expose both the rolled-up "high_risk" (CRITICAL + HIGH) used
+            # by the headline tile *and* the split bands so charts can
+            # render an accurate "Critical vs High" breakdown without
+            # silently relabeling. Round 3 fix for the executive risk
+            # pie's misleading "High Risk" wedge.
+            payload["critical_risk_customers"] = band_counts["CRITICAL"]
+            payload["high_only_risk_customers"] = band_counts["HIGH"]
             payload["medium_risk_customers"] = band_counts["MEDIUM"]
             payload["low_risk_customers"] = band_counts["LOW"]
             payload["healthy_customers"] = band_counts["HEALTHY"]
