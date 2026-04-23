@@ -8,6 +8,7 @@ build/
 *.zip
 _bundled_secrets.py
 secrets.env
+secrets.env.bak-*
 version_info.txt
 *.spec.bak
 
