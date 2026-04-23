@@ -2329,6 +2329,7 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
 
         # 2. Contract data with service end dates
         try:
+            _CONTRACT_FETCH_LIMIT = 50
             cur.execute(f"""
                 SELECT CONTRACT_NUMBER, SERVICE_END_DATE, C_360_SERVICE_TIER_C,
                        COALESCE(ARR_AMOUNT, 0) AS ARR_AMOUNT, ACCOUNT_ID_C
@@ -2336,7 +2337,7 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
                 WHERE ACCOUNT_ID_C IN ({placeholders})
                   AND SERVICE_END_DATE >= CURRENT_DATE()
                 ORDER BY SERVICE_END_DATE ASC
-                LIMIT 50
+                LIMIT {_CONTRACT_FETCH_LIMIT}
             """, tuple(batch))
             rows = cur.fetchall()
             if rows:
@@ -2346,6 +2347,16 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
                                 if c.get('SERVICE_END_DATE') and
                                 str(c['SERVICE_END_DATE'])[:10] <= (
                                     datetime.now() + timedelta(days=90)).strftime('%Y-%m-%d')]
+                # Surface truncation: if we hit the limit the caller MUST know
+                # that "active_contracts" / "expiring_arr" may under-report.
+                _was_truncated = len(rows) >= _CONTRACT_FETCH_LIMIT
+                if _was_truncated:
+                    logger.warning(
+                        "[[TRUNCATION]] COLLAB_ARR_CON_SKU fetch hit limit=%d for batch of %d account ids; "
+                        "contract counts and ARR may under-report.",
+                        _CONTRACT_FETCH_LIMIT,
+                        len(batch),
+                    )
                 result['contracts'] = {
                     'active_contracts': len(contracts),
                     'expiring_within_90d': len(expiring_90d),
@@ -2356,6 +2367,8 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
                          'arr': float(c.get('ARR_AMOUNT') or 0)}
                         for c in expiring_90d[:10]
                     ],
+                    'was_truncated': _was_truncated,
+                    'fetch_limit': _CONTRACT_FETCH_LIMIT,
                 }
         except Exception as e:
             logger.debug(f"Enhanced contracts skipped: {e}")
@@ -2383,11 +2396,12 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
 
         # 4. Renewal probability
         try:
+            _RENEWAL_FETCH_LIMIT = 50
             cur.execute(f"""
                 SELECT CONTRACT_NUMBER, RENEWAL_STATUS, RENEWAL_PROBABILITY
                 FROM CX_DB.CX_SWSSBST_BR.RENEWAL_DATA
                 WHERE ACCOUNT_ID_C IN ({placeholders})
-                LIMIT 50
+                LIMIT {_RENEWAL_FETCH_LIMIT}
             """, tuple(batch))
             rows = cur.fetchall()
             if rows:
@@ -2417,12 +2431,25 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
                             'probability': p,
                             'status': str(r.get('RENEWAL_STATUS', '')),
                         })
+                # Surface truncation: callers must know that aggregates over
+                # ``renewals`` (count, avg/min probability, status_distribution)
+                # may under-report the true population when the fetch hit the cap.
+                _was_truncated = len(rows) >= _RENEWAL_FETCH_LIMIT
+                if _was_truncated:
+                    logger.warning(
+                        "[[TRUNCATION]] RENEWAL_DATA fetch hit limit=%d for batch of %d account ids; "
+                        "renewal aggregates may under-report.",
+                        _RENEWAL_FETCH_LIMIT,
+                        len(batch),
+                    )
                 result['renewals'] = {
                     'count': len(renewals),
                     'avg_probability': round(sum(prob_values) / len(prob_values), 1) if prob_values else 0,
                     'min_probability': round(min(prob_values), 1) if prob_values else 0,
                     'status_distribution': status_dist,
                     'at_risk': at_risk_list[:10],
+                    'was_truncated': _was_truncated,
+                    'fetch_limit': _RENEWAL_FETCH_LIMIT,
                 }
         except Exception as e:
             logger.debug(f"Enhanced renewals skipped: {e}")
@@ -4335,19 +4362,21 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
         briefing.append("---")
 
     # Severity distribution by customer (P1/P2 = high priority - quick risk overview)
-    if csone_df is not None and not csone_df.empty:
-        sev_col = next((c for c in ['Severity', 'Highest Priority', 'Priority'] if c in csone_df.columns), None)
-        if sev_col and 'customer_name' in csone_df.columns:
-            p1_mask = csone_df[sev_col].astype(str).str.contains('P1|1|Critical', case=False, na=False)
-            p2_mask = csone_df[sev_col].astype(str).str.contains('P2|2|High', case=False, na=False)
-            p1_by_cust = csone_df[p1_mask]['customer_name'].value_counts()
-            p2_by_cust = csone_df[p2_mask]['customer_name'].value_counts()
+    # Uses canonical normalized priority (case_priority_norm via normalize_priority_label)
+    # so we never misclassify "P10" / "S12" / mixed-case labels as P1/P2.
+    if csone_df is not None and not csone_df.empty and 'customer_name' in csone_df.columns:
+        _csone_norm_for_sev = add_case_lifecycle_fields(csone_df)
+        if 'case_priority_norm' in _csone_norm_for_sev.columns:
+            p1_mask = _csone_norm_for_sev['case_priority_norm'] == 'P1'
+            p2_mask = _csone_norm_for_sev['case_priority_norm'] == 'P2'
+            p1_by_cust = _csone_norm_for_sev[p1_mask]['customer_name'].value_counts()
+            p2_by_cust = _csone_norm_for_sev[p2_mask]['customer_name'].value_counts()
             if not p1_by_cust.empty or not p2_by_cust.empty:
                 briefing.append("### P1/P2 Cases by Customer (High-Priority Risk):")
                 all_custs = set(p1_by_cust.index) | set(p2_by_cust.index)
                 for cust in sorted(all_custs, key=lambda c: (-p1_by_cust.get(c, 0), -p2_by_cust.get(c, 0)))[:15]:
-                    p1 = p1_by_cust.get(cust, 0)
-                    p2 = p2_by_cust.get(cust, 0)
+                    p1 = int(p1_by_cust.get(cust, 0))
+                    p2 = int(p2_by_cust.get(cust, 0))
                     if p1 > 0 or p2 > 0:
                         briefing.append(f"- **{cust}:** P1: {p1} | P2: {p2}")
                 briefing.append("---")
@@ -4896,38 +4925,44 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
                     briefing.append(f"- **{customer}**: {count} cases")
             briefing.append("")
         
-        # Case severity analysis - FULL
-        severity_col = 'Severity' if 'Severity' in csone_df.columns else ('Highest Priority' if 'Highest Priority' in csone_df.columns else None)
-        if severity_col:
-            severity = csone_df[severity_col].value_counts()
-            briefing.append("### Case Severity Distribution:")
+        # Case severity analysis - FULL (canonical normalized priority for accuracy)
+        # Use case_priority_norm (computed via normalize_priority_label) so the
+        # distribution agrees with cm.count_p1/p2/etc. and the dashboards.
+        # Falls back to a raw column only if normalization is unavailable.
+        if 'case_priority_norm' in csone_norm.columns:
+            severity = csone_norm['case_priority_norm'].fillna('Unknown').value_counts()
+            briefing.append("### Case Severity Distribution (normalized P1-P4):")
             for sev, count in severity.items():
                 briefing.append(f"- **Severity {sev}**: {count} cases")
             briefing.append("")
-        
-        # P1/P2 cases - DETAILED with case numbers
-        if severity_col:
-            critical_cases = csone_df[csone_df[severity_col].astype(str).str.contains('1|2', na=False)]
+
+        # P1/P2 critical cases - DETAILED with case numbers, using normalized priority
+        # so we never misclassify "P10" or "S12" as P1/P2 (the previous str.contains('1|2')
+        # mask did exactly that and produced false positives in user-facing briefings).
+        if 'case_priority_norm' in csone_norm.columns:
+            critical_cases = csone_norm[csone_norm['case_priority_norm'].isin(['P1', 'P2'])]
             if not critical_cases.empty:
-                # FIXED: Show ALL critical cases
+                # Show ALL critical cases (no truncation)
                 briefing.append("### ALL Critical Cases (P1/P2) - REQUIRES IMMEDIATE ATTENTION:")
                 for _, case in critical_cases.iterrows():
                     case_num = case.get('SR Number', case.get('Case Number', 'Unknown'))
                     title = case.get('Title', 'No title')
                     customer = case.get('customer_name', 'Unknown')
                     status = case.get('Case Status', 'Unknown')
-                    sev = case.get(severity_col, 'Unknown')
+                    sev = case.get('case_priority_norm', 'Unknown')
                     briefing.append(f"- TAC #{case_num} ({customer}): {title} - Severity: {sev}, Status: {status}")
                 briefing.append("")
         
         # ALL Case Details - COMPREHENSIVE (for AI thematic analysis)
+        # Iterate the normalized frame so the per-case Severity printed here
+        # matches case_priority_norm used in the distribution + critical lists above.
         briefing.append("### Complete TAC Case Details for Analysis:")
-        for idx, case in csone_df.iterrows():
+        for idx, case in csone_norm.iterrows():
             case_num = case.get('SR Number', case.get('Case Number', f'Case-{idx}'))
             title = case.get('Title', 'No title')
             customer = case.get('customer_name', 'Unknown')
             status = case.get('Case Status', 'Unknown')
-            sev = case.get(severity_col, 'Unknown') if severity_col else 'Unknown'
+            sev = case.get('case_priority_norm', case.get('Severity', case.get('Highest Priority', 'Unknown')))
             trans_id = case.get('Transaction ID', '')
             
             # Build comprehensive case line

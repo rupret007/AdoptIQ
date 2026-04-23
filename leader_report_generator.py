@@ -18,7 +18,7 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from adoptiq_backend import _ensure_outputs
 from enhanced_snowflake_insights import EnhancedSnowflakeInsights
-from data_normalization import detect_bems_mask, extract_bems_ids_from_row, normalize_customer_name
+from data_normalization import detect_bems_mask, extract_bems_ids_from_row, normalize_customer_name, normalize_severity_label
 from snowflake_table_policy import is_table_blocked
 import canonical_metrics as cm
 
@@ -224,6 +224,22 @@ class LeaderReportGenerator:
         separator_run.font.size = Pt(10)
         separator_para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
         self.doc.add_paragraph()  # Spacing after
+
+    @staticmethod
+    def _high_or_critical_barrier_mask(ab_df: pd.DataFrame) -> pd.Series:
+        """Single source of truth for the "high or critical barrier" filter.
+
+        Uses ``normalize_severity_label`` so case (``'HIGH'`` vs ``'high'``),
+        whitespace, and SF-style tokens (``'P1 (Critical)'``) all collapse into
+        the canonical ``Critical`` / ``High`` buckets. Two different sections
+        of the leader report previously used ``str.contains('High|Critical')``
+        and ``isin(['High','Critical'])`` and disagreed on mixed-casing data;
+        this helper guarantees a single answer.
+        """
+        if ab_df is None or ab_df.empty or 'SEVERITY_C' not in ab_df.columns:
+            return pd.Series(False, index=ab_df.index if ab_df is not None else None)
+        normalized = ab_df['SEVERITY_C'].apply(normalize_severity_label)
+        return normalized.isin(['Critical', 'High'])
     
     def generate_leader_report(
         self,
@@ -1865,13 +1881,41 @@ class LeaderReportGenerator:
             categories_str = ', '.join(top_barrier_categories)
             summary_text += f"The barrier categories are: {categories_str}, suggesting systemic issues that may benefit from standardized solutions or training programs. "
         
-        if avg_pulse_score is not None:
-            if avg_pulse_score >= 4.0:
-                summary_text += f"Customer pulse feedback is positive with an average score of {avg_pulse_score:.1f}/5.0, indicating strong customer satisfaction. "
-            elif avg_pulse_score >= 3.0:
-                summary_text += f"Customer pulse feedback shows moderate satisfaction with an average score of {avg_pulse_score:.1f}/5.0, with room for improvement. "
+        # Pulse narrative uses cm.pulse_sentiment so the Positive / Neutral /
+        # Concern label here matches every other report (Compact, EI, etc.).
+        # The 0-5 input scale is converted to the canonical 0-10 scale inside
+        # ``pulse_sentiment`` (0-5 doubled), then bucketed by
+        # ``PULSE_POSITIVE_THRESHOLD_0_TO_10`` (7.5) and
+        # ``PULSE_NEGATIVE_THRESHOLD_0_TO_10`` (5.0). The previous inline 4.0/3.0
+        # cutoffs against the raw mean disagreed with that contract.
+        if avg_pulse_score is not None and not customer_pulse.empty:
+            try:
+                pulse_summary = cm.pulse_sentiment(customer_pulse, scale=cm.PULSE_SCALE_0_TO_5)
+            except Exception:
+                pulse_summary = {"sentiment": "Neutral", "mean_0_to_10": None}
+            sent_label = pulse_summary.get("sentiment", "Neutral")
+            mean_norm = pulse_summary.get("mean_0_to_10")
+            mean_label = (
+                f"average score of {avg_pulse_score:.1f}/5.0 "
+                f"(normalized {mean_norm:.1f}/10.0)"
+                if mean_norm is not None
+                else f"average score of {avg_pulse_score:.1f}/5.0"
+            )
+            if sent_label == "Positive":
+                summary_text += (
+                    f"Customer pulse feedback is positive with an {mean_label}, "
+                    "indicating strong customer satisfaction. "
+                )
+            elif sent_label == "Negative":
+                summary_text += (
+                    f"Customer pulse feedback indicates concerns with an {mean_label}, "
+                    "requiring immediate customer engagement. "
+                )
             else:
-                summary_text += f"Customer pulse feedback indicates concerns with an average score of {avg_pulse_score:.1f}/5.0, requiring immediate customer engagement. "
+                summary_text += (
+                    f"Customer pulse feedback shows moderate satisfaction with an "
+                    f"{mean_label}, with room for improvement. "
+                )
         
         # Add actionable recommendations
         summary_text += "\n\nActionable Recommendations: "
@@ -2120,7 +2164,7 @@ class LeaderReportGenerator:
         ("0-7 days", 0, 7),
         ("8-30 days", 8, 30),
         ("31-60 days", 31, 60),
-        ("60+ days", 61, None),
+        ("61+ days", 61, None),
     )
 
     _CLOSED_STATUS_TOKENS: Tuple[str, ...] = (
@@ -2782,10 +2826,10 @@ class LeaderReportGenerator:
                     for category, count in category_counts.items():
                         challenges_para.add_run(f'• {category}: {count} barriers\n')
                 
-                # Show recent high-severity barriers
+                # Show recent high-severity barriers (canonical normalized severity)
                 if 'SEVERITY_C' in data['adoption_barriers'].columns:
                     high_severity = data['adoption_barriers'][
-                        data['adoption_barriers']['SEVERITY_C'].astype(str).str.contains('High|Critical', case=False, na=False)
+                        self._high_or_critical_barrier_mask(data['adoption_barriers'])
                     ]
                     
                     if not high_severity.empty:
@@ -2874,9 +2918,20 @@ class LeaderReportGenerator:
                 if tac_count > 0:
                     display_cases = tac_cases  # Show ALL cases
                     
-                    # Summary by priority if available
-                    if 'Highest Priority' in tac_cases.columns:
-                        priority_counts = tac_cases['Highest Priority'].value_counts()
+                    # Summary by priority - use canonical case_priority_norm so
+                    # mixed raw labels ("P1", "1", "Critical") collapse into a
+                    # single bucket, matching cm.count_p1/p2/etc.
+                    try:
+                        from data_normalization import add_case_lifecycle_fields as _add_lc
+                        _tac_for_priority = _add_lc(tac_cases)
+                    except Exception:
+                        _tac_for_priority = tac_cases
+                    if 'case_priority_norm' in _tac_for_priority.columns:
+                        priority_counts = (
+                            _tac_for_priority['case_priority_norm']
+                            .fillna('Unknown')
+                            .value_counts()
+                        )
                         summary_para = self.doc.add_paragraph()
                         summary_para.add_run('Cases by Priority: ')
                         for priority, count in priority_counts.items():
@@ -3759,7 +3814,7 @@ class LeaderReportGenerator:
             if not data.get('adoption_barriers', pd.DataFrame()).empty:
                 abs_df = data['adoption_barriers']
                 if 'SEVERITY_C' in abs_df.columns:
-                    high_severity_count = len(abs_df[abs_df['SEVERITY_C'].isin(['High', 'Critical'])])
+                    high_severity_count = int(self._high_or_critical_barrier_mask(abs_df).sum())
                 if 'STATUS_C' in abs_df.columns:
                     status_values = abs_df['STATUS_C'].astype(str)
                     open_ab_count = len(abs_df[status_values.isin(['Open', 'New'])])
@@ -4843,13 +4898,24 @@ class LeaderReportGenerator:
         # Add customer-specific insights
         self.doc.add_heading('Customer-Specific Enhanced Insights', level=3)
         
+        # Resolve the analysis window so per-customer Snowflake fetches honor
+        # the user-selected timeframe instead of silently defaulting to 90 days.
+        # Priority: data['analysis_days'] -> self._analysis_days -> 90 fallback.
+        _resolved_days = data.get('analysis_days') if isinstance(data, dict) else None
+        if _resolved_days is None:
+            _resolved_days = getattr(self, '_analysis_days', None)
+        try:
+            _resolved_days = max(1, int(_resolved_days)) if _resolved_days is not None else 90
+        except (TypeError, ValueError):
+            _resolved_days = 90
+
         # FIXED: Include insights for ALL customers
         for customer in customers:
             self.doc.add_paragraph(f"Customer: {customer}")
-            
+
             # Get enhanced insights for this customer
             try:
-                enhanced_data = self.enhanced_insights.get_comprehensive_customer_insights(customer, 90)
+                enhanced_data = self.enhanced_insights.get_comprehensive_customer_insights(customer, _resolved_days)
                 
                 if enhanced_data and enhanced_data.get('insights'):
                     insights = enhanced_data['insights']

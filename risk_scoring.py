@@ -43,14 +43,26 @@ def _priority_weight(value: Any) -> int:
     return {"P1": 4, "P2": 3, "P3": 2, "P4": 1}.get(pri, 0)
 
 
+# Canonical 0-100 risk-band thresholds. Exposed so chart code (e.g. the
+# renewal donut) can pick wedge colors from the same numbers as the
+# textual band label below — preventing a score of 72 from being drawn
+# orange while the same figure labels it CRITICAL.
+RISK_BAND_THRESHOLDS = {
+    "CRITICAL": 75,
+    "HIGH": 55,
+    "MEDIUM": 35,
+    "LOW": 15,
+}
+
+
 def _risk_band(score_0_100: float) -> str:
-    if score_0_100 >= 75:
+    if score_0_100 >= RISK_BAND_THRESHOLDS["CRITICAL"]:
         return "CRITICAL"
-    if score_0_100 >= 55:
+    if score_0_100 >= RISK_BAND_THRESHOLDS["HIGH"]:
         return "HIGH"
-    if score_0_100 >= 35:
+    if score_0_100 >= RISK_BAND_THRESHOLDS["MEDIUM"]:
         return "MEDIUM"
-    if score_0_100 >= 15:
+    if score_0_100 >= RISK_BAND_THRESHOLDS["LOW"]:
         return "LOW"
     return "HEALTHY"
 
@@ -122,7 +134,10 @@ def _score_support_cases(customer_csone: pd.DataFrame) -> Dict[str, Any]:
     use = add_case_lifecycle_fields(customer_csone)
     count = len(use)
     volume_points = min(float(count) * 2.5, 25.0)
-    escalated_count = int(use["case_priority_norm"].isin(["P1", "P2"]).sum())
+    # Use cm.count_escalated so the risk score and the headline "Escalated"
+    # tile in every report agree on the same definition of P1+P2.
+    import canonical_metrics as cm  # local import avoids any future cycle
+    escalated_count = int(cm.count_escalated(use))
     escalated_points = min(float(escalated_count) * 9.0, 35.0)
     bems_count = int(use["is_bems"].sum()) if "is_bems" in use.columns else int(detect_bems_mask(use).sum())
     bems_points = min(float(bems_count) * 12.0, 30.0)

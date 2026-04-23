@@ -198,14 +198,22 @@ class ExecutiveIntelligenceFormatter:
                 sample_customers = team_subs_df['BU_NAME'].dropna().unique()[:5].tolist()
                 logger.info(f"[[CUSTOMER_COUNT]] Sample customers from team_subs_df: {sample_customers}")
         except (ImportError, AttributeError) as e:
-            logger.warning(f"[[WARNING]] Could not import _get_all_customers_from_all_sources, using team_subs_df count: {e}")
-            # Fallback: Use team_subs_df as primary source, then AB, then CSOne
-            if team_subs_df is not None and not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns:
-                total_customers = len(team_subs_df['BU_NAME'].dropna().unique())
-            elif ab_data is not None and not ab_data.empty and 'customer_name' in ab_data.columns:
-                total_customers = len(ab_data['customer_name'].unique())
-            else:
-                total_customers = 0
+            logger.warning(f"[[WARNING]] Could not import _get_all_customers_from_all_sources, using cm.count_customers fallback: {e}")
+            # Canonical fallback: union of normalized names across every
+            # available source. This keeps EI in agreement with Compact /
+            # Leader / Renewal which all use cm.count_customers, instead
+            # of returning a smaller subs_df-only or AB-only count.
+            total_customers = cm.count_customers(
+                ab_df=ab_data if ab_data is not None else pd.DataFrame(),
+                csone_df=csone_data if csone_data is not None else pd.DataFrame(),
+                subs_df=team_subs_df if team_subs_df is not None else pd.DataFrame(),
+                action_plans_df=csconsole_action_plans if csconsole_action_plans is not None else pd.DataFrame(),
+                pulse_df=csconsole_customer_pulse if csconsole_customer_pulse is not None else pd.DataFrame(),
+                extra_frames=[
+                    csconsole_success_priorities if csconsole_success_priorities is not None else pd.DataFrame(),
+                    csconsole_adoption_barriers if csconsole_adoption_barriers is not None else pd.DataFrame(),
+                ],
+            )
         csone_norm = add_case_lifecycle_fields(csone_data if csone_data is not None else pd.DataFrame())
         total_cases = cm.count_total_tac(csone_norm)
 
@@ -265,7 +273,17 @@ class ExecutiveIntelligenceFormatter:
             format_metric_with_source("High (P2)", p2_count, "Support Cases (TAC)", fields=["Severity"]),
             format_metric_with_source("BEMS Escalations", bems_count, "BEMS Escalations", fields=["Transaction ID", "bemscsc_refs"]),
             format_metric_with_source("Software Defects", defect_count, "Software Defects", fields=["CSC ID", "BST ID"]),
-            format_metric_with_source("Security Vulnerabilities", vuln_count, "Service Incidents", fields=["CVE ID", "Advisory ID"], source_override="PSIRT advisories and vulnerability feeds", verification_override="Verify advisory/CVE identifiers in PSIRT and public advisories"),
+            format_metric_with_source(
+                "Security Vulnerabilities",
+                vuln_count,
+                # Source label was previously "Service Incidents" which is the
+                # label for status.webex.com incidents — Security
+                # Vulnerabilities come from PSIRT, not the incidents feed.
+                "PSIRT Advisories",
+                fields=["CVE ID", "Advisory ID"],
+                source_override="PSIRT advisories and vulnerability feeds",
+                verification_override="Verify advisory/CVE identifiers in PSIRT and public advisories",
+            ),
         ]
         for fact in dashboard_metric_facts:
             bullet = self.doc.add_paragraph(style='List Bullet')
@@ -490,7 +508,9 @@ class ExecutiveIntelligenceFormatter:
 
         if not csone_norm.empty:
             self.doc.add_paragraph('TAC Lifecycle Snapshot (Opened / Closed / Days Open)', style='Heading 3')
-            sample = csone_norm.head(20)
+            _LIFECYCLE_SAMPLE_LIMIT = 20
+            sample = csone_norm.head(_LIFECYCLE_SAMPLE_LIMIT)
+            _total_for_lifecycle = len(csone_norm)
             lifecycle_table = self.doc.add_table(rows=len(sample) + 1, cols=7)
             lifecycle_table.style = 'Light Grid Accent 1'
             headers = ["Case #", "Customer", "Status", "Opened", "Closed", "Days Open", "Type"]
@@ -504,6 +524,15 @@ class ExecutiveIntelligenceFormatter:
                 lifecycle_table.rows[ridx].cells[4].text = str(row.get('closed_date', 'N/A'))
                 lifecycle_table.rows[ridx].cells[5].text = str(row.get('open_age_days', 'N/A'))
                 lifecycle_table.rows[ridx].cells[6].text = str(row.get('case_type_class', 'unknown'))
+            # Truncation disclosure: tell the reader when only a sample is shown
+            # so the table never silently under-reports lifecycle coverage.
+            if _total_for_lifecycle > _LIFECYCLE_SAMPLE_LIMIT:
+                _trunc_para = self.doc.add_paragraph()
+                _trunc_run = _trunc_para.add_run(
+                    f"Showing {_LIFECYCLE_SAMPLE_LIMIT} of {_total_for_lifecycle} cases "
+                    "(table truncated; full set available in raw exports)."
+                )
+                _trunc_run.italic = True
         
         if bems_ids:
             metrics_para.add_run(f'• BEMS IDs: ')

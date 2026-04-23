@@ -239,8 +239,25 @@ class CompactReportFormatter:
             # views and with the cross-report consistency contract.
             csone_norm = add_case_lifecycle_fields(csone_data)
             total_customers = cm.count_customers(ab_df=ab_data, csone_df=csone_norm)
+            # ``total_customers_override`` (typically risk_summary['total_customers'])
+            # is honored only when it agrees with the canonical count. If it
+            # disagrees we keep the canonical value and log a warning instead
+            # of silently shadowing the SSoT — this prevents the same portfolio
+            # from rendering different headline tiles in Compact vs EI.
             if total_customers_override is not None:
-                total_customers = int(total_customers_override)
+                try:
+                    _override_int = int(total_customers_override)
+                except (TypeError, ValueError):
+                    _override_int = total_customers
+                if _override_int != total_customers:
+                    logger.warning(
+                        "[[CONSISTENCY]] Compact total_customers_override=%s differs from "
+                        "cm.count_customers=%s; keeping canonical value to preserve "
+                        "cross-report parity.",
+                        _override_int,
+                        total_customers,
+                    )
+                # else: override matches canonical; no-op.
             total_support_cases = cm.count_total_tac(csone_norm)
             critical_p1 = cm.count_p1(csone_norm)
             high_p2 = cm.count_p2(csone_norm)
@@ -1105,14 +1122,11 @@ class CompactReportFormatter:
             canonical = {m: (s, v) for m, s, v in get_data_sources_list()}
             support_source, support_verif = canonical.get('Support Cases (TAC)', ('CSOne (TAC case data)', 'Query by Case Number in CSOne'))
             ab_source, ab_verif = canonical.get('Adoption Barriers', ('CSConsole / Snowflake C360_CS_TASK_C_VW', 'Query by Record ID in CSConsole or Snowflake'))
-            if not csone_norm.empty:
-                if 'case_priority_norm' in csone_norm.columns:
-                    sev_series = csone_norm['case_priority_norm'].fillna('').astype(str)
-                else:
-                    sev_series = pd.Series(dtype=str)
-                p1_critical_count = int((sev_series == 'P1').sum())
-            else:
-                p1_critical_count = 0
+            # Use cm.count_p1 so this Citations table shares its P1 count with
+            # every other report (Compact dashboard, EI, Leader). The previous
+            # inline ``(sev_series == 'P1').sum()`` duplicated the canonical
+            # function and could drift if the helper changes.
+            p1_critical_count = cm.count_p1(csone_norm) if not csone_norm.empty else 0
 
             csone_unique_customers = (
                 int(

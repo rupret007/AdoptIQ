@@ -1940,31 +1940,53 @@ def create_executive_charts(
                 plt.close()
                 chart_paths.append(chart_path)
 
-        # Chart 2: Case Severity Distribution
-        if not csone_df.empty and 'Severity' in csone_df.columns:
-            fig, ax = plt.subplots(figsize=(10, 8))
-            severity_counts = csone_df['Severity'].value_counts()
-            color_map = {
-                'P1': '#d62728', '1': '#d62728', 'Critical': '#d62728',
-                'P2': '#ff7f0e', '2': '#ff7f0e', 'High': '#ff7f0e',
-                'P3': '#ffd700', '3': '#ffd700', 'Medium': '#ffd700',
-                'P4': '#2ca02c', '4': '#2ca02c', 'Low': '#2ca02c',
-            }
-            colors = [color_map.get(str(sev), '#1f77b4') for sev in severity_counts.index]
-            ax.pie(
-                severity_counts.values,
-                labels=[f'{sev} ({count})' for sev, count in zip(severity_counts.index, severity_counts.values)],
-                autopct='%1.1f%%',
-                colors=colors,
-                startangle=90,
-                textprops={'fontsize': 11, 'weight': 'bold'},
-            )
-            ax.set_title('Case Severity Distribution', fontsize=14, fontweight='bold', pad=20)
-            plt.tight_layout()
-            chart_path = f"outputs/severity_distribution_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-            plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            chart_paths.append(chart_path)
+        # Chart 2: Case Severity Distribution (canonical normalized priority).
+        # Building the pie from case_priority_norm collapses synonyms ("P1",
+        # "1", "Critical") into a single P1 wedge and includes an explicit
+        # "Unknown" wedge for missing values, so the pie's total equals the
+        # headline "Total: N cases" and matches cm.count_p1/p2/p3/p4 elsewhere.
+        if not csone_df.empty:
+            try:
+                _csone_norm_for_pie = add_case_lifecycle_fields(csone_df)
+            except Exception:
+                _csone_norm_for_pie = csone_df
+            if 'case_priority_norm' in _csone_norm_for_pie.columns:
+                severity_series = _csone_norm_for_pie['case_priority_norm'].fillna('Unknown').astype(str)
+                # Preserve a stable ordering for legend / colors regardless
+                # of which categories happen to be present in the data.
+                _ordered_keys = ['P1', 'P2', 'P3', 'P4', 'Unknown']
+                raw_counts = severity_series.value_counts()
+                severity_counts = pd.Series(
+                    [int(raw_counts.get(k, 0)) for k in _ordered_keys],
+                    index=_ordered_keys,
+                )
+                # Drop empty buckets so the chart isn't cluttered with 0-slices,
+                # but always keep at least P1/P2/Unknown if any of them exist.
+                severity_counts = severity_counts[severity_counts > 0]
+                if not severity_counts.empty:
+                    fig, ax = plt.subplots(figsize=(10, 8))
+                    color_map = {
+                        'P1': '#d62728',
+                        'P2': '#ff7f0e',
+                        'P3': '#ffd700',
+                        'P4': '#2ca02c',
+                        'Unknown': '#9e9e9e',
+                    }
+                    colors = [color_map.get(str(sev), '#1f77b4') for sev in severity_counts.index]
+                    ax.pie(
+                        severity_counts.values,
+                        labels=[f'{sev} ({count})' for sev, count in zip(severity_counts.index, severity_counts.values)],
+                        autopct='%1.1f%%',
+                        colors=colors,
+                        startangle=90,
+                        textprops={'fontsize': 11, 'weight': 'bold'},
+                    )
+                    ax.set_title('Case Severity Distribution (normalized P1-P4)', fontsize=14, fontweight='bold', pad=20)
+                    plt.tight_layout()
+                    chart_path = f"outputs/severity_distribution_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                    plt.savefig(chart_path, dpi=300, bbox_inches='tight')
+                    plt.close()
+                    chart_paths.append(chart_path)
 
         # Chart 3: Top Customers by Case Volume
         if not csone_df.empty and cust_col:
@@ -2102,10 +2124,24 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         
         fig, ax = plt.subplots(figsize=(10, 8))
         
-        # Create donut chart for risk score
+        # Create donut chart for risk score.
+        # Wedge color uses the canonical thresholds from
+        # ``risk_scoring.RISK_BAND_THRESHOLDS`` so the color and the
+        # textual band ("CRITICAL"/"HIGH"/"MEDIUM"/"LOW"/"HEALTHY") can
+        # never disagree (the previous inline 70/50/30 cutoffs did).
+        from risk_scoring import RISK_BAND_THRESHOLDS as _RBT
         sizes = [risk_score, 100 - risk_score]
-        colors = ['#d62728' if risk_score >= 70 else '#ff7f0e' if risk_score >= 50 else '#ffd700' if risk_score >= 30 else '#2ca02c',
-                  '#f0f0f0']
+        if risk_score >= _RBT["CRITICAL"]:
+            _wedge_color = '#d62728'  # CRITICAL
+        elif risk_score >= _RBT["HIGH"]:
+            _wedge_color = '#ff7f0e'  # HIGH
+        elif risk_score >= _RBT["MEDIUM"]:
+            _wedge_color = '#ffd700'  # MEDIUM
+        elif risk_score >= _RBT["LOW"]:
+            _wedge_color = '#fff176'  # LOW
+        else:
+            _wedge_color = '#2ca02c'  # HEALTHY
+        colors = [_wedge_color, '#f0f0f0']
         
         wedges, texts, autotexts = ax.pie(sizes, labels=['Risk Score', 'Remaining'], 
                                           autopct='', colors=colors, startangle=90,
@@ -2329,12 +2365,19 @@ def enrich_csone_with_arr(csone_df: pd.DataFrame, arr_data: pd.DataFrame) -> pd.
             # This is a rough estimate: More P1/P2 cases = larger customer
             logger.info(f"[[INFO]] No ARR data available - creating estimated ARR based on support activity")
             
-            # Create estimated ARR tiers based on case characteristics
+            # Create estimated ARR tiers based on case characteristics.
+            # Use canonical normalized priority so "1" / "Critical" / "P1" all
+            # count toward the P1 tier consistently with dashboards.
             def estimate_arr(customer_name, customer_cases):
                 case_count = len(customer_cases)
-                p1_count = len(customer_cases[customer_cases['Severity'].astype(str) == 'P1']) if 'Severity' in customer_cases.columns else 0
-                p2_count = len(customer_cases[customer_cases['Severity'].astype(str) == 'P2']) if 'Severity' in customer_cases.columns else 0
-                
+                if 'case_priority_norm' in customer_cases.columns:
+                    sev_series = customer_cases['case_priority_norm'].astype(str)
+                    p1_count = int((sev_series == 'P1').sum())
+                    p2_count = int((sev_series == 'P2').sum())
+                else:
+                    p1_count = 0
+                    p2_count = 0
+
                 # Rough estimation logic:
                 # High case volume + high severity = enterprise customer (high ARR)
                 if p1_count >= 2 or (p2_count >= 3 and case_count >= 5):
@@ -2347,13 +2390,19 @@ def enrich_csone_with_arr(csone_df: pd.DataFrame, arr_data: pd.DataFrame) -> pd.
                     return 100000   # $100K estimate
                 else:
                     return 50000    # $50K estimate
-            
+
+            # Enrich once so case_priority_norm is available before per-customer slicing.
+            try:
+                enriched_norm = add_case_lifecycle_fields(enriched_df)
+            except Exception:
+                enriched_norm = enriched_df
+
             # Calculate estimated ARR for each customer
-            cust_col = next((c for c in ['Customer Name', 'customer_name', 'BU_NAME', 'Customer'] if c in enriched_df.columns), None)
+            cust_col = next((c for c in ['Customer Name', 'customer_name', 'BU_NAME', 'Customer'] if c in enriched_norm.columns), None)
             if cust_col:
                 arr_estimates = {}
-                for customer in enriched_df[cust_col].dropna().unique():
-                    customer_cases = enriched_df[enriched_df[cust_col] == customer]
+                for customer in enriched_norm[cust_col].dropna().unique():
+                    customer_cases = enriched_norm[enriched_norm[cust_col] == customer]
                     arr_estimates[customer] = estimate_arr(customer, customer_cases)
                 
                 enriched_df['Customer_ARR'] = enriched_df[cust_col].map(arr_estimates).fillna(50000)
@@ -2742,77 +2791,11 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             run.bold = True
         doc.add_paragraph()  # Spacing
     
-    # Financial ARR sections intentionally disabled.
-    if False:
-        from docx.oxml.ns import qn
-        from docx.oxml import OxmlElement
-        
-        # Calculate key financial metrics
-        total_arr = csone_df['Customer_ARR'].sum()
-        total_customers = csone_df[customer_col].nunique() if customer_col else 0
-        
-        critical_arr = 0
-        bems_arr = 0
-        if 'Severity' in csone_df.columns:
-            critical_arr = csone_df[csone_df['Severity'].isin(['P1', '1', 'Critical'])]['Customer_ARR'].sum()
-        # Use comprehensive BEMS detection that checks Transaction ID column
-        bems_cases, _ = detect_bems_escalations(csone_df)
-        bems_arr = bems_cases['Customer_ARR'].sum() if not bems_cases.empty and 'Customer_ARR' in bems_cases.columns else 0
-        
-        # Add shaded box with financial summary
-        financial_para = doc.add_paragraph()
-        financial_para.paragraph_format.left_indent = Inches(0.5)
-        financial_para.paragraph_format.right_indent = Inches(0.5)
-        
-        run = financial_para.add_run('💰 FINANCIAL IMPACT SUMMARY\n\n')
-        run.bold = True
-        run.font.size = Pt(14)
-        run.font.color.rgb = RGBColor(0, 51, 102)
-        
-        run = financial_para.add_run(f'Total Portfolio ARR: ')
-        run.bold = True
-        run = financial_para.add_run(f'${total_arr:,.0f}\n')
-        run.font.size = Pt(12)
-        run.font.color.rgb = RGBColor(0, 112, 192)
-        
-        if critical_arr > 0:
-            run = financial_para.add_run(f'ARR at Critical Risk (P1): ')
-            run.bold = True
-            run = financial_para.add_run(f'${critical_arr:,.0f} ')
-            run.font.size = Pt(12)
-            run.font.color.rgb = RGBColor(192, 0, 0)
-            run = financial_para.add_run(f'({(critical_arr/total_arr*100):.1f}% of portfolio)\n' if total_arr > 0 else '\n')
-            run.font.size = Pt(11)
-        
-        if bems_arr > 0:
-            run = financial_para.add_run(f'ARR with Engineering Escalations: ')
-            run.bold = True
-            run = financial_para.add_run(f'${bems_arr:,.0f} ')
-            run.font.size = Pt(12)
-            run.font.color.rgb = RGBColor(192, 0, 0)
-            run = financial_para.add_run(f'({(bems_arr/total_arr*100):.1f}% of portfolio)\n' if total_arr > 0 else '\n')
-            run.font.size = Pt(11)
-        
-        if feature_requests and feature_requests.get('total_arr_impact', 0) > 0:
-            feature_arr = feature_requests['total_arr_impact']
-            run = financial_para.add_run(f'ARR Requesting Features: ')
-            run.bold = True
-            run = financial_para.add_run(f'${feature_arr:,.0f}\n')
-            run.font.size = Pt(12)
-            run.font.color.rgb = RGBColor(255, 140, 0)
-        
-        run = financial_para.add_run(f'\nAverage ARR per Customer: ')
-        run.bold = True
-        avg_arr = total_arr / total_customers if total_customers > 0 else 0
-        run = financial_para.add_run(f'${avg_arr:,.0f}')
-        run.font.size = Pt(11)
-        
-        # Add background color to paragraph (light blue)
-        shading_elm = OxmlElement('w:shd')
-        shading_elm.set(qn('w:fill'), 'E7F3FF')
-        financial_para._element.get_or_add_pPr().append(shading_elm)
-        
-        doc.add_paragraph()  # Spacing
+    # Financial ARR sections were intentionally disabled and the dead block
+    # was removed in the data-accuracy round 2 hardening to prevent silent
+    # re-activation of severity-string matching that bypassed canonical
+    # priority normalization.
+
     
     # Add AI-generated summary
     if ai_insights and 'executive_summary' in ai_insights:
@@ -4520,15 +4503,19 @@ def run_compact_analysis(analysis_id):
         
         escalated_cases = pd.DataFrame()
         if not csone_df.empty:
-            # Try different column names for severity
-            severity_cols = [col for col in csone_df.columns if 'severity' in col.lower() or 'priority' in col.lower()]
-            if severity_cols:
-                severity_col = severity_cols[0]
-                escalated_cases = csone_df[csone_df[severity_col].astype(str).str.contains('P1|P2|Critical|High', case=False, na=False)]
-                logger.info(f"   - Escalated cases found using column '{severity_col}': {len(escalated_cases)} rows")
+            # Use canonical normalized priority instead of substring matching on the
+            # first severity-named column. The previous heuristic matched any label
+            # containing "1" or "2" (e.g. "P10", "S12") and produced false positives.
+            try:
+                _csone_norm_for_esc = add_case_lifecycle_fields(csone_df)
+            except Exception:
+                _csone_norm_for_esc = csone_df
+            if 'case_priority_norm' in _csone_norm_for_esc.columns:
+                escalated_cases = _csone_norm_for_esc[_csone_norm_for_esc['case_priority_norm'].isin(['P1', 'P2'])]
+                logger.info(f"   - Escalated cases (canonical P1/P2): {len(escalated_cases)} rows")
             else:
                 escalated_cases = pd.DataFrame(columns=csone_df.columns)
-                logger.info(f"   - No severity/priority column found, escalated case count set to 0")
+                logger.info(f"   - case_priority_norm unavailable, escalated case count set to 0")
         
         # Create high-risk customers based on data availability
         high_risk_customers = pd.DataFrame()
@@ -5691,7 +5678,15 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         
         # Show top action plans; in portfolio mode prefix customer name (BU_NAME)
         doc.add_paragraph('Recent Action Plans (by customer where applicable):', style='Heading 3')
-        for i, (_, row) in enumerate(customer_action_plans.head(10).iterrows(), 1):
+        _ap_total = len(customer_action_plans)
+        _ap_sample_limit = 10
+        if _ap_total > _ap_sample_limit:
+            _ap_disclosure = doc.add_paragraph()
+            _ap_run = _ap_disclosure.add_run(
+                f'Showing {_ap_sample_limit} of {_ap_total} action plans (most recent first; full list available in raw exports).'
+            )
+            _ap_run.italic = True
+        for i, (_, row) in enumerate(customer_action_plans.head(_ap_sample_limit).iterrows(), 1):
             p = doc.add_paragraph(style='List Number')
             cust_label = ''
             if portfolio_mode and all_customers:
@@ -5730,7 +5725,15 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         
         # Show recent pulse records; in portfolio mode prefix customer name (BU_NAME)
         doc.add_paragraph('Recent Customer Pulse Records (by customer where applicable):', style='Heading 3')
-        for i, (_, row) in enumerate(customer_customer_pulse.head(10).iterrows(), 1):
+        _cp_total = len(customer_customer_pulse)
+        _cp_sample_limit = 10
+        if _cp_total > _cp_sample_limit:
+            _cp_disclosure = doc.add_paragraph()
+            _cp_run = _cp_disclosure.add_run(
+                f'Showing {_cp_sample_limit} of {_cp_total} pulse records (most recent first; full list available in raw exports).'
+            )
+            _cp_run.italic = True
+        for i, (_, row) in enumerate(customer_customer_pulse.head(_cp_sample_limit).iterrows(), 1):
             p = doc.add_paragraph(style='List Number')
             cust_label = ''
             if portfolio_mode and all_customers:
@@ -6420,6 +6423,31 @@ def run_customer_renewal_analysis(analysis_id):
                     customer_csone = sf_cases
                     support_cases_from_snowflake = True
                     logger.info(f"[[RENEWAL]] Using {len(customer_csone)} support cases from Snowflake (no CSOne file provided)")
+                    # Surface truncation: fetch_support_cases_snowflake sets
+                    # df.attrs['was_truncated'] when result count == limit.
+                    # We propagate that into report_quality_metadata so the
+                    # renderer can show a banner instead of silently under-reporting.
+                    try:
+                        if bool(sf_cases.attrs.get('was_truncated', False)):
+                            _fetch_limit = int(sf_cases.attrs.get('fetch_limit', 0)) or len(sf_cases)
+                            _trunc_msg = (
+                                f"Snowflake support-case fetch hit limit={_fetch_limit:,}; "
+                                "renewal counts below may under-report. Consider narrowing scope or raising the fetch limit."
+                            )
+                            logger.warning(f"[[RENEWAL]] {_trunc_msg}")
+                            try:
+                                # Best-effort surfacing into the analysis status payload
+                                # so the UI/report can render a visible warning.
+                                with analysis_status_lock:
+                                    _warns = list(status.get('warnings', []) or [])
+                                    _warns.append(_trunc_msg)
+                                    status['warnings'] = _warns
+                                    status['data_truncated'] = True
+                                    save_analysis_status()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.warning(f"[[WARNING]] Snowflake support cases fetch failed: {e}")
         
