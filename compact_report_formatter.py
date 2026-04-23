@@ -17,7 +17,7 @@ from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.shared import OxmlElement, qn
-from risk_scoring import compute_customer_risk_profile
+from risk_scoring import compute_customer_risk_profile, RISK_BAND_THRESHOLDS as _RBT_0_100
 from data_normalization import (
     add_case_lifecycle_fields,
     detect_bems_mask,
@@ -729,27 +729,40 @@ class CompactReportFormatter:
         """Add detailed renewal-specific recommendations (alternative to add_renewal_recommendations)"""
         try:
             self.doc.add_heading('Renewal Risk Mitigation Recommendations', level=1)
-            
+
+            # Round 4: anchor the high/moderate cuts to canonical
+            # RISK_BAND_THRESHOLDS (75/55/35/15 on 0-100 scale, ie
+            # 7.5/5.5/3.5/1.5 on the 0-10 displayed scale).  Previously
+            # the section used 6/4 cuts that disagreed with the rest of
+            # the report at the boundaries.
+            _RBT_0_10_HIGH = _RBT_0_100["HIGH"] / 10.0  # 5.5
+            _RBT_0_10_MEDIUM = _RBT_0_100["MEDIUM"] / 10.0  # 3.5
+
             # High-risk customer recommendations (risk_scores can be Dict[str, float] or Dict[str, Dict] with 'score' key)
             def _score(v):
                 return v.get('score', v) if isinstance(v, dict) else v
-            high_risk_customers = {k: v for k, v in risk_scores.items() if _score(v) >= 6}
-            
+            high_risk_customers = {k: v for k, v in risk_scores.items() if _score(v) >= _RBT_0_10_HIGH}
+
             if high_risk_customers:
                 rec_p = self.doc.add_paragraph()
-                rec_p.add_run('For High-Risk Customers (Risk Score ≥ 6):\n').bold = True
+                rec_p.add_run(f'For High-Risk Customers (Risk Score ≥ {_RBT_0_10_HIGH:.1f}):\n').bold = True
                 rec_p.add_run('• Schedule executive-level customer meetings within 30 days\n')
                 rec_p.add_run('• Assign dedicated Customer Success Manager for intensive support\n')
                 rec_p.add_run('• Create custom adoption plan addressing specific barriers\n')
                 rec_p.add_run('• Implement weekly check-ins and progress reviews\n')
                 rec_p.add_run('• Consider proactive support credits or additional resources\n')
-            
+
             # Moderate-risk customer recommendations
-            moderate_risk_customers = {k: v for k, v in risk_scores.items() if 4 <= _score(v) < 6}
-            
+            moderate_risk_customers = {
+                k: v for k, v in risk_scores.items()
+                if _RBT_0_10_MEDIUM <= _score(v) < _RBT_0_10_HIGH
+            }
+
             if moderate_risk_customers:
                 rec_p = self.doc.add_paragraph()
-                rec_p.add_run('For Moderate-Risk Customers (Risk Score 4-6):\n').bold = True
+                rec_p.add_run(
+                    f'For Moderate-Risk Customers (Risk Score {_RBT_0_10_MEDIUM:.1f}-{_RBT_0_10_HIGH:.1f}):\n'
+                ).bold = True
                 rec_p.add_run('• Increase touch frequency to bi-weekly check-ins\n')
                 rec_p.add_run('• Provide targeted training and enablement resources\n')
                 rec_p.add_run('• Monitor adoption metrics more closely\n')
@@ -901,7 +914,25 @@ class CompactReportFormatter:
             
             # Data rows
             score = risk_summary.get('overall_risk_score', 0)
-            renewal_risk_status = 'Low' if (isinstance(score, (int, float)) and score < 4) else 'Moderate' if (isinstance(score, (int, float)) and score < 7) else 'High'
+            # Round 4: route the renewal-risk row through the canonical
+            # RISK_BAND_THRESHOLDS (75/55/35/15 on the 0-100 scale, ie
+            # 7.5/5.5/3.5/1.5 on the displayed 0-10 scale) so the same
+            # numeric score cannot show as "Moderate" here while it
+            # appears as "High" in another section of the same doc.
+            if isinstance(score, (int, float)):
+                _score_0_100 = float(score) * 10.0 if float(score) <= 10.0 else float(score)
+                if _score_0_100 >= _RBT_0_100["CRITICAL"]:
+                    renewal_risk_status = 'Critical'
+                elif _score_0_100 >= _RBT_0_100["HIGH"]:
+                    renewal_risk_status = 'High'
+                elif _score_0_100 >= _RBT_0_100["MEDIUM"]:
+                    renewal_risk_status = 'Moderate'
+                elif _score_0_100 >= _RBT_0_100["LOW"]:
+                    renewal_risk_status = 'Low'
+                else:
+                    renewal_risk_status = 'Healthy'
+            else:
+                renewal_risk_status = 'Unknown'
             metrics_data = [
                 ('Customer Satisfaction', 'Good' if risk_summary.get('escalated_cases', 0) < 5 else 'Needs Attention', '📊'),
                 ('Adoption Health', 'Healthy' if risk_summary.get('critical_adoption_barriers', 0) < 3 else 'At Risk', '📈'),
@@ -1620,19 +1651,47 @@ class CompactReportFormatter:
             raise
 
 
-def calculate_renewal_risk_scores(ab_data: pd.DataFrame, csone_data: pd.DataFrame) -> Dict[str, Dict]:
-    """Calculate renewal risk scores and color categories for each customer"""
+def calculate_renewal_risk_scores(
+    ab_data: pd.DataFrame,
+    csone_data: pd.DataFrame,
+    *,
+    extra_frames: Optional[List[pd.DataFrame]] = None,
+    account_to_customer: Optional[Dict[str, str]] = None,
+) -> Dict[str, Dict]:
+    """Calculate renewal risk scores and color categories for each customer.
+
+    Round 4: accept optional ``extra_frames`` (subscriptions, pulse,
+    success priorities, action plans) and ``account_to_customer`` so
+    subscription-only and pulse-only customers receive a renewal-risk
+    row.  Previously the universe was AB ∪ CSOne only, which silently
+    dropped customers visible in the headline ``total_customers`` from
+    the renewal table.
+    """
     try:
         ab_data = ab_data if ab_data is not None else pd.DataFrame()
         csone_data = csone_data if csone_data is not None else pd.DataFrame()
         csone_norm = add_case_lifecycle_fields(csone_data)
         risk_data = {}
-        
-        customers = set()
-        if not ab_data.empty and 'customer_name' in ab_data.columns:
-            customers.update(normalize_customer_name(v) for v in ab_data['customer_name'].dropna().unique())
-        if not csone_norm.empty and 'customer_name' in csone_norm.columns:
-            customers.update(normalize_customer_name(v) for v in csone_norm['customer_name'].dropna().unique())
+
+        # Use the canonical customer-list helper so the renewal table's
+        # universe matches the headline ``total_customers``.
+        try:
+            canonical_names = cm.list_customers(
+                ab_df=ab_data,
+                csone_df=csone_norm,
+                extra_frames=extra_frames,
+                account_to_customer=account_to_customer,
+            )
+            customers = {normalize_customer_name(v) for v in canonical_names}
+        except Exception as _cu_err:
+            logger.debug(
+                f"calculate_renewal_risk_scores: falling back to AB+CSOne universe: {_cu_err}"
+            )
+            customers = set()
+            if not ab_data.empty and 'customer_name' in ab_data.columns:
+                customers.update(normalize_customer_name(v) for v in ab_data['customer_name'].dropna().unique())
+            if not csone_norm.empty and 'customer_name' in csone_norm.columns:
+                customers.update(normalize_customer_name(v) for v in csone_norm['customer_name'].dropna().unique())
         customers = {c for c in customers if c and c != "Unknown"}
         
         for customer in customers:
@@ -1664,17 +1723,21 @@ def calculate_renewal_risk_scores(ab_data: pd.DataFrame, csone_data: pd.DataFram
                     f"{format_inline_source('Adoption Barriers', fields=['OPEN_DATE_C', 'AB_STATUS_C'])}"
                 )
             
-            # Determine color category
-            if final_score >= 8:
+            # Round 4: route the color/category tiers through the
+            # canonical RISK_BAND_THRESHOLDS (CRITICAL=75, HIGH=55,
+            # MEDIUM=35, LOW=15 on the 0-100 axis) so the same numeric
+            # score gets the same color/label across every report.
+            _band = profile["risk_band"]
+            if _band == "CRITICAL":
                 color = "Red"
                 category = "Critical Risk - Immediate Action Required"
-            elif final_score >= 6:
+            elif _band == "HIGH":
                 color = "Red"
                 category = "High Risk - Urgent Attention Needed"
-            elif final_score >= 4:
+            elif _band == "MEDIUM":
                 color = "Yellow"
                 category = "Moderate Risk - Monitor Closely"
-            elif final_score >= 2:
+            elif _band == "LOW":
                 color = "Green"
                 category = "Low Risk - Standard Monitoring"
             else:
@@ -1734,8 +1797,16 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
     try:
         formatter = CompactReportFormatter()
         
-        # Calculate risk scores
-        risk_data = calculate_renewal_risk_scores(ab_data, csone_data)
+        # Calculate risk scores.  Round 4: pass through the multi-source
+        # ``extra_frames`` and ``account_to_customer`` map already
+        # available in this scope so subscription-only / pulse-only
+        # customers receive a renewal-risk row.
+        risk_data = calculate_renewal_risk_scores(
+            ab_data,
+            csone_data,
+            extra_frames=_extra_customer_frames if _extra_customer_frames else None,
+            account_to_customer=account_to_customer,
+        )
         
         # Create risk summary
         high_risk_customers = {k: v for k, v in risk_data.items() if isinstance(v, dict) and v.get('score', 0) >= 6}

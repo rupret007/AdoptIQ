@@ -201,6 +201,8 @@ from data_normalization import (
     extract_bems_ids_from_row,
     extract_bems_ids_from_text,
     normalize_customer_name,
+    normalize_severity_label,
+    normalize_status_label,
 )
 from risk_scoring import compute_customer_risk_profile, compute_portfolio_risk_summary
 from report_consistency import validate_report_consistency
@@ -1895,7 +1897,16 @@ def create_executive_charts(
             if len(monthly_cases) > 0:
                 months = [str(period) for period in monthly_cases.index]
                 bars = ax.bar(months, monthly_cases.values, color='#1f77b4')
-                ax.set_title('Support Cases by Month', fontsize=14, fontweight='bold')
+                # Round 4: title explicitly reflects that this groups the
+                # full ``csone_df`` it received (no internal date filter).
+                # The number of months shown equals ``len(months)`` —
+                # surface that in the title so readers can immediately
+                # see whether they are looking at 3 months or 24 months.
+                ax.set_title(
+                    f'Support Cases by Month ({len(months)} months in source data)',
+                    fontsize=14,
+                    fontweight='bold',
+                )
                 ax.set_ylabel('Number of Cases', fontsize=12)
                 ax.set_xlabel('Month', fontsize=12)
                 for bar, value in zip(bars, monthly_cases.values):
@@ -2268,13 +2279,20 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         for i, (key, value) in enumerate(metrics.items()):
             ax1.text(value + 0.5, i, f'{int(value)}', va='center', fontweight='bold')
         
-        # Panel 2: Risk Category Distribution
+        # Panel 2: Risk Score Gauge (out of 100)
+        # Round 4: this pie historically rendered ``[risk_score, 100 - risk_score]``
+        # under a "Risk Category" title which suggested a categorical
+        # breakdown.  Retitle as a score gauge so the visual matches
+        # the underlying numbers (band label is shown as the slice
+        # caption, score is the headline).
         risk_cat = risk_category
         risk_colors = {'CRITICAL': '#d62728', 'HIGH': '#ff7f0e', 'MEDIUM': '#ffd700', 'LOW': '#2ca02c'}
-        ax2.pie([risk_score, 100-risk_score], labels=[risk_cat, 'Remaining'], 
-                autopct='%1.1f%%', colors=[risk_colors.get(risk_cat, '#1f77b4'), '#f0f0f0'],
+        ax2.pie([risk_score, 100-risk_score],
+                labels=[f'{risk_cat} ({int(risk_score)}/100)', 'Remaining'],
+                autopct='%1.1f%%',
+                colors=[risk_colors.get(risk_cat, '#1f77b4'), '#f0f0f0'],
                 startangle=90)
-        ax2.set_title('Risk Category', fontweight='bold')
+        ax2.set_title('Renewal Risk Score (out of 100)', fontweight='bold')
         
         # Panel 3: Case Severity Distribution (if CSOne data available).
         # Round 3 hardening: collapse all P1/1/Critical-style synonyms via
@@ -2393,8 +2411,18 @@ def enrich_csone_with_arr(csone_df: pd.DataFrame, arr_data: pd.DataFrame) -> pd.
                     p1_count = int(cm.count_p1(customer_cases))
                     p2_count = int(cm.count_p2(customer_cases))
                 except Exception:
-                    if 'case_priority_norm' in customer_cases.columns:
-                        sev_series = customer_cases['case_priority_norm'].astype(str)
+                    # Round 4: enrich the slice via add_case_lifecycle_fields
+                    # FIRST so the fallback can still classify priorities
+                    # when the raw column name drifted (e.g. SEVERITY,
+                    # PRIORITY, P1_INDICATOR).  Without this the fallback
+                    # silently went to zero P1/P2 counts, which made
+                    # estimate_arr default everyone to $50K.
+                    try:
+                        _enriched_slice = add_case_lifecycle_fields(customer_cases)
+                    except Exception:
+                        _enriched_slice = customer_cases
+                    if 'case_priority_norm' in _enriched_slice.columns:
+                        sev_series = _enriched_slice['case_priority_norm'].astype(str)
                         p1_count = int((sev_series == 'P1').sum())
                         p2_count = int((sev_series == 'P2').sum())
                     else:
@@ -2830,17 +2858,32 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         if insights_para.runs:
             insights_para.runs[0].font.size = Pt(13)
         
-        # Calculate risk indicators
+        # Calculate risk indicators.  Round 4: rename the support-load
+        # denominator to ``csone_distinct_customers`` so it cannot
+        # silently shadow the canonical ``total_customers`` defined
+        # above (which spans ALL data sources, not just CSOne).  The
+        # narrative now explicitly labels what the denominator means.
         if customer_col:
-            total_customers = csone_df[customer_col].nunique()
-            avg_cases_per_customer = total_cases / total_customers if total_customers > 0 else 0
-            
+            csone_distinct_customers = csone_df[customer_col].nunique()
+            avg_cases_per_customer = (
+                total_cases / csone_distinct_customers if csone_distinct_customers > 0 else 0
+            )
+
             if avg_cases_per_customer > 3:
-                insights_para.add_run(f'• HIGH SUPPORT LOAD: Average {avg_cases_per_customer:.1f} cases per customer indicates potential adoption challenges\n')
+                insights_para.add_run(
+                    f'• HIGH SUPPORT LOAD: Average {avg_cases_per_customer:.1f} cases per customer with TAC cases '
+                    f'(n={csone_distinct_customers}) indicates potential adoption challenges\n'
+                )
             elif avg_cases_per_customer > 1.5:
-                insights_para.add_run(f'• MODERATE SUPPORT LOAD: Average {avg_cases_per_customer:.1f} cases per customer requires monitoring\n')
+                insights_para.add_run(
+                    f'• MODERATE SUPPORT LOAD: Average {avg_cases_per_customer:.1f} cases per customer with TAC cases '
+                    f'(n={csone_distinct_customers}) requires monitoring\n'
+                )
             else:
-                insights_para.add_run(f'• NORMAL SUPPORT LOAD: Average {avg_cases_per_customer:.1f} cases per customer indicates healthy adoption\n')
+                insights_para.add_run(
+                    f'• NORMAL SUPPORT LOAD: Average {avg_cases_per_customer:.1f} cases per customer with TAC cases '
+                    f'(n={csone_distinct_customers}) indicates healthy adoption\n'
+                )
         
         # Round 3: drop the raw-column gate; p1_count/p2_count are
         # already derived canonically and are safe to render regardless
@@ -4254,11 +4297,16 @@ def run_compact_analysis(analysis_id):
                     logger.info(f"[EXEC-REPORT] Risk scores calculated: {len(risk_scores)} customers (NOTE: This only counts customers with barriers/cases)")
                     
                     logger.info(f"[EXEC-REPORT] Step 2/5: Building risk summary...")
-                    # Create risk summary
+                    # Create risk summary.  Round 4: split the band-based
+                    # MEDIUM bucket from the score-range "Watch" bucket so
+                    # the executive narrative can label them distinctly.
                     high_risk_customers = {}
-                    moderate_risk_customers = {}
+                    moderate_risk_customers = {}  # legacy: score 4-6 (Watch) on 0-10 scale
+                    medium_band_customers = {}    # canonical: band MEDIUM (35-55 on 0-100 scale)
+                    critical_band_customers = {}  # canonical: band CRITICAL (>=75 on 0-100 scale)
+                    high_band_customers = {}      # canonical: band HIGH (55-75 on 0-100 scale)
                     scores = []
-                    
+
                     for k, v in risk_scores.items():
                         if isinstance(v, dict) and 'score' in v:
                             score = v['score']
@@ -4267,16 +4315,30 @@ def run_compact_analysis(analysis_id):
                                 high_risk_customers[k] = v
                             elif 4 <= score < 6:
                                 moderate_risk_customers[k] = v
-                    
+                            band = str(v.get('risk_band') or '').upper()
+                            if band == 'CRITICAL':
+                                critical_band_customers[k] = v
+                            elif band == 'HIGH':
+                                high_band_customers[k] = v
+                            elif band == 'MEDIUM':
+                                medium_band_customers[k] = v
+
                     overall_risk_score = np.mean(scores) if scores else 0
                     logger.info(f"[EXEC-REPORT] High-risk customers: {len(high_risk_customers)}, Overall score: {overall_risk_score:.1f}")
                     
                     logger.info(f"[EXEC-REPORT] Step 3/5: Creating risk summary structure...")
                     # NOTE: risk_summary['total_customers'] is NOT used for dashboard - dashboard calculates its own count
+                    # Round 4: expose both the legacy ``moderate_risk_customers``
+                    # (score 4-6 on 0-10 = "Watch") and the canonical
+                    # ``medium_risk_customers`` (band MEDIUM) so downstream
+                    # narratives can select the right denominator.
                     risk_summary = {
                         'overall_risk_score': round(overall_risk_score, 1),
                         'high_risk_customers': len(high_risk_customers),
                         'moderate_risk_customers': len(moderate_risk_customers),
+                        'medium_risk_customers': len(medium_band_customers),
+                        'critical_risk_customers': len(critical_band_customers),
+                        'high_only_risk_customers': len(high_band_customers),
                         'total_customers': len(risk_scores),  # only for risk summary, NOT dashboard
                         'critical_adoption_barriers': cm.count_critical_barriers(
                             ab_norm, mode=cm.CRITICAL_AB_MODE_CRITICAL_OR_HIGH
@@ -4441,32 +4503,101 @@ def run_compact_analysis(analysis_id):
             else:
                 logger.warning(f"Invalid risk data structure for customer {customer}: {risk_data}")
                 score = 0
-            
-            risk_level = "HIGH" if score >= 7 else "MODERATE" if score >= 4 else "LOW"
+
+            # Round 4: derive Risk_Level from the canonical band already
+            # produced by compute_customer_risk_profile (CRITICAL=75,
+            # HIGH=55, MEDIUM=35, LOW=15 on the 0-100 scale).  The
+            # legacy ad-hoc cuts (>=7 HIGH / >=4 MODERATE) caused score
+            # 6 to surface as "MODERATE" in the Risk_Level column while
+            # the high-risk sub-table downstream picks up everything
+            # >=6 — same row, two contradictory labels.
+            band = ''
+            if isinstance(risk_data, dict):
+                band = str(risk_data.get('risk_band') or '').upper()
+            if not band:
+                if score >= 7.5:
+                    band = 'CRITICAL'
+                elif score >= 5.5:
+                    band = 'HIGH'
+                elif score >= 3.5:
+                    band = 'MEDIUM'
+                elif score >= 1.5:
+                    band = 'LOW'
+                else:
+                    band = 'HEALTHY'
+            _band_to_level = {
+                'CRITICAL': 'CRITICAL',
+                'HIGH': 'HIGH',
+                'MEDIUM': 'MODERATE',
+                'LOW': 'LOW',
+                'HEALTHY': 'HEALTHY',
+            }
+            risk_level = _band_to_level.get(band, 'LOW')
             risk_summary_data.append({
                 'Customer': customer,
                 'Risk_Score': round(score, 1),
                 'Risk_Level': risk_level,
+                'Risk_Band': band,
                 'Adoption_Barriers': len(ab_norm[ab_norm['customer_name'] == customer]) if not ab_norm.empty else 0,
                 'Support_Cases': len(csone_df[csone_df['customer_name'] == customer]) if not csone_df.empty else 0
             })
         
         risk_summary_df = pd.DataFrame(
             risk_summary_data,
-            columns=['Customer', 'Risk_Score', 'Risk_Level', 'Adoption_Barriers', 'Support_Cases']
+            columns=['Customer', 'Risk_Score', 'Risk_Level', 'Risk_Band', 'Adoption_Barriers', 'Support_Cases']
         )
         logger.info(f"[[DATA]] Risk summary DataFrame created with {len(risk_summary_df)} rows")
-        
-        # Create high-risk customers DataFrame
-        high_risk_customers = risk_summary_df[risk_summary_df['Risk_Score'] >= 6].sort_values('Risk_Score', ascending=False)
+
+        # Round 4: keep the Excel "high risk" sub-table aligned with
+        # Risk_Level — anything labeled HIGH or CRITICAL is in scope so
+        # the Risk_Level column and this filter cannot disagree.
+        if 'Risk_Band' in risk_summary_df.columns:
+            high_risk_customers = risk_summary_df[
+                risk_summary_df['Risk_Band'].isin(['HIGH', 'CRITICAL'])
+            ].sort_values('Risk_Score', ascending=False)
+        else:
+            high_risk_customers = risk_summary_df[risk_summary_df['Risk_Score'] >= 5.5].sort_values('Risk_Score', ascending=False)
         logger.info(f"[[WARNING]] High-risk customers identified: {len(high_risk_customers)}")
         
         with analysis_status_lock:
             _update_progress(status, 90, 'Writing Excel workbook sheets...', 'Excel Report Generation')
         logger.info(f"[[LIST]] Preparing enhanced Excel sheets...")
         
-        # Calculate risk summary metrics
-        total_customers = len(ab_norm['customer_name'].unique()) if not ab_norm.empty else 0
+        # Calculate risk summary metrics.  Round 4: route the Excel
+        # ``total_customers`` denominator through cm.count_customers
+        # (with the same multi-source frames + account_to_customer map
+        # the Word headline already uses) so the Excel summary sheet
+        # cannot disagree with the corresponding Word headline.  The
+        # legacy AB-only count silently dropped subscription-only and
+        # pulse-only customers from the Excel total.
+        try:
+            _customer_lookup = build_customer_lookup(
+                team_subs_df_unfiltered if 'team_subs_df_unfiltered' in locals() else None
+            )
+            _account_to_customer = (_customer_lookup or {}).get("account_to_customer", {}) or {}
+            _extra_frames = []
+            for _df_name in (
+                'team_subs_df_unfiltered',
+                'csconsole_customer_pulse',
+                'csconsole_success_priorities',
+                'csconsole_adoption_barriers',
+                'ap_df',
+            ):
+                if _df_name in locals():
+                    _val = locals()[_df_name]
+                    if isinstance(_val, pd.DataFrame) and not _val.empty:
+                        _extra_frames.append(_val)
+            total_customers = cm.count_customers(
+                ab_df=ab_norm,
+                csone_df=csone_df,
+                extra_frames=_extra_frames if _extra_frames else None,
+                account_to_customer=_account_to_customer,
+            )
+        except Exception as _tc_err:
+            logger.debug(
+                f"[EXCEL] Falling back to AB-only total_customers: {_tc_err}"
+            )
+            total_customers = len(ab_norm['customer_name'].unique()) if not ab_norm.empty else 0
         high_risk_count = len(high_risk_customers)
         
         critical_abs = cm.count_critical_barriers(
@@ -6373,9 +6504,26 @@ def run_customer_renewal_analysis(analysis_id):
         
         # Filter CSConsole data for customer(s)
         if renewal_type == 'renewal_portfolio':
-            # Portfolio: get all customers from team subscriptions
-            all_customers = team_subs_df['BU_NAME'].dropna().unique().tolist() if not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns else []
-            logger.info(f"[[CUSTOMER_COUNT]] Portfolio renewal - found {len(all_customers)} customers from team subscriptions")
+            # Portfolio: get all customers from ALL sources so the renewal
+            # narrative's denominator includes subscription-only,
+            # pulse-only, and CSConsole-only customers — same set the
+            # Word/EI headline uses.  Round 4 fixes the silent
+            # subs-only undercount in the portfolio risk loop.
+            try:
+                _ren_all_set = _get_all_customers_from_all_sources(
+                    ab_norm=customer_ab if customer_ab is not None else None,
+                    csone_df=csone_df_prepared if 'csone_df_prepared' in locals() else None,
+                    team_subs_df=team_subs_df,
+                    csconsole_action_plans=csconsole_action_plans if 'csconsole_action_plans' in locals() else None,
+                    csconsole_customer_pulse=csconsole_customer_pulse if 'csconsole_customer_pulse' in locals() else None,
+                    csconsole_success_priorities=csconsole_success_priorities if 'csconsole_success_priorities' in locals() else None,
+                    csconsole_adoption_barriers=csconsole_adoption_barriers if 'csconsole_adoption_barriers' in locals() else None,
+                )
+                all_customers = sorted([c for c in _ren_all_set if c])
+            except Exception as _ren_err:
+                logger.debug(f"[[RENEWAL]] Falling back to subs-only customers: {_ren_err}")
+                all_customers = team_subs_df['BU_NAME'].dropna().unique().tolist() if not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns else []
+            logger.info(f"[[CUSTOMER_COUNT]] Portfolio renewal - found {len(all_customers)} customers (multi-source canonical)")
             # Ensure adoption barriers have customer_name for risk loop and report (Customer: X —)
             if not customer_ab.empty and all_customers:
                 if 'customer_name' not in customer_ab.columns and 'BU_NAME' in customer_ab.columns:
@@ -6709,7 +6857,15 @@ def run_customer_renewal_analysis(analysis_id):
                 'recommendations': portfolio_recs,
                 'high_risk_customers': high_risk,
                 'medium_risk_customers': medium_risk,
-                'low_risk_customers': [name for name, a in portfolio_renewal_analyses.items() if a.get('renewal_risk_score', a.get('overall_risk_score', 0)) < 30]
+                # Round 4: route the low-risk threshold through the same
+                # canonical RISK_BAND_THRESHOLDS used for high/medium so the
+                # three lists tile the same scoring axis without gaps or
+                # overlap.  Previously hardcoded ``< 30`` left scores in
+                # [30, _RBT['MEDIUM']) classified as neither MEDIUM nor LOW.
+                'low_risk_customers': [
+                    name for name, a in portfolio_renewal_analyses.items()
+                    if a.get('renewal_risk_score', a.get('overall_risk_score', 0)) < _RBT['MEDIUM']
+                ]
             }
             renewal_analysis['break_fix_cases_count'] = sum(
                 a.get('break_fix_cases_count', 0) for a in portfolio_renewal_analyses.values()
@@ -6740,12 +6896,37 @@ def run_customer_renewal_analysis(analysis_id):
         factual_claims = list(renewal_analysis.get("key_findings", [])) + list(renewal_analysis.get("risk_factors", []))
         # Build canonical portfolio metrics so the renewal path enforces the
         # same parity contract as the comprehensive / compact / EI paths.
+        # Round 4: pass the same multi-source frames + account_to_customer
+        # map already used by the Word headline so the renewal narrative's
+        # ``total_customers`` denominator matches the rest of the report
+        # and includes subscription-only / pulse-only customers.
         _renewal_csone_norm = add_case_lifecycle_fields(customer_csone)
+        try:
+            _ren_lookup = build_customer_lookup(
+                team_subs_df if 'team_subs_df' in locals() else None
+            )
+            _ren_account_to_customer = (_ren_lookup or {}).get("account_to_customer", {}) or {}
+        except Exception:
+            _ren_account_to_customer = {}
+        _ren_extra_frames = []
+        for _df_name in (
+            'team_subs_df',
+            'csconsole_customer_pulse',
+            'csconsole_success_priorities',
+            'csconsole_adoption_barriers',
+            'csconsole_action_plans',
+        ):
+            if _df_name in locals():
+                _val = locals()[_df_name]
+                if isinstance(_val, pd.DataFrame) and not _val.empty:
+                    _ren_extra_frames.append(_val)
         renewal_portfolio_metrics = cm.build_portfolio_metrics(
             ab_df=customer_ab if customer_ab is not None else pd.DataFrame(),
             csone_df=_renewal_csone_norm,
             risk_profiles=None,
             defects=software_defects if isinstance(software_defects, dict) else None,
+            extra_customer_frames=_ren_extra_frames if _ren_extra_frames else None,
+            account_to_customer=_ren_account_to_customer,
         )
         consistency_check = validate_report_consistency(
             customer_ab,
@@ -9009,7 +9190,20 @@ def ask_ai_portfolio():
                 if not account_ids:
                     sections.append("No account IDs found for detailed analysis.")
                 else:
-                    acct_batch = account_ids[:100]
+                    # Round 4: surface the account-batch cap so the LLM
+                    # cannot describe the per-account sections as
+                    # "complete" when only the first 100 accounts were
+                    # actually fetched.  Mirrors the truncation
+                    # disclosures used by fetch_enhanced_account_insights.
+                    _ASK_AI_ACCOUNT_BATCH_LIMIT = 100
+                    _account_ids_total = len(account_ids)
+                    acct_batch = account_ids[:_ASK_AI_ACCOUNT_BATCH_LIMIT]
+                    if _account_ids_total > _ASK_AI_ACCOUNT_BATCH_LIMIT:
+                        sections.append(
+                            f"[NOTE] Account-level insights cover the first "
+                            f"{_ASK_AI_ACCOUNT_BATCH_LIMIT} of {_account_ids_total} account IDs "
+                            f"in this scope (sample only; aggregate counts above are unaffected)."
+                        )
                     customer_batch_names = (
                         team_subs_df[
                             team_subs_df['ACCOUNT_ID_C'].isin(acct_batch)
@@ -9366,8 +9560,13 @@ def ask_ai_portfolio():
                 logger.debug("app context close failed: %s", _e)
 
         # --- Section 11: EXTERNAL INTELLIGENCE (NEW) ---
+        # Round 4: pass the user-requested ``days`` window to the
+        # incident-store fetch so the briefing's "active incidents" /
+        # "recent bugs" honor the same horizon as the rest of the
+        # context.  Without ``days_back=days`` the incident store
+        # silently defaulted to 365 days.
         try:
-            intel = get_all_external_intel()
+            intel = get_all_external_intel(days_back=days)
             if intel:
                 active_incidents = [i for i in (intel.get('incidents') or []) if (i.get('status') or '').lower() not in ('resolved', 'completed')]
                 if active_incidents:
@@ -9651,7 +9850,11 @@ def ask_intel():
         _ai_days = max(1, min(_ai_days_raw, 365))
 
         if is_grounded_ask_ai_enabled():
-            grounded_result = run_intel_grounded_ask_ai(question)
+            # Round 4: pass the user-requested analysis window through
+            # to the grounded path.  Without ``days=_ai_days`` the
+            # grounded fetch defaulted to 365 days even when the UI
+            # said "last 7 days", causing the prompt to silently widen.
+            grounded_result = run_intel_grounded_ask_ai(question, days=_ai_days)
             if grounded_result.get('ok'):
                 return jsonify({
                     'ok': True,
@@ -10395,11 +10598,22 @@ def run_subscription_analysis(analysis_id):
             briefing_parts = [f"## Subscription Briefing: {sub_data.get('customer_name', subscription_id)}"]
             briefing_parts.append(f"Subscription ID: {subscription_id}")
             briefing_parts.append(f"Analysis window: {days} days")
+            # Round 4: surface the 50-item display cap so the LLM cannot
+            # describe a 200-item section as "complete"; section header
+            # already shows the true total ``len(items)``.
+            _SUB_BRIEF_ITEM_LIMIT = 50
             for section_key in ('adoption_barriers', 'action_plans', 'customer_pulse', 'success_priorities'):
                 items = sub_data.get(section_key, [])
                 if items:
-                    briefing_parts.append(f"\n### {section_key.replace('_', ' ').title()} ({len(items)} items)")
-                    for item in items[:50]:
+                    _shown = min(len(items), _SUB_BRIEF_ITEM_LIMIT)
+                    _suffix = (
+                        f" — showing sample of {_shown} of {len(items)} items"
+                        if len(items) > _SUB_BRIEF_ITEM_LIMIT else ""
+                    )
+                    briefing_parts.append(
+                        f"\n### {section_key.replace('_', ' ').title()} ({len(items)} items{_suffix})"
+                    )
+                    for item in items[:_SUB_BRIEF_ITEM_LIMIT]:
                         if isinstance(item, dict):
                             briefing_parts.append(f"- {', '.join(f'{k}: {v}' for k, v in item.items() if v)}")
                         else:
@@ -10519,8 +10733,19 @@ def run_subscription_analysis(analysis_id):
                 ab_p = doc.add_paragraph()
                 ab_p.add_run(f'Found {len(ab_df)} adoption barriers:')
                 
-                # Show critical/high severity barriers
-                critical_ab = ab_df[ab_df['SEVERITY_C'].astype(str).str.contains('Critical|High', case=False, na=False)] if 'SEVERITY_C' in ab_df.columns else ab_df.iloc[0:0]
+                # Show critical/high severity barriers.  Round 4: route
+                # severity classification through the canonical
+                # ``normalize_severity_label`` so labels like
+                # ``Severity 1 - Critical`` and ``S1 - Critical`` are
+                # detected without false positives from substrings such
+                # as ``Higher Priority`` (which the previous
+                # ``str.contains('Critical|High', case=False)`` matched
+                # by accident).  Same pattern Compact already uses.
+                if 'SEVERITY_C' in ab_df.columns:
+                    _sev_norm = ab_df['SEVERITY_C'].apply(normalize_severity_label)
+                    critical_ab = ab_df[_sev_norm.isin(['Critical', 'High'])]
+                else:
+                    critical_ab = ab_df.iloc[0:0]
                 if not critical_ab.empty:
                     ab_p.add_run(f' {len(critical_ab)} critical/high severity barriers requiring immediate attention.')
                 
@@ -10552,19 +10777,20 @@ def run_subscription_analysis(analysis_id):
                 ap_p = doc.add_paragraph()
                 ap_p.add_run(f'Found {len(ap_df)} action plans:')
                 
-                # Show unresolved plans
+                # Show unresolved/completed plans.  Round 4: route status
+                # classification through ``normalize_status_label`` so
+                # variations ("In-Progress", "Completed - Cancelled",
+                # mixed case, leading whitespace) are bucketed
+                # consistently with the rest of the report.
                 if 'STATUS_C' in ap_df.columns:
-                    unresolved_plans = ap_df[ap_df['STATUS_C'].astype(str).str.contains('Open|New|In Progress', case=False, na=False)]
+                    _status_norm = ap_df['STATUS_C'].apply(normalize_status_label)
+                    unresolved_plans = ap_df[_status_norm.isin(['Open', 'New', 'In Progress'])]
+                    completed_plans = ap_df[_status_norm.isin(['Completed', 'Closed'])]
                 else:
                     unresolved_plans = ap_df.iloc[0:0]
+                    completed_plans = ap_df.iloc[0:0]
                 if not unresolved_plans.empty:
                     ap_p.add_run(f' {len(unresolved_plans)} unresolved action plans.')
-                
-                # Show completed plans
-                if 'STATUS_C' in ap_df.columns:
-                    completed_plans = ap_df[ap_df['STATUS_C'].astype(str).str.contains('Completed|Closed', case=False, na=False)]
-                else:
-                    completed_plans = ap_df.iloc[0:0]
                 if not completed_plans.empty:
                     ap_p.add_run(f' {len(completed_plans)} completed action plans.')
             else:

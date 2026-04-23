@@ -16,6 +16,43 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from snowflake_table_policy import is_table_blocked
 
+# Round 4: route renewal-risk band labeling through the canonical
+# ``RISK_BAND_THRESHOLDS`` so the same numeric score gets the same
+# CRITICAL/HIGH/MEDIUM/LOW label everywhere in the platform.  Falling
+# back to a local copy of the thresholds preserves behavior if the
+# import ever fails (e.g. circular import during early startup).
+try:
+    from risk_scoring import RISK_BAND_THRESHOLDS as _RISK_BAND_THRESHOLDS_0_100
+except Exception:  # pragma: no cover - defensive only
+    _RISK_BAND_THRESHOLDS_0_100 = {
+        "CRITICAL": 75,
+        "HIGH": 55,
+        "MEDIUM": 35,
+        "LOW": 15,
+    }
+
+
+def _renewal_risk_category_from_score(score_0_100: float) -> str:
+    """Round 4: Map a 0-100 renewal-risk score to a canonical band label.
+
+    Uses the same thresholds as ``risk_scoring._risk_band`` (CRITICAL=75,
+    HIGH=55, MEDIUM=35, LOW=15) so the renewal Word report and the
+    cross-report summary cannot disagree on what "HIGH" means at score 60.
+    The MINIMAL bucket is preserved for renewal-specific narratives where
+    a "no risk signal" callout differs from the canonical HEALTHY label.
+    """
+    score = max(0.0, min(100.0, float(score_0_100 or 0.0)))
+    if score >= _RISK_BAND_THRESHOLDS_0_100["CRITICAL"]:
+        return "CRITICAL"
+    if score >= _RISK_BAND_THRESHOLDS_0_100["HIGH"]:
+        return "HIGH"
+    if score >= _RISK_BAND_THRESHOLDS_0_100["MEDIUM"]:
+        return "MEDIUM"
+    if score >= _RISK_BAND_THRESHOLDS_0_100["LOW"]:
+        return "LOW"
+    return "MINIMAL"
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -112,12 +149,18 @@ class AdvancedRenewalAnalyzer:
             account_info = self._get_customer_account_info(customer_name)
             analysis_results['data_sources']['account_info'] = account_info
             
-            if not account_info:
+            # Round 4: ``account_info`` now carries a reserved ``_meta`` key
+            # for fetch-limit disclosure; iterate only the real account
+            # records when checking for emptiness or selecting the first.
+            _account_records = {
+                k: v for k, v in account_info.items() if not str(k).startswith('_')
+            }
+            if not _account_records:
                 analysis_results['renewal_risk_category'] = 'HIGH'
                 analysis_results['key_findings'].append('Customer not found in system - HIGH RISK')
                 return analysis_results
             
-            first_account = list(account_info.values())[0] if account_info else {}
+            first_account = next(iter(_account_records.values()))
             account_id = first_account.get('ACCOUNT_ID_C')
             logger.info(f"Using account_id: {account_id} for customer: {customer_name}")
             if account_id is None:
@@ -206,8 +249,12 @@ class AdvancedRenewalAnalyzer:
             cur.execute(query, (f'%{customer_name}%', f'%{customer_name}%'))
             results = cur.fetchall()
             
+            # Round 4: surface the LIMIT 10 truncation so downstream
+            # consumers can disclose that only the first 10 matches were
+            # inspected.  Stored under a reserved key prefixed with ``_``
+            # so it cannot collide with a legitimate ``ACCOUNT_ID_C``.
+            _FETCH_LIMIT = 10
             if results:
-                # Convert to dictionary format
                 account_info = {}
                 for row in results:
                     if row[0] not in account_info:  # ACCOUNT_ID_C
@@ -223,12 +270,22 @@ class AdvancedRenewalAnalyzer:
                             'CONTRACT_NUMBER': row[8],
                             'SUBSCRIPTION_ID': row[9]
                         }
-                
-                logger.info(f"✅ Found {len(account_info)} account records for {customer_name}")
+                account_info['_meta'] = {
+                    'fetch_limit': _FETCH_LIMIT,
+                    'rows_returned': len(results),
+                    'was_truncated': len(results) >= _FETCH_LIMIT,
+                }
+                logger.info(f"✅ Found {len(account_info) - 1} account records for {customer_name}")
                 return account_info
             else:
                 logger.warning(f"⚠️ No account information found for {customer_name}")
-                return {}
+                return {
+                    '_meta': {
+                        'fetch_limit': _FETCH_LIMIT,
+                        'rows_returned': 0,
+                        'was_truncated': False,
+                    }
+                }
                 
         except Exception as e:
             _log_query_fallback(f"Account info query for {customer_name}", e)
@@ -410,48 +467,67 @@ class AdvancedRenewalAnalyzer:
     def _get_usage_adoption_metrics(self, account_id: str, days: int) -> Dict:
         """Get usage and adoption metrics"""
         logger.info(f"📊 Getting usage/adoption metrics for account: {account_id}")
-        
+
         cur = None
         try:
             cur = self.ctx.cursor()
-            
-            # Query action plans and adoption barriers for usage patterns
+
+            # Round 4: parameterize the previously hardcoded 30-day
+            # "RECENT_ACTIVITY" cuts so they honor the same analysis
+            # window as the surrounding query.  We cap at the requested
+            # ``days`` so a 7-day run does not silently report the
+            # last 30 days as "recent".  Bound at min 1 / max ``days``.
+            try:
+                _recent_window = max(1, min(int(days), int(days)))
+            except (TypeError, ValueError):
+                _recent_window = 30
+
+            # Query action plans and adoption barriers for usage patterns.
+            # All time-window literals are parameterized so the bind
+            # values are the single source of truth.
             query = """
-            SELECT 
+            SELECT
                 'ACTION_PLAN' as RECORD_TYPE,
                 COUNT(*) as RECORD_COUNT,
                 AVG(CASE WHEN STATUS_C = 'Completed' THEN 1 ELSE 0 END) as COMPLETION_RATE,
-                COUNT(CASE WHEN DATE(CREATED_DATE) >= DATEADD(day, -30, CURRENT_DATE()) THEN 1 END) as RECENT_ACTIVITY
-            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW 
-            WHERE record_type_id = '0122T000000QHBGQA4' 
+                COUNT(CASE WHEN DATE(CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE()) THEN 1 END) as RECENT_ACTIVITY
+            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
+            WHERE record_type_id = '0122T000000QHBGQA4'
               AND ACCOUNT_ID_C = %s
               AND DATE(CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())
-            
+
             UNION ALL
-            
-            SELECT 
+
+            SELECT
                 'ADOPTION_BARRIER' as RECORD_TYPE,
                 COUNT(*) as RECORD_COUNT,
                 AVG(CASE WHEN STATUS_C = 'Resolved' THEN 1 ELSE 0 END) as COMPLETION_RATE,
-                COUNT(CASE WHEN DATE(CREATED_DATE) >= DATEADD(day, -30, CURRENT_DATE()) THEN 1 END) as RECENT_ACTIVITY
-            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW 
-            WHERE record_type_id = '0122T000000GJfTQAW' 
+                COUNT(CASE WHEN DATE(CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE()) THEN 1 END) as RECENT_ACTIVITY
+            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
+            WHERE record_type_id = '0122T000000GJfTQAW'
               AND ACCOUNT_ID_C = %s
               AND DATE(CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())
-            
+
             UNION ALL
-            
-            SELECT 
+
+            SELECT
                 'CUSTOMER_PULSE' as RECORD_TYPE,
                 COUNT(*) as RECORD_COUNT,
                 AVG(CASE WHEN STATUS_C = 'Completed' THEN 1 ELSE 0 END) as COMPLETION_RATE,
-                COUNT(CASE WHEN DATE(CREATEDDATE) >= DATEADD(day, -30, CURRENT_DATE()) THEN 1 END) as RECENT_ACTIVITY
-            FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C 
+                COUNT(CASE WHEN DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE()) THEN 1 END) as RECENT_ACTIVITY
+            FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C
             WHERE ACCOUNT__C = %s
               AND DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())
             """
-            
-            cur.execute(query, (account_id, days, account_id, days, account_id, days))
+
+            cur.execute(
+                query,
+                (
+                    _recent_window, account_id, days,
+                    _recent_window, account_id, days,
+                    _recent_window, account_id, days,
+                ),
+            )
             results = cur.fetchall()
             
             usage_metrics = {
@@ -536,12 +612,19 @@ class AdvancedRenewalAnalyzer:
         try:
             cur = self.ctx.cursor()
             
-            # Query success priorities for engagement metrics
+            # Round 4: parameterize the previously hardcoded 30-day
+            # ``RECENT_PRIORITIES`` cut so the recent-engagement count
+            # honors the requested analysis window.
+            try:
+                _recent_window = max(1, int(days))
+            except (TypeError, ValueError):
+                _recent_window = 30
+
             query = """
             SELECT 
                 COUNT(*) as TOTAL_PRIORITIES,
                 COUNT(CASE WHEN STATUS_C = 'Completed' THEN 1 END) as COMPLETED_PRIORITIES,
-                COUNT(CASE WHEN DATE(CREATEDDATE) >= DATEADD(day, -30, CURRENT_DATE()) THEN 1 END) as RECENT_PRIORITIES,
+                COUNT(CASE WHEN DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE()) THEN 1 END) as RECENT_PRIORITIES,
                 AVG(CASE WHEN PRIORITY_C = 'High' THEN 1 
                          WHEN PRIORITY_C = 'Medium' THEN 0.5 
                          WHEN PRIORITY_C = 'Low' THEN 0.25 
@@ -551,7 +634,7 @@ class AdvancedRenewalAnalyzer:
               AND DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())
             """
             
-            cur.execute(query, (account_id, days))
+            cur.execute(query, (_recent_window, account_id, days))
             results = cur.fetchall()
             
             if results:
@@ -628,7 +711,16 @@ class AdvancedRenewalAnalyzer:
                 
                 adoption_metrics['total_barriers'] += count
                 
-                if status == 'Resolved':
+                # Round 4: route status through canonical
+                # ``normalize_status_label`` so spelling variations
+                # ("Resolved - Workaround", "RESOLVED ", lowercase) are
+                # counted consistently with the rest of the platform.
+                try:
+                    from data_normalization import normalize_status_label as _norm_status
+                    _status_canonical = _norm_status(status)
+                except Exception:
+                    _status_canonical = str(status or '').strip().title()
+                if _status_canonical in ('Resolved', 'Closed'):
                     adoption_metrics['resolved_barriers'] += count
                 
                 # Round 3 hardening: route severity through canonical
@@ -784,18 +876,14 @@ class AdvancedRenewalAnalyzer:
         
         # Normalize risk score to 0-100
         risk_score = max(0, min(100, risk_score))
-        
-        # Determine risk category
-        if risk_score >= 80:
-            risk_category = 'CRITICAL'
-        elif risk_score >= 60:
-            risk_category = 'HIGH'
-        elif risk_score >= 40:
-            risk_category = 'MEDIUM'
-        elif risk_score >= 20:
-            risk_category = 'LOW'
-        else:
-            risk_category = 'MINIMAL'
+
+        # Round 4: route through the canonical RISK_BAND_THRESHOLDS
+        # (75/55/35/15) so the renewal-risk label matches every other
+        # report that scores customers on a 0-100 scale.  Using the
+        # legacy 80/60/40/20 cuts caused the same numeric score to
+        # surface as e.g. "HIGH" in the renewal Word and "MEDIUM" in
+        # the executive summary.
+        risk_category = _renewal_risk_category_from_score(risk_score)
         
         return {
             'renewal_risk_score': risk_score,

@@ -143,6 +143,36 @@ def _records_from_dataframe(
 ) -> Tuple[List[EvidenceRecord], Set[str]]:
     if df is None or df.empty:
         return [], set()
+    # Round 4: present human-readable column names to the LLM rather
+    # than the raw Snowflake/CSConsole schema names.  This prevents
+    # quoted evidence lines from carrying confusing identifiers like
+    # ``SUBJECT_C`` or ``RELATED_CUSTOMER__C`` which the model has been
+    # observed to echo verbatim into its narrative.
+    _SCHEMA_LABELS: Dict[str, str] = {
+        "SUBJECT_C": "Subject",
+        "SUBJECT": "Subject",
+        "DESCRIPTION_C": "Description",
+        "DESCRIPTION": "Description",
+        "RELATED_CUSTOMER__C": "Customer",
+        "CUSTOMER_BU_NAME__C": "Customer",
+        "BU_NAME": "Customer",
+        "ACCOUNT_NAME": "Account",
+        "ACCOUNT_ID_C": "Account ID",
+        "PRIORITY_C": "Priority",
+        "PRIORITY": "Priority",
+        "SEVERITY_C": "Severity",
+        "STATUS_C": "Status",
+        "STATUS": "Status",
+        "CASE_NUMBER": "Case Number",
+        "BARRIER_TYPE_C": "Barrier Type",
+        "ROOT_CAUSE_C": "Root Cause",
+        "RESOLUTION_C": "Resolution",
+        "OWNER_NAME_C": "Owner",
+        "OWNER_C": "Owner",
+        "CREATED_DATE": "Created",
+        "CLOSED_DATE": "Closed",
+        "LAST_MODIFIED_DATE": "Last Modified",
+    }
     records: List[EvidenceRecord] = []
     citation_ids: Set[str] = set()
     for _, row in df.head(max_rows).iterrows():
@@ -159,7 +189,8 @@ def _records_from_dataframe(
                     continue
                 clean = str(value).strip()
                 if clean and clean.lower() != "nan":
-                    detail_parts.append(f"{col}: {clean}")
+                    label = _SCHEMA_LABELS.get(str(col).upper(), str(col))
+                    detail_parts.append(f"{label}: {clean}")
         text = " | ".join(detail_parts) if detail_parts else f"{source_type} record"
         records.append(
             EvidenceRecord(
@@ -203,12 +234,16 @@ def build_evidence_context(
     allowed_ids: Set[str] = set()
     used_records = 0
     current_len = 0
-    for record in ranked[:max_records]:
+    total_candidates = len(ranked)
+    considered = ranked[:max_records]
+    budget_dropped = 0
+    for record in considered:
         line = (
             f"- [SourceID: {record.source_id}] [{record.source_type}] "
             f"Customer: {record.customer} | Time: {record.timestamp or 'N/A'} | {record.text}"
         )
         if current_len + len(line) + 1 > char_budget:
+            budget_dropped += 1
             continue
         kept.append(line)
         current_len += len(line) + 1
@@ -217,6 +252,15 @@ def build_evidence_context(
         allowed_ids.update(_extract_ids_from_text(record.text))
     if not kept:
         return "No evidence records were available for this question.", set(), 0
+    # Round 4: when ``max_records`` or ``char_budget`` clip the evidence,
+    # append an explicit truncation marker so the LLM knows it is seeing
+    # a sample and cannot describe partial coverage as exhaustive.
+    rank_dropped = max(total_candidates - len(considered), 0)
+    if rank_dropped or budget_dropped:
+        kept.append(
+            f"[Evidence truncated: included {used_records} of {total_candidates} ranked records "
+            f"due to context budget (rank-cap dropped {rank_dropped}, char-budget dropped {budget_dropped}).]"
+        )
     return "\n".join(kept), allowed_ids, used_records
 
 
@@ -396,7 +440,13 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         if not account_ids:
             return {"ok": True, "answer": "No account IDs found for detailed analysis in this scope.", "context_summary": "Data: no account IDs"}
 
-        account_batch = account_ids[: int(os.environ.get("ADOPTIQ_ASK_AI_MAX_ACCOUNTS", "120"))]
+        # Round 4: unify the legacy and grounded Ask-AI account batch
+        # caps to the same default (100) so two sections of the same
+        # model context cannot disagree on how many accounts were
+        # actually inspected.  Override via ``ADOPTIQ_ASK_AI_MAX_ACCOUNTS``.
+        _account_batch_limit = int(os.environ.get("ADOPTIQ_ASK_AI_MAX_ACCOUNTS", "100"))
+        account_batch = account_ids[:_account_batch_limit]
+        _account_batch_truncated = len(account_ids) > _account_batch_limit
         customer_batch_names = (
             team_subs_df[team_subs_df["ACCOUNT_ID_C"].isin(account_batch)]["BU_NAME"].dropna().astype(str).unique().tolist()
             if {"ACCOUNT_ID_C", "BU_NAME"}.issubset(set(team_subs_df.columns))
@@ -459,7 +509,22 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             "claims must be a list of objects with fields: statement (string) and citations (string array). "
             "Only cite SourceID values present in the provided evidence."
         )
+        # Round 4: explicitly state the analysis window and the data
+        # retrieval timestamp so the LLM grounds its temporal claims on
+        # the same horizon as the underlying fetch.  Previously the
+        # ``days`` value was buried inside the scope line which the LLM
+        # frequently ignored when summarizing "recent" trends.
+        from datetime import datetime as _dt
+        _retrieved_at = _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        _account_batch_disclosure = (
+            f"[NOTE] Account-level evidence covers the first "
+            f"{len(account_batch)} of {len(account_ids)} accounts in this scope (sample only).\n"
+            if _account_batch_truncated else ""
+        )
         user_prompt = (
+            f"Analysis window: last {req.days} days\n"
+            f"Data retrieved at: {_retrieved_at} (UTC)\n"
+            f"{_account_batch_disclosure}"
             f"Question: {req.question}\n"
             f"Scope: manager={req.manager}, technology={req.technology}, days={req.days}\n"
             f"Retrieval domains: {', '.join(retrieval_plan['domains'])}\n"
@@ -585,7 +650,16 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
         "Return STRICT JSON only with keys: executive_summary, claims, actions, unknowns. "
         "Each claim must include citations that exactly match SourceID values from evidence."
     )
+    # Round 4: inject the analysis window and the data-retrieval
+    # timestamp into the user prompt so the LLM cannot describe the
+    # evidence as "recent" without anchoring to a concrete window.
+    # This closes the long-standing fidelity gap where a 7-day request
+    # could surface 365-day-old incidents narrated as "recent".
+    from datetime import datetime as _dt
+    _retrieved_at = _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     user_prompt = (
+        f"Analysis window: last {_intel_days} days\n"
+        f"Data retrieved at: {_retrieved_at} (UTC)\n"
         f"Question: {question}\n"
         f"Citation whitelist: {', '.join(sorted(list(allowed_ids))[:400])}\n"
         f"Evidence:\n{context}\n"

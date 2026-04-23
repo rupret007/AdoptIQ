@@ -177,7 +177,17 @@ def prefetch_datasets(run_ctx: AnalysisRunContext, dataset_names: Iterable[str])
             results[name] = run_ctx.get_or_fetch(name)
         except Exception as e:
             logger.warning("Snowflake prefetch failed for %s: %s", name, e)
+            # Round 4: tag the empty placeholder with ``fetch_error`` so
+            # downstream truncation-aware consumers can distinguish a
+            # legitimate zero-row result from a query failure.  Pandas
+            # ``.attrs`` survives most concat/copy paths (we add the
+            # attribute to the cache copy *and* the returned copy).
             empty = pd.DataFrame()
+            try:
+                empty.attrs['fetch_error'] = str(e).strip() or e.__class__.__name__
+                empty.attrs['fetch_error_dataset'] = name
+            except Exception as _attr_err:
+                logger.debug("Could not set fetch_error attr on %s: %s", name, _attr_err)
             with run_ctx._lock:
                 run_ctx.cache[name] = empty
                 run_ctx.metrics[f"{name}_errors"] = run_ctx.metrics.get(f"{name}_errors", 0) + 1

@@ -120,10 +120,48 @@ def validate_report_consistency(
         # report tables / dashboards.
         metrics["critical_p1"] = _cm.count_p1(csone_df)
         metrics["high_p2"] = _cm.count_p2(csone_df)
+        # Round 4: also surface the canonical escalated total so the
+        # contract can pin (and detect drift in) the P1+P2 figure used
+        # across report headlines, AI prompts, and Excel summaries.
+        try:
+            metrics["escalated_cases"] = _cm.count_escalated(csone_df)
+        except Exception:
+            metrics["escalated_cases"] = metrics["critical_p1"] + metrics["high_p2"]
         priority_buckets = _cm.count_priority_breakdown(csone_df)
         metrics["p3_cases"] = priority_buckets["P3"]
         metrics["p4_cases"] = priority_buckets["P4"]
         metrics["unknown_priority_cases"] = priority_buckets["Unknown"]
+
+        # Round 4: open / closed TAC counts, derived via canonical
+        # status normalization so the validator and report templates
+        # cannot disagree on what "open" or "closed" means.
+        try:
+            from data_normalization import (
+                add_case_lifecycle_fields as _enrich,
+                normalize_status_label as _norm_status,
+            )
+            _status_enriched = _enrich(csone_df) if "status_norm" not in csone_df.columns else csone_df
+            if "status_norm" in _status_enriched.columns:
+                _status_norm = _status_enriched["status_norm"].astype(str)
+            else:
+                _status_col = next(
+                    (c for c in ("STATUS_C", "STATUS", "Status") if c in _status_enriched.columns),
+                    None,
+                )
+                _status_norm = (
+                    _status_enriched[_status_col].apply(_norm_status)
+                    if _status_col else pd.Series([], dtype=str)
+                )
+            _open_states = {"Open", "New", "InProgress", "WaitingOnCustomer", "Pending"}
+            _closed_states = {"Closed", "Resolved", "Cancelled"}
+            metrics["count_open_tac"] = int(_status_norm.isin(_open_states).sum())
+            metrics["count_closed_tac"] = int(_status_norm.isin(_closed_states).sum())
+        except Exception as _open_close_err:
+            metrics["count_open_tac"] = 0
+            metrics["count_closed_tac"] = 0
+            warnings.append(
+                f"Open/closed TAC derivation failed: {str(_open_close_err).strip() or _open_close_err.__class__.__name__}"
+            )
 
         # Case type classification (break/fix vs provisioning) - canonical.
         # If the caller did not pre-enrich the DataFrame, we enrich on the
@@ -202,16 +240,55 @@ def validate_report_consistency(
         reported_p2 = portfolio_metrics.get("high_p2", portfolio_metrics.get("p2_cases", None))
         if reported_p2 is not None and int(reported_p2) != metrics["high_p2"]:
             errors.append("Portfolio metric mismatch: high_p2 does not match canonical severity counting.")
-        # Extended priority parity (P3, P4, Unknown).
+        # Extended priority parity (P3, P4, Unknown, escalated).
         for key, expected_metric in (
             ("p3_cases", metrics["p3_cases"]),
             ("p4_cases", metrics["p4_cases"]),
             ("unknown_priority_cases", metrics["unknown_priority_cases"]),
+            ("escalated_cases", metrics.get("escalated_cases", 0)),
         ):
             reported = portfolio_metrics.get(key)
             if reported is not None and int(reported) != int(expected_metric):
                 errors.append(
                     f"Portfolio metric mismatch: {key} ({int(reported)}) does not match canonical severity counting ({int(expected_metric)})."
+                )
+
+        # Round 4: open / closed TAC parity.  Reported as warnings
+        # because some report variants (e.g. archived snapshots) carry
+        # historical totals that intentionally differ from the live
+        # canonical view.
+        for key, expected_metric in (
+            ("count_open_tac", metrics.get("count_open_tac", 0)),
+            ("count_closed_tac", metrics.get("count_closed_tac", 0)),
+        ):
+            reported = portfolio_metrics.get(key)
+            if reported is not None and int(reported) != int(expected_metric):
+                warnings.append(
+                    f"Portfolio metric drift: {key} ({int(reported)}) differs from canonical normalized status counting ({int(expected_metric)})."
+                )
+
+        # Round 4: dual BEMS check.  Some surfaces (Leader mode) report
+        # ``bems_combined`` (BEMS detected across BOTH AB and CSOne),
+        # while the canonical ``bems_count`` is TAC-only.  Track both
+        # explicitly so the Leader variance is surfaced as a tracked
+        # warning rather than masked silently.
+        if "bems_tac_only" in portfolio_metrics:
+            try:
+                if int(portfolio_metrics.get("bems_tac_only", 0)) != bems_count:
+                    warnings.append(
+                        f"Portfolio metric drift: bems_tac_only ({int(portfolio_metrics['bems_tac_only'])}) differs from canonical TAC BEMS detection ({bems_count})."
+                    )
+            except (TypeError, ValueError):
+                pass
+        if "bems_combined" in portfolio_metrics and ab_df is not None and not ab_df.empty:
+            try:
+                ab_bems = int(detect_bems_mask(ab_df).sum())
+            except Exception:
+                ab_bems = 0
+            metrics["bems_combined_observed"] = ab_bems + bems_count
+            if int(portfolio_metrics["bems_combined"]) != metrics["bems_combined_observed"]:
+                warnings.append(
+                    f"Portfolio metric drift: bems_combined ({int(portfolio_metrics['bems_combined'])}) differs from observed AB+TAC BEMS detection ({metrics['bems_combined_observed']})."
                 )
         # Case-type parity (break/fix vs provisioning).
         for key, expected_metric in (
@@ -224,16 +301,35 @@ def validate_report_consistency(
                     f"Portfolio metric mismatch: {key} ({int(reported)}) does not match canonical case-type counting ({int(expected_metric)})."
                 )
 
-        # Risk-band parity (high/medium/low/healthy). These are checked as
-        # warnings rather than errors because risk_band depends on the
-        # selected scoring scale and is recomputed per profile.
+        # Risk-band parity (critical/high/medium/low/healthy). These
+        # are checked as warnings rather than errors because risk_band
+        # depends on the selected scoring scale and is recomputed per
+        # profile.
+        # Round 4: split CRITICAL and HIGH into distinct buckets so a
+        # report that swaps the two categories no longer shows as
+        # "matching" against the merged ``high_risk_customers`` total.
+        # Maintain ``high_risk_customers`` as the legacy combined sum
+        # (CRITICAL+HIGH) for back-compat with existing report keys
+        # while also surfacing ``critical_risk_customers`` and
+        # ``high_only_risk_customers`` as Round 3 introduced them.
         if risk_data is not None:
-            band_observed = {"high": 0, "medium": 0, "low": 0, "healthy": 0}
+            band_observed = {
+                "critical": 0,
+                "high": 0,
+                "high_only": 0,
+                "medium": 0,
+                "low": 0,
+                "healthy": 0,
+            }
             for profile in risk_data.values():
                 if not isinstance(profile, dict):
                     continue
                 band = str(profile.get("risk_band", "")).strip().upper()
-                if band == "CRITICAL" or band == "HIGH":
+                if band == "CRITICAL":
+                    band_observed["critical"] += 1
+                    band_observed["high"] += 1  # legacy combined bucket
+                elif band == "HIGH":
+                    band_observed["high_only"] += 1
                     band_observed["high"] += 1
                 elif band == "MEDIUM":
                     band_observed["medium"] += 1
@@ -243,6 +339,8 @@ def validate_report_consistency(
                     band_observed["healthy"] += 1
             metrics["risk_band_observed"] = band_observed
             for key, observed in (
+                ("critical_risk_customers", band_observed["critical"]),
+                ("high_only_risk_customers", band_observed["high_only"]),
                 ("high_risk_customers", band_observed["high"]),
                 ("medium_risk_customers", band_observed["medium"]),
                 ("low_risk_customers", band_observed["low"]),

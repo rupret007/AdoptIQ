@@ -423,18 +423,44 @@ def get_all_external_intel(days_back: int = 365) -> Dict:
     rendered lists, so the headline counts on the page agree with the
     rows beneath them. ``*_stats_global`` keys are also returned for
     callers that need the all-time totals.
+
+    Round 4: include explicit ``list_truncated`` / ``list_fetch_limit``
+    flags so consumers can disclose that the lists are capped at
+    ``_LIST_FETCH_LIMIT`` rows even when ``incident_stats['count']``
+    (an unbounded ``COUNT(*)``) reports a larger total.
     """
+    _LIST_FETCH_LIMIT = 500
+    incidents = get_historical_incidents(days_back=days_back, limit=_LIST_FETCH_LIMIT)
+    bugs = get_historical_bugs(days_back=days_back, limit=_LIST_FETCH_LIMIT)
+    maintenances = get_historical_maintenances(days_back=days_back, limit=_LIST_FETCH_LIMIT)
+    incident_stats = get_incident_statistics(days_back=days_back)
+    bug_stats = get_bug_statistics(days_back=days_back)
+    maintenance_stats = get_maintenance_statistics(days_back=days_back)
+
+    def _list_truncated(rows, stats) -> bool:
+        try:
+            total = int((stats or {}).get('count') or 0)
+        except (TypeError, ValueError):
+            total = 0
+        return len(rows) >= _LIST_FETCH_LIMIT and total > _LIST_FETCH_LIMIT
+
     return {
-        'incidents': get_historical_incidents(days_back=days_back, limit=500),
-        'bugs': get_historical_bugs(days_back=days_back, limit=500),
-        'maintenances': get_historical_maintenances(days_back=days_back, limit=500),
-        'incident_stats': get_incident_statistics(days_back=days_back),
-        'bug_stats': get_bug_statistics(days_back=days_back),
-        'maintenance_stats': get_maintenance_statistics(days_back=days_back),
+        'incidents': incidents,
+        'bugs': bugs,
+        'maintenances': maintenances,
+        'incident_stats': incident_stats,
+        'bug_stats': bug_stats,
+        'maintenance_stats': maintenance_stats,
         'incident_stats_global': get_incident_statistics(),
         'bug_stats_global': get_bug_statistics(),
         'maintenance_stats_global': get_maintenance_statistics(),
         'days_back': int(days_back),
+        'list_fetch_limit': _LIST_FETCH_LIMIT,
+        'list_truncated': {
+            'incidents': _list_truncated(incidents, incident_stats),
+            'bugs': _list_truncated(bugs, bug_stats),
+            'maintenances': _list_truncated(maintenances, maintenance_stats),
+        },
     }
 
 

@@ -111,8 +111,29 @@ class EnhancedSnowflakeInsights:
             return insights
             
         except Exception as e:
+            # Round 4: do NOT silently fall back to mock data on real
+            # query failures.  Returning a populated mock_insights dict
+            # made downstream reports treat sample numbers as measured,
+            # which is the largest single source of accidental
+            # fabrication in the suite.  Surface an explicit error and
+            # mark ``data_quality='mock'`` so any UI that wants to show
+            # placeholder values can opt-in via ``mock_payload``.
             _log_query_fallback(f"Enhanced insights generation for {customer_name}", e)
-            return self._get_mock_insights(customer_name, days)
+            try:
+                _mock_payload = self._get_mock_insights(customer_name, days)
+            except Exception as _mock_err:
+                logger.debug("Mock fallback also failed: %s", _mock_err)
+                _mock_payload = None
+            return {
+                'ok': False,
+                'error': f"Enhanced insights generation failed: {str(e).strip() or e.__class__.__name__}",
+                'data_quality': 'mock',
+                'customer': customer_name,
+                'days_back': days,
+                'insights': {},
+                'source_attribution': {},
+                'mock_payload': _mock_payload,
+            }
     
     def _get_account_insights(self, customer_name: str) -> Dict:
         """Get account-level insights with source attribution"""

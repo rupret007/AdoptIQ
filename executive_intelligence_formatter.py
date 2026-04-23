@@ -297,7 +297,24 @@ class ExecutiveIntelligenceFormatter:
             risk_para.add_run('Risk Summary: ').font.bold = True
             risk_para.add_run(f"Overall Risk Score: {risk_summary.get('overall_risk_score', 'N/A')} | ")
             risk_para.add_run(f"High Risk Customers: {risk_summary.get('high_risk_customers', 0)} | ")
-            risk_para.add_run(f"Moderate Risk: {risk_summary.get('moderate_risk_customers', 0)}")
+            # Round 4: clarify the legacy ``moderate_risk_customers`` key
+            # (score 4-6 on 0-10 scale) is the score-range "Watch" bucket
+            # and is *not* the same as the canonical band MEDIUM
+            # (35-55 on 0-100 scale).  Prefer the canonical band count
+            # (medium_risk_customers) when available so the narrative
+            # ties out with the executive donut.
+            _medium_band = risk_summary.get('medium_risk_customers')
+            if _medium_band is not None:
+                risk_para.add_run(f"Medium Risk (band): {_medium_band}")
+                _watch = risk_summary.get('moderate_risk_customers')
+                if _watch is not None and _watch != _medium_band:
+                    risk_para.add_run(
+                        f" | Score 4-6 (Watch, 0-10 scale): {_watch}"
+                    )
+            else:
+                risk_para.add_run(
+                    f"Score 4-6 (Watch, 0-10 scale): {risk_summary.get('moderate_risk_customers', 0)}"
+                )
     
     def add_executive_summary(self, ai_insights: Dict[str, Any]):
         """Add AI-generated executive summary"""

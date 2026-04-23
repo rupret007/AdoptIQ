@@ -1473,13 +1473,38 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
     placeholders = ','.join(['%s'] * len(account_ids_clean))
     params = list(account_ids_clean) + [days, limit]
 
+    # Round 4: detect a real ``CLOSED_DATE`` column (or known synonyms)
+    # so case-resolution analytics actually have a closure timestamp
+    # instead of always seeing ``NULL``.  The previous SQL hardcoded
+    # ``NULL AS CLOSED_DATE`` even when the underlying table exposed
+    # the column, which silently broke open-vs-closed splits and TTR.
+    _SUPPORT_CASES_TABLE = "CX_DB.CX_SWSSBST_BR.SUPPORT_CASES"
+    try:
+        _support_cols = _get_table_columns(ctx, _SUPPORT_CASES_TABLE)
+    except Exception as _col_err:
+        logger.debug("Support cases column probe failed: %s", _col_err)
+        _support_cols = set()
+    _CLOSE_COL_CANDIDATES = (
+        "CLOSED_DATE",
+        "CLOSEDDATE",
+        "CLOSED_AT",
+        "DATE_CLOSED",
+        "RESOLVED_DATE",
+        "RESOLUTION_DATE",
+        "LASTMODIFIEDDATE",
+        "LAST_MODIFIED_DATE",
+    )
+    _close_col = next((c for c in _CLOSE_COL_CANDIDATES if c in _support_cols), None)
+    _close_select = f"s.{_close_col} AS CLOSED_DATE" if _close_col else "NULL AS CLOSED_DATE"
+    _close_select_unaliased = f"{_close_col} AS CLOSED_DATE" if _close_col else "NULL AS CLOSED_DATE"
+
     # Try 1: SUPPORT_CASES with ACCOUNT_ID IN (...)
     try:
         logger.info(f"[[RENEWAL]] Attempting Snowflake support cases fetch for {len(account_ids_clean)} accounts (SUPPORT_CASES.ACCOUNT_ID)...")
-        sql1 = """
-        SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE, NULL AS CLOSED_DATE, s.SEVERITY
-        FROM CX_DB.CX_SWSSBST_BR.SUPPORT_CASES s
-        WHERE s.ACCOUNT_ID IN (""" + placeholders + """)
+        sql1 = f"""
+        SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE, {_close_select}, s.SEVERITY
+        FROM {_SUPPORT_CASES_TABLE} s
+        WHERE s.ACCOUNT_ID IN ({placeholders})
           AND s.CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
         ORDER BY s.CREATED_DATE DESC
         LIMIT %s
@@ -1508,10 +1533,10 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
     # Try 2: SUPPORT_CASES with ACCOUNT_ID_C (some schemas use _C suffix)
     try:
         logger.info(f"[[RENEWAL]] Trying SUPPORT_CASES.ACCOUNT_ID_C for {len(account_ids_clean)} accounts...")
-        sql2 = """
-        SELECT CASE_ID, ACCOUNT_ID_C AS ACCOUNT_ID, SUBJECT, STATUS, CREATED_DATE, NULL AS CLOSED_DATE, SEVERITY
-        FROM CX_DB.CX_SWSSBST_BR.SUPPORT_CASES
-        WHERE ACCOUNT_ID_C IN (""" + placeholders + """)
+        sql2 = f"""
+        SELECT CASE_ID, ACCOUNT_ID_C AS ACCOUNT_ID, SUBJECT, STATUS, CREATED_DATE, {_close_select_unaliased}, SEVERITY
+        FROM {_SUPPORT_CASES_TABLE}
+        WHERE ACCOUNT_ID_C IN ({placeholders})
           AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
         ORDER BY CREATED_DATE DESC
         LIMIT %s
@@ -1538,11 +1563,11 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
     # Try 3: Join via dsm_assignment_data (same table we use for team subs)
     try:
         logger.info(f"[[RENEWAL]] Trying support cases via JOIN to dsm_assignment_data...")
-        sql3 = """
-        SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE, NULL AS CLOSED_DATE, s.SEVERITY
-        FROM CX_DB.CX_SWSSBST_BR.SUPPORT_CASES s
+        sql3 = f"""
+        SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE, {_close_select}, s.SEVERITY
+        FROM {_SUPPORT_CASES_TABLE} s
         INNER JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data d ON TRIM(s.ACCOUNT_ID) = TRIM(d.ACCOUNT_ID_C)
-        WHERE d.ACCOUNT_ID_C IN (""" + placeholders + """)
+        WHERE d.ACCOUNT_ID_C IN ({placeholders})
           AND s.CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
         ORDER BY s.CREATED_DATE DESC
         LIMIT %s
@@ -2087,8 +2112,13 @@ def fetch_barrier_velocity(ctx, account_ids, days):
             total_closed += closed_ct
 
         n_weeks = max(len(weeks), 1)
+        # Round 4: surface ``weeks_total`` so consumers cannot misread
+        # ``len(weeks)`` (capped at 12 below) as the analysis window.
         velocity = {
             'weeks': weeks[:12],
+            'weeks_total': len(weeks),
+            'weeks_displayed': min(len(weeks), 12),
+            'weeks_truncated': len(weeks) > 12,
             'avg_new_per_week': round(total_new / n_weeks, 1),
             'avg_closed_per_week': round(total_closed / n_weeks, 1),
             'net_velocity_per_week': round((total_new - total_closed) / n_weeks, 1),
@@ -2561,8 +2591,25 @@ def derive_portfolio_intelligence(arr_df, ab_df, cases_df=None, team_subs_df=Non
             return {}
 
         # 1. Customer concentration risk
+        # Round 4: distinct accounts that share a display ``BU_NAME``
+        # used to be silently collapsed into one bucket, inflating the
+        # apparent concentration of the largest "customer".  Group by
+        # the unique ``ACCOUNT_ID_C`` (preferred) when present and only
+        # use ``BU_NAME`` as the display label; fall back to ``BU_NAME``
+        # grouping when account id is missing.
         if 'BU_NAME' in arr_df.columns:
-            cust_arr = arr_df.groupby('BU_NAME')[arr_col].sum().sort_values(ascending=False)
+            if acct_col and acct_col in arr_df.columns:
+                _agg = (
+                    arr_df.groupby(acct_col)
+                    .agg(arr_sum=(arr_col, 'sum'), label=('BU_NAME', 'first'))
+                    .sort_values('arr_sum', ascending=False)
+                )
+                cust_arr = pd.Series(
+                    _agg['arr_sum'].values,
+                    index=_agg['label'].astype(str).values,
+                )
+            else:
+                cust_arr = arr_df.groupby('BU_NAME')[arr_col].sum().sort_values(ascending=False)
             top5_arr = float(cust_arr.head(5).sum())
             top10_arr = float(cust_arr.head(10).sum())
             if total_arr > 0:
@@ -2571,6 +2618,7 @@ def derive_portfolio_intelligence(arr_df, ab_df, cases_df=None, team_subs_df=Non
                     'top10_pct': round(top10_arr / total_arr * 100, 1),
                     'top5_customers': {str(k): float(v) for k, v in cust_arr.head(5).items()},
                     'hhi_index': round(float((cust_arr / total_arr * 100).pow(2).sum()), 1),
+                    'grouped_by': 'ACCOUNT_ID_C' if (acct_col and acct_col in arr_df.columns) else 'BU_NAME',
                 }
 
         # 2. CSSM workload imbalance
@@ -4859,8 +4907,13 @@ def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
         if 'open_date_c' in ab_norm.columns:
             try:
                 recent_barriers = ab_norm[ab_norm['open_date_c'] >= (datetime.now() - timedelta(days=30))]
+                # Round 4: clarify that this is a fixed 30-day spotlight
+                # nested inside the surrounding analysis window so
+                # readers do not assume it tracks the run's configured
+                # ``days``.  The spotlight is intentionally short-horizon
+                # (always 30 days) regardless of the broader window.
                 briefing.append(
-                    f"### Recent Barriers (last 30 days, short-horizon spotlight): {len(recent_barriers)}"
+                    f"### Recent Barriers (fixed 30-day spotlight, independent of analysis window): {len(recent_barriers)}"
                 )
                 if len(recent_barriers) > 0:
                     briefing.append("- Recent barriers indicate ongoing challenges requiring immediate attention")

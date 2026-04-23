@@ -769,6 +769,94 @@ def is_high_risk_profile(
         return False
 
 
+def count_score_range(
+    risk_profiles: Optional[Dict[str, Dict[str, Any]]],
+    *,
+    low: float,
+    high: float,
+    scale: str = RISK_SCALE_0_TO_100,
+    inclusive: str = "left",
+) -> int:
+    """Round 4: Count profiles whose numeric risk score falls in [low, high).
+
+    Distinct from :func:`compute_high_risk_count` which buckets by the
+    canonical CRITICAL/HIGH/MEDIUM/LOW band labels.  Use this helper
+    when narratives need to count, e.g., "Score 4-6 (Watch)" customers
+    on the legacy 0-10 scale — those rows do *not* line up exactly
+    with band MEDIUM (35-55 on 0-100 ≈ 3.5-5.5 on 0-10), so conflating
+    the two is the source of the long-standing
+    ``moderate_risk_customers`` vs ``medium_risk_customers`` drift.
+
+    Parameters
+    ----------
+    risk_profiles:
+        Mapping of customer_name -> profile dict (same shape accepted
+        by :func:`compute_high_risk_count`).
+    low, high:
+        Inclusive lower bound, exclusive upper bound by default.  Both
+        are interpreted on the requested ``scale``.
+    scale:
+        ``"0_to_100"`` (default, canonical) or ``"0_to_10"`` (legacy).
+    inclusive:
+        ``"left"`` (default), ``"right"``, ``"both"``, or ``"neither"``.
+    """
+
+    if scale not in _RISK_SCALES:
+        raise ValueError(
+            f"count_score_range: unknown scale {scale!r}. "
+            f"Allowed scales: {sorted(_RISK_SCALES)}"
+        )
+    if inclusive not in {"left", "right", "both", "neither"}:
+        raise ValueError(
+            f"count_score_range: unknown inclusive {inclusive!r}. "
+            f"Allowed: 'left', 'right', 'both', 'neither'"
+        )
+    if not risk_profiles:
+        return 0
+    try:
+        lo = float(low)
+        hi = float(high)
+    except (TypeError, ValueError):
+        return 0
+    if hi < lo:
+        lo, hi = hi, lo
+
+    count = 0
+    for profile in risk_profiles.values():
+        if scale == RISK_SCALE_0_TO_100:
+            score = profile.get("risk_score_0_100")
+            if score is None:
+                s10 = profile.get("risk_score_0_10", profile.get("score"))
+                if s10 is None:
+                    continue
+                try:
+                    score = float(s10) * 10.0
+                except (TypeError, ValueError):
+                    continue
+        else:
+            score = profile.get("risk_score_0_10", profile.get("score"))
+            if score is None and "risk_score_0_100" in profile:
+                try:
+                    score = float(profile["risk_score_0_100"]) / 10.0
+                except (TypeError, ValueError):
+                    continue
+        try:
+            sv = float(score)
+        except (TypeError, ValueError):
+            continue
+        if inclusive == "left":
+            in_range = lo <= sv < hi
+        elif inclusive == "right":
+            in_range = lo < sv <= hi
+        elif inclusive == "both":
+            in_range = lo <= sv <= hi
+        else:
+            in_range = lo < sv < hi
+        if in_range:
+            count += 1
+    return count
+
+
 # ---------------------------------------------------------------------------
 # Customer Pulse sentiment
 # ---------------------------------------------------------------------------
@@ -955,6 +1043,7 @@ __all__ = [
     "bems_rate",
     "build_portfolio_metrics",
     "compute_high_risk_count",
+    "count_score_range",
     "count_bems",
     "count_break_fix",
     "count_closed_tac",
