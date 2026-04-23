@@ -477,23 +477,33 @@ class EnhancedSnowflakeInsights:
                     })
 
                 if not block_success_priority:
+                    # NOTE: RELATED_CUSTOMER__C in the success-priority table is a
+                    # *customer name* (not an 18-char Salesforce ID), so the
+                    # previous subselect compared a name to ACCOUNT_ID_C and
+                    # returned zero rows for nearly every portfolio. We now
+                    # match RELATED_CUSTOMER__C against BU_ACCOUNT_NAME (and
+                    # the user-supplied name as a fallback) so counts are
+                    # actually populated.
                     sp_query = """
-                    SELECT 
+                    SELECT
                         ID,
                         SUBJECT_C,
                         PRIORITY_C,
                         RELATED_CUSTOMER__C,
                         CREATEDDATE
-                    FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C 
-                    WHERE UPPER(RELATED_CUSTOMER__C) IN (
-                        SELECT UPPER(ACCOUNT_ID_C) 
-                        FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
-                        WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
+                    FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C
+                    WHERE (
+                        UPPER(RELATED_CUSTOMER__C) IN (
+                            SELECT UPPER(BU_ACCOUNT_NAME)
+                            FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY
+                            WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
+                        )
+                        OR UPPER(RELATED_CUSTOMER__C) LIKE UPPER(%s)
                     )
                     AND CREATEDDATE >= DATEADD(day, -%s, CURRENT_DATE())
                     LIMIT 20
                     """
-                    cur.execute(sp_query, (f'%{customer_name}%', days))
+                    cur.execute(sp_query, (f'%{customer_name}%', f'%{customer_name}%', days))
                     sp_results = cur.fetchall()
                     if sp_results:
                         insights['success_priorities'] = {

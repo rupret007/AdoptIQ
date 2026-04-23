@@ -617,6 +617,43 @@ def log_performance_metrics(cpu_usage, memory_usage, disk_usage):
     except Exception as e:
         log_error('ERROR', f'Performance metrics logging failed: {e}', 'log_performance_metrics')
 
+def get_total_count(table: str) -> int:
+    """Return the true `SELECT COUNT(*)` for a monitoring table.
+
+    KPI tiles must always reflect the full database, never the
+    ``LIMIT 50`` slice rendered into the page.
+    """
+
+    # Hard allow-list to defeat any caller injection (table name comes from
+    # source code, but we still refuse to interpolate arbitrary identifiers).
+    allowed = {"report_history", "ip_connections", "error_logs", "security_events"}
+    if table not in allowed:
+        return 0
+    try:
+        with db_connection() as conn:
+            cursor = conn.cursor()
+            # Identifier is from the static allow-list; safe to interpolate.
+            cursor.execute(f'SELECT COUNT(*) FROM {table}')  # nosec - allow-listed identifier
+            row = cursor.fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+    except Exception as e:
+        log_error('ERROR', f'Total count query failed for {table}: {e}', 'get_total_count')
+        return 0
+
+
+def get_total_request_count() -> int:
+    """Return the SUM of request_count across every IP, not just the LIMIT 50 page."""
+    try:
+        with db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT COALESCE(SUM(request_count), 0) FROM ip_connections')
+            row = cursor.fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+    except Exception as e:
+        log_error('ERROR', f'Total request count query failed: {e}', 'get_total_request_count')
+        return 0
+
+
 def get_report_history():
     """Get comprehensive report history"""
     try:
@@ -1086,22 +1123,24 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
         </div>
         {% endif %}
         
-        <!-- Analytics Overview -->
+        <!-- Analytics Overview (counts come from SELECT COUNT(*); the lists
+             below show the most recent 50 rows only, so headline numbers
+             must NEVER be derived from list lengths.) -->
         <div class="analytics-grid">
             <div class="analytics-card">
-                <div class="analytics-number">{{ report_history|length }}</div>
+                <div class="analytics-number">{{ totals.report_history }}</div>
                 <div class="analytics-label">Total Reports</div>
             </div>
             <div class="analytics-card">
-                <div class="analytics-number">{{ ip_connections|length }}</div>
+                <div class="analytics-number">{{ totals.ip_connections }}</div>
                 <div class="analytics-label">Unique IPs</div>
             </div>
             <div class="analytics-card">
-                <div class="analytics-number">{{ ip_connections|sum(attribute='request_count') }}</div>
+                <div class="analytics-number">{{ totals.total_requests }}</div>
                 <div class="analytics-label">Total Requests</div>
             </div>
             <div class="analytics-card">
-                <div class="analytics-number">{{ error_logs|length }}</div>
+                <div class="analytics-number">{{ totals.error_logs }}</div>
                 <div class="analytics-label">Recent Errors</div>
             </div>
         </div>
@@ -1456,6 +1495,15 @@ def enhanced_admin_dashboard():
     error_logs = get_error_logs()
     audit_data = get_audit_history(limit=20)
     audit_summary = get_audit_summary()
+    # Headline KPI tiles must always reflect SELECT COUNT(*) totals,
+    # not the LIMIT 50 page rendered into the table below.
+    totals = {
+        'report_history': get_total_count('report_history'),
+        'ip_connections': get_total_count('ip_connections'),
+        'error_logs': get_total_count('error_logs'),
+        'security_events': get_total_count('security_events'),
+        'total_requests': get_total_request_count(),
+    }
     
     # Extract the audits list from the dictionary
     audit_history = audit_data.get('audits', [])
@@ -1488,6 +1536,7 @@ def enhanced_admin_dashboard():
                                 report_history=report_history,
                                 ip_connections=ip_connections,
                                 error_logs=error_logs,
+                                totals=totals,
                                 audit_history=audit_history,
                                 audit_summary=audit_summary,
                                 running_reports=running_reports,

@@ -205,6 +205,7 @@ from data_normalization import (
 from risk_scoring import compute_customer_risk_profile, compute_portfolio_risk_summary
 from report_consistency import validate_report_consistency
 from report_utils import format_inline_source
+import canonical_metrics as cm
 from snowflake_prefetch import AnalysisRunContext, prefetch_comprehensive, prefetch_ask_ai
 from ask_ai_grounded import (
     AskAIRequest,
@@ -1789,14 +1790,10 @@ def _generate_comprehensive_fallback_insights(ab_norm, csone_df, manager, techno
         if high_abs > 0:
             insights.append(f"HIGH PRIORITY: {high_abs} high-severity adoption barriers require focused intervention within the next 30 days.")
     
-    # Support case analysis
+    # Support case analysis (canonical priority counts)
     if not csone_df.empty:
-        if 'Severity' in csone_df.columns:
-            severity_col = csone_df['Severity'].astype(str)
-            p1_cases = len(csone_df[severity_col.str.contains('P1', case=False, na=False)])
-        else:
-            p1_cases = 0
-            
+        p1_cases = cm.count_p1(csone_df)
+
         if 'Status' in csone_df.columns:
             status_col = csone_df['Status'].astype(str)
             escalated_cases = len(csone_df[status_col.str.contains('Escalated', case=False, na=False)])
@@ -1815,10 +1812,7 @@ def _generate_comprehensive_fallback_insights(ab_norm, csone_df, manager, techno
         top_at_risk = by_cust.head(5).index.tolist()
         if top_at_risk:
             insights.append(f"TOP CUSTOMERS BY ADOPTION BARRIERS: {', '.join(top_at_risk[:5])}.")
-    bems_total = 0
-    if not csone_df.empty:
-        _cs_norm = add_case_lifecycle_fields(csone_df)
-        bems_total = int(detect_bems_mask(_cs_norm).sum())
+    bems_total = cm.count_bems(csone_df) if not csone_df.empty else 0
     if bems_total > 0:
         insights.append(
             f"BEMS ENGINEERING ESCALATIONS: {int(bems_total)} cases require specialized engineering support—high renewal risk indicator. "
@@ -2652,13 +2646,18 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                     break
             
         if severity_col:
-            p1_count = len(csone_df[csone_df[severity_col].isin(['P1', '1', 'Critical', 'Critical - P1'])])
-            p2_count = len(csone_df[csone_df[severity_col].isin(['P2', '2', 'High', 'High - P2'])])
-            logger.info(f"[[DEBUG]] Found {p1_count} P1 cases and {p2_count} P2 cases using column '{severity_col}'")
-        
-        # Use centralized BEMS detection function that checks Transaction ID column (only if CSOne is not empty)
+            # Canonical priority counting via case_priority_norm; agrees with
+            # Leader / Compact / EI to the row.
+            p1_count = cm.count_p1(csone_df)
+            p2_count = cm.count_p2(csone_df)
+            logger.info(f"[[DEBUG]] Found {p1_count} P1 cases and {p2_count} P2 cases using canonical priority normalization (severity_col='{severity_col}')")
+        else:
+            p1_count = 0
+            p2_count = 0
+
         if not csone_df.empty:
-            bems_cases, bems_count = detect_bems_escalations(csone_df)
+            bems_cases, _legacy_bems_count = detect_bems_escalations(csone_df)
+            bems_count = cm.count_bems(csone_df)
         else:
             bems_count = 0
             bems_cases = pd.DataFrame()
@@ -2729,13 +2728,13 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                     break
             
         if severity_col:
-            p1_count = len(csone_df[csone_df[severity_col].isin(['P1', '1', 'Critical', 'Critical - P1'])])
-            p2_count = len(csone_df[csone_df[severity_col].isin(['P2', '2', 'High', 'High - P2'])])
+            p1_count = cm.count_p1(csone_df)
+            p2_count = cm.count_p2(csone_df)
             overview_para.add_run(f'• Critical Cases (P1): {p1_count}\n')
             overview_para.add_run(f'• High Priority Cases (P2): {p2_count}\n')
-        
-        # Use centralized BEMS detection function that checks Transaction ID column
-        bems_cases, bems_count = detect_bems_escalations(csone_df)
+
+        bems_cases, _legacy_bems_count = detect_bems_escalations(csone_df)
+        bems_count = cm.count_bems(csone_df)
         if bems_count > 0:
             bems_customers = bems_cases[customer_col].nunique() if customer_col and customer_col in bems_cases.columns else 0
             run = overview_para.add_run(f'• BEMS Escalations: {bems_count} cases across {bems_customers} customers\n')
@@ -4254,13 +4253,11 @@ def run_compact_analysis(analysis_id):
                         'overall_risk_score': round(overall_risk_score, 1),
                         'high_risk_customers': len(high_risk_customers),
                         'moderate_risk_customers': len(moderate_risk_customers),
-                        'total_customers': len(risk_scores),  # This is only for risk summary, NOT dashboard
-                        'critical_adoption_barriers': len(ab_norm[
-                            ab_norm['SEVERITY_C'].astype(str).str.contains('Critical|High', case=False, na=False)
-                        ]) if not ab_norm.empty and 'SEVERITY_C' in ab_norm.columns else 0,
-                        'escalated_cases': len(csone_df[
-                            csone_df['Severity'].astype(str).str.contains('P1|P2|Critical', case=False, na=False)
-                        ]) if not csone_df.empty and 'Severity' in csone_df.columns else 0
+                        'total_customers': len(risk_scores),  # only for risk summary, NOT dashboard
+                        'critical_adoption_barriers': cm.count_critical_barriers(
+                            ab_norm, mode=cm.CRITICAL_AB_MODE_CRITICAL_OR_HIGH
+                        ),
+                        'escalated_cases': cm.count_escalated(csone_df),
                     }
                     logger.info(f"[EXEC-REPORT] Risk summary: {risk_summary}")
                     logger.info(f"[EXEC-REPORT] WARNING: risk_summary['total_customers']={risk_summary['total_customers']} is NOT used for dashboard - dashboard calculates its own count")
@@ -4448,17 +4445,10 @@ def run_compact_analysis(analysis_id):
         total_customers = len(ab_norm['customer_name'].unique()) if not ab_norm.empty else 0
         high_risk_count = len(high_risk_customers)
         
-        # Safely calculate critical adoption barriers
-        if not ab_norm.empty and 'SEVERITY_C' in ab_norm.columns:
-            critical_abs = len(ab_norm[ab_norm['SEVERITY_C'].astype(str).str.contains('Critical|High', case=False, na=False)])
-        else:
-            critical_abs = 0
-            
-        # Safely calculate escalated cases
-        if not csone_df.empty and 'Severity' in csone_df.columns:
-            escalated_cases = len(csone_df[csone_df['Severity'].astype(str).str.contains('P1|P2|Critical', case=False, na=False)])
-        else:
-            escalated_cases = 0
+        critical_abs = cm.count_critical_barriers(
+            ab_norm, mode=cm.CRITICAL_AB_MODE_CRITICAL_OR_HIGH
+        )
+        escalated_cases = cm.count_escalated(csone_df)
             
         overall_risk_score = risk_summary_df['Risk_Score'].mean() if not risk_summary_df.empty else 0
         
@@ -6629,9 +6619,19 @@ def run_customer_renewal_analysis(analysis_id):
         renewal_analysis['psirt_vulnerabilities'] = psirt_vulns
         
         factual_claims = list(renewal_analysis.get("key_findings", [])) + list(renewal_analysis.get("risk_factors", []))
+        # Build canonical portfolio metrics so the renewal path enforces the
+        # same parity contract as the comprehensive / compact / EI paths.
+        _renewal_csone_norm = add_case_lifecycle_fields(customer_csone)
+        renewal_portfolio_metrics = cm.build_portfolio_metrics(
+            ab_df=customer_ab if customer_ab is not None else pd.DataFrame(),
+            csone_df=_renewal_csone_norm,
+            risk_profiles=None,
+            defects=software_defects if isinstance(software_defects, dict) else None,
+        )
         consistency_check = validate_report_consistency(
             customer_ab,
-            add_case_lifecycle_fields(customer_csone),
+            _renewal_csone_norm,
+            portfolio_metrics=renewal_portfolio_metrics,
             defects=software_defects,
             factual_claims=factual_claims,
         )
@@ -7428,19 +7428,16 @@ def run_comprehensive_analysis(analysis_id):
         low_risk_customers = int(portfolio_risk_summary.get("low_risk_customers", 0))
         healthy_customers = int(portfolio_risk_summary.get("healthy_customers", 0))
 
-        priority_col = "case_priority_norm" if "case_priority_norm" in _cs_norm.columns else ("Severity" if "Severity" in _cs_norm.columns else None)
-        if priority_col:
-            sev_series = _cs_norm[priority_col].fillna("").astype(str).str.upper().str.strip()
-            p1_cases = int((sev_series == "P1").sum())
-            p2_cases = int((sev_series == "P2").sum())
-            p3_cases = int((sev_series == "P3").sum())
-            p4_cases = int((sev_series == "P4").sum())
-            unknown_priority_cases = int((sev_series == "UNKNOWN").sum())
-        else:
-            p1_cases = p2_cases = p3_cases = p4_cases = unknown_priority_cases = 0
+        # Canonical priority and case-type counts so the comprehensive
+        # report agrees with Compact / EI / Leader / Renewal byte-for-byte.
+        p1_cases = cm.count_p1(_cs_norm)
+        p2_cases = cm.count_p2(_cs_norm)
+        p3_cases = cm.count_p3(_cs_norm)
+        p4_cases = cm.count_p4(_cs_norm)
+        unknown_priority_cases = cm.count_unknown_priority(_cs_norm)
 
-        break_fix_count = int((_cs_norm["case_type_class"] == "break_fix_technical").sum()) if "case_type_class" in _cs_norm.columns else 0
-        provisioning_count = int((_cs_norm["case_type_class"] == "provisioning_request").sum()) if "case_type_class" in _cs_norm.columns else 0
+        break_fix_count = cm.count_break_fix(_cs_norm)
+        provisioning_count = cm.count_provisioning(_cs_norm)
         portfolio_metrics = {
             'total_customers': len(all_customers_comprehensive),
             'total_barriers': len(_ab) if not _ab.empty else 0,
@@ -9520,8 +9517,13 @@ def ask_intel():
                         if acct_ids:
                             _cases = fetch_support_cases_snowflake(_ctx, acct_ids[:80], 90)
                             if _cases is not None and not _cases.empty:
-                                p1p2 = _cases[_cases['SEVERITY'].isin(['1', '2', 'P1', 'P2', 'S1', 'S2'])] if 'SEVERITY' in _cases.columns else pd.DataFrame()
-                                context_parts.append(f"Active support cases (90d): {len(_cases)} total, {len(p1p2)} P1/P2")
+                                # Canonical priority counts so Ask-Intel agrees with the rest of the app.
+                                p1_count = cm.count_p1(_cases)
+                                p2_count = cm.count_p2(_cases)
+                                p1p2_total = p1_count + p2_count
+                                context_parts.append(
+                                    f"Active support cases (90d): {len(_cases)} total, {p1p2_total} P1/P2"
+                                )
                                 for _, row in _cases.head(10).iterrows():
                                     c_id = row.get('CASE_ID', row.get('ID', ''))
                                     context_parts.append(f"  - [Case: {c_id}] [{row.get('SEVERITY','')}] {row.get('SUBJECT','')}")

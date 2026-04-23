@@ -1376,10 +1376,20 @@ def fetch_arr_data(ctx, account_ids: List[str]) -> pd.DataFrame:
         if cur:
             cur.close()
 
-def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit: int = 1000) -> pd.DataFrame:
+def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit: int = 50000) -> pd.DataFrame:
     """Fetch support/TAC cases from Snowflake by account IDs.
+
     Tries SUPPORT_CASES; if that fails (table/perms), tries join via dsm_assignment_data.
     Used when no CSOne file is uploaded so renewal report can still show case counts.
+
+    The default ``limit`` was raised from 1000 to 50000 because the prior
+    cap silently truncated portfolios with high case volume, causing every
+    downstream metric (BEMS, P1/P2/P3/P4, total cases, customer counts)
+    to under-report. When the result equals ``limit``, the returned
+    DataFrame is annotated via ``df.attrs['was_truncated'] = True`` and a
+    warning is emitted so callers can surface a "result truncated"
+    banner in their reports.
+
     Returns empty DataFrame on error or if table/columns are missing.
     """
     if not ctx or not account_ids:
@@ -1390,13 +1400,18 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
     if not isinstance(limit, int) or limit < 1:
         logger.warning(f"[[RENEWAL]] Invalid limit parameter: {limit}")
         return pd.DataFrame()
-    limit = min(limit, 10000)
+    # Hard ceiling stays at 100k for memory safety, but this is well above
+    # any real-world portfolio (largest manager < 5k cases / 90d).
+    limit = min(limit, 100000)
 
     def _normalize_cases_df(df: pd.DataFrame) -> pd.DataFrame:
         expected = ['CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'SEVERITY']
         derived = ['case_status_norm', 'case_priority_norm', 'open_date', 'closed_date', 'is_open', 'open_age_days']
         if df is None or df.empty:
-            return pd.DataFrame(columns=expected + derived)
+            empty = pd.DataFrame(columns=expected + derived)
+            empty.attrs['was_truncated'] = False
+            empty.attrs['fetch_limit'] = limit
+            return empty
         normalized = df.copy()
         for col in expected:
             if col not in normalized.columns:
@@ -1409,7 +1424,16 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         normalized["open_age_days"] = (
             (pd.Timestamp(datetime.utcnow()) - normalized["open_date"]).dt.days.where(normalized["is_open"], other=pd.NA)
         )
-        return normalized[expected + derived]
+        out = normalized[expected + derived]
+        # Surface truncation so report code can warn the user.
+        out.attrs['was_truncated'] = bool(len(out) >= limit)
+        out.attrs['fetch_limit'] = limit
+        if out.attrs['was_truncated']:
+            logger.warning(
+                f"[[RENEWAL]] Snowflake support-case fetch hit limit={limit}; "
+                "result is TRUNCATED. Counts in downstream reports may under-report."
+            )
+        return out
 
     if is_table_blocked("CX_DB.CX_SWSSBST_BR.SUPPORT_CASES"):
         logger.info("[[RENEWAL]] SUPPORT_CASES disabled by Snowflake table policy; returning empty support cases.")
@@ -1559,16 +1583,23 @@ def fetch_adoption_barriers(ctx, account_ids: List[str], days: int) -> pd.DataFr
     try:
         logger.debug(f"Starting adoption barriers query for {len(account_ids)} accounts...")
         cur = ctx.cursor()
+        # Canonical AB date column priority order. Using COALESCE here keeps
+        # the renewal-style "OPEN_DATE_C if set else CREATED_DATE" behaviour
+        # but is now identical to the CSConsole/Leader paths that read AB.
         date_expr = "DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))"
-        
-        # Use proper parameterized query to prevent SQL injection
+
+        # Use proper parameterized query to prevent SQL injection.
+        # NOTE: "RECORD_TYPE_ID IS NULL" was previously included but pulled
+        # in non-AB rows (Action Plans, Customer Pulse, etc) whenever a row
+        # in the shared C360_CS_TASK_C_VW view had no record type. We now
+        # only count rows whose RECORD_TYPE_ID matches the AB record type.
         placeholders = ','.join(['%s'] * len(account_ids))
         sql = f"""
         SELECT *
         FROM {AB_TABLE}
         WHERE ACCOUNT_ID_C IN ({placeholders})
           AND {date_expr} >= DATEADD(day, -%s, CURRENT_DATE())
-          AND (RECORD_TYPE_ID = '0122T000000GJfTQAW' OR RECORD_TYPE_ID IS NULL)
+          AND RECORD_TYPE_ID = '0122T000000GJfTQAW'
         """
         logger.debug("Executing SQL query...")
         cur.execute(sql, [*account_ids, days])
@@ -1881,12 +1912,17 @@ def fetch_csconsole_adoption_barriers(
             return pd.DataFrame()
 
         where_clause = " OR ".join(predicates)
+        # Align AB date window with fetch_adoption_barriers / period and
+        # velocity queries (COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C)).
+        # Using CREATED_DATE only here previously caused CSConsole reports
+        # to under-count vs. the renewal/Snowflake report on the same window.
         sql = f"""
         SELECT *, 'Adoption Barrier' as RECORD_SOURCE
         FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
         WHERE record_type_id = '0122T000000GJfTQAW'
           AND ({where_clause})
-          AND DATE(CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())
+          AND DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
+              >= DATEADD(day, -%s, CURRENT_DATE())
         """
         params.append(days)
         cur.execute(sql, params)
@@ -1932,7 +1968,7 @@ def fetch_period_comparison(ctx, account_ids, days):
                                  AND DATEADD(day, -%s, CURRENT_DATE()) THEN 1 ELSE 0 END) AS previous_period
             FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
             WHERE ACCOUNT_ID_C IN ({placeholders})
-              AND (RECORD_TYPE_ID = '0122T000000GJfTQAW' OR RECORD_TYPE_ID IS NULL)
+              AND RECORD_TYPE_ID = '0122T000000GJfTQAW'
               AND DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
                   >= DATEADD(day, -%s, CURRENT_DATE())
         """
@@ -2031,7 +2067,7 @@ def fetch_barrier_velocity(ctx, account_ids, days):
                 SUM(CASE WHEN UPPER(STATUS_C) IN ('CLOSED', 'RESOLVED', 'COMPLETED') THEN 1 ELSE 0 END) AS closed_barriers
             FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
             WHERE ACCOUNT_ID_C IN ({placeholders})
-              AND (RECORD_TYPE_ID = '0122T000000GJfTQAW' OR RECORD_TYPE_ID IS NULL)
+              AND RECORD_TYPE_ID = '0122T000000GJfTQAW'
               AND DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
                   >= DATEADD(day, -%s, CURRENT_DATE())
             GROUP BY week_start

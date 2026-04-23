@@ -20,6 +20,7 @@ import re
 from data_normalization import add_case_lifecycle_fields, detect_bems_mask, extract_bems_ids_from_row
 from report_consistency import validate_report_consistency
 from report_utils import format_inline_source, format_metric_with_source
+import canonical_metrics as cm
 
 logger = logging.getLogger(__name__)
 
@@ -206,16 +207,12 @@ class ExecutiveIntelligenceFormatter:
             else:
                 total_customers = 0
         csone_norm = add_case_lifecycle_fields(csone_data if csone_data is not None else pd.DataFrame())
-        total_cases = len(csone_norm) if not csone_norm.empty else 0
-        
-        p1_count = 0
-        p2_count = 0
-        bems_count = 0
-        
-        if not csone_norm.empty:
-            p1_count = int((csone_norm.get('case_priority_norm', pd.Series(dtype=str)) == "P1").sum())
-            p2_count = int((csone_norm.get('case_priority_norm', pd.Series(dtype=str)) == "P2").sum())
-            bems_count = int(detect_bems_mask(csone_norm).sum())
+        total_cases = cm.count_total_tac(csone_norm)
+
+        # Canonical priority and BEMS counts shared with Compact / Leader.
+        p1_count = cm.count_p1(csone_norm)
+        p2_count = cm.count_p2(csone_norm)
+        bems_count = cm.count_bems(csone_norm)
         
         # Extract software defects and PSIRT vulnerabilities counts
         defect_count = 0
@@ -852,9 +849,20 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
         for claim in factual_claims
         if str(claim or "").strip()
     ]
+    ab_for_check = ab_data if ab_data is not None else pd.DataFrame()
+    csone_for_check = add_case_lifecycle_fields(
+        csone_data if csone_data is not None else pd.DataFrame()
+    )
+    portfolio_metrics = cm.build_portfolio_metrics(
+        ab_df=ab_for_check,
+        csone_df=csone_for_check,
+        risk_profiles=risk_scores if isinstance(risk_scores, dict) else {},
+        risk_scale=cm.RISK_SCALE_0_TO_10,
+    )
     consistency = validate_report_consistency(
-        ab_data if ab_data is not None else pd.DataFrame(),
-        add_case_lifecycle_fields(csone_data if csone_data is not None else pd.DataFrame()),
+        ab_for_check,
+        csone_for_check,
+        portfolio_metrics=portfolio_metrics,
         risk_data=risk_scores if isinstance(risk_scores, dict) else {},
         defects=software_defects if isinstance(software_defects, dict) else {},
         factual_claims=factual_claims,

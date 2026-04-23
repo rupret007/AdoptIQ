@@ -26,6 +26,7 @@ from data_normalization import (
 )
 from report_consistency import validate_report_consistency
 from report_utils import format_inline_source, format_metric_with_source
+import canonical_metrics as cm
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -233,37 +234,19 @@ class CompactReportFormatter:
             csone_data = csone_data if csone_data is not None else pd.DataFrame()
             self.doc.add_heading('At-a-Glance Dashboard', level=1)
             
-            # Calculate metrics from normalized shared fields
+            # All five tile values are produced by canonical_metrics so
+            # this dashboard always agrees with the EI / Leader / Admin
+            # views and with the cross-report consistency contract.
             csone_norm = add_case_lifecycle_fields(csone_data)
-            customer_set = set()
-            if not ab_data.empty:
-                ab_customer_col = next(
-                    (c for c in ('customer_name', 'BU_NAME', 'Customer Name') if c in ab_data.columns),
-                    None,
-                )
-                if ab_customer_col:
-                    customer_set.update(
-                        ab_data[ab_customer_col].dropna().astype(str).apply(normalize_customer_name)
-                    )
-            if not csone_norm.empty and 'customer_name' in csone_norm.columns:
-                customer_set.update(csone_norm['customer_name'].dropna().astype(str).apply(normalize_customer_name))
-            total_customers = len([c for c in customer_set if c and c != "Unknown"])
+            total_customers = cm.count_customers(ab_df=ab_data, csone_df=csone_norm)
             if total_customers_override is not None:
                 total_customers = int(total_customers_override)
-            total_support_cases = len(csone_norm) if not csone_norm.empty else 0
-            
-            # Count P1 (Critical) cases
-            critical_p1 = 0
-            high_p2 = 0
-            if not csone_norm.empty:
-                sev_series = csone_norm.get('case_priority_norm', pd.Series(dtype=str)).astype(str)
-                critical_p1 = int((sev_series == "P1").sum())
-                high_p2 = int((sev_series == "P2").sum())
-            
-            # Count BEMS escalations
-            bems_count = 0
-            if not csone_norm.empty:
-                bems_count = int(detect_bems_mask(csone_norm).sum())
+            total_support_cases = cm.count_total_tac(csone_norm)
+            critical_p1 = cm.count_p1(csone_norm)
+            high_p2 = cm.count_p2(csone_norm)
+            # Canonical (TAC-only) BEMS count. This is what the cross-report
+            # consistency contract enforces.
+            bems_count = cm.count_bems(csone_norm)
             
             # Create dashboard table (matches example format)
             dashboard_table = self.doc.add_table(rows=2, cols=5)
@@ -729,65 +712,72 @@ class CompactReportFormatter:
             raise
     
     def _generate_key_concerns(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame) -> List[str]:
-        """Generate key concerns based on data analysis"""
-        concerns = []
-        
-        if not ab_data.empty:
-            ab_sev_col = (
-                'severity_norm'
-                if 'severity_norm' in ab_data.columns
-                else next((c for c in ('SEVERITY_C', 'severity_c', 'Severity') if c in ab_data.columns), None)
+        """Generate key concerns from canonical metrics.
+
+        "Critical" here means strict Critical-only (P1 severity) so the
+        narrative does not silently include P2/High rows. The headline
+        At-a-Glance dashboard uses ``CRITICAL_AB_MODE_CRITICAL_OR_HIGH``
+        for the broader executive label; both modes are explicit and
+        named to prevent silent drift.
+        """
+        concerns: List[str] = []
+
+        critical_abs = cm.count_critical_barriers(
+            ab_data, mode=cm.CRITICAL_AB_MODE_CRITICAL_ONLY
+        )
+        if critical_abs > 0:
+            concerns.append(
+                f"{critical_abs} critical adoption barriers requiring immediate attention"
             )
-            critical_abs = (
-                int(ab_data[ab_sev_col].astype(str).str.contains('Critical', case=False, na=False).sum())
-                if ab_sev_col
-                else 0
+
+        p1_cases = cm.count_p1(csone_data)
+        if p1_cases > 0:
+            concerns.append(
+                f"{p1_cases} P1 support cases indicating customer dissatisfaction"
             )
-            if critical_abs > 0:
-                concerns.append(f"{critical_abs} critical adoption barriers requiring immediate attention")
-        
-        csone_norm = add_case_lifecycle_fields(csone_data) if csone_data is not None and not csone_data.empty else pd.DataFrame()
-        if not csone_norm.empty and 'case_priority_norm' in csone_norm.columns:
-            p1_cases = int((csone_norm['case_priority_norm'].astype(str) == 'P1').sum())
-            if p1_cases > 0:
-                concerns.append(f"{p1_cases} P1 support cases indicating customer dissatisfaction")
-        
+
         if not concerns:
             concerns.append("No critical concerns identified in current analysis period")
-        
+
         return concerns
-    
-    def _generate_immediate_actions(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame, risk_scores: Dict) -> List[str]:
-        """Generate immediate actions based on risk analysis"""
-        actions = []
-        
-        high_risk_count = len([v for v in risk_scores.values() if isinstance(v, dict) and v.get('score', 0) >= 6])
+
+    def _generate_immediate_actions(
+        self, ab_data: pd.DataFrame, csone_data: pd.DataFrame, risk_scores: Dict
+    ) -> List[str]:
+        """Generate immediate actions from canonical metrics.
+
+        High-risk count uses the canonical 0-10 legacy scale here for
+        backwards compatibility with existing risk_scores dicts that
+        carry a `score` key only; the canonical 0-100 banded model is
+        used elsewhere via ``cm.compute_high_risk_count``.
+        """
+        actions: List[str] = []
+
+        high_risk_count = cm.compute_high_risk_count(
+            risk_scores, scale=cm.RISK_SCALE_0_TO_10
+        )
         if high_risk_count > 0:
-            actions.append(f"Schedule executive meetings with {high_risk_count} high-risk customers")
-        
-        if not ab_data.empty:
-            ab_sev_col = (
-                'severity_norm'
-                if 'severity_norm' in ab_data.columns
-                else next((c for c in ('SEVERITY_C', 'severity_c', 'Severity') if c in ab_data.columns), None)
+            actions.append(
+                f"Schedule executive meetings with {high_risk_count} high-risk customers"
             )
-            critical_abs = (
-                int(ab_data[ab_sev_col].astype(str).str.contains('Critical', case=False, na=False).sum())
-                if ab_sev_col
-                else 0
+
+        critical_abs = cm.count_critical_barriers(
+            ab_data, mode=cm.CRITICAL_AB_MODE_CRITICAL_ONLY
+        )
+        if critical_abs > 0:
+            actions.append(
+                f"Assign dedicated CSM resources to address {critical_abs} critical adoption barriers"
             )
-            if critical_abs > 0:
-                actions.append(f"Assign dedicated CSM resources to address {critical_abs} critical adoption barriers")
-        
-        csone_norm = add_case_lifecycle_fields(csone_data) if csone_data is not None and not csone_data.empty else pd.DataFrame()
-        if not csone_norm.empty and 'case_priority_norm' in csone_norm.columns:
-            p1_cases = int((csone_norm['case_priority_norm'].astype(str) == 'P1').sum())
-            if p1_cases > 0:
-                actions.append(f"Escalate and prioritize resolution of {p1_cases} P1 support cases")
-        
+
+        p1_cases = cm.count_p1(csone_data)
+        if p1_cases > 0:
+            actions.append(
+                f"Escalate and prioritize resolution of {p1_cases} P1 support cases"
+            )
+
         if not actions:
             actions.append("Continue monitoring current initiatives and maintain regular check-ins")
-        
+
         return actions
     
     def _generate_fallback_insights(self, risk_summary: Dict) -> str:
@@ -1435,20 +1425,22 @@ class CompactReportFormatter:
                 csone_data = pd.DataFrame()
             self.doc.add_heading('Predictive Risk', level=2)
             
-            total_customers = len(risk_data) if risk_data else 0
-            red_customers = sum(1 for v in risk_data.values() if v.get('color') == 'Red') if risk_data else 0
-            
-            bems_count = 0
-            if not csone_data.empty:
-                bems_count = int(detect_bems_mask(add_case_lifecycle_fields(csone_data)).sum())
-            
+            # Use canonical high-risk count (legacy 0-10 ``color/score`` model
+            # because risk_data here comes from ``calculate_renewal_risk_scores``
+            # which still returns a 0-10 score with a ``color`` flag).
+            red_customers = cm.compute_high_risk_count(
+                risk_data, scale=cm.RISK_SCALE_0_TO_10
+            )
+
+            bems_count = cm.count_bems(csone_data)
+            bems_rate = cm.bems_rate(csone_data)
+
             risk_p = self.doc.add_paragraph()
             risk_p.add_run('- High-Risk Customers: ').bold = True
             risk_p.add_run(f'{red_customers} customers currently in red-risk status\n')
-            
+
             risk_p.add_run('- Escalation Probability: ').bold = True
             if bems_count > 0:
-                bems_rate = (bems_count / len(csone_data) * 100) if len(csone_data) > 0 else 0
                 risk_p.add_run(f'BEMS rate at {bems_rate:.1f}% - if not reduced below 15% in 90 days, expect additional escalations\n')
             else:
                 risk_p.add_run('Low - minimal BEMS escalations detected\n')
@@ -1625,59 +1617,52 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
         high_risk_customers = {k: v for k, v in risk_data.items() if isinstance(v, dict) and v.get('score', 0) >= 6}
         moderate_risk_customers = {k: v for k, v in risk_data.items() if isinstance(v, dict) and 4 <= v.get('score', 0) < 6}
         
-        # Calculate BEMS count
-        total_bems = int(detect_bems_mask(csone_norm).sum()) if not csone_norm.empty else 0
-        
+        # All cross-report counts come from canonical_metrics so this
+        # report agrees byte-for-byte with the Leader / EI / Comprehensive
+        # documents. ``critical_adoption_barriers`` here is the executive
+        # "Critical or High" definition; the strict Critical-only count is
+        # exposed via _generate_key_concerns where appropriate.
+        total_bems = cm.count_bems(csone_norm)
+
         _scores = [v.get('score', 0) for v in risk_data.values() if isinstance(v, dict) and isinstance(v.get('score'), (int, float)) and not np.isnan(v.get('score', 0))] if risk_data else []
         overall_risk_score = float(np.mean(_scores)) if _scores else 0.0
         if np.isnan(overall_risk_score) or np.isinf(overall_risk_score):
             overall_risk_score = 0.0
-        if not ab_data.empty:
-            ab_sev_col = 'severity_norm' if 'severity_norm' in ab_data.columns else ('SEVERITY_C' if 'SEVERITY_C' in ab_data.columns else None)
-            critical_adoption_barriers = int(
-                ab_data[ab_sev_col].astype(str).str.contains('Critical|High', case=False, na=False).sum()
-            ) if ab_sev_col else 0
-        else:
-            critical_adoption_barriers = 0
-        escalated_cases = int(
-            csone_norm['case_priority_norm'].astype(str).str.contains('P1|P2', case=False, na=False).sum()
-        ) if not csone_norm.empty and 'case_priority_norm' in csone_norm.columns else 0
-        customer_set = set()
-        if not ab_data.empty:
-            ab_customer_col = next(
-                (c for c in ('customer_name', 'BU_NAME', 'Customer Name') if c in ab_data.columns),
-                None,
-            )
-            if ab_customer_col:
-                customer_set.update(
-                    ab_data[ab_customer_col].dropna().astype(str).apply(normalize_customer_name)
-                )
-        if not csone_norm.empty and 'customer_name' in csone_norm.columns:
-            customer_set.update(
-                csone_norm['customer_name'].dropna().astype(str).apply(normalize_customer_name)
-            )
-        canonical_total_customers = len([c for c in customer_set if c and c != "Unknown"])
-        
+
+        critical_adoption_barriers = cm.count_critical_barriers(
+            ab_data, mode=cm.CRITICAL_AB_MODE_CRITICAL_OR_HIGH
+        )
+        critical_only_barriers = cm.count_critical_barriers(
+            ab_data, mode=cm.CRITICAL_AB_MODE_CRITICAL_ONLY
+        )
+        escalated_cases = cm.count_escalated(csone_norm)
+        p1_cases = cm.count_p1(csone_norm)
+        p2_cases = cm.count_p2(csone_norm)
+        canonical_total_customers = cm.count_customers(
+            ab_df=ab_data, csone_df=csone_norm
+        )
+
         risk_summary = {
             'overall_risk_score': round(overall_risk_score, 1),
             'high_risk_customers': len(high_risk_customers),
             'moderate_risk_customers': len(moderate_risk_customers),
             'total_customers': canonical_total_customers,
             'critical_adoption_barriers': critical_adoption_barriers,
+            'critical_only_adoption_barriers': critical_only_barriers,
             'escalated_cases': escalated_cases,
             'bems_escalations': total_bems,
             'key_concerns': [
                 f"{len(high_risk_customers)} customers at high renewal risk",
                 f"{critical_adoption_barriers} critical/high adoption barriers",
-                f"{int(csone_norm['case_priority_norm'].astype(str).str.contains('P1', case=False, na=False).sum()) if not csone_norm.empty and 'case_priority_norm' in csone_norm.columns else 0} P1 support cases",
-                f"{total_bems} BEMS engineering escalations"
+                f"{p1_cases} P1 support cases",
+                f"{total_bems} BEMS engineering escalations",
             ],
             'immediate_actions': [
                 "Schedule executive meetings with high-risk customers",
                 "Assign dedicated CSM resources to critical accounts",
                 "Create targeted adoption plans for at-risk customers",
-                "Coordinate with engineering on BEMS escalations"
-            ]
+                "Coordinate with engineering on BEMS escalations",
+            ],
         }
         factual_claims = []
         for profile in risk_data.values():
@@ -1699,7 +1684,25 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
         if ai_summary_text:
             factual_claims.append(ai_summary_text)
         factual_claims = [_ensure_inline_source_claim(claim) for claim in factual_claims if str(claim or "").strip()]
-        consistency = validate_report_consistency(ab_data, csone_norm, risk_data=risk_data, factual_claims=factual_claims)
+
+        # Build the canonical portfolio_metrics payload and pass it to the
+        # consistency validator so the Compact path is now contract-checked
+        # the same way the Comprehensive path is.
+        portfolio_metrics = cm.build_portfolio_metrics(
+            ab_df=ab_data,
+            csone_df=csone_norm,
+            risk_profiles=risk_data,
+            risk_scale=cm.RISK_SCALE_0_TO_10,
+        )
+        consistency = validate_report_consistency(
+            ab_data,
+            csone_norm,
+            portfolio_metrics=portfolio_metrics,
+            risk_data=risk_data,
+            factual_claims=factual_claims,
+        )
+        if consistency["errors"]:
+            logger.error(f"[CONSISTENCY] Compact report errors: {consistency['errors']}")
         if consistency["warnings"]:
             logger.warning(f"[CONSISTENCY] Compact report warnings: {consistency['warnings']}")
         

@@ -20,6 +20,7 @@ from adoptiq_backend import _ensure_outputs
 from enhanced_snowflake_insights import EnhancedSnowflakeInsights
 from data_normalization import detect_bems_mask, extract_bems_ids_from_row, normalize_customer_name
 from snowflake_table_policy import is_table_blocked
+import canonical_metrics as cm
 
 # Optional analyzers - may not be available in all deployments
 try:
@@ -101,38 +102,25 @@ class LeaderReportGenerator:
         used in narratives without requiring an LLM. If both inputs are empty
         or unusable, we return ``Unknown`` so downstream prose stays honest.
         """
-        pulse_signal: Optional[str] = None
-        if customer_pulse is not None and not getattr(customer_pulse, 'empty', True):
-            score_col = next(
-                (col for col in ('SCORE__C', 'SCORE') if col in customer_pulse.columns),
-                None,
-            )
-            if score_col is not None:
-                scores = pd.to_numeric(customer_pulse[score_col], errors='coerce').dropna()
-                if not scores.empty:
-                    avg = float(scores.mean())
-                    if avg >= 7.5:
-                        pulse_signal = 'Positive'
-                    elif avg <= 5.0:
-                        pulse_signal = 'Negative'
-                    else:
-                        pulse_signal = 'Neutral'
+        # Canonical pulse sentiment: threshold table lives in
+        # canonical_metrics.pulse_sentiment (Positive >= 7.5, Negative <= 5.0
+        # on a 0-10 scale). Returns 'Unknown' when no scores parse.
+        pulse_summary = cm.pulse_sentiment(customer_pulse, scale=cm.PULSE_SCALE_0_TO_10)
+        pulse_signal: Optional[str] = pulse_summary["sentiment"] if pulse_summary["count"] > 0 else None
 
         barrier_pressure: Optional[str] = None
         if adoption_barriers is not None and not getattr(adoption_barriers, 'empty', True):
-            severity_col = next(
-                (col for col in ('SEVERITY_C', 'SEVERITY') if col in adoption_barriers.columns),
-                None,
+            # Use canonical critical/high counter so the "high|critical|urgent"
+            # heuristic is no longer column-name-dependent (SEVERITY_C vs PRIORITY).
+            high_count = cm.count_critical_barriers(
+                adoption_barriers, mode=cm.CRITICAL_AB_MODE_CRITICAL_OR_HIGH
             )
-            if severity_col is not None:
-                severities = adoption_barriers[severity_col].astype(str).str.lower()
-                high_count = int(severities.str.contains('high|critical|urgent', na=False).sum())
-                if high_count >= 5:
-                    barrier_pressure = 'Negative'
-                elif high_count >= 1:
-                    barrier_pressure = 'Neutral'
-                else:
-                    barrier_pressure = 'Positive'
+            if high_count >= 5:
+                barrier_pressure = 'Negative'
+            elif high_count >= 1:
+                barrier_pressure = 'Neutral'
+            else:
+                barrier_pressure = 'Positive'
 
         # Combine: barrier pressure can downgrade pulse, and vice versa. When
         # only one signal is present, use it directly.
@@ -270,7 +258,10 @@ class LeaderReportGenerator:
                     logger.debug(f"Progress callback error: {_cb_err}")
 
         logger.info(f"Generating leader report for {manager_name} covering last {days} days")
-        
+        # Make the analysis window available to per-customer enhancement
+        # methods so they no longer fall back to a hard-coded 90-day window.
+        self._analysis_days = int(days) if days else 90
+
         _cb(18, f'Finding direct reports for {manager_name}...', 'Document Generation')
         direct_reports = self._get_direct_reports(manager_name)
         
@@ -1331,15 +1322,33 @@ class LeaderReportGenerator:
         self.doc.add_paragraph()
     
     def _count_bems_escalations(self, data: Dict) -> int:
-        """Count BEMS escalations using canonical centralized detection."""
+        """Count BEMS escalations using canonical centralized detection.
+
+        Leader Report intentionally uses the *combined* AB + TAC mode so
+        the team-activity rollup includes both adoption-barrier rows that
+        reference a BEMS and TAC rows that match the BEMS mask. The
+        canonical TAC-only count (used by the Compact / EI dashboards and
+        the cross-report consistency contract) is exposed via
+        ``cm.count_bems(..., mode=cm.BEMS_MODE_CANONICAL)`` if that value
+        is needed elsewhere.
+        """
         abs_df = data.get('adoption_barriers', pd.DataFrame())
         tac_df = data.get('tac_cases', pd.DataFrame())
-
-        ab_bems = int(detect_bems_mask(abs_df).sum()) if abs_df is not None and not abs_df.empty else 0
-        tac_bems = int(detect_bems_mask(tac_df).sum()) if tac_df is not None and not tac_df.empty else 0
-        bems_count = ab_bems + tac_bems
-        logger.debug(f"Total BEMS escalations found via canonical detector: {bems_count} (AB={ab_bems}, TAC={tac_bems})")
+        bems_count = cm.count_bems(
+            tac_df, ab_df=abs_df, mode=cm.BEMS_MODE_COMBINED_AB_TAC
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            ab_bems = cm.count_bems(abs_df, mode=cm.BEMS_MODE_CANONICAL)
+            tac_bems = cm.count_bems(tac_df, mode=cm.BEMS_MODE_CANONICAL)
+            logger.debug(
+                f"Leader BEMS (combined AB+TAC mode): {bems_count} "
+                f"(AB={ab_bems}, TAC={tac_bems})"
+            )
         return bems_count
+
+    def _count_bems_canonical_tac(self, data: Dict) -> int:
+        """Canonical TAC-only BEMS count (matches Compact / EI dashboards)."""
+        return cm.count_bems(data.get('tac_cases', pd.DataFrame()))
     
     def _add_technology_breakdown(self, team_data: Dict[str, Dict]):
         """Add technology breakdown by team member"""
@@ -1978,10 +1987,18 @@ class LeaderReportGenerator:
             num_abs = self.safe_len(data['adoption_barriers'])
             num_cps = self.safe_len(data['customer_pulse'])
             
-            # Count BEMS escalations
+            # Count BEMS escalations (combined AB+TAC for the Leader summary).
             num_bems = self._count_bems_escalations(data)
-            
-            num_total = num_aps + num_abs + num_cps + num_bems
+
+            # Canonical Leader-summary "Total Activities" = AP + AB + CP + BEMS.
+            # Named mode prevents silent drift back to AP+AB+CP or AP+AB+CP+TAC.
+            num_total = cm.count_total_activities(
+                action_plans_df=data.get('action_plans'),
+                ab_df=data.get('adoption_barriers'),
+                customer_pulse_df=data.get('customer_pulse'),
+                bems_count=num_bems,
+                mode=cm.ACTIVITIES_MODE_LEADER_SUMMARY,
+            )
             
             total_aps += num_aps
             total_abs += num_abs
@@ -3017,8 +3034,13 @@ class LeaderReportGenerator:
                 columns_to_show.append(db_col)
                 column_headers.append(display_col)
         
-        # Create table
-        num_rows = min(self.safe_len(combined_abs), 100) + 1  # Limit to 100 + header
+        # Create table. Cap at 100 displayed rows for document length;
+        # the cap is disclosed below the table so readers know they are
+        # looking at a truncated sample, not the entire data set.
+        AB_LIST_DISPLAY_CAP = 100
+        total_ab_rows = self.safe_len(combined_abs)
+        displayed_rows = min(total_ab_rows, AB_LIST_DISPLAY_CAP)
+        num_rows = displayed_rows + 1  # +1 for header
         table = self.doc.add_table(rows=num_rows, cols=self.safe_len(column_headers))
         table.style = 'Light Grid Accent 1'
         
@@ -3036,7 +3058,7 @@ class LeaderReportGenerator:
             cell._element.get_or_add_tcPr().append(shading_elm)
         
         # Use .head(n).iterrows() so we don't materialize every row into a list.
-        for row_idx, (_, ab) in enumerate(combined_abs.head(100).iterrows(), start=1):
+        for row_idx, (_, ab) in enumerate(combined_abs.head(AB_LIST_DISPLAY_CAP).iterrows(), start=1):
             row_cells = table.rows[row_idx].cells
 
             for col_idx, col_name in enumerate(columns_to_show):
@@ -3055,13 +3077,24 @@ class LeaderReportGenerator:
                 if row_cells[col_idx].paragraphs and row_cells[col_idx].paragraphs[0].runs:
                     row_cells[col_idx].paragraphs[0].runs[0].font.size = Pt(8)
         
-        # Add note about linked records
+        # Add note about linked records and explicit list cap disclosure so
+        # readers never confuse a truncated sample with a complete list.
         note_para = self.doc.add_paragraph('\n')
         note_para.add_run('Note: ').font.bold = True
         note_para.add_run(
             'Linked Customer Pulse and Action Plans can be identified by matching '
             'account IDs and customer names in the respective sections above.'
         )
+        if total_ab_rows > AB_LIST_DISPLAY_CAP:
+            cap_para = self.doc.add_paragraph()
+            cap_run = cap_para.add_run(
+                f'Showing {AB_LIST_DISPLAY_CAP} of {total_ab_rows} adoption barriers '
+                f'(table truncated for length). Headline counts elsewhere in this '
+                f'report use the full {total_ab_rows} records.'
+            )
+            cap_run.font.italic = True
+            cap_run.font.size = Pt(9)
+            cap_run.font.color.rgb = CISCO_GRAY
     
     def _add_team_member_activity_table(self, cssm_name: str, data: Dict):
         """Add a detailed activity table for an individual team member"""
@@ -3106,7 +3139,14 @@ class LeaderReportGenerator:
         num_aps = safe_len(data.get('action_plans', []))
         num_abs = safe_len(data.get('adoption_barriers', []))
         num_cps = safe_len(data.get('customer_pulse', []))
-        num_total = num_aps + num_abs + num_cps
+        # Canonical "member_table" total = AP + AB + CP. This per-member table
+        # intentionally excludes TAC and BEMS (those have their own sections).
+        num_total = cm.count_total_activities(
+            action_plans_df=data.get('action_plans'),
+            ab_df=data.get('adoption_barriers'),
+            customer_pulse_df=data.get('customer_pulse'),
+            mode=cm.ACTIVITIES_MODE_MEMBER_TABLE,
+        )
         
         # Populate data cells
         data_cells[0].text = cssm_name
@@ -3754,7 +3794,14 @@ class LeaderReportGenerator:
                 'resolved_abs': resolved_ab_count,
                 'completed_aps': completed_ap_count,
                 'impact_score': impact_score,
-                'total_activities': num_aps + num_abs + num_cps + num_tac
+                # Canonical "overall_summary" total = AP + AB + CP + TAC.
+                'total_activities': cm.count_total_activities(
+                    action_plans_df=data.get('action_plans'),
+                    ab_df=data.get('adoption_barriers'),
+                    customer_pulse_df=data.get('customer_pulse'),
+                    tac_df=data.get('tac_cases'),
+                    mode=cm.ACTIVITIES_MODE_OVERALL_SUMMARY,
+                ),
             })
         
         # Create overall statistics table
@@ -3789,6 +3836,7 @@ class LeaderReportGenerator:
             ('Customer Pulse Records', str(total_cps), f"{total_cps/avg_divisor:.1f}"),
             ('TAC Cases', str(total_tac_cases), f"{total_tac_cases/avg_divisor:.1f}"),
             ('BEMS Escalations', str(total_bems), f"{total_bems/avg_divisor:.1f}"),
+            # Aggregate "overall_summary" total = AP + AB + CP + TAC across all members.
             ('Total Activities', str(total_aps + total_abs + total_cps + total_tac_cases), f"{(total_aps + total_abs + total_cps + total_tac_cases)/avg_divisor:.1f}")
         ]
         
@@ -3923,20 +3971,45 @@ class LeaderReportGenerator:
         meta_para.add_run(f'• Total Records Analyzed: {total_aps + total_abs + total_cps + total_tac_cases}\n')
         meta_para.style = 'Normal'
     
-    def _add_customer_enhanced_insights(self, customer: str, data: Dict):
-        """Add comprehensive enhanced insights including Snowflake data, BEMS, and defects"""
+    def _add_customer_enhanced_insights(self, customer: str, data: Dict, days: Optional[int] = None):
+        """Add comprehensive enhanced insights including Snowflake data, BEMS, and defects.
+
+        ``days`` is the analysis window the user selected for this report. We
+        propagate it to ``EnhancedSnowflakeInsights`` so the customer-level
+        Snowflake fetch matches the rest of the report. The previous
+        hard-coded ``days=90`` ignored the caller's choice and silently
+        showed a 90-day slice even when the user requested 30 or 180 days.
+        ``data['analysis_days']`` is checked as a secondary source so callers
+        that haven't yet been updated still pass the right window.
+        """
         try:
             # Add heading
             insights_heading = self.doc.add_heading('📊 Additional Customer Insights', level=5)
             if insights_heading.runs:
                 insights_heading.runs[0].font.color.rgb = CISCO_BLUE
-            
+
             insights_added = False
-            
+
+            # Resolve the analysis window. Priority order:
+            #   1) explicit ``days`` argument from caller
+            #   2) ``data['analysis_days']`` (set by the report driver)
+            #   3) ``self._analysis_days`` (set by ``generate_leader_report``)
+            #   4) default 90 (legacy behaviour kept as a final fallback)
+            if days is None:
+                days = data.get('analysis_days')
+            if days is None:
+                days = getattr(self, '_analysis_days', None)
+            if days is None:
+                days = 90
+            try:
+                days = max(1, int(days))
+            except (TypeError, ValueError):
+                days = 90
+
             # Get Enhanced Snowflake Insights
             try:
                 if self.enhanced_insights:
-                    customer_insights = self.enhanced_insights.get_comprehensive_customer_insights(customer, days=90)
+                    customer_insights = self.enhanced_insights.get_comprehensive_customer_insights(customer, days=days)
                     
                     if customer_insights and customer_insights.get('insights'):
                         insights_added = True

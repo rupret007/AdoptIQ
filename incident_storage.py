@@ -170,16 +170,43 @@ def get_historical_incidents(days_back: int = 90, limit: int = 50) -> List[Dict]
     return [dict(r) for r in rows]
 
 
-def get_incident_statistics() -> Dict:
-    """Aggregate statistics for the stored incidents."""
+def get_incident_statistics(days_back: Optional[int] = None) -> Dict:
+    """Aggregate statistics for the stored incidents.
+
+    When ``days_back`` is provided, every count is restricted to incidents
+    whose ``last_seen`` is within the same window as the rows surfaced by
+    ``get_historical_incidents`` so the dashboard headline matches the
+    table beneath it (no more "Total: 421" above a list that only shows
+    the last 90 days).
+    """
+    where_clause = ""
+    params: tuple = ()
+    if days_back is not None and int(days_back) > 0:
+        cutoff = (datetime.utcnow() - timedelta(days=int(days_back))).strftime('%Y-%m-%d %H:%M:%S')
+        where_clause = "WHERE last_seen >= ?"
+        params = (cutoff,)
     with _connect() as conn:
-        total = conn.execute("SELECT COUNT(*) FROM incidents").fetchone()[0]
-        active = conn.execute("SELECT COUNT(*) FROM incidents WHERE status = 'active'").fetchone()[0]
-        resolved = conn.execute("SELECT COUNT(*) FROM incidents WHERE status = 'resolved'").fetchone()[0]
-        sources_rows = conn.execute("SELECT DISTINCT source FROM incidents").fetchall()
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM incidents {where_clause}", params
+        ).fetchone()[0]
+        active = conn.execute(
+            f"SELECT COUNT(*) FROM incidents {where_clause}{' AND' if where_clause else ' WHERE'} status = 'active'",
+            params,
+        ).fetchone()[0]
+        resolved = conn.execute(
+            f"SELECT COUNT(*) FROM incidents {where_clause}{' AND' if where_clause else ' WHERE'} status = 'resolved'",
+            params,
+        ).fetchone()[0]
+        sources_rows = conn.execute(
+            f"SELECT DISTINCT source FROM incidents {where_clause}", params
+        ).fetchall()
         sources = [r[0] for r in sources_rows if r[0]]
-        oldest = conn.execute("SELECT MIN(first_seen) FROM incidents").fetchone()[0]
-        newest = conn.execute("SELECT MAX(last_seen) FROM incidents").fetchone()[0]
+        oldest = conn.execute(
+            f"SELECT MIN(first_seen) FROM incidents {where_clause}", params
+        ).fetchone()[0]
+        newest = conn.execute(
+            f"SELECT MAX(last_seen) FROM incidents {where_clause}", params
+        ).fetchone()[0]
     return {
         'total': total,
         'active': active,
@@ -187,6 +214,7 @@ def get_incident_statistics() -> Dict:
         'sources': sources,
         'oldest': oldest or '',
         'newest': newest or '',
+        'days_back': int(days_back) if days_back is not None and int(days_back) > 0 else None,
     }
 
 
@@ -245,19 +273,38 @@ def get_historical_bugs(days_back: int = 90, limit: int = 50) -> List[Dict]:
     return [dict(r) for r in rows]
 
 
-def get_bug_statistics() -> Dict:
-    """Aggregate statistics for the stored bugs."""
+def get_bug_statistics(days_back: Optional[int] = None) -> Dict:
+    """Aggregate statistics for the stored bugs.
+
+    See :func:`get_incident_statistics` for the rationale behind the
+    optional ``days_back`` window.
+    """
+    where_clause = ""
+    params: tuple = ()
+    if days_back is not None and int(days_back) > 0:
+        cutoff = (datetime.utcnow() - timedelta(days=int(days_back))).strftime('%Y-%m-%d %H:%M:%S')
+        where_clause = "WHERE last_seen >= ?"
+        params = (cutoff,)
     with _connect() as conn:
-        total = conn.execute("SELECT COUNT(*) FROM bugs").fetchone()[0]
-        sources_rows = conn.execute("SELECT DISTINCT source FROM bugs").fetchall()
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM bugs {where_clause}", params
+        ).fetchone()[0]
+        sources_rows = conn.execute(
+            f"SELECT DISTINCT source FROM bugs {where_clause}", params
+        ).fetchall()
         sources = [r[0] for r in sources_rows if r[0]]
-        oldest = conn.execute("SELECT MIN(first_seen) FROM bugs").fetchone()[0]
-        newest = conn.execute("SELECT MAX(last_seen) FROM bugs").fetchone()[0]
+        oldest = conn.execute(
+            f"SELECT MIN(first_seen) FROM bugs {where_clause}", params
+        ).fetchone()[0]
+        newest = conn.execute(
+            f"SELECT MAX(last_seen) FROM bugs {where_clause}", params
+        ).fetchone()[0]
     return {
         'total': total,
         'sources': sources,
         'oldest': oldest or '',
         'newest': newest or '',
+        'days_back': int(days_back) if days_back is not None and int(days_back) > 0 else None,
     }
 
 
@@ -320,16 +367,40 @@ def get_historical_maintenances(days_back: int = 90, limit: int = 200) -> List[D
     return [dict(r) for r in rows]
 
 
-def get_maintenance_statistics() -> Dict:
-    """Aggregate statistics for the stored maintenances."""
+def get_maintenance_statistics(days_back: Optional[int] = None) -> Dict:
+    """Aggregate statistics for the stored maintenances.
+
+    See :func:`get_incident_statistics` for the rationale behind the
+    optional ``days_back`` window.
+    """
+    where_clause = ""
+    params: tuple = ()
+    if days_back is not None and int(days_back) > 0:
+        cutoff = (datetime.utcnow() - timedelta(days=int(days_back))).strftime('%Y-%m-%d %H:%M:%S')
+        where_clause = "WHERE last_seen >= ?"
+        params = (cutoff,)
     with _connect() as conn:
-        total = conn.execute("SELECT COUNT(*) FROM maintenances").fetchone()[0]
-        scheduled = conn.execute("SELECT COUNT(*) FROM maintenances WHERE status = 'scheduled'").fetchone()[0]
-        completed = conn.execute("SELECT COUNT(*) FROM maintenances WHERE status = 'completed'").fetchone()[0]
-        sources_rows = conn.execute("SELECT DISTINCT source FROM maintenances").fetchall()
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM maintenances {where_clause}", params
+        ).fetchone()[0]
+        scheduled = conn.execute(
+            f"SELECT COUNT(*) FROM maintenances {where_clause}{' AND' if where_clause else ' WHERE'} status = 'scheduled'",
+            params,
+        ).fetchone()[0]
+        completed = conn.execute(
+            f"SELECT COUNT(*) FROM maintenances {where_clause}{' AND' if where_clause else ' WHERE'} status = 'completed'",
+            params,
+        ).fetchone()[0]
+        sources_rows = conn.execute(
+            f"SELECT DISTINCT source FROM maintenances {where_clause}", params
+        ).fetchall()
         sources = [r[0] for r in sources_rows if r[0]]
-        oldest = conn.execute("SELECT MIN(first_seen) FROM maintenances").fetchone()[0]
-        newest = conn.execute("SELECT MAX(last_seen) FROM maintenances").fetchone()[0]
+        oldest = conn.execute(
+            f"SELECT MIN(first_seen) FROM maintenances {where_clause}", params
+        ).fetchone()[0]
+        newest = conn.execute(
+            f"SELECT MAX(last_seen) FROM maintenances {where_clause}", params
+        ).fetchone()[0]
     return {
         'total': total,
         'scheduled': scheduled,
@@ -337,6 +408,7 @@ def get_maintenance_statistics() -> Dict:
         'sources': sources,
         'oldest': oldest or '',
         'newest': newest or '',
+        'days_back': int(days_back) if days_back is not None and int(days_back) > 0 else None,
     }
 
 
@@ -345,14 +417,24 @@ def get_maintenance_statistics() -> Dict:
 # ---------------------------------------------------------------------------
 
 def get_all_external_intel(days_back: int = 365) -> Dict:
-    """Return incidents, bugs, maintenances, and statistics for the external intelligence page."""
+    """Return incidents, bugs, maintenances, and statistics for the external intelligence page.
+
+    Statistics are now scoped to the same ``days_back`` window as the
+    rendered lists, so the headline counts on the page agree with the
+    rows beneath them. ``*_stats_global`` keys are also returned for
+    callers that need the all-time totals.
+    """
     return {
         'incidents': get_historical_incidents(days_back=days_back, limit=500),
         'bugs': get_historical_bugs(days_back=days_back, limit=500),
         'maintenances': get_historical_maintenances(days_back=days_back, limit=500),
-        'incident_stats': get_incident_statistics(),
-        'bug_stats': get_bug_statistics(),
-        'maintenance_stats': get_maintenance_statistics(),
+        'incident_stats': get_incident_statistics(days_back=days_back),
+        'bug_stats': get_bug_statistics(days_back=days_back),
+        'maintenance_stats': get_maintenance_statistics(days_back=days_back),
+        'incident_stats_global': get_incident_statistics(),
+        'bug_stats_global': get_bug_statistics(),
+        'maintenance_stats_global': get_maintenance_statistics(),
+        'days_back': int(days_back),
     }
 
 

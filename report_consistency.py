@@ -126,6 +126,35 @@ def validate_report_consistency(
             )
         metrics["critical_p1"] = int((sev_series == "P1").sum())
         metrics["high_p2"] = int((sev_series == "P2").sum())
+        metrics["p3_cases"] = int((sev_series == "P3").sum())
+        metrics["p4_cases"] = int((sev_series == "P4").sum())
+        metrics["unknown_priority_cases"] = int((sev_series == "Unknown").sum() + (sev_series == "UNKNOWN").sum() + (sev_series == "").sum())
+
+        # Case type classification (break/fix vs provisioning) - canonical.
+        # If the caller did not pre-enrich the DataFrame, we enrich on the
+        # fly via the same helper that canonical_metrics uses, so the
+        # validator agrees with the metrics that report builders compute.
+        if "case_type_class" not in csone_df.columns:
+            try:
+                from data_normalization import add_case_lifecycle_fields as _enrich
+                _enriched = _enrich(csone_df)
+            except Exception:
+                _enriched = csone_df
+        else:
+            _enriched = csone_df
+        if "case_type_class" in _enriched.columns:
+            ctc = _enriched["case_type_class"].astype(str)
+            metrics["break_fix_cases"] = int((ctc == "break_fix_technical").sum())
+            metrics["provisioning_cases"] = int((ctc == "provisioning_request").sum())
+        else:
+            metrics["break_fix_cases"] = 0
+            metrics["provisioning_cases"] = 0
+    else:
+        metrics["p3_cases"] = 0
+        metrics["p4_cases"] = 0
+        metrics["unknown_priority_cases"] = 0
+        metrics["break_fix_cases"] = 0
+        metrics["provisioning_cases"] = 0
 
     # Adoption-barrier categorization leakage
     if ab_df is not None and not ab_df.empty and "sub_technology" in ab_df.columns:
@@ -178,6 +207,57 @@ def validate_report_consistency(
         reported_p2 = portfolio_metrics.get("high_p2", portfolio_metrics.get("p2_cases", None))
         if reported_p2 is not None and int(reported_p2) != metrics["high_p2"]:
             errors.append("Portfolio metric mismatch: high_p2 does not match canonical severity counting.")
+        # Extended priority parity (P3, P4, Unknown).
+        for key, expected_metric in (
+            ("p3_cases", metrics["p3_cases"]),
+            ("p4_cases", metrics["p4_cases"]),
+            ("unknown_priority_cases", metrics["unknown_priority_cases"]),
+        ):
+            reported = portfolio_metrics.get(key)
+            if reported is not None and int(reported) != int(expected_metric):
+                errors.append(
+                    f"Portfolio metric mismatch: {key} ({int(reported)}) does not match canonical severity counting ({int(expected_metric)})."
+                )
+        # Case-type parity (break/fix vs provisioning).
+        for key, expected_metric in (
+            ("break_fix_cases", metrics["break_fix_cases"]),
+            ("provisioning_cases", metrics["provisioning_cases"]),
+        ):
+            reported = portfolio_metrics.get(key)
+            if reported is not None and int(reported) != int(expected_metric):
+                errors.append(
+                    f"Portfolio metric mismatch: {key} ({int(reported)}) does not match canonical case-type counting ({int(expected_metric)})."
+                )
+
+        # Risk-band parity (high/medium/low/healthy). These are checked as
+        # warnings rather than errors because risk_band depends on the
+        # selected scoring scale and is recomputed per profile.
+        if risk_data is not None:
+            band_observed = {"high": 0, "medium": 0, "low": 0, "healthy": 0}
+            for profile in risk_data.values():
+                if not isinstance(profile, dict):
+                    continue
+                band = str(profile.get("risk_band", "")).strip().upper()
+                if band == "CRITICAL" or band == "HIGH":
+                    band_observed["high"] += 1
+                elif band == "MEDIUM":
+                    band_observed["medium"] += 1
+                elif band == "LOW":
+                    band_observed["low"] += 1
+                elif band == "HEALTHY":
+                    band_observed["healthy"] += 1
+            metrics["risk_band_observed"] = band_observed
+            for key, observed in (
+                ("high_risk_customers", band_observed["high"]),
+                ("medium_risk_customers", band_observed["medium"]),
+                ("low_risk_customers", band_observed["low"]),
+                ("healthy_customers", band_observed["healthy"]),
+            ):
+                reported = portfolio_metrics.get(key)
+                if reported is not None and int(reported) != int(observed):
+                    warnings.append(
+                        f"Portfolio metric drift: {key} ({int(reported)}) differs from observed risk_band tally ({int(observed)})."
+                    )
 
     # Risk data/customer totals coherence
     if risk_data is not None:
