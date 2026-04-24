@@ -77,15 +77,33 @@ echo.
 echo Creating OUTBOX...
 if not exist OUTBOX mkdir OUTBOX
 
-REM Keep OUTBOX deterministic: exactly three files.
+REM Keep OUTBOX deterministic: exactly the user-facing release payload.
 for %%F in (OUTBOX\*) do (
-    if /I not "%%~nxF"=="AdoptIQ.exe" if /I not "%%~nxF"=="README.md" if /I not "%%~nxF"=="build_info.txt" del /Q "%%~fF" >nul 2>nul
+    if /I not "%%~nxF"=="AdoptIQ.exe" if /I not "%%~nxF"=="Run_AdoptIQ.bat" if /I not "%%~nxF"=="Unblock_AdoptIQ.bat" if /I not "%%~nxF"=="READ_ME_FIRST.txt" if /I not "%%~nxF"=="README.md" if /I not "%%~nxF"=="build_info.txt" del /Q "%%~fF" >nul 2>nul
 )
 
 copy /Y dist\AdoptIQ.exe "OUTBOX\AdoptIQ.exe" >nul 2>nul
 if %ERRORLEVEL% neq 0 (
     echo ERROR: Failed to copy dist\AdoptIQ.exe into OUTBOX.
     echo        Ensure the file is not locked and retry.
+    pause
+    exit /b 1
+)
+copy /Y Run_AdoptIQ.bat "OUTBOX\Run_AdoptIQ.bat" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to copy Run_AdoptIQ.bat into OUTBOX.
+    pause
+    exit /b 1
+)
+copy /Y Unblock_AdoptIQ.bat "OUTBOX\Unblock_AdoptIQ.bat" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to copy Unblock_AdoptIQ.bat into OUTBOX.
+    pause
+    exit /b 1
+)
+copy /Y "scripts\win\READ_ME_FIRST.txt" "OUTBOX\READ_ME_FIRST.txt" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to copy scripts\win\READ_ME_FIRST.txt into OUTBOX.
     pause
     exit /b 1
 )
@@ -98,16 +116,34 @@ if %ERRORLEVEL% neq 0 (
 echo AdoptIQ v%ADOPTIQ_VERSION% build %ADOPTIQ_BUILD% > OUTBOX\build_info.txt
 echo Built: %date% %time% >> OUTBOX\build_info.txt
 
-REM Mirror release payload to staging folder with the same 3-file contract.
+REM Mirror release payload to staging folder with the same file contract.
 echo Syncing staging folder...
 if not exist "%STAGING_DIR%" mkdir "%STAGING_DIR%"
 for %%F in ("%STAGING_DIR%\*") do (
-    if /I not "%%~nxF"=="AdoptIQ.exe" if /I not "%%~nxF"=="README.md" if /I not "%%~nxF"=="build_info.txt" del /Q "%%~fF" >nul 2>nul
+    if /I not "%%~nxF"=="AdoptIQ.exe" if /I not "%%~nxF"=="Run_AdoptIQ.bat" if /I not "%%~nxF"=="Unblock_AdoptIQ.bat" if /I not "%%~nxF"=="READ_ME_FIRST.txt" if /I not "%%~nxF"=="README.md" if /I not "%%~nxF"=="build_info.txt" del /Q "%%~fF" >nul 2>nul
 )
 copy /Y "OUTBOX\AdoptIQ.exe" "%STAGING_DIR%\AdoptIQ.exe" >nul 2>nul
 if %ERRORLEVEL% neq 0 (
     echo ERROR: Failed to sync AdoptIQ.exe to staging.
     echo        Close any running AdoptIQ.exe from "%STAGING_DIR%" and retry.
+    pause
+    exit /b 1
+)
+copy /Y "OUTBOX\Run_AdoptIQ.bat" "%STAGING_DIR%\Run_AdoptIQ.bat" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to sync Run_AdoptIQ.bat to staging.
+    pause
+    exit /b 1
+)
+copy /Y "OUTBOX\Unblock_AdoptIQ.bat" "%STAGING_DIR%\Unblock_AdoptIQ.bat" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to sync Unblock_AdoptIQ.bat to staging.
+    pause
+    exit /b 1
+)
+copy /Y "OUTBOX\READ_ME_FIRST.txt" "%STAGING_DIR%\READ_ME_FIRST.txt" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to sync READ_ME_FIRST.txt to staging.
     pause
     exit /b 1
 )
@@ -134,6 +170,24 @@ if %ERRORLEVEL% neq 0 (
     pause
     exit /b 1
 )
+copy /Y "OUTBOX\Run_AdoptIQ.bat" "%MAC_OUTBOX_STAGING_DIR%\Run_AdoptIQ.bat" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to sync Run_AdoptIQ.bat to Mac OUTBOX staging.
+    pause
+    exit /b 1
+)
+copy /Y "OUTBOX\Unblock_AdoptIQ.bat" "%MAC_OUTBOX_STAGING_DIR%\Unblock_AdoptIQ.bat" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to sync Unblock_AdoptIQ.bat to Mac OUTBOX staging.
+    pause
+    exit /b 1
+)
+copy /Y "OUTBOX\READ_ME_FIRST.txt" "%MAC_OUTBOX_STAGING_DIR%\READ_ME_FIRST.txt" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to sync READ_ME_FIRST.txt to Mac OUTBOX staging.
+    pause
+    exit /b 1
+)
 copy /Y "OUTBOX\README.md" "%MAC_OUTBOX_STAGING_DIR%\README.md" >nul 2>nul
 if %ERRORLEVEL% neq 0 (
     echo ERROR: Failed to sync README.md to Mac OUTBOX staging.
@@ -157,9 +211,13 @@ echo ==============================================
 echo   Done
 echo ==============================================
 echo.
-echo   OUTBOX\AdoptIQ.exe  - Standalone exe: double-click to run
-echo   OUTBOX\README.md   - User instructions
+echo   OUTBOX\AdoptIQ.exe          - Standalone exe (the app itself)
+echo   OUTBOX\Run_AdoptIQ.bat      - RECOMMENDED user entry point (auto-unblocks then launches)
+echo   OUTBOX\Unblock_AdoptIQ.bat  - Clears SmartScreen "downloaded" flag if needed
+echo   OUTBOX\READ_ME_FIRST.txt    - First-run instructions (open in Notepad)
+echo   OUTBOX\README.md            - Full user documentation
+echo   OUTBOX\build_info.txt       - Version / build metadata
 echo.
-echo   User double-clicks AdoptIQ.exe; browser opens automatically to http://localhost:5001
+echo   User double-clicks Run_AdoptIQ.bat; browser opens automatically to http://localhost:5001
 echo.
 pause

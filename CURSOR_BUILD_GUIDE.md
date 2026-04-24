@@ -61,18 +61,23 @@ build_pc.bat
 ### 5. What the build does
 
 1. Installs dependencies (`pip install -r requirements.txt`, `pyinstaller`)
-2. Runs `embed_credentials.py` (embeds Snowflake, Keeper, CircuIT, PSIRT from `secrets.env`)
+2. Runs `embed_credentials.py` (embeds Snowflake, Keeper, CircuIT, PSIRT from `secrets.env`; reads file as `utf-8-sig` so a BOM is OK)
 3. Updates `config.py` with version/build (v1.0.3 build 1)
 4. Runs PyInstaller with `adoptiq_pc.spec`
-5. Creates OUTBOX: `AdoptIQ.exe` plus `README.md`
-6. Unblocks files (removes Zone.Identifier for SmartScreen)
+5. Creates the OUTBOX release payload (6 files - see "Output location" below)
+6. Mirrors the same 6-file payload to the user's OneDrive staging folders for both PC and Mac releases
+7. Runs `Unblock-File` on every file in OUTBOX and the staging folders (removes Zone.Identifier so SmartScreen does not block them)
 
 ### 6. Output location
 
-| Item | Location |
-|------|----------|
-| Executable | `OUTBOX\AdoptIQ.exe` |
-| User guide | `OUTBOX\README.md` |
+| Item | Location | Notes |
+|------|----------|-------|
+| Application binary | `OUTBOX\AdoptIQ.exe` | Standalone PyInstaller exe |
+| User entry point | `OUTBOX\Run_AdoptIQ.bat` | Auto-unblocks the folder, then launches `AdoptIQ.exe`. **Recommended** way to start AdoptIQ. |
+| Manual unblock helper | `OUTBOX\Unblock_AdoptIQ.bat` | Use only if SmartScreen still blocks the EXE |
+| First-run instructions | `OUTBOX\READ_ME_FIRST.txt` | Plain text, opens in Notepad |
+| Full user docs | `OUTBOX\README.md` | Markdown |
+| Build metadata | `OUTBOX\build_info.txt` | Version + build timestamp |
 
 ---
 
@@ -139,17 +144,29 @@ AdoptIQ/
 ├── build_pc.bat               # Windows build script
 ├── build_mac.sh               # macOS .app build script
 ├── build_mac_dmg.sh           # macOS DMG wrapper script
-├── embed_credentials.py       # Embeds secrets.env into _bundled_secrets.py
+├── Run_AdoptIQ.bat            # User entry point (Windows; copied into OUTBOX)
+├── Unblock_AdoptIQ.bat        # SmartScreen unblock helper (Windows; copied into OUTBOX)
+├── embed_credentials.py       # Embeds secrets.env into _bundled_secrets.py (utf-8-sig BOM-safe)
 ├── update_version_pc.py       # Stamps version into config.py
 ├── requirements.txt
 ├── secrets.env.template       # Template for credentials
 ├── team_config.json
 ├── templates/
 ├── static/
-├── tests/                     # pytest suite (currently 661 tests)
-├── OUTBOX/                    # Build output folder
-│   ├── AdoptIQ.exe            # (Windows, after build)
-│   └── README.md
+├── scripts/
+│   ├── mac/
+│   │   ├── READ_ME_FIRST.txt          # First-run instructions, copied into the .dmg
+│   │   └── Unblock_AdoptIQ.command    # First-run helper, copied into the .dmg
+│   └── win/
+│       └── READ_ME_FIRST.txt          # First-run instructions, copied into OUTBOX
+├── tests/                     # pytest suite (current baseline; run pytest --collect-only -q for the live count)
+├── OUTBOX/                    # Build output folder (deterministic 6-file payload)
+│   ├── AdoptIQ.exe
+│   ├── Run_AdoptIQ.bat
+│   ├── Unblock_AdoptIQ.bat
+│   ├── READ_ME_FIRST.txt
+│   ├── README.md
+│   └── build_info.txt
 ├── BUILD_WINDOWS.md           # End-user Windows build docs
 ├── CURSOR_BUILD_GUIDE.md      # This file
 ├── CURSOR_PC_BUILD_INSTRUCTIONS.md  # PC Cursor kickoff instructions

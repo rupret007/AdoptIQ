@@ -110,7 +110,12 @@ jobs:
             Write-Error "SECRETS_ENV_FILE is not configured"
             exit 1
           }
-          Set-Content -Path secrets.env -Value $env:SECRETS_ENV_FILE -Encoding UTF8
+          # Write UTF-8 WITHOUT BOM. Set-Content -Encoding UTF8 on PS 5.1 emits a
+          # BOM, which used to cause embed_credentials.py to silently drop the
+          # first key. embed_credentials.py is now BOM-safe (utf-8-sig), but we
+          # still write a clean BOM-free file here for hygiene.
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText("secrets.env", $env:SECRETS_ENV_FILE, $utf8NoBom)
         env:
           SECRETS_ENV_FILE: ${{ secrets.SECRETS_ENV_FILE }}
 
@@ -131,9 +136,13 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path OUTBOX | Out-Null
           Copy-Item dist\AdoptIQ.exe OUTBOX\
+          Copy-Item Run_AdoptIQ.bat OUTBOX\
+          Copy-Item Unblock_AdoptIQ.bat OUTBOX\
+          Copy-Item scripts\win\READ_ME_FIRST.txt OUTBOX\
           Copy-Item README.md OUTBOX\
           "AdoptIQ v${{ env.ADOPTIQ_VERSION }} build ${{ env.ADOPTIQ_BUILD }}" | Set-Content OUTBOX\build_info.txt
           "Built: $(Get-Date)" | Add-Content OUTBOX\build_info.txt
+          Get-ChildItem -Path OUTBOX -File | Unblock-File -ErrorAction SilentlyContinue
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
@@ -141,6 +150,9 @@ jobs:
           name: AdoptIQ-Windows-v${{ env.ADOPTIQ_VERSION }}-build${{ env.ADOPTIQ_BUILD }}
           path: |
             OUTBOX/AdoptIQ.exe
+            OUTBOX/Run_AdoptIQ.bat
+            OUTBOX/Unblock_AdoptIQ.bat
+            OUTBOX/READ_ME_FIRST.txt
             OUTBOX/README.md
             OUTBOX/build_info.txt
           if-no-files-found: error

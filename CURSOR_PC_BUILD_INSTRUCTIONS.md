@@ -58,6 +58,20 @@ pip install pyinstaller
 python embed_credentials.py
 ```
 
+> **Important - Keeper credentials must match the latest Mac build.**
+> `KEEPER_ROLE_ID` and `KEEPER_SECRET_ID` are rotated periodically. If the
+> PC build is started from an older `secrets.env` than the Mac build, the
+> packaged app will fail at first request with
+> `Keeper rejected the bundled KEEPER_ROLE_ID / KEEPER_SECRET_ID as invalid`.
+> Always copy the same `secrets.env` we just used for the most recent Mac
+> build (or re-export it from your Desktop/secret store) before running
+> `embed_credentials.py`.
+>
+> `embed_credentials.py` reads the file as `utf-8-sig`, so a UTF-8 BOM
+> (which Notepad and PowerShell often add) is silently stripped. CRLF
+> line endings are also fine. You do **not** need to scrub the file
+> before use.
+
 ## 4) Build on Windows
 
 ```cmd
@@ -66,20 +80,35 @@ build_pc.bat
 
 This will:
 1. Install dependencies from `requirements.txt`
-2. Embed credentials from `secrets.env`
+2. Embed credentials from `secrets.env` (BOM-safe, see section 3)
 3. Update version/build metadata in `config.py`
 4. Run PyInstaller with `adoptiq_pc.spec`
-5. Create `OUTBOX\AdoptIQ.exe` and `OUTBOX\README.md`
+5. Create the OUTBOX release payload (6 files, see below)
+6. Run `Unblock-File` on every file in OUTBOX so SmartScreen does not
+   block the freshly built artifacts
 
 ## 5) Verify build outputs
 
-Confirm:
-- `OUTBOX\AdoptIQ.exe` exists
-- `OUTBOX\README.md` exists
+Confirm `OUTBOX\` contains exactly these six files:
+
+| File | Purpose |
+|------|---------|
+| `AdoptIQ.exe` | The application binary |
+| `Run_AdoptIQ.bat` | Recommended user entry point (auto-unblocks then launches `AdoptIQ.exe`) |
+| `Unblock_AdoptIQ.bat` | Standalone helper if SmartScreen still blocks the EXE |
+| `READ_ME_FIRST.txt` | First-run instructions (open in Notepad) |
+| `README.md` | Full user documentation |
+| `build_info.txt` | Version / build metadata |
 
 Also verify:
-- Double-click `AdoptIQ.exe` -- it should start and open `http://localhost:5001`
-- No missing module errors at startup (check the console window)
+- Double-click `Run_AdoptIQ.bat` -- AdoptIQ should start and the default
+  browser should open `http://localhost:5001`. The console window stays
+  open while AdoptIQ is running; closing it stops the app.
+- No missing module errors at startup (check the console window).
+- Hit `http://localhost:5001/api/diag/connectivity` in the browser to
+  confirm DNS, TLS, AppRole login, secret read, and Snowflake all pass.
+  If AppRole login fails here, the bundled Keeper credentials are stale
+  (see section 3).
 
 ## 6) Where files are stored on Windows
 
@@ -96,7 +125,13 @@ In Explorer, type `%APPDATA%\AdoptIQ` in the address bar to open the folder.
 
 - **"Python is not recognized":** Install Python 3.11 from python.org. Check "Add Python to PATH" during install. Restart terminal.
 - **Missing modules at runtime:** Ensure the module is in `hidden_imports` inside `adoptiq_pc.spec`. Key modules: `incident_storage`, `enhanced_admin_dashboard_v2`, `cisco_internal_integrations`, `_bundled_secrets`.
-- **SmartScreen blocks the app:** Right-click `AdoptIQ.exe` -> Properties -> check "Unblock" -> OK.
+- **SmartScreen blocks the app:** Use the helpers shipped in OUTBOX:
+  - Easiest: double-click `OUTBOX\Run_AdoptIQ.bat` (it calls `Unblock-File` on the folder before launching `AdoptIQ.exe`).
+  - If the SmartScreen dialog still appears, click **More info -> Run anyway**.
+  - As a fallback: double-click `OUTBOX\Unblock_AdoptIQ.bat` once, then double-click `AdoptIQ.exe`.
+  - Manual equivalent: right-click `AdoptIQ.exe` -> Properties -> tick **Unblock** -> OK.
+- **"Could not reach the AdoptIQ server" appears in the browser:** The AdoptIQ console window was closed (or never started). Double-click `Run_AdoptIQ.bat` again. The friendlier message replaces the misleading "verify your input" text from earlier builds.
+- **"Keeper rejected the bundled KEEPER_ROLE_ID / KEEPER_SECRET_ID":** The `secrets.env` used at build time has a stale Keeper AppRole. Refresh from the same `secrets.env` used by the most recent Mac build, re-run `embed_credentials.py`, and rebuild. See section 3.
 - **Port 5001 in use:** Run `netstat -ano | findstr :5001` to find and stop the conflicting process.
 - Keep platform path differences in mind:
   - Windows: `%APPDATA%\AdoptIQ`
@@ -108,7 +143,7 @@ In Explorer, type `%APPDATA%\AdoptIQ` in the address bar to open the folder.
 python -m pytest tests/ -q --tb=short
 ```
 
-All 551 tests should pass on both Mac and Windows.
+All tests should pass on both Mac and Windows. The pytest baseline grows over time; check `pytest --collect-only -q | tail -3` for the current count.
 
 ## 9) Paste-ready Cursor kickoff prompt (Windows)
 
