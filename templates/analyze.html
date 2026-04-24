@@ -1152,6 +1152,9 @@ const AnalysisFormManager = (() => {
             } else if (error.message.includes('403') || error.message.includes('401')) {
                 errorMessage += 'Access denied.';
                 suggestion = 'Please refresh the page and try again.';
+            } else if (error instanceof TypeError && /failed to fetch|networkerror|load failed/i.test(error.message)) {
+                errorMessage += 'Could not reach the AdoptIQ server.';
+                suggestion = 'AdoptIQ may have stopped or been closed. Please relaunch AdoptIQ from the Applications folder and try again.';
             } else {
                 errorMessage += error.message;
                 suggestion = 'Please verify your input and try again.';

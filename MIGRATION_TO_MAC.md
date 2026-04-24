@@ -577,6 +577,11 @@ Create `tests/test_reports_extensive.py` with tests for:
 - **Port:** Windows uses 5001; confirm Mac uses the same or update README.
 - **Paths:** `%APPDATA%\AdoptIQ` becomes `~/Library/Application Support/AdoptIQ` or similar on Mac. Update README paths for Mac.
 - **SmartScreen:** Mac doesn't have SmartScreen; that section can be Mac-specific or omitted.
+- **Code signing (adhoc only):** Builds use adhoc signing — there is no Apple Developer ID. To keep the DMG drag-to-install flow working on Apple Silicon:
+  - `build_mac.sh` and `build_mac_dmg.sh` MUST use `ditto` (not `cp -R`) to copy `dist/AdoptIQ.app`, then `xattr -cr` the result and re-sign adhoc with `codesign --force --deep --sign - --timestamp=none`, then verify with `codesign --verify --deep --strict`.
+  - `build_mac_dmg.sh` MUST include `scripts/mac/Unblock_AdoptIQ.command` (renamed to `Unblock AdoptIQ.command` inside the DMG, chmod +x) and `scripts/mac/READ_ME_FIRST.txt` alongside `AdoptIQ.app` and the `Applications` symlink.
+  - Without these steps, the installed app silently bounces in the Dock and dies on first launch because Gatekeeper / AMFI rejects a quarantined adhoc-signed bundle.
+  - End-user docs (README.md macOS install section) MUST tell users to double-click `Unblock AdoptIQ.command` once after dragging the app to `/Applications` (or run `xattr -dr com.apple.quarantine /Applications/AdoptIQ.app` manually).
 
 ## 14. Optional (not required for app parity)
 

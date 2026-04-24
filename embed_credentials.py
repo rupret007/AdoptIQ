@@ -67,7 +67,12 @@ def _parse_env_file(path: Path) -> dict:
     out = {}
     if not path.exists():
         return out
-    with open(path, "r", encoding="utf-8") as f:
+    # encoding="utf-8-sig" so that a UTF-8 BOM at the start of the file
+    # (Notepad / Windows exports / hand-edited files) is silently consumed.
+    # Without this, the first non-comment key would be prefixed with U+FEFF,
+    # silently fail the ENV_KEYS membership check, and ship a build that
+    # is missing exactly one credential without any warning.
+    with open(path, "r", encoding="utf-8-sig") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):

@@ -79,8 +79,14 @@ Use the packaged app for your platform. No Python or development tools are requi
 
 #### macOS
 1. Open the **AdoptIQ** DMG (e.g. `AdoptIQ-v1.0.3-build1.dmg`).
-2. Drag **AdoptIQ.app** to **Applications**.
-3. Eject the DMG. Launch **AdoptIQ** from Applications (or Spotlight).
+2. Drag **AdoptIQ.app** onto the **Applications** shortcut in the DMG window.
+3. In the same DMG window, double-click **Unblock AdoptIQ.command**.
+   - This clears macOS Gatekeeper's quarantine flag on the installed app and launches AdoptIQ.
+   - You only need to do this the first time after installing or updating.
+   - If macOS asks "Allow Terminal to open this script?", click **Open**.
+4. Eject the DMG. From now on, launch **AdoptIQ** from Applications or Spotlight.
+
+> **Why the Unblock step?** AdoptIQ is signed adhoc (no Apple Developer ID), so macOS quarantines it when downloaded. On Apple Silicon Macs, quarantined adhoc-signed apps are silently killed at launch (the Dock icon bounces once and the app exits with no error window). The helper simply runs `xattr -dr com.apple.quarantine /Applications/AdoptIQ.app` and then `open /Applications/AdoptIQ.app`. You can run those two commands manually in Terminal instead if you prefer.
 
 #### Windows
 1. Open the folder containing `AdoptIQ.exe`, `README.md`, and `build_info.txt`.
@@ -114,12 +120,20 @@ Use the packaged app for your platform. No Python or development tools are requi
 
 **To quit:** Use **AdoptIQ → Quit AdoptIQ** from the menu bar (or ⌘Q). Closing only the terminal window may leave the app running in the background.
 
-### If macOS blocks the app ("cannot be opened because it is from an unidentified developer")
+### If macOS blocks the app or it bounces in the Dock and exits
 
-- **Right-click** (or Control-click) **AdoptIQ.app** → **Open** → **Open** in the dialog. You only need to do this once.
-- Or: **System Settings** → **Privacy & Security** → scroll to the blocked app → click **Open Anyway**.
+This happens because the build is adhoc-signed (no Apple Developer ID) and macOS has quarantined the installed app. Use the **Unblock AdoptIQ.command** helper from the DMG window — it removes the quarantine flag and launches the app.
 
-**Alternative:** You can run **AdoptIQ.app** directly from the DMG mount without installing. If you see sync or startup issues, copy the app to a local folder (e.g. `~/Applications`) and run it from there.
+If you no longer have the DMG mounted, run this once in Terminal:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/AdoptIQ.app
+open /Applications/AdoptIQ.app
+```
+
+If macOS shows "cannot be opened because Apple cannot check it for malicious software", click **Done**, then re-run the unblock command above.
+
+> Older guidance suggested right-clicking **AdoptIQ.app** → **Open**. That workaround is unreliable for adhoc-signed apps on Apple Silicon — use the unblock command instead.
 
 ---
 
@@ -187,7 +201,8 @@ Thank you for your feedback and for helping us improve AdoptIQ!
 ## Troubleshooting
 
 - **Port 5001 in use:** If you launch AdoptIQ while another instance is running, the app will show a dialog asking whether to quit the other instance and start, or cancel. From Terminal you can also run `lsof -i :5001` to find and stop the process.
-- **App closes immediately:** Launch from Terminal to see startup errors.
+- **App closes immediately / bounces in the Dock and exits (macOS):** This is almost always macOS Gatekeeper quarantine on an adhoc-signed build. Run the **Unblock AdoptIQ.command** from the DMG window, or in Terminal run `xattr -dr com.apple.quarantine /Applications/AdoptIQ.app` then `open /Applications/AdoptIQ.app`. See "If macOS blocks the app" above.
+- **App closes immediately (other):** Launch from Terminal to see startup errors. On macOS, also check `~/Library/Application Support/AdoptIQ/startup_error.txt` for any uncaught Python exception.
 - **Windows SmartScreen warning:** Click **More info** and then **Run anyway** if you trust the packaged build source.
 - **Connection errors:** You may need to be on **corporate VPN**.
 - **Snowflake/credential errors:** The app has embedded credentials. If you see credential errors, the build may have been created without a complete `secrets.env`. Contact your administrator for a properly configured build.

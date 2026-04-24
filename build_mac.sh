@@ -57,13 +57,23 @@ echo
 echo "Creating OUTBOX..."
 mkdir -p OUTBOX
 rm -rf "OUTBOX/AdoptIQ.app"
-cp -R "$APP_PATH" "OUTBOX/AdoptIQ.app"
+# Use ditto to faithfully copy the bundle (preserves Mach-O code signatures,
+# resource forks, ACLs, and extended attributes that `cp -R` can drop).
+ditto "$APP_PATH" "OUTBOX/AdoptIQ.app"
+# Strip stray extended attributes (e.g. com.apple.provenance, quarantine) that
+# would otherwise invalidate the deep code signature.
+xattr -cr "OUTBOX/AdoptIQ.app"
+# Re-apply an adhoc deep signature so the bundle that ships in OUTBOX/ is
+# guaranteed to be cleanly signed. Without this, Apple Silicon Gatekeeper /
+# AMFI silently kill the app on first launch (it bounces in the Dock and dies).
+codesign --force --deep --sign - --timestamp=none "OUTBOX/AdoptIQ.app"
+codesign --verify --deep --strict "OUTBOX/AdoptIQ.app"
 cp "README.md" "OUTBOX/README.md"
 echo "AdoptIQ v${ADOPTIQ_VERSION} build ${ADOPTIQ_BUILD}" > OUTBOX/build_info.txt
 echo "Built: $(date)" >> OUTBOX/build_info.txt
 
 if [[ -x "dist/AdoptIQ/AdoptIQ" ]]; then
-  cp "dist/AdoptIQ/AdoptIQ" "OUTBOX/AdoptIQ"
+  ditto "dist/AdoptIQ/AdoptIQ" "OUTBOX/AdoptIQ"
 fi
 
 echo

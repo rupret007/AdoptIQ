@@ -98,6 +98,22 @@ Create a macOS build script equivalent to build_pc.bat that installs deps, runs 
 If you run `build_mac_dmg.sh`, also confirm:
 - `OUTBOX/AdoptIQ-v<version>-build<build>.dmg`
 
+Verify the build output before shipping the DMG to anyone:
+
+```bash
+codesign --verify --deep --strict OUTBOX/AdoptIQ.app
+```
+
+Mount the DMG and confirm it contains all four user-facing items:
+
+```bash
+hdiutil attach -readonly -nobrowse OUTBOX/AdoptIQ-v*-build*.dmg -mountpoint /tmp/adoptiq_dmg
+ls /tmp/adoptiq_dmg
+# Expected: AdoptIQ.app  Applications  Unblock AdoptIQ.command  READ_ME_FIRST.txt  README.md
+codesign --verify --deep --strict /tmp/adoptiq_dmg/AdoptIQ.app
+hdiutil detach /tmp/adoptiq_dmg
+```
+
 Also verify:
 - App starts and opens `http://localhost:5001`
 - No missing module errors at startup
@@ -110,6 +126,16 @@ Also verify:
   - Windows `%APPDATA%\\AdoptIQ`
   - macOS `~/Library/Application Support/AdoptIQ`
 - SmartScreen notes are Windows-only; ignore on Mac.
+- **App bounces in the Dock and exits after dragging to Applications:** This is macOS Gatekeeper / AMFI killing the adhoc-signed bundle because of `com.apple.quarantine`. Two ways to confirm and recover:
+  1. Run the `Unblock AdoptIQ.command` helper that ships in the DMG window — it strips the quarantine attribute and launches the app.
+  2. Or, manually in Terminal:
+     ```bash
+     xattr /Applications/AdoptIQ.app                       # confirm com.apple.quarantine is present
+     xattr -dr com.apple.quarantine /Applications/AdoptIQ.app
+     open /Applications/AdoptIQ.app
+     ```
+  If the unblock helper is missing from the DMG, regenerate it via `./build_mac_dmg.sh`. The build script re-codesigns the staged bundle adhoc with `codesign --force --deep --sign -` after using `ditto` to copy it; both steps are required to keep the deep signature valid on Apple Silicon.
+- **`codesign --verify --deep --strict` fails on `OUTBOX/AdoptIQ.app`:** Almost always caused by a stray extended attribute or by `cp -R` instead of `ditto`. Re-run the build; `build_mac.sh` strips xattrs (`xattr -cr`) and re-signs adhoc as part of staging.
 
 ## 8) Paste-ready Cursor kickoff prompt (Mac)
 
