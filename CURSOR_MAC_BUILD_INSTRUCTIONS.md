@@ -120,29 +120,50 @@ Also verify:
 
 ### Staging sync (OneDrive)
 
-`build_mac_dmg.sh` now mirrors a lean release payload to the OneDrive staging
-folder so the latest DMG is always available alongside the PC build:
+`build_mac_dmg.sh` mirrors release artifacts to TWO OneDrive destinations,
+each with its own strict whitelist (anything else in the folder is purged
+on every build, `.DS_Store` is preserved):
 
-- Default destination: `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/OUTBOX/`
-- Override with `MAC_STAGING_DIR=...` before running the script if needed.
-- Lean payload (whitelist): `AdoptIQ-v<version>-build<build>.dmg`, `README.md`,
-  `build_info.txt`. Anything else in that folder is purged on each build
-  (`.DS_Store` is preserved). This intentionally drops loose `AdoptIQ.app` /
-  raw `AdoptIQ` CLI binaries from previous in-folder builds, since the DMG is
-  the canonical install path on macOS.
-- The same staging folder also receives the PC payload (`AdoptIQ.exe`,
-  `Run_AdoptIQ.bat`, `Unblock_AdoptIQ.bat`, `READ_ME_FIRST.txt`) when the
-  Windows machine runs `build_pc.bat`. Mac and PC whitelists do not overlap
-  except on `README.md` / `build_info.txt`, so each build refreshes its own
-  artifacts without clobbering the other platform's.
-- If the staging folder doesn't exist (e.g. fresh Mac without OneDrive set up)
-  the script prints a warning and skips the mirror — it does not fail the
-  build.
+| Destination (env var override) | Default path | Payload |
+|---|---|---|
+| `MAC_STAGING_DIR` | `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/OUTBOX/` | DMG + `README.md` + `build_info.txt` |
+| `MAC_OUTBOX_DIR` | `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ/` | DMG + `README.md` + `AdoptIQ.app` |
+
+- The Staging mirror is the cross-platform drop zone: `build_pc.bat` ALSO
+  writes the PC payload (`AdoptIQ.exe`, `Run_AdoptIQ.bat`,
+  `Unblock_AdoptIQ.bat`, `READ_ME_FIRST.txt`) into the same folder. Mac and
+  PC whitelists do not overlap except on `README.md` / `build_info.txt`,
+  so each build refreshes its own artifacts without clobbering the other
+  platform's. The Mac build deliberately purges any loose `AdoptIQ.app`
+  here, since the DMG is the canonical install path.
+- The OUTBOX mirror is Mac-only and includes the `.app` bundle for direct
+  install / inspection. `ditto` copies the bundle, then `xattr -cr` strips
+  OneDrive-injected metadata and an adhoc deep `codesign` is re-applied so
+  the bundle in OneDrive can still be dragged to `/Applications` and run.
+  If `codesign --verify` fails afterwards (OneDrive can re-inject xattrs
+  during ongoing sync), the script prints a warning and continues; the DMG
+  remains the recommended install path.
+- OneDrive sync-conflict variants (`README-MACHINENAME-XXXX.md`,
+  `build_info-MACHINENAME-XXXX.txt`, `AdoptIQ-MACHINENAME-XXXX.app`) are
+  matched explicitly by the prune step so they get cleaned up automatically
+  on the next build.
+- `rm -rf` and prune steps retry up to four times with a 1-second sleep
+  to ride out OneDrive's "Directory not empty" race when sync hasn't
+  caught up.
+- If a destination's parent doesn't exist (e.g. fresh Mac without OneDrive
+  set up) the script prints a warning and skips that mirror; it does not
+  fail the build.
+- Mirroring `.app` to a OneDrive path is slow (~1-2 minutes) because
+  OneDrive throttles writes for the bundle's thousands of small files.
+  This is expected. The DMG and README copies are nearly instant.
 
 Quick check after a build:
 
 ```bash
 ls "$HOME/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/OUTBOX/"
+ls "$HOME/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ/"
+codesign --verify --deep --strict \
+  "$HOME/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ/AdoptIQ.app"
 ```
 
 ## 7) Troubleshooting
