@@ -118,6 +118,33 @@ Also verify:
 - App starts and opens `http://localhost:5001`
 - No missing module errors at startup
 
+### Staging sync (OneDrive)
+
+`build_mac_dmg.sh` now mirrors a lean release payload to the OneDrive staging
+folder so the latest DMG is always available alongside the PC build:
+
+- Default destination: `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/OUTBOX/`
+- Override with `MAC_STAGING_DIR=...` before running the script if needed.
+- Lean payload (whitelist): `AdoptIQ-v<version>-build<build>.dmg`, `README.md`,
+  `build_info.txt`. Anything else in that folder is purged on each build
+  (`.DS_Store` is preserved). This intentionally drops loose `AdoptIQ.app` /
+  raw `AdoptIQ` CLI binaries from previous in-folder builds, since the DMG is
+  the canonical install path on macOS.
+- The same staging folder also receives the PC payload (`AdoptIQ.exe`,
+  `Run_AdoptIQ.bat`, `Unblock_AdoptIQ.bat`, `READ_ME_FIRST.txt`) when the
+  Windows machine runs `build_pc.bat`. Mac and PC whitelists do not overlap
+  except on `README.md` / `build_info.txt`, so each build refreshes its own
+  artifacts without clobbering the other platform's.
+- If the staging folder doesn't exist (e.g. fresh Mac without OneDrive set up)
+  the script prints a warning and skips the mirror — it does not fail the
+  build.
+
+Quick check after a build:
+
+```bash
+ls "$HOME/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/OUTBOX/"
+```
+
 ## 7) Troubleshooting
 
 - If PyInstaller misses modules, add them to hidden imports in the Mac spec.
