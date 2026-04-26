@@ -117,3 +117,23 @@ Branch model: develop on machine-specific branches (`pc-sync-YYYY-MM-DD`, `mac-s
 Quality gate (from `.cursor/rules/quality-gate.mdc`): Never hide or skip tests. When fixing bugs, add a regression test. Run the narrowest relevant check first (`pytest tests/test_<module>.py`) before the full suite. Changes must report: files changed, tests added/updated, commands run, pass/fail status.
 
 Audit log convention: when adding a Round-N audit, use `# Round N` markers in the affected source so `git diff <file> | grep 'Round N'` gives a per-file footprint; document phase-by-phase findings, residual risks, and follow-ups in `QUALITY_AUDIT.md`. See Round 14/15/16 sections for the established format.
+
+## Loop conventions (Cursor ↔ Claude Code)
+
+This repo runs a two-tool loop: **Cursor generates code, Claude Code audits and writes a review back**. The loop is bootstrapped in Round 0 (see `QUALITY_AUDIT.md`).
+
+**Where things live:**
+- LLM-bible (this file): `CLAUDE.md` — invariants, SSoT modules, critical rules.
+- Audit journal: `QUALITY_AUDIT.md` — per-round handoff + review log.
+- Verify gate: `make verify` — lint + security + audit + test. **Local contract**; CI (`.github/workflows/build.yml`) runs only `pytest -q`.
+- Cursor session-close handoff: appended to `QUALITY_AUDIT.md` under `## Round N — handoff <date>`. Format pinned in `.cursor/rules/session-handoff.mdc`.
+- Claude session review: appended under the same Round, in a `## Round N — Claude review` subsection.
+- Review standards: `.cursor/rules/quality-gate.mdc` (in-session gate) and `.cursor/BUGBOT.md` (PR-style review checklist) — both apply to Claude as well.
+
+**Commit trailers** (existing convention — keep):
+- Cursor commits: `Made-with: Cursor`
+- Claude commits: `Made-with: Claude Opus 4.7 (1M context)` (or current model)
+
+**Round-N source markers** (existing convention — keep): when changing code as part of Round N, drop a `# Round N` comment so `git diff <file> | grep 'Round N'` shows the per-file footprint.
+
+**Floor:** every round must hold the Round 0 floor — `make verify` clean with at least the test count recorded in Round 0. A round that lowers the floor is a regression and must explain why in the handoff under **Known deferrals**.

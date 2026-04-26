@@ -1526,3 +1526,55 @@ The whole point of Round 13 was to make those three surfaces agree byte-for-byte
 - No port changes (Round 17.3 already shipped).
 - No rebuild — pure template / CSS / JS change picked up by the existing v1.0.4 build at next launch.
 
+# Round 0 — loop bootstrap floor (2026-04-26)
+
+Bootstrap of the Cursor ↔ Claude Code review loop. **No source / test / CI changes.** Only adds the missing `.cursor/rules/session-handoff.mdc` rule, extends `CLAUDE.md` with a "Loop conventions" section, and pins this floor.
+
+This round is numbered **0** because it is the loop baseline — every future Round-N must hold this floor or explain the regression in the handoff. Numerically it sits *after* Round 17.4.1 in time but *before* every round that uses the new handoff format.
+
+## Why Round 0 is needed
+
+Pre-bootstrap state: the repo already had a strong LLM-bible (`CLAUDE.md`), a working journal (`QUALITY_AUDIT.md` Rounds 14-17), a canonical verify gate (`make verify`), and Cursor rules (`adoptiq.mdc`, `quality-gate.mdc`, `BUGBOT.md`). The only missing piece was a structured Cursor → Claude handoff so each session opens against a known floor instead of repeating discovery.
+
+## Files added / extended
+
+- **CREATE** `.cursor/rules/session-handoff.mdc` — pins the closing-handoff template every Cursor session writes into this file before exit.
+- **EXTEND** `CLAUDE.md` — appended `## Loop conventions (Cursor ↔ Claude Code)` section (no changes to prior content).
+- **EXTEND** `QUALITY_AUDIT.md` — this Round 0 section (no changes to Rounds 14-17.4).
+
+## Files NOT touched
+
+- Zero source-code changes (`*.py`).
+- Zero test changes.
+- Zero CI changes (`.github/workflows/build.yml`).
+- Zero changes to `Makefile`, `pyproject.toml`, `bandit.yaml`, `pytest.ini`.
+- Zero changes to `.cursor/BUGBOT.md`, `.cursor/rules/quality-gate.mdc`, `.cursor/rules/adoptiq.mdc`.
+- Zero changes to `.gitignore` or any historical `CODE_REVIEW*.md`.
+
+## Verify gate baseline (the floor)
+
+`make verify` on `round-13-audit` @ HEAD `9d2241a` (Round 17.4.1):
+
+| Gate | Result |
+| --- | --- |
+| `ruff check .` | clean (gate-passing under the E/F/B/S ruleset in `pyproject.toml`) |
+| `bandit -ll -c bandit.yaml` | 0 HIGH / 0 MED |
+| `pip-audit -r requirements.txt --strict` | clean (no known vulnerabilities) |
+| `pytest -q` | **2196 passed / 2 skipped in 8.03s** |
+| `make verify` overall | **PASS** ("All Round 14 gates passed.") |
+
+**Floor contract:** every Round-N must keep all four gates green and must not lower the test count below 2196 without an explicit `Known deferrals` entry in the handoff explaining why (e.g. test removed because the behavior it pinned was intentionally changed, with replacement test referenced).
+
+## CI vs local divergence (knowingly deferred)
+
+CI (`.github/workflows/build.yml::quality-checks`) runs `pytest -q` only — it does not run ruff, bandit, or pip-audit. `make verify` is therefore a stricter local contract than CI. Aligning CI to `make verify` is a follow-up; left out of Round 0 to keep the bootstrap surgical (no CI changes).
+
+## Loop mechanics (the contract Round 0 establishes)
+
+1. **Cursor** opens a session, edits code, runs `make verify`, then writes `## Round N — handoff <YYYY-MM-DD>` to the bottom of this file using the template in `.cursor/rules/session-handoff.mdc`. Commits carry `Made-with: Cursor`.
+2. **Claude Code** opens its next session, reads the most recent `## Round N — handoff` block, audits per `.cursor/BUGBOT.md` + `.cursor/rules/quality-gate.mdc`, fixes what's wrong, and appends `## Round N — Claude review` under the same round. Commits carry `Made-with: Claude Opus 4.7 (1M context)`.
+3. Both sides leave `# Round N` markers in source so `git diff <file> | grep 'Round N'` shows the per-file footprint.
+4. The next round is `N+1`. Mid-round splits are `N.1`, `N.2`, etc.
+
+**Trailer:** Made-with: Claude Opus 4.7 (1M context)
+
