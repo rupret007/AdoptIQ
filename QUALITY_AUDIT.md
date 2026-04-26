@@ -1919,3 +1919,64 @@ Net test delta: **2205 → 2208 passed** (+3, all from `tests/test_round20_in_lo
 | R20-NEXT-001 — closure-binding bug in generate_report/generate_excel | DOCUMENTED + presence-pin test | `tests/test_round20_in_locals_simplification.py` (NEW) |
 
 **Trailer:** Made-with: Claude Opus 4.7 (1M context)
+
+## Round 21 — handoff 2026-04-26
+
+**What changed (plain English):**
+- Built the Round 19 golden-fixture mission's Phase 2 + Phase 3 + Phase 4-SSoT (per the registry at `QUALITY_AUDIT.md` L1299-1416). New synthetic input + hand-computed `EXPECTED_KPIS` dict + canonical-layer diff harness. Ships R20-NEXT-004 Phases 2-3-4S; Phases 4F (formatter render) and 5 (extract + diff) are queued for Round 21.1.
+- No source-code changes. This round only ADDS test artifacts that pin `canonical_metrics` against a known input.
+- The 4 reconciliation invariants from the registry (priority sum == total_cases, band sum == len(risk_profiles), high_risk == critical+high_only, open+closed <= total) are now first-class tests so a future SSoT regression points directly at the broken invariant.
+- Excel summary row order + values are pinned against `report_export_styling.build_summary_rows` so the documented summary sequence (`QUALITY_AUDIT.md` L1388-1403) is enforced.
+
+**Files touched:**
+- `tests/fixtures/round19/golden.py` — NEW (420 lines). Phase 2 + Phase 3: deterministic `make_ab_df` / `make_csone_df` / `make_pulse_df` / `make_risk_profiles` / `make_extra_frames` builders + frozen `EXPECTED_KPIS` dict covering every KPI in the registry. All values literal, no `np.random` or `datetime.now()`.
+- `tests/test_round21_canonical_kpi_golden_fixture.py` — NEW (404 lines, 27 tests). Phase 4-SSoT: per-helper exact-match (`count_total_tac`, `count_p1`–`count_p4`, `count_unknown_priority`, `count_break_fix`, `count_provisioning`, `count_bems`, `bems_rate`, `count_total_barriers`, `count_critical_barriers`, `count_open_barriers`, `count_open_tac`, `count_closed_tac`, `count_escalated`, `count_customers`, `compute_high_risk_count`, `pulse_sentiment`) + `build_portfolio_metrics` integration test + 4 reconciliation invariants + Excel summary row-order test + Excel summary KPI-value test.
+- `QUALITY_AUDIT.md` — this Round 21 handoff section.
+
+**SSoT modules touched:** none (test-only round; the SSoT modules `canonical_metrics`, `report_export_styling`, `report_export_schema` are exercised but unchanged)
+
+**Tests added/updated:**
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_count_total_tac_matches_expected` — pins `count_total_tac` against the 20-row CSOne fixture (expected 20).
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_count_p1_matches_expected` … `test_count_p4_matches_expected` — pin priority bucket counts (4 / 4 / 4 / 4).
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_count_unknown_priority_matches_expected` — pins unknown bucket (4).
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_count_break_fix_matches_expected` / `test_count_provisioning_matches_expected` — pin case-type taxonomy (3 / 2).
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_count_bems_matches_expected` / `test_bems_rate_matches_expected` — pin BEMS counter and 2-dp rate.
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_count_total_barriers_matches_expected` / `test_count_critical_barriers_matches_expected` / `test_count_open_barriers_matches_expected` — pin AB metrics (10 / 4 / 5).
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_count_open_tac_matches_expected` / `test_count_closed_tac_matches_expected` — pin lifecycle counts.
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_count_escalated_matches_expected` — pins escalation marker count.
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_count_customers_matches_expected` — pins cross-frame customer dedup (5).
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_compute_high_risk_count_matches_expected` — pins CRITICAL+HIGH band membership against the 10-profile risk universe (4).
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_pulse_sentiment_matches_expected` — pins pulse roll-up (8 rows → 6.5 mean → Neutral, 3 pos / 3 neut / 2 neg).
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_build_portfolio_metrics_matches_expected` — integration test: every KPI key in `build_portfolio_metrics` payload must equal the expected value (exact, no tolerance).
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_invariant_priority_sum_equals_total_cases` — Reconciliation invariant 1.
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_invariant_band_sum_equals_risk_universe_size` — Reconciliation invariant 2.
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_invariant_high_risk_equals_critical_plus_high_only` — Reconciliation invariant 3.
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_invariant_open_plus_closed_at_most_total_cases` — Reconciliation invariant 4.
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_excel_summary_row_order_matches_documented_sequence` — pins the `build_summary_rows` label sequence against the documented order at QUALITY_AUDIT.md L1388-1403.
+- `tests/test_round21_canonical_kpi_golden_fixture.py::test_excel_summary_kpi_values_use_canonical_metrics` — pins that the values emitted in the summary sheet equal the canonical-helper outputs.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 2235 passed / 2 skipped (was 2208, +27 net)
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `tests/fixtures/round19/golden.py` — Phase 3 hand-computation. Walk the 20 CSOne rows, 10 AB rows, 8 pulse rows, 10 risk profiles, and 4 extra-frame rows against the `EXPECTED_KPIS` literal. Any disagreement between you and the dict is exactly the contract failure this fixture is meant to surface — please file as `R21-D*` rather than silently fixing.
+2. `tests/fixtures/round19/golden.py::_CSONE_ROWS` BEMS coverage — 4 rows have `Transaction ID = BEMS-*`, the test expects `bems_count == 4`. The registry note at `QUALITY_AUDIT.md` L1322 says BEMS can be observed via either AB column OR CSOne `Transaction ID`. The fixture currently exercises the CSOne path only. If your read of `count_bems` says AB-side BEMS rows must also count, the expected value is wrong (file as R21-D).
+3. `tests/test_round21_canonical_kpi_golden_fixture.py::test_excel_summary_kpi_values_use_canonical_metrics` — the values emitted by `build_summary_rows` are checked against `EXPECTED_KPIS` (not against `build_portfolio_metrics` output). If `build_summary_rows` does any post-processing on the KPI before emitting (e.g. integer-cast, percent format), this test will catch it; please confirm the test is reading the right cell.
+4. The fixture pre-populates `case_priority_norm` / `severity_norm` / `case_status_norm` / `is_open` / `is_closed` / `case_type_class` columns directly. This makes the diff harness robust against changes in `data_normalization` regex, but it also means the harness does NOT exercise the raw → normalized pipeline. Please flag if you think Round 22 should add a separate test that asserts `add_case_lifecycle_fields` produces the same normalized values from the raw columns the fixture also includes.
+5. `tests/test_round21_canonical_kpi_golden_fixture.py` `sys.path` mutation (L46-52) — same pattern as `tests/conftest.py` PROJECT_ROOT injection, but please confirm it's idempotent under repeated test collection.
+
+**Known deferrals (intentional non-fixes):**
+- **R20-NEXT-001 stays deferred** (HIGH severity closure-binding bug in `generate_report` L7062+ / `generate_excel` L7335+). Per the [Round 20 review](#round-20--claude-review-2026-04-26) and the user flag, the fix is behavior-changing and must wait for the Round 21.1 formatter-render diff (Phases 4F + 5) to confirm the bug's actual report-content footprint before any change ships.
+- **R20-NEXT-004 Phases 4F + 5** (formatter render + extract + diff) — split into Round 21.1 commit per the plan's two-commit boundary. The canonical-layer commit is a complete, useful artifact on its own.
+- **R20-NEXT-002** (long-tail in-locals chunk in `run_customer_renewal_analysis` / `run_subscription_analysis` / `run_leader_report_generation`) — different round.
+- **R20-NEXT-003** (broad-except observability sub-audit) — different round.
+- **R20-NEXT-005 / -006** (CI alignment + outdated-package bumps) — different rounds, out of Round 21 scope.
+- **Subscription / ARR aggregates, period comparison, per-CSSM rollups** — out of Round 19's scope per QUALITY_AUDIT.md L1405-1410. Future round.
+- **Phase 6** (sentinel input variants — empty frames, all-Unknown priorities, all-CRITICAL risks) and **Phase 7** (rolling regression flag in audit log) — registry follow-on phases, out of Round 21.
+
+**Trailer:** Made-with: Cursor
+
