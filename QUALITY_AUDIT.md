@@ -1578,3 +1578,136 @@ CI (`.github/workflows/build.yml::quality-checks`) runs `pytest -q` only — it 
 
 **Trailer:** Made-with: Claude Opus 4.7 (1M context)
 
+# Round 18 — Claude review (2026-04-26)
+
+First Claude review pass through the new loop. **No `## Cursor session handoff` block existed yet** (loop only just bootstrapped in Round 0), so per the documented fallback the input batch was the commits since the most recent prior Round-N journal entry — i.e. `9d2241a` Round 17.4.1 (templates/CSS, +1 test) plus the Round 0 bootstrap itself (no source changes). With such a tiny input batch the prompt called for a wider 100% audit pass; that's what this entry documents.
+
+## Stack (unchanged from Round 17)
+Python 3.11.9; Flask web app + PyInstaller bundles; SQLite for local persistence; Snowflake / Cisco internal services / CircuIT LLM upstream. Hot files (>2k LoC): `app_simple.py` (~19.8k), `adoptiq_backend.py` (~11.9k), `leader_report_generator.py` (~6.3k).
+
+## Verification commands
+- `make test` — pytest baseline.
+- `make lint` / `make security` / `make audit` / `make verify` — Round 14 harness, unchanged.
+
+## Phase 0 — input batch & floor (Round 0)
+
+| Source | Result |
+| --- | --- |
+| Most recent Cursor session handoff block | **none** — loop just bootstrapped; fallback to commits-since-most-recent-Round-N |
+| Input batch | `9d2241a` Round 17.4.1 (templates +21 lines, `tests/test_round17_4_dark_theme.py` +39 lines) and `ffeb308` loop-bootstrap (zero source changes) |
+| Floor entering Round 18 | **2196 passed / 2 skipped**, ruff clean, bandit HIGH/MED 0, pip-audit clean (`make verify` PASS) |
+
+## Phase 1 — recon counts (production only, excluding tests/.venv/__pycache__/build/dist/_bundled_secrets.py)
+
+| Smell | Count | Notes |
+| --- | --- | --- |
+| `except Exception:` | 647 (top file: `app_simple.py` 247) | Heavily defensive analysis pipeline; load-bearing per Rounds 5/6/8/13 |
+| Bare `except:` | 0 | — |
+| `if 'X' in locals()` shape | 76 (74 in `app_simple.py`) | R14-006 fixed 4 obvious dead-branch sites; remainder needs per-site analysis |
+| Naive `datetime.now()` / `utcnow()` (non-comment) | 1 real hit (`export_adrian_snowflake_records.py:645`, CLI script — filename use) | 36 raw hits include comments documenting past replacements |
+| f-string SQL with `{}` interpolation | 24, all with allow-list discipline | See Batch 2 below |
+| Hardcoded secret-shaped literals (AWS / Stripe / GitHub / OpenAI / JWT / private-key) | **0** in production | — |
+| `print()` in non-CLI app modules | 46 in `app_simple.py` + `adoptiq_backend.py`, **all in CLI/startup**; zero in request paths | — |
+| TODO / FIXME / XXX / HACK | 0 | — |
+| `pickle.load` / unsafe `yaml.load` | 0 | — |
+| `pytest.skip` callers | 29 (all conditional, none unconditional in CI) | — |
+| `pip list --outdated` | 76 packages | `pip-audit` still clean (no CVEs) |
+
+## Phase 2 — Findings table
+
+| ID | Severity | Status | Surface | One-liner | Commit |
+| --- | --- | --- | --- | --- | --- |
+| R18-001 | LOW | FIXED | docs / sec posture | `CLAUDE.md` Two Flask Apps row claimed main-app default bind = `0.0.0.0`; actual code defaults to `127.0.0.1` per Round 14 R14-007. LLM-bible drift silently regresses documented security posture. | (see Round 18 commit) |
+
+## Phase 2.1 — R18-001: CLAUDE.md ↔ app_simple.py bind-default parity (FIXED)
+
+**Root cause.** Round 14 R14-007 changed `app_simple.py` to default `127.0.0.1` (opt-in public via `ADOPTIQ_BIND_PUBLIC=1`); the matching update to `CLAUDE.md` Two Flask Apps table was missed. Every future Cursor / Claude session reading the bible would have been told "default 0.0.0.0 via ADOPTIQ_BIND_HOST", which is the opposite of the actual posture. Not exploitable directly (the code is right) but it actively misleads downstream LLM reasoning about the security model.
+
+**Fix.** Rewrote the `Main UI` row in the Two Flask Apps table to: "Loopback (`127.0.0.1`) by default; opt-in public bind via `ADOPTIQ_BIND_PUBLIC=1`, or set `ADOPTIQ_BIND_HOST` directly (Round 14 R14-007)". Updated the `Admin` row to the same shape for symmetry.
+
+**Regression test.** `tests/test_round18_doc_code_parity.py` (NEW, 3 cases):
+- `test_app_simple_bind_default_is_loopback` — pins the exact ternary `'0.0.0.0' if _bind_public else '127.0.0.1'` plus the `ADOPTIQ_BIND_PUBLIC` env-var name in `app_simple.py`.
+- `test_claude_md_does_not_claim_public_bind_default` — fails if the Main UI row in `CLAUDE.md` ever re-asserts `default \`0.0.0.0\``.
+- `test_claude_md_documents_loopback_default_and_escape_hatch` — fails if the Main UI row drops either `127.0.0.1` or `ADOPTIQ_BIND_PUBLIC`.
+
+A future doc edit OR code edit that breaks the doc/code parity now fails `make verify` locally before it can land.
+
+## Phase 3 — verifications (no defect found)
+
+### Phase 3.1 — Round 17.4.1 input batch (Batch 5, read-only)
+- `templates/base.html:1025-1028` `[data-bs-theme="dark"] h1.display-4:not(.error-code)` + adjacent `.lead.text-muted` override matches `tests/test_round17_4_dark_theme.py::test_page_header_title_is_white_in_dark_mode` exactly.
+- `.error-code` marker is unique to `404.html`, `500.html`, and the `base.html` CSS rule itself — no collateral collisions.
+- Other navigable templates (`analyze.html`, `history.html`, `ask_ai.html`, `external_intelligence.html`, `help.html`, `leader_report_form.html`) carry `h1.display-4` without `.error-code`, so the bright-white treatment correctly applies to them. **No drift.**
+
+### Phase 3.2 — f-string SQL allow-list audit (Batch 2)
+All 24 hits are SAFE. Three categories, each with documented allow-list discipline:
+- `incident_storage.py` (17 hits): all interpolate a constant `where_clause` string built earlier in-function, with user values bound via `?` placeholders. The two identifier-interpolating sites (`_fetch` at L738/747) validate `table` / `order_col` against an explicit `_EXPORT_TABLES` dict allow-list AND a strict regex (`^[A-Za-z_][A-Za-z0-9_]*$`) before interpolation — Round 6 / Phase 4.19 documented.
+- `enhanced_admin_dashboard_v2.py:333` (DDL): `_col` and `_type` come from a hardcoded `_new_cols` list, not input.
+- Snowflake-side (`snowflake_csone_discovery.py:148/176`, `adoptiq_backend.py:1000`, `adoptiq_backend.py:1927-1929`): every interpolation is gated by `_safe_or_skip()` regex, `guard_table()` from `snowflake_table_policy`, or built from hardcoded constants/4-element column allow-lists, with user values bound via `%s` placeholders.
+
+This validates the documented `bandit.yaml` B608 skip rationale ("all fire on f-strings that build SELECT projections (column lists), not WHERE values"). No regression test added because Round 6/7/8/9's existing test files (`test_round6_export_all_data_allowlist.py`, `test_round7_policy_allowlist_enforced.py`, `test_round8_snowflake_table_policy_edges.py`, `test_round9_snowflake_policy_comma_join.py`, `test_policy_blocked_table_emits_fetch_error.py`) already cover the allow-list invariants.
+
+### Phase 3.3 — broad-except sample (Batch 3)
+Sampled ~10 representative sites in `app_simple.py` (`after_request` headers, `_r12_safe_excel_value`, `run_compact_analysis` data-fetch wrappers). All are Category (i) defensive boundaries — load-bearing for the rugged-analysis-pipeline pattern that Rounds 5/6/8/13 deliberately built. Past rounds (R14-002, R14-003) caught the obvious NameError-class bugs hidden behind these. Random sampling on a 17-round-audited surface didn't surface new defects. **Stopping without per-site fixes** in this round; deferring to R18-NEXT-002 below.
+
+### Phase 3.4 — print() in production (Batch 4)
+46 hits across `app_simple.py` (21) and `adoptiq_backend.py` (25). Every single hit is in CLI / startup context:
+- `app_simple.py` L19648-L19811: CLI startup banner, port-conflict resolution UI ("AdoptIQ Simple - AI-Powered Executive Analytics", "Port %s is in use…", "Exiting.").
+- `adoptiq_backend.py` L11320-L11749: `main()` CLI entry point ("Connecting to Snowflake…", "Fetching subscriptions…", final "SUCCESS:" / "ERROR:" lines).
+
+**Zero hits in request handlers or worker threads.** The Flask request layer correctly uses `structured_logging`. No fix needed.
+
+### Phase 3.5 — `if 'X' in locals()` antipattern (Batch 1)
+76 hits, 74 in `app_simple.py`. Spot-checked the `feature_requests if 'feature_requests' in locals() else …` pattern at L6704: in that case `feature_requests` is assigned in BOTH branches of the preceding try/except, so the `'feature_requests' in locals()` guard at the call site is in fact dead — same shape R14-006 fixed at 4 sites. The remaining ~70 hits each need per-function dead-code analysis (is `X` always bound by the call site, or only conditionally?), which is a multi-round effort on its own. **Deferring to R18-NEXT-001.**
+
+## Files changed
+
+| File | Why | `# Round 18` markers |
+| --- | --- | --- |
+| `CLAUDE.md` | R18-001 fix: bind-default doc/code parity (Main UI row + Admin row symmetry) | 0 (doc) |
+| `tests/test_round18_doc_code_parity.py` | NEW — pins R18-001 doc/code parity in 3 cases | (NEW file) |
+| `QUALITY_AUDIT.md` | This Round 18 section | 0 (doc) |
+
+No `*.py` source-code changes outside of the new test file.
+
+## Verification commands & results
+
+```
+$ make verify
+ruff check .          → clean
+bandit -ll …          → 0 HIGH / 0 MED
+pip-audit --strict    → clean
+pytest -q             → 2199 passed / 2 skipped (was 2196)
+All Round 14 gates passed.
+```
+
+Net test delta: **2196 → 2199 passed** (+3, all from `tests/test_round18_doc_code_parity.py`), **2 skipped unchanged**, all gates green.
+
+## Residual risks
+
+- **Bind-posture doc drift could re-occur on other dimensions** (admin port, CSP, CORS, etc.). The R18-001 test only pins the main-app bind row; expanding the parity check to every documented invariant would be a larger meta-test (deferred).
+- **Past-round audit markers** continue to be the load-bearing rationale for the broad-except / in-locals patterns. If those markers are ever removed without a replacement test, the rationale evaporates and a future reviewer may mass-rewrite. Mitigation: the existing `# Round N` source-marker convention combined with the new Round 0 floor + Round 18 doc/code parity pattern collectively encode the rationale.
+
+## Recommended follow-ups (R18-NEXT)
+
+| ID | Sev | Surface | One-liner | Why deferred | Effort |
+| --- | --- | --- | --- | --- | --- |
+| R18-NEXT-001 | MED | `app_simple.py` correctness | Per-site triage of remaining ~70 `if 'X' in locals() else Y` sites: classify each as (a) always-bound → simplify, or (b) conditionally-bound → keep with comment naming the producing branch | Requires per-function dead-code analysis on a 19.8k-line file; one-round-of-its-own | M-L |
+| R18-NEXT-002 | MED | `app_simple.py` reliability | Sub-audit of `except Exception:` sites that have NO `as e:` (no exception context) — ensure each at least logs to debug. Estimated ~50 sites of the 247 in `app_simple.py` | Mass change risks breaking the rugged-pipeline contract; needs targeted tests per site | M |
+| R18-NEXT-003 | LOW | dependency hygiene | 76 outdated packages per `pip list --outdated`; pip-audit currently clean (no CVEs). Bump conservatively in a dedicated round so failures isolate | Mass version bump risks regressions across the report stack | M |
+| R18-NEXT-004 | LOW | CI parity | Align `.github/workflows/build.yml::quality-checks` with `make verify` (currently CI runs only `pytest -q`; ruff/bandit/pip-audit are local-only) | Out-of-scope per Round 0 contract; needs a separate CI-only commit | S |
+| R18-NEXT-005 | LOW | docs | Audit `CLAUDE.md` for other doc/code drifts (CSP defaults, port overrides, corpus opt-in default, etc.) using the same parity-test pattern landed in Round 18 | One per invariant; pattern is reusable from `tests/test_round18_doc_code_parity.py` | S each |
+
+## Per-batch footprint
+
+| Batch | Status | Files touched |
+| --- | --- | --- |
+| 1 — `if 'X' in locals()` | DEFERRED → R18-NEXT-001 | none |
+| 2 — f-string SQL allow-list | NO DEFECT | none |
+| 3 — broad-except sample | NO DEFECT (sample); DEFERRED → R18-NEXT-002 | none |
+| 4 — `print()` in request paths | NO DEFECT | none |
+| 5 — Round 17.4.1 input batch verify | NO DRIFT | none |
+| R18-001 — bind-default doc/code parity | FIXED | `CLAUDE.md`, `tests/test_round18_doc_code_parity.py` (NEW) |
+
+**Trailer:** Made-with: Claude Opus 4.7 (1M context)
+

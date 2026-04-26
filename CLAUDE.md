@@ -45,8 +45,8 @@ The project is flat — 33 top-level Python modules with no package hierarchy. T
 ### Two Flask Apps
 | App | Port | File | Access |
 |-----|------|------|--------|
-| Main UI | 5151 | `app_simple.py` | `ADOPTIQ_BIND_HOST` (default `0.0.0.0`) |
-| Admin | 5152 | `enhanced_admin_dashboard_v2.py` | Loopback only by default |
+| Main UI | 5151 | `app_simple.py` | Loopback (`127.0.0.1`) by default; opt-in public bind via `ADOPTIQ_BIND_PUBLIC=1`, or set `ADOPTIQ_BIND_HOST` directly (Round 14 R14-007) |
+| Admin | 5152 | `enhanced_admin_dashboard_v2.py` | Loopback (`127.0.0.1`) by default; opt-in public bind via `ADOPTIQ_ADMIN_BIND_PUBLIC=1` |
 
 ### Data Flow
 ```
