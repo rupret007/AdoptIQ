@@ -14,7 +14,7 @@ if [[ ! -d "$APP_PATH" ]]; then
   exit 1
 fi
 
-VERSION="${ADOPTIQ_VERSION:-1.0.3}"
+VERSION="${ADOPTIQ_VERSION:-1.0.4}"
 BUILD="${ADOPTIQ_BUILD:-1}"
 DMG_PATH="OUTBOX/AdoptIQ-v${VERSION}-build${BUILD}.dmg"
 

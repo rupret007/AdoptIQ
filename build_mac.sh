@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-ADOPTIQ_VERSION="${ADOPTIQ_VERSION:-1.0.3}"
+ADOPTIQ_VERSION="${ADOPTIQ_VERSION:-1.0.4}"
 ADOPTIQ_BUILD="${ADOPTIQ_BUILD:-1}"
 
 echo "=============================================="
