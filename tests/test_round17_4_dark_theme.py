@@ -129,3 +129,42 @@ def test_risk_band_hexes_are_byte_identical_round_13_pin(base_html_text: str) ->
             f"longer match the chart/Excel colors and Round 13's "
             f"cross-surface parity is broken."
         )
+
+
+def test_page_header_title_is_white_in_dark_mode(base_html_text: str) -> None:
+    """Round 17.4.1: navigable-page hero titles + lead subtitles must
+    render bright white in dark mode.
+
+    Every navigable page hangs ``h1.display-4 fw-bold`` + a
+    ``p.lead.text-muted`` subtitle as its hero block.  The user wants
+    those to read pure ``#ffffff`` against the charcoal canvas; the
+    Bootstrap ``.text-primary`` / ``.text-info`` / ``.text-warning``
+    tints are only for the light-mode brand palette.
+
+    Error pages (``404.html``, ``500.html``) opt out via the
+    ``.error-code`` marker class so the big "404" / red "500" still
+    carry their semantic urgency cue.  This test pins both halves of
+    that contract: the override exists, and it is gated on
+    ``:not(.error-code)`` so a future template can opt out cleanly.
+    """
+    assert '[data-bs-theme="dark"] h1.display-4:not(.error-code)' in base_html_text, (
+        "Round 17.4.1 contract: a [data-bs-theme=\"dark\"] "
+        "h1.display-4:not(.error-code) override must exist in "
+        "templates/base.html so navigable-page hero titles read bright "
+        "white in dark mode.  The :not(.error-code) gate is the "
+        "documented opt-out for 404/500."
+    )
+    assert (
+        '[data-bs-theme="dark"] h1.display-4:not(.error-code) + p.lead.text-muted'
+        in base_html_text
+    ), (
+        "Round 17.4.1 contract: the matching p.lead.text-muted subtitle "
+        "rule must also exist so the descriptive line under each page "
+        "title flips to bright white in dark mode."
+    )
+    assert "color: #ffffff !important;" in base_html_text, (
+        "Round 17.4.1 contract: bright white (#ffffff) is the target "
+        "color and must be applied with !important so it wins over "
+        "Bootstrap's .text-primary / .text-info / .text-warning "
+        "utilities on the h1.display-4 page title."
+    )

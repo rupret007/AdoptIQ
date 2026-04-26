@@ -1010,6 +1010,25 @@
             color: var(--text-muted) !important;
         }
 
+        /*
+         * Round 17.4.1: page-header titles + lead subtitles read bright
+         * white in dark mode.  Each navigable page hangs an
+         * ``h1.display-4 fw-bold`` title (sometimes tinted via Bootstrap's
+         * ``.text-primary`` / ``.text-info`` / ``.text-warning`` utilities
+         * for variety) followed by a ``p.lead.text-muted`` descriptive
+         * subtitle.  In dark mode the brand-tinted titles read with
+         * reduced contrast against the charcoal canvas; pulling them to
+         * plain white restores the hero punch.  The ``.error-code``
+         * opt-out keeps the big "404" / red "500" on the error pages
+         * tinted so they still carry their semantic urgency cue.
+         */
+        [data-bs-theme="dark"] h1.display-4:not(.error-code) {
+            color: #ffffff !important;
+        }
+        [data-bs-theme="dark"] h1.display-4:not(.error-code) + p.lead.text-muted {
+            color: #ffffff !important;
+        }
+
         [data-bs-theme="dark"] .dropdown-menu {
             background-color: var(--bg-surface-raised);
             border: 1px solid var(--border-subtle);
