@@ -1783,3 +1783,139 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 
 **Trailer:** Made-with: Cursor
 
+# Round 20 — Claude review (2026-04-26)
+
+Picked up hot spot #1 from the Round 19.1 handoff (the `if 'X' in locals()` long-tail in `app_simple.py`). The handoff framed it as "count grew 74 → 84 in 24 hours, R18-NEXT-001 grew while we slept." The first thing this round did was reconcile that claim against git history, which produced a recon-discipline finding before any code changed.
+
+## Stack
+Unchanged from Round 19.1.
+
+## Verification commands
+- `make verify` — Round 14 harness, unchanged.
+
+## Phase 0 — recon-discipline finding (R20-D1)
+
+**Claim from Round 19.1 handoff (L1769):** "`if 'X' in locals()` antipattern count grew from **74 → 84** since Round 18's recon (24 hours)."
+
+**Actual git history of the count in `app_simple.py`:**
+
+| Commit | Round | `in locals()` count |
+| --- | --- | --- |
+| `c3ebfb0` | Round 12 baseline | 93 |
+| `9d53b94` | Round 14 (R14-006 fixed 4) | **84** |
+| `0543130` | Round 15 + 16 | **84** |
+| `95b7597` | Round 17.1 + 17.2 | **84** |
+| `6702046` | Round 17.4 | **84** |
+| `9d2241a` | Round 17.4.1 | **84** |
+| `ffeb308` | loop-bootstrap (Round 0) | **84** |
+| `db0803e` | Round 18 | **84** |
+| `e19f97f` | Round 19.1 (input HEAD) | **84** |
+
+**Conclusion:** the count has been stable at **84 since Round 14** (10+ commits, no regression, no growth). Round 18's own recon (mine) reported "76 / 74-in-app_simple.py" — that was an error on my part, off by 10. Round 19.1 inherited the wrong number and labelled the (correct) 84 as a "growth from 74." There was no growth.
+
+**Why this matters:** the handoff's framing implied an emergency drift-rollback was needed. The actual work was the same long-tail R18-NEXT-001 triage. Going forward, this round adds a count-guard test pinning the floor in code, so the next session reads the authoritative number from a passing assertion instead of a comment in some other doc.
+
+## Phase 1 — Findings table
+
+| ID | Severity | Status | File:line | One-liner | Commit |
+| --- | --- | --- | --- | --- | --- |
+| R20-D1 | LOW | DOCUMENTED | n/a | Round 18 + Round 19.1 mis-counted `in locals()` in `app_simple.py` (claimed 74 / "grew 74→84"); actual count was 84 stable since Round 14. Pinned by `tests/test_round20_in_locals_simplification.py::test_in_locals_count_is_at_or_below_post_r20_floor` so future recon reads the authoritative number. | (this round) |
+| R20-001 | MED | FIXED | `app_simple.py` (19 sites in `run_compact_analysis`) | Drop dead `X if 'X' in locals() else FALLBACK` guards on call args where the producer is provably bound by sentinel-init at function top OR by a try/except whose every branch assigns. | (this round) |
+| R20-NEXT-001 | **HIGH** | DOCUMENTED | `app_simple.py:7076-7124` (in `generate_report` nested fn), `app_simple.py:7346-7387` (in `generate_excel` nested fn) | The `'X' in locals()` guards INSIDE nested functions are not just dead-branch antipatterns — they are closure-binding bugs. `locals()` inside a nested function does NOT include free vars captured from the enclosing scope, so `'team_subs_df_unfiltered' in locals()` evaluates False and the else branch is silently taken. Consequence: outer-scope data (the actual `team_subs_df_unfiltered`, `csconsole_*`, `days`, etc.) is dropped at the call site and replaced with `None`/`30`/empty fallback. This means `generate_report` calls `build_customer_lookup(None)` instead of with the real frame, and the multi-source `extra_frames` list never gets populated — risk-universe always falls back to AB+CSOne only. Same bug in `generate_excel`. Behavior-changing fix; needs its own round. | — |
+
+## Phase 2 — R20-001 simplifications (FIXED)
+
+19 dead-branch guard sites in `run_compact_analysis` simplified, all OUTSIDE nested functions:
+
+| Cluster | Lines | Args simplified | Why dead |
+| --- | --- | --- | --- |
+| Briefing book call (single block) | L6779-6788 | `feature_requests`, `software_defects`, `psirt_vulns`, `ext_incidents`, `ext_bugs` (5) | `feature_requests` sentinel-init L5970; `ext_bugs`/`ext_incidents` sentinel-init L6720/L6721 + try/except all-branches; `software_defects`/`psirt_vulns` assigned in BOTH branches of L6759-6765 try/except |
+| Fallback insights (AI insufficient path) | L6905-6909 | `team_subs_df`, `csconsole_action_plans`, `csconsole_customer_pulse`, `csconsole_success_priorities`, `csconsole_adoption_barriers` (5) | All bound by L6372-6526 fetch block (every try-success and except path assigns); else at L6527 sets status=error and returns before reaching call |
+| Fallback insights (AI exception path) | L6937-6941 | same 5 vars | Same; AI call failure cannot un-bind upstream fetched frames |
+| Validation call | L6999-7001 | `csconsole_action_plans`, `csconsole_customer_pulse`, `csconsole_success_priorities` (3) | Same |
+| Executive charts call | L6704 | `feature_requests` (1) | Sentinel-init L5970; the guard's else branch was a literal copy of the sentinel default |
+
+Each simplification has a `# Round 20 / R20-001` comment immediately above naming the producer rationale so a future reader can audit the dead-branch claim without re-running the per-function dead-code analysis.
+
+**Behavior preservation:** all 19 simplifications are byte-identical at runtime — the dead-branch fallback values were never being passed to receivers because the producer was always bound. Verified by:
+- Pre-edit: 191 targeted tests (`-k "compact or briefing or fallback or validation"`) green at floor 2205.
+- Post-edit: same 191 pass; full `make verify` green at 2208 / 2 skipped (+3 from the new R20 test file).
+
+## Phase 3 — R20-NEXT-001 (HIGH bug pattern, deliberately deferred)
+
+Documenting because this is the most consequential finding of the round and **must not be re-conflated** with the dead-branch antipattern in future planning.
+
+The pattern looks identical to R20-001 from a grep view:
+```python
+build_customer_lookup(team_subs_df_unfiltered if 'team_subs_df_unfiltered' in locals() else None)
+```
+But it appears INSIDE a nested function (`generate_report` at L7062, `generate_excel` at L7335). In CPython, `locals()` inside a function returns only that function's local namespace; free variables captured from the enclosing scope are NOT in `locals()`. So `'team_subs_df_unfiltered' in locals()` is always False inside the nested function, and the else branch (`None`) is always taken. The outer-scope frame is silently discarded.
+
+**Effects observed by reading L7062-7134:**
+- `build_customer_lookup` is always called with `None` instead of `team_subs_df_unfiltered`.
+- `_ei_extra_frames` always remains `[]` because the loop at L7080-7100 checks `if _df_name in locals():` — none of the listed names are local to `generate_report`, so the body never runs.
+- `risk_scores = calculate_renewal_risk_scores(..., extra_frames=None, ...)` — multi-source customer expansion is silently disabled.
+- `recent_window_days=int(days) if 'days' in locals() and days else 30` — `days` is a free var from outer scope; guard is False → `recent_window_days` is hardcoded to 30, the user's `days` parameter is ignored in the risk-scores call.
+
+This means:
+1. The compact-analysis Word report's risk-scores universe is always AB+CSOne-only (never multi-source), even when team_subs_df_unfiltered + csconsole_* are populated.
+2. The `recent_window_days` parameter to risk scoring is hardcoded at 30 days regardless of the report's `days` setting.
+
+Same bug pattern repeats in `generate_excel` (L7335+) for the Excel writer side.
+
+**Why deferred:** fixing these is behavior-changing (report content shifts). Risk scores and customer counts would change for every analysis. Needs:
+1. Stakeholder confirmation that current report numbers are already wrong and should be corrected.
+2. Per-affected-call-site verification with the golden fixture (Round 19 KPI mission, Phases 2-7).
+3. Likely a coordinated update of any baseline test that currently asserts the buggy values.
+
+**Reproducibility / pin:** `tests/test_round20_in_locals_simplification.py::test_in_locals_inside_nested_functions_remains_documented_as_known_bug` asserts the bug-marker call site at L7076 still exists, so a future "well-meaning fix" cannot land silently.
+
+## Files changed
+
+| File | Why | `# Round 20` markers |
+| --- | --- | --- |
+| `app_simple.py` | R20-001: 19 dead-branch guard simplifications across 5 call sites in `run_compact_analysis` | 5 (one per cluster, with rationale comment) |
+| `tests/test_round20_in_locals_simplification.py` | NEW — pins R20-D1 (count guard at floor 65), R20-001 (simplified call shapes don't regress), R20-NEXT-001 (nested-fn closure-bug marker still present) | (NEW file) |
+| `QUALITY_AUDIT.md` | This Round 20 section | n/a (doc) |
+
+## Verification commands & results
+
+```
+$ make verify
+ruff check .          → clean
+bandit -ll …          → 0 HIGH / 0 MED
+pip-audit --strict    → clean
+pytest -q             → 2208 passed / 2 skipped (was 2205)
+All Round 14 gates passed.
+```
+
+Net test delta: **2205 → 2208 passed** (+3, all from `tests/test_round20_in_locals_simplification.py`), **2 skipped unchanged**, all gates green.
+
+`in locals()` count in app_simple.py: **84 → 65** (19 sites simplified; new floor pinned by the count-guard test).
+
+## Residual risks
+
+- **R20-NEXT-001 is HIGH severity and unfixed.** The compact analysis's Word and Excel writers silently drop the `extra_frames` and `days` parameters at the risk-scores call inside `generate_report` / `generate_excel` due to the closure-binding misunderstanding. Every compact report shipped while this bug exists may have understated risk-universe coverage. Fix is behavior-changing.
+- **The 28 remaining `in locals()` sites in `run_customer_renewal_analysis` (L10341-L11494), `run_subscription_analysis` (L17927-L18575), and `run_leader_report_generation` (L19166-L19167)** are the same long-tail R18-NEXT-001 work. Same per-function dead-code analysis required; addressed incrementally per round.
+- **My Round 18 recon was wrong** (74 vs actual 84). I reported it as the floor; Round 19.1 trusted it. The new count-guard test eliminates this failure mode going forward but does not retroactively fix any planning that was based on the wrong number.
+
+## Recommended follow-ups (R20-NEXT)
+
+| ID | Sev | Surface | One-liner | Why deferred | Effort |
+| --- | --- | --- | --- | --- | --- |
+| R20-NEXT-001 | **HIGH** | `app_simple.py` correctness | Closure-binding bugs in `generate_report` (L7062+) and `generate_excel` (L7335+): `'X' in locals()` inside nested functions always False for free vars; receiver always gets `None`/`30`/`[]` instead of outer-scope value. Affects risk-scores universe + window param in both Word and Excel writers. | Behavior-changing; needs golden-fixture verification (Round 19 mission Phases 2-7) before any change | M-L |
+| R20-NEXT-002 | MED | `app_simple.py` correctness | Long-tail R18-NEXT-001: ~28 remaining `in locals()` sites in `run_customer_renewal_analysis` / `run_subscription_analysis` / `run_leader_report_generation`. Same per-function dead-code triage as R20-001; incremental progress per round. | Multi-round effort; same shape; safe to chunk | M each chunk |
+| R20-NEXT-003 | MED | `app_simple.py` reliability | R18-NEXT-002 inherited: ~50 broad-except sites without `as e:` clause (no exception context, no debug log). Mass-add `logger.debug("...: %s", e, exc_info=True)` per site OR justify silence. | Untouched this round (one-batch rule); previously partially scoped in the rolled-back Round 19 attempt | M |
+| R20-NEXT-004 | MED | `app_simple.py` correctness | Round 19 mission Phase 2-7 (Report Accuracy Golden Fixture): synthetic input + per-KPI diff harness. The Round 19 KPI registry at QUALITY_AUDIT.md L1299 is Phase 1 only; absorbs R18-D1 (cross-format parity coverage gap). | Big mission; standalone round; required to safely fix R20-NEXT-001 | L |
+| R20-NEXT-005 | LOW | CI parity | R18-NEXT-004 inherited: align `.github/workflows/build.yml::quality-checks` with local `make verify` (CI runs `pytest -q` only; ruff/bandit/pip-audit are local-only). | Out of scope per Round 0 contract; needs CI-only commit | S |
+| R20-NEXT-006 | LOW | dependency hygiene | R18-NEXT-003 inherited: 76 outdated packages, `pip-audit` clean. Conservative bumps in dedicated round. | Mass version bump risks regressions across report stack | M |
+
+## Per-batch footprint
+
+| Batch | Status | Files touched |
+| --- | --- | --- |
+| R20-D1 — recon-discipline finding | DOCUMENTED + count-guard test | `tests/test_round20_in_locals_simplification.py` (NEW) |
+| R20-001 — `if X in locals()` simplification (19 sites in run_compact_analysis) | FIXED | `app_simple.py` |
+| R20-NEXT-001 — closure-binding bug in generate_report/generate_excel | DOCUMENTED + presence-pin test | `tests/test_round20_in_locals_simplification.py` (NEW) |
+
+**Trailer:** Made-with: Claude Opus 4.7 (1M context)

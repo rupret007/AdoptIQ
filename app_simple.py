@@ -6701,7 +6701,11 @@ def run_compact_analysis(analysis_id):
                 arr_data,
                 arr_impact,
                 csone_df if csone_df is not None else pd.DataFrame(),
-                feature_requests if 'feature_requests' in locals() else {'total_requests': 0, 'top_features': [], 'customer_examples': [], 'total_arr_impact': 0},
+                # Round 20 / R20-001: drop the dead presence guard.
+                # ``feature_requests`` is sentinel-init'd at L5970 with the
+                # exact same default this guard's else branch was using;
+                # the guard was never reachable.
+                feature_requests,
             )
             logger.info(f"[[OK]] Generated {len(chart_paths)} charts")
         except Exception as e:
@@ -6772,20 +6776,29 @@ def run_compact_analysis(analysis_id):
             logger.info(f"[[DATA]] Creating executive summary from {len(ab_norm)} adoption barriers and {len(csone_df)} CSOne cases")
             # Create a simplified briefing book focusing on adoption barriers for executive insights
             # Include CSOne data summary and optional enrichment (ARR, feature requests, defects, PSIRT)
+            # Round 20 / R20-001: drop the dead presence guards on these
+            # five args.  Each variable is sentinel-init'd
+            # earlier in run_compact_analysis (feature_requests at L5970,
+            # ext_bugs at L6720, ext_incidents at L6721) or assigned in BOTH
+            # branches of the preceding try/except (software_defects /
+            # psirt_vulns at L6759-6765), so by the time control reaches
+            # this call they are provably bound.  The guard's else-fallback
+            # (None) was never reachable; dropping the guard preserves
+            # observable behavior and makes the data-flow legible.
             briefing_book = _create_executive_briefing_book_with_csone(
                 manager, ab_norm, csone_df, team_subs_df, technology,
                 arr_data=None,
                 arr_impact=None,
-                feature_requests=feature_requests if 'feature_requests' in locals() else None,
-                software_defects=software_defects if 'software_defects' in locals() else None,
-                psirt_vulns=psirt_vulns if 'psirt_vulns' in locals() else None,
+                feature_requests=feature_requests,
+                software_defects=software_defects,
+                psirt_vulns=psirt_vulns,
                 # Round 4 / Phase 5.2: forward external intel so the
                 # compact briefing book lists status.webex incidents
                 # and help.webex bug references.  These were previously
                 # dropped, leaving the LLM blind and prone to invent
                 # incident IDs.
-                ext_incidents=ext_incidents if 'ext_incidents' in locals() else None,
-                ext_bugs=ext_bugs if 'ext_bugs' in locals() else None,
+                ext_incidents=ext_incidents,
+                ext_bugs=ext_bugs,
             )
         else:
             # Create minimal briefing book from whatever data we have
@@ -6897,16 +6910,23 @@ def run_compact_analysis(analysis_id):
                 # Phase 1.6: Generate non-AI fallback insights using the same
                 # multi-source customer frames the AI path used so the
                 # customer count agrees with the headline.
+                # Round 20 / R20-001: drop the dead presence guards.  By
+                # this point in run_compact_analysis the team_subs_df and
+                # csconsole_* frames are guaranteed bound: the L6372-6526
+                # block assigns each one in the try-success path AND in
+                # both except paths (timeout, runtime), and the else
+                # branch at L6527 sets status=error and returns before
+                # we can reach this call.
                 fallback_insights = _generate_comprehensive_fallback_insights(
                     ab_norm,
                     csone_df,
                     manager,
                     technology,
-                    team_subs_df=team_subs_df if 'team_subs_df' in locals() else None,
-                    csconsole_action_plans=csconsole_action_plans if 'csconsole_action_plans' in locals() else None,
-                    csconsole_customer_pulse=csconsole_customer_pulse if 'csconsole_customer_pulse' in locals() else None,
-                    csconsole_success_priorities=csconsole_success_priorities if 'csconsole_success_priorities' in locals() else None,
-                    csconsole_adoption_barriers=csconsole_adoption_barriers if 'csconsole_adoption_barriers' in locals() else None,
+                    team_subs_df=team_subs_df,
+                    csconsole_action_plans=csconsole_action_plans,
+                    csconsole_customer_pulse=csconsole_customer_pulse,
+                    csconsole_success_priorities=csconsole_success_priorities,
+                    csconsole_adoption_barriers=csconsole_adoption_barriers,
                     llm_error=str(ai_insights_raw)[:500] if ai_insights_raw else "LLM returned empty/short response",
                 )
                 logger.info(f"[[REFRESH]] Generated fallback insights: {len(fallback_insights)} characters")
@@ -6929,16 +6949,21 @@ def run_compact_analysis(analysis_id):
             # Phase 1.6: Generate non-AI fallback insights using the same
             # multi-source customer frames the AI path used so the
             # customer count agrees with the headline.
+            # Round 20 / R20-001: drop the dead presence guards (same
+            # reasoning as L6905+).  We are inside the AI-call except
+            # block here, but team_subs_df / csconsole_* are bound by
+            # the upstream L6372-6526 fetch block, not by anything in
+            # the AI call -- so AI failure cannot un-bind them.
             fallback_insights = _generate_comprehensive_fallback_insights(
                 ab_norm,
                 csone_df,
                 manager,
                 technology,
-                team_subs_df=team_subs_df if 'team_subs_df' in locals() else None,
-                csconsole_action_plans=csconsole_action_plans if 'csconsole_action_plans' in locals() else None,
-                csconsole_customer_pulse=csconsole_customer_pulse if 'csconsole_customer_pulse' in locals() else None,
-                csconsole_success_priorities=csconsole_success_priorities if 'csconsole_success_priorities' in locals() else None,
-                csconsole_adoption_barriers=csconsole_adoption_barriers if 'csconsole_adoption_barriers' in locals() else None,
+                team_subs_df=team_subs_df,
+                csconsole_action_plans=csconsole_action_plans,
+                csconsole_customer_pulse=csconsole_customer_pulse,
+                csconsole_success_priorities=csconsole_success_priorities,
+                csconsole_adoption_barriers=csconsole_adoption_barriers,
                 llm_error=str(ai_error),
             )
             logger.info(f"[[REFRESH]] Generated fallback insights: {len(fallback_insights)} characters")
@@ -6990,15 +7015,19 @@ def run_compact_analysis(analysis_id):
             validation_required_sources = ['snowflake', 'team_subscriptions'] if single_customer_mode else None
             if validation_required_sources:
                 logger.info("[[VALIDATION]] Compact single-customer mode: treating adoption barriers and CSOne as optional")
+            # Round 20 / R20-001: drop the dead csconsole_* presence
+            # guards.  The csconsole_* frames are bound by the L6372-6526
+            # fetch block; reaching this validation call requires having
+            # passed that block (the else at L6527 returns early).
             raise_validation_error_if_invalid(
                 report_type='compact',
                 snowflake_ctx=ctx,
                 team_subs_df=team_subs_df,
                 ab_data=ab_norm,
                 csone_data=csone_df,
-                csconsole_action_plans=csconsole_action_plans if 'csconsole_action_plans' in locals() else None,
-                csconsole_customer_pulse=csconsole_customer_pulse if 'csconsole_customer_pulse' in locals() else None,
-                csconsole_success_priorities=csconsole_success_priorities if 'csconsole_success_priorities' in locals() else None,
+                csconsole_action_plans=csconsole_action_plans,
+                csconsole_customer_pulse=csconsole_customer_pulse,
+                csconsole_success_priorities=csconsole_success_priorities,
                 arr_data=arr_data,
                 required_sources=validation_required_sources
             )
