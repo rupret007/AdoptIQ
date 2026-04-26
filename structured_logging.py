@@ -178,6 +178,35 @@ def _is_technical_name_shape(s: str) -> bool:
     return True
 
 
+def _strip_log_control_chars(s: str) -> str:
+    """Round 15 / Phase 4.1 -- strip CR/LF/control chars for log safety.
+
+    A structured log prefix renders user-supplied values such as
+    ``customer_name`` or ``error`` directly into the log line.  If any
+    of those values contain ``\\r``, ``\\n``, ``\\x00`` or other ASCII
+    control characters an attacker could splice fake log entries onto
+    a single legitimate line ("log injection") -- rendering downstream
+    SIEM rules useless for that record.  Replace every control byte
+    (``< 0x20`` and ``0x7F``, sans tab) with a visible escape so the
+    line stays single-record while still being inspectable by a
+    human reader.
+    """
+
+    if not s:
+        return s
+    out_chars: list[str] = []
+    for ch in s:
+        cp = ord(ch)
+        if ch == "\t":
+            out_chars.append(" ")
+            continue
+        if cp < 0x20 or cp == 0x7F:
+            out_chars.append("\\x{:02x}".format(cp))
+            continue
+        out_chars.append(ch)
+    return "".join(out_chars)
+
+
 def _redact_extra_kv_value(key: str, value: Any) -> str:
     """Redact sensitive value shapes for structured log prefixes.
 
@@ -185,6 +214,10 @@ def _redact_extra_kv_value(key: str, value: Any) -> str:
     (``<redacted:KIND>``) for any value that matches a sensitive
     pattern, or whose key looks secret-bearing.  Non-sensitive
     primitives pass through (still ``str()``-coerced).
+
+    Round 15 / Phase 4.1: every primitive that survives redaction is
+    additionally passed through ``_strip_log_control_chars`` so a
+    ``\\r\\n``-bearing value can no longer fake a new log line.
     """
     try:
         key_l = str(key).lower()
@@ -207,7 +240,7 @@ def _redact_extra_kv_value(key: str, value: Any) -> str:
         m = _re.search(r"\b([A-Z][a-z0-9]{2,}\s){2,}[A-Z][a-z0-9]{2,}\b", s)
         if m and not _is_technical_name_shape(m.group(0)):
             return "<redacted:name-shape>"
-        return s
+        return _strip_log_control_chars(s)
     except Exception:
         return "<redacted:unrenderable>"
 

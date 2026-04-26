@@ -302,6 +302,18 @@ from adoptiq_backend import fetch_subscription_data, search_subscriptions_by_cus
 
 # Import leader report functionality
 from leader_report_generator import generate_leader_report, LeaderReportGenerator
+# Round 15 / Phase 1.3: customer-facing column SSoT.  All Excel-writing
+# code paths in this module project sheets through this filter so we
+# stop leaking Salesforce/ETL plumbing into customer deliverables.
+from report_export_schema import apply_export_schema as _r15_apply_export_schema
+
+# Round 16 / Phase 5.1: extend the Round-15 polish helper to the
+# app_simple Excel writers, which use a ``startrow=1`` / merged-title
+# convention.  ``apply_excel_polish`` accepts a ``startrow`` parameter
+# (default 0, behavior preserving) so the per-sheet Excel Tables and
+# conditional-format rules anchor on the actual data range, not on
+# the title row.
+from report_export_styling import apply_excel_polish as _r16_apply_excel_polish
 
 def validate_manager_input(manager: str) -> tuple[bool, str]:
     """Validate manager input"""
@@ -6798,11 +6810,53 @@ def run_compact_analysis(analysis_id):
             # Convert string response to expected format for compact report formatter
             if isinstance(ai_insights_raw, str) and ai_insights_raw and not ai_insights_raw.startswith("ERROR:") and len(ai_insights_raw.strip()) > 50:
                 logger.info(f"[[OK]] AI insights successfully generated: {len(ai_insights_raw)} characters")
+                # Round 16 / Phase 3.4: gate the narrative through
+                # ``ai_narrative_validator.validate_narrative`` before
+                # accepting it for the report body.  The schema-validated
+                # JSON path was already hardened in Round 14; the
+                # free-form narrative path that flows into the Word /
+                # Excel "Executive Summary" sections previously reached
+                # the renderer with only a length + ``ERROR:``-prefix
+                # check.  When the validator rejects (HTML injection,
+                # ungrounded numbers, invented entities), replace the
+                # narrative with a labeled placeholder so the report
+                # never quotes hallucinated numbers from the LLM.  The
+                # underlying KPIs in the data tabs remain authoritative
+                # regardless.
+                _safe_insight_text = ai_insights_raw
+                try:
+                    import ai_narrative_validator as _anv
+                    _anv_result = _anv.validate_narrative(
+                        ai_insights_raw,
+                        briefing_book,
+                    )
+                    if not _anv_result.is_valid:
+                        logger.warning(
+                            "[[AI]] Round 16 / Phase 3.4: narrative failed grounding "
+                            "validation; substituting placeholder. failures=%s "
+                            "samples=%s",
+                            list(_anv_result.failures),
+                            {
+                                k: (v[:80] if isinstance(v, str) else v)
+                                for k, v in (_anv_result.sample_offending or {}).items()
+                            },
+                        )
+                        _safe_insight_text = _anv.GROUNDING_FAILURE_PLACEHOLDER
+                except Exception as _anv_err:
+                    # Validator must never break the report pipeline.
+                    # Log at WARNING so a regression in the validator
+                    # (import failure, regex bug) is visible without
+                    # masking the underlying narrative.
+                    logger.warning(
+                        "[[AI]] Round 16 / Phase 3.4: narrative validator raised "
+                        "unexpectedly (%s); accepting LLM output as-is",
+                        _anv_err,
+                    )
                 ai_insights = {
                     'portfolio_summary': {
-                        'executive_summary': ai_insights_raw
+                        'executive_summary': _safe_insight_text
                     },
-                    'executive_summary': ai_insights_raw,
+                    'executive_summary': _safe_insight_text,
                     'raw_response': ai_insights_raw
                 }
             else:
@@ -7952,7 +8006,11 @@ def run_compact_analysis(analysis_id):
             
             with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
                 workbook = writer.book
-                
+                # Round 16 / Phase 5.1: shared Table-name registry so
+                # the Round-15 polish helper can dedupe Excel-Table
+                # names across every sheet in this workbook.
+                _r16_used_table_names: set = set()
+
                 # Create enhanced formats
                 header_format = workbook.add_format({
                     'bold': True,
@@ -8168,10 +8226,47 @@ def run_compact_analysis(analysis_id):
                         logger.info(f"[[CLEAN]] Cleaning datetime columns for sheet '{sheet_name}'...")
                         df_clean = _clean_datetime_columns_for_excel(df)
                         logger.info(f"[[OK]] Datetime columns cleaned for sheet '{sheet_name}'")
-                    
+
+                        # Round 15 / Phase 1.3: project to the customer-facing
+                        # column SSoT so the compact-analysis writer stops
+                        # leaking SF/ETL plumbing (IS_DELETED, MAY_EDIT, etc.)
+                        # and synthetic underscore-prefixed pipeline markers.
+                        try:
+                            df_clean = _r15_apply_export_schema(df_clean, sheet_name=sheet_name)
+                        except Exception as _schema_err:
+                            logger.debug(
+                                "Round 15 export schema skipped for sheet '%s': %s",
+                                sheet_name,
+                                _schema_err,
+                            )
+
                         logger.info(f" Writing data to Excel sheet '{sheet_name}'...")
                         df_clean.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
                         logger.info(f"[[OK]] Data written to sheet '{sheet_name}'")
+
+                        # Round 16 / Phase 5.1: layer Round-15 polish
+                        # (Excel Table + conditional formatting) on the
+                        # ``startrow=1`` data range.  ``apply_excel_polish``
+                        # is internally defensive (try/except per rule) so
+                        # a sheet-level failure here cannot brick the
+                        # workbook write -- but we still wrap it so a
+                        # truly unexpected exception (e.g. xlsxwriter
+                        # API drift) cannot crash the report pipeline.
+                        try:
+                            _r16_apply_excel_polish(
+                                workbook,
+                                writer.sheets[sheet_name],
+                                df_clean,
+                                sheet_name,
+                                _r16_used_table_names,
+                                startrow=1,
+                            )
+                        except Exception as _r16_err:
+                            logger.warning(
+                                "Round 16 / Phase 5.1: apply_excel_polish skipped on '%s': %s",
+                                sheet_name,
+                                _r16_err,
+                            )
                     
                         # Enhanced sheet formatting
                         worksheet = writer.sheets[sheet_name]
@@ -11078,6 +11173,9 @@ def run_customer_renewal_analysis(analysis_id):
         try:
             with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
                 workbook = writer.book
+                # Round 16 / Phase 5.1: shared Table-name registry for
+                # the Round-15 polish helper across this writer's sheets.
+                _r16_used_table_names: set = set()
             
                 # Create enhanced formats
                 header_format = workbook.add_format({
@@ -11204,11 +11302,41 @@ def run_customer_renewal_analysis(analysis_id):
                     if not df.empty:
                         # Clean datetime columns for Excel compatibility
                         df_clean = _clean_datetime_columns_for_excel(df)
+                        # Round 15 / Phase 1.3: column-curation SSoT.
+                        try:
+                            df_clean = _r15_apply_export_schema(df_clean, sheet_name=sheet_name)
+                        except Exception as _schema_err:
+                            logger.debug(
+                                "Round 15 export schema skipped for sheet '%s': %s",
+                                sheet_name,
+                                _schema_err,
+                            )
                         df_clean.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
                     
                         # Format the sheet
                         worksheet = writer.sheets[sheet_name]
-                    
+
+                        # Round 16 / Phase 5.1: layer Round-15 polish on
+                        # the renewal-analysis sheets.  Defensive try/
+                        # except so any helper failure cannot abort the
+                        # workbook write -- the sheet has already been
+                        # populated above.
+                        try:
+                            _r16_apply_excel_polish(
+                                workbook,
+                                worksheet,
+                                df_clean,
+                                sheet_name,
+                                _r16_used_table_names,
+                                startrow=1,
+                            )
+                        except Exception as _r16_err:
+                            logger.warning(
+                                "Round 16 / Phase 5.1: apply_excel_polish skipped on '%s': %s",
+                                sheet_name,
+                                _r16_err,
+                            )
+
                         # Round 5 / Phase 1.9: use ``merge_range`` across the
                         # full column span so the sheet title is centered
                         # over the data rather than pinned to column A.
@@ -12919,33 +13047,51 @@ def progress(analysis_id):
             else:
                 logger.warning(f"Status file not found at: {status_file_path}. Current directory: {os.getcwd()}")
                 # Check if analysis is in memory (might have been created but not saved yet)
+                # Round 15 / Phase 6.2: previously the audit-fallback
+                # SQLite query (``_build_status_from_report_history``)
+                # ran while ``analysis_status_lock`` was held, blocking
+                # every other request thread that wanted to read or
+                # write the in-memory status dict on a single SQLite
+                # round-trip.  The sibling branch above (status-file
+                # found, id missing) already releases the lock around
+                # the same query and only re-acquires to commit; mirror
+                # that pattern here so neither branch holds the lock
+                # across IO.
+                _audit_status = None
                 with analysis_status_lock:
                     if analysis_id in analysis_status:
                         status = dict(analysis_status[analysis_id])
+                        _need_audit_lookup = False
                     else:
-                        # Round 4 / Phase 5.4: same audit fallback
-                        # path when the on-disk status file itself is
-                        # missing (fresh container, wiped tmp, etc.).
-                        _audit_status = _build_status_from_report_history(analysis_id)
-                        if _audit_status is not None:
-                            analysis_status[analysis_id] = _audit_status
+                        _need_audit_lookup = True
+                if _need_audit_lookup:
+                    _audit_status = _build_status_from_report_history(analysis_id)
+                    if _audit_status is not None:
+                        with analysis_status_lock:
+                            # Re-check under the lock in case another
+                            # thread populated the entry while we
+                            # were querying SQLite.
+                            if analysis_id not in analysis_status:
+                                analysis_status[analysis_id] = _audit_status
                             status = dict(analysis_status[analysis_id])
-                        else:
-                            # Round 8 / Phase 1.4 + 1.7: snapshot keys under the
-                            # lock and digest both the requested id and the
-                            # available sample.  Verbatim values still flow at
-                            # DEBUG.
+                    else:
+                        # Round 8 / Phase 1.4 + 1.7: snapshot keys under the
+                        # lock and digest both the requested id and the
+                        # available sample.  Verbatim values still flow at
+                        # DEBUG.
+                        with analysis_status_lock:
                             _available_sample_digests = [_id_digest(_aid) for _aid in list(analysis_status.keys())[:5]]
-                            logger.error(
-                                "Analysis aid_digest=%s not found in memory, file, or report_history. "
-                                "Available aid_digests (sample): %s",
-                                _id_digest(analysis_id), _available_sample_digests,
-                            )
-                            logger.debug(
-                                "Verbatim analysis id=%r not found; verbatim available sample=%r",
-                                analysis_id, list(analysis_status.keys())[:5],
-                            )
-                            return f"<h1>Analysis not found</h1><p>Analysis ID: {analysis_id_safe}</p><a href='/'>Start New Analysis</a>", 404
+                            _verbatim_sample = list(analysis_status.keys())[:5]
+                        logger.error(
+                            "Analysis aid_digest=%s not found in memory, file, or report_history. "
+                            "Available aid_digests (sample): %s",
+                            _id_digest(analysis_id), _available_sample_digests,
+                        )
+                        logger.debug(
+                            "Verbatim analysis id=%r not found; verbatim available sample=%r",
+                            analysis_id, _verbatim_sample,
+                        )
+                        return f"<h1>Analysis not found</h1><p>Analysis ID: {analysis_id_safe}</p><a href='/'>Start New Analysis</a>", 404
         except Exception as e:
             logger.error(f"Error loading analysis status from file: {e}", exc_info=True)
             return f"<h1>Analysis not found</h1><p>The analysis could not be loaded.</p><a href='/'>Start New Analysis</a>", 404
@@ -16863,9 +17009,22 @@ def run_subscription_analysis(analysis_id):
                         # header-only frame already written above.
                         pass
 
+                # Round 15 / Phase 1.4: subscription-renewal Excel writer
+                # uses different sheet names from the manager-portfolio
+                # writer (``Adoption_Barriers`` vs ``AB_Detail_All``) so
+                # the curated allowlist does not apply, but the
+                # denylist still strips SF plumbing (IS_DELETED, MAY_EDIT,
+                # SYSTEM_MODSTAMP, _FIVETRAN_*) before write.
+                def _r15_curate(_df, _sheet):
+                    try:
+                        return _r15_apply_export_schema(_df, sheet_name=_sheet)
+                    except Exception as _e:
+                        logger.debug("Round 15 export schema skipped for sheet '%s': %s", _sheet, _e)
+                        return _df
+
                 # Adoption Barriers
                 if not ab_df.empty:
-                    ab_df.to_excel(writer, sheet_name='Adoption_Barriers', index=False)
+                    _r15_curate(ab_df, 'Adoption_Barriers').to_excel(writer, sheet_name='Adoption_Barriers', index=False)
                 else:
                     _write_empty_or_placeholder(
                         ab_df, 'Adoption_Barriers',
@@ -16874,7 +17033,7 @@ def run_subscription_analysis(analysis_id):
 
                 # Action Plans
                 if not ap_df.empty:
-                    ap_df.to_excel(writer, sheet_name='Action_Plans', index=False)
+                    _r15_curate(ap_df, 'Action_Plans').to_excel(writer, sheet_name='Action_Plans', index=False)
                 else:
                     _write_empty_or_placeholder(
                         ap_df, 'Action_Plans',
@@ -16883,7 +17042,7 @@ def run_subscription_analysis(analysis_id):
 
                 # Customer Pulse
                 if not cp_df.empty:
-                    cp_df.to_excel(writer, sheet_name='Customer_Pulse', index=False)
+                    _r15_curate(cp_df, 'Customer_Pulse').to_excel(writer, sheet_name='Customer_Pulse', index=False)
                 else:
                     _write_empty_or_placeholder(
                         cp_df, 'Customer_Pulse',
@@ -16892,7 +17051,7 @@ def run_subscription_analysis(analysis_id):
 
                 # Success Priorities
                 if not sp_df.empty:
-                    sp_df.to_excel(writer, sheet_name='Success_Priorities', index=False)
+                    _r15_curate(sp_df, 'Success_Priorities').to_excel(writer, sheet_name='Success_Priorities', index=False)
                 else:
                     _write_empty_or_placeholder(
                         sp_df, 'Success_Priorities',
@@ -18078,6 +18237,9 @@ def run_leader_report_generation(analysis_id):
                 _failed_sheets: list = []
                 with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
                     workbook = writer.book
+                    # Round 16 / Phase 5.1: shared Table-name registry for
+                    # the Round-15 polish helper.
+                    _r16_used_table_names: set = set()
                     
                     # Create formats
                     header_format = workbook.add_format({
@@ -18135,13 +18297,47 @@ def run_leader_report_generation(analysis_id):
                             try:
                                 # Clean datetime columns for Excel compatibility
                                 df_clean = _clean_datetime_columns_for_excel(df)
-                                
+
+                                # Round 15 / Phase 1.5: leader-team-report
+                                # writer also routes through the SSoT.
+                                try:
+                                    df_clean = _r15_apply_export_schema(df_clean, sheet_name=sheet_name)
+                                except Exception as _schema_err:
+                                    logger.debug(
+                                        "Round 15 export schema skipped for sheet '%s': %s",
+                                        sheet_name,
+                                        _schema_err,
+                                    )
+
                                 # Write data
                                 df_clean.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
                                 
                                 # Format worksheet
                                 worksheet = writer.sheets[sheet_name]
-                                
+
+                                # Round 16 / Phase 5.1: layer Round-15
+                                # polish (Excel Table + conditional
+                                # formatting) on the leader-team-report
+                                # sheets.  Helper is internally
+                                # defensive; we wrap it once more so a
+                                # truly unexpected failure cannot
+                                # cascade into a partial workbook.
+                                try:
+                                    _r16_apply_excel_polish(
+                                        workbook,
+                                        worksheet,
+                                        df_clean,
+                                        sheet_name,
+                                        _r16_used_table_names,
+                                        startrow=1,
+                                    )
+                                except Exception as _r16_err:
+                                    logger.warning(
+                                        "Round 16 / Phase 5.1: apply_excel_polish skipped on '%s': %s",
+                                        sheet_name,
+                                        _r16_err,
+                                    )
+
                                 # Write title -- merge_range requires >=2 columns
                                 title_text = f"{sheet_name.replace('_', ' ')} - {manager} Team Report"
                                 n_cols = len(df_clean.columns)

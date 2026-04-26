@@ -28,6 +28,12 @@ from data_normalization import (
 from report_consistency import validate_report_consistency
 from report_utils import format_inline_source, format_metric_with_source
 import canonical_metrics as cm
+# Round 16 / Phase 5.2: pull the banded top-N table helper from the
+# Round-15 Word styling SSoT so the compact-formatter top-N tables get
+# the same Cisco-blue header + alternating-row banding as the
+# title-page summary table, instead of the inherited ``Table Grid``
+# default.
+from report_word_styling import add_banded_top_n_table as _r16_add_banded_top_n_table
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -821,7 +827,19 @@ class CompactReportFormatter:
             # Yellow customers (Moderate Risk) - FIXED: Show ALL yellow customers
             if yellow_customers:
                 self.doc.add_heading('🟡 YELLOW - Moderate Risk Customers', level=2)
-                sorted_yellow = sorted(yellow_customers.items(), key=lambda x: x[1].get('score', 0) if isinstance(x[1], dict) else 0, reverse=True)
+                # Round 16 / Phase 2.1: previously sorted by score alone,
+                # which left the rendering order undefined for two
+                # yellow customers that shared the same risk score (e.g.
+                # both at 5.5).  Mirror the ``sorted_red`` tuple-key
+                # pattern so the Word output is byte-stable across runs
+                # over identical input.
+                sorted_yellow = sorted(
+                    yellow_customers.items(),
+                    key=lambda x: (
+                        -(x[1].get('score', 0) if isinstance(x[1], dict) else 0),
+                        str(x[0] or '').casefold(),
+                    ),
+                )
                 
                 for customer_name, risk_info in sorted_yellow:  # Show ALL yellow customers
                     self._add_customer_risk_section(customer_name, risk_info, ab_data, csone_data, 'Yellow')
@@ -2149,7 +2167,17 @@ class CompactReportFormatter:
                         )
             
             # Sort by frequency - FIXED: Show ALL problem themes
-            sorted_themes = sorted(problem_themes.items(), key=lambda x: x[1], reverse=True)
+            # Round 16 / Phase 2.2: tie-break on the theme name (case-
+            # folded) so two themes that detect the same number of
+            # affected rows render in the same order across runs.
+            # Without the tiebreaker the order is dict-insertion order,
+            # which is stable inside a single Python process but not
+            # across re-runs that ingest the same source frames in a
+            # different order.
+            sorted_themes = sorted(
+                problem_themes.items(),
+                key=lambda x: (-x[1], str(x[0] or '').casefold()),
+            )
 
             # Round 11 / Phase 9.1: when no themes were detected the
             # section previously rendered an empty heading and then
@@ -2857,22 +2885,46 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
         sorted_by_risk = sorted(risk_data.items(), key=_focus_sort_key)[:10]
         if sorted_by_risk:
             formatter.doc.add_heading('Top 10 Focus Accounts by Risk', level=1)
-            focus_table = formatter.doc.add_table(rows=1 + len(sorted_by_risk), cols=4)
-            focus_table.style = 'Table Grid'
-            hdr = focus_table.rows[0].cells
-            for i, txt in enumerate(['Rank', 'Customer', 'Risk Score', 'Category']):
-                hdr[i].text = txt
-                for para in hdr[i].paragraphs:
-                    for run in para.runs:
-                        run.bold = True
+            # Round 16 / Phase 5.2: substitute the Round-15 banded
+            # top-N helper for the legacy ``Table Grid`` build.  Same
+            # contract (header row + ranked data rows), same content,
+            # but consumers now see the Cisco-blue header treatment
+            # used by the title-page executive summary, so all top-N
+            # tables in the compact report carry one consistent style.
+            _r16_focus_headers = ['Rank', 'Customer', 'Risk Score', 'Category']
+            _r16_focus_rows = []
             for idx, (cust, info) in enumerate(sorted_by_risk, 1):
-                row = focus_table.rows[idx].cells
-                row[0].text = str(idx)
-                row[1].text = str(cust)
                 _s = info.get('score', 0)
                 _s = 0 if _s is None or (isinstance(_s, float) and np.isnan(_s)) else _s
-                row[2].text = f"{_s:.1f}/10"
-                row[3].text = str(info.get('category') or 'N/A')
+                _r16_focus_rows.append([
+                    str(idx),
+                    str(cust),
+                    f"{_s:.1f}/10",
+                    str(info.get('category') or 'N/A'),
+                ])
+            focus_table = _r16_add_banded_top_n_table(
+                formatter.doc,
+                headers=_r16_focus_headers,
+                rows=_r16_focus_rows,
+            )
+            if focus_table is None:
+                # Defensive fallback: if the helper refused to build the
+                # table (e.g. python-docx surface unavailable in a test
+                # harness), keep the legacy renderer alive so the report
+                # still ships the focus list rather than vanishing
+                # silently.
+                focus_table = formatter.doc.add_table(rows=1 + len(sorted_by_risk), cols=4)
+                focus_table.style = 'Table Grid'
+                hdr = focus_table.rows[0].cells
+                for i, txt in enumerate(_r16_focus_headers):
+                    hdr[i].text = txt
+                    for para in hdr[i].paragraphs:
+                        for run in para.runs:
+                            run.bold = True
+                for r_idx, row_vals in enumerate(_r16_focus_rows, 1):
+                    row = focus_table.rows[r_idx].cells
+                    for c_idx, v in enumerate(row_vals):
+                        row[c_idx].text = v
             # Round 12 / Phase 9.5: see comment above the slice -- emit
             # the truncation footer only when there really are more
             # than 10 ranked accounts so the briefing never claims

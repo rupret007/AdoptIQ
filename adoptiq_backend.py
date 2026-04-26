@@ -47,6 +47,20 @@ from data_normalization import (
     parse_datetime_series,
 )
 from risk_scoring import compute_customer_risk_profile
+# Round 15 / Phase 1.1: route every Excel sheet through the customer-facing
+# column SSoT so the fallback writer below never re-leaks SF/ETL plumbing
+# (IS_DELETED, MAY_EDIT, _stale_storage, EDWSF_*, etc.).
+from report_export_schema import apply_export_schema as _r15_apply_export_schema
+
+# Round 15 / Phase 2.1: visual polish helpers -- convert the written
+# data range into a true Excel Table, apply per-column number formats
+# (currency / date / percent / integer), layer conditional formatting
+# rules anchored to the canonical RISK_BAND_THRESHOLDS, and prepend a
+# Summary KPI sheet pulled from canonical_metrics.
+from report_export_styling import (
+    apply_excel_polish as _r15_apply_excel_polish,
+    write_summary_sheet as _r15_write_summary_sheet,
+)
 from report_utils import (
     format_inline_source,
     format_number as _r12_format_number,
@@ -4398,10 +4412,19 @@ def derive_portfolio_intelligence(arr_df, ab_df, cases_df=None, team_subs_df=Non
         _have_acct_col = bool(acct_col) and acct_col in arr_df.columns
         if _have_label_col or _have_acct_col:
             if _have_acct_col and _have_label_col:
+                # Round 16 / Phase 2.3: stable tiebreaker on the
+                # groupby key (ACCOUNT_ID_C / BU_NAME) so two accounts
+                # that share an ``arr_sum`` produce the same top-5 /
+                # top-10 ranking on every run.  Without the
+                # ``sort_index`` + ``mergesort`` chain the order of
+                # tied accounts depends on pandas' internal hashing
+                # and can flip between runs of the same data.
                 _agg = (
                     arr_df.groupby(acct_col)
                     .agg(arr_sum=(arr_col, 'sum'), label=('BU_NAME', 'first'))
-                    .sort_values('arr_sum', ascending=False)
+                )
+                _agg = _agg.sort_index(kind='mergesort').sort_values(
+                    'arr_sum', ascending=False, kind='mergesort'
                 )
                 cust_arr = pd.Series(
                     _agg['arr_sum'].values,
@@ -4431,8 +4454,11 @@ def derive_portfolio_intelligence(arr_df, ab_df, cases_df=None, team_subs_df=Non
                 # Group by account and use ``str(account_id)`` as the
                 # display label so the concentration block still publishes
                 # a useful top-N list and HHI even without display names.
-                _agg = (
-                    arr_df.groupby(acct_col)[arr_col].sum().sort_values(ascending=False)
+                # Round 16 / Phase 2.3: stable tiebreaker (see the
+                # ``_have_acct_col and _have_label_col`` branch above).
+                _agg = arr_df.groupby(acct_col)[arr_col].sum()
+                _agg = _agg.sort_index(kind='mergesort').sort_values(
+                    ascending=False, kind='mergesort'
                 )
                 cust_arr = pd.Series(
                     _agg.values,
@@ -4463,11 +4489,16 @@ def derive_portfolio_intelligence(arr_df, ab_df, cases_df=None, team_subs_df=Non
                     .fillna('Unknown')
                     .apply(normalize_customer_name)
                 )
+                # Round 16 / Phase 2.3: stable tiebreaker on the
+                # groupby key so two customers sharing the same
+                # summed ARR rank in a deterministic order.
                 cust_arr = (
                     _arr_df_for_fallback
                     .groupby('_bu_disp')[arr_col]
                     .sum()
-                    .sort_values(ascending=False)
+                )
+                cust_arr = cust_arr.sort_index(kind='mergesort').sort_values(
+                    ascending=False, kind='mergesort'
                 )
                 _top5_account_ids = []
                 _top10_account_ids = []
@@ -7506,7 +7537,50 @@ Report Date: {_r12_now_utc.strftime("%B %d, %Y")} UTC
         
         # Page break after title
         doc.add_page_break()
-        
+
+        # Round 15 / Phase 3.6: the gold docx had no executive
+        # summary table at the top of the report -- the only KPI
+        # surface was the buried 3x4 "Portfolio Dashboard" table,
+        # which has no parity with the Excel ``Summary`` sheet.
+        # Render a dedicated Heading-2 summary table here so the
+        # first thing on page 2 of the report is the same KPIs the
+        # workbook leads with.  Defensive: any failure logs and
+        # falls through silently.
+        try:
+            import report_word_styling as _r15_word_styling  # noqa: PLC0415
+            _r15_metrics = portfolio_metrics or {}
+            _r15_kpi_rows: list[tuple[str, str]] = [
+                ("Manager scope", str(manager) if manager else "All"),
+                ("Technology scope", str(technology) if technology else "All"),
+                ("Window (days)", str(days) if days is not None else "--"),
+            ]
+            for _r15_label, _r15_key in (
+                ("Customers in portfolio", "total_customers"),
+                ("Adoption barriers (total)", "total_barriers"),
+                ("TAC cases (total)", "total_cases"),
+                ("BEMS / break-fix", "bems_count"),
+                ("Critical + High risk", "high_risk_customers"),
+                ("Medium risk", "medium_risk_customers"),
+                ("Low risk", "low_risk_customers"),
+                ("Healthy", "healthy_customers"),
+                ("P1 / Critical cases", "critical_p1"),
+                ("P2 / High cases", "high_p2"),
+            ):
+                if _r15_key in _r15_metrics and _r15_metrics[_r15_key] is not None:
+                    _r15_kpi_rows.append((_r15_label, str(_r15_metrics[_r15_key])))
+            _r15_word_styling.add_executive_summary_table(
+                doc,
+                _r15_kpi_rows,
+                title="Executive Summary",
+                title_level=2,
+            )
+            doc.add_paragraph()
+        except Exception as _r15_summary_err:
+            logger.debug(
+                "Round 15 / Phase 3.6: executive summary table skipped (%s)",
+                _r15_summary_err,
+            )
+
     except Exception as e:
         # If title page creation fails, just continue - don't break the report
         logger.warning(f"Could not create title page: {e}")
@@ -7520,7 +7594,13 @@ _RE_NUMBERED_LIST_ITEM = re.compile(r'^\d+[\.\)]\s')
 
 def append_to_word_report(doc_or_path, markdown_content: str, heading: str = None):
     """Enhanced Word report writer with professional executive-ready formatting - removes ALL markdown symbols"""
-    
+
+    # Round 15 / Phase 3.1: lazy-import the Word styling SSoT so the
+    # markdown -> Heading-N mapping lives in exactly one place
+    # (``report_word_styling.markdown_heading_level``) and the
+    # heading-discipline regression test can pin the contract there.
+    import report_word_styling as _r15_word_styling
+
     if not isinstance(markdown_content, str) or not markdown_content.strip():
         return
     
@@ -7629,10 +7709,16 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
     except Exception as _style_err:
         logger.debug("Document style configuration skipped: %s", _style_err)
     
-    # Add heading if provided
+    # Round 15 / Phase 3.1: the section heading argument used to land
+    # on Heading 1, so every per-customer / per-section ``append_to_word_report``
+    # call stamped another H1 entry into the docx (the gold report
+    # had 38 of them).  Heading 1 is reserved for the document title
+    # set by ``create_executive_title_page``; section headings
+    # passed in here drop to Heading 2 so the document has a proper
+    # H1 -> H2 -> H3 hierarchy.
     if heading:
-        doc.add_heading(heading, level=1)
-    
+        doc.add_heading(heading, level=_r15_word_styling.MIN_BODY_HEADING_LEVEL)
+
     # Add elegant section separator if this isn't the first section
     if len(doc.paragraphs) > 1:
         # Add some spacing
@@ -7681,30 +7767,37 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
             i += 1
             continue
         
+        # Round 15 / Phase 3.1: previously every markdown ``# heading``
+        # in LLM-generated content collapsed onto Heading 1, producing
+        # the 38-H1 gold docx (and a TOC where every customer section
+        # was a top-level chapter).  Reserve Heading 1 for the
+        # document title page only and demote ``# / ## / ### / ####``
+        # by one level via ``report_word_styling.markdown_heading_level``
+        # so the document body has a real H2 -> H3 -> H4 hierarchy.
         # Handle headings - remove ALL # and ** symbols completely
         if line.startswith('#####'):
             heading_text = line.lstrip('#').strip().replace('**', '')
-            h = doc.add_heading(heading_text, level=4)
+            h = doc.add_heading(heading_text, level=_r15_word_styling.markdown_heading_level(5))
             if h.runs:
                 h.runs[0].font.size = Pt(11)
                 h.runs[0].font.bold = True
                 h.runs[0].font.color.rgb = RGBColor(0, 123, 199)
         elif line.startswith('####'):
             heading_text = line.lstrip('#').strip().replace('**', '')
-            h = doc.add_heading(heading_text, level=4)
+            h = doc.add_heading(heading_text, level=_r15_word_styling.markdown_heading_level(4))
             if h.runs:
                 h.runs[0].font.size = Pt(11)
                 h.runs[0].font.bold = True
                 h.runs[0].font.color.rgb = RGBColor(0, 123, 199)
         elif line.startswith('###'):
             heading_text = line.lstrip('#').strip().replace('**', '')
-            h = doc.add_heading(heading_text, level=3)
+            h = doc.add_heading(heading_text, level=_r15_word_styling.markdown_heading_level(3))
         elif line.startswith('##'):
             heading_text = line.lstrip('#').strip().replace('**', '')
-            h = doc.add_heading(heading_text, level=2)
+            h = doc.add_heading(heading_text, level=_r15_word_styling.markdown_heading_level(2))
         elif line.startswith('#'):
             heading_text = line.lstrip('#').strip().replace('**', '')
-            h = doc.add_heading(heading_text, level=1)
+            h = doc.add_heading(heading_text, level=_r15_word_styling.markdown_heading_level(1))
         
         # Handle bullet points - remove ALL markdown symbols
         elif line.startswith(('* ', '- ', '• ')):
@@ -7780,7 +7873,18 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
     elif isinstance(sheets_or_path, dict):
         # Called as write_excel_workbook(sheets_dict) - need to generate filename
         sheets = sheets_or_path
-        base_path = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        # Round 15 / Phase 5.1: previously this default filename was
+        # stamped via ``datetime.now()`` (HOST-LOCAL clock, no tz
+        # suffix).  Two operators running the same workbook export in
+        # different regions on the same UTC second got *different*
+        # filenames -- and a UK operator who ran it during BST got a
+        # filename one hour ahead of a colleague in UTC.  Anchor on
+        # UTC and append a ``Z`` so the suffix matches the UTC ISO-Z
+        # timestamps Round 5 / Phase 6.3 + Round 12 / Phase 10.4
+        # standardised for ``store_report_history`` and the admin
+        # persisted columns.  Behaviour-preserving for any caller
+        # that supplies its own filename via the other branches.
+        base_path = f"report_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}Z"
     else:
         # Default case - assume it's a path and sheets
         base_path = str(sheets_or_path)
@@ -7860,12 +7964,41 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                 _name = "Sheet"
             return _name[:31]
         with pd.ExcelWriter(f"{base_path}.xlsx", engine="xlsxwriter") as xw:
+            # Round 15 / Phase 2.4: Summary sheet first.  This is the
+            # tab the recipient lands on when they double-click the
+            # file; pre-Round-15 they landed on ``Report_Info`` (which
+            # was a 3-row metadata stub).  KPIs are sourced from the
+            # ``canonical_metrics`` helpers so the workbook summary
+            # never disagrees with the Word-report narrative.
+            try:
+                _r15_summary_ts: str | None = None
+                try:
+                    _r15_summary_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                except Exception:
+                    _r15_summary_ts = None
+                _r15_write_summary_sheet(
+                    xw,
+                    sheets,
+                    csconsole_data,
+                    manager=manager,
+                    tech=technology,
+                    days=days,
+                    generated_at_utc_iso_z=_r15_summary_ts,
+                )
+            except Exception as _summary_err:
+                logger.debug("Round 15 summary sheet skipped: %s", _summary_err)
+
+            # Round 15 / Phase 2.5: workbook-wide table-name registry
+            # so the polish pass can guarantee uniqueness across every
+            # sheet (Excel rejects duplicate Table names).
+            _r15_used_table_names: set[str] = set()
+
             report_info = pd.DataFrame([
                 ["Export type", "Standard (fallback)"],
                 ["Note", "This report was generated using the standard Excel export. The enhanced formatter was not available; all data is present and accurate."],
             ], columns=["Item", "Value"])
             report_info.to_excel(xw, sheet_name="Report_Info", index=False)
-            _used_sheet_names = {"Report_Info"}
+            _used_sheet_names = {"Summary", "Report_Info"}
 
             # Round 13 / Phase 9.8: previously the fallback path emitted
             # raw ``df.to_excel(...)`` with no header bolding, no
@@ -7957,6 +8090,19 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                 df_copy = df_copy.replace([_np.inf, -_np.inf], _np.nan)
                 df_copy = _defang_formulas(df_copy)
 
+                # Round 15 / Phase 1.2: project every sheet through the
+                # customer-facing column SSoT before write.  Defensive --
+                # if the schema call raises for any reason we fall back
+                # to the un-curated frame so the report still ships.
+                try:
+                    df_copy = _r15_apply_export_schema(df_copy, sheet_name=name)
+                except Exception as _schema_err:
+                    logger.debug(
+                        "Round 15 export schema skipped for sheet '%s': %s",
+                        name,
+                        _schema_err,
+                    )
+
                 # Round 12 / Phase 9.8: previously the fallback sheet
                 # name was only truncated to 31 characters but the
                 # Excel-invalid characters ``[ ] : * ? / \`` (and the
@@ -7986,6 +8132,26 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                     _r13_fallback_apply_styling(df_copy, xw.sheets.get(sheet))
                 except Exception:
                     pass
+                # Round 15 / Phase 2.6: convert to a real Excel Table
+                # (banded rows / native filter UX) and layer per-column
+                # formats + conditional formatting (risk 3-color scale,
+                # severity tier bands, status grey/yellow/red, days-open
+                # data bar).  Defensive -- the previous styling pass
+                # already shipped a usable sheet if this fails.
+                try:
+                    _r15_apply_excel_polish(
+                        _r13_book,
+                        xw.sheets.get(sheet),
+                        df_copy,
+                        sheet,
+                        _r15_used_table_names,
+                    )
+                except Exception as _polish_err:
+                    logger.debug(
+                        "Round 15 visual polish skipped for sheet '%s': %s",
+                        sheet,
+                        _polish_err,
+                    )
             if csconsole_data:
                 for key, sheet_name in csconsole_sheet_names.items():
                     df = csconsole_data.get(key)
@@ -7995,6 +8161,18 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                             if df_copy[col].dt.tz is not None:
                                 df_copy[col] = df_copy[col].dt.tz_convert(None)
                         df_copy = _defang_formulas(df_copy)
+                        # Round 15 / Phase 1.2: same column-curation
+                        # filter for the CSConsole branch -- this is
+                        # where ``CSConsole_Customer_Pulse`` was leaking
+                        # ETL_ID / DELETE_FLAG / EDWSF_* etc.
+                        try:
+                            df_copy = _r15_apply_export_schema(df_copy, sheet_name=sheet_name)
+                        except Exception as _schema_err:
+                            logger.debug(
+                                "Round 15 export schema skipped for sheet '%s': %s",
+                                sheet_name,
+                                _schema_err,
+                            )
                         # Round 12 / Phase 9.8: see comment above --
                         # ``csconsole_sheet_names`` is hard-coded today
                         # but a future caller could easily inject an
@@ -8013,6 +8191,26 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                             _r13_fallback_apply_styling(df_copy, xw.sheets.get(_r13_cs_sheet))
                         except Exception:
                             pass
+                        # Round 15 / Phase 2.7: same Round-15 polish pass
+                        # for CSConsole sheets so the table / conditional-
+                        # formatting contract is uniform across the
+                        # workbook (CSConsole_Customer_Pulse used to
+                        # ship as a flat unformatted dump even after
+                        # Phase 1 column curation).
+                        try:
+                            _r15_apply_excel_polish(
+                                _r13_book,
+                                xw.sheets.get(_r13_cs_sheet),
+                                df_copy,
+                                _r13_cs_sheet,
+                                _r15_used_table_names,
+                            )
+                        except Exception as _polish_err:
+                            logger.debug(
+                                "Round 15 visual polish skipped for CSConsole sheet '%s': %s",
+                                _r13_cs_sheet,
+                                _polish_err,
+                            )
         return f"{base_path}.xlsx"
 
 # --------------------------- LLM prompt ---------------------------

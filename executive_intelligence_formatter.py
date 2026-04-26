@@ -32,6 +32,11 @@ from report_utils import (
     format_percent_points,
 )
 import canonical_metrics as cm
+# Round 16 / Phase 5.2: pull the banded top-N table helper from the
+# Round-15 Word styling SSoT so the executive-intelligence top-N
+# tables get the Cisco-blue header / alternating-row banding instead
+# of the inherited ``Light Grid Accent 1`` default.
+from report_word_styling import add_banded_top_n_table as _r16_add_banded_top_n_table
 
 logger = logging.getLogger(__name__)
 
@@ -960,27 +965,46 @@ class ExecutiveIntelligenceFormatter:
         defect_by_customer = software_defects.get('defect_by_customer', {})
         if defect_by_customer:
             self.doc.add_paragraph()
-            table = self.doc.add_table(rows=len(defect_by_customer) + 1, cols=3)
-            table.style = 'Light Grid Accent 1'
-            headers = table.rows[0].cells
-            headers[0].text = "Customer Name"
-            headers[1].text = "Defect Count"
-            headers[2].text = "Defect IDs"
-            for cell in headers:
-                if cell.paragraphs and cell.paragraphs[0].runs:
-                    cell.paragraphs[0].runs[0].bold = True
-            for idx, (customer, defects) in enumerate(sorted(defect_by_customer.items()), 1):
+            # Round 16 / Phase 5.2: substitute the Round-15 banded
+            # top-N helper.  Same data shape (per-customer defect
+            # rollup), but the helper provides the Cisco-blue header
+            # treatment and alternating-row fill that the rest of the
+            # Round-15 surfaces use, so the executive-intelligence
+            # report no longer carries the ``Light Grid Accent 1``
+            # outlier table.
+            _r16_defect_headers = ["Customer Name", "Defect Count", "Defect IDs"]
+            _r16_defect_rows = []
+            for customer, defects in sorted(defect_by_customer.items()):
                 defect_list = sorted(set(defects or []))
-                row = table.rows[idx].cells
-                # Round 11 / Phase 3.4: normalize displayed customer
-                # so duplicate-spelling rows collapse visually.
                 try:
                     _disp_cust = normalize_customer_name(str(customer)) or str(customer)
                 except Exception:
                     _disp_cust = str(customer)
-                row[0].text = _disp_cust
-                row[1].text = str(len(defect_list))
-                row[2].text = ", ".join([f"[{d}]" for d in defect_list])
+                _r16_defect_rows.append([
+                    _disp_cust,
+                    str(len(defect_list)),
+                    ", ".join([f"[{d}]" for d in defect_list]),
+                ])
+            table = _r16_add_banded_top_n_table(
+                self.doc,
+                headers=_r16_defect_headers,
+                rows=_r16_defect_rows,
+            )
+            if table is None:
+                # Defensive fallback: if helper unavailable, keep the
+                # legacy Light-Grid-Accent build alive so the report
+                # still surfaces the per-customer defect rollup.
+                table = self.doc.add_table(rows=len(_r16_defect_rows) + 1, cols=3)
+                table.style = 'Light Grid Accent 1'
+                headers = table.rows[0].cells
+                for i, txt in enumerate(_r16_defect_headers):
+                    headers[i].text = txt
+                    if headers[i].paragraphs and headers[i].paragraphs[0].runs:
+                        headers[i].paragraphs[0].runs[0].bold = True
+                for r_idx, row_vals in enumerate(_r16_defect_rows, 1):
+                    row = table.rows[r_idx].cells
+                    for c_idx, v in enumerate(row_vals):
+                        row[c_idx].text = v
     
     def add_psirt_vulnerabilities_section(self, psirt_vulns: Dict):
         """Add PSIRT Vulnerabilities section - CVEs and PSIRT advisories extracted from data"""

@@ -1,0 +1,11 @@
+Executive summary for the 90-day window: the portfolio of 12 customers
+shows 24 adoption barriers (7 critical, 18 still open) and 31 TAC cases,
+of which 3 are P1 and 14 remain open. Total ARR at risk is approximately
+$1,250,000 (~40% concentrated in Acme Corp at $500,000), with Beta Inc
+($300,000), Gamma Ltd ($250,000), and Delta Co ($200,000) rounding out
+the top exposures. The most frequent barrier theme is provisioning
+delays affecting 8 customers, followed by authentication / SSO at 5.
+Recommendation: focus the next 30 days on the 7 critical barriers and
+the 3 P1 cases concentrated on Acme Corp and Beta Inc. External
+incidents (6) and bugs (11) cited in this window do not currently align
+with any open P1 case, but should be tracked for emerging patterns.
