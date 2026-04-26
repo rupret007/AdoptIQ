@@ -1,0 +1,7 @@
+customer_name,snapshot_date,CUSTOMER_PULSE__C,COMMENTS__C
+Synthetic Alpha,2026-01-15,green,Operator noted moderate satisfaction after resolving authentication issue.
+Synthetic Alpha,2026-02-15,green,Improving sentiment; reported pipeline stabilizing.
+Synthetic Alpha,2026-03-15,green,Positive sentiment after performance improvements landed.
+Synthetic Beta,2026-02-15,red,Frustration reported with policy drift incident.
+Synthetic Beta,2026-03-15,yellow,Recovering; awaiting webhook stabilization plan.
+Synthetic Gamma,2026-02-28,green,Mobile regression resolved quickly; sentiment positive.

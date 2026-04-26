@@ -1,5 +1,7 @@
 # AdoptIQ: Sync Windows PC Changes to Mac Version
 
+> **Status: historical / one-time migration document.** This guide captured the PC→Mac parity migration from the v1.0.x era. The migration items in section 14 and the section-level checklist below have all been applied to the current codebase. For the current quality state and ongoing audits, see `QUALITY_AUDIT.md`. Do not use this document as a current-state reference.
+
 **Purpose:** Apply all changes from the Windows PC restore point (commit d6cdd77) to the Mac version so both apps are identical in behavior.
 
 **Use this document:** Paste it into a Cursor session on the Mac AdoptIQ project and ask the AI to implement all changes.

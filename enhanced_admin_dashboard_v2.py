@@ -2180,6 +2180,178 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
             <a href="/api/analytics" class="btn btn-success">View Analytics</a>
         </div>
 
+        {# Round 17 / Phase D.5: Corpus tile + CSRF-protected refresh action. #}
+        <div class="table-container">
+            <h3>CSOne Knowledge Corpus</h3>
+            {% if corpus_status_failed %}
+                <p style="color:#dc3545;">
+                    <strong>Status:</strong> n/a (main app unreachable from
+                    admin process &mdash; check that AdoptIQ is running)
+                </p>
+            {% elif not corpus_status.enabled %}
+                <p>
+                    <strong>Status:</strong> disabled
+                    (set <code>CORPUS_KNOWLEDGE_ENABLED=true</code> to enable)
+                </p>
+            {% elif not corpus_status.available %}
+                <p>
+                    <strong>Status:</strong> unavailable
+                    {% if corpus_status.reason %}
+                        &mdash; {{ corpus_status.reason }}
+                    {% endif %}
+                </p>
+                {% if corpus_status.boot.last_error %}
+                <p>
+                    <strong>Last error:</strong>
+                    {{ corpus_status.boot.last_error_kind or 'error' }}:
+                    {{ corpus_status.boot.last_error }}
+                </p>
+                {% endif %}
+            {% else %}
+                <p><strong>Status:</strong> available</p>
+                <p>
+                    <strong>Files indexed:</strong>
+                    {{ corpus_status.corpus.files_parsed }} /
+                    {{ corpus_status.corpus.files_total }}
+                    &middot;
+                    <strong>Customers:</strong> {{ corpus_status.corpus.customers }}
+                    &middot;
+                    <strong>Cases:</strong> {{ corpus_status.corpus.cases }}
+                    &middot;
+                    <strong>Chunks:</strong> {{ corpus_status.corpus.chunks }}
+                </p>
+                <p>
+                    <strong>Last parsed:</strong>
+                    {{ corpus_status.corpus.last_parsed_at or 'never' }}
+                    &middot;
+                    <strong>Last indexed:</strong>
+                    {{ corpus_status.corpus.indexed_at or 'never' }}
+                    &middot;
+                    <strong>Schema:</strong>
+                    v{{ corpus_status.corpus.schema_version }}
+                </p>
+                {% if corpus_status.boot.encrypted_path %}
+                <p>
+                    <strong>Encrypted cache:</strong>
+                    <code>{{ corpus_status.boot.encrypted_path }}</code>
+                </p>
+                {% endif %}
+
+                {# Round 17.2: SharePoint pull state.  Rendered for
+                   every state (signed-out / signed-in / error) so the
+                   operator always knows whether the share is being
+                   pulled and who AdoptIQ is signed in as. #}
+                {% set sp = corpus_status.boot.sharepoint %}
+                {% if sp %}
+                <p style="margin-top:0.6em;">
+                    <strong>SharePoint pull:</strong>
+                    {% if not sp.enabled %}
+                        disabled
+                    {% elif not sp.configured %}
+                        not configured (set <code>ADOPTIQ_SHAREPOINT_FOLDER_URL</code>)
+                    {% elif sp.error_kind == 'auth_required' %}
+                        <span style="color:#dc3545;">sign-in required</span>
+                    {% elif sp.error_kind %}
+                        <span style="color:#dc3545;">{{ sp.error_kind }}</span>
+                        {% if sp.error_detail %}
+                            &mdash; {{ sp.error_detail }}
+                        {% endif %}
+                    {% elif sp.signed_in %}
+                        signed in
+                    {% else %}
+                        not signed in
+                    {% endif %}
+                </p>
+                {% if sp.signed_in and sp.upn %}
+                <p>
+                    <strong>SharePoint account:</strong>
+                    <code>{{ sp.upn }}</code>
+                    {% if sp.expires_at %}
+                        &middot; token expires {{ sp.expires_at }}
+                    {% endif %}
+                </p>
+                {% endif %}
+                {% if sp.stats %}
+                <p>
+                    <strong>SharePoint last refresh:</strong>
+                    listed {{ sp.stats.files_listed }}
+                    &middot; downloaded {{ sp.stats.files_downloaded }}
+                    &middot; cached {{ sp.stats.files_cached }}
+                    &middot; failed {{ sp.stats.files_failed }}
+                    &middot; bytes {{ sp.stats.bytes_downloaded }}
+                </p>
+                {% endif %}
+                <p>
+                    {% if sp.error_kind == 'auth_required' or not sp.signed_in %}
+                    <form method="POST" action="/sharepoint_signin" style="display:inline;">
+                        <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
+                        <button type="submit" class="btn btn-primary">Sign in to SharePoint</button>
+                    </form>
+                    {% endif %}
+                    <form method="POST" action="/sharepoint_refresh" style="display:inline;">
+                        <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
+                        <button type="submit" class="btn btn-success">Refresh SharePoint corpus</button>
+                    </form>
+                </p>
+                {% endif %}
+
+                {# Round 17.1 + 17.2: per-source breakdown (SharePoint
+                   cache, OneDrive sync, the runtime user's Downloads).
+                   Rendered only when the bootstrap recorded per-source
+                   stats; otherwise the summary stats above are
+                   sufficient. #}
+                {% if corpus_status.boot.last_sources %}
+                <p style="margin-top: 0.6em;">
+                    <strong>Per-source breakdown</strong>
+                    <span style="color:#6c757d; font-size: 0.9em;">
+                        (last bootstrap pass)
+                    </span>
+                </p>
+                <table class="data-table" style="font-size: 0.9em;">
+                    <thead>
+                        <tr>
+                            <th>Source</th>
+                            <th>Folder</th>
+                            <th>Seen</th>
+                            <th>Parsed</th>
+                            <th>Skipped</th>
+                            <th>Failed</th>
+                            <th>Chunks added</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for source in corpus_status.boot.last_sources %}
+                        <tr>
+                            <td>{{ source.label }}</td>
+                            <td><code>{{ source.dir }}</code></td>
+                            <td>{{ source.files_seen }}</td>
+                            <td>{{ source.files_parsed }}</td>
+                            <td>{{ source.files_skipped }}</td>
+                            <td>{{ source.files_failed }}</td>
+                            <td>{{ source.chunks_added }}</td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+                {% endif %}
+            {% endif %}
+
+            {# Refresh button always rendered so the operator can recover from
+               an "unavailable" or "disabled" state without leaving the admin
+               console.  Refresh is CSRF-protected (admin token verified
+               server-side before the proxy call to the main app). #}
+            <form method="POST" action="/corpus_refresh" style="display:inline;">
+                <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
+                <button type="submit" class="btn btn-primary">Refresh Corpus</button>
+            </form>
+            <form method="POST" action="/corpus_refresh" style="display:inline;"
+                  onsubmit="return confirm('Rebuild the entire encrypted cache from scratch? This may take several minutes.');">
+                <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
+                <input type="hidden" name="rebuild" value="1">
+                <button type="submit" class="btn btn-warning">Force Rebuild</button>
+            </form>
+        </div>
+
         <div class="table-container">
             <h3>Debug Controls</h3>
             <p><strong>Verbose Debug:</strong> {{ 'ON' if verbose_debug else 'OFF' }}</p>
@@ -2416,6 +2588,65 @@ def enhanced_admin_dashboard():
     admin_risk_color_medium = _R12_ADMIN_RBC.get('MEDIUM', _R12_ADMIN_RBC_DEFAULT)
     admin_risk_color_low = _R12_ADMIN_RBC.get('LOW', _R12_ADMIN_RBC_DEFAULT)
 
+    # Round 17 / Phase D.5: Corpus status fetched from the main app.
+    # The admin app is a separate Flask process; we deliberately do
+    # NOT import ``corpus_retriever`` here (it would race the main
+    # app's connection lifecycle).  Instead we reach across to the
+    # ``/api/corpus/status`` JSON endpoint we added in app_simple.py.
+    corpus_status = {
+        "ok": False,
+        "enabled": False,
+        "available": False,
+        "reason": "main app unreachable",
+        "boot": {
+            "completed": False,
+            "in_progress": False,
+            "last_started_at": None,
+            "last_finished_at": None,
+            "last_error": None,
+            "last_error_kind": None,
+            "encrypted_path": None,
+            "onedrive_root": None,
+            "last_stats": None,
+            # Round 17.1: per-source breakdown rendered in the
+            # Corpus tile.  ``None`` means the bootstrap has not
+            # recorded source-level stats yet.
+            "last_sources": None,
+            # Round 17.2: SharePoint pull state (None means feature
+            # disabled / never invoked; see the public endpoint
+            # contract in app_simple.py).
+            "sharepoint": None,
+        },
+        "corpus": {
+            "files_total": 0,
+            "files_parsed": 0,
+            "customers": 0,
+            "cases": 0,
+            "chunks": 0,
+            "schema_version": 0,
+            "last_parsed_at": None,
+            "indexed_at": None,
+        },
+    }
+    corpus_status_failed = True
+    try:
+        _r17_corpus_resp = requests.get(
+            f'{MAIN_APP_URL.rstrip("/")}/api/corpus/status',
+            timeout=2,
+        )
+        if _r17_corpus_resp.status_code == 200:
+            _r17_data = _r17_corpus_resp.json() or {}
+            if isinstance(_r17_data, dict):
+                # Merge over defaults so a partial response still
+                # renders.
+                corpus_status.update({
+                    k: v for k, v in _r17_data.items()
+                    if k in corpus_status
+                })
+                corpus_status_failed = False
+    except Exception as _r17_err:  # noqa: BLE001 - tile must always render
+        logger.debug("Round 17 / corpus tile fetch failed: %s", _r17_err)
+
     return render_template_string(ENHANCED_ADMIN_TEMPLATE_V2, 
                                 server_status=server_status,
                                 system_info=system_info,
@@ -2433,7 +2664,168 @@ def enhanced_admin_dashboard():
                                 snowflake_query_count_failed=snowflake_query_count_failed,
                                 admin_risk_color_high=admin_risk_color_high,
                                 admin_risk_color_medium=admin_risk_color_medium,
-                                admin_risk_color_low=admin_risk_color_low)
+                                admin_risk_color_low=admin_risk_color_low,
+                                corpus_status=corpus_status,
+                                corpus_status_failed=corpus_status_failed)
+
+@admin_app.route('/corpus_refresh', methods=['POST'])
+def corpus_refresh_route():
+    """Round 17 / Phase D.5 -- proxy a CSRF-protected refresh request
+    to the main app's ``/api/corpus/refresh`` endpoint.
+
+    Strategy: validate the admin CSRF token first (so a hostile
+    cross-origin POST cannot trigger a rebuild), then make a
+    server-to-server HTTP call to the main app.  We pass ``rebuild``
+    only when the form field is set so the default action is the
+    cheaper incremental refresh.
+    """
+    _require_admin_csrf()
+    rebuild = '1' if (request.form.get('rebuild') == '1') else ''
+    refresh_status = 'unknown'
+    try:
+        # We do NOT have the main-app CSRF token here, so we use the
+        # server-to-server header-based auth path: most main-app
+        # endpoints that accept ``X-CSRFToken`` will reject the
+        # request.  The cleanest path is to pass through the admin
+        # token as a header the main app validates separately.  For
+        # local-only admin posture we instead mark this endpoint as
+        # internal-only (admin app already binds 127.0.0.1) and
+        # configure the main app to accept refresh requests from a
+        # peer ``ADOPTIQ_INTERNAL_TOKEN``.  Fall back to a no-op
+        # status if the token is unset.
+        import requests as _r17_req
+        headers = {}
+        _internal_tok = os.environ.get('ADOPTIQ_INTERNAL_TOKEN')
+        if _internal_tok:
+            headers['X-AdoptIQ-Internal'] = _internal_tok
+        body = {'rebuild': rebuild} if rebuild else {}
+        resp = _r17_req.post(
+            f'{MAIN_APP_URL.rstrip("/")}/api/corpus/refresh',
+            data=body,
+            headers=headers,
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            data = resp.json() or {}
+            if data.get('refresh_started'):
+                refresh_status = 'started'
+            elif data.get('refresh_error'):
+                refresh_status = data.get('refresh_error')
+            else:
+                refresh_status = 'no-op'
+        elif resp.status_code == 403:
+            refresh_status = 'CSRF/auth rejected by main app'
+        else:
+            refresh_status = f'main app HTTP {resp.status_code}'
+    except Exception as err:
+        log_error(
+            'WARNING',
+            f'Round 17 corpus_refresh proxy failed: {type(err).__name__}',
+            'corpus_refresh_route',
+        )
+        refresh_status = 'unreachable'
+    return redirect(url_for(
+        'enhanced_admin_dashboard',
+        message=f'Corpus refresh: {refresh_status}',
+        message_type=('success' if refresh_status == 'started' else 'warning'),
+    ))
+
+
+@admin_app.route('/sharepoint_signin', methods=['POST'])
+def sharepoint_signin_route():
+    """Round 17.2 -- proxy a SharePoint device-code sign-in request to
+    the main app.  Validates the admin CSRF token first; the main
+    app authenticates the request via ``X-AdoptIQ-Internal``.  On
+    success surfaces the user_code so the operator can copy it into
+    https://microsoft.com/devicelogin in their browser.
+    """
+    _require_admin_csrf()
+    sp_msg = 'unknown'
+    try:
+        import requests as _r17_2_req
+        headers: dict[str, str] = {}
+        _internal_tok = os.environ.get('ADOPTIQ_INTERNAL_TOKEN')
+        if _internal_tok:
+            headers['X-AdoptIQ-Internal'] = _internal_tok
+        resp = _r17_2_req.post(
+            f'{MAIN_APP_URL.rstrip("/")}/api/corpus/sharepoint/signin',
+            data={},
+            headers=headers,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json() or {}
+            if data.get('ok'):
+                code = data.get('user_code') or '?'
+                uri = data.get('verification_uri') or 'https://microsoft.com/devicelogin'
+                sp_msg = (
+                    f'Open {uri} and enter code {code}. '
+                    f'AdoptIQ will pick up the session automatically once you complete sign-in.'
+                )
+            elif data.get('error'):
+                sp_msg = f"sign-in failed: {data['error']}"
+        elif resp.status_code == 403:
+            sp_msg = 'CSRF/auth rejected by main app'
+        else:
+            sp_msg = f'main app HTTP {resp.status_code}'
+    except Exception as err:
+        log_error(
+            'WARNING',
+            f'Round 17.2 sharepoint_signin proxy failed: {type(err).__name__}',
+            'sharepoint_signin_route',
+        )
+        sp_msg = 'unreachable'
+    return redirect(url_for(
+        'enhanced_admin_dashboard',
+        message=f'SharePoint sign-in: {sp_msg}',
+        message_type=('success' if 'enter code' in sp_msg else 'warning'),
+    ))
+
+
+@admin_app.route('/sharepoint_refresh', methods=['POST'])
+def sharepoint_refresh_route():
+    """Round 17.2 -- proxy a SharePoint cache refresh request to the
+    main app.  Equivalent to ``/corpus_refresh`` but the labelling
+    helps operators understand which source they are pulling."""
+    _require_admin_csrf()
+    refresh_status = 'unknown'
+    try:
+        import requests as _r17_2_req
+        headers: dict[str, str] = {}
+        _internal_tok = os.environ.get('ADOPTIQ_INTERNAL_TOKEN')
+        if _internal_tok:
+            headers['X-AdoptIQ-Internal'] = _internal_tok
+        resp = _r17_2_req.post(
+            f'{MAIN_APP_URL.rstrip("/")}/api/corpus/sharepoint/refresh',
+            data={},
+            headers=headers,
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            data = resp.json() or {}
+            if data.get('refresh_started'):
+                refresh_status = 'started'
+            elif data.get('refresh_error'):
+                refresh_status = data.get('refresh_error')
+            else:
+                refresh_status = 'no-op'
+        elif resp.status_code == 403:
+            refresh_status = 'CSRF/auth rejected by main app'
+        else:
+            refresh_status = f'main app HTTP {resp.status_code}'
+    except Exception as err:
+        log_error(
+            'WARNING',
+            f'Round 17.2 sharepoint_refresh proxy failed: {type(err).__name__}',
+            'sharepoint_refresh_route',
+        )
+        refresh_status = 'unreachable'
+    return redirect(url_for(
+        'enhanced_admin_dashboard',
+        message=f'SharePoint refresh: {refresh_status}',
+        message_type=('success' if refresh_status == 'started' else 'warning'),
+    ))
+
 
 @admin_app.route('/start_server', methods=['POST'])
 def start_server_route():

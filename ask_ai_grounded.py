@@ -1131,6 +1131,31 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         else:
             partial_block = ""
 
+        # Round 17 / Phase D.1: pull historical corpus context (case
+        # history, recurring barrier themes, BM25-ranked playbook
+        # chunks) so the LLM has knowledge beyond the freshly fetched
+        # window.  Builds an empty block when the corpus is
+        # unavailable; corpus chunks earn synthetic ``CORPUS:NNN``
+        # SourceIDs which we add to the citation whitelist below.
+        try:
+            from ask_ai_corpus import build_corpus_block as _r17_build_corpus
+            from config import Config as _r17_cfg
+            _corpus_ctx = _r17_build_corpus(
+                question=req.question,
+                technology=req.technology,
+                enabled=bool(getattr(_r17_cfg, "CORPUS_KNOWLEDGE_ENABLED", False)),
+            )
+        except Exception as _r17_corpus_err:  # noqa: BLE001 - never break Ask AI
+            logger.debug("Round 17 corpus block failed: %s", _r17_corpus_err)
+            class _EmptyCorpusCtx:  # noqa: D401 - shim
+                block = ""
+                allowed_ids: tuple = ()
+                banner = ""
+                stats: Dict[str, Any] = {}
+            _corpus_ctx = _EmptyCorpusCtx()
+        if getattr(_corpus_ctx, "allowed_ids", ()):
+            allowed_ids = set(allowed_ids) | set(_corpus_ctx.allowed_ids)
+
         # Round 7 / Phase 5.8: extend the portfolio system prompt
         # with the same explicit *negative* constraints the customer-
         # path prompt already carries (Round 6 / Phase 3.5).  The
@@ -1229,6 +1254,15 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             f"{_safe_question}\n"
             "=== END USER_QUESTION ===\n"
         )
+        # Round 17 / Phase D.1: the corpus block, when present, is
+        # rendered before the per-run evidence so the model sees the
+        # historical context alongside the freshly fetched evidence
+        # and treats both as cite-by-SourceID rather than free
+        # knowledge.
+        _corpus_inline = (
+            f"\n{getattr(_corpus_ctx, 'block', '')}\n"
+            if getattr(_corpus_ctx, "block", "") else ""
+        )
         user_prompt = (
             f"Analysis window: last {req.days} days\n"
             f"Data retrieved at: {_retrieved_at} (UTC)\n"
@@ -1247,6 +1281,7 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             # cannot see.
             f"Citation whitelist (must use exactly): "
             f"{_render_citation_whitelist(allowed_ids, cap=400)}\n\n"
+            f"{_corpus_inline}"
             f"Evidence:\n{context_text}\n"
         )
         # Round 6 / Phase 3.9: pin ``additionalProperties: false`` at
@@ -1337,6 +1372,14 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         # to the UI so the user knows the LLM saw a sample, not the whole
         # population. partial_data_warnings / canonical_headline are
         # included so the front-end can render structured banners.
+        # Round 17 / Phase D.1: surface the corpus state so the UI can
+        # render either an "Augmented with N corpus chunks" line or a
+        # banner telling the user the corpus was unavailable.
+        _corpus_payload = {
+            "available": bool(getattr(_corpus_ctx, "allowed_ids", ())),
+            "banner": getattr(_corpus_ctx, "banner", "") or "",
+            "stats": dict(getattr(_corpus_ctx, "stats", {}) or {}),
+        }
         return {
             "ok": True,
             "answer": answer,
@@ -1349,6 +1392,7 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             "account_total": len(account_ids),
             "partial_data_warnings": partial_warnings,
             "canonical_headline": canonical_headline,
+            "corpus": _corpus_payload,
         }
     except Exception as exc:
         logger.error("Grounded Ask AI portfolio pipeline failed: %s", exc, exc_info=True)

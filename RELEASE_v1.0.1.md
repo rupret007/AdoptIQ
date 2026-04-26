@@ -1,6 +1,8 @@
 # AdoptIQ v1.0.1 — Restore Point
 
-**Date:** February 2026  
+> **Status: historical release marker.** v1.0.1 was superseded by v1.0.2 and v1.0.3 (current packaged build). Round 14/15/16 quality work since v1.0.3 is documented in `README.md` § "What's New since v1.0.3" and `QUALITY_AUDIT.md`. This file is preserved only as a `git checkout v1.0.1` reference point.
+
+**Date:** February 2026
 **Version:** 1.0.1 (Build 1)
 
 This document marks the v1.0.1 restore point for the AdoptIQ Windows app.

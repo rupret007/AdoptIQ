@@ -1,6 +1,8 @@
 # AdoptIQ v1.0.1 Code Review – Logic and Error Audit
 
-**Date:** February 5, 2026  
+> **Status: historical snapshot (v1.0.1 release, Feb 5, 2026).** All fixes documented here have been applied. The codebase has since gone through Round 14, 15, and 16 audits. **For current state see `CODE_REVIEW_LATEST.md` and `QUALITY_AUDIT.md`.**
+
+**Date:** February 5, 2026
 **Scope:** Full codebase logic and error review for v1.0.1 release
 
 ---

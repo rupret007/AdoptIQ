@@ -1,6 +1,8 @@
 # AdoptIQ Deep Code & Logic Review Audit
 
-**Date:** February 2, 2025  
+> **Status: historical snapshot (Feb 2, 2025).** Earliest deep-audit pass. Findings here have all been applied; the codebase has since gone through Round 14, 15, and 16 audits in 2026. **For current state see `CODE_REVIEW_LATEST.md` and `QUALITY_AUDIT.md`.**
+
+**Date:** February 2, 2025
 **Scope:** Full application audit – reports, data sources, error handling, and logic correctness
 
 ---

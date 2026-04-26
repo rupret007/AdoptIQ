@@ -73,6 +73,51 @@ def _resolve_debug_flag() -> bool:
     return requested
 
 
+def _csone_onedrive_candidates() -> list[str]:
+    """Round 17.2: priority-ordered list of paths to search for a
+    synced OneDrive copy of ``AdoptIQ_CSOne_Reports``.  Modern macOS
+    (Big Sur+) puts the OneDrive sync under
+    ``~/Library/CloudStorage/OneDrive-Cisco/...``; older installations
+    kept the human-readable ``OneDrive - Cisco`` directory directly
+    under ``~``; some users nested everything under a ``Documents/``
+    subfolder.  We try each candidate in this order and pick the
+    first one that exists.
+    """
+    home = os.path.expanduser('~')
+    return [
+        # Modern macOS Cloud-Storage location (most users today).
+        os.path.join(home, 'Library', 'CloudStorage', 'OneDrive-Cisco',
+                     'AI Projects', 'AdoptIQ_CSOne_Reports'),
+        # Modern macOS Cloud-Storage with the legacy ``Documents/`` nesting.
+        os.path.join(home, 'Library', 'CloudStorage', 'OneDrive-Cisco',
+                     'Documents', 'AI Projects', 'AdoptIQ_CSOne_Reports'),
+        # Pre-Big Sur macOS / Windows symlink shape.
+        os.path.join(home, 'OneDrive - Cisco',
+                     'AI Projects', 'AdoptIQ_CSOne_Reports'),
+        # Legacy default with the ``Documents/`` segment.
+        os.path.join(home, 'OneDrive - Cisco', 'Documents',
+                     'AI Projects', 'AdoptIQ_CSOne_Reports'),
+    ]
+
+
+def _resolve_csone_onedrive_folder() -> str:
+    """Round 17.2: return the first existing OneDrive candidate, or
+    fall back to the modern Cloud-Storage path so error messages
+    still point at the right "expected" location when nothing is
+    synced.  Honors ``CSONE_ONEDRIVE_FOLDER`` env override
+    unconditionally so power users can pin any path."""
+    override = os.environ.get('CSONE_ONEDRIVE_FOLDER')
+    if override:
+        return override
+    for candidate in _csone_onedrive_candidates():
+        try:
+            if os.path.isdir(candidate):
+                return candidate
+        except Exception:
+            continue
+    return _csone_onedrive_candidates()[0]
+
+
 def enforce_production_safety() -> None:
     """Round 9 / Phase 1.4: hard-fail boot when production+DEBUG/TESTING.
 
@@ -116,13 +161,90 @@ class Config:
     
     # CSOne OneDrive folder: when no file is uploaded, use the most recent .xlsx from this folder.
     # Macro places reports here daily. Override via CSONE_ONEDRIVE_FOLDER env var.
-    # Default: OneDrive - Cisco\Documents\AI Projects\AdoptIQ_CSOne_Reports
-    # Use expanduser('~') for cross-platform (works on Windows, Mac, Linux)
-    _default_csone_folder = os.path.join(
-        os.path.expanduser('~'),
-        'OneDrive - Cisco', 'Documents', 'AI Projects', 'AdoptIQ_CSOne_Reports'
+    # Round 17.2: auto-discover the synced OneDrive folder across the
+    # paths Microsoft / Apple have used at different points in time.
+    # See ``_csone_onedrive_candidates`` / ``_resolve_csone_onedrive_folder``
+    # for the priority list; the first existing directory wins.
+    CSONE_ONEDRIVE_FOLDER = _resolve_csone_onedrive_folder()
+
+    # Round 17.1: corpus also indexes the runtime user's Downloads
+    # folder, filtered to ``AdoptIQ_*`` / ``AdoptIQ Enhanced ...``
+    # filenames (see ``corpus_indexer._USER_REPORT_NAME_RE``).  The
+    # walker is non-recursive so unrelated user files in nested
+    # directories (e.g. ``~/Downloads/Photos/``) are never opened.
+    # ``CSONE_INCLUDE_USER_DOWNLOADS=false`` skips the Downloads
+    # source entirely; ``CSONE_USER_DOWNLOADS_DIR`` overrides the
+    # default ``~/Downloads`` location for the rare site-specific
+    # case where reports land elsewhere.
+    CSONE_INCLUDE_USER_DOWNLOADS = (
+        str(os.environ.get('CSONE_INCLUDE_USER_DOWNLOADS', 'true')).strip().lower()
+        in {'1', 'true', 'yes', 'on'}
     )
-    CSONE_ONEDRIVE_FOLDER = os.environ.get('CSONE_ONEDRIVE_FOLDER') or _default_csone_folder
+    CSONE_USER_DOWNLOADS_DIR = os.environ.get('CSONE_USER_DOWNLOADS_DIR') or str(
+        Path.home() / 'Downloads'
+    )
+
+    # Round 17: CSOne Knowledge Corpus feature flag.
+    #
+    # When enabled (env ``CORPUS_KNOWLEDGE_ENABLED`` truthy), AdoptIQ
+    # builds an encrypted local cache of the CSOne report corpus from
+    # ``CSONE_ONEDRIVE_FOLDER`` on first launch and surfaces it through
+    # Ask AI / Customer 360 / Playbook / Admin tile.  The OneDrive
+    # client itself enforces the SharePoint ACL -- if the user has no
+    # local sync the corpus surfaces as ``CorpusUnavailable`` and every
+    # caller falls back to today's behavior.  Default: off, so existing
+    # deployments are unchanged until explicitly enabled.
+    CORPUS_KNOWLEDGE_ENABLED = (
+        str(os.environ.get('CORPUS_KNOWLEDGE_ENABLED', 'false')).strip().lower()
+        in {'1', 'true', 'yes', 'on'}
+    )
+
+    # Round 17.2: SharePoint Microsoft Graph corpus source.
+    #
+    # When enabled, AdoptIQ pulls raw CSOne report files from a
+    # delegated-share folder URL using the Microsoft Graph PowerShell
+    # public client + device-code flow, caches them under
+    # ``ADOPTIQ_SHAREPOINT_CACHE_DIR`` (default
+    # ``~/.adoptiq/cache/sharepoint_csone``) and indexes that cache
+    # before falling through to ``CSONE_ONEDRIVE_FOLDER`` and
+    # ``CSONE_USER_DOWNLOADS_DIR``.  No tenant-specific app
+    # registration is required; the client id is the public
+    # Microsoft Graph PowerShell value baked into MSAL samples and is
+    # explicitly NOT a secret.  The user signs in once via the
+    # device-code flow; the refresh token is persisted in the macOS
+    # Keychain (via ``keyring``) with a 0600 file fallback under
+    # ``~/.adoptiq``.  Defaults: feature is on by default once a
+    # share URL is configured; auth state being absent simply skips
+    # the source on the first launch.
+    ADOPTIQ_SHAREPOINT_ENABLED = (
+        str(os.environ.get('ADOPTIQ_SHAREPOINT_ENABLED', 'true')).strip().lower()
+        in {'1', 'true', 'yes', 'on'}
+    )
+    ADOPTIQ_SHAREPOINT_FOLDER_URL = (
+        os.environ.get('ADOPTIQ_SHAREPOINT_FOLDER_URL')
+        or 'https://cisco-my.sharepoint.com/:f:/r/personal/jestory_cisco_com/Documents/AI%20Projects/AdoptIQ_CSOne_Reports?csf=1&web=1&e=d5qzVl'
+    )
+    # Microsoft-owned public client id ("Microsoft Graph PowerShell").
+    # Public, not a secret -- listed in MSAL sample code.  Operators
+    # who run their own Azure AD app can override.
+    ADOPTIQ_SHAREPOINT_CLIENT_ID = (
+        os.environ.get('ADOPTIQ_SHAREPOINT_CLIENT_ID')
+        or '14d82eec-204b-4c2f-b7e8-296a70dab67e'
+    )
+    ADOPTIQ_SHAREPOINT_AUTHORITY = (
+        os.environ.get('ADOPTIQ_SHAREPOINT_AUTHORITY')
+        or 'https://login.microsoftonline.com/common'
+    )
+    ADOPTIQ_SHAREPOINT_CACHE_DIR = os.environ.get(
+        'ADOPTIQ_SHAREPOINT_CACHE_DIR'
+    ) or str(Path.home() / '.adoptiq' / 'cache' / 'sharepoint_csone')
+    # Per-file cap (50 MiB) -- aligned with corpus_indexer's
+    # ``_MAX_PARSE_BYTES`` so files we download will not be silently
+    # rejected by the indexer.  Operators with larger reports can
+    # raise via env, but be aware the indexer will skip them.
+    ADOPTIQ_SHAREPOINT_MAX_FILE_BYTES = int(
+        os.environ.get('ADOPTIQ_SHAREPOINT_MAX_FILE_BYTES') or (50 * 1024 * 1024)
+    )
 
     # CSOne shared folder URL: opens in browser so users can download and
     # upload when the OneDrive folder isn't synced.  Configure via

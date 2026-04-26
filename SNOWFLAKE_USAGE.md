@@ -2,7 +2,7 @@
 
 **Purpose:** Technical summary of how Snowflake is used in the AdoptIQ application for sharing with colleagues.
 
-**Last updated:** March 2026
+**Last updated:** April 2026 (current as of Round 16 audit; tables and policy below match `snowflake_table_policy.py` HEAD).
 
 ---
 

@@ -1,7 +1,9 @@
 # Code and Logic Review: History, Admin, and Learning
 
-**Date:** 2025-02  
-**Scope:** History page, Admin link, Admin console “Back to AdoptIQ”, Learn-from-past-analyses (report_insights), and related flows.
+> **Status: historical snapshot (Feb 2025).** Earliest review of the History/Admin/Learning surfaces. Findings here have all been applied. The codebase has since gone through Round 14, 15, and 16 audits in 2026. **For current state see `CODE_REVIEW_LATEST.md` and `QUALITY_AUDIT.md`.**
+
+**Date:** 2025-02
+**Scope:** History page, Admin link, Admin console "Back to AdoptIQ", Learn-from-past-analyses (report_insights), and related flows.
 
 ---
 

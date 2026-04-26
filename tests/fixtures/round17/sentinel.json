@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "label": "round17-test-sentinel",
+  "created_utc": "2026-04-25T00:00:00Z",
+  "purpose": "Round 17 corpus encryption KDF input for unit tests; this file is fully synthetic and is not a secret."
+}

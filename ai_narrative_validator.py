@@ -378,6 +378,61 @@ def validate_no_invented_entities(
     return ValidationResult(is_valid=True)
 
 
+#: Round 17 / Phase E -- patterns we never accept inside a corpus
+#: chunk that is about to enter the LLM prompt.  These are
+#: pre-prompt-injection guards, distinct from the post-rendering
+#: HTML/JS guards above.
+_CORPUS_INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("script_tag", re.compile(r"<\s*script\b", re.IGNORECASE)),
+    ("javascript_url", re.compile(r"javascript\s*:", re.IGNORECASE)),
+    (
+        "ignore_previous_instructions",
+        # Round 18 / Phase 4.1: widened so the canonical
+        # prompt-injection phrase "Ignore all previous instructions"
+        # is caught.  The original pattern only allowed a single
+        # token between ``ignore`` and ``instructions``, so
+        # ``ignore <a> <b> instructions`` (the common form) leaked
+        # through.  Now allows any of ``ignore``/``disregard``/
+        # ``forget`` followed by up to four intermediate word
+        # tokens (no punctuation, so we cannot cross sentence
+        # boundaries) before ``instruction(s)``.
+        re.compile(
+            r"\b(?:ignore|disregard|forget)\s+(?:[\w'\-]+\s+){0,4}instructions?\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "system_prompt_override",
+        re.compile(r"\b(?:system|developer|assistant)\s*[:>]\s*you\s+are\b", re.IGNORECASE),
+    ),
+    (
+        "fence_break",
+        re.compile(r"=== END USER_QUESTION ===|=== END CORPUS ===|</\s*corpus\s*>", re.IGNORECASE),
+    ),
+)
+
+
+def is_corpus_chunk_safe(text: str) -> bool:
+    """Round 17 / Phase E -- pre-prompt safety gate for corpus chunks.
+
+    Returns ``False`` when the chunk carries an obvious prompt-
+    injection sequence or HTML / script payload.  Used by
+    ``ask_ai_corpus.build_corpus_block`` to drop hostile spans before
+    they reach the LLM.  Conservative: any match is grounds for
+    rejection.
+    """
+
+    body = _coerce_text(text)
+    if not body:
+        return True
+    if len(body.encode("utf-8", errors="ignore")) > _MAX_NARRATIVE_BYTES:
+        return False
+    for _label, pattern in _CORPUS_INJECTION_PATTERNS:
+        if pattern.search(body):
+            return False
+    return True
+
+
 def validate_narrative(
     text: str,
     briefing: str,
@@ -424,6 +479,7 @@ def validate_narrative(
 __all__ = [
     "GROUNDING_FAILURE_PLACEHOLDER",
     "ValidationResult",
+    "is_corpus_chunk_safe",
     "validate_grounded_numbers",
     "validate_narrative",
     "validate_no_html_injection",

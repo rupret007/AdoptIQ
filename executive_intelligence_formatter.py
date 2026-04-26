@@ -700,7 +700,25 @@ class ExecutiveIntelligenceFormatter:
                             cell_para.runs[0].font.bold = True
                 
                 # FIXED: Show ALL high-risk customers
-                for customer, data in sorted(high_risk.items(), key=lambda x: x[1].get('score', 0), reverse=True):
+                # Round 18 / Phase 2.1: tuple sort key with a casefolded
+                # name secondary tiebreaker so two customers tied on the
+                # same score render in the same order across runs
+                # regardless of upstream dict insertion order.
+                def _high_risk_sort_key(item):
+                    name, profile = item
+                    try:
+                        score = (
+                            float(profile.get('score', 0))
+                            if isinstance(profile, dict) else 0.0
+                        )
+                    except (TypeError, ValueError):
+                        score = 0.0
+                    return (-score, str(name).casefold())
+
+                for customer, data in sorted(
+                    high_risk.items(),
+                    key=_high_risk_sort_key,
+                ):
                     row = table.add_row().cells
                     # Round 11 / Phase 3.4: normalize the displayed
                     # cell so spelling variants of the same account

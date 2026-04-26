@@ -41,6 +41,22 @@ hidden_imports = [
     'cisco_internal_integrations',
     '_bundled_secrets',
     'error_classifier', 'connectivity_diagnostics',
+    'ai_narrative_validator',
+    'knowledge_schema',
+    'corpus_crypto',
+    'corpus_indexer',
+    'corpus_retriever',
+    'corpus_bootstrap',
+    'ask_ai_corpus',
+    'report_corpus_context',
+    # Round 17.2 -- SharePoint Microsoft Graph pull.  Pull msal and
+    # keyring (plus the macOS-native keyring backend) into the bundle
+    # so the device-code flow + secure token cache work in the
+    # frozen .app build.
+    'sharepoint_corpus_source',
+    'msal', 'msal.application', 'msal.authority', 'msal.token_cache',
+    'keyring', 'keyring.backend', 'keyring.backends',
+    'keyring.backends.macOS', 'keyring.backends.fail',
 ]
 
 a = Analysis(

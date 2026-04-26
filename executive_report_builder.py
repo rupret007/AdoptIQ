@@ -176,3 +176,59 @@ class ExecutiveReportBuilder:
     def _add_customer_separator(self):
         """Add visual separator between customer sections (page break)."""
         self.doc.add_page_break()
+
+    def add_historical_context_section(
+        self,
+        customer_names,
+        technology=None,
+        *,
+        enabled: bool = None,
+    ) -> dict:
+        """Round 17 / Phase D.2 -- append the CSOne corpus historical
+        context section.  Always returns a small status dict the
+        caller can log; never raises.
+
+        ``enabled`` defaults to ``Config.CORPUS_KNOWLEDGE_ENABLED``
+        when not supplied, so the call site does not have to import
+        Config when the feature flag is off.
+        """
+        try:
+            if enabled is None:
+                from config import Config as _r17_cfg
+                enabled_resolved = bool(getattr(_r17_cfg, "CORPUS_KNOWLEDGE_ENABLED", False))
+            else:
+                enabled_resolved = bool(enabled)
+            from report_corpus_context import (
+                build_historical_context,
+                render_to_word,
+            )
+            context = build_historical_context(
+                customer_names or [],
+                technology=technology,
+                enabled=enabled_resolved,
+            )
+            try:
+                render_to_word(self.doc, context)
+            except Exception as render_err:  # noqa: BLE001
+                logger.warning(
+                    "Round 17 / Historical Context: Word render failed (%s); "
+                    "skipping section.",
+                    render_err,
+                )
+                return {
+                    "rendered": False,
+                    "available": context.available,
+                    "reason": "render_failed",
+                }
+            return {
+                "rendered": True,
+                "available": context.available,
+                "entries": len(context.entries),
+                "unmatched": len(context.unmatched),
+            }
+        except Exception as err:  # noqa: BLE001
+            logger.warning(
+                "Round 17 / Historical Context: section build failed (%s); skipping.",
+                err,
+            )
+            return {"rendered": False, "available": False, "reason": "build_failed"}

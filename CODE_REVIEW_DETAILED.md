@@ -1,6 +1,8 @@
 # AdoptIQ – Detailed Code and Logic Review
 
-**Date:** February 2026  
+> **Status: historical snapshot (Feb 2026).** Findings here have all been applied. The codebase has since gone through Round 14, 15, and 16 audits. **For current state see `CODE_REVIEW_LATEST.md` and `QUALITY_AUDIT.md`.**
+
+**Date:** February 2026
 **Scope:** All report types, CSOne handling, build, runtime, and logic flows
 
 ---

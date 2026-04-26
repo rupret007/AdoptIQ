@@ -63,6 +63,14 @@ In Cursor on Mac, use this prompt:
 Apply all required parity updates from MIGRATION_TO_MAC.md to this codebase, including any Mac build spec updates. Then run the test suite and report what changed.
 ```
 
+## 4b) Pre-build verification (recommended)
+
+```bash
+make verify
+```
+
+This runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt`. All four gates must pass before producing a release build. Current baseline: **1949 passed / 2 skipped**, ruff clean, no HIGH/MED bandit findings, no pip-audit vulns.
+
 ## 5) Build on Mac
 
 Preferred scripts:

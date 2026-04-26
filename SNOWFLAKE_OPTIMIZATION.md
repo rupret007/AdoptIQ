@@ -2,6 +2,8 @@
 
 This document captures the current query-reduction model, baseline instrumentation, and runtime fallback controls.
 
+> Companion documents: `SNOWFLAKE_USAGE.md` (table inventory, schemas, and per-report data flow) and `QUALITY_AUDIT.md` (Round 14+ audit findings, including any optimization-related work).
+
 ## What Changed
 
 - Added run-scoped prefetch layer in `snowflake_prefetch.py`:

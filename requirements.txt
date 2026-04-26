@@ -24,6 +24,12 @@ WTForms>=3.0.0
 hvac>=1.0.0
 cryptography>=41.0.0
 
+# Round 17.2: Microsoft Graph device-code OAuth + secure token cache
+# (used by sharepoint_corpus_source.py to pull the AdoptIQ_CSOne_Reports
+# share without requiring local OneDrive sync).
+msal>=1.28.0
+keyring>=24.3.0
+
 # TLS trust store integration (lets urllib3/requests/hvac/snowflake use the
 # OS keychain so Cisco corporate TLS inspection no longer breaks keeper.cisco.com)
 truststore>=0.9.0

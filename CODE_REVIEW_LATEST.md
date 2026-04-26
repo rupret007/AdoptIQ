@@ -1,138 +1,108 @@
-# AdoptIQ Code & Logic Review
+# AdoptIQ Code & Logic Review — Latest
 
-**Date:** February 4, 2026  
-**Scope:** Full application – code quality, logic correctness, security, and robustness
+**Date:** April 2026
+**Scope:** Current quality posture across reports accuracy, AI insights grounding, build pipeline, security gates, and (Round 17) the CSOne knowledge corpus integration.
+**Status:** Active. For round-by-round detail (Round 14 → Round 17) see `QUALITY_AUDIT.md`.
 
----
-
-## 1. Executive Summary
-
-The AdoptIQ codebase is well-structured with clear data flow, validation, and error handling. Previous audits fixed DataFrame/string handling issues. This review identifies one path bug, documents the browser-launch addition, and summarizes strengths and recommendations.
+> The earlier `CODE_REVIEW_*.md` files in this repo are point-in-time snapshots from the v1.0.x era. They are kept for historical traceability but do not reflect the current codebase. **Use this file plus `QUALITY_AUDIT.md` for current state.**
 
 ---
 
-## 2. Architecture & Data Flow
+## 1. Quality posture (snapshot)
 
-| Report Type | Entry Point | Data Sources | Validation |
-|-------------|-------------|--------------|------------|
-| Compact/Executive | `create_executive_intelligence_report` / `_create_enhanced_compact_report` | Snowflake, team_subs, AB, CSOne | `raise_validation_error_if_invalid('compact')` |
-| Renewal (Single/Portfolio) | `_create_simple_renewal_report` | Snowflake, team_subs (AB/CSOne optional) | `raise_validation_error_if_invalid('renewal')` |
-| Comprehensive | `ExecutiveReportBuilder` + `create_enhanced_word_report` | Snowflake, team_subs, AB, CSOne | `raise_validation_error_if_invalid('comprehensive')` |
-| Leader | `generate_leader_report` | Snowflake, team_subs | `raise_validation_error_if_invalid('leader')` |
-| Advanced Renewal | `generate_renewal_report` | Snowflake (CX_DB) | None (mock fallback) |
-| Enhanced Snowflake | `generate_enhanced_insights_report` | Snowflake (89+ tables) | None |
-
----
-
-## 3. Bug: Status File Path When Frozen
-
-**Location:** `app_simple.py` – `save_analysis_status()`, `load_analysis_status()`, and status-load logic in `/analysis/<id>` route
-
-**Issue:** The status file path uses `os.path.join(os.path.dirname(__file__), STATUS_FILE)`. When running as a PyInstaller-frozen executable:
-- `__file__` may point to a temp extraction folder (e.g. `_MEIxxxxx`)
-- That folder can be read-only or deleted after exit
-- The comment says "cwd is _APP_SUPPORT so analysis_status.json works" but the code does **not** use cwd—it uses `dirname(__file__)`
-
-**Fix applied:** Use `_APP_SUPPORT` for the status file so it is always written to the writable app support directory:
-
-```python
-status_file_path = str(_APP_SUPPORT / STATUS_FILE) if not os.path.isabs(STATUS_FILE) else STATUS_FILE
-```
-
-This works for both frozen (e.g. `%APPDATA%\AdoptIQ\analysis_status.json`) and development (project folder when `_APP_SUPPORT = _BASE_PATH`).
-
----
-
-## 4. Recent Addition: Browser Launch on Startup
-
-**Location:** `app_simple.py` – main block, before `app.run()`
-
-**Implementation:**
-- Daemon thread sleeps 1.5 seconds, then calls `webbrowser.open('http://localhost:5001/')`
-- Wrapped in try/except to avoid crashes if no browser is available
-
-**Assessment:** Logic is correct. The delay allows the server to bind before the browser opens.
-
----
-
-## 5. Security
-
-### 5.1 Input Validation
-- **Manager, Technology:** Length limits, dangerous-character checks (`'`, `"`, `;`, `--`, `/*`, `*/`, `xp_`, `sp_`)
-- **Customer name:** Optional, length limit, SQL/script injection checks
-- **Days:** 1–365 range
-- **File uploads:** `secure_filename`, size limit (50MB), extension validation
-
-### 5.2 CSRF
-- CSRF enabled with `WTF_CSRF_ENABLED = True`
-- AJAX requests identified by `X-Requested-With: XMLHttpRequest` bypass CSRF and use manual validation
-- **Note:** For a local-only app (localhost), risk is low. If exposed to a network, consider stricter CSRF handling.
-
-### 5.3 Secrets
-- Credentials from environment variables and Keeper
-- No hardcoded secrets in config
-- `_bundled_secrets` used when frozen for embedded config
-
----
-
-## 6. Error Handling & Robustness
-
-| Area | Status |
+| Gate | Result |
 |------|--------|
-| DataFrame None/empty | Guards in `calculate_arr_impact_for_issues`, formatters |
-| `.str.contains` on mixed types | `.astype(str)` applied consistently |
-| `DataFrame.get` misuse | Replaced with column-existence checks |
-| Executive formatter fallback | Uses `_create_enhanced_compact_report` (no missing module) |
-| Data source validation | `raise_validation_error_if_invalid` before report generation |
+| `make test` (`pytest -q`) | **2106 passed / 2 skipped** |
+| `make lint` (`ruff check`) | All checks passed |
+| `make security` (`bandit -ll`) | 0 HIGH / 0 MED |
+| `make audit` (`pip-audit -r requirements.txt`) | No known vulnerabilities |
+| `make verify` | All four gates clean, back-to-back idempotent |
+
+Two pre-existing `# nosec B104` rationales remain in `app_simple.py` and `enhanced_admin_dashboard_v2.py` for env-flag-gated public bind. Both are documented and unchanged from Round 14.
 
 ---
 
-## 7. Logic Correctness
+## 2. Architecture & data flow
 
-- **Renewal CSOne upload:** Renewal requests use FormData to `/start_analysis` so `csone_file` is included
-- **Risk scores:** `risk_scores.values()` treated as dicts with `score` key
-- **Canonical data sources:** All reports use `report_utils` for citations
-- **estimate_arr:** Uses column check and `df['Severity'].astype(str)` instead of `DataFrame.get`
+| Report Type | Entry Point | Validation |
+|-------------|-------------|------------|
+| Compact / Executive Intelligence | `create_executive_intelligence_report` / `_create_enhanced_compact_report` | `raise_validation_error_if_invalid('compact')` |
+| Renewal (single / portfolio) | `_create_simple_renewal_report` | `raise_validation_error_if_invalid('renewal')` |
+| Comprehensive | `ExecutiveReportBuilder` + `create_enhanced_word_report` | `raise_validation_error_if_invalid('comprehensive')` |
+| Leader | `generate_leader_report` | `raise_validation_error_if_invalid('leader')` |
+| Advanced Renewal | `generate_renewal_report` | None (mock fallback) |
+| Enhanced Snowflake Insights | `generate_enhanced_insights_report` | None |
 
----
-
-## 8. Recommendations
-
-### High Priority
-1. **Fix status file path** – Use `_APP_SUPPORT / STATUS_FILE` instead of `dirname(__file__)` so the frozen app writes to the correct writable directory.
-
-### Medium Priority
-2. **Add `end_time` to datetime parsing** – In `load_analysis_status`, the `key in ['step_start_time', ...]` check does not include `end_time`; add it if that key is used.
-3. **Consider port check before browser launch** – If the port is in use and the app exits, the browser may open to a different app. Low impact for normal runs.
-
-### Low Priority
-4. **Extract magic numbers** – e.g. 1.5s browser delay, 50MB upload limit – into config for easier tuning.
-5. **Add integration tests** – For full report flows with mocked Snowflake/CSOne.
+All four user-facing reports route through `data_source_validator.py` before generation; report content is built from `canonical_metrics.py` (counts), `risk_scoring.py` (deterministic weighted scores), `report_export_schema.py` (Excel columns), and `report_word_styling.py` (Word formatting).
 
 ---
 
-## 9. Test Coverage
+## 3. Single-source-of-truth modules (Round 15 / 16 introductions)
 
-**`tests/test_reports_extensive.py`** covers:
-- report_utils
-- _calculate_simple_renewal_risk
-- _create_simple_renewal_report (single, portfolio, no-data)
-- create_compact_executive_report (with data, empty)
-- calculate_renewal_risk_scores edge cases
-- AdvancedRenewalAnalyzer (mock)
-- LeaderReportGenerator structure
-- ExecutiveIntelligenceFormatter
-
-**Recommendation:** Run `python tests/test_reports_extensive.py` after changes.
+| Module | Responsibility |
+|--------|----------------|
+| `canonical_metrics.py` | Cross-report counts (customers, ARR at risk, high-risk count, P1 open, top barriers). Always use these; never recompute inline. |
+| `report_export_schema.py` | Excel column ordering, headers, and dtypes — shared by all report writers. |
+| `report_export_styling.py` | Excel polish: native Tables, banded rows, frozen header, conditional formatting (3-color risk scale, severity bands, status pills, days-open data bar). Honors `startrow` for title-row offsets. |
+| `report_word_styling.py` | Word top-N table renderer (`add_banded_top_n_table`) with consistent header colors, alternating row shading, reproducible formatting. |
+| `ai_narrative_validator.py` | Validates LLM-generated narratives against the source briefing: rejects ungrounded numbers, invented entities, and HTML/JS injection. |
+| `data_contracts.py` + `data_normalization.py` | Shared DataFrame consistency helpers — use before mutating any DataFrame. |
+| `structured_logging.py` | All logging routes through this module. Pipeline-boundary entry/exit logs use manager-digest only (no PII). |
+| `knowledge_schema.py` | Round 17 SSoT SQLite DDL for the CSOne knowledge corpus (`corpus_files`, `customers`, `cases`, `barriers`, `resolutions`, `sentiments`, `playbook_chunks`, `term_stats`, `corpus_stats`). |
+| `corpus_indexer.py` | Round 17 idempotent file enumeration + schema-aware parsers (`.xlsx`, `.docx`, `.csv`) + entity extraction + in-house BM25 indexing. |
+| `corpus_crypto.py` | Round 17 AES-256-GCM at rest with HKDF-SHA-256 derived from the OneDrive sentinel; file mode `0600`; plaintext scrubbed on close. |
+| `corpus_retriever.py` | Round 17 read-side facade exposing `get_status`, `get_customer_history`, `get_recurring_themes`, `get_resolutions_for`, `search_playbook`, `list_customers`. Returns frozen dataclasses; raises `CorpusUnavailable`. |
+| `corpus_bootstrap.py` | Round 17 startup wiring + background indexer thread + `request_refresh()` + shutdown cleanup. |
+| `ask_ai_corpus.py` / `report_corpus_context.py` | Round 17 Ask AI prompt builder and report pre-fill helper. Both route corpus chunks through `ai_narrative_validator.is_corpus_chunk_safe`. |
 
 ---
 
-## 10. Summary
+## 4. Recent quality wins (Round 14 → Round 17)
 
-| Category | Rating | Notes |
-|----------|--------|-------|
-| Architecture | Good | Clear separation, validation before reports |
-| Security | Good | Input validation, CSRF, no hardcoded secrets |
-| Error handling | Good | Defensive checks, fallbacks |
-| Data flow | Good | Documented, canonical sources |
-| Path handling | Fix needed | Status file path when frozen |
+- **Cross-format consistency.** Word and Excel reports now share canonical-metrics output; headline KPIs match exactly. Pinned by `tests/test_round16_cross_format_consistency.py`.
+- **Sort determinism.** Top-N rankings use stable name-based tiebreakers; identical input → byte-identical ranking. Pinned by `tests/test_round16_sort_determinism.py`.
+- **AI narrative grounding.** `ai_narrative_validator` blocks hallucinated numbers, invented entities, and HTML injection at the report-narrative gate. Pinned by `tests/test_round16_ai_narrative_validator.py` (31 cases incl. R17 surface) + `tests/test_round16_ai_insights_eval.py` (7 fixture-driven cases).
+- **Excel polish coverage.** `apply_excel_polish` accepts `startrow` and is wired into all three Excel report writers in `app_simple.py` (compact, renewal, summaries-per-person). Pinned by `tests/test_round16_apply_excel_polish_offset.py`.
+- **Word top-N polish.** Banded top-N table helper substituted in `compact_report_formatter` and `executive_intelligence_formatter`. Leader report tables retain their custom per-cell color logic by design (tracked as R16-FOLLOWUP-2).
+- **Currency precision.** Audited `canonical_metrics`, `risk_scoring`, `advanced_renewal_analyzer`, and the three formatters — no intermediate-rounding bugs found. Documented and moved on per the audit plan's "zero-finding" constraint.
+- **CSOne Knowledge Corpus (Round 17).** Persistent customer / troubleshooting knowledge sourced from the daily CSOne report corpus, surfaced via Ask AI grounded retrieval, Historical Context sections in Executive / Leader reports, a Customer 360 page, a Troubleshooting Playbook page, and an Admin tile. Encrypted local cache (AES-256-GCM, HKDF over OneDrive sentinel + per-install salt, file mode `0600`) — no customer PII ships in the installer. Feature-flagged behind `CORPUS_KNOWLEDGE_ENABLED` and degrades gracefully when OneDrive is not synced. 157 new tests, no new dependencies.
+
+---
+
+## 5. Known residual risks
+
+- `ai_narrative_validator.validate_grounded_numbers` accepts numerics, dollar amounts, percentages, and ISO-8601 quarter labels — it does not yet parse natural-language number words ("twenty-three"). Future model swaps to a verbose-numeric model would need an extension.
+- The "common-knowledge" allow-list in the validator covers calendar years 2024–2027; it will need extending past 2027.
+- The cross-format consistency test reads numbers from Excel cells and the docx executive-summary table only — narrative-only drift between docx and xlsx is not currently caught at the cell level. Mitigated upstream by the grounding validator.
+- Leader report top-N tables retain custom paint logic (color-coded deltas, per-column alignment); they are deliberately not migrated to `add_banded_top_n_table` until that helper supports per-cell color hooks (R16-FOLLOWUP-2, low priority).
+- Round 17 corpus indexer is single-threaded and runs in-process; very large corpora (>10k files) may take >60s on first launch. Background-thread design avoids blocking startup, but progress reporting is coarse (`boot.in_progress` only). Tracked as R17-FOLLOWUP-1.
+- BM25 lexical retrieval (in-house) is sufficient for v1 but does not handle synonyms or paraphrase-heavy queries. Round 18 may revisit embeddings if the DMG-size budget allows.
+- Multi-worker WSGI deployments still flag the in-process Ask AI throttle warning at startup; the playbook page reuses the same throttle and has the same caveat.
+
+---
+
+## 6. Recommended follow-ups (open)
+
+1. **R16-FOLLOWUP-1** — extend `validate_grounded_numbers` to handle natural-language number words.
+2. **R16-FOLLOWUP-2** — add a richer `add_banded_top_n_table_with_overrides` helper, then migrate the four leader-report top-N tables.
+3. **R16-FOLLOWUP-3** — extend cross-format consistency test to parse docx narrative paragraphs.
+
+All three are tracked in `QUALITY_AUDIT.md` Round 16 § "Recommended follow-ups". None block release.
+
+---
+
+## 7. Build / release status
+
+- **Packaged build:** v1.0.3 build 1 (macOS DMG + Windows EXE).
+- **Active branch with Round 14/15/16 work:** `round-13-audit` (locally committed; pending push to corporate GitHub when on VPN — see commit `0543130`).
+- **macOS DMG (latest local build):** `OUTBOX/AdoptIQ-v1.0.3-build1.dmg` (~117 MB, ad-hoc-signed, `codesign --verify --deep --strict` clean).
+
+---
+
+## 8. Where to look next
+
+- Round-by-round audit detail: `QUALITY_AUDIT.md`
+- User-facing release notes: `README.md` § "What's New since v1.0.3"
+- Snowflake table inventory and per-report data flow: `SNOWFLAKE_USAGE.md`
+- Build / packaging: `BUILD_WINDOWS.md`, `CURSOR_MAC_BUILD_INSTRUCTIONS.md`, `CURSOR_PC_BUILD_INSTRUCTIONS.md`
+- Branch workflow: `BRANCH_WORKFLOW.md`

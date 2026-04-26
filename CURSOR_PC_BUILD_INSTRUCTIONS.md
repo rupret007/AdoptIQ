@@ -143,7 +143,15 @@ In Explorer, type `%APPDATA%\AdoptIQ` in the address bar to open the folder.
 python -m pytest tests/ -q --tb=short
 ```
 
-All tests should pass on both Mac and Windows. The pytest baseline grows over time; check `pytest --collect-only -q | tail -3` for the current count.
+Or, on macOS / a POSIX-like shell, the full audit gate:
+
+```bash
+make verify
+```
+
+(`make verify` chains pytest + ruff + bandit + pip-audit. On Windows you can run the four tools individually; the Makefile targets are POSIX-only.)
+
+All tests should pass on both Mac and Windows. Current baseline: **1949 passed / 2 skipped**. Live count: `pytest --collect-only -q | tail -3`.
 
 ## 9) Paste-ready Cursor kickoff prompt (Windows)
 

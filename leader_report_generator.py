@@ -4805,7 +4805,18 @@ class LeaderReportGenerator:
             perf_header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
         
         # Data rows
-        for member_data in sorted(team_summary_data, key=lambda x: x['total_activities'], reverse=True):
+        # Round 18 / Phase 2.2: tuple sort key with a casefolded
+        # cssm_name secondary tiebreaker so two CSSMs tied on the
+        # same total_activities render in the same order across runs
+        # regardless of team_data insertion order.
+        def _team_summary_sort_key(x):
+            try:
+                activities = int(x.get('total_activities', 0))
+            except (TypeError, ValueError):
+                activities = 0
+            return (-activities, str(x.get('cssm_name', '')).casefold())
+
+        for member_data in sorted(team_summary_data, key=_team_summary_sort_key):
             row_cells = perf_table.add_row().cells
             row_cells[0].text = member_data['cssm_name']
             row_cells[1].text = str(member_data['customers'])
@@ -6142,6 +6153,76 @@ class LeaderReportGenerator:
         self.doc.add_paragraph("Classification: Cisco Internal Data with proper safeguards")
 
 
+def _r17_collect_team_customers(team_data: Dict) -> List[str]:
+    """Round 17 / Phase D.2 -- pull a deduped, length-capped list of
+    customer names from a leader ``team_data`` dict.  Returns up to
+    50 names; defensive against missing keys / non-iterables."""
+    out: List[str] = []
+    seen: set = set()
+    if not isinstance(team_data, dict):
+        return out
+    for _, member in team_data.items():
+        if not isinstance(member, dict):
+            continue
+        names = member.get('customers') or []
+        try:
+            iterator = list(names)
+        except TypeError:
+            continue
+        for raw in iterator:
+            if not raw:
+                continue
+            text = str(raw).strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(text)
+            if len(out) >= 50:
+                return out
+    return out
+
+
+def _r17_append_historical_context(doc, team_data: Dict, *, technology=None) -> Dict:
+    """Round 17 / Phase D.2 -- add the corpus-sourced Historical
+    Context section to the leader Word document.  Always returns a
+    status dict; never raises."""
+    try:
+        from config import Config as _r17_cfg
+        enabled = bool(getattr(_r17_cfg, "CORPUS_KNOWLEDGE_ENABLED", False))
+        from report_corpus_context import (
+            build_historical_context,
+            render_to_word,
+        )
+        names = _r17_collect_team_customers(team_data)
+        ctx = build_historical_context(
+            names,
+            technology=technology,
+            enabled=enabled,
+        )
+        try:
+            render_to_word(doc, ctx)
+        except Exception as render_err:  # noqa: BLE001
+            logger.warning(
+                "Round 17 / Leader Historical Context render failed: %s",
+                render_err,
+            )
+            return {"rendered": False, "available": ctx.available, "reason": "render_failed"}
+        return {
+            "rendered": True,
+            "available": ctx.available,
+            "entries": len(ctx.entries),
+            "unmatched": len(ctx.unmatched),
+        }
+    except Exception as err:  # noqa: BLE001
+        logger.warning(
+            "Round 17 / Leader Historical Context build failed: %s", err,
+        )
+        return {"rendered": False, "available": False, "reason": "build_failed"}
+
+
 def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[Tuple[str, str, str]], 
                           csone_df: Optional[pd.DataFrame] = None,
                           ext_bugs: List[Dict] = None, ext_incidents: List[Dict] = None,
@@ -6214,6 +6295,19 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             generator._add_external_intelligence_section(ext_bugs, ext_incidents, software_defects, psirt_vulns)
             generator._add_section_separator()
             generator._add_validation_section(validation_results)
+            try:
+                _r17_status_tac = _r17_append_historical_context(
+                    generator.doc, team_data,
+                )
+                logger.info(
+                    "Round 17 / Leader Historical Context (post-TAC): %s",
+                    _r17_status_tac,
+                )
+            except Exception as _r17_err:  # noqa: BLE001
+                logger.warning(
+                    "Round 17 / Leader Historical Context (post-TAC) failed: %s",
+                    type(_r17_err).__name__,
+                )
             _cb(87, 'Saving final Word document...', 'Document Finalization')
             generator.doc.save(filepath)
             
@@ -6223,6 +6317,19 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             validation_results = generator._validate_and_verify_data(team_data, days)
             
             generator._add_validation_section(validation_results)
+            try:
+                _r17_status_no_tac = _r17_append_historical_context(
+                    generator.doc, team_data,
+                )
+                logger.info(
+                    "Round 17 / Leader Historical Context (no-TAC): %s",
+                    _r17_status_no_tac,
+                )
+            except Exception as _r17_err2:  # noqa: BLE001
+                logger.warning(
+                    "Round 17 / Leader Historical Context (no-TAC) failed: %s",
+                    type(_r17_err2).__name__,
+                )
             _cb(86, 'Saving final Word document...', 'Document Finalization')
             generator.doc.save(filepath)
             

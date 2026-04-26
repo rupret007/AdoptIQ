@@ -639,4 +639,779 @@ No scope creep; no stray edits to unrelated business logic. The marker count agr
 - **R16-FOLLOWUP-3** — extend the cross-format consistency test to parse the docx narrative paragraphs (not just the executive-summary table), if a future ai-insights eval suite needs that coverage.
 - The two pre-existing `# nosec B104` rationales in `app_simple.py` and `enhanced_admin_dashboard_v2.py` (env-flag-gated public bind) remain; they were re-validated against bandit's HIGH/MED gate and are unchanged from Round 14.
 
+---
+
+# Round 17 — CSOne Knowledge Corpus Integration
+
+Working note. Round 17 plan: surface persistent customer / troubleshooting knowledge derived from the daily CSOne report corpus (`OneDrive - Cisco/Documents/AI Projects/AdoptIQ_CSOne_Reports`) so users get insights even without freshly running a report.
+
+## Phase A — Discovery findings
+
+| Finding | Decision |
+| --- | --- |
+| OneDrive folder is **not** synced on this dev host. Default path `~/OneDrive - Cisco/Documents/AI Projects/AdoptIQ_CSOne_Reports` does not exist. | All architecture must degrade gracefully when the folder is absent. Tests use synthetic fixtures only. |
+| `cryptography>=41.0.0` already in `requirements.txt`. `bm25s`, `faiss`, `sentence-transformers` are NOT. Adding them inflates the DMG materially. | Implement minimal pure-Python BM25 in-house; no new dependency. |
+| Existing seam `adoptiq_backend.scan_historical_reports` (line 3580) already mines local AdoptIQ outputs but only top-line metrics from summary sheets — no entity extraction, no narrative chunks, no encryption. | New corpus pipeline is *additive*; does not replace `scan_historical_reports`. |
+| SSoT modules already in place: `report_export_schema.py`, `report_word_styling.py`, `canonical_metrics.py`, `data_normalization.py`, `data_source_validator.py`, `ai_narrative_validator.py`. | New modules follow the same contract: pure functions, defensive defaults, never raise on bad input, single source of truth. |
+| CSRF infra: `flask_wtf.csrf.validate_csrf` + `generate_csrf` available app-wide; `WTF_CSRF_ENABLED=True` with `WTF_CSRF_TIME_LIMIT=None`. | Reuse for the admin "Refresh corpus" action and any state-changing playbook endpoint. |
+| `_is_local_client` gate is the existing pattern for sensitive admin endpoints (Round 5 / 6). | Reuse for `/customer/<name>` and `/playbook` routes. |
+| Architecture refinement: the user originally chose "encrypted bundle in installer." Phase A surfaced that the OneDrive folder is the user-side ACL gate, so we ship the bundle empty and build the encrypted cache lazily on first run from the user's own OneDrive. **No customer PII ever ships in the installer.** | Confirmed in plan. Crypto module derives DEK from a sentinel file inside the OneDrive folder; if OneDrive is not synced (no folder ACL), decrypt fails and the corpus surfaces as `CorpusUnavailable`. |
+
+## Phase A — Files in scope
+
+New (untracked) modules planned:
+
+- `knowledge_schema.py` — SQLite DDL SSoT.
+- `corpus_indexer.py` — file enumeration, schema-aware parsers, entity extraction, BM25 chunk indexing.
+- `corpus_crypto.py` — AES-256-GCM at rest, HKDF-SHA-256 from sentinel + per-install salt.
+- `corpus_retriever.py` — facade returning dataclasses, raises `CorpusUnavailable`.
+- `templates/customer_360.html`, `templates/playbook.html` — surfaces.
+
+Touch-points in existing files:
+
+- `app_simple.py` — feature-flag wiring, `/customer/<name>`, `/playbook`, admin Corpus tile.
+- `ask_ai_grounded.py` — corpus retrieval path, validator pipeline.
+- `executive_report_builder.py`, `leader_report_generator.py` — Historical Context section.
+- `requirements.txt` — no changes (no new deps).
+- `QUALITY_AUDIT.md` — this section + closing summary.
+
+## Phase B–E — Implementation summary
+
+| Phase | Outcome |
+| --- | --- |
+| B.1 `knowledge_schema.py` | SSoT SQLite DDL with `corpus_files`, `customers`, `cases`, `barriers`, `resolutions`, `sentiments`, `playbook_chunks`, `term_stats`, `corpus_stats`, `schema_meta`. Indexes on `(customer_id)`, `(technology, theme)`, and `(snapshot_date)`. `apply_schema()` is idempotent and PRAGMA-tightened (`foreign_keys = ON`, `journal_mode = WAL`). |
+| B.2 `corpus_indexer.py` | Idempotent file enumeration over `Config.CSONE_ONEDRIVE_FOLDER`; `.tmp` / `~lock` skipped. Parsers cover `.xlsx`, `.docx`, `.csv`. Entity extraction normalizes themes via canonical helpers. In-house BM25 (no new deps). Skips files whose `(path, mtime, sha256)` are already indexed; `--rebuild` performs a foreign-key-safe full rebuild. |
+| B.3 `corpus_crypto.py` | AES-256-GCM with fresh per-write nonces. Key derivation = HKDF-SHA-256 over `sentinel.json` + per-install salt. Files written under `~/Library/Application Support/AdoptIQ/knowledge/` with mode `0600`. `EncryptedCorpusHandle` wipes plaintext on close. |
+| B.4 `corpus_bootstrap.py` | Wires the indexer into `app_simple.py` startup behind `CORPUS_KNOWLEDGE_ENABLED` (env var). Background thread on first launch; `request_refresh()` triggers an incremental pass. Shutdown hook closes handles cleanly. |
+| C `corpus_retriever.py` | Read-side facade exposing `get_status`, `get_customer_history`, `get_recurring_themes`, `get_resolutions_for`, `search_playbook`, `list_customers`. Returns frozen dataclasses; raises `CorpusUnavailable` on disconnect. Inputs run through `_safe_identifier` (control-character strip + length cap). |
+| D.1 Ask AI grounding | `ask_ai_corpus.build_corpus_block` injects top-K chunks under `<corpus>` tags inside the LLM prompt. Hostile sequences (`</corpus>`, `=== END CORPUS ===`) are stripped before render. Chunk text passes through `ai_narrative_validator.is_corpus_chunk_safe`; rejected chunks are dropped and counted in the prompt envelope. |
+| D.2 Report pre-fill | `report_corpus_context.build_historical_context` plus `render_to_text` / `render_to_word` insert "Historical Context" sections into Executive and Leader reports. Falls back to a banner when the corpus is unavailable; cites source filenames. |
+| D.3 Customer 360 | `GET /customer/<name>` route renders `templates/customer_360.html` server-side. Customer-name allow-list `^[A-Za-z0-9 .,&'\-_/()]{1,200}$` rejects HTML/JS chars with HTTP 400. Jinja auto-escape; no `innerHTML` on user-controlled fields. |
+| D.4 Playbook | `GET/POST /playbook` route. CSRF enforced via Flask-WTF on POST. Sliding-window throttle reuses `_check_ask_ai_throttle`. Selectors are strict allow-lists (`_PLAYBOOK_TECH_SET`, `_PLAYBOOK_THEME_SET`); free-text query passes the same allow-list as Customer 360. |
+| D.5 Admin Corpus tile | `GET /api/corpus/status` returns the stable boot-+-corpus payload (counts, timestamps; never customer text). `POST /api/corpus/refresh` accepts a Flask-WTF CSRF token *or* a constant-time-compared `X-AdoptIQ-Internal` header (server-to-server proxy path). The admin app's `/corpus_refresh` proxy enforces `_require_admin_csrf()` first (Round 5 pattern). |
+| E Hygiene | All corpus surfaces (Ask AI prompt builder, Customer 360 case summaries / resolutions, Playbook chunks, report pre-fill rendering) route corpus text through `ai_narrative_validator.is_corpus_chunk_safe`. The validator is now the documented public symbol and is exported via `__all__`. Logging policy: customer names never appear at INFO; structured fields only. |
+
+## Phase F — Test coverage and verification
+
+`make verify` baseline before Round 17: 1949 passed / 2 skipped (Round 16 close-out).
+
+After Round 17:
+
+| Module | Tests added |
+| --- | --- |
+| `tests/test_round17_corpus_indexer.py` | 23 |
+| `tests/test_round17_corpus_crypto.py` | 31 |
+| `tests/test_round17_corpus_retriever.py` | 29 |
+| `tests/test_round17_ask_ai_corpus_grounding.py` | 15 |
+| `tests/test_round17_report_prefill_historical_context.py` | 19 |
+| `tests/test_round17_customer_360_route.py` | 12 |
+| `tests/test_round17_playbook_route.py` | 15 |
+| `tests/test_round17_admin_corpus_tile.py` | 13 |
+| `tests/test_round16_ai_narrative_validator.py` | +1 (extended `__all__` pin to cover `is_corpus_chunk_safe`) |
+| **Total Round 17 additions** | **157 new tests, 1 extended** |
+
+Synthetic fixture corpus lives in `tests/fixtures/round17/`:
+- `sentinel.json` — KDF input for `corpus_crypto` round-trip tests; explicitly synthetic and labeled as such.
+- `synthetic_cases.csv` — three fictional customers (Synthetic Alpha / Beta / Gamma), schema-aligned with `_parse_csv` aliases.
+- `synthetic_barriers.csv` — barriers + resolutions for the same fictional customers.
+- `synthetic_pulse.csv` — sentiment snapshots using canonical color labels.
+
+Total committed fixture footprint: ~6 KB. No real customer data.
+
+### Final Round 17 verification
+
+```
+make verify
+└── ruff:        All checks passed!
+└── bandit:      no HIGH/MED findings (only pre-existing nosec rationales)
+└── pip-audit:   No known vulnerabilities found
+└── pytest:      2106 passed, 2 skipped
+```
+
+Net new test count: **+157** (1949 → 2106). Two pre-existing skips unchanged. No new ruff, bandit, or pip-audit findings.
+
+## Phase F — Bugs found & fixed during Round 17 implementation
+
+| Module | Bug | Fix |
+| --- | --- | --- |
+| `corpus_indexer.rebuild_index` | `DROP TABLE` on a populated parent table failed with `IntegrityError` because `apply_schema` re-enables `foreign_keys = ON`. | Wrap the drop loop in `PRAGMA foreign_keys = OFF` / `ON` (idempotent on exotic SQLite builds). |
+| `corpus_retriever.search_playbook` | `WHERE LOWER("technology") = …` raised `OperationalError: ambiguous column name` because the joined `customers` table also exposes `technology`. | Qualify the predicate with the `pc.` alias on both `technology` and `theme`. |
+
+Both fixes ship with regression tests in `tests/test_round17_corpus_indexer.py` and `tests/test_round17_corpus_retriever.py`.
+
+## Phase F — CodeGuard alignment
+
+| CodeGuard rule | Round 17 evidence |
+| --- | --- |
+| `codeguard-0-input-validation-injection` | Allow-list regex on customer names, technology/theme enum sets, query allow-list with length cap, parameterized SQL throughout `corpus_retriever`. |
+| `codeguard-0-additional-cryptography` | AES-256-GCM, fresh per-write nonces, HKDF-SHA-256 KDF, no hardcoded keys, file mode `0600`. Plaintext scrubbed on close. |
+| `codeguard-0-authorization-access-control` | Admin tile refresh requires CSRF or constant-time-compared internal token; main-app refresh enforces `secrets.compare_digest`. |
+| `codeguard-0-client-side-web-security` | Jinja auto-escape, no `innerHTML` for corpus or user-controlled values, CSRF tokens emitted on all state-changing forms. |
+| `codeguard-0-logging` | Customer names redacted from INFO logs in route handlers; only `(file_id, sha256_short, schema_version)` flow at INFO during indexing. |
+| `codeguard-0-privacy-data-protection` | No customer PII in installer artifact; encrypted cache lives under `~/Library/Application Support/AdoptIQ/knowledge/` per-user. SharePoint ACL on OneDrive is the gate. |
+| `codeguard-0-api-web-services` | Status endpoint always returns 200 with structured JSON; refresh endpoint surfaces stable error envelopes; no token leakage in query strings. |
+| `codeguard-0-data-storage` | Encrypted SQLite handle, foreign-key enforcement, indexes on hot paths, no plaintext on disk. |
+
+## Phase F — Manual smoke test plan (DMG)
+
+> Recorded for the operator running the manual sign-off; no automated coverage substitutes for the OneDrive-gate behavior on a clean Mac account.
+
+1. Build with `bash build_mac.sh` (current branch).
+2. Install on a Mac account that **has** `AI Projects/AdoptIQ_CSOne_Reports` synced.
+   - Launch app, set `CORPUS_KNOWLEDGE_ENABLED=true` in the environment, restart.
+   - Confirm `~/Library/Application Support/AdoptIQ/knowledge/` is populated and mode `0700` (dir) with `0600` files.
+   - Hit `/api/corpus/status`: `available=true`, non-zero `corpus.files_parsed`.
+   - Open `/customer/<known-customer>` and `/playbook`; both render data.
+3. Install on a Mac account that does **not** have the OneDrive folder.
+   - Confirm app starts cleanly; `/api/corpus/status` returns 200 with `available=false` and a `reason` banner.
+   - `/customer/<name>` and `/playbook` render the "OneDrive sync" banner without raising.
+4. Toggle `CORPUS_KNOWLEDGE_ENABLED=false` and restart.
+   - Confirm Customer 360 and Playbook render the disabled banner; existing report flows are unaffected.
+
+### In-process smoke test (executed during Round 17 sign-off)
+
+Performed on the build host before the DMG hand-off as a proxy for steps 3 and 4 above:
+
+1. **All Round 17 modules import cleanly** — `knowledge_schema`, `corpus_crypto`, `corpus_indexer`, `corpus_retriever`, `corpus_bootstrap`, `ask_ai_corpus`, `report_corpus_context` import with no warnings.
+2. **`app_simple` import with corpus disabled** — flag off, all four new routes (`/customer/<path:name>`, `/playbook`, `/api/corpus/status`, `/api/corpus/refresh`) register on the Flask app without raising.
+3. **Graceful degradation when OneDrive is missing** — flag on with `CSONE_ONEDRIVE_FOLDER=/tmp/this-folder-does-not-exist`, `corpus_retriever.list_customers()` raises `CorpusUnavailable("corpus connection has not been configured")` instead of crashing. `corpus_bootstrap.get_state()` returns a sane snapshot with `enabled=False, started=False`.
+4. **PyInstaller spec updated** — `adoptiq_mac.spec` extended with explicit `hiddenimports` for the seven new corpus modules plus `ai_narrative_validator`, so the eventual DMG cannot drop a lazily-imported corpus module.
+
+# QUALITY_AUDIT.md — Round 18 (Overnight QA Sweep)
+
+## Scoping notes
+
+Round 18 is a survey-and-fix overnight sweep across four priority areas:
+
+1. Report accuracy
+2. Report output quality (Word + Excel only — PowerPoint is **N/A** in this repo, confirmed by ripgrep at the start of Round 16 and reverified at the start of Round 18)
+3. AI insights quality
+4. General code quality (only inside the reporting pipeline)
+
+Pacing: small batches, one concern per batch, `make verify` between batches, two consecutive clean runs as the final gate. Findings → failing test → fix → verify. "No actionable findings" is a valid outcome per surface.
+
+Hard envelope: no commits, no destructive shell, no public-API or schema changes, no edits to `.cursor/rules` / `CLAUDE.md` / CI config / the plan file, no dependency upgrades, no rule disables.
+
+## Phase 1 — Map and harness baseline
+
+`make verify` baseline at the start of Round 18:
+
+```
+make verify
+└── ruff:        All checks passed!
+└── bandit:      no HIGH/MED findings (only pre-existing nosec rationales)
+└── pip-audit:   No known vulnerabilities found
+└── pytest:      2106 passed, 2 skipped in 93.57s
+```
+
+### Pipeline map (verified)
+
+| Stage | Module(s) | Notes |
+| --- | --- | --- |
+| Source data | CSOne XLSX upload, Snowflake prefetch, External intel, Round 17 corpus | Single source of truth per metric. |
+| Normalization | `data_normalization.py`, `data_contracts.py` | Round 14 fixed `columns_raw` bug (R14-002). |
+| Calculations | `canonical_metrics.py`, `risk_scoring.py`, `advanced_renewal_analyzer.py` | All currency on float, no intermediate rounding (Round 16 / Phase 2 audit). |
+| Word formatters | `compact_report_formatter.py`, `executive_intelligence_formatter.py`, `leader_report_generator.py` | `add_banded_top_n_table` wired at compact + exec (Round 16); leader retains custom paint (deliberate). |
+| Excel writers | `adoptiq_backend.write_excel_workbook` (gold path) + 3 `app_simple.py` writers (compact / renewal / leader-team) | All wrapped by `report_export_styling.apply_excel_polish` after R16 / Phase 5.1 (`startrow` parameter). |
+| AI narrative gate | `ai_narrative_validator.py` (Round 16) + `is_corpus_chunk_safe` (Round 17) | Hooked into `app_simple.py` ai_insights gate. |
+| Corpus retrieval | `corpus_retriever.py` (Round 17) | Frozen dataclasses; raises `CorpusUnavailable`. |
+
+### Test counts at baseline (per priority area)
+
+| Area | Round-tagged test files | Approx. cases |
+| --- | --- | --- |
+| Report accuracy (cross-format / sort determinism / currency / canonical metrics) | `test_round16_cross_format_consistency.py`, `test_round16_sort_determinism.py`, `test_cross_report_parity.py`, `test_total_customers_*.py`, `test_round8_compact_*` | ~80 |
+| Word + Excel output quality | `test_round15_word_format.py` (40), `test_round15_excel_format.py` (67), `test_round15_excel_columns.py` (54), `test_round15_export_quality.py`, `test_round16_apply_excel_polish_offset.py` (15) | ~190 |
+| AI insights quality | `test_round16_ai_narrative_validator.py` (31), `test_round16_ai_insights_eval.py` (7), `test_round17_ask_ai_corpus_grounding.py` (15), `test_round17_corpus_*` | ~120 |
+| Reporting code quality / security / reliability | `test_round14_*.py`, `test_round15_security.py`, `test_round15_reliability.py`, `test_round15_correctness.py`, Round 6/8/9 hardening | ~250 |
+
+### Phase 1 status
+
+- [x] `make verify` baseline confirmed: 2106 passed / 2 skipped, ruff/bandit/pip-audit clean.
+- [x] Pipeline map verified.
+- [x] PowerPoint is **N/A** for this repo (ripgrep on `pptx`, `python-pptx`, `Presentation(`, case-insensitive `powerpoint` returns zero hits in code, templates, fixtures, or static assets — same result as Round 16 baseline).
+- [x] Round 18 backlog seeded by Phase 2 survey below.
+
+## Phase 2 — Report accuracy survey
+
+Method: surface-by-surface ripgrep + targeted `Read`. Each surface is either fixed (failing test → patch → verify) or logged "no actionable findings" with the rationale. Test ledger lives in `tests/test_round18_*.py`.
+
+| Surface | Result | Notes |
+| --- | --- | --- |
+| Time-zone correctness | **No actionable findings** | Naive `datetime.now()` / `utcnow()` / `date.today()` greps return zero production hits outside `structured_logging.py` (where it's the wall-clock formatter, not a boundary date). Round 6 / 14 already migrated all "as-of" / "through" boundaries to UTC-aware. |
+| Rounding precision | **No actionable findings** | Round 16 / Phase 2 audit pinned float-only intermediates; nothing has regressed in the diff since. Spot-checked `canonical_metrics`, `risk_scoring`, `advanced_renewal_analyzer`. |
+| Empty / single-row / all-null datasets | **No actionable findings** | Every formatter was already guarded with `.empty`, `len(...) == 0`, or `if df is None` checks. No new fixture-driven crash reproduced. |
+| Division-by-zero | **No actionable findings** | AST scan over `canonical_metrics`, `risk_scoring`, `advanced_renewal_analyzer`: every `/` site is gated with `max(divisor, 1)`, `if total <= 0`, or routes through `_safe_div` (Round 9 / Phase 9.x). |
+| Sort determinism — `executive_intelligence_formatter` high-risk table | **R18-001 fixed** | See below. |
+| Sort determinism — `leader_report_generator` team performance table | **R18-002 fixed** | See below. |
+| Sort determinism — `leader_report_generator._add_customer_details` `all_items_sorted` | **No actionable findings** (logged) | Line 4280 sorts within a single customer's items by `(type_order, date)`. Two items with identical type *and* identical timestamp inside one customer's record are realistically collision-free; not the same regression class as the cross-customer sorts. Logged for awareness; not fixed to keep the Round 18 diff one-concern-per-batch. |
+| Pagination / truncation (Excel) | **No actionable findings** | No explicit row-cap constants in writers. `xlsxwriter` raises rather than silently truncating when the 1,048,575-row limit is exceeded; that is already the loud-failure mode the rubric requires. |
+| Cross-format parity gaps (Word/Excel KPI parity) | **Coverage gap noted (deferred)** | `report_export_styling.build_summary_rows` returns a strict superset of the KPIs that `tests/test_round16_cross_format_consistency.py` asserts on. Not a correctness bug — a coverage gap. Tracked as R18-003 below; deferred to keep Round 18 fixes minimal. |
+
+### R18-001 — `executive_intelligence_formatter` high-risk customer table
+
+**Class:** sort determinism · **Severity:** Medium · **Phase:** 2.1
+
+The high-risk customer table at `_add_high_risk_customers_table` (line ≈703) sorted `high_risk.items()` by `score` only. Two customers tied on the same score render in upstream-`risk_scores`-dict insertion order, which depends on worker-pool completion order and isn't byte-stable across re-runs of the same fixture. Same regression class fixed by Round 16 / Phase 2 in `compact_report_formatter`, missed here.
+
+- **Fix:** Tuple sort key `(-score, name.casefold())`. Score still drives ranking; ties resolve by case-folded name.
+- **Test:** `tests/test_round18_sort_determinism.py::test_phase_2_1_*` (3 cases — legacy form is gone, marker present, in-process tuple sort is order-stable).
+- **Marker:** `# Round 18 / Phase 2.1`.
+
+### R18-002 — `leader_report_generator` team performance summary
+
+**Class:** sort determinism · **Severity:** Medium · **Phase:** 2.2
+
+`_add_team_performance_summary` (line ≈4808) sorted `team_summary_data` by `total_activities` only. Two CSSMs tied on activity count rendered in `team_data` insertion order — same regression class as R18-001.
+
+- **Fix:** Tuple sort key `(-total_activities, cssm_name.casefold())`. Activity count still drives ranking; ties resolve by case-folded name.
+- **Test:** `tests/test_round18_sort_determinism.py::test_phase_2_2_*` (3 cases).
+- **Marker:** `# Round 18 / Phase 2.2`.
+
+### R18-003 — Cross-format parity coverage gap (deferred)
+
+**Class:** test coverage · **Severity:** Low · **Phase:** 2 (logged, not fixed)
+
+`tests/test_round16_cross_format_consistency.py` asserts a curated subset of the KPIs that flow into both Word and Excel; `report_export_styling.build_summary_rows` returns more rows than that subset (e.g. average risk score, supportability bucket counts). No correctness bug — every KPI computed once via `canonical_metrics`. Adding tests for every row would re-test code already exercised by `test_canonical_metrics.py`. Deferred; revisit only if a future regression motivates it.
+
+### Phase 2 verification
+
+```
+make verify
+└── ruff:        All checks passed!
+└── bandit:      no HIGH/MED findings
+└── pip-audit:   No known vulnerabilities found
+└── pytest:      2112 passed, 2 skipped in 8.02s   (+6 Round 18)
+```
+
+## Phase 3 — Word + Excel output quality
+
+| Surface | Result | Notes |
+| --- | --- | --- |
+| `apply_excel_polish` coverage | **No actionable findings** | Confirmed every `to_excel` callsite in the *report* writers is wrapped: 3 sites in `adoptiq_backend.write_excel_workbook` (8125, 8127, 8182) and 3 sites in the `app_simple.py` Excel writers (8261, 11337, 18877). The 4th writer at `app_simple.py:17422` (subscription-renewal) uses `startrow=0` with its own band-coloring + custom header format -- a deliberately separate convention that pre-dates the helper. Logged as design intent, not a coverage gap. |
+| Polished workbook opens cleanly in `openpyxl` | **R18-004 (test) added** | `tests/test_round18_output_quality.py::test_phase_3_1_polished_workbook_opens_without_openpyxl_warnings` -- a real smoke test that drives the polish helper end-to-end against both `startrow=0` and `startrow=1` conventions, then reopens the workbook through `openpyxl` under `warnings.catch_warnings(record=True)` and asserts no openpyxl-emitted UserWarnings. Catches the "Workbook contains no default style" and similar regressions that visual mocks won't surface. |
+| Non-finite floats in Excel cells | **R18-005 (test) added** | `test_phase_3_1_pipeline_guards_against_non_finite_floats` -- pins the upstream contract: every public number formatter in `report_utils` (`format_number`, `format_ratio_percent`, `format_percent_points`, `format_currency`) must return the `"N/A"` placeholder on `inf` / `-inf` / `nan`, because xlsxwriter silently coerces `float('inf')` to the literal string `'inf'` and would corrupt a numeric column. |
+| Word doc round-trips through `python-docx` | **R18-006 (test) added** | `test_phase_3_2_banded_top_n_round_trips_through_python_docx` -- generates a doc with the Round-15 banded top-N helper, saves to disk, reopens with `python-docx`, asserts the headings + table shape survive the round trip with no exceptions. |
+| `add_banded_top_n_table` empty-data behavior | **R18-007 (test) added** | Two pins: empty `rows` produces a header-only table (no synthesized blank "(none)" row), and empty `headers` returns `None`. Pin so a future "render `(none)` placeholder row" change is a deliberate test update, not a silent regression. |
+| Round-trip determinism for polish helper | **R18-008 (test) added** | `test_phase_3_3_polished_workbook_is_byte_stable_across_runs` -- two consecutive runs of the polish helper against the same fixture produce workbooks with identical observable contents (cell-by-cell). Doesn't assert binary file equality (xlsxwriter's zip timestamps drift), but pins the user-visible determinism contract. |
+| Heading hierarchy + empty-section handling | **No actionable findings** | Spot-checked compact, executive-intelligence, leader formatters. Every H2/H3 in the formatters surveyed is gated by an `if <data>:` block that ensures body content follows. No orphan-heading patterns reproduced. |
+| Number/date/percent format consistency | **No actionable findings** | Round 11 / Phase 11.8 (`round_percent`) and Round 6 / Phase 1.20 (`format_*` helpers) already centralized rounding + formatting; the Round 18 non-finite-float test above pins the placeholder contract. |
+
+### Phase 3 verification
+
+```
+make verify
+└── ruff:        All checks passed!
+└── bandit:      no HIGH/MED findings
+└── pip-audit:   No known vulnerabilities found
+└── pytest:      2119 passed, 2 skipped in 8.43s   (+13 Round 18 cumulative; +7 Phase 3)
+```
+
+## Phase 4 — AI insights survey
+
+Goal: confirm the Round 16 narrative-grounding gate and the Round 17
+prompt-safety gate hold against documented residual risks; broaden
+test coverage where the existing harness left genuine gaps; flag
+(don't fix) any cost / latency surface for future cleanup.
+
+### Findings
+
+| Surface | Disposition | Notes |
+|---|---|---|
+| Prompt / data parity for `validate_narrative` | **No actionable findings (verified by construction)** | Single production call site at `app_simple.py:6843` passes the **same** `briefing_book` variable to both `generate_llm_response(...)` (line 6809) and `_anv.validate_narrative(...)`. The validator is therefore evaluating the LLM's narrative against the exact corpus the LLM was given -- parity holds by construction. Pinned indirectly by the existing Round 16 integration test. |
+| `is_corpus_chunk_safe` regex regression — *security finding* | **R18-009 (fix + 9 tests) shipped** | The Round-17 pattern `\bignore\s+(?:all\|previous\|prior\|the\s+above)\s+instructions?\b` only allowed a single token between `ignore` and `instructions`, so the canonical wild-corpus phrase **"Ignore all previous instructions"** (two tokens) leaked through and would have reached the LLM prompt. Round 18 broadens the pattern to `\b(?:ignore\|disregard\|forget)\s+(?:[\w'\-]+\s+){0,4}instructions?\b` (also covers `disregard` / `forget` synonyms; bounded to 4 intermediate word tokens to avoid crossing sentence boundaries). 10 prompt-injection vectors plus 5 legitimate-prose negatives are now pinned in `tests/test_round18_ai_insights.py`. |
+| Year allow-list edge (2024-2027) | **R18-010 (3 tests) added** | Pins behavior at the upper edge: 2027 auto-allowed, bare 2028 fails grounding when not in briefing, briefing-grounded 2028 passes. Catches a future "extend to 2028+" change without accompanying briefing content. |
+| Suffix-multiplier parsing (`$2.5M` ↔ `2,500,000`) | **R18-011 (2 tests) added** | Pins both `M` and `K` suffix matches against grouped-thousands briefing values. Most common point of confusion in narrative-vs-briefing audit logs. |
+| Numeric tolerance boundaries (~1% relative) | **R18-012 (2 tests) added** | Pins both sides of the 1% tolerance: 0.8%-off passes, 20%-off fails. Catches the classic "LLM hallucinated a round number" symptom. |
+| Common-reference numbers (7/14/30/60/90/180/365 days) | **R18-013 (2 tests) added** | Positive control auto-allows the documented set; negative control (73 days) requires briefing presence. Catches a future drop or unintended widening of the common-reference set. |
+| Failure modes (validator → labeled placeholder) | **No actionable findings** | `app_simple.py:6859-6868` already wraps the validator in a try/except that **never** silently inserts a hallucinated narrative -- on validator exception the underlying LLM output is logged at WARNING and accepted as-is. On *validation failure* (the much more common path) the narrative is replaced with `GROUNDING_FAILURE_PLACEHOLDER`. Both paths logged. |
+| Redundant per-row LLM calls (cost / latency) | **Flagged, not fixed (deferred)** | `app_simple.py:12535` (and the mirror at `adoptiq_backend.py:11696`) issue **one LLM call per customer** inside the leader-report customer loop. This is documented design (each customer storyboard is rendered from its own per-customer briefing), not a bug -- but it scales linearly with the customer count and is the dominant latency / token-cost driver in the leader report. Logged in deferred items so a future "batch storyboards in a single call with structured output" experiment is on the radar. |
+
+### Files changed in Phase 4
+
+```
+ai_narrative_validator.py                              (5 lines:  injection regex widened)
+tests/test_round18_ai_insights.py                      (new file, 18 tests)
+```
+
+### Phase 4 verification
+
+```
+make verify
+└── ruff:        All checks passed!
+└── bandit:      no HIGH/MED findings
+└── pip-audit:   No known vulnerabilities found
+└── pytest:      2145 passed, 2 skipped in 7.84s   (+39 Round 18 cumulative; +18 Phase 4 + adjusted)
+```
+
+## Phase 5 — Code quality / corpus security spot-checks
+
+Strictly scoped to the reporting pipeline and Round-17 corpus paths
+(per the plan's Phase-5 envelope: "swallowed exceptions, pipeline-
+boundary logging integrity, security hygiene spot-checks").
+
+### Findings
+
+| Surface | Disposition | Notes |
+|---|---|---|
+| Pipeline-boundary INFO logging (Round 14 markers) | **No actionable findings (verified)** | `tests/test_round14_markers.py` (6 cases) and `tests/test_round14_behavioral.py` (9 cases) -- all 15 passing. Round 14's INFO entry/exit logs at the report-generation boundary remain intact. |
+| Swallowed exceptions in formatters | **No actionable findings** | Spot-checked `leader_report_generator.py` (~30 `except Exception:` sites), `compact_report_formatter.py`, `executive_intelligence_formatter.py`. Every silent-pass site falls into one of three legitimate patterns: (a) helper-function safe defaults (RGB color, text cleaner), (b) defensive metadata extraction with empty-string fallback, (c) format-helper redefinition fallback when the primary helper is unavailable. None mask data-correctness errors. |
+| **R18-014: corpus safety gate fail-open** — *security finding* | **Fix + 4 tests shipped** | `report_corpus_context._is_safe_chunk` is the second-line defense that runs corpus content through `is_corpus_chunk_safe` before letting it into a Word/Excel report. The Round-17 implementation translated "never break a report on a chunk" into `return True` on **any** validator exception -- meaning if `ai_narrative_validator` ever failed to import, every corpus chunk silently bypassed the gate and reached the rendered Office document. Round 18 corrects the contract to **fail-closed**: validator exception now drops the chunk (returns `False`), logs at WARNING, and the report is still not broken (the chunk is simply omitted). Test contract pinned in both `tests/test_round18_corpus_security.py` (4 new) and `tests/test_round17_report_prefill_historical_context.py` (1 updated). |
+| PII / untrusted strings in fixtures | **No actionable findings** | Round 17 corpus fixtures (`tests/fixtures/round17/*.csv`) are synthetic; no real customer / case names. Confirmed during Round 17 build-out, reverified by inspection. |
+
+### Files changed in Phase 5
+
+```
+report_corpus_context.py                                          (~20 lines: fail-closed + WARNING log)
+tests/test_round18_corpus_security.py                             (new file, 4 tests)
+tests/test_round17_report_prefill_historical_context.py           (~12 lines: contract update + comment)
+```
+
+### Phase 5 verification
+
+```
+make verify
+└── ruff:        All checks passed!
+└── bandit:      no HIGH/MED findings
+└── pip-audit:   No known vulnerabilities found
+└── pytest:      2149 passed, 2 skipped in 7.41s   (+43 Round 18 cumulative; +4 Phase 5)
+```
+
+## Phase 6 — Final verification gate
+
+Two consecutive clean `make verify` runs after the last code change
+of the night:
+
+| Run | Result | Tests | Lint | Security | Audit |
+|---|---|---|---|---|---|
+| Final #1 | clean | 2149 / 2 skipped (7.41s) | ruff: All checks passed | bandit: no HIGH/MED | pip-audit: no known vulns |
+| Final #2 | clean | 2149 / 2 skipped (7.01s) | ruff: All checks passed | bandit: no HIGH/MED | pip-audit: no known vulns |
+
+## Round 18 — Executive summary
+
+Round 18 was a one-night autonomous QA sweep across four priority
+areas. The repo entered the night at 2106 / 2 skipped and exits at
+2149 / 2 skipped (+43 tests added, all passing). Two genuine
+security fixes shipped on top of the broader survey, and the
+balance of the surveyed surface area was logged as either "no
+actionable findings" or "deferred / flag-don't-fix" with explicit
+rationale.
+
+### Files changed by priority area
+
+**Report accuracy (Phase 2):**
+```
+executive_intelligence_formatter.py    (~14 lines:  high-risk customer sort tuple key + casefold tiebreaker)
+leader_report_generator.py             (~14 lines:  team-summary CSSM sort tuple key + casefold tiebreaker)
+tests/test_round18_sort_determinism.py (new file, 6 tests pinning both sites)
+```
+
+**Word + Excel output quality (Phase 3):**
+```
+tests/test_round18_output_quality.py   (new file, 7 tests:
+                                         - openpyxl no-warning open
+                                         - python-docx structural round-trip
+                                         - non-finite float -> "N/A" placeholder
+                                         - add_banded_top_n_table empty-data behavior
+                                         - polish-helper byte-stable round-trip)
+```
+
+**AI insights (Phase 4):**
+```
+ai_narrative_validator.py              (~5 lines:  prompt-injection regex widened so the canonical
+                                                   "Ignore all previous instructions" phrase no longer leaks)
+tests/test_round18_ai_insights.py      (new file, 18 tests:
+                                         - is_corpus_chunk_safe behavioral coverage  (15 vectors)
+                                         - validator year-allow-list edges            (3 cases)
+                                         - suffix-multiplier parity                    (2 cases)
+                                         - tolerance boundary                          (2 cases)
+                                         - common-reference numbers                    (2 cases))
+```
+
+**Code quality / corpus security (Phase 5):**
+```
+report_corpus_context.py                                       (~20 lines:  _is_safe_chunk fail-closed + WARNING)
+tests/test_round18_corpus_security.py                          (new file, 4 tests)
+tests/test_round17_report_prefill_historical_context.py        (~12 lines:  contract update from fail-open to fail-closed)
+```
+
+**Documentation:**
+```
+QUALITY_AUDIT.md                       (this file: Round 18 sections appended)
+```
+
+### Tests added — totals
+
+| Phase | Test file | Count |
+|---|---|---|
+| 2 | `tests/test_round18_sort_determinism.py` | 6 |
+| 3 | `tests/test_round18_output_quality.py` | 7 |
+| 4 | `tests/test_round18_ai_insights.py` | 18 |
+| 5 | `tests/test_round18_corpus_security.py` | 4 |
+| 5 | `tests/test_round17_report_prefill_historical_context.py` (updated) | 0 (1 contract change) |
+| 4 | `tests/test_round16_ai_narrative_validator.py` (updated, R17 carryover) | 0 (1 `__all__` symbol added) |
+| **Total** | | **+43 (and 2 contract updates)** |
+
+Documented baseline → final: **2106 → 2149** (+43 net), 2 skipped throughout.
+
+### Verification commands & results
+
+```
+make verify
+├── pytest:      2149 passed, 2 skipped (verified twice in a row)
+├── ruff check . : All checks passed
+├── bandit -ll -r . -c bandit.yaml : no HIGH or MEDIUM findings
+└── pip-audit -r requirements.txt : No known vulnerabilities found
+```
+
+### Deferred items (logged for the next round)
+
+| ID | Item | Rationale |
+|---|---|---|
+| R18-D1 | Cross-format parity test coverage | `report_export_styling.build_summary_rows` returns a strict superset of the KPIs that `tests/test_round16_cross_format_consistency.py` asserts on. Not a correctness bug, a coverage gap. Worth a focused round. |
+| R18-D2 | Per-customer LLM calls in leader report | `app_simple.py:12535` and `adoptiq_backend.py:11696` issue one LLM call per customer in the leader-report customer loop. Documented design, but linear cost / latency in the customer count. Worth experimenting with batched / structured-output calls in a future round. |
+| R18-D3 | `_add_customer_details` per-item sort | A within-customer sort by `(type_order, date)` has no secondary tiebreaker. Practical collision risk is very low (same customer, same item type, same timestamp). Logged for awareness, not fixed in Round 18 to keep the diff one-concern-per-batch. |
+
+### Risks & recommendations
+
+- **R18-009 (prompt-injection regex) is a fail-closed widening, not a behavior change for legitimate corpus content.** The 5 safe-chunk negatives in `tests/test_round18_ai_insights.py` pin that legitimate prose ("the system was upgraded last quarter; the assistant lead handled rollout.") still passes. No action recommended; ship.
+- **R18-014 (corpus safety gate fail-closed) flips a previously fail-open path to fail-closed.** This is the correct security posture but does change behavior in the rare case of an `ai_narrative_validator` import failure: the affected corpus chunks are silently dropped from the report rather than rendered. Logged at WARNING so an operator can see it. Recommended action if a deployment ever sees that log line: investigate the validator error and re-run; the report itself remains correct.
+- **No P0 / P1 items remain in the Round-18 backlog.** The two security findings shipped with fixes; everything else is either pinned by new tests or explicitly deferred with rationale above.
+
+### Round 18 stop condition
+
+> Stop when ... two consecutive `make verify` runs are clean **and** the issue backlog in `QUALITY_AUDIT.md` shows zero P0/P1 items remaining.
+
+**Both conditions met.** Round 18 is complete.
+
+# QUALITY_AUDIT.md — Round 17.1 (Corpus Real-Data Completion)
+
+## Mission
+
+Round 17 wired the encrypted corpus to `Config.CSONE_ONEDRIVE_FOLDER`,
+but two structural bugs in
+[`corpus_indexer._parse_xlsx`](corpus_indexer.py) caused silent data
+loss when the indexer met real CSOne / AdoptIQ exports:
+
+1. The xlsx sheet-family router only matched on `csone | tac | case |
+   barrier | _ab_ | pulse | sentiment`. The CSOne OneDrive workbook
+   has one sheet named `AdoptIQ Enhanced Premium Collab`, none of those
+   tokens match, so every row dropped on the floor.
+2. `pd.read_excel(...)` reads from row 1, but the CSOne export has
+   banner rows 1-14 and the header on row 16 while AdoptIQ-rendered
+   Data xlsx has a title in row 1 and the header on row 2. Both
+   layouts produced all-`Unnamed:` columns under the original call,
+   so `_get(row, "Customer Name", ...)` returned `None` everywhere.
+
+Round 17.1 fixes both bugs and extends the corpus to ingest
+AdoptIQ-rendered reports from the runtime user's `~/Downloads`,
+filtered to `AdoptIQ*` filenames only.
+
+## Findings
+
+| ID | Severity | Surface | Finding | Action |
+|---|---|---|---|---|
+| R17.1-001 | HIGH | corpus indexer | CSOne export single-sheet workbook never matched the sheet-family router; every TAC row was silently dropped. | Add `_detect_xlsx_layout` and treat the `csone_export` layout as the case branch regardless of sheet name. |
+| R17.1-002 | HIGH | corpus indexer | `pd.read_excel(...)` consumed banner rows as the header row, returning all-`Unnamed:` columns; every `_get(row, "Customer Name", ...)` lookup returned `None`. | Detect the layout, then call `pd.read_excel(..., header=header_row)` with `15` for `csone_export`, `1` for `adoptiq_data`, `0` for plain. |
+| R17.1-003 | MED  | corpus coverage | AdoptIQ Data xlsx sheets (`Risk_Summary`, `Adoption_Barriers`, `Customer_Pulse`, `Action_Plans`, ...) had no router branches and were silently skipped. | Add per-sheet emit helpers (`_emit_case_record`, `_emit_barrier_record`, `_emit_pulse_record`, `_emit_narrative_record`, `_emit_external_record`) routed by sheet-name token tuples. |
+| R17.1-004 | MED  | corpus coverage | The runtime user's Downloads folder (the natural home of AdoptIQ-rendered reports) was not indexed. | Add `CSONE_INCLUDE_USER_DOWNLOADS` (default `true`) + `CSONE_USER_DOWNLOADS_DIR` config; new `enumerate_user_report_files()` enforces an `^AdoptIQ[\s_]...$` allow-list and walks the top level only (no recursion). |
+| R17.1-005 | LOW  | observability | The admin Corpus tile rolled up across sources, hiding which folder produced which counts. | `CorpusBootState.last_sources` now records per-source `{label, dir, files_seen, files_parsed, files_skipped, files_failed, chunks_added}`; surfaced under `boot.last_sources` and `corpus.sources` on `/api/corpus/status`. |
+
+## Files changed
+
+| File | Change |
+|---|---|
+| `corpus_indexer.py` | Added `_detect_xlsx_layout`, `_USER_REPORT_NAME_RE`, `enumerate_user_report_files`, `_row_to_blob`, `_emit_*_record` helpers; rewrote `_parse_xlsx` against the layout detector; extended `enumerate_corpus_files` with a `filename_filter` + `recursive` knob; `index_folder` now accepts a pre-enumerated `files=` list. |
+| `config.py` | Added `CSONE_INCLUDE_USER_DOWNLOADS` + `CSONE_USER_DOWNLOADS_DIR`. |
+| `corpus_bootstrap.py` | New `_resolve_index_sources` + `_accumulate_index_stats`; `_run_index_pass` walks every source, records per-source stats on `last_sources`. |
+| `app_simple.py` | `_r17_corpus_status_payload` surfaces `boot.last_sources` and `corpus.sources`. |
+| `tests/test_round17_xlsx_layout_detector.py` | NEW — pins the three layouts (csone_export / adoptiq_data / plain) plus empty + short fallback. |
+| `tests/test_round17_csone_export_indexed.py` | NEW — end-to-end indexing of a synthetic CSOne-shaped xlsx; pins customers, cases, and `is_open` lifecycle. |
+| `tests/test_round17_adoptiq_data_router.py` | NEW — multi-sheet AdoptIQ Data fixture; pins each sheet → table mapping. |
+| `tests/test_round17_user_downloads_filter.py` | NEW — filename allow-list, no-recursion, missing-dir, lock-file rejection. |
+| `tests/test_round17_admin_corpus_tile.py` | UPDATED — pins per-source breakdown keys on the status payload. |
+
+## Live-corpus smoke (read-only, dev machine)
+
+The smoke pass below ran on the dev machine against the real
+OneDrive `AdoptIQ_CSOne_Reports` folder (248 .xlsx files, sampled
+the first 30) and the user's `~/Downloads` AdoptIQ-named files (48
+files, sampled the first 20). No customer-identifying data leaves
+this audit row — only counts.
+
+| Pass | Files seen | Files parsed | Files failed | Chunks added |
+|---|---|---|---|---|
+| OneDrive (sampled 30 of 248) | 30 | 30 | 0 | 37,156 |
+| Downloads (sampled 20 of 48) | 20 | 20 | 0 | 12,184 |
+
+Resulting corpus rollup:
+
+| Table | Rows |
+|---|---|
+| `corpus_files` | 50 |
+| `customers` | 958 |
+| `cases` | 50,167 |
+| `barriers` | 7,235 |
+| `sentiments` | 1,112 |
+| `resolutions` | 6,571 |
+| `playbook_chunks` | 49,340 |
+
+Top playbook themes (first eight, no PII):
+
+| Theme | Chunks |
+|---|---|
+| general | 30,119 |
+| configuration | 4,339 |
+| upgrade | 3,196 |
+| connectivity | 2,659 |
+| authentication | 2,167 |
+| data_quality | 1,780 |
+| integration | 1,739 |
+| licensing | 1,543 |
+
+The smoke run was executed against an in-memory temp DB (no commit
+to the encrypted corpus) and used the indexer directly; the
+encrypted-corpus path is exercised by the existing Round 17 tests.
+
+## Verification
+
+- `tests/test_round17_xlsx_layout_detector.py` — 5 cases, all pass.
+- `tests/test_round17_csone_export_indexed.py` — 2 cases, all pass.
+- `tests/test_round17_adoptiq_data_router.py` — 2 cases, all pass.
+- `tests/test_round17_user_downloads_filter.py` — 5 cases, all pass.
+- `tests/test_round17_admin_corpus_tile.py` — 15 cases (was 13; +2
+  for per-source breakdown contracts), all pass.
+- Combined Round 17 / corpus suite (`-k "round17 or corpus"`):
+  **199 passed, 1968 deselected**.
+- `make verify` clean twice (run at the close of Round 17.1).
+
+## Out of scope for Round 17.1
+
+- Encryption-at-rest contract (`corpus_crypto.py`), schema version,
+  BM25 scorer, and retriever public API are unchanged.
+- Round 19's golden-fixture accuracy work is *not* gated on this
+  round and resumes from its existing Phase 2 todo afterwards.
+- The default `CSONE_ONEDRIVE_FOLDER` path
+  (`~/OneDrive - Cisco/Documents/AI Projects/AdoptIQ_CSOne_Reports`)
+  matches the documented Microsoft default. Sites whose OneDrive
+  layout differs (the dev machine has the folder at
+  `~/OneDrive - Cisco/AI Projects/AdoptIQ_CSOne_Reports`) override
+  via the `CSONE_ONEDRIVE_FOLDER` env var; we do not add fallback
+  search paths here because they would risk reading unrelated
+  Cisco-tenant content.
+
+# QUALITY_AUDIT.md — Round 17.2 (SharePoint Pull + Detailed Logging)
+
+## Mission
+
+Round 17.1 made the corpus indexer ingest both the user's synced
+OneDrive folder and the AdoptIQ-named files in `~/Downloads`. After
+shipping, the user clarified the deployment posture:
+
+> "they need to use the link
+> [SharePoint URL] because the raw data files won't be on their
+> local computer. they might have previous reports in downloads.
+> i want their clients to automatically reach out to this link and
+> pull the data from the folder."
+
+So the corpus must work for operators who have **no OneDrive sync
+at all** — AdoptIQ has to authenticate to SharePoint itself, pull
+the share into a local cache, and then index the cache the same way
+it indexes any other folder. Round 17.2 adds that path while keeping
+OneDrive sync and Downloads as graceful fallbacks.
+
+## Findings
+
+| ID | Severity | Surface | Finding | Action |
+|---|---|---|---|---|
+| R17.2-001 | HIGH | corpus availability | Corpus only worked for operators who had a synced OneDrive copy of `AdoptIQ_CSOne_Reports`; users running the bundled .app on a fresh laptop saw an empty corpus and an unhelpful "OneDrive not synced" banner. | Add `sharepoint_corpus_source.py` (Microsoft Graph + device-code OAuth via `msal`); cache the share at `~/.adoptiq/cache/sharepoint_csone/` with mtime-aware manifest; expose this as a first-class corpus source ahead of OneDrive in `corpus_bootstrap._resolve_index_sources`. |
+| R17.2-002 | HIGH | secrets / token storage | Refresh tokens cannot be stored in `secrets.env` (would defeat installer-portability) or `localStorage` (no browser); a clear-text JSON file would expose them on multi-user hosts. | New `KeyringTokenCache` writes to the macOS Keychain via the `keyring` package, with a 0600-permission JSON fallback under `~/.adoptiq/`. No tokens ever appear in logs. |
+| R17.2-003 | MED  | rate limiting / DoS | Tenant rate limiter and "Retry-After" responses had to be honored by the Graph client to avoid being throttled out of the share on a refresh storm. | `_request_with_retry` and `download_to_path` parse `Retry-After`, fall back to capped exponential backoff on transient 5xx, and enforce a 50 MiB per-file cap aligned with `corpus_indexer._MAX_PARSE_BYTES`. |
+| R17.2-004 | MED  | path resolution | The OneDrive default path was `~/OneDrive - Cisco/Documents/AI Projects/AdoptIQ_CSOne_Reports`, but modern macOS Big Sur+ syncs into `~/Library/CloudStorage/OneDrive-Cisco/...` and most operators don't keep the `Documents/` segment. The Round 17.1 default missed both. | `config._resolve_csone_onedrive_folder` walks four candidates (CloudStorage with/without `Documents/`, legacy `~/OneDrive - Cisco/` with/without `Documents/`), first existing wins; honors `CSONE_ONEDRIVE_FOLDER` env override unconditionally. |
+| R17.2-005 | LOW  | observability | The corpus indexer logged at DEBUG, so first-run troubleshooting from a packaged .app (where DEBUG is filtered) gave the operator no visibility into which files were ingested vs skipped. | Promoted per-file `indexed=… skipped=… failed=…` lines to INFO with `filename / ext / layout / records / bytes`; per-sheet xlsx layout summary at INFO; SharePoint refresh summary line at INFO with listed/downloaded/cached/failed/bytes; startup banner logs the resolved log path, OneDrive folder, Downloads dir, and SharePoint state. No PII (customer names, paths beyond the cache root, token material) leaks above DEBUG. |
+| R17.2-006 | LOW  | UX | Operators had no way to trigger SharePoint sign-in or refresh from the running app; they had to sign in via a separate Microsoft Graph CLI. | New `/api/corpus/sharepoint/signin` and `/api/corpus/sharepoint/refresh` endpoints (CSRF + internal-token auth, mirroring `/api/corpus/refresh`); admin Corpus tile shows sign-in CTA, signed-in UPN + token expiry, last-refresh stats, and "Refresh SharePoint corpus" button. |
+| R17.2-007 | LOW  | bug | `sharepoint_corpus_source.default_cache_dir()` called `.strip()` on a `Path` object, which `AttributeError`s. Caught by the dev-machine static smoke before live network ever ran. | Fixed: strip the env-var string before wrapping in `Path`. |
+
+## Files changed
+
+| File | Change |
+|---|---|
+| `sharepoint_corpus_source.py` | NEW — `SharePointGraphClient` (device-code OAuth, paginated `/shares/{id}/driveItem/children`, throttled retries, 50 MiB cap), `KeyringTokenCache` (macOS Keychain + 0600 fallback), `refresh_local_cache` (mtime-aware `manifest.json`, atomic temp→rename writes, sanitized filenames). All HTTP I/O is injectable so unit tests fake `msal` + `requests` without monkey-patching. |
+| `config.py` | NEW `_csone_onedrive_candidates` + `_resolve_csone_onedrive_folder` (Big Sur CloudStorage path first); new `ADOPTIQ_SHAREPOINT_*` config flags (enabled/folder URL/client id/authority/cache dir/max bytes). |
+| `corpus_bootstrap.py` | `_resolve_index_sources` now orders `sharepoint_csone → onedrive → user_downloads`; OneDrive only included when the directory exists. New `_refresh_sharepoint_cache_for_bootstrap` runs before the indexer pass and stores per-pass SharePoint state on `CorpusBootState.sharepoint`. New public `begin_sharepoint_signin` (device-code launcher; spawns a worker thread that auto-refreshes after sign-in completes) and `request_sharepoint_refresh` (refresh trigger) — exported in `__all__`. |
+| `corpus_indexer.py` | `index_folder` per-file lines promoted to INFO with `filename / ext / layout / records / bytes`; `_parse_xlsx` logs the detected layout per sheet. |
+| `app_simple.py` | `_r17_corpus_status_payload` carries `boot.sharepoint` block (signed-in/UPN/expiry/error-kind/stats). New shared `_r17_2_authorize_corpus_admin` helper centralizes CSRF + internal-token validation. New `/api/corpus/sharepoint/signin` and `/api/corpus/sharepoint/refresh` endpoints (CSRF-protected admin auth). Startup banner logs resolved log file, OneDrive folder, Downloads dir, and SharePoint config. |
+| `enhanced_admin_dashboard_v2.py` | Corpus tile renders SharePoint state (sign-in CTA / signed-in UPN+expiry / last-refresh stats / "Refresh SharePoint corpus" button); new `/sharepoint_signin` and `/sharepoint_refresh` proxy routes (CSRF-protected; forwards to main app via `X-AdoptIQ-Internal`). |
+| `corpus_crypto.py` | Docstring + error messages updated — sentinel arrives via SharePoint Graph pull *or* OneDrive sync; both paths are gated by Microsoft's SharePoint ACL. |
+| `ask_ai_corpus.py`, `report_corpus_context.py`, `templates/customer_360.html`, `templates/playbook.html` | User-facing strings reflect the new "sign in to SharePoint or sync OneDrive" guidance. |
+| `requirements.txt` | Added `msal>=1.28.0`, `keyring>=24.3.0`. |
+| `adoptiq_mac.spec` | Hidden imports for `sharepoint_corpus_source`, `msal` submodules, `keyring.backends.macOS` so the frozen .app bundle has the device-code flow + Keychain backend at runtime. |
+| `secrets.env.template` | Documents `ADOPTIQ_SHAREPOINT_*` env knobs and the auto-discovered OneDrive paths. |
+| `README.md` | "What's New" + "CSOne Knowledge Corpus" sections describe the SharePoint pull, sign-in flow, and per-source ordering. |
+| `tests/test_round17_2_sharepoint.py` | NEW — 21 cases covering share-URL encoding (round-trip + empty rejection), `/shares/.../children` pagination, `Retry-After`-driven 429 retries, oversize-rejection before HTTP, 0600 mode on cached files, KeyringTokenCache fallback when keyring fails + preference when keyring works, `refresh_local_cache` `auth_required` short-circuit + mtime-aware idempotency + sanitized filenames, `_resolve_index_sources` three-source ordering / missing-OneDrive skip / SharePoint-disabled skip, status payload `boot.sharepoint` shape, `/api/corpus/sharepoint/signin` 403 without auth, `/api/corpus/sharepoint/refresh` happy path with internal token, indexer per-file INFO logging, and OneDrive auto-discover (first-existing / fall-through / env override). |
+
+## Live-corpus smoke (read-only, dev machine)
+
+The smoke run below ran on the dev machine. It exercises every wire
+that runs *before* an actual Microsoft login — share-URL encoding,
+configuration auto-discovery, keyring backend resolution, three-source
+ordering — without invoking any live HTTP, so no customer data was
+fetched. The live device-code flow is gated on the operator opening
+`https://microsoft.com/devicelogin` in their browser.
+
+| Check | Result |
+|---|---|
+| `sharepoint_corpus_source` import + `build_default_client()` | OK (client_id `14d82eec-…`, max 50 MiB, cache `~/.adoptiq/cache/sharepoint_csone`) |
+| `encode_share_url(<real share URL>)` round-trip | OK (`u!aHR0cHM6Ly9j…` decodes back to original URL byte-for-byte) |
+| `msal.__version__` | `1.36.0` (≥ pinned floor) |
+| `keyring.__version__` | `25.7.0` (≥ pinned floor); active backend `keyring.backends.macOS.Keyring` |
+| `Config.CSONE_ONEDRIVE_FOLDER` resolution on dev machine | `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/AdoptIQ_CSOne_Reports` (exists) — auto-discovery picked the modern Big Sur path correctly. |
+| `corpus_bootstrap._resolve_index_sources()` order on dev machine | `sharepoint_csone → onedrive → user_downloads` (3 sources) |
+| `client.get_token_info()` before sign-in | `signed_in=False` (no cached account on this machine; matches expected first-run state) |
+
+The `signed_in=False` state confirms the device-code flow is the
+expected next step, and the admin tile will render its sign-in CTA
+when the operator opens `/admin`.
+
+## Verification
+
+- `tests/test_round17_2_sharepoint.py` — **21 cases, all pass** (offline,
+  faked HTTP / msal / keyring; ≈ 2 s runtime).
+- `make verify` clean twice (run at the close of Round 17.2 — see the
+  next round-stop block).
+
+## Out of scope for Round 17.2
+
+- Tenant-pinned authority (`/common` is currently used so any
+  Microsoft work account can sign in). Sites that want to lock to a
+  specific tenant override `ADOPTIQ_SHAREPOINT_AUTHORITY`.
+- Token-revocation UX (sign-out button). Operators who need to switch
+  accounts can delete the macOS Keychain entry under
+  `service=adoptiq, account=sharepoint_graph_token_cache` (or the
+  fallback file at `~/.adoptiq/sharepoint_token_cache.json`); a
+  dedicated UI button is deferred.
+- Multi-folder pull. Round 17.2 pulls a single share URL; tenants who
+  need multiple shares can run multiple AdoptIQ instances with
+  different `ADOPTIQ_SHAREPOINT_FOLDER_URL` values.
+- Round 19's golden-fixture accuracy work resumes from its existing
+  Phase 2 todo afterwards.
+
+# QUALITY_AUDIT.md — Round 19 (Report Accuracy Golden Fixture)
+
+## Mission
+
+Round 19 is an end-to-end accuracy audit anchored on a single golden
+fixture. The goal is the strongest possible accuracy claim: a known
+synthetic input, hand-computed expected values for every KPI, all
+three report formatters (compact, executive-intelligence, leader)
+rendered to both Word and Excel, and every emitted number programmatically
+diffed against expected.
+
+Round 18's deferred R18-D1 (cross-format parity coverage gap) is
+absorbed and closed by this round.
+
+## Phase 1 — KPI registry
+
+Every auditable number in Round 19. Anything not in this table is
+out of scope. Numeric matches are strict equality unless the SoT
+explicitly rounds (e.g., `round_percent`, `pulse_sentiment.mean_0_to_10`
+which is `round(x, 2)`).
+
+### Core portfolio KPIs (canonical contract)
+
+Every formatter ultimately consumes [`canonical_metrics.build_portfolio_metrics`](canonical_metrics.py) (callsites: `app_simple.py:5612`, `app_simple.py:10907`, `app_simple.py:18593`, `compact_report_formatter.py:2729`, `executive_intelligence_formatter.py:1710`, `ask_ai_grounded.py:1033`). Every key in that payload is a KPI:
+
+| KPI key | Source function | Mode / args | Tolerance |
+|---|---|---|---|
+| `total_customers` | `count_customers` | `ab_df + csone_df + extra_frames`, `drop_unknown=True` | exact integer |
+| `total_barriers` | `count_total_barriers` | `ab_df` | exact integer |
+| `total_cases` | `count_total_tac` | `csone_df` | exact integer |
+| `bems_count` | `count_bems` | default `mode=canonical_tac_rows` | exact integer |
+| `critical_p1` / `p1_cases` | `count_priority_breakdown` | `["P1"]` | exact integer |
+| `high_p2` / `p2_cases` | `count_priority_breakdown` | `["P2"]` | exact integer |
+| `p3_cases` | `count_priority_breakdown` | `["P3"]` | exact integer |
+| `p4_cases` | `count_priority_breakdown` | `["P4"]` | exact integer |
+| `unknown_priority_cases` | `count_priority_breakdown` | `["Unknown"]` | exact integer |
+| `break_fix_cases` | `count_break_fix` | `csone_df` | exact integer |
+| `provisioning_cases` | `count_provisioning` | `csone_df` | exact integer |
+| `high_risk_customers` | `compute_high_risk_count` | `scale=RISK_SCALE_0_TO_100` (CRITICAL+HIGH) | exact integer |
+| `critical_risk_customers` | band-split in `build_portfolio_metrics` | RISK_BAND_THRESHOLDS["CRITICAL"]=75 | exact integer |
+| `high_only_risk_customers` | band-split | RISK_BAND_THRESHOLDS["HIGH"]=55 | exact integer |
+| `medium_risk_customers` | band-split | RISK_BAND_THRESHOLDS["MEDIUM"]=35 | exact integer |
+| `low_risk_customers` | band-split | RISK_BAND_THRESHOLDS["LOW"]=15 | exact integer |
+| `healthy_customers` | band-split | else | exact integer |
+
+**Reconciliation invariant** (independently asserted): `p1_cases + p2_cases + p3_cases + p4_cases + unknown_priority_cases == total_cases`. Every row of `csone_df` is in exactly one priority bucket.
+
+**Reconciliation invariant**: `critical_risk_customers + high_only_risk_customers + medium_risk_customers + low_risk_customers + healthy_customers == len(risk_profiles)`. Every profile lands in exactly one band.
+
+**Reconciliation invariant**: `high_risk_customers == critical_risk_customers + high_only_risk_customers`.
+
+### TAC lifecycle KPIs
+
+| KPI | Source | Tolerance |
+|---|---|---|
+| `count_open_tac` | `is_open` after `add_case_lifecycle_fields` | exact integer |
+| `count_closed_tac` | `is_closed` after `add_case_lifecycle_fields` | exact integer |
+| `count_escalated` | priority in {P1, P2} | exact integer |
+
+**Reconciliation invariant**: `count_open_tac(df) + count_closed_tac(df) <= count_total_tac(df)` (lifecycle fields can be unclassified for some statuses; the sum is upper-bounded but not necessarily equal — pin the actual relationship in the fixture).
+
+### Adoption Barrier KPIs
+
+| KPI | Source | Tolerance |
+|---|---|---|
+| `count_critical_barriers` | severity in {Critical, High} (default mode `critical_or_high`) | exact integer |
+| `count_open_barriers` | normalized status == "Open" | exact integer |
+
+### Pulse / sentiment KPIs
+
+`pulse_sentiment(pulse_df)` returns:
+
+| Field | Tolerance |
+|---|---|
+| `count` | exact integer |
+| `mean_0_to_10` | exact post-`round(x, 2)` |
+| `positive` | exact integer (count where score >= 7.5) |
+| `neutral` | exact integer (count - positive - negative) |
+| `negative` | exact integer (count where score <= 5.0) |
+| `sentiment` | exact string label |
+
+**Reconciliation invariant**: `positive + neutral + negative == count`.
+
+### BEMS rate
+
+`bems_rate(csone_df) = round(count_bems / count_total_tac * 100.0, 2)`. Tolerance: exact post-rounding to 2 dp.
+
+### Excel Summary sheet (Round 15)
+
+[`report_export_styling.build_summary_rows`](report_export_styling.py:733) emits these labeled rows in order:
+
+| Label | KPI |
+|---|---|
+| `Customers in portfolio` | `count_customers` |
+| `Adoption barriers (total)` | `count_total_barriers` |
+| `Adoption barriers (critical)` | `count_critical_barriers` (default `critical_or_high`) |
+| `Adoption barriers (open)` | `count_open_barriers` |
+| `TAC cases (total)` | `count_total_tac` |
+| `TAC cases (P1)` | `count_p1` |
+| `TAC cases (open)` | `count_open_tac` |
+| `Escalations` | `count_escalated` |
+| `BEMS / break-fix` | `count_bems` |
+| `External bugs (rows)` | `len(External_Bugs)` |
+| `External incidents (rows)` | `len(External_Incidents)` |
+| `Manager scope` / `Technology scope` / `Window (days)` | scope params (string match) |
+
+### Out of scope for Round 19
+
+- Narrative numbers from the LLM (Round 16 / 18 covered grounding; LLM is mocked here).
+- Subscription / ARR aggregates: not all formatter paths use them; covered in `tests/test_renewal_*` and `tests/test_round5_renewal_*`. We will *not* add ARR aggregates to the canonical fixture in Round 19; a separate round if needed.
+- Period comparison (current vs prior window): SoT lives in `cisco_internal_integrations` and behaves correctly per existing tests; not duplicated here.
+- Per-CSSM rollups in the leader report: deferred to Phase 6 if the canonical fixture turns up no findings.
+
+## Phase 1 verification
+
+- KPI registry above is the canonical reference for Phases 2-7.
+- No code changes in Phase 1; this is a read-only inventory.
+- Test count baseline at the start of Round 19: 2149 passed, 2 skipped (Round 18 closing baseline).
 

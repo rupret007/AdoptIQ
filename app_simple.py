@@ -1119,6 +1119,39 @@ except Exception:
 app.config['CSONE_ONEDRIVE_FOLDER'] = Config.CSONE_ONEDRIVE_FOLDER
 app.config['CSONE_SHARED_FOLDER_URL'] = Config.CSONE_SHARED_FOLDER_URL
 
+# Round 17.2: emit a one-shot startup banner surfacing the paths we
+# resolved (active log file, corpus sources) so operators can verify
+# the install picked up the right OneDrive sync / SharePoint URL
+# without having to open the admin tile.  All log lines are bounded
+# and contain no PII.
+try:
+    _r17_2_log_file = locals().get('_log_path') or '<stderr only>'
+    logger.info(
+        "Round 17.2 / startup: log_file=%s corpus_onedrive=%s "
+        "corpus_downloads=%s sharepoint_enabled=%s sharepoint_cache=%s",
+        _r17_2_log_file,
+        Config.CSONE_ONEDRIVE_FOLDER,
+        getattr(Config, 'CSONE_USER_DOWNLOADS_DIR', '<unset>'),
+        getattr(Config, 'ADOPTIQ_SHAREPOINT_ENABLED', False),
+        getattr(Config, 'ADOPTIQ_SHAREPOINT_CACHE_DIR', '<unset>'),
+    )
+except Exception:
+    pass  # noqa: PIE790 - banner is best-effort
+
+# Round 17 / Phase B.4: kick off the encrypted CSOne knowledge corpus
+# indexer in the background when the feature flag is on.  Bootstrap
+# never raises and degrades gracefully when OneDrive is not synced --
+# downstream callers handle ``CorpusUnavailable`` from the retriever.
+try:
+    import corpus_bootstrap as _r17_corpus_bootstrap
+    if _r17_corpus_bootstrap.is_enabled():
+        _r17_corpus_bootstrap.start_background()
+except Exception as _r17_corpus_err:  # noqa: BLE001 - never block boot
+    logger.warning(
+        "Round 17 / corpus bootstrap startup failed: %s",
+        type(_r17_corpus_err).__name__,
+    )
+
 @app.context_processor
 def inject_version():
     # Round 6 / Phase 2.16: also expose the current UTC year so the
@@ -12568,6 +12601,25 @@ def run_comprehensive_analysis(analysis_id):
         status['step_start_time'] = _now_utc_iso_z()
         status['estimated_completion'] = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
         
+        # Round 17 / Phase D.2: append a Historical Context section
+        # sourced from the CSOne knowledge corpus (or a banner when
+        # the corpus is unavailable).  Never raises -- always returns
+        # a status dict that we log for diagnostics.
+        try:
+            _r17_hc_status = report_builder.add_historical_context_section(
+                customer_names=list(all_customers_comprehensive or [])[:50],
+                technology=status.get('tech'),
+            )
+            logger.info(
+                "[[ROUND17]] Historical context section status: %s",
+                _r17_hc_status,
+            )
+        except Exception as _r17_hc_err:  # noqa: BLE001 - never break the report
+            logger.warning(
+                "[[ROUND17]] Historical context section integration failed: %s",
+                type(_r17_hc_err).__name__,
+            )
+
         logger.info(f"[[DOC]] Saving main Word document with clean formatting (NO markdown symbols)...")
         docx_path = f"{base}.docx"
         report_builder.save(docx_path)
@@ -14331,6 +14383,630 @@ def ask_ai_page():
     )
 
 
+# ---------------------------------------------------------------------------
+# Round 17 / Phase D.3-D.5: CSOne Knowledge Corpus surfaces
+# ---------------------------------------------------------------------------
+#
+# These routes expose the encrypted knowledge corpus as three new
+# pages: Customer 360 (detail view), Playbook (theme/technology
+# search), and an Admin status tile / refresh action.  All three
+# follow the same defense-in-depth pattern:
+#   * input length caps + allow-list regex on every parameter
+#   * auto-escaped Jinja templates only -- no innerHTML, no |safe on
+#     user-controlled / corpus content
+#   * CSRF on POSTs, rate-limited via the existing Ask AI throttle
+#     pattern, soft fall-through when the corpus is unavailable.
+#
+# Round 17 / Phase D.3 -- Customer 360
+_CUSTOMER_NAME_ALLOWLIST = re.compile(r"^[A-Za-z0-9 .,&'\-_/()]{1,200}$")
+
+
+def _r17_corpus_enabled() -> bool:
+    """Round 17 -- helper that returns the resolved feature flag."""
+    try:
+        return bool(getattr(Config, "CORPUS_KNOWLEDGE_ENABLED", False))
+    except Exception:  # noqa: BLE001 - defensive
+        return False
+
+
+@app.route('/customer/<path:name>', methods=['GET'])
+def customer_360_page(name: str):
+    """Round 17 / Phase D.3 -- Customer 360 detail view.
+
+    Reads exclusively from the encrypted corpus retriever; never
+    touches the live Snowflake path so it is safe to render even
+    when the live data fetch is offline.  All output is server-side
+    rendered through Jinja's auto-escape; the template never
+    re-injects ``name`` or corpus text via innerHTML.
+    """
+    import unicodedata as _r17_ucd
+    from urllib.parse import unquote as _r17_unquote
+    requested_raw = _r17_unquote(name or '').strip()
+    requested_safe = _r17_ucd.normalize('NFKC', requested_raw)
+    if not requested_safe:
+        return render_template(
+            'customer_360.html',
+            requested_name='',
+            history=None,
+            sentiment_direction=None,
+            corpus_enabled=_r17_corpus_enabled(),
+            unavailable_reason='Customer name is required.',
+            validation_error=True,
+        ), 400
+    if len(requested_safe) > 200 or not _CUSTOMER_NAME_ALLOWLIST.match(requested_safe):
+        logger.info(
+            "Round 17 / customer_360_page: rejecting customer name "
+            "(len=%d) failed allow-list",
+            len(requested_safe),
+        )
+        return render_template(
+            'customer_360.html',
+            requested_name=requested_safe[:120],
+            history=None,
+            sentiment_direction=None,
+            corpus_enabled=_r17_corpus_enabled(),
+            unavailable_reason='Customer name contains disallowed characters.',
+            validation_error=True,
+        ), 400
+
+    enabled = _r17_corpus_enabled()
+    if not enabled:
+        return render_template(
+            'customer_360.html',
+            requested_name=requested_safe,
+            history=None,
+            sentiment_direction=None,
+            corpus_enabled=False,
+            unavailable_reason=None,
+        )
+
+    history = None
+    sentiment_direction = None
+    unavailable_reason: Optional[str] = None
+    try:
+        import corpus_retriever as _r17_cr
+        if not _r17_cr.is_configured():
+            unavailable_reason = (
+                'Corpus is not connected. Confirm OneDrive sync of '
+                'AdoptIQ_CSOne_Reports.'
+            )
+        else:
+            try:
+                history = _r17_cr.get_customer_history(
+                    requested_safe,
+                    limit_cases=25,
+                    limit_resolutions=8,
+                )
+                # Round 17 / Phase E: defense-in-depth -- drop any
+                # corpus rows whose free-form body matches a known
+                # prompt-injection or script payload before render.
+                # Jinja's auto-escape already neutralises HTML, this
+                # stops hostile content from being re-emitted into
+                # any downstream Ask AI prompt that picks up the
+                # rendered page.
+                try:
+                    from ai_narrative_validator import (
+                        is_corpus_chunk_safe as _r17_is_safe,
+                    )
+                except Exception:
+                    _r17_is_safe = None
+                if _r17_is_safe is not None:
+                    safe_cases = tuple(
+                        c for c in history.cases
+                        if _r17_is_safe(getattr(c, 'summary', '') or '')
+                    )
+                    safe_resolutions = tuple(
+                        r for r in history.top_resolutions
+                        if _r17_is_safe(getattr(r, 'method_text', '') or '')
+                    )
+                    # CustomerHistory is frozen; rebuild via dataclasses.replace.
+                    from dataclasses import replace as _r17_replace
+                    history = _r17_replace(
+                        history,
+                        cases=safe_cases,
+                        top_resolutions=safe_resolutions,
+                    )
+                # Compress sentiment trend into a single direction
+                # label for the badge -- mirrors the Word renderer.
+                from report_corpus_context import _sentiment_direction
+                scores = [
+                    snap.score for snap in history.sentiment_trend
+                    if snap.score is not None
+                ]
+                sentiment_direction = _sentiment_direction(scores)
+            except _r17_cr.CorpusUnavailable as miss:
+                unavailable_reason = str(miss)
+    except Exception as err:  # noqa: BLE001 - render banner instead
+        logger.warning(
+            "Round 17 / customer_360_page: retrieval failed: %s",
+            type(err).__name__,
+        )
+        unavailable_reason = 'Corpus retrieval failed; see server logs.'
+
+    return render_template(
+        'customer_360.html',
+        requested_name=requested_safe,
+        history=history,
+        sentiment_direction=sentiment_direction,
+        corpus_enabled=enabled,
+        unavailable_reason=unavailable_reason,
+    )
+
+
+# Round 17 / Phase D.4 -- Playbook
+#
+# Allowed values for the technology selector are sourced from the
+# AdoptIQ-canonical TECH_CHOICES list so we never trust raw user
+# input.  ``ALL`` is rendered as the default.
+_PLAYBOOK_TECH_CHOICES: tuple[str, ...] = (
+    "Webex Meetings & Messaging",
+    "Webex Calling",
+    "Webex Contact Center",
+    "Cisco UCCE",
+    "Cisco UCCX",
+)
+_PLAYBOOK_TECH_SET = frozenset(_PLAYBOOK_TECH_CHOICES)
+# Theme allow-list mirrors the indexer's barrier theme normalizer so
+# the UI cannot ask the corpus for something the indexer would never
+# produce.  Add to this list when the indexer learns new themes.
+_PLAYBOOK_THEME_CHOICES: tuple[str, ...] = (
+    "general",
+    "configuration",
+    "connectivity",
+    "performance",
+    "feature_gap",
+    "training",
+    "user_adoption",
+    "billing",
+    "integration",
+    "outage",
+    "audio_quality",
+    "video_quality",
+)
+_PLAYBOOK_THEME_SET = frozenset(_PLAYBOOK_THEME_CHOICES)
+_PLAYBOOK_QUERY_PATTERN = re.compile(r"^[A-Za-z0-9 .,&'\-_/()?!]{0,200}$")
+
+
+@app.route('/playbook', methods=['GET', 'POST'])
+def playbook_page():
+    """Round 17 / Phase D.4 -- Troubleshooting playbook page.
+
+    GET  renders the form (technology / theme / free-text query).
+    POST runs the corpus retriever and re-renders the same template
+         with results.  CSRF is enforced via ``flask_wtf``'s app-wide
+         ``CSRFProtect`` (already wired in app startup); the same
+         sliding-window throttle used by Ask AI gates the POST.
+
+    All output is server-side rendered with Jinja auto-escape; the
+    template never injects corpus content via innerHTML.
+    """
+    enabled = _r17_corpus_enabled()
+
+    selected_tech = ''
+    selected_theme = ''
+    query_text = ''
+    themes: list = []
+    resolutions: list = []
+    chunks: list = []
+    unavailable_reason: Optional[str] = None
+    validation_error: Optional[str] = None
+
+    if request.method == 'POST':
+        # Round 17 / Phase D.4: explicit CSRF validation because the
+        # app does not register a global ``CSRFProtect`` (it relies
+        # on per-route validation).  Mirrors the pattern in
+        # ``ask_ai_portfolio``.
+        if app.config.get('WTF_CSRF_ENABLED', True):
+            try:
+                validate_csrf(
+                    request.headers.get('X-CSRFToken')
+                    or request.headers.get('X-CSRF-Token')
+                    or request.form.get('csrf_token')
+                )
+            except Exception:
+                logger.info(
+                    "Round 17 / playbook_page: CSRF validation failed"
+                )
+                return render_template(
+                    'playbook.html',
+                    tech_choices=_PLAYBOOK_TECH_CHOICES,
+                    theme_choices=_PLAYBOOK_THEME_CHOICES,
+                    selected_tech='',
+                    selected_theme='',
+                    query_text='',
+                    themes=[],
+                    resolutions=[],
+                    chunks=[],
+                    corpus_enabled=enabled,
+                    unavailable_reason=None,
+                    validation_error='CSRF validation failed; refresh the page and try again.',
+                ), 403
+
+        # Reuse the Ask AI sliding-window throttle so the corpus
+        # surfaces share one rate budget.  Returns (payload, status)
+        # when over the limit.
+        _throttle = _check_ask_ai_throttle()
+        if _throttle is not None:
+            return render_template(
+                'playbook.html',
+                tech_choices=_PLAYBOOK_TECH_CHOICES,
+                theme_choices=_PLAYBOOK_THEME_CHOICES,
+                selected_tech='',
+                selected_theme='',
+                query_text='',
+                themes=[],
+                resolutions=[],
+                chunks=[],
+                corpus_enabled=enabled,
+                unavailable_reason=str(_throttle[0].get('error') or 'Rate limit exceeded.'),
+                validation_error=None,
+            ), 429
+
+        # Pull + sanitize selectors -- enums are strict allow-lists.
+        raw_tech = (request.form.get('technology') or '').strip()
+        raw_theme = (request.form.get('theme') or '').strip()
+        raw_query = (request.form.get('query') or '').strip()
+
+        if raw_tech and raw_tech not in _PLAYBOOK_TECH_SET:
+            validation_error = 'Unsupported technology selection.'
+        elif raw_theme and raw_theme not in _PLAYBOOK_THEME_SET:
+            validation_error = 'Unsupported theme selection.'
+        elif raw_query and not _PLAYBOOK_QUERY_PATTERN.match(raw_query):
+            validation_error = 'Search query contains disallowed characters.'
+
+        if validation_error is None:
+            selected_tech = raw_tech
+            selected_theme = raw_theme
+            query_text = raw_query
+
+            if not enabled:
+                unavailable_reason = (
+                    'Corpus knowledge is disabled '
+                    '(set CORPUS_KNOWLEDGE_ENABLED=true to enable).'
+                )
+            else:
+                try:
+                    import corpus_retriever as _r17_cr
+                    if not _r17_cr.is_configured():
+                        unavailable_reason = (
+                            'Corpus is not connected. Confirm OneDrive '
+                            'sync of AdoptIQ_CSOne_Reports.'
+                        )
+                    else:
+                        try:
+                            themes = list(_r17_cr.get_recurring_themes(
+                                selected_tech or None,
+                                top_k=12,
+                            ))
+                            if selected_theme:
+                                resolutions = list(_r17_cr.get_resolutions_for(
+                                    selected_theme,
+                                    selected_tech or None,
+                                    limit=8,
+                                ))
+                            if query_text:
+                                _raw_chunks = list(_r17_cr.search_playbook(
+                                    query_text,
+                                    technology=selected_tech or None,
+                                    theme=selected_theme or None,
+                                    top_k=8,
+                                ))
+                                # Round 17 / Phase E: defense-in-depth.
+                                # Jinja auto-escapes the chunk text on
+                                # render, but we still drop chunks
+                                # whose body matches a prompt-injection
+                                # / script payload pattern so a hostile
+                                # corpus entry cannot influence
+                                # downstream Ask AI prompts that
+                                # re-use these results.
+                                try:
+                                    from ai_narrative_validator import (
+                                        is_corpus_chunk_safe as _r17_is_safe,
+                                    )
+                                except Exception:
+                                    _r17_is_safe = None
+                                if _r17_is_safe is None:
+                                    chunks = _raw_chunks
+                                else:
+                                    chunks = [
+                                        c for c in _raw_chunks
+                                        if _r17_is_safe(getattr(c, 'text', '') or '')
+                                    ]
+                        except _r17_cr.CorpusUnavailable as miss:
+                            unavailable_reason = str(miss)
+                except Exception as err:  # noqa: BLE001 - surface banner
+                    logger.warning(
+                        "Round 17 / playbook_page: retrieval failed: %s",
+                        type(err).__name__,
+                    )
+                    unavailable_reason = 'Corpus retrieval failed; see server logs.'
+
+    return render_template(
+        'playbook.html',
+        tech_choices=_PLAYBOOK_TECH_CHOICES,
+        theme_choices=_PLAYBOOK_THEME_CHOICES,
+        selected_tech=selected_tech,
+        selected_theme=selected_theme,
+        query_text=query_text,
+        themes=themes,
+        resolutions=resolutions,
+        chunks=chunks,
+        corpus_enabled=enabled,
+        unavailable_reason=unavailable_reason,
+        validation_error=validation_error,
+    )
+
+
+# Round 17 / Phase D.5 -- Admin Corpus tile endpoints
+#
+# ``/api/corpus/status`` is a read-only GET surface the admin tile
+# polls.  It is intentionally local-network-only (Flask app already
+# binds to 127.0.0.1 by default) and never logs customer names.
+# ``/api/corpus/refresh`` is a CSRF-protected POST that requests a
+# background re-index pass; it returns immediately so the admin
+# console does not block.
+
+
+def _r17_corpus_status_payload() -> Dict[str, Any]:
+    """Round 17 / Phase D.5 -- assemble the corpus tile payload.
+
+    Combines :class:`corpus_bootstrap.CorpusBootState` (thread / file
+    progress) with :class:`corpus_retriever.CorpusSnapshot` (DB
+    contents) so the admin tile can render both in one shot.  Never
+    raises; degraded fields fall back to safe defaults.
+    """
+    payload: Dict[str, Any] = {
+        "ok": True,
+        "enabled": False,
+        "available": False,
+        "reason": None,
+        "boot": {
+            "started": False,
+            "in_progress": False,
+            "completed": False,
+            "last_started_at": None,
+            "last_finished_at": None,
+            "last_error": None,
+            "last_error_kind": None,
+            "last_stats": None,
+            "last_sources": None,
+            "encrypted_path": None,
+            "onedrive_root": None,
+            # Round 17.2: SharePoint pull state.  ``None`` when the
+            # feature is disabled or has not been invoked yet; a
+            # serializable dict otherwise (see
+            # :func:`corpus_bootstrap._refresh_sharepoint_cache_for_bootstrap`).
+            "sharepoint": None,
+        },
+        "corpus": {
+            "files_total": 0,
+            "files_parsed": 0,
+            "customers": 0,
+            "cases": 0,
+            "chunks": 0,
+            "schema_version": 0,
+            "last_parsed_at": None,
+            "indexed_at": None,
+            "sources": None,
+        },
+    }
+    try:
+        import corpus_bootstrap as _r17_cb
+        payload["enabled"] = bool(_r17_cb.is_enabled())
+        boot_state = _r17_cb.get_state()
+        payload["boot"] = {
+            "started": bool(boot_state.started),
+            "in_progress": bool(boot_state.in_progress),
+            "completed": bool(boot_state.completed),
+            "last_started_at": boot_state.last_started_at,
+            "last_finished_at": boot_state.last_finished_at,
+            "last_error": boot_state.last_error,
+            "last_error_kind": boot_state.last_error_kind,
+            "last_stats": boot_state.last_stats,
+            "last_sources": boot_state.last_sources,
+            "encrypted_path": boot_state.encrypted_path,
+            "onedrive_root": boot_state.onedrive_root,
+            "sharepoint": boot_state.sharepoint,
+        }
+        # Round 17.1: also surface per-source counts under
+        # ``corpus.sources`` so the admin Corpus tile can render the
+        # OneDrive vs Downloads breakdown without reaching into the
+        # bootstrap state.
+        payload["corpus"]["sources"] = boot_state.last_sources
+    except Exception as err:  # noqa: BLE001 - admin tile must always render
+        payload["boot"]["last_error"] = type(err).__name__
+        payload["boot"]["last_error_kind"] = "bootstrap_import"
+
+    try:
+        import corpus_retriever as _r17_cr
+        snap = _r17_cr.get_status()
+        payload["available"] = bool(snap.available)
+        payload["reason"] = snap.reason
+        # Round 17.1: keep the per-source breakdown that was placed
+        # on ``corpus`` by the bootstrap path above.
+        existing_sources = payload.get("corpus", {}).get("sources")
+        payload["corpus"] = {
+            "files_total": int(snap.files_total),
+            "files_parsed": int(snap.files_parsed),
+            "customers": int(snap.customers),
+            "cases": int(snap.cases),
+            "chunks": int(snap.chunks),
+            "schema_version": int(snap.schema_version),
+            "last_parsed_at": snap.last_parsed_at,
+            "indexed_at": snap.indexed_at,
+            "sources": existing_sources,
+        }
+    except Exception as err:  # noqa: BLE001 - admin tile must always render
+        payload["available"] = False
+        payload["reason"] = type(err).__name__
+
+    return payload
+
+
+@app.route('/api/corpus/status', methods=['GET'])
+def api_corpus_status():
+    """Round 17 / Phase D.5 -- read-only status payload for the admin
+    Corpus tile.  Returns 200 even when the corpus is unavailable so
+    the tile can render the banner; the JSON body always carries the
+    machine-readable state."""
+    return jsonify(_r17_corpus_status_payload()), 200
+
+
+@app.route('/api/corpus/refresh', methods=['POST'])
+def api_corpus_refresh():
+    """Round 17 / Phase D.5 -- request a background re-index pass.
+
+    Auth: either a valid Flask-WTF CSRF token (browser path) **or**
+    a matching ``X-AdoptIQ-Internal`` header containing
+    ``ADOPTIQ_INTERNAL_TOKEN`` (admin-app proxy path).  The internal
+    path is opt-in: when ``ADOPTIQ_INTERNAL_TOKEN`` is unset the
+    fallback is rejected.  Never blocks the request; returns the
+    same payload shape as ``/api/corpus/status`` plus a
+    ``refresh_started`` boolean.
+    """
+    authorized = False
+    # Path 1: server-to-server internal token.
+    _internal_expected = os.environ.get('ADOPTIQ_INTERNAL_TOKEN', '')
+    _internal_provided = request.headers.get('X-AdoptIQ-Internal', '')
+    if (
+        _internal_expected
+        and _internal_provided
+        and secrets.compare_digest(str(_internal_expected), str(_internal_provided))
+    ):
+        authorized = True
+
+    # Path 2: browser CSRF token (only checked when WTF_CSRF_ENABLED).
+    if not authorized and app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(
+                request.headers.get('X-CSRFToken')
+                or request.headers.get('X-CSRF-Token')
+                or request.form.get('csrf_token')
+            )
+            authorized = True
+        except Exception:
+            authorized = False
+    elif not authorized and not app.config.get('WTF_CSRF_ENABLED', True):
+        # CSRF is globally disabled (test mode / dev only).
+        authorized = True
+
+    if not authorized:
+        return jsonify({
+            'ok': False,
+            'error': 'CSRF validation failed',
+        }), 403
+
+    rebuild = bool(request.form.get('rebuild') or request.args.get('rebuild'))
+    refresh_started = False
+    refresh_error: Optional[str] = None
+    try:
+        import corpus_bootstrap as _r17_cb
+        if not _r17_cb.is_enabled():
+            refresh_error = 'CORPUS_KNOWLEDGE_ENABLED is false'
+        else:
+            refresh_started = bool(_r17_cb.request_refresh(rebuild=rebuild))
+    except Exception as err:  # noqa: BLE001 - never bubble; log and report
+        logger.warning(
+            "Round 17 / api_corpus_refresh failed: %s",
+            type(err).__name__,
+        )
+        refresh_error = type(err).__name__
+
+    payload = _r17_corpus_status_payload()
+    payload['refresh_started'] = refresh_started
+    if refresh_error:
+        payload['refresh_error'] = refresh_error
+    return jsonify(payload), 200
+
+
+def _r17_2_authorize_corpus_admin() -> Optional[Tuple[Dict[str, Any], int]]:
+    """Round 17.2: shared CSRF / internal-token check used by the
+    SharePoint endpoints.  Returns ``None`` when the request is
+    authorized; a (body, status) pair to be returned to the client
+    otherwise.  Mirrors the logic in :func:`api_corpus_refresh`.
+    """
+    authorized = False
+    _internal_expected = os.environ.get('ADOPTIQ_INTERNAL_TOKEN', '')
+    _internal_provided = request.headers.get('X-AdoptIQ-Internal', '')
+    if (
+        _internal_expected
+        and _internal_provided
+        and secrets.compare_digest(str(_internal_expected), str(_internal_provided))
+    ):
+        authorized = True
+    if not authorized and app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(
+                request.headers.get('X-CSRFToken')
+                or request.headers.get('X-CSRF-Token')
+                or request.form.get('csrf_token')
+            )
+            authorized = True
+        except Exception:
+            authorized = False
+    elif not authorized and not app.config.get('WTF_CSRF_ENABLED', True):
+        authorized = True
+    if not authorized:
+        return ({'ok': False, 'error': 'CSRF validation failed'}, 403)
+    return None
+
+
+@app.route('/api/corpus/sharepoint/signin', methods=['POST'])
+def api_corpus_sharepoint_signin():
+    """Round 17.2: kick off a Microsoft Graph device-code sign-in for
+    the SharePoint corpus pull.  Returns the user-displayable code +
+    verification URI so the admin tile can render the prompt.  The
+    completion of the flow is handled on a worker thread inside
+    :func:`corpus_bootstrap.begin_sharepoint_signin` -- this endpoint
+    returns immediately so the admin UI is never blocked.
+    """
+    auth_err = _r17_2_authorize_corpus_admin()
+    if auth_err is not None:
+        body, status = auth_err
+        return jsonify(body), status
+    try:
+        import corpus_bootstrap as _r17_cb
+        result = _r17_cb.begin_sharepoint_signin()
+    except Exception as err:  # noqa: BLE001 - never bubble
+        logger.warning(
+            "Round 17.2 / sharepoint signin endpoint failed: %s",
+            type(err).__name__,
+        )
+        return jsonify({'ok': False, 'error': type(err).__name__}), 200
+    return jsonify(result), 200
+
+
+@app.route('/api/corpus/sharepoint/refresh', methods=['POST'])
+def api_corpus_sharepoint_refresh():
+    """Round 17.2: trigger an incremental SharePoint cache refresh +
+    corpus re-index.  Equivalent to ``/api/corpus/refresh`` but
+    documented separately so the admin tile can label the button
+    accurately ("Refresh SharePoint corpus")."""
+    auth_err = _r17_2_authorize_corpus_admin()
+    if auth_err is not None:
+        body, status = auth_err
+        return jsonify(body), status
+    refresh_started = False
+    refresh_error: Optional[str] = None
+    try:
+        import corpus_bootstrap as _r17_cb
+        if not _r17_cb.is_enabled():
+            refresh_error = 'CORPUS_KNOWLEDGE_ENABLED is false'
+        else:
+            refresh_started = bool(_r17_cb.request_sharepoint_refresh())
+    except Exception as err:  # noqa: BLE001
+        logger.warning(
+            "Round 17.2 / sharepoint refresh endpoint failed: %s",
+            type(err).__name__,
+        )
+        refresh_error = type(err).__name__
+    payload = _r17_corpus_status_payload()
+    payload['refresh_started'] = refresh_started
+    if refresh_error:
+        payload['refresh_error'] = refresh_error
+    return jsonify(payload), 200
+
+
 @app.route('/api/ask-ai-portfolio', methods=['POST'])
 def ask_ai_portfolio():
     """Advanced AI assistant: fetches live Snowflake data, historical context,
@@ -14380,6 +15056,8 @@ def ask_ai_portfolio():
                     'account_total': grounded_result.get('account_total'),
                     'partial_data_warnings': grounded_result.get('partial_data_warnings') or [],
                     'canonical_headline': grounded_result.get('canonical_headline') or {},
+                    # Round 17 / Phase D.1: surface corpus availability to the UI.
+                    'corpus': grounded_result.get('corpus') or {},
                 })
             # Phase 2.4: only fall back to the legacy ungrounded LLM when
             # the caller explicitly opts in (request flag or env var).
@@ -18897,6 +19575,20 @@ def _shutdown_handler():
 
 
 atexit.register(_shutdown_handler)
+
+
+# Round 17 / Phase B.4: gracefully shut down the corpus bootstrap so
+# the in-memory plaintext temp file is scrubbed before the process
+# exits.  The hook is best-effort and never raises.
+def _r17_corpus_shutdown() -> None:
+    try:
+        import corpus_bootstrap as _r17_cb_shutdown
+        _r17_cb_shutdown.stop()
+    except Exception:  # noqa: BLE001 - shutdown path
+        pass
+
+
+atexit.register(_r17_corpus_shutdown)
 
 
 if __name__ == '__main__':

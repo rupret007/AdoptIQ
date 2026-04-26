@@ -247,7 +247,15 @@ def test_phase_3_4_placeholder_constant_is_user_facing():
 
 
 def test_phase_3_4_module_public_api_surface():
-    """The module's __all__ must expose the documented symbols."""
+    """The module's __all__ must expose the documented symbols.
+
+    Round 17 / Phase E extends this surface with
+    ``is_corpus_chunk_safe`` so the Customer 360 + Playbook routes
+    (and the report pre-fill helper) can run the same hostile-
+    content filter that Round 16 introduced for narrative
+    validation.  Update both ``__all__`` and this expected set
+    when adding new public symbols.
+    """
     expected = {
         "GROUNDING_FAILURE_PLACEHOLDER",
         "ValidationResult",
@@ -255,6 +263,7 @@ def test_phase_3_4_module_public_api_surface():
         "validate_narrative",
         "validate_no_html_injection",
         "validate_no_invented_entities",
+        "is_corpus_chunk_safe",  # Round 17 / Phase E.
     }
     assert set(anv.__all__) == expected
 

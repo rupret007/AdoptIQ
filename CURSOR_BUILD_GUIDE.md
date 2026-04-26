@@ -2,6 +2,8 @@
 
 Use this guide when building AdoptIQ for Windows on a PC. The build must run on Windows because PyInstaller produces platform-specific executables.
 
+> **Before you build:** run `make verify` (or on Windows, `python -m pytest -q && python -m ruff check .` plus `bandit -r . -ll` and `pip-audit -r requirements.txt`). The audit baseline is 1949 passed / 2 skipped, ruff clean, no HIGH/MED bandit findings.
+
 ---
 
 ## Prerequisites
