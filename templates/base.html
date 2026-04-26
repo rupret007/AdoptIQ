@@ -54,7 +54,22 @@
     <!-- Custom CSS -->
     <style>
         :root {
-            /* Cisco Official Color Palette */
+            /* Cisco Official Color Palette
+             *
+             * Round 13 / Phase 5.9: the historical
+             * ``--cisco-success`` / ``--cisco-warning`` /
+             * ``--cisco-danger`` tokens are intentionally distinct
+             * from the matplotlib / Excel risk-band palette in
+             * ``canonical_metrics.RISK_BAND_COLORS``: they are
+             * Cisco *brand* greens / oranges / reds tuned for the
+             * site chrome, while the chart palette is the colour-
+             * blind-aware data-viz palette.  We keep both sets of
+             * tokens so a future brand-refresh of the chrome does
+             * NOT silently change chart colours, and we expose the
+             * canonical risk-band hexes as ``--risk-*`` so risk-
+             * coded UI elements (button-danger / badge-danger /
+             * etc.) can opt in to the chart palette explicitly.
+             */
             --cisco-blue: #00bceb;
             --cisco-dark-blue: #003da5;
             --cisco-navy: #1a365d;
@@ -63,6 +78,18 @@
             --cisco-success: #00a651;
             --cisco-warning: #ff8c00;
             --cisco-danger: #e31c3d;
+            /*
+             * Round 13 / Phase 5.9: canonical risk-band data-viz
+             * tokens, mirrored from
+             * ``canonical_metrics.RISK_BAND_COLORS``.  Update both
+             * sides together if the canonical palette changes.
+             */
+            --risk-critical: #d62728;
+            --risk-high: #ff7f0e;
+            --risk-medium: #ffd700;
+            --risk-low: #2ca02c;
+            --risk-healthy: #28B463;
+            --risk-unknown: #7f7f7f;
             --cisco-gray-100: #f8f9fa;
             --cisco-gray-200: #e9ecef;
             --cisco-gray-300: #dee2e6;

@@ -617,6 +617,19 @@ def run_connectivity_diagnostics(secrets: Dict[str, str]) -> Dict[str, Any]:
         )
         public_checks.append(chk_copy)
 
+    # Round 13 / Phase 10.1: previously this response had no
+    # timestamp, so a UI / admin client cached connectivity output had
+    # no way to tell whether the result was 5 seconds old or 5 hours
+    # old.  Stamp a UTC ISO-Z timestamp at response-build time so
+    # consumers can render "as of HH:MM:SS UTC" labels and reject
+    # stale cached payloads.  Use ``timezone.utc`` explicitly so the
+    # value is reproducible across operators in different host
+    # timezones.
+    try:
+        from datetime import datetime as _r13_dt, timezone as _r13_tz
+        _r13_diag_at = _r13_dt.now(_r13_tz.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    except Exception:
+        _r13_diag_at = ''
     return {
         "ok": ok,
         "checks": public_checks,
@@ -629,6 +642,9 @@ def run_connectivity_diagnostics(secrets: Dict[str, str]) -> Dict[str, Any]:
         "keeper_host": "<redacted>",
         "namespace": "<redacted>",
         "secret_path": "<redacted>",
+        # Round 13 / Phase 10.1: see comment above; UTC ISO-Z marker
+        # so admin/diag UI can disclose freshness.
+        "diagnostics_at_utc": _r13_diag_at,
     }
 
 

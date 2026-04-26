@@ -136,8 +136,33 @@ class _ThemeColors:
     CISCO_BLUE_RGB = (0x00, 0x7B, 0xC7)
     CISCO_GRAY_HEX = '58595B'
     CISCO_GRAY_RGB = (0x58, 0x59, 0x5B)
-    CRIMSON_HEX = 'DC143C'
-    CRIMSON_RGB = (220, 20, 60)
+    # Round 13 / Phase 5.5: ``CRIMSON_HEX`` was historically the W3C
+    # named-colour ``crimson`` (``#DC143C`` / RGB(220,20,60)), which
+    # is NOT the canonical CRITICAL hex used by every matplotlib
+    # chart, Excel band fill, and (after Round 13 Phase 5.1)
+    # leader-report BEMS heading: ``RISK_BAND_COLORS["CRITICAL"]``
+    # is ``#d62728`` / RGB(214,39,40).  Rendering Critical-P1 and
+    # BEMS counts in compact-Word in ``crimson`` while the chart
+    # pages and EI Word output rendered the same semantic in
+    # ``#d62728`` made the two reds look subtly different on the
+    # same page (notably distracting on tone-matched displays).
+    # Resolve the constant from ``canonical_metrics`` at import-time
+    # so any future palette tweak lands in exactly one place; fall
+    # back to the canonical hex as RGB if the import fails.
+    try:
+        from canonical_metrics import RISK_BAND_COLORS as _R13_CRF_RBC
+        _r13_crit_hex = (_R13_CRF_RBC.get('CRITICAL', '#d62728') or '#d62728').lstrip('#').upper()
+        if len(_r13_crit_hex) != 6:
+            _r13_crit_hex = 'D62728'
+        CRIMSON_HEX = _r13_crit_hex
+        CRIMSON_RGB = (
+            int(_r13_crit_hex[0:2], 16),
+            int(_r13_crit_hex[2:4], 16),
+            int(_r13_crit_hex[4:6], 16),
+        )
+    except Exception:
+        CRIMSON_HEX = 'D62728'
+        CRIMSON_RGB = (0xD6, 0x27, 0x28)
     WHITE_HEX = 'FFFFFF'
     WHITE_RGB = (255, 255, 255)
 
@@ -774,7 +799,21 @@ class CompactReportFormatter:
             # Red customers (Critical/High Risk) - FIXED: Show ALL red customers
             if red_customers:
                 self.doc.add_heading('🔴 RED - Critical/High Risk Customers', level=2)
-                sorted_red = sorted(red_customers.items(), key=lambda x: x[1].get('score', 0) if isinstance(x[1], dict) else 0, reverse=True)
+                # Round 13 / Phase 6.7: previously this sort had no
+                # secondary tie-break, so customers with the same
+                # risk score appeared in input-dict order which is
+                # not stable across runs (especially when the
+                # upstream renewal analyzer is fed in worker-pool
+                # completion order).  Add a deterministic
+                # case-insensitive secondary key on customer name so
+                # ties break alphabetically.
+                sorted_red = sorted(
+                    red_customers.items(),
+                    key=lambda x: (
+                        -(x[1].get('score', 0) if isinstance(x[1], dict) else 0),
+                        str(x[0] or '').casefold(),
+                    ),
+                )
                 
                 for customer_name, risk_info in sorted_red:  # Show ALL red customers
                     self._add_customer_risk_section(customer_name, risk_info, ab_data, csone_data, 'Red')
@@ -1689,7 +1728,23 @@ class CompactReportFormatter:
             overview_p.add_run(f'• Total Adoption Barriers: {len(ab_data)}\n')
             
             if 'customer_name' in ab_data.columns:
-                n_cust = ab_data['customer_name'].nunique()
+                # Round 13 / Phase 3.13: count customers against the
+                # canonical normalized name so cosmetic spelling drift
+                # (NBSPs, casing, trailing punctuation) does not inflate
+                # the "Customers with Barriers" tile relative to the
+                # rolled-up Voice-of-Customer narrative below (which
+                # iterates per-customer).  Without this fix the tile
+                # said e.g. "12 customers" while the narrative bullet
+                # list contained 11 distinct accounts.
+                try:
+                    from data_normalization import normalize_customer_name as _r13_norm_cust_voc
+                except Exception:
+                    _r13_norm_cust_voc = lambda v: v  # noqa: E731
+                _cust_norm_series = (
+                    ab_data['customer_name'].fillna('').apply(_r13_norm_cust_voc)
+                )
+                _cust_norm_series = _cust_norm_series[_cust_norm_series.astype(str) != '']
+                n_cust = int(_cust_norm_series.nunique())
                 overview_p.add_run(f'• Customers with Barriers: {n_cust}\n')
                 avg_per_customer = len(ab_data) / n_cust if n_cust > 0 else 0
                 overview_p.add_run(f'• Average Barriers per Customer: {avg_per_customer:.1f}\n')

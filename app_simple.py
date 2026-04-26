@@ -678,6 +678,28 @@ _SENSITIVE_ENDPOINTS = {
     'search_related_vulnerabilities',
 }
 
+# Round 13 / Phase 4.1: UI shells (``index``, ``help``, etc.) are
+# intentionally NOT in ``_SENSITIVE_ENDPOINTS`` (they need to be
+# reachable for public UI rendering and we don't want to gate them on
+# localhost), but they still embed sensitive customer-facing context
+# in server-side rendered Jinja (manager rosters in ``index``, latest
+# state in ``progress``, etc.).  Without ``Cache-Control: no-store`` a
+# browser-disk or HTTP-intermediary cache could persist those rendered
+# HTML shells and serve them to a different user on the same machine.
+# Set the cache-control posture for these shells so the response body
+# is not stored, while still allowing the route to be served to
+# non-loopback clients.
+_UI_SHELL_NOSTORE_ENDPOINTS = {
+    'index',
+    'help',
+    'ask_ai_page',
+    'external_intelligence',
+    'leader_report_form',
+    'bst_psirt_search',
+    'history',
+    'progress',
+}
+
 _ANALYSIS_ID_RE = re.compile(r'^[A-Za-z0-9._-]{1,200}$')
 
 
@@ -710,6 +732,42 @@ def _id_digest(value: Any, length: int = 12) -> str:
         return _h.sha256(str(value).encode("utf-8", errors="replace")).hexdigest()[: max(4, length)]
     except Exception:
         return "unavailable"
+
+
+def _redact_partial_warning_error(value: Any) -> str:
+    """Round 13 / Phase 4.5: scrub UI-bound partial_data_warnings.error.
+
+    Many ``partial_data_warnings.append({..., 'error': str(e), ...})``
+    sites ship a raw ``str(e)`` straight to the UI banner.  When ``e``
+    is something like a ``requests`` exception, that text often
+    contains the failing URL, internal Cisco hostname, Snowflake
+    account, or filesystem path.  Reuse ``error_classifier._detail_tail``
+    to strip URLs / hosts / paths and cap the length so the banner
+    stays informative without leaking infrastructure topology.
+
+    Best-effort: if ``error_classifier`` is unavailable for any reason
+    we fall back to the raw string truncated to 240 chars.
+    """
+    if value is None:
+        return ""
+    try:
+        if isinstance(value, BaseException):
+            try:
+                from error_classifier import _detail_tail as _r13_pdw_tail
+                return _r13_pdw_tail(value)
+            except Exception:
+                value = f"{type(value).__name__}: {value}"
+        text = str(value)
+        try:
+            from error_classifier import _detail_tail as _r13_pdw_tail
+            class _ShimErr(Exception):
+                pass
+            shim = _ShimErr(text)
+            return _r13_pdw_tail(shim).removeprefix("_ShimErr: ").removeprefix("ShimErr: ")
+        except Exception:
+            return text[:240]
+    except Exception:
+        return "<error-redacted>"
 
 
 def _redact_form_data(data: Any) -> Dict[str, Any]:
@@ -788,6 +846,16 @@ def add_security_headers_for_sensitive_routes(response):
         endpoint = request.endpoint or ''
     except Exception:
         endpoint = ''
+    # Round 13 / Phase 4.1: stamp ``Cache-Control: no-store`` on the
+    # UI shell endpoints too, even though they are not localhost-gated.
+    # The HTML they emit still embeds manager rosters / customer state,
+    # so we don't want a downstream browser/proxy cache persisting it.
+    if endpoint in _UI_SHELL_NOSTORE_ENDPOINTS and endpoint not in _SENSITIVE_ENDPOINTS:
+        try:
+            response.headers['Cache-Control'] = 'no-store'
+            response.headers['Pragma'] = 'no-cache'
+        except Exception:
+            pass
     if endpoint in _SENSITIVE_ENDPOINTS:
         try:
             response.headers['Cache-Control'] = 'no-store'
@@ -864,6 +932,24 @@ def add_security_headers_for_sensitive_routes(response):
                 if isinstance(body, dict):
                     has_ok = 'ok' in body
                     has_success = 'success' in body
+                    has_error = 'error' in body
+                    # Round 13 / Phase 4.9: broaden the shim so an
+                    # error-only JSON body (e.g. ``{"error": "..."}``)
+                    # also gets a stable ``ok: false`` / ``success:
+                    # false`` pair stamped on it.  Previously the shim
+                    # only fired when one of the two keys was already
+                    # present, which left CSRF / 4xx / 5xx error
+                    # bodies inconsistent for clients that grep for
+                    # either key.  HTTP status >= 400 is the safety
+                    # gate so we never flip a legitimate 2xx
+                    # ``error`` field (a non-fatal warning string)
+                    # into ``ok=false``.
+                    needs_error_only_stamp = (
+                        not has_ok
+                        and not has_success
+                        and has_error
+                        and getattr(response, 'status_code', 200) >= 400
+                    )
                     if has_ok ^ has_success:
                         if has_ok and not has_success:
                             body['success'] = bool(body.get('ok'))
@@ -874,9 +960,18 @@ def add_security_headers_for_sensitive_routes(response):
                             response.headers['Content-Length'] = str(len(response.get_data()))
                         except Exception:
                             pass
+                    elif needs_error_only_stamp:
+                        body['ok'] = False
+                        body['success'] = False
+                        response.set_data(_r12_json.dumps(body))
+                        try:
+                            response.headers['Content-Length'] = str(len(response.get_data()))
+                        except Exception:
+                            pass
     except Exception:
-        # Round 12 / Phase 11.3: never let the compatibility shim
-        # crash a response -- it is purely additive.
+        # Round 12 / Phase 11.3 + Round 13 / Phase 4.9: never let the
+        # compatibility shim crash a response -- it is purely
+        # additive.
         pass
 
     return response
@@ -1046,6 +1141,151 @@ analysis_status = {}
 cancellation_flags = {}  # Track cancellation requests
 analysis_status_lock = RLock()  # Thread safety for analysis_status (re-entrant for save helpers)
 cancellation_flags_lock = Lock()  # Thread safety for cancellation_flags
+
+
+# Round 13 / Phase 11.4: TTL-based eviction for ``analysis_status``.
+# Previously this dict only ever grew: a successful run wrote the
+# completed status, a crashed run wrote an error status, and the
+# only path that ever removed an entry was the explicit
+# ``DELETE /admin/analyses/<id>`` admin call.  A long-running
+# server therefore accumulated thousands of historical records,
+# inflating every ``/api/status/all`` poll, and once the
+# pickled ``analysis_status.json`` crossed ~5MB the on-disk
+# round-trip itself became a noticeable hot path.  Apply a
+# defensive TTL: any *terminal* status (``completed`` or
+# ``error``) older than ``ADOPTIQ_STATUS_TTL_HOURS`` (default
+# 168 = 7 days) is dropped on the next eviction sweep.  Active
+# (``processing`` / ``starting``) entries are *never* evicted by
+# TTL -- they survive until they themselves move to a terminal
+# state.  Eviction only runs lazily (on next mutation) so a quiet
+# process does not pay the sweep cost.
+_ANALYSIS_STATUS_TTL_HOURS = max(
+    1, int(os.environ.get("ADOPTIQ_STATUS_TTL_HOURS", "168"))
+)
+_ANALYSIS_STATUS_LAST_SWEEP: List[float] = [0.0]
+_ANALYSIS_STATUS_SWEEP_INTERVAL_SECONDS = 600.0  # 10 minutes
+
+
+def _r13_unique_upload_filename(uuid_module, raw_name: str, file_obj) -> str:
+    """Round 13 / Phase 11.7: deterministic-in-test-mode upload prefix.
+
+    Previously every upload prepended ``uuid.uuid4().hex[:8]_`` so
+    a test could not assert against the saved filename without
+    monkeypatching ``uuid.uuid4``.  Under
+    ``ADOPTIQ_TEST_MODE`` (or when running under pytest), derive
+    the prefix from a SHA-256 of the file content (first 8 hex
+    chars) so two test runs against the same upload produce the
+    same filename.  Production behavior is unchanged: a random
+    ``uuid4`` prefix is still used so concurrent uploads of the
+    same content cannot collide on a real deployment.
+    """
+    try:
+        _r13_test_mode = bool(
+            os.environ.get("ADOPTIQ_TEST_MODE")
+            or os.environ.get("PYTEST_CURRENT_TEST")
+        )
+    except Exception:
+        _r13_test_mode = False
+    if not _r13_test_mode:
+        return f"{uuid_module.uuid4().hex[:8]}_{raw_name}"
+    # Test mode: hash the file body for determinism.  Reset the
+    # stream position so the subsequent ``file.save(filepath)``
+    # still writes the full body.
+    try:
+        import hashlib as _hashlib
+        try:
+            file_obj.stream.seek(0)
+        except Exception:
+            try:
+                file_obj.seek(0)
+            except Exception:
+                pass
+        try:
+            _body = file_obj.stream.read()
+        except Exception:
+            try:
+                _body = file_obj.read()
+            except Exception:
+                _body = b""
+        try:
+            file_obj.stream.seek(0)
+        except Exception:
+            try:
+                file_obj.seek(0)
+            except Exception:
+                pass
+        _digest = _hashlib.sha256(_body or b"").hexdigest()[:8]
+        return f"{_digest}_{raw_name}"
+    except Exception:
+        return f"{uuid_module.uuid4().hex[:8]}_{raw_name}"
+
+
+def _r13_evict_stale_analysis_status() -> int:
+    """Drop terminal ``analysis_status`` entries older than the TTL.
+
+    Returns the number of entries evicted.  Caller MUST hold
+    ``analysis_status_lock``.  The function self-throttles: it
+    runs at most once per ``_ANALYSIS_STATUS_SWEEP_INTERVAL_SECONDS``
+    so a tight burst of mutations does not pay the sweep cost on
+    every call.
+    """
+    try:
+        _now_mono = time.monotonic()
+        if (
+            _now_mono - _ANALYSIS_STATUS_LAST_SWEEP[0]
+            < _ANALYSIS_STATUS_SWEEP_INTERVAL_SECONDS
+        ):
+            return 0
+        _ANALYSIS_STATUS_LAST_SWEEP[0] = _now_mono
+
+        _ttl_seconds = float(_ANALYSIS_STATUS_TTL_HOURS) * 3600.0
+        _now_dt = datetime.now(timezone.utc)
+        _evict: List[str] = []
+        for _aid, _entry in list(analysis_status.items()):
+            try:
+                _status = str(_entry.get("status") or "").lower()
+                if _status not in ("completed", "error", "cancelled", "failed"):
+                    continue
+                _ts = (
+                    _entry.get("end_time")
+                    or _entry.get("completion_time")
+                    or _entry.get("start_time")
+                )
+                if not _ts:
+                    continue
+                # ``_ts`` may be a datetime (naive UTC by convention)
+                # or an ISO string; normalize defensively.
+                if isinstance(_ts, datetime):
+                    _ts_dt = _ts
+                else:
+                    try:
+                        _ts_dt = datetime.fromisoformat(str(_ts).replace("Z", "+00:00"))
+                    except Exception:
+                        continue
+                if _ts_dt.tzinfo is None:
+                    _ts_dt = _ts_dt.replace(tzinfo=timezone.utc)
+                _age = (_now_dt - _ts_dt).total_seconds()
+                if _age > _ttl_seconds:
+                    _evict.append(_aid)
+            except Exception:
+                continue
+        for _aid in _evict:
+            try:
+                analysis_status.pop(_aid, None)
+            except Exception:
+                pass
+        if _evict:
+            try:
+                logger.info(
+                    "analysis_status TTL sweep evicted %d stale terminal entries (TTL %dh)",
+                    len(_evict),
+                    _ANALYSIS_STATUS_TTL_HOURS,
+                )
+            except Exception:
+                pass
+        return len(_evict)
+    except Exception:
+        return 0
 
 # File-based status persistence to survive Flask reloads (when frozen, cwd is _APP_SUPPORT so "analysis_status.json" works)
 STATUS_FILE = "analysis_status.json"
@@ -1665,7 +1905,7 @@ def start_analysis():
                 try:
                     validate_csrf(csrf_token)
                 except Exception:
-                    return jsonify({'success': False, 'error': 'CSRF validation failed'}), 400
+                    return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 400  # Round 13 / Phase 4.3
             if json_data:
                 # JSON data (typically for renewal reports)
                 manager = json_data.get('manager', '').strip() if json_data.get('manager') else ''
@@ -1802,7 +2042,7 @@ def start_analysis():
                     }), 400
                 import uuid as _uuid
                 raw_name = secure_filename(file.filename)
-                filename = f"{_uuid.uuid4().hex[:8]}_{raw_name}"
+                filename = _r13_unique_upload_filename(_uuid, raw_name, file)
                 filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                 file.save(filepath)
                 csone_file = filepath
@@ -1929,6 +2169,15 @@ def update_analysis_status(analysis_id: str, updates: Dict[str, Any], save: bool
     with analysis_status_lock:
         if analysis_id in analysis_status:
             analysis_status[analysis_id].update(updates)
+            # Round 13 / Phase 11.4: opportunistic TTL sweep on
+            # mutation.  Self-throttles internally so we only pay
+            # the sweep cost once per
+            # ``_ANALYSIS_STATUS_SWEEP_INTERVAL_SECONDS`` regardless
+            # of how busy the worker is.
+            try:
+                _r13_evict_stale_analysis_status()
+            except Exception:
+                pass
             if save:
                 save_analysis_status()
         else:
@@ -1958,7 +2207,22 @@ def filter_subscriptions_by_criteria(team_subs_df: pd.DataFrame, customer_name: 
         # Filter by customer name (case-insensitive partial match)
         customer_name_filter = customer_name.strip()
         filtered_df = filtered_df[filtered_df['BU_NAME'].astype(str).str.contains(customer_name_filter, case=False, na=False)]
-        logger.info(f"[[FILTER]] Filtering to customer: {customer_name_filter} - {len(filtered_df)}/{original_count} subscriptions found")
+        # Round 13 / Phase 10.6: previously this logged the raw
+        # ``customer_name_filter`` at INFO level, which writes a
+        # PII customer name into the structured log stream that
+        # ships off-host (audit mirror, syslog).  PII customer
+        # names should not appear in logs above DEBUG -- they're
+        # already accessible via the analysis envelope where they
+        # belong.  Log a redacted token (length only) at INFO and
+        # keep the full name at DEBUG for triage.
+        _r13_redacted_cust = f"<redacted len={len(customer_name_filter)}>"
+        logger.info(
+            "[[FILTER]] Filtering to customer: %s - %s/%s subscriptions found",
+            _r13_redacted_cust, len(filtered_df), original_count,
+        )
+        logger.debug(
+            "[[FILTER]] (debug) customer name filter: %r", customer_name_filter
+        )
         
         if filtered_df.empty:
             return filtered_df, f"No subscriptions found for customer '{customer_name_filter}'"
@@ -1972,7 +2236,21 @@ def filter_subscriptions_by_criteria(team_subs_df: pd.DataFrame, customer_name: 
             return pd.DataFrame(), f"Invalid subscription ID format: '{subscription_id_filter}'"
         
         filtered_df = filtered_df[filtered_df['SUBSCRIPTION_ID'] == subscription_id_filter]
-        logger.info(f"[[FILTER]] Filtering to subscription: {subscription_id_filter} - {len(filtered_df)}/{original_count} subscriptions found")
+        # Round 13 / Phase 10.6: subscription IDs are not PII per se
+        # but they are tenant identifiers; surface only a hash-like
+        # truncated tail at INFO so the log shows the existence and
+        # correlation key without exposing the full ID broadly.
+        _r13_sub_tail = (
+            subscription_id_filter[-6:]
+            if len(subscription_id_filter) >= 6 else 'short'
+        )
+        logger.info(
+            "[[FILTER]] Filtering to subscription: <id ...%s> - %s/%s subscriptions found",
+            _r13_sub_tail, len(filtered_df), original_count,
+        )
+        logger.debug(
+            "[[FILTER]] (debug) subscription id filter: %r", subscription_id_filter
+        )
         
         if filtered_df.empty:
             return filtered_df, f"No subscriptions found with ID '{subscription_id_filter}'"
@@ -2796,10 +3074,49 @@ def _generate_comprehensive_fallback_insights(
     
     # Data-driven: top at-risk customers and BEMS count
     if not ab_norm.empty and 'customer_name' in ab_norm.columns:
-        by_cust = ab_norm.groupby('customer_name').size().sort_values(ascending=False)
-        top_at_risk = by_cust.head(5).index.tolist()
+        # Round 13 / Phase 3.11: route customer through
+        # ``normalize_customer_name`` before the groupby so cosmetic
+        # spelling drift collapses into a single "top at-risk" entry
+        # instead of inflating the list with two variants of the same
+        # account.
+        try:
+            from data_normalization import normalize_customer_name as _r13_norm_cust_top
+        except Exception:
+            _r13_norm_cust_top = lambda v: v  # noqa: E731 - identity fallback
+        _ab_top = ab_norm.copy()
+        _ab_top['_cust_disp'] = (
+            _ab_top['customer_name'].fillna('Unknown').apply(_r13_norm_cust_top)
+        )
+        # Round 13 / Phase 6.1: previously the at-risk list emitted only
+        # the first 5 customers with no disclosure that more existed.
+        # Readers therefore could not tell whether 5 was the literal
+        # population size or whether 47 other accounts had been
+        # silently dropped.  Stamp a deterministic "+N more" footer
+        # whenever the population exceeds the cap so the truncation
+        # is honest.  Sort secondary on ``_cust_disp`` so accounts
+        # with identical barrier counts pick a stable order across
+        # runs (otherwise the head(5) cut depends on dict ordering
+        # of pandas size aggregation, which can flip on tie).
+        by_cust = (
+            _ab_top.groupby('_cust_disp')
+            .size()
+            .reset_index(name='_count')
+            .sort_values(
+                by=['_count', '_cust_disp'],
+                ascending=[False, True],
+                kind='mergesort',
+            )
+            .set_index('_cust_disp')['_count']
+        )
+        _r13_top_cap = 5
+        top_at_risk = by_cust.head(_r13_top_cap).index.tolist()
         if top_at_risk:
-            insights.append(f"TOP CUSTOMERS BY ADOPTION BARRIERS: {', '.join(top_at_risk[:5])}.")
+            _r13_top_total = int(len(by_cust))
+            _r13_top_extra = max(0, _r13_top_total - _r13_top_cap)
+            _r13_top_msg = ', '.join(top_at_risk[:_r13_top_cap])
+            if _r13_top_extra > 0:
+                _r13_top_msg = f"{_r13_top_msg} (+{_r13_top_extra} more)"
+            insights.append(f"TOP CUSTOMERS BY ADOPTION BARRIERS: {_r13_top_msg}.")
     bems_total = cm.count_bems(csone_df) if not csone_df.empty else 0
     if bems_total > 0:
         insights.append(
@@ -2913,11 +3230,167 @@ def _parse_markdown_for_fallback(doc, ai_text: str):
                 parts = re.split(r'(\*\*[^*]+\*\*)', line)
                 for part in parts:
                     if part.startswith('**') and part.endswith('**'):
-                        _r12_safe_run(para, part.strip('**'), bold=True)
+                        # Round 14 / Phase 4.2: ``part.strip('**')`` is
+                        # misleading -- ``str.strip`` treats the argument
+                        # as a *set* of characters, so this strips any
+                        # number of ``*`` from both ends rather than the
+                        # literal ``**`` prefix/suffix the writer clearly
+                        # meant.  In practice the regex above guarantees
+                        # exactly two leading and two trailing stars on a
+                        # core with no embedded ``*``, so the observed
+                        # output is unchanged, but the slice expression
+                        # below makes the intent explicit and silences
+                        # ruff B005.
+                        _r12_safe_run(para, part[2:-2], bold=True)
                     elif part:
                         _r12_safe_run(para, part)
             else:
                 doc.add_paragraph(_safe_doc_text(line, max_len=5000))
+
+_R13_LABEL_MAX_LEN = 28
+
+
+def _r13_truncate_chart_labels(labels, max_len: int = _R13_LABEL_MAX_LEN):
+    """Round 13 / Phase 8.6: truncate long axis labels for chart legibility.
+
+    The Word reports embed 12x8 figures at ``Inches(6.5)``.  At that
+    rendered width, customer names longer than ~28 characters either
+    overflow the y-axis margin (matplotlib clips them silently) or
+    force ``tight_layout`` to shrink the plot area to fit, which
+    squeezes the data plot into a narrow strip and hides smaller bars.
+
+    Truncate display labels to ``max_len`` characters with an ellipsis
+    so the chart is legible, while leaving the original full labels
+    available for the alt-text helper (so screen readers and the Word
+    docPr description still surface the complete customer name).
+
+    Returns ``(display_labels, full_labels)`` so callers can feed the
+    first to ``set_yticklabels`` / ``set_xticklabels`` and the second
+    to the alt-text helper.
+    """
+    display: list[str] = []
+    full: list[str] = []
+    try:
+        cap = int(max_len) if max_len and int(max_len) > 4 else _R13_LABEL_MAX_LEN
+    except Exception:
+        cap = _R13_LABEL_MAX_LEN
+    for raw in labels or []:
+        text = '' if raw is None else str(raw)
+        full.append(text)
+        if len(text) > cap:
+            display.append(text[: max(1, cap - 1)].rstrip() + '\u2026')
+        else:
+            display.append(text)
+    return display, full
+
+
+def _r13_chart_alt_text(title: str, full_labels=None, value_labels=None, max_chars: int = 1024) -> str:
+    """Round 13 / Phase 8.6 + 9.10: build alt text for an embedded chart.
+
+    The Word ``add_picture`` calls have no alt text by default, which
+    means screen readers announce the chart filename only and do not
+    expose the underlying data.  This helper composes a short
+    description from the chart title and (optionally) the full,
+    untruncated category labels and their values, which we then attach
+    to the picture inline shape via ``docPr``.
+
+    Caller supplies:
+      * ``title``: chart title ("Top 10 Customers by Support Case Volume")
+      * ``full_labels``: original (un-truncated) category labels
+      * ``value_labels``: aligned numeric labels (e.g. "12 cases").
+        If supplied, must be the same length as ``full_labels``.
+
+    Returns a single string capped at ``max_chars`` so we never write
+    a 100k-character description into a Word docPr (the OOXML schema
+    technically allows it, but Word truncates and some accessibility
+    tools struggle).
+    """
+    parts: list[str] = []
+    if title:
+        parts.append(str(title).strip())
+    try:
+        if full_labels:
+            pairs: list[str] = []
+            vals = list(value_labels or [])
+            for idx, lbl in enumerate(full_labels):
+                lbl_text = '' if lbl is None else str(lbl)
+                if idx < len(vals) and vals[idx] is not None:
+                    pairs.append(f"{lbl_text}: {vals[idx]}")
+                else:
+                    pairs.append(lbl_text)
+            if pairs:
+                parts.append("Categories: " + "; ".join(pairs))
+    except Exception:
+        pass
+    out = ". ".join(p for p in parts if p)
+    if max_chars and len(out) > max_chars:
+        out = out[: max(0, max_chars - 1)].rstrip() + '\u2026'
+    return out
+
+
+def _r13_set_picture_alt_text(picture, alt_text: str) -> None:
+    """Round 13 / Phase 8.6 + 9.10: stamp alt text on an embedded picture.
+
+    python-docx exposes the inline shape via ``picture._inline``; the
+    accessibility-relevant fields are ``docPr.descr`` (long
+    description) and ``docPr.title`` (short title).  Some legacy
+    consumers also read ``cNvPr.descr``.  This helper writes both
+    where available and silently no-ops on any failure so a missing
+    schema attribute never crashes a report build.
+    """
+    if not alt_text or picture is None:
+        return
+    try:
+        inline = getattr(picture, '_inline', None)
+        if inline is None:
+            return
+        text = str(alt_text)
+        try:
+            doc_pr = inline.docPr
+            doc_pr.set('descr', text)
+            if not doc_pr.get('title'):
+                doc_pr.set('title', text[:120])
+        except Exception:
+            pass
+        try:
+            for cNvPr in inline.iter('{http://schemas.openxmlformats.org/drawingml/2006/main}cNvPr'):
+                cNvPr.set('descr', text)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _r13_close_fig(fig=None) -> None:
+    """Round 13 / Phase 8.5: explicit per-figure teardown helper.
+
+    ``plt.close()`` (no args) closes "the current figure" -- whichever
+    figure was last activated by ``plt.figure``/``plt.subplots``
+    globally.  In a server process that builds many charts back-to-back
+    (and especially across worker threads) the current-figure pointer
+    can race with the figure we actually wanted to release, leading to
+    slow figure leaks over the lifetime of a long-running daemon.
+    Always pass an explicit ``fig`` handle when one is in scope so the
+    exact figure we just rendered is freed; if no ``fig`` is provided
+    or the close fails (some legacy backends raise on closed figures),
+    fall back to the no-arg form so we never crash a chart pipeline
+    over a teardown bookkeeping issue.
+    """
+    try:
+        import matplotlib.pyplot as _r13_plt
+    except Exception:
+        return
+    try:
+        if fig is not None:
+            _r13_plt.close(fig)
+        else:
+            _r13_plt.close()
+    except Exception:
+        try:
+            _r13_plt.close()
+        except Exception:
+            pass
+
 
 def create_executive_charts(
     ab_norm: pd.DataFrame,
@@ -2949,7 +3422,12 @@ def create_executive_charts(
         # Chart 1: Support Case Trends
         if not csone_df.empty and 'Date/Time Opened' in csone_df.columns:
             fig, ax = plt.subplots(figsize=(10, 6))
-            date_series = pd.to_datetime(csone_df['Date/Time Opened'], errors='coerce')
+            # Round 13 / Phase 2.9: parse with utc=True so rows that
+            # carry explicit offsets land in the same UTC month bucket
+            # as the rest of the UTC-anchored case-volume analysis.
+            date_series = pd.to_datetime(
+                csone_df['Date/Time Opened'], errors='coerce', utc=True
+            )
             monthly_cases = csone_df.groupby(date_series.dt.to_period('M')).size()
             if len(monthly_cases) > 0:
                 months = [str(period) for period in monthly_cases.index]
@@ -2987,7 +3465,7 @@ def create_executive_charts(
                 # chart filename embeds an unambiguous timezone marker.
                 chart_path = f"outputs/support_cases_trend_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
                 plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-                plt.close()
+                _r13_close_fig(fig)
                 chart_paths.append(chart_path)
 
         # Chart 2: Case Severity Distribution (canonical normalized priority).
@@ -3031,11 +3509,22 @@ def create_executive_charts(
                         startangle=90,
                         textprops={'fontsize': 11, 'weight': 'bold'},
                     )
+                    # Round 13 / Phase 8.1: enforce 1:1 aspect on
+                    # every pie chart so wedge area is proportional
+                    # to value, regardless of the surrounding figure
+                    # ratio (matplotlib's default lets a non-square
+                    # subplot squash the pie into an oval which
+                    # subtly distorts the apparent share of each
+                    # slice).
+                    try:
+                        ax.set_aspect('equal')
+                    except Exception:
+                        pass
                     ax.set_title('Case Severity Distribution (normalized P1-P4)', fontsize=14, fontweight='bold', pad=20)
                     plt.tight_layout()
                     chart_path = f"outputs/severity_distribution_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
                     plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-                    plt.close()
+                    _r13_close_fig(fig)
                     chart_paths.append(chart_path)
 
         # Chart 3: Top Customers by Case Volume
@@ -3092,13 +3581,27 @@ def create_executive_charts(
                     fontsize=10,
                 )
             ax.set_yticks(range(len(customer_cases)))
-            ax.set_yticklabels(customer_cases.index, fontsize=10)
+            # Round 13 / Phase 8.6: previously the raw customer_cases
+            # index was passed straight to set_yticklabels, so a name
+            # like "Acme International Solutions Group, Inc.,
+            # Cybersecurity Division" overflowed the 12x8 fig embedded
+            # at Inches(6.5) and either got clipped silently or forced
+            # tight_layout to shrink the plot area.  Truncate the
+            # *display* label and stash the full name on the axes for
+            # the alt-text helper that runs at doc.add_picture() time.
+            _r13_disp, _r13_full = _r13_truncate_chart_labels(list(customer_cases.index))
+            ax.set_yticklabels(_r13_disp, fontsize=10)
+            try:
+                ax._r13_full_labels = _r13_full
+                ax._r13_value_labels = [f'{int(v)} cases' for v in customer_cases.values]
+            except Exception:
+                pass
             ax.invert_yaxis()
             ax.grid(axis='x', alpha=0.3)
             plt.tight_layout()
             chart_path = f"outputs/top_customers_analysis_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
             plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-            plt.close()
+            _r13_close_fig(fig)
             chart_paths.append(chart_path)
 
         # Chart 4: BEMS Escalations by Customer
@@ -3128,7 +3631,18 @@ def create_executive_charts(
             except Exception:
                 bems_by_customer = _bems_full.head(10)
             _bems_total_customers = int(_bems_full.shape[0]) if hasattr(_bems_full, 'shape') else len(_bems_full)
-            bars = ax.barh(range(len(bems_by_customer)), bems_by_customer.values, color='#d62728')
+            # Round 13 / Phase 8.3: previously every BEMS-by-customer
+            # bar was rendered in ``#d62728`` (the canonical
+            # ``CRITICAL`` red).  That was incorrect signalling: the
+            # bar's *height* already encodes "more BEMS == more
+            # escalations", so colouring every bar critical-red made
+            # a customer with 1 BEMS look as alarming as a customer
+            # with 12 BEMS.  Use a neutral data-viz blue
+            # (``#1f77b4``, the matplotlib default category-0 colour)
+            # so colour does not pre-judge severity and the chart
+            # legend stays consistent with the rest of the
+            # canonical-palette work in Phase 5.
+            bars = ax.barh(range(len(bems_by_customer)), bems_by_customer.values, color='#1f77b4')
             if _bems_total_customers > len(bems_by_customer):
                 _bems_more = _bems_total_customers - len(bems_by_customer)
                 ax.set_title(
@@ -3153,13 +3667,23 @@ def create_executive_charts(
                     fontsize=10,
                 )
             ax.set_yticks(range(len(bems_by_customer)))
-            ax.set_yticklabels(bems_by_customer.index, fontsize=10)
+            # Round 13 / Phase 8.6: see top_customers_analysis above
+            # for the rationale -- truncate the y-axis display label
+            # and keep the full customer name available for the
+            # add_picture alt-text helper.
+            _r13_disp, _r13_full = _r13_truncate_chart_labels(list(bems_by_customer.index))
+            ax.set_yticklabels(_r13_disp, fontsize=10)
+            try:
+                ax._r13_full_labels = _r13_full
+                ax._r13_value_labels = [f'{int(v)} BEMS' for v in bems_by_customer.values]
+            except Exception:
+                pass
             ax.invert_yaxis()
             ax.grid(axis='x', alpha=0.3)
             plt.tight_layout()
             chart_path = f"outputs/bems_escalations_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
             plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-            plt.close()
+            _r13_close_fig(fig)
             chart_paths.append(chart_path)
 
         # Chart 5: Feature Request Volume by Customer
@@ -3212,13 +3736,24 @@ def create_executive_charts(
                         fontsize=9,
                     )
                 ax.set_yticks(range(len(customer_names)))
-                ax.set_yticklabels(customer_names, fontsize=10)
+                # Round 13 / Phase 8.6: truncate the display labels so
+                # the chart embedded at Inches(6.5) in Word does not
+                # clip 30+ character customer names; full names are
+                # cached on the axes so the alt-text helper can surface
+                # them later.
+                _r13_disp, _r13_full = _r13_truncate_chart_labels(customer_names)
+                ax.set_yticklabels(_r13_disp, fontsize=10)
+                try:
+                    ax._r13_full_labels = _r13_full
+                    ax._r13_value_labels = [f'{int(v)} requests' for v in request_counts]
+                except Exception:
+                    pass
                 ax.invert_yaxis()
                 ax.grid(axis='x', alpha=0.3)
                 plt.tight_layout()
                 chart_path = f"outputs/feature_request_volume_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
                 plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-                plt.close()
+                _r13_close_fig(fig)
                 chart_paths.append(chart_path)
 
     except ImportError:
@@ -3309,6 +3844,12 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         wedges, texts, autotexts = ax.pie(sizes, labels=['Risk Score', 'Remaining'], 
                                           autopct='', colors=colors, startangle=90,
                                           pctdistance=0.85, labeldistance=1.1)
+        # Round 13 / Phase 8.1: enforce 1:1 aspect on the renewal-risk
+        # gauge pie so the wedge area is proportional to value.
+        try:
+            ax.set_aspect('equal')
+        except Exception:
+            pass
         
         # Round 10 / Phase 1.5: render the renewal-risk score with 1 decimal
         # to match the DOCX renewal section which uses
@@ -3323,7 +3864,7 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         plt.tight_layout()
         chart_path = f"outputs/renewal_risk_score_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
         plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-        plt.close()
+        _r13_close_fig(fig)
         chart_paths.append(chart_path)
         
         # Chart 2: Support Cases Trend Over Time (if CSOne data available)
@@ -3366,9 +3907,21 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                     weeks = [str(period) for period in weekly_cases.index]
                     case_counts = weekly_cases.values
                     
-                    # Color bars based on volume (red for high, orange for medium, green for low)
-                    colors = ['#d62728' if count > 5 else '#ff7f0e' if count > 2 else '#2ca02c' 
-                              for count in case_counts]
+                    # Round 13 / Phase 8.4: previously this weekly bar
+                    # chart applied an arbitrary
+                    # ``> 5 -> red, > 2 -> orange, else green``
+                    # threshold and re-used the canonical RISK band
+                    # palette to colour the bars.  That misleads the
+                    # reader: the canonical risk palette is reserved
+                    # for risk-band data (CRITICAL/HIGH/MEDIUM/LOW),
+                    # and "5 cases in a week" is not a canonical
+                    # risk threshold.  The bar's *height* already
+                    # encodes weekly volume, so use a single neutral
+                    # data-viz blue (matplotlib category-0 ``#1f77b4``)
+                    # to remove the false risk encoding.  Future
+                    # callers that genuinely need a risk overlay can
+                    # add a separate axis or annotation.
+                    colors = ['#1f77b4'] * len(case_counts)
                     
                     bars = ax.bar(weeks, case_counts, color=colors)
                     _disclosure = (
@@ -3392,7 +3945,7 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                     plt.tight_layout()
                     chart_path = f"outputs/renewal_support_trend_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
                     plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-                    plt.close()
+                    _r13_close_fig(fig)
                     chart_paths.append(chart_path)
         
         # Chart 3: Service Incidents Timeline (if incidents available)
@@ -3491,7 +4044,7 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                     plt.tight_layout()
                     chart_path = f"outputs/renewal_incidents_timeline_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
                     plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-                    plt.close()
+                    _r13_close_fig(fig)
                     chart_paths.append(chart_path)
         
         # Chart 4: Renewal Health Dashboard (Multi-panel)
@@ -3589,6 +4142,15 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                 autopct=_r10_autopct,
                 colors=[risk_colors.get(risk_cat, _risk_default_color), '#f0f0f0'],
                 startangle=90)
+        # Round 13 / Phase 8.1: enforce 1:1 aspect on the renewal-risk
+        # gauge pie (panel 2 of the 2x2 portfolio chart) so the wedge
+        # area is proportional to value and does not look distorted
+        # when the surrounding ``plt.subplot(2, 2, 2)`` cell is not
+        # square.
+        try:
+            ax2.set_aspect('equal')
+        except Exception:
+            pass
         ax2.set_title('Renewal Risk Score (out of 100)', fontweight='bold')
         
         # Panel 3: Case Severity Distribution (if CSOne data available).
@@ -3620,6 +4182,13 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                     colors = [color_map.get(k, SEVERITY_COLOR_DEFAULT) for k, _ in _slices]
                     # Round 11 / Phase 8.4: shared _r10_autopct for parity.
                     ax3.pie(sizes, labels=labels, autopct=_r10_autopct, colors=colors, startangle=90)
+                    # Round 13 / Phase 8.1: 1:1 aspect on panel 3
+                    # (case-severity pie) so wedge area is
+                    # proportional to value.
+                    try:
+                        ax3.set_aspect('equal')
+                    except Exception:
+                        pass
                     ax3.set_title('Case Severity Distribution', fontweight='bold')
                     _renewal_pie_built = True
         if not _renewal_pie_built:
@@ -3642,7 +4211,7 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         plt.tight_layout()
         chart_path = f"outputs/renewal_health_dashboard_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
         plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-        plt.close()
+        _r13_close_fig(fig)
         chart_paths.append(chart_path)
         
         logger.info(f"[[RENEWAL_CHARTS]] Generated {len(chart_paths)} renewal charts")
@@ -3899,7 +4468,29 @@ def analyze_feature_requests(csone_df: pd.DataFrame, arr_data: pd.DataFrame = No
                     if arr_data is not None and not arr_data.empty and 'BU_NAME' in arr_data.columns:
                         customer_arr = arr_data[arr_data['BU_NAME'] == customer]
                         if not customer_arr.empty and 'ANNUAL_CONTRACT_VALUE' in customer_arr.columns:
-                            customer_info['arr'] = float(customer_arr['ANNUAL_CONTRACT_VALUE'].sum())
+                            # Round 13 / Phase 1.4: dedupe ARR rows per
+                            # account before summing.  Without this we
+                            # multiplied ARR by the number of subscription
+                            # lines on the account (one row per
+                            # SUBSCRIPTION_ID), producing customer ARR
+                            # totals that were 2x-10x reality.  Prefer
+                            # ACCOUNT_ID_C; fall back to BU_NAME if the
+                            # column is missing.
+                            _arr_for_customer = customer_arr
+                            try:
+                                if 'ACCOUNT_ID_C' in customer_arr.columns:
+                                    _arr_for_customer = customer_arr.drop_duplicates(
+                                        subset=['ACCOUNT_ID_C']
+                                    )
+                                else:
+                                    _arr_for_customer = customer_arr.drop_duplicates(
+                                        subset=['BU_NAME']
+                                    )
+                            except Exception:
+                                _arr_for_customer = customer_arr
+                            customer_info['arr'] = float(
+                                _arr_for_customer['ANNUAL_CONTRACT_VALUE'].sum()
+                            )
                             # Round 12 / Phase 1.1: only accumulate the
                             # portfolio-wide ``total_arr_impact`` when ARR
                             # is single-currency.  When mixed, leave the
@@ -4553,10 +5144,31 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                     run.font.bold = True
         
         # Data rows
+        # Round 13 / Phase 9.1: previously customer / case_count / ARR
+        # cells were assigned via raw f-strings (``row_cells[0].text =
+        # customer`` / ``f"${avg_arr:,.0f}"``).  Two problems:
+        #   1. ``customer`` could carry XML-illegal control codes from
+        #      Snowflake (zero-width spaces, tab characters, mojibake)
+        #      which python-docx happily wrote to the document and Word
+        #      then rejected as "needing repair" on open.
+        #   2. ``f"${avg_arr:,.0f}"`` hardcoded the dollar sign even
+        #      when the underlying contract was EUR / GBP / JPY, and
+        #      reinvented number formatting locally instead of using
+        #      the shared ``format_number`` helper that the rest of
+        #      the report routes through.
+        # Route customer through ``_safe_doc_text`` (XML-safe + length
+        # cap) and ARR through the shared ``format_number`` helper for
+        # parity with the executive briefing tables.
+        try:
+            from report_utils import format_number as _r13_format_number
+        except Exception:
+            _r13_format_number = lambda v, d=0, p=False: (  # type: ignore
+                f"{v:,.{d}f}" if d else f"{int(v):,}"
+            ) if v is not None else "N/A"
         for i, (customer, case_count) in enumerate(customer_cases.items(), 1):
             row_cells = table.rows[i].cells
-            row_cells[0].text = customer
-            row_cells[1].text = str(case_count)
+            row_cells[0].text = _safe_doc_text(customer, max_len=200)
+            row_cells[1].text = _safe_doc_text(case_count, max_len=20)
             
             # Count BEMS references for this customer - use comprehensive detection
             customer_data = csone_df[csone_df[customer_col] == customer]
@@ -4568,9 +5180,20 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                     bems_refs_list.extend(extract_bems_ids_from_row(row))
                 
                 if bems_refs_list:
-                    all_refs = ', '.join(set(bems_refs_list))  # Remove duplicates
+                    # Round 13 / Phase 11.2: previously this used
+                    # ``', '.join(set(bems_refs_list))`` which dedupes
+                    # but renders BEMS refs in *unordered* set
+                    # iteration order -- so two reports run against
+                    # the same data on the same machine could (and
+                    # did, after a Python 3.12 hash-randomization
+                    # change) produce a different reference string
+                    # for the same customer, which broke
+                    # word-vs-excel parity tests and made it look
+                    # like data had drifted.  Sort the deduped set
+                    # so the output is deterministic across runs.
+                    all_refs = ', '.join(sorted(set(bems_refs_list)))
                     # FIXED: Show all BEMS references without truncation
-                    row_cells[2].text = all_refs
+                    row_cells[2].text = _safe_doc_text(all_refs, max_len=2000)
                 else:
                     row_cells[2].text = '-'
             else:
@@ -4579,7 +5202,23 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             # Add ARR
             if has_arr:
                 avg_arr = customer_data['Customer_ARR'].mean()
-                row_cells[3].text = f"${avg_arr:,.0f}"
+                # Round 13 / Phase 9.1: use the shared ``format_number``
+                # helper so the table reconciles row-for-row with the
+                # executive briefing's Customer ARR formatting (which
+                # also handles ``None`` / ``NaN`` defensively and emits
+                # ``"N/A"`` instead of ``"$nan"``).  The leading ``$``
+                # remains here because this table is rendered only on
+                # the single-currency path; the multi-currency path
+                # routes through enhanced_snowflake_insights /
+                # advanced_renewal_analyzer where Phase 9.4 / 9.5 emit
+                # the proper currency prefix.
+                if avg_arr is None or (isinstance(avg_arr, float) and avg_arr != avg_arr):
+                    row_cells[3].text = _safe_doc_text("N/A", max_len=20)
+                else:
+                    row_cells[3].text = _safe_doc_text(
+                        f"${_r13_format_number(float(avg_arr), 0)}",
+                        max_len=40,
+                    )
         
         doc.add_paragraph()
     
@@ -4829,18 +5468,35 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             if os.path.exists(chart_path):
                 try:
                     # Add chart title based on filename
+                    # Round 13 / Phase 8.6 + 9.10: previously only the
+                    # heading conveyed what the chart was; the embedded
+                    # PNG had no docPr alt text, so screen readers and
+                    # accessibility tools announced only the filename
+                    # ("severity_distribution_20251025_120000Z.png").
+                    # Capture the heading we just emitted so we can
+                    # also stamp it as the picture's alt-text once
+                    # add_picture returns.
+                    _r13_chart_title = ''
                     if 'support_cases_trend' in chart_path:
-                        doc.add_heading('Support Cases Over Time', level=2)
+                        _r13_chart_title = 'Support Cases Over Time'
                     elif 'severity_distribution' in chart_path:
-                        doc.add_heading('Case Severity Distribution', level=2)
+                        _r13_chart_title = 'Case Severity Distribution'
                     elif 'top_customers' in chart_path:
-                        doc.add_heading('Top Customers by Case Volume', level=2)
+                        _r13_chart_title = 'Top Customers by Case Volume'
                     elif 'bems_escalations' in chart_path:
-                        doc.add_heading('BEMS Escalations by Customer', level=2)
+                        _r13_chart_title = 'BEMS Escalations by Customer'
                     elif 'feature_request_volume' in chart_path:
-                        doc.add_heading('Feature Requests by Customer', level=2)
-                    
-                    doc.add_picture(chart_path, width=Inches(6.5))
+                        _r13_chart_title = 'Feature Requests by Customer'
+                    if _r13_chart_title:
+                        doc.add_heading(_r13_chart_title, level=2)
+                    _r13_picture = doc.add_picture(chart_path, width=Inches(6.5))
+                    try:
+                        _r13_set_picture_alt_text(
+                            _r13_picture,
+                            _r13_chart_alt_text(_r13_chart_title or os.path.basename(chart_path)),
+                        )
+                    except Exception:
+                        pass
                     doc.add_paragraph()  # Spacing
                     charts_added += 1
                     logger.info(f"[[OK]] Chart added: {chart_path}")
@@ -4879,8 +5535,25 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             doc.add_heading('All Requesting Customers', level=2)
             for customer_info in feature_requests['customer_examples']:
                 para = doc.add_paragraph()
-                para.add_run(f"{customer_info['customer_name']}").bold = True
-                para.add_run(f" - {customer_info['request_count']} requests")
+                # Round 13 / Phase 9.2: previously the raw
+                # ``customer_info['customer_name']`` was written via
+                # ``add_run`` directly, so a customer name carrying an
+                # XML-illegal control character (zero-width space, tab,
+                # mojibake from a Snowflake export) sailed through into
+                # the .docx and Word then refused to open without
+                # "repair".  The sibling table row at Phase 9.1 already
+                # routes the same field through ``_safe_doc_text``, so
+                # the feature-request roster was the only remaining
+                # raw-write site for ``customer_name`` in this report.
+                # ``request_count`` is also normalized so a hostile or
+                # bogus int (e.g. NaN from pandas) cannot inject
+                # surrogate code points either.
+                _r13_cust = _safe_doc_text(customer_info.get('customer_name', ''), max_len=200)
+                para.add_run(_r13_cust).bold = True
+                _r13_req_count = _safe_doc_text(
+                    customer_info.get('request_count', 0), max_len=20
+                )
+                para.add_run(f" - {_r13_req_count} requests")
                 if False and customer_info.get('arr', 0) > 0:
                     para.add_run(f" (ARR: ${customer_info['arr']:,.0f})")
     
@@ -5754,9 +6427,11 @@ def run_compact_analysis(analysis_id):
                     try:
                         _attrs = getattr(_ds_df, 'attrs', {}) or {}
                         if _attrs.get('fetch_error'):
+                            # Round 13 / Phase 4.5: scrub URL/host/path
+                            # from the UI-bound error string.
                             partial_data_warnings.append({
                                 'dataset': _attrs.get('fetch_error_dataset') or _ds_name,
-                                'error': str(_attrs.get('fetch_error')),
+                                'error': _redact_partial_warning_error(_attrs.get('fetch_error')),
                                 'kind': _attrs.get('fetch_error_kind') or 'runtime',
                             })
                     except Exception:
@@ -5797,9 +6472,11 @@ def run_compact_analysis(analysis_id):
                 csconsole_success_priorities = _empty_df_with_fetch_marker("csconsole_success_priorities", err_msg)
                 csconsole_adoption_barriers = _empty_df_with_fetch_marker("csconsole_adoption_barriers", err_msg)
                 # Round 4 / Phase 4.4: surface the runtime failure.
+                # Round 13 / Phase 4.5: redact URL/host/path before
+                # exposing on the UI banner.
                 partial_data_warnings.append({
                     'dataset': 'csconsole_bundle',
-                    'error': err_msg,
+                    'error': _redact_partial_warning_error(e),
                     'kind': 'runtime',
                 })
         else:
@@ -6003,9 +6680,10 @@ def run_compact_analysis(analysis_id):
             ext_bugs = fetch_help_webex_bugs()
         except Exception as e:
             logger.warning(f"[[WARNING]] help.webex bug feed gathering failed: {e}")
+            # Round 13 / Phase 4.5: redact UI-bound error.
             partial_data_warnings.append({
                 'dataset': 'ext_bugs',
-                'error': str(e).strip() or e.__class__.__name__,
+                'error': _redact_partial_warning_error(e),
                 'kind': 'fetch_failed',
                 'effect': 'External defect / PSIRT correlation will be empty.',
             })
@@ -6016,9 +6694,10 @@ def run_compact_analysis(analysis_id):
             ext_incidents = fetch_status_incidents(days_back=_inc_days)
         except Exception as e:
             logger.warning(f"[[WARNING]] status.webex incident feed gathering failed: {e}")
+            # Round 13 / Phase 4.5: redact UI-bound error.
             partial_data_warnings.append({
                 'dataset': 'ext_incidents',
-                'error': str(e).strip() or e.__class__.__name__,
+                'error': _redact_partial_warning_error(e),
                 'kind': 'fetch_failed',
                 'effect': 'Incident correlation / risk uplift will treat as zero.',
             })
@@ -7295,23 +7974,45 @@ def run_compact_analysis(analysis_id):
                     'valign': 'vcenter'
                 })
             
+                # Round 13 / Phase 5.6: previously the Excel band fills
+                # were hand-mixed (``#FF6B6B`` / ``#FFE66D`` / ``#4ECDC4``)
+                # and drifted from ``canonical_metrics.RISK_BAND_COLORS``
+                # (CRITICAL=#d62728, MEDIUM=#ffd700, LOW=#2ca02c) used by
+                # the matplotlib chart pages embedded in the same Word
+                # report.  Excel readers therefore saw a soft pinkish-red
+                # while the chart on the next page rendered a saturated
+                # crimson for the same risk band.  Resolve through the
+                # canonical map so the Excel sheet and the matplotlib
+                # chart agree on band colour; the
+                # ``RISK_BAND_PORTFOLIO_COLORS`` softer-fill aliases
+                # remain in ``canonical_metrics`` for callers that
+                # explicitly want them.
+                try:
+                    _r13_excel_high = (cm.RISK_BAND_COLORS.get('CRITICAL', '#d62728') or '#d62728')
+                    _r13_excel_med = (cm.RISK_BAND_COLORS.get('MEDIUM', '#ffd700') or '#ffd700')
+                    _r13_excel_low = (cm.RISK_BAND_COLORS.get('LOW', '#2ca02c') or '#2ca02c')
+                except Exception:
+                    _r13_excel_high = '#d62728'
+                    _r13_excel_med = '#ffd700'
+                    _r13_excel_low = '#2ca02c'
+
                 # Risk-based formatting
                 high_risk_format = workbook.add_format({
-                    'fg_color': '#FF6B6B',
+                    'fg_color': _r13_excel_high,
                     'font_color': 'white',
                     'bold': True,
                     'border': 1
                 })
-            
+
                 medium_risk_format = workbook.add_format({
-                    'fg_color': '#FFE66D',
+                    'fg_color': _r13_excel_med,
                     'font_color': 'black',
                     'bold': True,
                     'border': 1
                 })
-            
+
                 low_risk_format = workbook.add_format({
-                    'fg_color': '#4ECDC4',
+                    'fg_color': _r13_excel_low,
                     'font_color': 'white',
                     'bold': True,
                     'border': 1
@@ -8194,11 +8895,33 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                 p2.add_run(f'{high_barrier} customer(s) have 3+ open adoption barriers and warrant focused attention. ')
                 p2.add_run('See Troubled Accounts Deep Dive for per-account risk factors and recommended actions.\n')
             # Top 15 by barrier count
-            top15 = by_cust.head(15)
+            # Round 13 / Phase 6.2: previously the renewal Word body
+            # listed only the first 15 accounts with no disclosure
+            # about the long tail.  A reader looking at the doc could
+            # not tell whether 15 was the literal universe or a cap.
+            # Stamp a "+N more" footer when the population exceeds
+            # the cap, and apply a stable secondary sort (count
+            # desc, customer asc) so accounts with the same count
+            # land in a deterministic order across runs.
+            try:
+                _r13_top15_sorted = by_cust.sort_values(ascending=False, kind='mergesort')
+                # secondary alphabetical tie-break on the index
+                _r13_top15_sorted = _r13_top15_sorted.sort_index(kind='mergesort').sort_values(ascending=False, kind='mergesort')
+            except Exception:
+                _r13_top15_sorted = by_cust
+            _r13_top15_cap = 15
+            top15 = _r13_top15_sorted.head(_r13_top15_cap)
             if len(top15) > 0:
                 p3 = doc.add_paragraph()
                 p3.add_run('Top customers by adoption barrier count (Source: CSConsole/Snowflake): ').bold = True
-                p3.add_run('; '.join([f'{c}: {n}' for c, n in top15.items()]) + '.\n')
+                _r13_top15_total = int(len(_r13_top15_sorted))
+                _r13_top15_extra = max(0, _r13_top15_total - _r13_top15_cap)
+                _r13_top15_body = '; '.join([f'{c}: {n}' for c, n in top15.items()])
+                if _r13_top15_extra > 0:
+                    _r13_top15_body = (
+                        f"{_r13_top15_body} (+{_r13_top15_extra} more)"
+                    )
+                p3.add_run(_r13_top15_body + '.\n')
     # Risk Factors
     if renewal_analysis.get('risk_factors'):
         doc.add_heading('Risk Factors', level=2)
@@ -8212,11 +8935,27 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         doc.add_page_break()
         doc.add_heading('Top 10 Focus Accounts by Risk', level=1)
         cust_analyses = renewal_analysis['customer_analyses']
+        # Round 13 / Phase 6.3 + 7.7: previously the focus list was
+        # ``sorted(..., key=score, reverse=True)[:10]`` with no
+        # secondary tie-break, so accounts with identical risk scores
+        # produced run-to-run flicker (Python's ``sorted`` is stable
+        # but the *input* dict ordering is not, especially when the
+        # upstream renewal analyzer is fed in random worker-pool
+        # completion order).  Add a deterministic secondary key on
+        # ``customer_name`` (case-insensitive ascending) so ties
+        # break alphabetically, and stamp a "+M more" footnote when
+        # the population exceeds the cap so readers know the tail
+        # was clipped.
+        _r13_focus_cap = 10
+        _r13_focus_total = len(cust_analyses)
         sorted_by_risk = sorted(
             cust_analyses.items(),
-            key=lambda x: x[1].get('renewal_risk_score', x[1].get('overall_risk_score', 0)),
-            reverse=True
-        )[:10]
+            key=lambda x: (
+                -float(x[1].get('renewal_risk_score', x[1].get('overall_risk_score', 0)) or 0),
+                str(x[0] or '').casefold(),
+            ),
+        )[:_r13_focus_cap]
+        _r13_focus_extra = max(0, _r13_focus_total - _r13_focus_cap)
         focus_table = doc.add_table(rows=1 + len(sorted_by_risk), cols=4)
         focus_table.style = 'Table Grid'
         hdr = focus_table.rows[0].cells
@@ -8231,6 +8970,18 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             row[1].text = str(cust)
             row[2].text = f"{ana.get('renewal_risk_score', ana.get('overall_risk_score', 0)):.1f}/100"
             row[3].text = str(ana.get('renewal_risk_category', 'N/A'))
+        # Round 13 / Phase 6.3: emit a "+M more" footnote whenever the
+        # full population is larger than the cap so readers know the
+        # focus list is a clipped view of a longer tail.
+        if _r13_focus_extra > 0:
+            _foot = doc.add_paragraph()
+            _foot_run = _foot.add_run(
+                f"Showing {len(sorted_by_risk)} of {_r13_focus_total} accounts; "
+                f"{_r13_focus_extra} more accounts ranked below the top "
+                f"{_r13_focus_cap} are omitted from this focus list."
+            )
+            _foot_run.italic = True
+            _foot_run.font.size = Pt(9)
         doc.add_paragraph()
     
     # Risk Scoring Methodology (transparent explanation)
@@ -8478,18 +9229,30 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if os.path.exists(chart_path):
                 try:
                     # Add chart title based on filename
+                    # Round 13 / Phase 8.6 + 9.10: capture the chart
+                    # heading so we can stamp it as docPr alt text on
+                    # the embedded PNG (was previously bare).
+                    _r13_chart_title = ''
                     if 'renewal_risk_score' in chart_path:
-                        doc.add_heading('Renewal Risk Score Visualization', level=2)
+                        _r13_chart_title = 'Renewal Risk Score Visualization'
                     elif 'renewal_support_trend' in chart_path:
-                        doc.add_heading('Support Cases Trend Over Time', level=2)
+                        _r13_chart_title = 'Support Cases Trend Over Time'
                     elif 'renewal_incidents_timeline' in chart_path:
-                        doc.add_heading('Service Incidents Timeline', level=2)
+                        _r13_chart_title = 'Service Incidents Timeline'
                     elif 'renewal_health_dashboard' in chart_path:
-                        doc.add_heading('Renewal Health Dashboard', level=2)
+                        _r13_chart_title = 'Renewal Health Dashboard'
                     elif 'renewal_risk_factors' in chart_path:
-                        doc.add_heading('Risk Factors Breakdown', level=2)
-                    
-                    doc.add_picture(chart_path, width=Inches(6.5))
+                        _r13_chart_title = 'Risk Factors Breakdown'
+                    if _r13_chart_title:
+                        doc.add_heading(_r13_chart_title, level=2)
+                    _r13_picture = doc.add_picture(chart_path, width=Inches(6.5))
+                    try:
+                        _r13_set_picture_alt_text(
+                            _r13_picture,
+                            _r13_chart_alt_text(_r13_chart_title or os.path.basename(chart_path)),
+                        )
+                    except Exception:
+                        pass
                     doc.add_paragraph()  # Spacing
                     charts_added += 1
                     logger.info(f"[[OK]] Chart added to renewal report: {chart_path}")
@@ -9421,15 +10184,26 @@ def run_customer_renewal_analysis(analysis_id):
             # pulse-only, and CSConsole-only customers — same set the
             # Word/EI headline uses.  Round 4 fixes the silent
             # subs-only undercount in the portfolio risk loop.
+            # Round 14 / Phase 2.4: previously this used the
+            # ``X if 'X' in locals() else None`` antipattern for each
+            # optional source.  Bare-name references to (e.g.)
+            # ``csone_df_prepared`` lit up ruff F821 because that name
+            # is never bound in this function -- the in-scope CSConsole
+            # frames are looked up elsewhere too -- and the truthy
+            # branch was dead.  Use ``locals().get(...)`` so the lookup
+            # is explicit and ruff-clean while preserving the original
+            # behavior (the names that *are* in scope still resolve;
+            # those that are not still pass ``None``).
+            _scope_locals = locals()
             try:
                 _ren_all_set = _get_all_customers_from_all_sources(
                     ab_norm=customer_ab if customer_ab is not None else None,
-                    csone_df=csone_df_prepared if 'csone_df_prepared' in locals() else None,
+                    csone_df=_scope_locals.get('csone_df_prepared'),
                     team_subs_df=team_subs_df,
-                    csconsole_action_plans=csconsole_action_plans if 'csconsole_action_plans' in locals() else None,
-                    csconsole_customer_pulse=csconsole_customer_pulse if 'csconsole_customer_pulse' in locals() else None,
-                    csconsole_success_priorities=csconsole_success_priorities if 'csconsole_success_priorities' in locals() else None,
-                    csconsole_adoption_barriers=csconsole_adoption_barriers if 'csconsole_adoption_barriers' in locals() else None,
+                    csconsole_action_plans=_scope_locals.get('csconsole_action_plans'),
+                    csconsole_customer_pulse=_scope_locals.get('csconsole_customer_pulse'),
+                    csconsole_success_priorities=_scope_locals.get('csconsole_success_priorities'),
+                    csconsole_adoption_barriers=_scope_locals.get('csconsole_adoption_barriers'),
                 )
                 all_customers = sorted([c for c in _ren_all_set if c])
             except Exception as _ren_err:
@@ -9722,9 +10496,16 @@ def run_customer_renewal_analysis(analysis_id):
             # actually uploaded a CSOne file for this job so the
             # validator can make ``csone`` required when an upload
             # silently produced zero rows.
+            # Round 14 / Phase 2.4: replaced ``X if 'X' in locals() else
+            # None`` antipatterns with ``locals().get(...)`` so ruff/F821
+            # stops flagging the bare names as undefined.  ``locals()``
+            # captures the current frame so ``csone_file`` and
+            # ``csone_path`` only resolve if they were actually bound on
+            # this code path.
+            _scope_locals = locals()
             _csone_file_provided = bool(
-                (csone_file if 'csone_file' in locals() else None)
-                or (csone_path if 'csone_path' in locals() else None)
+                _scope_locals.get('csone_file')
+                or _scope_locals.get('csone_path')
             )
             raise_validation_error_if_invalid(
                 report_type='renewal' if renewal_type == 'renewal_single' else 'renewal_portfolio',
@@ -10319,23 +11100,45 @@ def run_customer_renewal_analysis(analysis_id):
                     'valign': 'vcenter'
                 })
             
+                # Round 13 / Phase 5.6: previously the Excel band fills
+                # were hand-mixed (``#FF6B6B`` / ``#FFE66D`` / ``#4ECDC4``)
+                # and drifted from ``canonical_metrics.RISK_BAND_COLORS``
+                # (CRITICAL=#d62728, MEDIUM=#ffd700, LOW=#2ca02c) used by
+                # the matplotlib chart pages embedded in the same Word
+                # report.  Excel readers therefore saw a soft pinkish-red
+                # while the chart on the next page rendered a saturated
+                # crimson for the same risk band.  Resolve through the
+                # canonical map so the Excel sheet and the matplotlib
+                # chart agree on band colour; the
+                # ``RISK_BAND_PORTFOLIO_COLORS`` softer-fill aliases
+                # remain in ``canonical_metrics`` for callers that
+                # explicitly want them.
+                try:
+                    _r13_excel_high = (cm.RISK_BAND_COLORS.get('CRITICAL', '#d62728') or '#d62728')
+                    _r13_excel_med = (cm.RISK_BAND_COLORS.get('MEDIUM', '#ffd700') or '#ffd700')
+                    _r13_excel_low = (cm.RISK_BAND_COLORS.get('LOW', '#2ca02c') or '#2ca02c')
+                except Exception:
+                    _r13_excel_high = '#d62728'
+                    _r13_excel_med = '#ffd700'
+                    _r13_excel_low = '#2ca02c'
+
                 # Risk-based formatting
                 high_risk_format = workbook.add_format({
-                    'fg_color': '#FF6B6B',
+                    'fg_color': _r13_excel_high,
                     'font_color': 'white',
                     'bold': True,
                     'border': 1
                 })
-            
+
                 medium_risk_format = workbook.add_format({
-                    'fg_color': '#FFE66D',
+                    'fg_color': _r13_excel_med,
                     'font_color': 'black',
                     'bold': True,
                     'border': 1
                 })
-            
+
                 low_risk_format = workbook.add_format({
-                    'fg_color': '#4ECDC4',
+                    'fg_color': _r13_excel_low,
                     'font_color': 'white',
                     'bold': True,
                     'border': 1
@@ -10700,9 +11503,14 @@ def run_comprehensive_analysis(analysis_id):
         try:
             _ab_attrs = getattr(ab_raw, 'attrs', {}) or {}
             if _ab_attrs.get('fetch_error'):
+                # Round 13 / Phase 4.5: route exception text through
+                # ``_redact_partial_warning_error`` so the UI banner
+                # never echoes the raw failing URL / Snowflake account /
+                # filesystem path.  Logs still capture the verbatim
+                # error via ``logger.warning`` below.
                 partial_data_warnings.append({
                     'dataset': _ab_attrs.get('fetch_error_dataset') or 'adoption_barriers',
-                    'error': str(_ab_attrs.get('fetch_error')),
+                    'error': _redact_partial_warning_error(_ab_attrs.get('fetch_error')),
                     'kind': _ab_attrs.get('fetch_error_kind') or 'runtime',
                 })
                 logger.warning(
@@ -10773,9 +11581,10 @@ def run_comprehensive_analysis(analysis_id):
             csconsole_customer_pulse = _empty_df_with_fetch_marker("csconsole_customer_pulse", str(e))
             csconsole_success_priorities = _empty_df_with_fetch_marker("csconsole_success_priorities", str(e))
             csconsole_adoption_barriers = _empty_df_with_fetch_marker("csconsole_adoption_barriers", str(e))
+            # Round 13 / Phase 4.5: redact UI-bound exception text.
             partial_data_warnings.append({
                 'dataset': 'csconsole_bundle',
-                'error': str(e) or 'prefetch_failed',
+                'error': _redact_partial_warning_error(e) or 'prefetch_failed',
                 'kind': 'runtime',
             })
         
@@ -11188,18 +11997,32 @@ def run_comprehensive_analysis(analysis_id):
                     if os.path.exists(chart_path):
                         try:
                             # Add chart title based on filename
+                            # Round 13 / Phase 8.6 + 9.10: capture the
+                            # heading so the picture's docPr alt text
+                            # can be stamped after add_picture returns,
+                            # giving screen-reader users the same
+                            # context as sighted readers.
+                            _r13_chart_title = ''
                             if 'support_cases_trend' in chart_path:
-                                report_builder.add_heading('Support Cases Over Time', level=2)
+                                _r13_chart_title = 'Support Cases Over Time'
                             elif 'severity_distribution' in chart_path:
-                                report_builder.add_heading('Case Severity Distribution', level=2)
+                                _r13_chart_title = 'Case Severity Distribution'
                             elif 'top_customers' in chart_path:
-                                report_builder.add_heading('Top Customers by Case Volume', level=2)
+                                _r13_chart_title = 'Top Customers by Case Volume'
                             elif 'bems_escalations' in chart_path:
-                                report_builder.add_heading('BEMS Escalations by Customer', level=2)
+                                _r13_chart_title = 'BEMS Escalations by Customer'
                             elif 'feature_request_volume' in chart_path:
-                                report_builder.add_heading('Feature Requests by Customer', level=2)
-                            
-                            report_builder.doc.add_picture(chart_path, width=Inches(6.5))
+                                _r13_chart_title = 'Feature Requests by Customer'
+                            if _r13_chart_title:
+                                report_builder.add_heading(_r13_chart_title, level=2)
+                            _r13_picture = report_builder.doc.add_picture(chart_path, width=Inches(6.5))
+                            try:
+                                _r13_set_picture_alt_text(
+                                    _r13_picture,
+                                    _r13_chart_alt_text(_r13_chart_title or os.path.basename(chart_path)),
+                                )
+                            except Exception:
+                                pass
                             report_builder.doc.add_paragraph()  # Spacing
                             charts_added += 1
                             logger.info(f"[[OK]] Chart added to comprehensive report: {chart_path}")
@@ -11242,16 +12065,35 @@ def run_comprehensive_analysis(analysis_id):
         logger.info(f"[[CUSTOMER_COUNT]] Portfolio metrics using {portfolio_metrics['total_customers']} customers (unfiltered)")
         
         try:
+            # Round 13 / Phase 3.10: canonicalize ``customer_name`` on
+            # both sides of the engagement merge so cosmetic spelling
+            # drift (NBSPs, casing, trailing punctuation) does not split
+            # the same customer into two rows after the outer-join.
+            # Without this fix, "Acme Co" landed once with ab_count and
+            # "Acme co." landed once with csone_count, leaving each
+            # variant credited with only half the engagement signal.
+            try:
+                from data_normalization import normalize_customer_name as _r13_norm_cust
+            except Exception:
+                _r13_norm_cust = lambda v: v  # noqa: E731 - fail-safe identity
             ab_norm_empty = ab_norm is None or (hasattr(ab_norm, 'empty') and ab_norm.empty)
             if not ab_norm_empty:
-                ab_counts = ab_norm['customer_name'].value_counts().reset_index()
+                _ab_for_engage = ab_norm.copy()
+                _ab_for_engage['customer_name'] = (
+                    _ab_for_engage['customer_name'].fillna('Unknown').apply(_r13_norm_cust)
+                )
+                ab_counts = _ab_for_engage['customer_name'].value_counts().reset_index()
                 ab_counts.columns = ['customer_name', 'ab_count']
             else:
                 ab_counts = pd.DataFrame(columns=['customer_name', 'ab_count'])
 
             csone_empty = csone_df is None or (hasattr(csone_df, 'empty') and csone_df.empty)
             if not csone_empty:
-                csone_counts = csone_df['customer_name'].value_counts().reset_index()
+                _cs_for_engage = csone_df.copy()
+                _cs_for_engage['customer_name'] = (
+                    _cs_for_engage['customer_name'].fillna('Unknown').apply(_r13_norm_cust)
+                )
+                csone_counts = _cs_for_engage['customer_name'].value_counts().reset_index()
                 csone_counts.columns = ['customer_name', 'csone_count']
             else:
                 csone_counts = pd.DataFrame(columns=['customer_name', 'csone_count'])
@@ -12574,8 +13416,23 @@ def get_status(analysis_id):
                                 and _err.strip()
                             ):
                                 status_copy['status'] = 'error'
-                        except Exception:
-                            pass  # noqa: PIE790
+                        except Exception as _r13_status_swallow:
+                            # Round 13 / Phase 11.5: previously this
+                            # was a bare ``except: pass``.  Surface
+                            # the swallowed exception at DEBUG so a
+                            # support engineer attaching to the log
+                            # at debug level can see what the
+                            # status-serialization path actually
+                            # rejected, without spamming the default
+                            # log stream.
+                            try:
+                                logger.debug(
+                                    "status fallback path swallowed exception while "
+                                    "downgrading completed→error: %r",
+                                    _r13_status_swallow,
+                                )
+                            except Exception:
+                                pass
                         return jsonify(status_copy)
                     else:
                         logger.warning(f"Analysis ID not found in memory or file")
@@ -12593,7 +13450,27 @@ def get_status(analysis_id):
             if key.startswith('_') or key in _EXCLUDE_FROM_STATUS_API:
                 continue
             if isinstance(value, datetime):
-                status_copy[key] = value.isoformat()
+                # Round 13 / Phase 10.3: previously this serialized
+                # naive datetimes via ``value.isoformat()`` with no
+                # ``Z`` suffix, so a consumer parsing the response
+                # had no way to tell whether the timestamp was UTC
+                # (the worker's actual convention) or local-time.
+                # Cross-host clients in different timezones therefore
+                # rendered the same status with a multi-hour offset.
+                # Normalize to UTC ISO-Z explicitly: tz-naive values
+                # are *defined* upstream as UTC (see worker
+                # ``datetime.now(timezone.utc)`` calls) so attach
+                # ``timezone.utc`` and emit ``...Z``; tz-aware values
+                # are converted to UTC and emitted with ``Z`` for
+                # consistency.
+                try:
+                    if value.tzinfo is None:
+                        _r13_dt = value.replace(tzinfo=timezone.utc)
+                    else:
+                        _r13_dt = value.astimezone(timezone.utc)
+                    status_copy[key] = _r13_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+                except Exception:
+                    status_copy[key] = value.isoformat()
             else:
                 status_copy[key] = value
     status_copy['excel_available'] = bool(status.get('excel_report'))
@@ -12622,19 +13499,90 @@ def get_status(analysis_id):
                 analysis_id,
             )
             status_copy['status'] = 'error'
-    except Exception:
-        pass  # noqa: PIE790  (defensive; never fail status serialization)
+    except Exception as _r13_status_swallow:
+        # Round 13 / Phase 11.5: previously this was a bare
+        # ``except: pass`` with only a comment.  Promote the
+        # swallowed exception to DEBUG so log-level=DEBUG users
+        # see exactly what the serializer rejected without
+        # leaking noise into INFO-level logs.
+        try:
+            logger.debug(
+                "status main path swallowed exception while downgrading completed→error "
+                "for %s: %r",
+                analysis_id, _r13_status_swallow,
+            )
+        except Exception:
+            pass
 
     return jsonify(status_copy)
 
 @app.route('/api/status/all')
 def get_all_status():
-    """Get status of all analyses (for admin console monitoring)"""
+    """Get status of all analyses (for admin console monitoring).
+
+    Round 13 / Phase 10.2: previously this endpoint returned a raw
+    JSON array of every analysis status with no envelope, no
+    ``generated_at_utc`` timestamp, and no pagination -- so a
+    long-running server with hundreds of analyses returned a
+    multi-MB payload on every admin poll, and the UI had no way to
+    detect a stale cached response.  Wrap the list in a
+    ``{ ok, meta: { generated_at_utc, total, returned, limit,
+    cursor, next_cursor }, statuses }`` envelope and accept
+    ``?limit=`` and ``?cursor=`` query params to bound payload
+    size.  Backwards-compat: legacy clients that expected an array
+    still get one when ``?envelope=0`` is passed.
+    """
     try:
+        # Parse pagination kwargs defensively -- never let a bad
+        # client query crash the admin console.
+        try:
+            _r13_limit_raw = request.args.get('limit') if 'request' in globals() else None
+        except Exception:
+            _r13_limit_raw = None
+        try:
+            _r13_cursor_raw = request.args.get('cursor') if 'request' in globals() else None
+        except Exception:
+            _r13_cursor_raw = None
+        try:
+            _r13_envelope_raw = request.args.get('envelope', '1') if 'request' in globals() else '1'
+        except Exception:
+            _r13_envelope_raw = '1'
+        # Cap limit at 1000 to prevent denial-of-service via
+        # ``?limit=2147483647`` and default to a generous 200 so
+        # most admin consoles see everything in one page.
+        try:
+            _r13_limit = max(1, min(1000, int(_r13_limit_raw))) if _r13_limit_raw else 200
+        except Exception:
+            _r13_limit = 200
+        try:
+            _r13_cursor = max(0, int(_r13_cursor_raw)) if _r13_cursor_raw else 0
+        except Exception:
+            _r13_cursor = 0
+        _r13_envelope = str(_r13_envelope_raw or '1').strip().lower() not in (
+            '0', 'false', 'no', ''
+        )
+
         with analysis_status_lock:
-            # Return all statuses as a list with calculated ETAs
+            # Sort analysis ids deterministically so cursor pagination
+            # returns a stable slice across calls; freshest first.
+            try:
+                _r13_id_list = sorted(
+                    analysis_status.keys(),
+                    key=lambda _aid: (
+                        # Most-recently-started first; fall back to id
+                        # for stable tie-break.
+                        _safe_iso_for_sort(analysis_status[_aid].get('started_at')),
+                        str(_aid),
+                    ),
+                    reverse=True,
+                )
+            except Exception:
+                _r13_id_list = list(analysis_status.keys())
+            _r13_total = len(_r13_id_list)
+            _r13_slice = _r13_id_list[_r13_cursor : _r13_cursor + _r13_limit]
             all_statuses = []
-            for analysis_id, status in analysis_status.items():
+            for analysis_id in _r13_slice:
+                status = analysis_status.get(analysis_id) or {}
                 status_copy = {}
                 
                 # Copy fields safely, converting datetime to string
@@ -12683,15 +13631,76 @@ def get_all_status():
                         and _err.strip()
                     ):
                         status_copy['status'] = 'error'
-                except Exception:
-                    pass  # noqa: PIE790
+                except Exception as _r13_status_swallow:
+                    # Round 13 / Phase 11.5: log the swallowed
+                    # exception at DEBUG so the bulk-status path
+                    # surfaces the same diagnostic signal as the
+                    # per-id ``/status/<id>`` path.
+                    try:
+                        logger.debug(
+                            "/api/status/all swallowed exception while downgrading "
+                            "completed→error for %s: %r",
+                            analysis_id, _r13_status_swallow,
+                        )
+                    except Exception:
+                        pass
 
                 all_statuses.append(status_copy)
-            
-            return jsonify(all_statuses)
+
+            # Round 13 / Phase 10.2: build the envelope.  Legacy
+            # callers can opt out via ``?envelope=0`` and still get
+            # the bare array.
+            try:
+                _r13_now_iso = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            except Exception:
+                _r13_now_iso = ''
+            _r13_next_cursor = (
+                _r13_cursor + len(all_statuses)
+                if (_r13_cursor + len(all_statuses)) < _r13_total
+                else None
+            )
+            if not _r13_envelope:
+                return jsonify(all_statuses)
+            return jsonify({
+                'ok': True,
+                'success': True,
+                'meta': {
+                    'generated_at_utc': _r13_now_iso,
+                    'total': _r13_total,
+                    'returned': len(all_statuses),
+                    'limit': _r13_limit,
+                    'cursor': _r13_cursor,
+                    'next_cursor': _r13_next_cursor,
+                },
+                'statuses': all_statuses,
+            })
     except Exception as e:
         logger.error(f"Error fetching batch statuses: {e}", exc_info=True)
-        return jsonify({'error': 'Failed to retrieve statuses', 'statuses': []}), 500
+        return jsonify({
+            'ok': False,
+            'success': False,
+            'error': 'Failed to retrieve statuses',
+            'statuses': [],
+        }), 500
+
+
+def _safe_iso_for_sort(value) -> str:
+    """Round 13 / Phase 10.2: stable sort key for status entries.
+
+    ``analysis_status[id].get('started_at')`` may be a ``datetime``,
+    an ISO string, ``None``, or some other type a defensive caller
+    stuffed in.  Coerce to an ISO-Z-comparable string and never
+    raise -- a sort key that throws would crash the entire admin
+    console poll on a single bad row.
+    """
+    if value is None:
+        return ''
+    try:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return str(value)
+    except Exception:
+        return ''
 
 
 @app.route('/api/debug/verbose', methods=['GET', 'POST'])
@@ -12704,7 +13713,7 @@ def verbose_debug_api():
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token') or request.form.get('csrf_token'))
         except Exception:
-            return jsonify({'error': 'CSRF validation failed'}), 403
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     # Round 12 / Phase 11.2: previously this endpoint exposed the
     # Snowflake query log but not the prefetch cache layer, so support
     # could see "we ran 14 queries" while having no signal on whether
@@ -12846,6 +13855,30 @@ def previous_reports():
         # Find all report files (including leader reports - both old and new naming)
         word_files = glob.glob(os.path.join(outputs_dir, "AdoptIQ_*.docx")) + glob.glob(os.path.join(outputs_dir, "Leader_Report_*.docx"))
         excel_files = glob.glob(os.path.join(outputs_dir, "AdoptIQ_*.xlsx")) + glob.glob(os.path.join(outputs_dir, "AdoptIQ_Data_*.xlsx"))
+
+        # Round 13 / Phase 10.8 + 11.8: previously this consumed
+        # ``glob.glob(...)`` results in raw filesystem order, which
+        # varies by OS / FS readdir order (e.g. macOS APFS returns
+        # alphabetic, ext4 returns insertion order, NTFS returns
+        # hash-bucket order).  The downstream group dict therefore
+        # got a non-deterministic insertion ordering, and the final
+        # ``modified`` field for each group could disagree on which
+        # of two same-mtime files won.  Sort both lists by mtime
+        # descending (newest first) with a stable lexicographic
+        # tie-break on the file path so identical timestamps still
+        # produce a reproducible iteration order across hosts.
+        def _r13_mtime_key(_path: str) -> tuple:
+            try:
+                _mt = os.stat(_path).st_mtime
+            except Exception:
+                _mt = 0.0
+            return (-float(_mt or 0.0), str(_path))
+
+        try:
+            word_files = sorted(word_files, key=_r13_mtime_key)
+            excel_files = sorted(excel_files, key=_r13_mtime_key)
+        except Exception:
+            pass
         
         # Group files by report (remove file extension and timestamp to group them)
         report_groups = {}
@@ -13099,9 +14132,15 @@ def history():
         except (TypeError, ValueError):
             total_managers = 0
     list_truncated = total_analyses > len([r for r in raw if not r.get('_placeholder')])
+    # Round 13 / Phase 4.6: provide ``id_digest`` (12-char SHA-256 prefix)
+    # so the rendered DOM can expose a non-routable, log-friendly handle
+    # in ``data-analysis-id-digest`` instead of leaking the verbatim
+    # analysis_id (which embeds customer / manager / technology
+    # fragments) into the page source / browser inspector.
     analyses = [
         {
             'id': r.get('request_id', ''),
+            'id_digest': _id_digest(r.get('request_id', '')),
             'start_time': r.get('start_time') or r.get('created_at') or 'Unknown',
             'manager': r.get('manager') or '—',
             'technology': r.get('technology') or '—',
@@ -13154,7 +14193,7 @@ def ask_ai_portfolio():
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
         except Exception:
-            return jsonify({'ok': False, 'error': 'CSRF validation failed'}), 403
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     # Round 5 / Phase 3.10: per-IP/per-user sliding-window throttle.
     _throttle = _check_ask_ai_throttle()
     if _throttle is not None:
@@ -13407,14 +14446,94 @@ def ask_ai_portfolio():
                                 sections.append(f"Open/active: {open_count} | Closed/resolved: {n_abs - open_count}")
                             if 'BU_NAME' in ab_df.columns or 'ACCOUNT_NAME_C' in ab_df.columns:
                                 cust_col = 'BU_NAME' if 'BU_NAME' in ab_df.columns else 'ACCOUNT_NAME_C'
-                                ab_by_cust = ab_df[cust_col].value_counts().head(10)
-                                sections.append("Top 10 customers by barrier count:\n" + "\n".join(f"  - {c}: {n}" for c, n in ab_by_cust.items()))
+                                # Round 13 / Phase 6.4: previously the
+                                # Ask-AI prompt fed only the head(10)
+                                # without disclosing the long tail, so
+                                # the LLM produced "across all 10
+                                # customers" sentences when there were
+                                # really 47 affected accounts.  Disclose
+                                # truncation so the LLM can hedge
+                                # quantification.
+                                _r13_cust_full = ab_df[cust_col].value_counts()
+                                ab_by_cust = _r13_cust_full.head(10)
+                                _r13_cust_extra = max(0, int(len(_r13_cust_full)) - 10)
+                                _r13_cust_lines = [f"  - {c}: {n}" for c, n in ab_by_cust.items()]
+                                if _r13_cust_extra > 0:
+                                    _r13_cust_lines.append(
+                                        f"  - [+{_r13_cust_extra} more customers omitted from this top-10 list]"
+                                    )
+                                sections.append("Top 10 customers by barrier count:\n" + "\n".join(_r13_cust_lines))
                             if 'AB_CATEGORY_C' in ab_df.columns:
-                                cat_dist = ab_df['AB_CATEGORY_C'].value_counts().head(8)
-                                sections.append("Top categories:\n" + "\n".join(f"  - {c}: {n}" for c, n in cat_dist.items()))
+                                # Round 13 / Phase 6.4: parallel
+                                # disclosure for category truncation so
+                                # the LLM does not infer "all categories
+                                # are listed" from a head(8) view.
+                                _r13_cat_full = ab_df['AB_CATEGORY_C'].value_counts()
+                                cat_dist = _r13_cat_full.head(8)
+                                _r13_cat_extra = max(0, int(len(_r13_cat_full)) - 8)
+                                _r13_cat_lines = [f"  - {c}: {n}" for c, n in cat_dist.items()]
+                                if _r13_cat_extra > 0:
+                                    _r13_cat_lines.append(
+                                        f"  - [+{_r13_cat_extra} more categories omitted from this top-8 list]"
+                                    )
+                                sections.append("Top categories:\n" + "\n".join(_r13_cat_lines))
 
-                            sections.append("Barrier details (up to 50):")
-                            for _, row in ab_df.head(50).iterrows():
+                            # Round 13 / Phase 6.6: previously
+                            # ``ab_df.head(50)`` produced an arbitrary
+                            # 50-row sample because the upstream frame
+                            # was unsorted (Snowflake returns rows in
+                            # whatever order the cluster scanned them).
+                            # Sort by SEVERITY_C (with ``case_priority_norm``
+                            # ordering) and CREATED_DATE so the 50-row
+                            # sample is stable across runs and skewed
+                            # toward the most-severe / most-recent
+                            # barriers.  Falls back to the original
+                            # ordering on any sort error so we never
+                            # crash the prompt builder.
+                            try:
+                                _r13_ab_sorted = ab_df.copy()
+                                _r13_ab_sort_keys: list[tuple[str, bool]] = []
+                                if 'SEVERITY_C' in _r13_ab_sorted.columns:
+                                    # ``Critical`` < ``High`` < ``Medium`` < ``Low``
+                                    _sev_order = {
+                                        'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3
+                                    }
+                                    _r13_ab_sorted['_sev_rank'] = (
+                                        _r13_ab_sorted['SEVERITY_C']
+                                        .fillna('')
+                                        .astype(str)
+                                        .str.upper()
+                                        .map(_sev_order)
+                                        .fillna(99)
+                                    )
+                                    _r13_ab_sort_keys.append(('_sev_rank', True))
+                                if 'CREATED_DATE' in _r13_ab_sorted.columns:
+                                    try:
+                                        _r13_ab_sorted['_created_dt'] = pd.to_datetime(
+                                            _r13_ab_sorted['CREATED_DATE'],
+                                            errors='coerce',
+                                            utc=True,
+                                        )
+                                        _r13_ab_sort_keys.append(('_created_dt', False))
+                                    except Exception:
+                                        pass
+                                if _r13_ab_sort_keys:
+                                    _r13_ab_sorted = _r13_ab_sorted.sort_values(
+                                        by=[k for k, _ in _r13_ab_sort_keys],
+                                        ascending=[asc for _, asc in _r13_ab_sort_keys],
+                                        kind='mergesort',
+                                    )
+                                _r13_ab_iter = _r13_ab_sorted.head(50)
+                            except Exception:
+                                _r13_ab_iter = ab_df.head(50)
+                            _r13_ab_total = int(len(ab_df))
+                            _r13_ab_extra = max(0, _r13_ab_total - 50)
+                            sections.append(
+                                f"Barrier details ([SAMPLE: {min(50, _r13_ab_total)} of {_r13_ab_total}]"
+                                f"{'; sorted by severity desc, created desc' if _r13_ab_total > 0 else ''}"
+                                f"{f'; {_r13_ab_extra} barriers omitted' if _r13_ab_extra > 0 else ''}):"
+                            )
+                            for _, row in _r13_ab_iter.iterrows():
                                 cust = row.get('BU_NAME', row.get('ACCOUNT_NAME_C', 'Unknown'))
                                 subj = row.get('SUBJECT_C', 'No subject')
                                 sev = row.get('SEVERITY_C', '')
@@ -13453,7 +14572,22 @@ def ask_ai_portfolio():
                                 except Exception:
                                     sev_counts = cases_df[sev_col].value_counts()
                                 sections.append("By severity: " + ", ".join(f"{s}: {c}" for s, c in sev_counts.items()))
-                            for _, row in cases_df.head(25).iterrows():
+                            # Round 13 / Phase 6.5: previously the
+                            # cases preview was ``head(25)`` with no
+                            # ``[SAMPLE: N of M]`` prefix, so an LLM
+                            # reading the prompt could not tell
+                            # whether 25 was the literal population
+                            # size or a cap.  Stamp a deterministic
+                            # sample disclosure so the LLM hedges its
+                            # quantification.
+                            _r13_cases_total = int(len(cases_df))
+                            _r13_cases_cap = 25
+                            _r13_cases_omitted = max(0, _r13_cases_total - _r13_cases_cap)
+                            sections.append(
+                                f"Case details ([SAMPLE: {min(_r13_cases_cap, _r13_cases_total)} of {_r13_cases_total}]"
+                                f"{f'; {_r13_cases_omitted} cases omitted' if _r13_cases_omitted > 0 else ''}):"
+                            )
+                            for _, row in cases_df.head(_r13_cases_cap).iterrows():
                                 subj = row.get('SUBJECT', 'N/A')
                                 sev = row.get(sev_col, '') if sev_col else ''
                                 status = row.get('STATUS', '')
@@ -14116,7 +15250,7 @@ def refresh_external_intel():
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
         except Exception:
-            return jsonify({'ok': False, 'error': 'CSRF validation failed'}), 403
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     try:
         from adoptiq_backend import (
             fetch_status_incidents,
@@ -14253,7 +15387,7 @@ def ask_intel():
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
         except Exception:
-            return jsonify({'ok': False, 'error': 'CSRF validation failed'}), 403
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     # Round 5 / Phase 3.10: per-IP/per-user sliding-window throttle.
     _throttle = _check_ask_ai_throttle()
     if _throttle is not None:
@@ -14464,7 +15598,7 @@ def import_intel():
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
         except Exception:
-            return jsonify({'ok': False, 'error': 'CSRF validation failed'}), 403
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     import json as _json
     from incident_storage import import_all_data
     try:
@@ -14562,7 +15696,7 @@ def cancel_analysis(analysis_id):
                 or request.form.get('csrf_token')
             )
         except Exception:
-            return jsonify({'error': 'CSRF validation failed'}), 403
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     # Round 6 / Phase 6.5: snapshot the live status under the lock,
     # then release before returning so the global ``analysis_status_lock``
     # (an RLock used by every status / writer / progress path in the
@@ -14610,7 +15744,7 @@ def start_compact_analysis():
             try:
                 validate_csrf(csrf_token)
             except Exception:
-                return jsonify({'success': False, 'error': 'CSRF validation failed'}), 400
+                return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 400  # Round 13 / Phase 4.3
 
         # Handle both form data and JSON data
         subscription_id = ''
@@ -14649,7 +15783,7 @@ def start_compact_analysis():
                     
                     import uuid as _uuid
                     raw_name = secure_filename(file.filename)
-                    filename = f"{_uuid.uuid4().hex[:8]}_{raw_name}"
+                    filename = _r13_unique_upload_filename(_uuid, raw_name, file)
                     filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                     file.save(filepath)
                     csone_file = filename
@@ -14766,7 +15900,7 @@ def start_customer_renewal_analysis():
             try:
                 validate_csrf(csrf_token)
             except Exception:
-                return jsonify({'success': False, 'error': 'CSRF validation failed'}), 400
+                return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 400  # Round 13 / Phase 4.3
 
         data = request.get_json() or {}
         # Round 8 / Phase 1.7: previously logged the entire payload (manager,
@@ -14892,7 +16026,7 @@ def search_subscriptions():
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
         except Exception:
-            return jsonify({'error': 'CSRF validation failed'}), 403
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     try:
         data = request.get_json() or {}
         customer_name = data.get('customer_name', '').strip()
@@ -15059,7 +16193,7 @@ def start_subscription_analysis():
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token') or request.form.get('csrf_token'))
         except Exception:
-            return jsonify({'error': 'CSRF validation failed'}), 403
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     try:
         data = request.form
         subscription_id = data.get('subscription_id', '').strip()
@@ -15784,6 +16918,114 @@ def run_subscription_analysis(analysis_id):
                                 worksheet.write(0, col_num, value, header_format)
                         except Exception:
                             pass  # noqa: PIE790
+                        # Round 13 / Phase 9.9: previously the
+                        # ``Risk_Components`` sheet shipped without
+                        # band coloring on the ``Score`` column or
+                        # consistent numeric formatting -- so the
+                        # subscription renewal Excel disagreed with
+                        # the matching Word body color cues (where
+                        # CRITICAL/HIGH/MEDIUM/LOW are already mapped
+                        # to ``RISK_BAND_COLORS``).  Apply
+                        # conditional formatting from the canonical
+                        # band thresholds + a numeric format to the
+                        # ``Score`` column so the workbook renders
+                        # the same risk gradient the chart uses.
+                        try:
+                            from canonical_metrics import (
+                                RISK_BAND_COLORS as _R13_RBC,
+                                RISK_BAND_THRESHOLDS as _R13_RBT,
+                            )
+                        except Exception:
+                            _R13_RBC = {
+                                'CRITICAL': '#d62728',
+                                'HIGH': '#ff7f0e',
+                                'MEDIUM': '#fdae61',
+                                'LOW': '#2ca02c',
+                                'HEALTHY': '#28B463',
+                            }
+                            _R13_RBT = None
+                        try:
+                            _r13_score_col = None
+                            for _col_idx, _col_name in enumerate(list(risk_df.columns)):
+                                if str(_col_name).strip().lower() == 'score':
+                                    _r13_score_col = _col_idx
+                                    break
+                            if _r13_score_col is not None and len(risk_df) > 0:
+                                _r13_book = writer.book
+                                # Build per-band formats; tints lean
+                                # slightly lighter than the chart hex
+                                # so cell text stays readable on the
+                                # background.
+                                def _r13_fmt(hex_str: str):
+                                    try:
+                                        return _r13_book.add_format({'bg_color': hex_str, 'num_format': '0.0'})
+                                    except Exception:
+                                        return _r13_book.add_format({'num_format': '0.0'})
+                                _r13_critical_fmt = _r13_fmt(_R13_RBC.get('CRITICAL', '#d62728'))
+                                _r13_high_fmt = _r13_fmt(_R13_RBC.get('HIGH', '#ff7f0e'))
+                                _r13_med_fmt = _r13_fmt(_R13_RBC.get('MEDIUM', '#fdae61'))
+                                _r13_low_fmt = _r13_fmt(_R13_RBC.get('LOW', '#2ca02c'))
+                                # Default thresholds align with
+                                # ``cm.RISK_BAND_THRESHOLDS`` for the
+                                # 0..10 scale: CRITICAL >= 8, HIGH >=
+                                # 6, MEDIUM >= 4, LOW < 4.  Allow
+                                # canonical override if available.
+                                _r13_th_critical = 8.0
+                                _r13_th_high = 6.0
+                                _r13_th_medium = 4.0
+                                try:
+                                    if isinstance(_R13_RBT, dict):
+                                        _r13_th_critical = float(_R13_RBT.get('CRITICAL', _r13_th_critical))
+                                        _r13_th_high = float(_R13_RBT.get('HIGH', _r13_th_high))
+                                        _r13_th_medium = float(_R13_RBT.get('MEDIUM', _r13_th_medium))
+                                except Exception:
+                                    pass
+                                _r13_first_row = 1  # header is row 0
+                                _r13_last_row = len(risk_df)
+                                worksheet.conditional_format(
+                                    _r13_first_row, _r13_score_col,
+                                    _r13_last_row, _r13_score_col,
+                                    {
+                                        'type': 'cell',
+                                        'criteria': '>=',
+                                        'value': _r13_th_critical,
+                                        'format': _r13_critical_fmt,
+                                    },
+                                )
+                                worksheet.conditional_format(
+                                    _r13_first_row, _r13_score_col,
+                                    _r13_last_row, _r13_score_col,
+                                    {
+                                        'type': 'cell',
+                                        'criteria': 'between',
+                                        'minimum': _r13_th_high,
+                                        'maximum': _r13_th_critical - 0.0001,
+                                        'format': _r13_high_fmt,
+                                    },
+                                )
+                                worksheet.conditional_format(
+                                    _r13_first_row, _r13_score_col,
+                                    _r13_last_row, _r13_score_col,
+                                    {
+                                        'type': 'cell',
+                                        'criteria': 'between',
+                                        'minimum': _r13_th_medium,
+                                        'maximum': _r13_th_high - 0.0001,
+                                        'format': _r13_med_fmt,
+                                    },
+                                )
+                                worksheet.conditional_format(
+                                    _r13_first_row, _r13_score_col,
+                                    _r13_last_row, _r13_score_col,
+                                    {
+                                        'type': 'cell',
+                                        'criteria': '<',
+                                        'value': _r13_th_medium,
+                                        'format': _r13_low_fmt,
+                                    },
+                                )
+                        except Exception:
+                            pass  # noqa: PIE790 - styling is best-effort
                     else:
                         # Format other sheets - check if they have data
                         if sheet_name in ['Adoption_Barriers', 'Action_Plans', 'Customer_Pulse', 'Success_Priorities']:
@@ -15951,13 +17193,22 @@ def download_result(analysis_id, file_type):
     
     if not word_report and not excel_report:
         logger.error(f"[[ERROR]] No reports available for analysis (digest=%s)", _aid_digest)
-        logger.info(f"[[DATA]] Status structure: {status.keys()}")
-        # Round 9 / Phase 1.3: digest the analysis_id in the error body
-        # (raw id stays in server-side DEBUG logs for correlation).
+        # Round 13 / Phase 4.4: previously the client-visible JSON
+        # echoed ``status.keys()`` (an internal step-name dictionary
+        # such as ``current_step``, ``progress_internal``,
+        # ``trace_id``, etc.).  That gave a remote caller a
+        # fingerprint of our pipeline structure for free.  Keep the
+        # diagnostic at server-side DEBUG only and ship a generic
+        # public-facing error body.
+        try:
+            logger.debug("[[DATA]] Status structure (DEBUG only): %s", list(status.keys()))
+        except Exception:
+            pass
         return jsonify({
+            'ok': False,
+            'success': False,
             'error': 'No results available for this analysis',
             'analysis_id_digest': _aid_digest,
-            'status_keys': list(status.keys())
         }), 400
     
     # Round 6 / Phase 6.7: paths reveal customer / report names.
@@ -16045,7 +17296,7 @@ def simple_test():
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token') or request.form.get('csrf_token'))
         except Exception:
-            return jsonify({'error': 'CSRF validation failed'}), 403
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     try:
         logger.info(f"[[SEARCH]] Simple test endpoint called")
         return jsonify({'success': True, 'message': 'Simple test successful'})
@@ -16063,7 +17314,7 @@ def test_generate_report():
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token') or request.form.get('csrf_token'))
         except Exception:
-            return jsonify({'error': 'CSRF validation failed'}), 403
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     try:
         logger.info(f"[[SEARCH]] Test generate report endpoint called")
 
@@ -16142,7 +17393,7 @@ def clear_stuck_analyses():
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token') or request.form.get('csrf_token'))
         except Exception:
-            return jsonify({'error': 'CSRF validation failed'}), 403
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     try:
         with analysis_status_lock:
             cleared_count = 0
@@ -16213,7 +17464,7 @@ def start_leader_report():
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token') or request.form.get('csrf_token'))
         except Exception:
-            return jsonify({'error': 'CSRF validation failed'}), 403
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     try:
         manager = request.form.get('manager')
         try:
@@ -16241,7 +17492,7 @@ def start_leader_report():
                 
                 import uuid as _uuid
                 raw_name = secure_filename(file.filename)
-                filename = f"{_uuid.uuid4().hex[:8]}_{raw_name}"
+                filename = _r13_unique_upload_filename(_uuid, raw_name, file)
                 filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                 file.save(filepath)
                 csone_file = filepath
@@ -16371,9 +17622,17 @@ def run_leader_report_generation(analysis_id):
             # the report fails loud if the upload produced zero rows
             # rather than silently shipping a leader report without
             # TAC evidence.
+            # Round 14 / Phase 2.4: previously this used a bare-name
+            # ``locals()`` membership check on csone_path / csone_file,
+            # but csone_path is computed *after* this validation block,
+            # so the bare-name reference was always dead and the
+            # short-circuit always returned False.  Use
+            # ``locals().get(...)`` so the lookup is explicit and
+            # ruff-clean while preserving behavior.
+            _scope_locals = locals()
             _leader_csone_provided = bool(
-                (csone_file if 'csone_file' in locals() else None)
-                or (csone_path if 'csone_path' in locals() else None)
+                _scope_locals.get('csone_file')
+                or _scope_locals.get('csone_path')
             )
             _leader_required = ['snowflake', 'team_subscriptions']
             raise_validation_error_if_invalid(
@@ -16565,9 +17824,23 @@ def run_leader_report_generation(analysis_id):
             # account_to_customer mapping so the validator counts
             # subscription-only / pulse-only customers in the same
             # universe the leader report does.
+            # Round 14 / Phase 2.4: replace the
+            # ``team_subs_df_unfiltered if 'team_subs_df_unfiltered' in
+            # locals() else pd.DataFrame()`` antipattern with an
+            # explicit ``locals().get`` so the bare name is no longer a
+            # ruff F821, and so the intent (use the unfiltered frame
+            # only if it has been bound earlier in the function) is
+            # easier to read.  Behavior is identical because the
+            # short-circuit short-circuited identically.
             try:
+                _scope_locals = locals()
+                _team_subs_unfiltered_for_lookup = _scope_locals.get(
+                    'team_subs_df_unfiltered'
+                )
+                if not isinstance(_team_subs_unfiltered_for_lookup, pd.DataFrame):
+                    _team_subs_unfiltered_for_lookup = pd.DataFrame()
                 _leader_lookup = build_customer_lookup(
-                    team_subs_df_unfiltered if 'team_subs_df_unfiltered' in locals() else pd.DataFrame()
+                    _team_subs_unfiltered_for_lookup
                 )
                 _leader_a2c = (_leader_lookup or {}).get('account_to_customer', {}) or {}
             except Exception:
@@ -16595,9 +17868,18 @@ def run_leader_report_generation(analysis_id):
             # Build a leader-scope ``PortfolioMetrics`` first and
             # thread it through so all paths use the same source of
             # truth.
+            # Round 14 / Phase 2.4: replace the
+            # ``team_subs_df_unfiltered if 'team_subs_df_unfiltered' in
+            # locals() and isinstance(...) else pd.DataFrame()`` antipattern
+            # with an explicit ``locals().get`` lookup so the bare name
+            # stops tripping ruff F821.  Behavior is preserved.
             try:
+                _scope_locals = locals()
+                _team_subs_unfiltered_for_pm = _scope_locals.get('team_subs_df_unfiltered')
+                if not isinstance(_team_subs_unfiltered_for_pm, pd.DataFrame):
+                    _team_subs_unfiltered_for_pm = pd.DataFrame()
                 _leader_portfolio_metrics = cm.build_portfolio_metrics(
-                    customer_subs=team_subs_df_unfiltered if 'team_subs_df_unfiltered' in locals() and isinstance(team_subs_df_unfiltered, pd.DataFrame) else pd.DataFrame(),
+                    customer_subs=_team_subs_unfiltered_for_pm,
                     ab_df=agg_ab,
                     csone_df=agg_tac,
                     customer_pulse_df=agg_pulse if not agg_pulse.empty else None,
@@ -17073,7 +18355,7 @@ def search_bst_defect():
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
         except Exception:
-            return jsonify({'error': 'CSRF validation failed'}), 403
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     try:
         data = request.get_json() or {}
         defect_id = data.get('defect_id', '').strip()
@@ -17132,7 +18414,7 @@ def search_psirt_advisory():
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
         except Exception:
-            return jsonify({'error': 'CSRF validation failed'}), 403
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     try:
         data = request.get_json() or {}
         advisory_id = data.get('advisory_id', '').strip()
@@ -17192,7 +18474,7 @@ def search_related_defects():
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
         except Exception:
-            return jsonify({'error': 'CSRF validation failed'}), 403
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     try:
         data = request.get_json() or {}
         search_terms = data.get('search_terms', [])
@@ -17257,7 +18539,7 @@ def search_related_vulnerabilities():
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
         except Exception:
-            return jsonify({'error': 'CSRF validation failed'}), 403
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     try:
         data = request.get_json() or {}
         search_terms = data.get('search_terms', [])
@@ -17377,12 +18659,45 @@ def _check_port_available(port):
 
 
 def _shutdown_handler():
-    """Save analysis status on shutdown."""
+    """Save analysis status on shutdown.
+
+    Round 14 / Phase 3.1: previously this function called
+    ``logger.info`` and ``logger.error`` unconditionally.  ``atexit``
+    handlers run after pytest's capture plugin (and many production
+    container runtimes) have already closed the underlying
+    ``StreamHandler`` streams, so the unguarded log calls produced
+    ``ValueError: I/O operation on closed file`` at the end of every
+    pytest run and -- more importantly -- after every clean shutdown
+    of the desktop bundle.  The ``ValueError`` is swallowed inside
+    ``logging.Handler.handleError``; the visible side-effect is a
+    ``--- Logging error ---`` diagnostic printed to stderr.  Toggle
+    ``logging.raiseExceptions`` off for the duration of the shutdown
+    log emission so that diagnostic stays out of stdout/stderr while
+    the rest of the handler runs unchanged.
+    """
     try:
         save_analysis_status()
-        logger.info("Analysis status saved on shutdown")
-    except Exception as e:
-        logger.error(f"Failed to save status on shutdown: {e}")
+    except Exception as save_err:
+        _prev_raise = logging.raiseExceptions
+        logging.raiseExceptions = False
+        try:
+            try:
+                logger.error("Failed to save status on shutdown: %s", save_err)
+            except Exception:
+                pass
+        finally:
+            logging.raiseExceptions = _prev_raise
+        return
+
+    _prev_raise = logging.raiseExceptions
+    logging.raiseExceptions = False
+    try:
+        try:
+            logger.info("Analysis status saved on shutdown")
+        except Exception:
+            pass
+    finally:
+        logging.raiseExceptions = _prev_raise
 
 
 atexit.register(_shutdown_handler)
@@ -17543,7 +18858,21 @@ if __name__ == '__main__':
     # we hard-warn at boot when the chosen host is non-loopback while the
     # sensitive surface is enabled, so the misconfiguration is impossible
     # to miss in stdout / shipped logs.
-    _bind_host = os.environ.get('ADOPTIQ_BIND_HOST', '0.0.0.0').strip() or '0.0.0.0'
+    # Round 14 / Phase 1.1: default to loopback-only.  Previously the
+    # default was ``0.0.0.0`` (any interface) with a runtime warning when
+    # sensitive endpoints were registered.  That warning is easy to miss
+    # in shipped desktop logs and the only reason ``0.0.0.0`` was ever
+    # the default is parity with `flask run` -- not a deliberate security
+    # decision.  The admin dashboard already defaults to ``127.0.0.1``
+    # and gates public binding behind ``ADOPTIQ_ADMIN_BIND_PUBLIC=1``;
+    # mirror that here.  Operators who *want* LAN access can either set
+    # ``ADOPTIQ_BIND_HOST`` directly or flip ``ADOPTIQ_BIND_PUBLIC=1``.
+    _bind_host_env = os.environ.get('ADOPTIQ_BIND_HOST', '').strip()
+    if _bind_host_env:
+        _bind_host = _bind_host_env
+    else:
+        _bind_public = os.environ.get('ADOPTIQ_BIND_PUBLIC', '').strip().lower() in {'1', 'true', 'yes'}
+        _bind_host = '0.0.0.0' if _bind_public else '127.0.0.1'  # noqa: S104 # nosec B104 - opt-in via ADOPTIQ_BIND_PUBLIC=1
     _loopback_hosts = {'127.0.0.1', '::1', 'localhost'}
     if _bind_host not in _loopback_hosts and _SENSITIVE_ENDPOINTS:
         _msg = (

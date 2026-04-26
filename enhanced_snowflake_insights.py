@@ -502,8 +502,14 @@ class EnhancedSnowflakeInsights:
                     # mark the currency UNKNOWN so the renderer cannot
                     # accidentally label a multi-currency total with a
                     # "$" prefix.
+                    # Round 13 / Phase 1.1: ALSO emit the multi-currency
+                    # contract (is_multi_currency + totals_by_currency)
+                    # so downstream renderers can break the total out
+                    # per currency code instead of summing into one
+                    # ambiguous "_total" scalar.
                     _seen_ccy: set = set()
                     _total = 0.0
+                    _totals_by_ccy: Dict[str, float] = {}
                     for _row in contract_results:
                         _amt = _row[3] if len(_row) > 3 else None
                         if _amt is None:
@@ -514,11 +520,14 @@ class EnhancedSnowflakeInsights:
                             _ccy = (_row[5] if len(_row) > 5 else None) or "UNKNOWN"
                         except Exception:
                             _ccy = "UNKNOWN"
-                        _seen_ccy.add(str(_ccy).strip().upper() or "UNKNOWN")
+                        _ccy_norm = str(_ccy).strip().upper() or "UNKNOWN"
+                        _seen_ccy.add(_ccy_norm)
                         try:
-                            _total += float(_amt)
+                            _amt_f = float(_amt)
                         except (TypeError, ValueError):
                             continue
+                        _total += _amt_f
+                        _totals_by_ccy[_ccy_norm] = _totals_by_ccy.get(_ccy_norm, 0.0) + _amt_f
                     if len(_seen_ccy) == 1:
                         _total_currency = next(iter(_seen_ccy))
                     elif len(_seen_ccy) == 0:
@@ -531,11 +540,19 @@ class EnhancedSnowflakeInsights:
                             customer_name, len(_seen_ccy),
                             ",".join(sorted(_seen_ccy)),
                         )
+                    # Round 13 / Phase 1.1: is_multi_currency contract.
+                    _is_multi_currency = len(_seen_ccy) > 1
                     insights['contract_data'] = {
                         'contracts_found': len(contract_results),
                         'contracts': [dict(zip([col[0] for col in cur.description], row)) for row in contract_results],
                         'total_arr': _total,
                         'total_arr_currency': _total_currency,
+                        # Round 13 / Phase 1.1: per-currency breakdown so
+                        # the Word renderer can show "USD 1,234.00 / EUR
+                        # 4,567.00" instead of summing into one bogus
+                        # scalar with a CURRENCY UNKNOWN label.
+                        'is_multi_currency': _is_multi_currency,
+                        'totals_by_currency': dict(sorted(_totals_by_ccy.items())),
                         'fetch_limit': _CONTRACT_LIMIT,
                         'was_truncated': len(contract_results) >= _CONTRACT_LIMIT,
                     }
@@ -1358,13 +1375,60 @@ class EnhancedSnowflakeInsights:
             # Round 7 / Phase 2.4: render the total with the resolved
             # currency code (or CURRENCY UNKNOWN when the contract set
             # is mixed) instead of always prefixing "$".
-            _arr_total = contract_insights['contract_data'].get('total_arr', 0) or 0
-            _arr_ccy = contract_insights['contract_data'].get('total_arr_currency', 'UNKNOWN')
-            if _arr_ccy and _arr_ccy != 'UNKNOWN':
-                doc.add_paragraph(f"Total ARR: {_arr_ccy} {_arr_total:,.2f}")
-            else:
+            # Round 13 / Phase 1.1 + 9.4: when the contract set is
+            # multi-currency, break the totals out per currency rather
+            # than summing into one ambiguous scalar with a "CURRENCY
+            # UNKNOWN" label.
+            _cd = contract_insights['contract_data']
+            _arr_total = _cd.get('total_arr', 0) or 0
+            _arr_ccy = _cd.get('total_arr_currency', 'UNKNOWN')
+            _is_multi = bool(_cd.get('is_multi_currency'))
+            _totals_by_ccy = _cd.get('totals_by_currency') or {}
+            # Round 13 / Phase 9.4: previously the per-currency lines
+            # (and the CURRENCY UNKNOWN fallback) were rendered with
+            # raw ``f"{x:,.2f}"`` formatting and a hardcoded ``$``
+            # below.  Two issues:
+            #   1. The format ignored ``report_utils.format_number`` so
+            #      this report disagreed with the executive briefing /
+            #      compact report in how thousands separators and
+            #      decimal precision were applied (compact report
+            #      uses ``format_number(x, 0)`` for ARR).
+            #   2. ``$`` was forced even when ``_arr_ccy`` was EUR /
+            #      GBP / JPY -- a customer who pays in EUR saw the
+            #      Word doc say "Total ARR: EUR 1,234,567.89" but the
+            #      booking line at ``Total booking amount`` still
+            #      printed a $ sign.  We disclose the currency code
+            #      explicitly per line and use the shared formatter
+            #      so all reports reconcile field-for-field.
+            try:
+                from report_utils import format_number as _r13_format_number
+            except Exception:
+                _r13_format_number = lambda v, d=2, p=False: (  # type: ignore
+                    f"{float(v):,.{d}f}" if v is not None else "N/A"
+                )
+            if _is_multi and _totals_by_ccy:
                 doc.add_paragraph(
-                    f"Total ARR: {_arr_total:,.2f} (CURRENCY UNKNOWN -- mixed or unset)"
+                    "Total ARR (multi-currency -- not summed across currencies):"
+                )
+                for _ccy, _amt in sorted(_totals_by_ccy.items()):
+                    try:
+                        _amt_text = _r13_format_number(float(_amt or 0), 2)
+                    except Exception:
+                        _amt_text = f"{float(_amt or 0):,.2f}"
+                    doc.add_paragraph(f"  {_ccy}: {_amt_text}")
+            elif _arr_ccy and _arr_ccy != 'UNKNOWN':
+                try:
+                    _arr_text = _r13_format_number(float(_arr_total), 2)
+                except Exception:
+                    _arr_text = f"{float(_arr_total):,.2f}"
+                doc.add_paragraph(f"Total ARR: {_arr_ccy} {_arr_text}")
+            else:
+                try:
+                    _arr_text = _r13_format_number(float(_arr_total), 2)
+                except Exception:
+                    _arr_text = f"{float(_arr_total):,.2f}"
+                doc.add_paragraph(
+                    f"Total ARR: {_arr_text} (CURRENCY UNKNOWN -- mixed or unset)"
                 )
             
             # Add source attribution

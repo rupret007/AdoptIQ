@@ -43,11 +43,90 @@ CISCO_GRAY = RGBColor(0x58, 0x59, 0x5B)
 CISCO_LIGHT_GRAY = RGBColor(0xF5, 0xF5, 0xF5)
 
 # Status colors
-EXCELLENT_GREEN = RGBColor(0x00, 0x8B, 0x00)
-SUCCESS_GREEN = RGBColor(0x28, 0xA7, 0x45)
-WARNING_ORANGE = RGBColor(0xFF, 0x8C, 0x00)
-DANGER_RED = RGBColor(0xDC, 0x14, 0x3C)
-CRITICAL_RED = RGBColor(0x8B, 0x00, 0x00)
+# Round 13 / Phase 5.4: previously this module exported a parallel
+# traffic-light palette (``EXCELLENT_GREEN`` 0x008B00,
+# ``SUCCESS_GREEN`` 0x28A745, ``WARNING_ORANGE`` 0xFF8C00,
+# ``DANGER_RED`` 0xDC143C) that diverged from the canonical
+# matplotlib / Excel band palette in ``canonical_metrics``
+# (CRITICAL=#d62728, HIGH=#ff7f0e, LOW=#2ca02c, HEALTHY=#28B463).
+# That meant the EI-formatter Word output rendered "danger" in a
+# brighter red than the corresponding matplotlib chart, and
+# "success" in two slightly different greens across one document.
+# Re-resolve the four traffic-light aliases from the canonical
+# ``RISK_BAND_COLORS`` map at import time.  The historical CRITICAL
+# darkening (``CRITICAL_RED`` was ``0x8B0000``) is preserved as a
+# 50% saturation of the canonical CRITICAL since we have no canonical
+# "darker than CRITICAL" entry; if that ever changes we can drop the
+# fallback.
+try:
+    from canonical_metrics import RISK_BAND_COLORS as _R13_EI_RBC
+
+    def _r13_ei_hex_to_rgb(_hex_str: str, _fallback: 'RGBColor') -> 'RGBColor':
+        try:
+            _h = (_hex_str or '').lstrip('#')
+            if len(_h) != 6:
+                return _fallback
+            return RGBColor(int(_h[0:2], 16), int(_h[2:4], 16), int(_h[4:6], 16))
+        except Exception:
+            return _fallback
+
+    EXCELLENT_GREEN = _r13_ei_hex_to_rgb(
+        _R13_EI_RBC.get('HEALTHY', '#28B463'),
+        RGBColor(0x28, 0xB4, 0x63),
+    )
+    SUCCESS_GREEN = _r13_ei_hex_to_rgb(
+        _R13_EI_RBC.get('LOW', '#2ca02c'),
+        RGBColor(0x2c, 0xa0, 0x2c),
+    )
+    WARNING_ORANGE = _r13_ei_hex_to_rgb(
+        _R13_EI_RBC.get('HIGH', '#ff7f0e'),
+        RGBColor(0xff, 0x7f, 0x0e),
+    )
+    DANGER_RED = _r13_ei_hex_to_rgb(
+        _R13_EI_RBC.get('CRITICAL', '#d62728'),
+        RGBColor(0xd6, 0x27, 0x28),
+    )
+    # We don't have a canonical "darker than CRITICAL" hex; keep the
+    # historical dark-red fallback so Word rendering of CRITICAL_RED
+    # stays distinguishable from DANGER_RED in legends.
+    CRITICAL_RED = RGBColor(0x8B, 0x00, 0x00)
+except Exception:  # pragma: no cover - defensive
+    EXCELLENT_GREEN = RGBColor(0x00, 0x8B, 0x00)
+    SUCCESS_GREEN = RGBColor(0x28, 0xA7, 0x45)
+    WARNING_ORANGE = RGBColor(0xFF, 0x8C, 0x00)
+    DANGER_RED = RGBColor(0xDC, 0x14, 0x3C)
+    CRITICAL_RED = RGBColor(0x8B, 0x00, 0x00)
+
+
+def _r13_safe_doc_text(value: Any, max_len: int = 200) -> str:
+    """Round 13 / Phase 9.3: sanitize a string before docx ``add_run``.
+
+    Mirrors the helper in ``app_simple._safe_doc_text`` /
+    ``compact_report_formatter._safe_doc_text`` /
+    ``advanced_renewal_analyzer._safe_doc_text`` so the EI formatter
+    can route raw customer / count strings through the same
+    XML-illegal-control-code stripper before they reach python-docx.
+    Without this guard, a customer name carrying a zero-width space,
+    tab, or surrogate code point produced a .docx that Word refused
+    to open without "repair".
+    """
+    try:
+        s = "" if value is None else str(value)
+    except Exception:
+        return ""
+    cleaned: list[str] = []
+    for ch in s:
+        cp = ord(ch)
+        if cp < 0x20 and ch not in ('\t', '\n', '\r'):
+            continue
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        cleaned.append(ch)
+    s = ''.join(cleaned)
+    s = re.sub(r'\s+', ' ', s).strip()
+    if max_len and len(s) > max_len:
+        s = s[: max_len - 1] + '\u2026'
+    return s
 
 
 def _ensure_inline_source_claim(
@@ -833,9 +912,32 @@ class ExecutiveIntelligenceFormatter:
             breakdown_para.add_run('BEMS Escalations by Customer:\n').bold = True
             
             # FIXED: Show ALL customers with BEMS escalations
-            for customer, count in sorted(bems_by_customer.items(), key=lambda x: x[1], reverse=True):
-                breakdown_para.add_run(f'• {customer}: ')
-                count_run = breakdown_para.add_run(f'{count} escalation(s)')
+            # Round 13 / Phase 9.3: previously this rendered each
+            # ``customer`` raw via ``add_run(f'• {customer}: ')`` and
+            # sorted by count alone (``key=lambda x: x[1]``).  Two bugs:
+            #   1. A customer name carrying an XML-illegal control code
+            #      (zero-width space, tab, surrogate from a Snowflake
+            #      mojibake row) silently broke the .docx; Word would
+            #      refuse to open it without "repair".
+            #   2. Count-only sort produced unstable output: two
+            #      customers with the same escalation count flipped
+            #      order between runs / between Python builds, so
+            #      diffing two compact reports showed phantom changes.
+            # Route names through the local ``_r13_safe_doc_text``
+            # helper and add a stable secondary tie-break by
+            # case-folded customer name (mirrors Phase 6.7's compact
+            # formatter rule).
+            _r13_bems_sorted = sorted(
+                bems_by_customer.items(),
+                key=lambda x: (-int(x[1] or 0), str(x[0]).casefold()),
+            )
+            for customer, count in _r13_bems_sorted:
+                _r13_cust = _r13_safe_doc_text(customer, max_len=200)
+                breakdown_para.add_run(f'• {_r13_cust}: ')
+                _r13_count_text = _r13_safe_doc_text(
+                    f'{int(count or 0)} escalation(s)', max_len=80
+                )
+                count_run = breakdown_para.add_run(_r13_count_text)
                 count_run.font.color.rgb = DANGER_RED if count > 1 else WARNING_ORANGE
                 breakdown_para.add_run('\n')
         else:
@@ -1270,11 +1372,13 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
 
     # Round 7 / Phase 1.1: surface the "accepted but not rendered"
     # mismatch instead of silently dropping the inputs.
+    # Round 13 / Phase 1.9: ``arr_data`` and ``arr_impact`` are now
+    # rendered into a small "ARR Exposure" section after the executive
+    # summary (multi-currency-safe).  They no longer appear in the
+    # _unused_inputs warning list.  ``feature_requests`` continues to
+    # be sourced from ai_insights/risk_scores; warn only if it is
+    # passed without an outlet.
     _unused_inputs = []
-    if arr_data is not None and getattr(arr_data, "empty", True) is False:
-        _unused_inputs.append("arr_data")
-    if arr_impact:
-        _unused_inputs.append("arr_impact")
     if feature_requests:
         _unused_inputs.append("feature_requests")
     if _unused_inputs:
@@ -1338,7 +1442,59 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
     
     # Add executive summary
     formatter.add_executive_summary(ai_insights)
-    
+
+    # Round 13 / Phase 1.9: render an "ARR Exposure" section using the
+    # ``arr_data`` frame and ``arr_impact`` summary the caller already
+    # passes in.  Multi-currency-safe: when the upstream frame mixes
+    # currencies we disclose totals_by_currency rather than printing a
+    # bogus single-currency headline.  Single-currency portfolios get
+    # the resolved currency code prefix instead of a hardcoded "$".
+    try:
+        _has_arr_data = (
+            arr_data is not None
+            and getattr(arr_data, "empty", True) is False
+        )
+        _has_arr_impact = bool(arr_impact)
+        if _has_arr_data or _has_arr_impact:
+            formatter.doc.add_heading("ARR Exposure", level=1)
+            _arr_p = formatter.doc.add_paragraph()
+            _ai = arr_impact or {}
+            _is_mixed_arr = bool(_ai.get('is_multi_currency'))
+            _by_ccy_arr = _ai.get('arr_by_currency') or _ai.get('totals_by_currency') or {}
+            _arr_ccy = (str(_ai.get('currency') or '').strip().upper()
+                        or 'USD')
+            if _is_mixed_arr and isinstance(_by_ccy_arr, dict) and _by_ccy_arr:
+                _arr_p.add_run(
+                    "Total Portfolio ARR (multi-currency -- not summed across currencies):"
+                ).bold = True
+                for _ccy_lbl, _amt in sorted(_by_ccy_arr.items()):
+                    formatter.doc.add_paragraph(
+                        f"  {_ccy_lbl}: {float(_amt or 0):,.2f}",
+                        style='List Bullet',
+                    )
+            else:
+                _total_p = (
+                    _ai.get('total_portfolio_arr')
+                    or _ai.get('total_arr')
+                    or 0
+                )
+                _arr_p.add_run(
+                    f"Total Portfolio ARR: {_arr_ccy} {float(_total_p or 0):,.2f}"
+                ).bold = True
+            if _has_arr_data:
+                try:
+                    _row_count = int(getattr(arr_data, 'shape', (0, 0))[0])
+                except Exception:
+                    _row_count = 0
+                formatter.doc.add_paragraph(
+                    f"ARR records analyzed: {_row_count:,}"
+                )
+    except Exception as _arr_render_err:
+        logger.warning(
+            "Round 13 / Phase 1.9: ARR Exposure section render failed: %s",
+            _arr_render_err,
+        )
+
     # Add risk analysis
     if risk_scores:
         formatter.add_risk_analysis_section(risk_scores, ab_data, csone_data)
@@ -1385,7 +1541,45 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
                     if not visual_heading_added:
                         formatter.doc.add_heading("Visual Analysis", level=1)
                         visual_heading_added = True
-                    formatter.doc.add_picture(_cp, width=_Inches(6.5))
+                    # Round 13 / Phase 9.10: previously the chart PNG
+                    # was embedded with no ``docPr`` description.
+                    # Screen readers and Word's Accessibility Checker
+                    # therefore announced only the temp/file name,
+                    # losing all chart context.  Stamp alt text from
+                    # the file basename so accessibility tools (and
+                    # exported HTML/PDF copies) announce a meaningful
+                    # chart label.
+                    _r13_picture = formatter.doc.add_picture(_cp, width=_Inches(6.5))
+                    try:
+                        _r13_basename = _os.path.basename(str(_cp))
+                        _r13_chart_title = (
+                            _r13_basename.replace('_', ' ')
+                            .replace('-', ' ')
+                            .rsplit('.', 1)[0]
+                            .strip()
+                            .title()
+                        ) or 'Visual Analysis Chart'
+                        _r13_alt = (
+                            f"{_r13_chart_title}: chart embedded in the "
+                            "Visual Analysis section of this report."
+                        )
+                        _r13_inline = getattr(_r13_picture, '_inline', None)
+                        if _r13_inline is not None:
+                            try:
+                                _r13_doc_pr = _r13_inline.docPr
+                                _r13_doc_pr.set('descr', _r13_alt)
+                                if not _r13_doc_pr.get('title'):
+                                    _r13_doc_pr.set('title', _r13_chart_title[:120])
+                            except Exception:
+                                pass
+                            try:
+                                _r13_ns = '{http://schemas.openxmlformats.org/drawingml/2006/main}cNvPr'
+                                for _r13_cnv in _r13_inline.iter(_r13_ns):
+                                    _r13_cnv.set('descr', _r13_alt)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                 except Exception as _pic_err:
                     logger.warning(
                         "Could not embed chart %s in EI report: %s",

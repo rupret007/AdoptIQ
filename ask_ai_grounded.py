@@ -324,8 +324,19 @@ def build_evidence_context(
     # a sample and cannot describe partial coverage as exhaustive.
     rank_dropped = max(total_candidates - len(considered), 0)
     if rank_dropped or budget_dropped:
+        # Round 13 / Phase 6.8: previously this disclosure was a
+        # free-text "[Evidence truncated: included N of M ...]"
+        # which downstream Word/UI surfaces could not grep for
+        # without a fragile substring match against the prose.
+        # Stamp a stable, machine-greppable ``[EVIDENCE CAP]``
+        # prefix so callers (citation whitelist truncation, the
+        # Ask-AI banner, marker tests) can detect "the evidence
+        # frame was capped" without parsing the rest of the line.
+        # The original prose is preserved so existing downstream
+        # consumers that key off "Evidence truncated:" continue to
+        # work; the new prefix is purely additive.
         kept.append(
-            f"[Evidence truncated: included {used_records} of {total_candidates} ranked records "
+            f"[EVIDENCE CAP] [Evidence truncated: included {used_records} of {total_candidates} ranked records "
             f"due to context budget (rank-cap dropped {rank_dropped}, char-budget dropped {budget_dropped}).]"
         )
     return "\n".join(kept), allowed_ids, used_records
@@ -1294,9 +1305,27 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                 account_to_customer=_account_to_customer or None,
             )
         except Exception:
-            _summary_customer_count = (
-                team_subs_df['BU_NAME'].nunique() if 'BU_NAME' in team_subs_df.columns else 0
-            )
+            # Round 13 / Phase 3.14: when the canonical
+            # ``cm.count_customers`` path fails we fall back to a raw
+            # ``BU_NAME.nunique()`` which over-counts by every cosmetic
+            # spelling variant.  Normalize first so the fallback agrees
+            # with the canonical count to within whitespace/case noise.
+            if 'BU_NAME' in team_subs_df.columns:
+                try:
+                    from data_normalization import normalize_customer_name as _r13_norm_cust_ai
+                    _summary_customer_count = int(
+                        team_subs_df['BU_NAME']
+                        .dropna()
+                        .astype(str)
+                        .apply(_r13_norm_cust_ai)
+                        .replace("Unknown", pd.NA)
+                        .dropna()
+                        .nunique()
+                    )
+                except Exception:
+                    _summary_customer_count = team_subs_df['BU_NAME'].nunique()
+            else:
+                _summary_customer_count = 0
 
         summary = (
             f"Data: {len(team_subs_df)} subs, "

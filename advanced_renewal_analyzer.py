@@ -1319,11 +1319,29 @@ class AdvancedRenewalAnalyzer:
         # financial frame is single-currency; otherwise the gates
         # would compare arbitrary mixed-currency sums against a
         # fixed USD-shaped threshold.
+        # Round 13 / Phase 1.7: additionally gate on the threshold's
+        # ``currency_basis`` (USD) matching the customer's resolved
+        # currency.  A 100k-USD gate applied against a 100k-EUR or
+        # 100k-JPY total tells the wrong story.  When the basis
+        # mismatches we skip the gate and emit a disclosure factor
+        # so the omission is visible in the narrative.
         financial_metrics = analysis_results.get('financial_metrics', {})
         if financial_metrics:
             total_arr = financial_metrics.get('total_arr', 0)
             is_multi_ccy = bool(financial_metrics.get('is_multi_currency', False))
-            if not is_multi_ccy:
+            _customer_ccy = (str(financial_metrics.get('currency') or '')
+                             .strip().upper())
+            _basis_ccy = str(_RAT.get('currency_basis') or 'USD').strip().upper()
+            _basis_matches = (
+                not _customer_ccy or _customer_ccy == _basis_ccy
+            )
+            if is_multi_ccy or not _basis_matches:
+                if not is_multi_ccy and not _basis_matches:
+                    risk_factors.append(
+                        f"ARR gates skipped: customer currency {_customer_ccy} "
+                        f"differs from threshold basis {_basis_ccy}"
+                    )
+            if not is_multi_ccy and _basis_matches:
                 if total_arr > _RAT["high_value_arr"]:
                     success_factors.append(
                         f"High-value customer (ARR > {_RAT['high_value_arr']:,})"
@@ -1485,11 +1503,26 @@ class AdvancedRenewalAnalyzer:
         # Financial recommendations
         financial_metrics = analysis_results.get('financial_metrics', {})
         if financial_metrics:
-            total_arr = financial_metrics.get('total_arr', 0)
-            if total_arr > 100000:
-                recommendations.append("👑 High-value customer - provide premium support and dedicated resources")
-            elif total_arr < 10000:
-                recommendations.append("💡 Identify upsell opportunities to increase contract value")
+            # Round 13 / Phase 1.3: gate the 100k/10k high/low ARR
+            # gates on currency comparability.  When the upstream
+            # financials span multiple currencies, summing into a
+            # single ``total_arr`` and comparing it against a USD-
+            # equivalent threshold silently mixes currencies and can
+            # either over- or under-trigger the recommendation.  Skip
+            # the gate and emit a disclosure recommendation instead.
+            _is_mixed_rec = bool(financial_metrics.get('is_multi_currency'))
+            if _is_mixed_rec:
+                recommendations.append(
+                    "INFO: Multi-currency portfolio — high/low ARR "
+                    "recommendations skipped; review per-currency totals "
+                    "before applying upsell or premium-support gates."
+                )
+            else:
+                total_arr = financial_metrics.get('total_arr', 0)
+                if total_arr > 100000:
+                    recommendations.append("👑 High-value customer - provide premium support and dedicated resources")
+                elif total_arr < 10000:
+                    recommendations.append("💡 Identify upsell opportunities to increase contract value")
         
         return recommendations
     
@@ -1736,6 +1769,21 @@ class AdvancedRenewalAnalyzer:
             _fm = analysis_results.get('financial_metrics', {}) or {}
             _is_mixed_contract = bool(_fm.get('is_multi_currency'))
             _by_ccy_contract = _fm.get('totals_by_currency') or {}
+            # Round 13 / Phase 9.5: previously every money line above
+            # rendered raw via ``f"{x:,.2f}"``, which diverged from the
+            # shared ``report_utils.format_number`` helper that the
+            # executive briefing / compact report use.  That meant two
+            # reports produced from the same Snowflake snapshot
+            # disagreed on thousands separators and on how ``None`` /
+            # ``NaN`` ARR was displayed (one rendered "$nan", the
+            # other "N/A").  Route through ``format_number`` so all
+            # Word money figures reconcile field-for-field.
+            try:
+                from report_utils import format_number as _r13_format_number
+            except Exception:
+                _r13_format_number = lambda v, d=2, p=False: (  # type: ignore
+                    f"{float(v):,.{d}f}" if v is not None else "N/A"
+                )
             if _is_mixed_contract:
                 contract_para.add_run(
                     'Total ARR: MIXED — see Financial Metrics > totals_by_currency '
@@ -1744,14 +1792,27 @@ class AdvancedRenewalAnalyzer:
                 if isinstance(_by_ccy_contract, dict) and _by_ccy_contract:
                     for _ccy, _val in _by_ccy_contract.items():
                         try:
-                            contract_para.add_run(
-                                f'  {_ccy}: {_safe_num(_val):,.2f}\n'
-                            )
+                            _r13_amt = _r13_format_number(float(_safe_num(_val) or 0), 2)
                         except Exception:
-                            contract_para.add_run(f'  {_ccy}: {_val}\n')
+                            _r13_amt = str(_val)
+                        contract_para.add_run(f'  {_ccy}: {_r13_amt}\n')
             else:
+                # Round 13 / Phase 1.2 + 9.5: prefix the single-currency
+                # total with the currency code from financial_metrics
+                # rather than always hardcoding "$"; mixed portfolios
+                # took the multi-currency branch above.  Route the
+                # number itself through the shared ``format_number``
+                # helper for parity with the briefing/compact reports.
+                _ccy_contract = (str(_fm.get('currency') or '').strip().upper()
+                                 or 'USD')
+                try:
+                    _r13_total = _r13_format_number(
+                        float(_safe_num(contract_info.get('total_arr', 0)) or 0), 2
+                    )
+                except Exception:
+                    _r13_total = str(contract_info.get('total_arr', 0))
                 contract_para.add_run(
-                    f'Total ARR: ${_safe_num(contract_info.get("total_arr", 0)):,.2f}\n'
+                    f'Total ARR: {_ccy_contract} {_r13_total}\n'
                 )
             contract_para.add_run(f'Auto-Renewal Contracts: {_safe_num(contract_info.get("auto_renewal_contracts", 0))}\n')
             contract_para.add_run(f'Manual Renewal Contracts: {_safe_num(contract_info.get("manual_renewal_contracts", 0))}\n')
@@ -1769,6 +1830,18 @@ class AdvancedRenewalAnalyzer:
             # reader can audit each currency line.
             _is_mixed = bool(financial_metrics.get('is_multi_currency'))
             _by_ccy = financial_metrics.get('totals_by_currency') or {}
+            # Round 13 / Phase 9.5: same shared-formatter rationale as
+            # the contract block above -- we want every money line in
+            # this Word body to come from ``format_number`` so the
+            # workbook-level Excel sheet and the per-customer
+            # briefing prose agree on thousands separators and on
+            # how ``None`` / ``NaN`` are rendered.
+            try:
+                from report_utils import format_number as _r13_format_number
+            except Exception:
+                _r13_format_number = lambda v, d=2, p=False: (  # type: ignore
+                    f"{float(v):,.{d}f}" if v is not None else "N/A"
+                )
             if _is_mixed:
                 financial_para.add_run(
                     'Total ARR: MIXED — see totals_by_currency (do not sum across currencies)\n'
@@ -1776,18 +1849,60 @@ class AdvancedRenewalAnalyzer:
                 if isinstance(_by_ccy, dict) and _by_ccy:
                     for _ccy, _val in _by_ccy.items():
                         try:
-                            financial_para.add_run(
-                                f'  {_ccy}: {_safe_num(_val):,.2f}\n'
-                            )
+                            _r13_amt = _r13_format_number(float(_safe_num(_val) or 0), 2)
                         except Exception:
-                            financial_para.add_run(f'  {_ccy}: {_val}\n')
+                            _r13_amt = str(_val)
+                        financial_para.add_run(f'  {_ccy}: {_r13_amt}\n')
                 financial_para.add_run('Product ARR: MIXED — see per-currency rows above\n')
                 financial_para.add_run('Contract Value: MIXED — see per-currency rows above\n')
             else:
-                financial_para.add_run(f'Total ARR: ${_safe_num(financial_metrics.get("total_arr", 0)):,.2f}\n')
-                financial_para.add_run(f'Product ARR: ${_safe_num(financial_metrics.get("product_arr", 0)):,.2f}\n')
-                financial_para.add_run(f'Contract Value: ${_safe_num(financial_metrics.get("contract_value", 0)):,.2f}\n')
-            financial_para.add_run(f'Discount Percentage: {_safe_num(financial_metrics.get("discount_percentage", 0)):.1f}%\n')
+                # Round 13 / Phase 1.2 + 9.5: prefix every
+                # single-currency money figure with the currency code
+                # resolved upstream rather than always hardcoding "$",
+                # and route the values through the shared
+                # ``format_number`` helper for parity with the
+                # briefing / compact report.
+                _ccy_fm = (str(financial_metrics.get('currency') or '')
+                           .strip().upper() or 'USD')
+                try:
+                    _r13_total = _r13_format_number(
+                        float(_safe_num(financial_metrics.get('total_arr', 0)) or 0),
+                        2,
+                    )
+                    _r13_product = _r13_format_number(
+                        float(_safe_num(financial_metrics.get('product_arr', 0)) or 0),
+                        2,
+                    )
+                    _r13_contract = _r13_format_number(
+                        float(_safe_num(financial_metrics.get('contract_value', 0)) or 0),
+                        2,
+                    )
+                except Exception:
+                    _r13_total = str(financial_metrics.get('total_arr', 0))
+                    _r13_product = str(financial_metrics.get('product_arr', 0))
+                    _r13_contract = str(financial_metrics.get('contract_value', 0))
+                financial_para.add_run(f'Total ARR: {_ccy_fm} {_r13_total}\n')
+                financial_para.add_run(f'Product ARR: {_ccy_fm} {_r13_product}\n')
+                financial_para.add_run(f'Contract Value: {_ccy_fm} {_r13_contract}\n')
+            # Round 13 / Phase 9.6: previously this was rendered with a
+            # raw ``f"{x:.1f}%"`` which (a) did not handle ``None`` /
+            # ``NaN`` (would throw or print ``"nan%"``) and (b)
+            # diverged from how the executive briefing formats
+            # already-percent values via the shared
+            # ``format_percent_points`` helper.  ``discount_percentage``
+            # upstream is in 0..100 percent points, so route through
+            # ``format_percent_points`` for parity with the briefing.
+            try:
+                from report_utils import format_percent_points as _r13_format_percent_points
+                _r13_discount = _r13_format_percent_points(
+                    _safe_num(financial_metrics.get('discount_percentage', 0)),
+                    1,
+                )
+            except Exception:
+                _r13_discount = (
+                    f'{float(_safe_num(financial_metrics.get("discount_percentage", 0)) or 0):.1f}%'
+                )
+            financial_para.add_run(f'Discount Percentage: {_r13_discount}\n')
             financial_para.add_run(f'Pricing Tier: {financial_metrics.get("pricing_tier", "Standard")}\n')
         
         # Add page break
@@ -1814,9 +1929,29 @@ class AdvancedRenewalAnalyzer:
             # the engagement score line was already percent-points and
             # got an extra ``%`` glyph.  Make every percent label
             # state its unit explicitly so the reader cannot misread.
+            # Round 13 / Phase 9.6: previously every ``:.1%`` here
+            # would print ``"nan%"`` for ``None`` / ``NaN`` /
+            # non-numeric upstream values (which the briefing-path
+            # ``format_ratio_percent`` quietly rendered as ``"N/A"``).
+            # Route every 0..1 ratio through the shared
+            # ``format_ratio_percent`` helper for parity with the
+            # executive briefing / compact report.
+            try:
+                from report_utils import (
+                    format_ratio_percent as _r13_format_ratio_percent,
+                    format_percent_points as _r13_format_percent_points,
+                )
+            except Exception:
+                _r13_format_ratio_percent = lambda v, d=1: (  # type: ignore
+                    f"{float(v) * 100:.{d}f}%" if v is not None else "N/A"
+                )
+                _r13_format_percent_points = lambda v, d=1: (  # type: ignore
+                    f"{float(v):.{d}f}%" if v is not None else "N/A"
+                )
             _ocr = _safe_num(usage_metrics.get("overall_completion_rate", 0))
             usage_para.add_run(
-                f'Overall Completion Rate (ratio 0-1 -> %): {_ocr:.1%}\n'
+                f'Overall Completion Rate (ratio 0-1 -> %): '
+                f'{_r13_format_ratio_percent(_ocr, 1)}\n'
             )
             _res = _safe_num(usage_metrics.get("recent_engagement_score", 0))
             usage_para.add_run(
@@ -1826,19 +1961,22 @@ class AdvancedRenewalAnalyzer:
             ap_metrics = usage_metrics.get('action_plans', {})
             usage_para.add_run(
                 f'Action Plans: {ap_metrics.get("count", 0)} '
-                f'(Completion ratio: {_safe_num(ap_metrics.get("completion_rate", 0)):.1%})\n'
+                f'(Completion ratio: '
+                f'{_r13_format_ratio_percent(_safe_num(ap_metrics.get("completion_rate", 0)), 1)})\n'
             )
 
             ab_metrics = usage_metrics.get('adoption_barriers', {})
             usage_para.add_run(
                 f'Adoption Barriers: {ab_metrics.get("count", 0)} '
-                f'(Resolution ratio: {_safe_num(ab_metrics.get("completion_rate", 0)):.1%})\n'
+                f'(Resolution ratio: '
+                f'{_r13_format_ratio_percent(_safe_num(ab_metrics.get("completion_rate", 0)), 1)})\n'
             )
 
             cp_metrics = usage_metrics.get('customer_pulse', {})
             usage_para.add_run(
                 f'Customer Pulse: {cp_metrics.get("count", 0)} '
-                f'(Completion ratio: {_safe_num(cp_metrics.get("completion_rate", 0)):.1%})\n'
+                f'(Completion ratio: '
+                f'{_r13_format_ratio_percent(_safe_num(cp_metrics.get("completion_rate", 0)), 1)})\n'
             )
         
         # Adoption health
@@ -1850,7 +1988,21 @@ class AdvancedRenewalAnalyzer:
             adoption_para.add_run(f'Total Barriers: {adoption_metrics.get("total_barriers", 0)}\n')
             adoption_para.add_run(f'Resolved Barriers: {adoption_metrics.get("resolved_barriers", 0)}\n')
             adoption_para.add_run(f'High-Severity Barriers: {adoption_metrics.get("high_severity_barriers", 0)}\n')
-            adoption_para.add_run(f'Resolution Rate: {_safe_num(adoption_metrics.get("resolution_rate", 0)):.1%}\n')
+            # Round 13 / Phase 9.6: route the resolution-rate ratio
+            # through the shared ``format_ratio_percent`` helper so
+            # ``None`` / ``NaN`` upstream values render as ``"N/A"``
+            # consistent with the briefing/compact report rather than
+            # the legacy ``"nan%"`` output.
+            try:
+                from report_utils import format_ratio_percent as _r13_format_ratio_percent
+                _r13_resolution = _r13_format_ratio_percent(
+                    _safe_num(adoption_metrics.get('resolution_rate', 0)), 1
+                )
+            except Exception:
+                _r13_resolution = (
+                    f'{float(_safe_num(adoption_metrics.get("resolution_rate", 0)) or 0) * 100:.1f}%'
+                )
+            adoption_para.add_run(f'Resolution Rate: {_r13_resolution}\n')
         
         # Add page break
         doc.add_page_break()

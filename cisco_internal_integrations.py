@@ -381,7 +381,11 @@ class CiscoInternalIntegrations:
         
         try:
             # OAuth 2.0 token endpoint for Cisco API
-            token_url = "https://id.cisco.com/oauth2/default/v1/token"
+            # Round 14 / Phase 4.4: this is the public OAuth /token URL
+            # used to *exchange* credentials, not a credential itself --
+            # bandit/ruff S105 flags the literal because of the trailing
+            # ``token`` path segment.  Pin a noqa per line.
+            token_url = "https://id.cisco.com/oauth2/default/v1/token"  # noqa: S105 -- OAuth endpoint URL
             
             headers = {
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -737,6 +741,11 @@ class CiscoInternalIntegrations:
             # attribute.
             row_text = row.get_text(" ", strip=True) if row is not None else ""
             parsed_date = self._extract_date_from_text(row_text)
+            # Round 13 / Phase 2.7: stamp ``last_indexed_at`` with a real
+            # UTC timestamp.  The previous code called ``datetime.now()``
+            # (local zone) but appended " UTC" to the string, mislabeling
+            # the worker's wall time as UTC.  Use timezone.utc so the
+            # value matches the label.
             return DefectInfo(
                 defect_id=defect_id,
                 title=title,
@@ -752,9 +761,9 @@ class CiscoInternalIntegrations:
                 classification=classification,
                 source='BST Web Scraping',
                 verification_method=f'BST Web Interface - Search: {search_query}',
-                last_indexed_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC'),
+                last_indexed_at=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
             )
-        
+
         return None
     
     def _extract_defect_from_div(self, div, search_query: str, product_filter: Optional[str]) -> Optional[DefectInfo]:
@@ -779,6 +788,8 @@ class CiscoInternalIntegrations:
         # than stamping today's date and making old defects look new.
         div_text = div.get_text(" ", strip=True) if div is not None else ""
         parsed_date = self._extract_date_from_text(div_text)
+        # Round 13 / Phase 2.7: stamp ``last_indexed_at`` with a real
+        # UTC timestamp -- mirror of the row-extractor branch above.
         return DefectInfo(
             defect_id=defect_id,
             title=title,
@@ -794,7 +805,7 @@ class CiscoInternalIntegrations:
             classification=classification,
             source='BST Web Scraping',
             verification_method=f'BST Web Interface - Search: {search_query}',
-            last_indexed_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC'),
+            last_indexed_at=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
         )
     
     def _extract_defect_from_list_item(self, li, search_query: str, product_filter: Optional[str]) -> Optional[DefectInfo]:
@@ -1184,7 +1195,9 @@ class CiscoInternalIntegrations:
                 logger.error("BST OAuth2 credentials not configured")
                 return None
             
-            token_url = "https://id.cisco.com/oauth2/default/v1/token"
+            # Round 14 / Phase 4.4: see PSIRT block above -- this is the
+            # public OAuth /token URL, not a credential.
+            token_url = "https://id.cisco.com/oauth2/default/v1/token"  # noqa: S105 -- OAuth endpoint URL
             
             data = {
                 'grant_type': 'client_credentials',
@@ -1912,6 +1925,11 @@ class CiscoInternalIntegrations:
         Returns:
             Comprehensive analysis dictionary
         """
+        # Round 13 / Phase 2.8: diagnostic timestamps were emitted via
+        # naive ``datetime.now().isoformat()``, which yields a string
+        # without any zone marker.  Downstream parsers (and humans
+        # reading the JSON) had no way to know whether that referred
+        # to the worker's local zone or UTC.  Standardize on UTC ISO-Z.
         analysis = {
             'bst_defects': [],
             'circuit_data': [],
@@ -1919,7 +1937,7 @@ class CiscoInternalIntegrations:
             'classification_summary': {},
             'data_sources': [],
             'verification_methods': [],
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         }
         
         # Get specific defect details from BST
@@ -1971,7 +1989,10 @@ class CiscoInternalIntegrations:
         report.append("=" * 80)
         report.append("CISCO DATA CLASSIFICATION REPORT")
         report.append("=" * 80)
-        report.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # Round 13 / Phase 2.8: stamp the classification report header
+        # with a real UTC timestamp so the value matches the rest of
+        # the UTC-anchored reporting surface.
+        report.append(f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
         report.append("")
         
         # Classification summary
@@ -2384,11 +2405,14 @@ def test_cisco_integrations():
     """Test function for Cisco internal integrations"""
     
     # Initialize with mock API keys (replace with actual keys in production)
+    # Round 14 / Phase 4.4: this is a developer smoke-test entry point
+    # with deliberately fake placeholder values.  Pin per-line noqa for
+    # bandit S105/S106 so the false positives are documented.
     integrations = CiscoInternalIntegrations(
-        bst_api_key="mock_bst_key",
-        circuit_api_key="mock_circuit_key",
-        psirt_api_key="test-psirt-key-not-real",
-        psirt_client_secret="test-psirt-secret-not-real"
+        bst_api_key="mock_bst_key",  # noqa: S106 -- developer smoke-test placeholder
+        circuit_api_key="mock_circuit_key",  # noqa: S106 -- developer smoke-test placeholder
+        psirt_api_key="test-psirt-key-not-real",  # noqa: S106 -- developer smoke-test placeholder
+        psirt_client_secret="test-psirt-secret-not-real"  # noqa: S106 -- developer smoke-test placeholder
     )
     
     # Test defect search

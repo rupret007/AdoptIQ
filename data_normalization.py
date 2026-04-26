@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -163,7 +164,20 @@ def _clean_text(value: Any) -> str:
 
 
 def _clean_name_for_key(name: str) -> str:
-    lowered = _clean_text(name).lower()
+    text = _clean_text(name)
+    if not text:
+        return ""
+    # Round 13 / Phase 3.15: collapse compatibility variants (NFKC) and
+    # case-fold (not just lowercase) before further canonicalization.
+    # Without this, the join key for "ACME co." and "AcmE\u00A0co" --
+    # which include a non-breaking space and a German "ß" -- mismatched
+    # the corresponding "Acme Co" rows in another source, producing
+    # double-counted customers in cross-source merges and BEMS lookups.
+    try:
+        text = unicodedata.normalize("NFKC", text)
+    except Exception:
+        pass
+    lowered = text.casefold()
     if not lowered:
         return ""
     lowered = re.sub(r"\s+", " ", lowered).strip()
@@ -182,6 +196,17 @@ def normalize_customer_name(value: Any) -> str:
     text = _clean_text(value)
     if not text:
         return "Unknown"
+    # Round 13 / Phase 3.15: collapse compatibility variants (NFKC) so
+    # display strings like "Acme\u00A0Co" (non-breaking space) and
+    # "Acme Co" present identically in the report and in groupby /
+    # nunique cardinality counts.  Note: we deliberately do NOT lower
+    # or case-fold here; that's reserved for the join key
+    # (``_clean_name_for_key``) so display preserves the original
+    # capitalization the customer recognizes.
+    try:
+        text = unicodedata.normalize("NFKC", text)
+    except Exception:
+        pass
     text = re.sub(r"\s+", " ", text).strip()
     return text
 

@@ -45,6 +45,22 @@ _current_analysis_id: contextvars.ContextVar[Optional[str]] = contextvars.Contex
     "adoptiq_current_analysis_id", default=None
 )
 
+# Round 13 / Phase 10.7: previously the structured logger only
+# correlated by ``analysis_id``.  Flask handlers that are *not* tied
+# to an analysis (e.g. ``/api/diag/connectivity``, ``/admin/*``,
+# admin UI POSTs) had no way to thread an upstream request id into
+# their log lines, so support could not stitch together "this
+# /admin/* call landed at 11:35:01" with the actual error log line
+# that fired three frames deeper inside a worker pool.  Mirror the
+# same contextvar pattern for ``request_id`` so any handler that
+# wants per-request correlation can call ``bind_request_id`` once
+# in a ``before_request`` hook and every nested log line picks up
+# the id automatically -- *without* requiring an adapter to be
+# threaded through every call.
+_current_request_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "adoptiq_current_request_id", default=None
+)
+
 
 def bind_analysis_id(analysis_id: Optional[str]) -> contextvars.Token:
     """Bind ``analysis_id`` to the current logical context.
@@ -61,6 +77,25 @@ def get_current_analysis_id() -> Optional[str]:
     """Return the currently-bound analysis ID, or None if unbound."""
     try:
         return _current_analysis_id.get()
+    except LookupError:
+        return None
+
+
+def bind_request_id(request_id: Optional[str]) -> contextvars.Token:
+    """Bind ``request_id`` to the current logical context (Round 13).
+
+    Same pattern as :func:`bind_analysis_id`.  Returns the
+    ``contextvars.Token`` so callers (typically Flask
+    ``before_request`` / ``after_request`` hooks) can reset the
+    binding once the request lifecycle ends.
+    """
+    return _current_request_id.set(request_id)
+
+
+def get_current_request_id() -> Optional[str]:
+    """Return the currently-bound request ID, or None if unbound."""
+    try:
+        return _current_request_id.get()
     except LookupError:
         return None
 
@@ -109,7 +144,10 @@ _NAME_SHAPE_ALLOWLIST_TOKENS: frozenset[str] = frozenset({
     "Snowflake", "Cisco", "AdoptIQ", "Bst", "BST", "Keeper", "PSIRT",
     "Circuit", "OneDrive", "Power", "Salesforce", "SS", "EDW",
     # Technical nouns
-    "Cache", "Bulk", "Worker", "Worker", "Threaded", "Strict", "Mode",
+    # Round 14 / Phase 4.3: removed duplicate "Worker" and "Mode" tokens
+    # (B033) -- duplicates in a frozenset literal are silently collapsed
+    # but signal a copy/paste mistake that ruff should keep flagging.
+    "Cache", "Bulk", "Worker", "Threaded", "Strict",
     "Ask", "AI", "Audit", "Auditor", "Verbose", "Debug", "Health",
     "Latency", "Profile", "Request", "Response", "Server", "Client",
     "Schema", "Database", "Table", "Tables", "Query", "Index", "View",
@@ -204,6 +242,18 @@ class StructuredAdapter(logging.LoggerAdapter):
         cur = get_current_analysis_id()
         if cur is not None and "analysis_id" not in bound and "analysis_id" not in per_call:
             merged["analysis_id"] = cur
+        # Round 13 / Phase 10.7: same fallback for the request_id
+        # contextvar so handlers that bind a request id in
+        # ``before_request`` automatically carry it into every
+        # nested ``logger.info`` line without needing to thread
+        # an adapter through every helper function.
+        cur_req = get_current_request_id()
+        if (
+            cur_req is not None
+            and "request_id" not in bound
+            and "request_id" not in per_call
+        ):
+            merged["request_id"] = cur_req
         for k, v in bound.items():
             merged[k] = v
         for k, v in per_call.items():
@@ -218,9 +268,15 @@ class StructuredAdapter(logging.LoggerAdapter):
         # secret-bearing tokens straight into the log line.  Apply a
         # value scrubber so the structured prefix only carries low-risk
         # tokens while sensitive shapes are tagged as ``<redacted:...>``.
+        # Round 13 / Phase 10.7: ``request_id`` joins ``analysis_id``
+        # at the head of the prefix for stable, grep-friendly
+        # ordering.
         ordered_keys = sorted(
             merged.keys(),
-            key=lambda k: (0 if k == "analysis_id" else 1, k),
+            key=lambda k: (
+                0 if k == "analysis_id" else (1 if k == "request_id" else 2),
+                k,
+            ),
         )
         rendered = " ".join(
             f"{k}={_redact_extra_kv_value(k, merged[k])}" for k in ordered_keys
@@ -262,4 +318,6 @@ __all__ = [
     "analysis_logger",
     "bind_analysis_id",
     "get_current_analysis_id",
+    "bind_request_id",
+    "get_current_request_id",
 ]

@@ -96,6 +96,43 @@ RISK_BAND_PORTFOLIO_COLORS: Dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# Round 13 / Phase 5.7 -- Portfolio Health-grade canonical color map
+# ---------------------------------------------------------------------------
+# ``adoptiq_backend.create_subscription_summary_chart`` previously
+# rendered the "Grade: A/B/C/D/F" text in
+# ``#28B463`` / ``#FFB81C`` / ``#FF6B6B`` inline -- duplicating the
+# ``RISK_BAND_PORTFOLIO_COLORS`` "Healthy" / "Medium Risk" / "High Risk"
+# hexes but with no shared definition.  Future palette tweaks therefore
+# would have to chase every inline ternary instead of landing in one
+# place.  Centralize the A-F to-hex mapping so the chart, any future
+# Excel grade cell, and dashboards all resolve the same colours.
+HEALTH_GRADE_COLORS: Dict[str, str] = {
+    "A": RISK_BAND_PORTFOLIO_COLORS.get("Healthy", "#28B463"),
+    "B": RISK_BAND_PORTFOLIO_COLORS.get("Healthy", "#28B463"),
+    "C": RISK_BAND_PORTFOLIO_COLORS.get("Medium Risk", "#FFB81C"),
+    "D": RISK_BAND_PORTFOLIO_COLORS.get("High Risk", "#FF6B6B"),
+    "F": RISK_BAND_PORTFOLIO_COLORS.get("High Risk", "#FF6B6B"),
+}
+HEALTH_GRADE_COLOR_DEFAULT: str = RISK_BAND_PORTFOLIO_COLORS.get("Medium Risk", "#FFB81C")
+
+
+def get_health_grade_color(grade: str) -> str:
+    """Round 13 / Phase 5.7: resolve a portfolio health grade to its
+    canonical hex.
+
+    Accepts ``"A"`` through ``"F"`` (case-insensitive); falls back to
+    ``HEALTH_GRADE_COLOR_DEFAULT`` for unknown labels so an unexpected
+    grade label never crashes the chart.
+    """
+
+    try:
+        key = (grade or "").strip().upper()
+    except Exception:
+        return HEALTH_GRADE_COLOR_DEFAULT
+    return HEALTH_GRADE_COLORS.get(key, HEALTH_GRADE_COLOR_DEFAULT)
+
+
+# ---------------------------------------------------------------------------
 # Round 12 / Phase 11.7 -- fold_fuzzy degradation counter
 # ---------------------------------------------------------------------------
 # When ``_collect_customer_names(..., fold_fuzzy=True)`` cannot import

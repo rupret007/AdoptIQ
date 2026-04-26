@@ -79,6 +79,43 @@ _SNOWFLAKE_QUERY_METRICS_LOCK = threading.Lock()
 _SNOWFLAKE_QUERY_SAMPLES_MAX = 50
 
 
+def _r13_set_picture_alt_text(picture: Any, alt_text: str) -> None:
+    """Round 13 / Phase 8.6 + 9.10: stamp accessibility alt text on a python-docx picture.
+
+    Default ``doc.add_picture`` calls leave the embedded image without
+    a docPr description, which means screen readers and Word's
+    Accessibility Checker announce the chart only by filename
+    ("portfolio_dashboard_2025...png").  Write the supplied
+    ``alt_text`` to ``inline.docPr.descr`` (long description) and
+    ``inline.docPr.title`` (short title), and mirror to ``cNvPr.descr``
+    where available for legacy consumers.  Silently no-ops on any
+    failure so a missing schema attribute or non-inline shape never
+    crashes a report build.
+    """
+    if not alt_text or picture is None:
+        return
+    try:
+        inline = getattr(picture, "_inline", None)
+        if inline is None:
+            return
+        text = str(alt_text)
+        try:
+            doc_pr = inline.docPr
+            doc_pr.set("descr", text)
+            if not doc_pr.get("title"):
+                doc_pr.set("title", text[:120])
+        except Exception:
+            pass
+        try:
+            ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}cNvPr"
+            for c_nv_pr in inline.iter(ns):
+                c_nv_pr.set("descr", text)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def _record_snowflake_query(sql: Any) -> None:
     preview = " ".join(str(sql).split())
     if len(preview) > 220:
@@ -319,7 +356,12 @@ warnings.filterwarnings("ignore", category=FutureWarning, message="Downcasting o
 
 
 # === CREDENTIALS: From config (which reads .env); no hardcoded secrets ===
-from config import Config
+# Round 14 / Phase 4.1: ``Config`` is already imported at the top of the
+# module (line ~62 with the rest of the first-party imports), so this
+# second ``from config import Config`` was a redundant redefinition that
+# tripped pyflakes F811 and could mask future import-shadowing bugs.
+# Drop the duplicate import; the ``Config`` symbol from the original
+# import is in scope here.
 KEEPER_CONFIG = Config.KEEPER_CONFIG
 SNOWFLAKE_CONFIG = Config.SNOWFLAKE_CONFIG
 CIRCUIT_CONFIG = Config.CIRCUIT_CONFIG
@@ -806,7 +848,15 @@ AB_TABLE  = "EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW"
 # catalog scan) cannot grow this cache without bound and leak
 # process memory.  ``OrderedDict`` gives us cheap LRU eviction by
 # popping from the front when we exceed the cap.
-from collections import OrderedDict as _OrderedDictForSchemaCache  # noqa: E402
+# Round 14 / Phase 2.3: previously this only imported ``OrderedDict`` under
+# the alias ``_OrderedDictForSchemaCache``, so the quoted annotations on the
+# next two ``OrderedDict[...]`` declarations referenced an undefined name
+# when ``typing.get_type_hints`` walked the module.  Bind the unaliased
+# symbol too so static analysis (ruff F821) and runtime introspection
+# both resolve cleanly.  The aliased name is preserved for backwards
+# compatibility with any caller that imported it.
+from collections import OrderedDict  # noqa: E402
+_OrderedDictForSchemaCache = OrderedDict
 
 _TABLE_COLUMN_CACHE: "OrderedDict[str, Tuple[set[str], float]]" = _OrderedDictForSchemaCache()
 _TABLE_COLUMN_CACHE_LOCK = threading.Lock()
@@ -825,7 +875,31 @@ _TABLE_COLUMN_CACHE_FAIL_TTL_SECONDS = int(
 # layers (prefetch, leader report) can surface them as
 # partial_data_warnings instead of treating an empty column set as
 # "this column simply does not exist".
-_TABLE_COLUMN_INTROSPECTION_FAILURES: Dict[str, Tuple[str, float]] = {}
+# Round 13 / Phase 11.3: previously this was a plain ``Dict`` and
+# the only way a key was ever evicted was via
+# ``get_recent_column_introspection_failures`` running the
+# expiry sweep (caller-driven).  A long-running process that
+# never called the report builders accumulated unbounded
+# entries -- one per (transient) failure -- and a runaway
+# Snowflake outage that flapped through hundreds of distinct
+# tables would inflate this dict indefinitely.  Use an
+# ``OrderedDict`` with an explicit LRU cap; insert/touch on
+# ``move_to_end`` and evict from the front when the cap is
+# exceeded.  The cap is generous (256 by default, env override)
+# so legitimate failure registries are never thrown out
+# in normal operation.
+_TABLE_COLUMN_INTROSPECTION_FAILURES: "OrderedDict[str, Tuple[str, float]]" = (
+    _OrderedDictForSchemaCache()
+)
+_TABLE_COLUMN_INTROSPECTION_FAILURES_MAX_ENTRIES = max(
+    16,
+    int(
+        os.environ.get(
+            "ADOPTIQ_TABLE_COLUMN_INTROSPECTION_FAILURES_MAX",
+            str(_TABLE_COLUMN_CACHE_MAX_ENTRIES),
+        )
+    ),
+)
 
 
 def get_recent_column_introspection_failures(max_age_seconds: int = 3600) -> Dict[str, str]:
@@ -897,6 +971,18 @@ def _get_table_columns(ctx, table_name: str) -> set[str]:
         try:
             guard_table(table_name)
             cur_local = ctx.cursor()
+            # Round 13 / Phase 7.6: this ``LIMIT 1`` is a *schema probe*
+            # whose only goal is to read ``cur.description`` (column
+            # names + types) for the introspection cache.  We
+            # intentionally do NOT add an ``ORDER BY`` here: an
+            # ``ORDER BY <some_col>`` would require us to know a
+            # column exists ahead of time (the very thing we are
+            # introspecting), and ``ORDER BY 1`` would force a sort
+            # on every column type including unsortable ones (VARIANT
+            # / ARRAY).  We discard ``rows`` entirely; only the
+            # cursor description is consumed.  The non-determinism
+            # of which row Snowflake returns is therefore harmless
+            # because we never read any row payload from this query.
             cur_local.execute(f"SELECT * FROM {table_name} LIMIT 1")
             cols_local: set = set()
             for meta in (cur_local.description or []):
@@ -958,6 +1044,18 @@ def _get_table_columns(ctx, table_name: str) -> set[str]:
         except Exception:
             pass
         _TABLE_COLUMN_INTROSPECTION_FAILURES[cache_key] = (err_msg, time.monotonic())
+        # Round 13 / Phase 11.3: enforce LRU cap on the failure
+        # registry so a long-running outage that flaps through
+        # many distinct tables cannot grow this dict without bound.
+        try:
+            _TABLE_COLUMN_INTROSPECTION_FAILURES.move_to_end(cache_key)
+            while (
+                len(_TABLE_COLUMN_INTROSPECTION_FAILURES)
+                > _TABLE_COLUMN_INTROSPECTION_FAILURES_MAX_ENTRIES
+            ):
+                _TABLE_COLUMN_INTROSPECTION_FAILURES.popitem(last=False)
+        except Exception:
+            pass
     return set()
 
 
@@ -2334,12 +2432,20 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
     # Try 1: SUPPORT_CASES with ACCOUNT_ID IN (...)
     try:
         logger.info(f"[[RENEWAL]] Attempting Snowflake support cases fetch for {len(account_ids_clean)} accounts (SUPPORT_CASES.ACCOUNT_ID)...")
+        # Round 13 / Phase 7.1: previously the ORDER BY only sorted on
+        # ``s.CREATED_DATE DESC`` -- which is non-deterministic when
+        # the LIMIT clips a tail of cases that share the exact same
+        # second-precision timestamp (Snowflake CREATED_DATE is to
+        # the second; bulk-import jobs routinely write hundreds of
+        # rows in the same second).  Add ``s.CASE_ID ASC`` as a
+        # secondary key so the LIMIT keeps a stable, run-to-run
+        # identical sample.
         sql1 = f"""
         SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE, {_close_select}, s.SEVERITY
         FROM {_SUPPORT_CASES_TABLE} s
         WHERE s.ACCOUNT_ID IN ({placeholders})
           AND s.CREATED_DATE >= %s
-        ORDER BY s.CREATED_DATE DESC
+        ORDER BY s.CREATED_DATE DESC, s.CASE_ID ASC
         LIMIT %s
         """
         cur = ctx.cursor()
@@ -2366,12 +2472,14 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
     # Try 2: SUPPORT_CASES with ACCOUNT_ID_C (some schemas use _C suffix)
     try:
         logger.info(f"[[RENEWAL]] Trying SUPPORT_CASES.ACCOUNT_ID_C for {len(account_ids_clean)} accounts...")
+        # Round 13 / Phase 7.1: same CASE_ID tie-break as the
+        # ACCOUNT_ID variant above.
         sql2 = f"""
         SELECT CASE_ID, ACCOUNT_ID_C AS ACCOUNT_ID, SUBJECT, STATUS, CREATED_DATE, {_close_select_unaliased}, SEVERITY
         FROM {_SUPPORT_CASES_TABLE}
         WHERE ACCOUNT_ID_C IN ({placeholders})
           AND CREATED_DATE >= %s
-        ORDER BY CREATED_DATE DESC
+        ORDER BY CREATED_DATE DESC, CASE_ID ASC
         LIMIT %s
         """
         cur = ctx.cursor()
@@ -2396,13 +2504,15 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
     # Try 3: Join via dsm_assignment_data (same table we use for team subs)
     try:
         logger.info(f"[[RENEWAL]] Trying support cases via JOIN to dsm_assignment_data...")
+        # Round 13 / Phase 7.1: same CASE_ID tie-break as the
+        # SUPPORT_CASES variants above.
         sql3 = f"""
         SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE, {_close_select}, s.SEVERITY
         FROM {_SUPPORT_CASES_TABLE} s
         INNER JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data d ON TRIM(s.ACCOUNT_ID) = TRIM(d.ACCOUNT_ID_C)
         WHERE d.ACCOUNT_ID_C IN ({placeholders})
           AND s.CREATED_DATE >= %s
-        ORDER BY s.CREATED_DATE DESC
+        ORDER BY s.CREATED_DATE DESC, s.CASE_ID ASC
         LIMIT %s
         """
         cur = ctx.cursor()
@@ -3263,6 +3373,12 @@ def calculate_arr_at_risk(arr_df, ab_df, cases_df=None):
         currency_col = 'CURRENCY_CODE' if 'CURRENCY_CODE' in arr_df.columns else None
         per_currency_breakdown: Dict[str, float] = {}
         is_multi_currency = bool(arr_df.attrs.get('is_multi_currency')) if hasattr(arr_df, 'attrs') else False
+        # Round 13 / Phase 1.5: track whether ambiguous (NULL/blank)
+        # CURRENCY_CODE rows exist; mixing rows with unknown currency
+        # alongside known currencies (or even alongside each other) is
+        # NOT comparable and must NOT collapse into a single
+        # ``is_multi_currency=False`` answer.
+        has_unknown_currency = False
         if currency_col:
             try:
                 grouped = (
@@ -3274,11 +3390,26 @@ def calculate_arr_at_risk(arr_df, ab_df, cases_df=None):
                     str(k or 'UNKNOWN'): float(v or 0.0) for k, v in grouped.items()
                 }
                 distinct_known = [c for c in per_currency_breakdown.keys() if c and c != 'UNKNOWN']
-                is_multi_currency = is_multi_currency or len(distinct_known) > 1
+                # Round 13 / Phase 1.5: NULL/blank currency rows are
+                # treated as non-comparable; presence of an UNKNOWN
+                # bucket alongside any other currency, or as the sole
+                # currency, forces is_multi_currency=True so summed
+                # totals are NOT presented as a comparable headline.
+                has_unknown_currency = 'UNKNOWN' in per_currency_breakdown
+                is_multi_currency = (
+                    is_multi_currency
+                    or len(distinct_known) > 1
+                    or (has_unknown_currency and (len(distinct_known) >= 1
+                                                   or len(per_currency_breakdown) > 1))
+                )
             except Exception:
                 per_currency_breakdown = {}
         result['arr_by_currency'] = per_currency_breakdown
         result['is_multi_currency'] = bool(is_multi_currency)
+        # Round 13 / Phase 1.5: surface the ambiguity flag so renderers
+        # can show "currency unknown -- not comparable" instead of a
+        # bogus single-currency total.
+        result['has_unknown_currency'] = bool(has_unknown_currency)
         if per_currency_breakdown:
             result['currencies_present'] = sorted(per_currency_breakdown.keys())
 
@@ -4318,7 +4449,26 @@ def derive_portfolio_intelligence(arr_df, ab_df, cases_df=None, team_subs_df=Non
                     for idx, val in _agg.head(5).items()
                 ]
             else:
-                cust_arr = arr_df.groupby('BU_NAME')[arr_col].sum().sort_values(ascending=False)
+                # Round 13 / Phase 3.9: when we have to fall back to
+                # ``BU_NAME``-only grouping (no ACCOUNT_ID_C column),
+                # canonicalize via ``normalize_customer_name`` first.
+                # Otherwise two cosmetic spellings of the same customer
+                # ("Acme Co", "Acme co.") are treated as separate
+                # accounts and the HHI / Top5 percentages
+                # under-concentrate (each variant gets its own slice
+                # of the pie).
+                _arr_df_for_fallback = arr_df.copy()
+                _arr_df_for_fallback['_bu_disp'] = (
+                    _arr_df_for_fallback['BU_NAME']
+                    .fillna('Unknown')
+                    .apply(normalize_customer_name)
+                )
+                cust_arr = (
+                    _arr_df_for_fallback
+                    .groupby('_bu_disp')[arr_col]
+                    .sum()
+                    .sort_values(ascending=False)
+                )
                 _top5_account_ids = []
                 _top10_account_ids = []
                 _top5_records = [
@@ -4676,10 +4826,32 @@ def compute_barrier_aging(ab_df, arr_df=None):
                                     )
                                 except Exception:
                                     _acct_ccys = set()
+                            # Round 13 / Phase 1.6: dedupe rows before
+                            # summing per-currency.  Without this, a
+                            # single subscription line that appears N
+                            # times in ``arr_df`` (e.g. one row per child
+                            # SKU) would multiply ``account_arr`` by N.
+                            # Prefer SUBSCRIPTION_ID, then fall back to
+                            # SUBSCRIPTION_ID_C, then ACCOUNT_ID_C alone.
+                            try:
+                                if 'SUBSCRIPTION_ID' in _acct_rows.columns:
+                                    _acct_rows_dedup = _acct_rows.drop_duplicates(
+                                        subset=['ACCOUNT_ID_C', 'SUBSCRIPTION_ID']
+                                    )
+                                elif 'SUBSCRIPTION_ID_C' in _acct_rows.columns:
+                                    _acct_rows_dedup = _acct_rows.drop_duplicates(
+                                        subset=['ACCOUNT_ID_C', 'SUBSCRIPTION_ID_C']
+                                    )
+                                else:
+                                    _acct_rows_dedup = _acct_rows.drop_duplicates(
+                                        subset=['ACCOUNT_ID_C']
+                                    )
+                            except Exception:
+                                _acct_rows_dedup = _acct_rows
                             if len(_acct_ccys) > 1:
                                 try:
                                     by_ccy = (
-                                        _acct_rows.groupby('CURRENCY_CODE')['ANNUAL_CONTRACT_VALUE']
+                                        _acct_rows_dedup.groupby('CURRENCY_CODE')['ANNUAL_CONTRACT_VALUE']
                                         .sum().to_dict()
                                     )
                                     entry['account_arr_by_currency'] = {
@@ -4690,7 +4862,7 @@ def compute_barrier_aging(ab_df, arr_df=None):
                                 entry['account_arr'] = None
                                 entry['account_arr_currency'] = 'MIXED'
                             else:
-                                acct_arr = _acct_rows['ANNUAL_CONTRACT_VALUE'].sum()
+                                acct_arr = _acct_rows_dedup['ANNUAL_CONTRACT_VALUE'].sum()
                                 entry['account_arr'] = float(acct_arr)
                                 entry['account_arr_currency'] = (
                                     next(iter(_acct_ccys)) if _acct_ccys else 'UNKNOWN'
@@ -4752,6 +4924,13 @@ def build_cross_report_trends(reports_data):
                 'total_arr': 0,
                 'severity_counts': {},
                 'canonical_sheet': None,
+                # Round 13 / Phase 1.8: capture per-snapshot
+                # currency-comparability flags so the cross-period
+                # arr_trend can refuse to compute pct_change when
+                # the two snapshots' ARR figures aren't denominated
+                # comparably.
+                'is_multi_currency': False,
+                'arr_currency': None,
             }
             metrics_by_sheet = rpt.get('metrics', {}) or {}
             _canonical_name, _canonical_metrics = _pick_canonical_sheet(metrics_by_sheet)
@@ -4766,6 +4945,18 @@ def build_cross_report_trends(reports_data):
                     combined['unique_customers'] = int(_canonical_metrics['unique_customers'])
                 if _canonical_metrics.get('total_arr'):
                     combined['total_arr'] = float(_canonical_metrics['total_arr'])
+                # Round 13 / Phase 1.8: read currency flags from the
+                # canonical metrics block.  Treat missing flags as
+                # ambiguous (non-comparable) so we err on the side of
+                # suppressing the trend rather than fabricating one.
+                combined['is_multi_currency'] = bool(
+                    _canonical_metrics.get('is_multi_currency')
+                )
+                combined['arr_currency'] = (
+                    _canonical_metrics.get('arr_currency')
+                    or _canonical_metrics.get('currency')
+                    or None
+                )
 
             # Round 12 / Phase 6.2 + 6.3: previously this loop summed
             # ``severity_distribution`` and ``rows`` across EVERY sheet
@@ -4844,14 +5035,50 @@ def build_cross_report_trends(reports_data):
                     'change': cust_change,
                 }
             if oldest['total_arr'] > 0 and newest['total_arr'] > 0:
+                # Round 13 / Phase 1.8: ARR pct_change is only meaningful
+                # when the two snapshots' totals are denominated
+                # comparably.  When either snapshot is multi-currency,
+                # OR the resolved single currencies disagree, OR either
+                # currency is unknown, we still publish the raw oldest/
+                # newest numbers (with disclosure) but suppress
+                # pct_change so reports can't claim a "+12% YoY" that's
+                # actually a USD-vs-EUR mix.
+                _old_ccy = (
+                    str(oldest.get('arr_currency') or '').strip().upper() or None
+                )
+                _new_ccy = (
+                    str(newest.get('arr_currency') or '').strip().upper() or None
+                )
+                _arr_comparable = (
+                    not bool(oldest.get('is_multi_currency'))
+                    and not bool(newest.get('is_multi_currency'))
+                    and _old_ccy is not None
+                    and _new_ccy is not None
+                    and _old_ccy == _new_ccy
+                )
                 arr_change = newest['total_arr'] - oldest['total_arr']
-                trends['arr_trend'] = {
+                _arr_trend_entry: Dict[str, Any] = {
                     'oldest': oldest['total_arr'],
                     'newest': newest['total_arr'],
                     'change': arr_change,
-                    # Round 12 / Phase 11.1: canonical percent rounding.
-                    'pct_change': _r12_round_percent(arr_change / oldest['total_arr'] * 100, 1),
+                    # Round 13 / Phase 1.8: explicit comparability flag
+                    # so report renderers know whether to print a
+                    # percentage or a "currency-not-comparable" label.
+                    'currency_comparable': bool(_arr_comparable),
+                    'oldest_currency': _old_ccy,
+                    'newest_currency': _new_ccy,
                 }
+                if _arr_comparable:
+                    # Round 12 / Phase 11.1: canonical percent rounding.
+                    _arr_trend_entry['pct_change'] = _r12_round_percent(
+                        arr_change / oldest['total_arr'] * 100, 1
+                    )
+                else:
+                    _arr_trend_entry['pct_change'] = None
+                    _arr_trend_entry['note'] = (
+                        'pct_change suppressed: snapshots not currency-comparable'
+                    )
+                trends['arr_trend'] = _arr_trend_entry
 
             if oldest['severity_counts'] and newest['severity_counts']:
                 sev_trend = {}
@@ -6177,11 +6404,24 @@ def _correlate_incidents_with_cases(ext_incidents: List[Dict], csone_df: pd.Data
                 days_diff = None
                 if incident_date and case_date_str:
                     try:
-                        case_date = pd.to_datetime(case_date_str)
-                        if isinstance(case_date, pd.Timestamp):
-                            case_date = case_date.to_pydatetime()
-                        if isinstance(case_date, datetime):
-                            days_diff = abs((incident_date - case_date).days)
+                        # Round 13 / Phase 2.4: parse the case-side date
+                        # with utc=True so a case row carrying its own
+                        # offset (or already tz-aware) compares cleanly
+                        # against the UTC-anchored incident_date.  The
+                        # previous implementation dropped tz info, then
+                        # subtracted from a naive (or sometimes UTC-
+                        # naive) incident_date, skewing the +/-7 day
+                        # window by up to 24h.
+                        case_date = pd.to_datetime(case_date_str, errors="coerce", utc=True)
+                        if isinstance(case_date, pd.Timestamp) and not pd.isna(case_date):
+                            try:
+                                case_date_dt = case_date.tz_convert(None).to_pydatetime()
+                            except Exception:
+                                case_date_dt = case_date.to_pydatetime()
+                        else:
+                            case_date_dt = None
+                        if isinstance(case_date_dt, datetime):
+                            days_diff = abs((incident_date - case_date_dt).days)
                             if days_diff <= 7:
                                 temporal_match = True
                     except Exception as _temp_err:
@@ -6406,14 +6646,34 @@ class CircuitChatClient:
             )
             # Full-jitter: pick a random sleep in [0, backoff] so a
             # fleet of concurrent callers does not synchronize.
-            _sleep = _r.uniform(0.0, _backoff)
+            # Round 13 / Phase 11.1: previously this called
+            # ``random.uniform(0, backoff)`` and ``time.sleep(...)``
+            # unconditionally, which made every test that exercised
+            # the 429 retry path timing-dependent (the wall clock
+            # actually slept up to 4s per attempt) and used
+            # ``random.uniform`` from the global RNG -- so reproducing
+            # a CI-only timing regression locally was effectively
+            # impossible.  In test mode honor a deterministic
+            # backoff: use the *cap* of the exponential window
+            # (instead of a random draw) and skip the actual
+            # ``time.sleep`` call.  Production behavior is unchanged.
+            _r13_test_mode = bool(
+                os.environ.get("ADOPTIQ_TEST_MODE")
+                or os.environ.get("PYTEST_CURRENT_TEST")
+            )
+            if _r13_test_mode:
+                _sleep = float(_backoff)  # deterministic upper bound
+            else:
+                _sleep = _r.uniform(0.0, _backoff)
             logger.warning(
-                "CircuIT 429 rate-limit on attempt %d/%d; sleeping %.2fs before retry",
+                "CircuIT 429 rate-limit on attempt %d/%d; sleeping %.2fs before retry%s",
                 _attempt,
                 self.RATE_LIMIT_RETRY_MAX_ATTEMPTS,
                 _sleep,
+                " (test-mode: sleep elided)" if _r13_test_mode else "",
             )
-            _t.sleep(_sleep)
+            if not _r13_test_mode:
+                _t.sleep(_sleep)
         return last_result
 
     def _complete_once(self, system_message: str, user_message: str) -> Optional[str]:
@@ -6496,8 +6756,24 @@ class CircuitChatClient:
                         self.model_name,
                     )
                     return "ERROR: content_filter: model refused to answer (policy)."
-            except Exception:
-                pass
+            except (AttributeError, IndexError, TypeError) as _r13_cf_err:
+                # Round 13 / Phase 11.6: previously this was a bare
+                # ``except Exception: pass`` that swallowed *every*
+                # error -- including programming bugs.  Narrow to the
+                # exact attribute / index / type errors that the
+                # SDK shape can legitimately throw, and log a warning
+                # so an operator knows we silently bypassed the
+                # content-filter classification step (and therefore
+                # the model's refusal reason will surface as a
+                # generic ``parse_fail`` instead of
+                # ``content_filter`` downstream).
+                try:
+                    logger.warning(
+                        "CircuIT content_filter classification skipped (model=%s): %s",
+                        self.model_name, _r13_cf_err,
+                    )
+                except Exception:
+                    pass
             # Round 3 / Phase 2.5: warn loudly when the completion was
             # cut short by max_tokens. ``finish_reason='length'`` means
             # the JSON / narrative we just returned is structurally
@@ -6839,6 +7115,21 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                 )
             wedges, texts, autotexts = ax2.pie(risk_values, labels=risk_labels, colors=risk_colors,
                                                 autopct=_r10_autopct, startangle=90)
+            # Round 13 / Phase 8.1: previously this pie was rendered
+            # without ``set_aspect('equal')``.  Matplotlib's default
+            # ``axes.box_aspect`` is the figure's data-ratio, which
+            # for a 2x2 ``plt.subplot`` cell on a non-square figure
+            # quietly squashes the wedges into ovals -- a 25% slice
+            # then *looks* like 30%+ at the long end and a 15% slice
+            # looks like 12% at the short end.  Force a 1:1 aspect
+            # ratio so wedge area is proportional to value, which is
+            # the whole point of a pie chart.  Falls back silently on
+            # ``Exception`` so a stub ``ax2`` does not crash the
+            # report.
+            try:
+                ax2.set_aspect('equal')
+            except Exception:
+                pass
             for text in texts:
                 text.set_fontsize(9)
             for autotext in autotexts:
@@ -6892,7 +7183,42 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             ax3.set_title('TAC Case Severity', fontsize=12, fontweight='bold')
             ax3.grid(axis='y', alpha=0.3)
             plt.setp(ax3.xaxis.get_majorticklabels(), rotation=45, ha='right')
-            
+
+            # Round 13 / Phase 8.2: previously the TAC severity bar
+            # encoded priority entirely through colour.  That meant
+            # readers with deuteranopia / protanopia (~5% of the
+            # male population) saw the P1 (red) and P3 (yellow)
+            # bars as nearly the same hue, and ad-hoc readers had
+            # no legend mapping P1->Critical / P2->High / P3->Medium
+            # / P4->Low.  Add a small legend keyed by the same
+            # canonical SEVERITY_COLORS palette already used by the
+            # bars so the chart is self-describing without relying
+            # on colour alone, and so the legend stays aligned with
+            # the rest of the report's priority palette.  The
+            # ``rectangle`` proxy artists let us emit a discrete
+            # legend without an extra call to ``ax3.bar``.
+            try:
+                import matplotlib.patches as _r13_mpatches
+                _r13_handles = [
+                    _r13_mpatches.Patch(color=severity_colors[0], label='P1 - Critical'),
+                    _r13_mpatches.Patch(color=severity_colors[1], label='P2 - High'),
+                    _r13_mpatches.Patch(color=severity_colors[2], label='P3 - Medium'),
+                    _r13_mpatches.Patch(color=severity_colors[3], label='P4+ Low'),
+                ]
+                ax3.legend(
+                    handles=_r13_handles,
+                    loc='upper right',
+                    fontsize=7,
+                    framealpha=0.85,
+                    title='Priority',
+                    title_fontsize=8,
+                )
+            except Exception as _r13_legend_err:
+                logger.debug(
+                    "Round 13 / Phase 8.2: TAC severity legend skipped (%s)",
+                    _r13_legend_err,
+                )
+
             # Add value labels on bars
             for bar, value in zip(bars, severity_values):
                 height = bar.get_height()
@@ -6916,9 +7242,24 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             # Create a simple gauge/indicator
             ax4.text(0.5, 0.6, f'Portfolio Health', ha='center', va='center', 
                     fontsize=14, fontweight='bold')
-            ax4.text(0.5, 0.4, f'Grade: {health_score}', ha='center', va='center', 
+            # Round 13 / Phase 5.7: resolve the Grade colour through
+            # ``canonical_metrics.HEALTH_GRADE_COLORS`` instead of
+            # inlining the same ``#28B463``/``#FFB81C``/``#FF6B6B``
+            # ternary that drifted from
+            # ``RISK_BAND_PORTFOLIO_COLORS``.  Future palette tweaks
+            # land in exactly one place.
+            try:
+                from canonical_metrics import get_health_grade_color as _r13_grade_color
+                _r13_grade_color_hex = _r13_grade_color(str(health_score))
+            except Exception:
+                _r13_grade_color_hex = (
+                    '#28B463' if health_score in ['A', 'B']
+                    else '#FFB81C' if health_score == 'C'
+                    else '#FF6B6B'
+                )
+            ax4.text(0.5, 0.4, f'Grade: {health_score}', ha='center', va='center',
                     fontsize=32, fontweight='bold',
-                    color='#28B463' if health_score in ['A', 'B'] else '#FFB81C' if health_score == 'C' else '#FF6B6B')
+                    color=_r13_grade_color_hex)
             ax4.text(0.5, 0.2, f'Trend: {trend_data}', ha='center', va='center', 
                     fontsize=12, style='italic')
             ax4.set_xlim(0, 1)
@@ -6954,10 +7295,42 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             # all chart families render at the same target resolution.
             plt.savefig(img_stream, format='png', dpi=300, bbox_inches='tight')
             img_stream.seek(0)
-            plt.close()
+            # Round 13 / Phase 8.5: previously this was ``plt.close()``
+            # which closes "the current figure" -- i.e. whichever
+            # figure was last activated by matplotlib globally.  In
+            # a server process that builds many charts back-to-back
+            # (and especially when called from worker threads) the
+            # current-figure pointer can race with the figure we
+            # actually want to release, leading to slow figure leaks
+            # over the lifetime of a long-running daemon.  Pass the
+            # explicit ``fig`` handle so we always release the exact
+            # figure we just rendered, regardless of any concurrent
+            # ``plt.figure()`` calls in other threads.
+            try:
+                plt.close(fig)
+            except Exception:
+                plt.close()
             
             # Add chart to document
-            doc.add_picture(img_stream, width=Inches(6.5))
+            # Round 13 / Phase 8.6 + 9.10: previously ``add_picture``
+            # was called without an alt-text follow-up, so the
+            # embedded portfolio dashboard PNG had no docPr
+            # description.  Screen readers and Word's Accessibility
+            # Checker therefore announced only the BytesIO/temp name,
+            # losing all chart context.  Stamp a static alt text
+            # describing the four-panel dashboard so accessibility
+            # tooling and exported HTML/PDF copies announce it as
+            # "Portfolio Dashboard - At-A-Glance".
+            _r13_dashboard_picture = doc.add_picture(img_stream, width=Inches(6.5))
+            try:
+                _r13_set_picture_alt_text(
+                    _r13_dashboard_picture,
+                    "Portfolio Dashboard - At-A-Glance: four-panel chart showing "
+                    "portfolio health metrics, customer risk distribution, TAC case "
+                    "severity, and team summary.",
+                )
+            except Exception:
+                pass
             
             # Add space after chart
             doc.add_paragraph()
@@ -7493,6 +7866,82 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
             ], columns=["Item", "Value"])
             report_info.to_excel(xw, sheet_name="Report_Info", index=False)
             _used_sheet_names = {"Report_Info"}
+
+            # Round 13 / Phase 9.8: previously the fallback path emitted
+            # raw ``df.to_excel(...)`` with no header bolding, no
+            # frozen panes, no column-width autofit, and no zebra
+            # striping.  When the enhanced formatter was available the
+            # workbook had a polished header / autofit pass; when it
+            # wasn't (e.g. xlsxwriter unavailable, or the formatter
+            # raised), the user opened a wall of unformatted text and
+            # blamed the report.  Add a minimal styling pass that
+            # mirrors the enhanced formatter's *visual* contract:
+            # bold header row, autofiltered table, frozen header,
+            # and width-fit columns (capped at a sane max so a
+            # rogue 50KB cell value can't blow up the workbook).
+            try:
+                _r13_book = xw.book  # xlsxwriter.Workbook
+                _r13_header_fmt = _r13_book.add_format({
+                    'bold': True,
+                    'bg_color': '#0076CE',
+                    'font_color': '#FFFFFF',
+                    'border': 1,
+                    'align': 'center',
+                    'valign': 'vcenter',
+                })
+            except Exception:
+                _r13_header_fmt = None
+
+            def _r13_fallback_apply_styling(_df, _ws):
+                """Round 13 / Phase 9.8: bold header, autofilter, freeze
+                pane, and per-column width autofit.  Defensive --
+                styling is best-effort and never breaks the export."""
+                if _ws is None or _df is None:
+                    return
+                try:
+                    _ncols = int(_df.shape[1])
+                    _nrows = int(_df.shape[0])
+                except Exception:
+                    return
+                if _ncols <= 0:
+                    return
+                try:
+                    if _r13_header_fmt is not None:
+                        for _col_idx, _col_name in enumerate(list(_df.columns)):
+                            _ws.write(0, _col_idx, str(_col_name), _r13_header_fmt)
+                except Exception:
+                    pass
+                try:
+                    _ws.freeze_panes(1, 0)
+                except Exception:
+                    pass
+                try:
+                    if _nrows > 0:
+                        _ws.autofilter(0, 0, _nrows, max(0, _ncols - 1))
+                except Exception:
+                    pass
+                try:
+                    for _col_idx, _col_name in enumerate(list(_df.columns)):
+                        try:
+                            _series = _df.iloc[:, _col_idx]
+                            _max_len = max(
+                                int(_series.astype(str).map(len).max() or 0),
+                                len(str(_col_name)),
+                            )
+                        except Exception:
+                            _max_len = len(str(_col_name))
+                        # Cap to 60 so a giant free-text cell can't
+                        # explode the column width (Excel UI gets
+                        # unusable past ~80 chars).
+                        _ws.set_column(_col_idx, _col_idx, min(60, max(8, _max_len + 2)))
+                except Exception:
+                    pass
+
+            try:
+                _r13_fallback_apply_styling(report_info, xw.sheets.get("Report_Info"))
+            except Exception:
+                pass
+
             for name, df in sheets.items():
                 if df is None: continue
                 if not isinstance(df, pd.DataFrame):
@@ -7530,6 +7979,13 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                     df_copy.to_excel(xw, sheet_name=sheet, index=False)
                 else:
                     pd.DataFrame(df_copy).to_excel(xw, sheet_name=sheet, index=False)
+                # Round 13 / Phase 9.8: apply the shared fallback
+                # styling pass so this fallback workbook visually
+                # matches the enhanced formatter's contract.
+                try:
+                    _r13_fallback_apply_styling(df_copy, xw.sheets.get(sheet))
+                except Exception:
+                    pass
             if csconsole_data:
                 for key, sheet_name in csconsole_sheet_names.items():
                     df = csconsole_data.get(key)
@@ -7544,11 +8000,19 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                         # but a future caller could easily inject an
                         # invalid character via key rename, so route
                         # through the same sanitizer.
+                        _r13_cs_sheet = _r12_sanitize_sheet_name(sheet_name)
                         df_copy.to_excel(
                             xw,
-                            sheet_name=_r12_sanitize_sheet_name(sheet_name),
+                            sheet_name=_r13_cs_sheet,
                             index=False,
                         )
+                        # Round 13 / Phase 9.8: apply the same fallback
+                        # styling pass to CSConsole sheets so the
+                        # workbook is uniformly styled.
+                        try:
+                            _r13_fallback_apply_styling(df_copy, xw.sheets.get(_r13_cs_sheet))
+                        except Exception:
+                            pass
         return f"{base_path}.xlsx"
 
 # --------------------------- LLM prompt ---------------------------
@@ -7688,9 +8152,21 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                     )
                 except Exception as _per_acct_err:
                     logger.debug("Briefing-1 per-account ARR rollup failed: %s", _per_acct_err)
-                    arr_by_cust = arr_data.groupby('BU_NAME')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False)
+                    # Round 13 / Phase 3.9: fallback rollup must canonicalize
+                    # BU_NAME so cosmetic variants don't fan out into
+                    # separate "customers" with under-concentrated shares.
+                    _arr_data_norm = arr_data.copy()
+                    _arr_data_norm['_bu_disp'] = (
+                        _arr_data_norm['BU_NAME'].fillna('Unknown').apply(normalize_customer_name)
+                    )
+                    arr_by_cust = _arr_data_norm.groupby('_bu_disp')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False)
             else:
-                arr_by_cust = arr_data.groupby('BU_NAME')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False)
+                # Round 13 / Phase 3.9: same as the except branch above.
+                _arr_data_norm = arr_data.copy()
+                _arr_data_norm['_bu_disp'] = (
+                    _arr_data_norm['BU_NAME'].fillna('Unknown').apply(normalize_customer_name)
+                )
+                arr_by_cust = _arr_data_norm.groupby('_bu_disp')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False)
             total_arr = arr_by_cust.sum()
             # Round 6 / Phase 7.1: when ``CURRENCY_CODE`` is missing
             # entirely or every value is null/empty, the previous
@@ -7866,14 +8342,22 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
     if csone_df is not None and not csone_df.empty and 'customer_name' in csone_df.columns:
         _csone_norm_for_sev = add_case_lifecycle_fields(csone_df)
         if 'case_priority_norm' in _csone_norm_for_sev.columns:
-            p1_mask = _csone_norm_for_sev['case_priority_norm'] == 'P1'
-            p2_mask = _csone_norm_for_sev['case_priority_norm'] == 'P2'
-            p1_by_cust = _csone_norm_for_sev[p1_mask]['customer_name'].value_counts()
-            p2_by_cust = _csone_norm_for_sev[p2_mask]['customer_name'].value_counts()
+            # Round 13 / Phase 3.1: count P1/P2 against the normalized
+            # customer key so two source rows that differ only in
+            # whitespace/case (e.g. ``"acme co."`` vs ``"Acme Co"``)
+            # contribute to the same row in the briefing.  Without
+            # normalization the same customer appeared as two entries
+            # and the top-15 sort silently dropped one of them.
+            _sev_df = _csone_norm_for_sev.copy()
+            _sev_df['_cust_disp'] = _sev_df['customer_name'].apply(normalize_customer_name)
+            p1_mask = _sev_df['case_priority_norm'] == 'P1'
+            p2_mask = _sev_df['case_priority_norm'] == 'P2'
+            p1_by_cust = _sev_df[p1_mask]['_cust_disp'].value_counts()
+            p2_by_cust = _sev_df[p2_mask]['_cust_disp'].value_counts()
             if not p1_by_cust.empty or not p2_by_cust.empty:
                 briefing.append("### P1/P2 Cases by Customer (High-Priority Risk):")
                 all_custs = set(p1_by_cust.index) | set(p2_by_cust.index)
-                for cust in sorted(all_custs, key=lambda c: (-p1_by_cust.get(c, 0), -p2_by_cust.get(c, 0)))[:15]:
+                for cust in sorted(all_custs, key=lambda c: (-p1_by_cust.get(c, 0), -p2_by_cust.get(c, 0), str(c)))[:15]:
                     p1 = int(p1_by_cust.get(cust, 0))
                     p2 = int(p2_by_cust.get(cust, 0))
                     if p1 > 0 or p2 > 0:
@@ -7897,8 +8381,20 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
             barrier_id = row.get('ID', 'Unknown')
             title = row.get('title', 'No Title')
             description = row.get('description', 'No Description')
-            customer = row.get('customer_name', 'Unknown Customer')
-            
+            # Round 13 / Phase 3.4: route the customer name through
+            # ``normalize_customer_name`` so cosmetic variants of the
+            # same upstream value (NBSP, doubled spaces, stray dots)
+            # render identically to other briefing sections that
+            # already normalize.  Mirrors the TAC-case branch lower
+            # in the file.
+            _raw_customer = row.get('customer_name', 'Unknown Customer')
+            try:
+                customer = normalize_customer_name(_raw_customer) if _raw_customer else 'Unknown Customer'
+                if not customer or customer == 'Unknown':
+                    customer = 'Unknown Customer'
+            except Exception:
+                customer = _raw_customer or 'Unknown Customer'
+
             # Format with source citation
             briefing.append(f"\n**CSConsole Record: {barrier_id}**")
             briefing.append(f"**Customer:** {customer}")
@@ -7916,7 +8412,14 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
         if date_col:
             try:
                 df_trend = csone_df.copy()
-                df_trend['_dt'] = pd.to_datetime(df_trend[date_col], errors='coerce')
+                # Round 13 / Phase 2.5: parse with utc=True so a row whose
+                # original timestamp falls on the boundary between two
+                # months in the worker's local zone but is the same
+                # calendar month in UTC is bucketed by the UTC month
+                # (matching the rest of the report which is UTC-anchored).
+                df_trend['_dt'] = pd.to_datetime(
+                    df_trend[date_col], errors='coerce', utc=True
+                )
                 df_trend = df_trend.dropna(subset=['_dt'])
                 if len(df_trend) >= 2:
                     monthly = df_trend.groupby(df_trend['_dt'].dt.to_period('M')).size().sort_index()
@@ -8005,7 +8508,21 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                 for _, row in bems_cases.iterrows():
                     case_number = row.get('SR Number', row.get('Case Number', 'Unknown'))
                     title = row.get('Title', 'No Title')
-                    customer = row.get('customer_name', 'Unknown Customer')
+                    # Round 13 / Phase 3.5: route customer through
+                    # normalize_customer_name so the per-case BEMS
+                    # listing shows the same canonical spelling as the
+                    # rollup section above (which already normalizes
+                    # via ``_r12_cust_key``).  Without this the rollup
+                    # said "5 BEMS escalations for Acme Co" and the
+                    # detail block listed three of them under "Acme
+                    # Co" and two under "Acme co.".
+                    _raw_customer = row.get('customer_name', 'Unknown Customer')
+                    try:
+                        customer = normalize_customer_name(_raw_customer) if _raw_customer else 'Unknown Customer'
+                        if not customer or customer == 'Unknown':
+                            customer = 'Unknown Customer'
+                    except Exception:
+                        customer = _raw_customer or 'Unknown Customer'
                     bems_refs = row.get('bemscsc_refs', 'No BEMS refs')
                     transaction_id = row.get('Transaction ID', '')
                     
@@ -8334,12 +8851,24 @@ def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
         
         # Customer list - FIXED: Show ALL customers
         if 'BU_NAME' in team_subs_df.columns:
-            customers = team_subs_df['BU_NAME'].dropna().unique().tolist()
+            # Round 13 / Phase 3.2: normalize before .unique() so two
+            # raw spellings of the same customer (e.g. trailing
+            # whitespace, NBSP, casing) collapse into a single
+            # portfolio entry.  Without this, the briefing rendered
+            # "Acme Co" twice (once for each variant) and the listed
+            # count contradicted the unique-customer headline above.
+            customers = sorted(
+                {
+                    normalize_customer_name(_v)
+                    for _v in team_subs_df['BU_NAME'].dropna().tolist()
+                    if normalize_customer_name(_v) and normalize_customer_name(_v) != "Unknown"
+                }
+            )
             briefing.append("### Complete Customer Portfolio:")
             for customer in customers:  # Show ALL customers
                 briefing.append(f"- {customer}")
             briefing.append("")
-    
+
     # Adoption barriers analysis
     if not ab_norm.empty:
         briefing.append("## Critical Adoption Barriers Analysis")
@@ -8347,10 +8876,17 @@ def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
         
         # Top customers with barriers
         if 'customer_name' in ab_norm.columns:
-            customer_barriers = ab_norm['customer_name'].value_counts()
+            # Round 13 / Phase 3.5/3.7: normalize before value_counts so
+            # cosmetic spelling drift (whitespace, NBSPs, casing) does
+            # not split a single customer into multiple briefing lines.
+            _ab_min = ab_norm.copy()
+            _ab_min['_cust_disp'] = (
+                _ab_min['customer_name'].fillna('Unknown').apply(normalize_customer_name)
+            )
+            customer_barriers = _ab_min['_cust_disp'].value_counts()
             briefing.append(f"- **Customers with Barriers:** {len(customer_barriers)}")
             briefing.append("")
-            
+
             briefing.append("### All Customers Requiring Attention:")
             # FIXED: Show ALL customers with barriers for complete visibility
             for customer, count in customer_barriers.items():
@@ -8425,7 +8961,14 @@ def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
             elif 'title' in barrier:
                 briefing.append(f"- Subject: {barrier['title']}")
             if 'customer_name' in barrier:
-                briefing.append(f"- Customer: {barrier['customer_name']}")
+                # Round 13 / Phase 3.5: normalize per-barrier customer
+                # so the canonical spelling matches the rollup above.
+                _raw_b_cust = barrier.get('customer_name', '')
+                try:
+                    _cust_disp = normalize_customer_name(_raw_b_cust) if _raw_b_cust else ''
+                except Exception:
+                    _cust_disp = _raw_b_cust
+                briefing.append(f"- Customer: {_cust_disp}")
             if 'ab_category_c' in barrier:
                 briefing.append(f"- Category: {barrier['ab_category_c']}")
             elif 'AB_CATEGORY_C' in barrier:
@@ -8464,7 +9007,17 @@ def _create_minimal_briefing_book(manager, ab_norm, team_subs_df, technology):
         
         # FIXED: Show ALL customers with data
         if 'customer_name' in ab_norm.columns:
-            customers = ab_norm['customer_name'].unique()
+            # Round 13 / Phase 3.8: dedupe on the canonical
+            # ``normalize_customer_name`` value so a customer that
+            # appears with both "Acme co." and "Acme Co" is listed
+            # once, and the count headline matches the bullet list.
+            customers = sorted(
+                {
+                    normalize_customer_name(_v)
+                    for _v in ab_norm['customer_name'].dropna().tolist()
+                    if normalize_customer_name(_v)
+                }
+            )
             briefing.append(f"- **Customers with Data:** {len(customers)}")
             for customer in customers:
                 briefing.append(f"  - {customer}")
@@ -8533,7 +9086,18 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
         
         # FULL customer list (not truncated - AI needs this for comprehensive analysis)
         if 'BU_NAME' in team_subs_df.columns:
-            customers = team_subs_df['BU_NAME'].dropna().unique().tolist()
+            # Round 13 / Phase 3.3: normalize and dedupe so the AI does
+            # not see the same customer twice with cosmetic variants
+            # (whitespace, NBSP, capitalization).  Mirrors Phase 3.2 in
+            # the prior portfolio block above so both listings stay in
+            # sync with the unique-customer headline.
+            customers = sorted(
+                {
+                    normalize_customer_name(_v)
+                    for _v in team_subs_df['BU_NAME'].dropna().tolist()
+                    if normalize_customer_name(_v) and normalize_customer_name(_v) != "Unknown"
+                }
+            )
             briefing.append("### Complete Customer Portfolio:")
             for customer in customers:  # NO LIMIT - include all customers
                 briefing.append(f"- {customer}")
@@ -8626,12 +9190,20 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
                 for _, case in critical_cases.iterrows():
                     case_num = case.get('SR Number', case.get('Case Number', 'Unknown'))
                     title = case.get('Title', 'No title')
-                    customer = case.get('customer_name', 'Unknown')
+                    # Round 13 / Phase 3.6: normalize the customer label so
+                    # the executive briefing's "ALL Critical Cases" listing
+                    # matches the canonical spelling used elsewhere in the
+                    # same briefing (rollups + ARR sections).
+                    _raw_customer = case.get('customer_name', 'Unknown')
+                    try:
+                        customer = normalize_customer_name(_raw_customer) if _raw_customer else 'Unknown'
+                    except Exception:
+                        customer = _raw_customer or 'Unknown'
                     status = case.get('Case Status', 'Unknown')
                     sev = case.get('case_priority_norm', 'Unknown')
                     briefing.append(f"- TAC #{case_num} ({customer}): {title} - Severity: {sev}, Status: {status}")
                 briefing.append("")
-        
+
         # ALL Case Details - COMPREHENSIVE (for AI thematic analysis)
         # Iterate the normalized frame so the per-case Severity printed here
         # matches case_priority_norm used in the distribution + critical lists above.
@@ -8639,7 +9211,16 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
         for idx, case in csone_norm.iterrows():
             case_num = case.get('SR Number', case.get('Case Number', f'Case-{idx}'))
             title = case.get('Title', 'No title')
-            customer = case.get('customer_name', 'Unknown')
+            # Round 13 / Phase 3.6: normalize customer for the
+            # comprehensive case-detail emission, matching the
+            # critical-cases block above so cosmetic variants do not
+            # surface as separate customer buckets in the model
+            # context.
+            _raw_customer = case.get('customer_name', 'Unknown')
+            try:
+                customer = normalize_customer_name(_raw_customer) if _raw_customer else 'Unknown'
+            except Exception:
+                customer = _raw_customer or 'Unknown'
             status = case.get('Case Status', 'Unknown')
             sev = case.get('case_priority_norm', case.get('Severity', case.get('Highest Priority', 'Unknown')))
             trans_id = case.get('Transaction ID', '')
@@ -8674,10 +9255,23 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
         
         # ALL customers with barriers (not truncated)
         if 'customer_name' in ab_norm.columns:
-            customer_barriers = ab_norm['customer_name'].value_counts()
+            # Round 13 / Phase 3.7: normalize before value_counts so a
+            # customer that appears with both "Acme co." and "Acme Co"
+            # rolls up into a single bucket.  Without this the
+            # "Customers with Barriers" headline overcounted by the
+            # number of cosmetic variants and the listing emitted the
+            # same customer multiple times under sub-totals that did
+            # not match the headline.
+            _ab_for_count = ab_norm.copy()
+            _ab_for_count['_cust_disp'] = (
+                _ab_for_count['customer_name']
+                .fillna('Unknown')
+                .apply(normalize_customer_name)
+            )
+            customer_barriers = _ab_for_count['_cust_disp'].value_counts()
             briefing.append(f"- **Customers with Barriers:** {len(customer_barriers)}")
             briefing.append("")
-            
+
             briefing.append("### All Customers with Adoption Barriers (sorted by barrier count):")
             for customer, count in customer_barriers.items():  # ALL customers
                 briefing.append(f"- **{customer}**: {count} barriers")
@@ -8715,7 +9309,14 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
                 briefing.append("### HIGH/CRITICAL Severity Barriers - REQUIRES ATTENTION:")
                 for _hi_idx, barrier in high_sev.iterrows():
                     subj = barrier.get('SUBJECT_C', barrier.get('subject_c', barrier.get('title', 'No subject')))
-                    customer = barrier.get('customer_name', 'Unknown')
+                    # Round 13 / Phase 3.7: normalize customer for the
+                    # high/critical barrier listing so the bullet matches
+                    # the customer label used in the rollup section above.
+                    _raw_customer = barrier.get('customer_name', 'Unknown')
+                    try:
+                        customer = normalize_customer_name(_raw_customer) if _raw_customer else 'Unknown'
+                    except Exception:
+                        customer = _raw_customer or 'Unknown'
                     sev = barrier.get(sev_col, 'Unknown')
                     status = barrier.get('AB_STATUS_C', barrier.get('STATUS_C', 'Unknown'))
                     b_id = barrier.get('ID', barrier.get('id', ''))
@@ -8728,7 +9329,14 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
         subj_col = 'SUBJECT_C' if 'SUBJECT_C' in ab_norm.columns else ('subject_c' if 'subject_c' in ab_norm.columns else ('title' if 'title' in ab_norm.columns else None))
         if subj_col:
             for _, barrier in ab_norm.iterrows():
-                customer = barrier.get('customer_name', 'Unknown')
+                # Round 13 / Phase 3.7: normalize customer for the
+                # thematic-analysis listing so cosmetic variants
+                # don't fan out into multiple model-context buckets.
+                _raw_customer = barrier.get('customer_name', 'Unknown')
+                try:
+                    customer = normalize_customer_name(_raw_customer) if _raw_customer else 'Unknown'
+                except Exception:
+                    customer = _raw_customer or 'Unknown'
                 subject = barrier.get(subj_col, 'No subject')
                 sev = barrier.get(sev_col, 'N/A') if sev_col else 'N/A'
                 cat = barrier.get(cat_col, 'Uncategorized') if cat_col else 'Uncategorized'
@@ -8736,13 +9344,19 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
                 id_tag = f" [AB-ID: {b_id}]" if b_id else ''
                 briefing.append(f"- [{customer}] {subject} (Severity: {sev}, Category: {cat}){id_tag}")
         briefing.append("")
-        
+
         # Complete barrier details with record IDs for traceability
         briefing.append("### Complete Adoption Barrier Details (with CSConsole Record IDs):")
         for idx, barrier in ab_norm.iterrows():
             record_id = barrier.get('ID', barrier.get('RECORD_ID', f'AB-{idx}'))
             subj = barrier.get('SUBJECT_C', barrier.get('subject_c', barrier.get('title', 'No subject')))
-            customer = barrier.get('customer_name', 'Unknown')
+            # Round 13 / Phase 3.7: normalize customer for the complete
+            # barrier-detail emission as well.
+            _raw_customer = barrier.get('customer_name', 'Unknown')
+            try:
+                customer = normalize_customer_name(_raw_customer) if _raw_customer else 'Unknown'
+            except Exception:
+                customer = _raw_customer or 'Unknown'
             sev = barrier.get(sev_col, 'N/A') if sev_col else 'N/A'
             cat = barrier.get(cat_col, 'Uncategorized') if cat_col else 'Uncategorized'
             status = barrier.get('AB_STATUS_C', barrier.get('STATUS_C', 'Unknown'))
@@ -8797,11 +9411,23 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
                 total_arr = float(_per_acct['ANNUAL_CONTRACT_VALUE'].sum())
             except Exception as _per_acct_err:
                 logger.debug("Briefing per-account ARR rollup failed: %s", _per_acct_err)
-                arr_by_cust = arr_data.groupby('BU_NAME')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False)
+                # Round 13 / Phase 3.9: canonicalize BU_NAME first so
+                # cosmetic spelling drift doesn't fragment the customer
+                # rollup (otherwise % concentration is artificially low).
+                _arr_data_norm = arr_data.copy()
+                _arr_data_norm['_bu_disp'] = (
+                    _arr_data_norm['BU_NAME'].fillna('Unknown').apply(normalize_customer_name)
+                )
+                arr_by_cust = _arr_data_norm.groupby('_bu_disp')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False)
                 arr_by_cust_pairs = list(arr_by_cust.items())
                 total_arr = float(arr_by_cust.sum())
         else:
-            arr_by_cust = arr_data.groupby('BU_NAME')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False)
+            # Round 13 / Phase 3.9: same as the except branch above.
+            _arr_data_norm = arr_data.copy()
+            _arr_data_norm['_bu_disp'] = (
+                _arr_data_norm['BU_NAME'].fillna('Unknown').apply(normalize_customer_name)
+            )
+            arr_by_cust = _arr_data_norm.groupby('_bu_disp')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False)
             arr_by_cust_pairs = list(arr_by_cust.items())
             total_arr = float(arr_by_cust.sum())
 
@@ -9410,12 +10036,17 @@ def generate_llm_response(system_prompt: str, briefing_book: str) -> str:
                 # readability); the full body is still returned to
                 # the caller for downstream branching.
                 import hashlib as _h
-                _kind_token = "unknown"
+                # Round 14 / Phase 4.4: ``_kind_token`` is the parsed
+                # error classifier (e.g. ``timeout``, ``rate_limited``)
+                # not a credential -- ``S105`` flags the variable name
+                # because of the substring ``token``.  Pin a noqa per
+                # line so the false positive is documented in context.
+                _kind_token = "unknown"  # noqa: S105 -- error-kind label, not a secret
                 try:
                     _after = result[len("ERROR:"):].lstrip()
-                    _kind_token = _after.split(":", 1)[0].strip() or "unknown"
+                    _kind_token = _after.split(":", 1)[0].strip() or "unknown"  # noqa: S105 -- error-kind label
                 except Exception:
-                    _kind_token = "unknown"
+                    _kind_token = "unknown"  # noqa: S105 -- error-kind label
                 try:
                     _digest = _h.sha256(result.encode("utf-8", errors="replace")).hexdigest()[:8]
                 except Exception:
@@ -10638,8 +11269,27 @@ def main():
         csone_df = _apply_scope_filter_csone(csone_df_prepared, tech, days, sub_ids, team_customer_names)
 
         # Integrity gates
-        reason = _integrity_checks(ab_norm, csone_df)
-        ts = time.strftime("%Y%m%d_%H%M%S")
+        # Round 14 / Phase 4.6: previously this stored the integrity
+        # check result in ``reason`` and discarded it (ruff F841), which
+        # silently neutered the gate on the CLI report path -- the
+        # Flask flow in ``app_simple.py`` correctly inspects ``reason``
+        # and short-circuits on non-empty.  Log the reason at WARNING
+        # here so operators running the CLI report still see when the
+        # integrity check fired, without changing the CLI's "always
+        # produce a report" contract.
+        _integrity_reason = _integrity_checks(ab_norm, csone_df)
+        if _integrity_reason:
+            logger.warning(
+                "[[INTEGRITY]] Integrity check fired on CLI report path: %s",
+                _integrity_reason,
+            )
+        # Round 13 / Phase 2.10: ``time.strftime`` reads the worker's
+        # local zone, so two operators running ``adoptiq_backend.py``
+        # at the same instant in different zones produced different
+        # ``AdoptIQ_<...>_<ts>`` filenames -- the on-disk artifact
+        # name no longer matched the UTC-anchored "Generated:" header
+        # inside the Word/Excel files.  Stamp the filename with UTC.
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
         tag = f"{manager.replace(' ','_')}_{tech.replace(' ','_').replace('&','and')}_{days}d_{ts}"
         base = str(out_dir / f"AdoptIQ_{tag}")
         

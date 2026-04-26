@@ -32,6 +32,46 @@ import socket
 import uuid
 import hashlib
 import re
+from typing import Any  # Round 14 / Phase 2.2: needed by `_utc_iso_z(value: Any)`.
+
+# Round 14 / Phase 2.2: previously `_utc_iso_z` and `_tz` lived inside
+# `record_report_completion` only.  `get_report_history` and `get_analytics`
+# both referenced them at module scope (computing the "last 7 days" window
+# in UTC for sqlite WHERE clauses), which raised NameError every call.  The
+# top-level `except Exception` swallowed the failure into a "report history
+# retrieval failed" log line and an empty placeholder, so the History UI
+# silently lost its 7-day tile and the analytics endpoint silently returned
+# `{}`.  Promote both helpers to module scope so all callers share one
+# definition.
+_tz = timezone
+
+
+def _utc_iso_z(value: Any) -> str:
+    """Render any datetime-ish value as a UTC ISO-8601 ``Z``-suffixed string.
+
+    This mirrors the helper that previously lived inside
+    ``record_report_completion``.  Strings that already carry a Z / offset
+    are returned untouched; naive strings get a ``Z`` appended; aware
+    datetimes are converted via ``astimezone``; naive datetimes are treated
+    as UTC.  Empty / falsy inputs return ``''``.
+    """
+    if not value:
+        return ''
+    if isinstance(value, str):
+        _v = value.strip()
+        if not _v:
+            return ''
+        if _v.endswith('Z') or '+' in _v[10:] or '-' in _v[10:]:
+            return _v
+        return _v + 'Z'
+    try:
+        if hasattr(value, 'astimezone'):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=_tz.utc)
+            return value.astimezone(_tz.utc).isoformat().replace('+00:00', 'Z')
+    except Exception:
+        pass
+    return str(value)
 
 # Setup comprehensive logging (fallback to console only if log file fails)
 try:
@@ -1352,10 +1392,20 @@ def get_ip_connections():
             cursor = conn.cursor()
             
             # Get IP connection stats
+            # Round 13 / Phase 7.2: previously the ORDER BY only
+            # used ``last_seen DESC`` which is non-deterministic when
+            # the LIMIT clips a tail of rows that share the exact
+            # same second-precision ``last_seen`` (the column is a
+            # text ISO-8601 timestamp; bulk-import / replay test
+            # fixtures routinely write hundreds of rows in the same
+            # second).  Add ``id DESC`` as a secondary key so the
+            # LIMIT 50 page always selects the same 50 rows for a
+            # given snapshot and the admin dashboard does not
+            # flicker between two equally valid orderings.
             cursor.execute('''
                 SELECT ip_address, first_seen, last_seen, request_count, user_agent, country, city, risk_level
                 FROM ip_connections 
-                ORDER BY last_seen DESC 
+                ORDER BY last_seen DESC, id DESC
                 LIMIT 50
             ''')
             
@@ -1383,11 +1433,14 @@ def get_security_events():
         with db_connection() as conn:
             cursor = conn.cursor()
             
-            # Get recent security events
+            # Round 13 / Phase 7.3: same ``id DESC`` tie-break as the
+            # ip_connections page above; ``timestamp`` alone is not a
+            # stable sort key when bulk-import or replay events share
+            # the same second.
             cursor.execute('''
                 SELECT timestamp, event_type, ip_address, user_agent, endpoint, severity, description
                 FROM security_events 
-                ORDER BY timestamp DESC 
+                ORDER BY timestamp DESC, id DESC
                 LIMIT 50
             ''')
             
@@ -1414,11 +1467,12 @@ def get_error_logs():
         with db_connection() as conn:
             cursor = conn.cursor()
             
-            # Get recent errors
+            # Round 13 / Phase 7.4: same ``id DESC`` tie-break as the
+            # security_events / ip_connections pages above.
             cursor.execute('''
                 SELECT timestamp, level, message, source, ip_address
                 FROM error_logs 
-                ORDER BY timestamp DESC 
+                ORDER BY timestamp DESC, id DESC
                 LIMIT 50
             ''')
             
@@ -2598,10 +2652,34 @@ def api_diag_connectivity_proxy():
         return jsonify(resp.json()), resp.status_code
     except Exception as e:
         logger.error("Connectivity diag proxy failed: %s", e)
+        # Round 13 / Phase 10.5: previously this returned the raw
+        # exception message in ``detail``, which on requests errors
+        # (e.g. ``ConnectionError``) leaks the proxied target URL,
+        # internal hostnames, port numbers, and sometimes the path
+        # to the local socket file -- all of which the admin tile is
+        # not authorized to expose to the browser.  Redact down to a
+        # generic kind label so an operator running with logs has
+        # full context (logger.error above) but the browser never
+        # sees the underlying URL/hostname.
+        try:
+            _r13_kind = type(e).__name__
+        except Exception:
+            _r13_kind = 'unknown_error'
+        _r13_kind_to_msg = {
+            'ConnectionError': 'connection refused or unreachable',
+            'ConnectTimeout': 'connection timed out',
+            'ReadTimeout': 'read timed out',
+            'Timeout': 'request timed out',
+            'SSLError': 'TLS handshake failed',
+            'ProxyError': 'proxy error',
+            'TooManyRedirects': 'redirect loop',
+        }
+        _r13_user_msg = _r13_kind_to_msg.get(_r13_kind, 'connectivity check failed')
         return jsonify({
             'ok': False,
             'error': 'Unable to reach main app /api/diag/connectivity',
-            'detail': f'{type(e).__name__}: {e}'[:240],
+            'error_kind': _r13_kind,
+            'detail': _r13_user_msg,
         }), 502
 
 _ANALYSIS_ID_RE = re.compile(r'^[A-Za-z0-9._-]{1,200}$')
@@ -2655,8 +2733,34 @@ def audit_report(analysis_id):
                     ORDER BY created_at DESC LIMIT 1
                 ''', (analysis_id,))
                 report_data = cursor.fetchone()
-        except sqlite3.OperationalError:
-            pass  # report_history may not exist yet; continue with file-based audit
+        except sqlite3.OperationalError as _r13_db_err:
+            # Round 13 / Phase 10.4: previously this swallowed the
+            # ``OperationalError`` silently with ``pass`` and the
+            # caller had no signal that the audit_report DB leg had
+            # been skipped (e.g. report_history table missing,
+            # database file corrupt).  The audit then quietly
+            # downgraded to file-only mode without surfacing any
+            # warning, so an operator running ``audit_report`` on a
+            # broken DB saw a green "passed" report despite half the
+            # checks being skipped.  Log the skip + surface it as a
+            # ``checks`` entry so the audit envelope discloses that
+            # the DB leg ran in degraded mode.
+            try:
+                logger.warning(
+                    "audit_report: report_history DB leg skipped (analysis_id=%s): %s",
+                    analysis_id, _r13_db_err,
+                )
+            except Exception:
+                pass
+            try:
+                audit_result.setdefault('checks', []).append({
+                    'check': 'report_history_db_leg',
+                    'status': 'skipped',
+                    'reason': 'sqlite_operational_error',
+                    'detail': str(_r13_db_err)[:240],
+                })
+            except Exception:
+                pass
         
         # Check 1: Verify report file exists (search outputs/ and Reports/)
         output_dirs = [Path('outputs'), Path('Reports')]
@@ -3049,7 +3153,10 @@ if __name__ == '__main__':
         _admin_host = (os.environ.get('ADOPTIQ_ADMIN_HOST') or '').strip()
         if not _admin_host:
             _bind_public = os.environ.get('ADOPTIQ_ADMIN_BIND_PUBLIC', '').strip().lower() in {'1', 'true', 'yes'}
-            _admin_host = '0.0.0.0' if _bind_public else '127.0.0.1'
+            # Round 14 / Phase 4.5: 0.0.0.0 here is gated by the explicit
+            # ``ADOPTIQ_ADMIN_BIND_PUBLIC=1`` opt-in.  Default is loopback.
+            # Keep the noqa pinned per line so the opt-in stays explicit.
+            _admin_host = '0.0.0.0' if _bind_public else '127.0.0.1'  # noqa: S104 # nosec B104 - opt-in via ADOPTIQ_ADMIN_BIND_PUBLIC=1
         if _admin_host not in ('127.0.0.1', '::1', 'localhost'):
             print(
                 "[SECURITY] Admin dashboard binding to non-loopback host "
@@ -3057,7 +3164,7 @@ if __name__ == '__main__':
                 "the before_request hook still restricts to loopback peers."
             )
         print("Starting AdoptIQ Admin Dashboard v2.0...")
-        print(f"Access the dashboard at: http://{_admin_host if _admin_host != '0.0.0.0' else 'localhost'}:5002")
+        print(f"Access the dashboard at: http://{_admin_host if _admin_host != '0.0.0.0' else 'localhost'}:5002")  # noqa: S104 # nosec B104 - string compare in display label
         admin_app.run(host=_admin_host, port=5002, debug=False)
     except Exception as e:
         print("Admin Console failed to start:", e)

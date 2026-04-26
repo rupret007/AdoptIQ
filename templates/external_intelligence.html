@@ -327,7 +327,9 @@
                             <h5>Incidents source unavailable</h5>
                             <p class="text-danger mb-2">
                                 Could not load incidents from storage.
-                                {% if fetch_errors and fetch_errors.get('incidents') %}<br><small>{{ fetch_errors['incidents'] }}</small>{% endif %}
+                                {# Round 13 / Phase 4.2: pipe fetch_errors through |e explicitly so a future Jinja env
+                                   that flips autoescape off (or a `|safe` upstream) still HTML-escapes the error string. #}
+                                {% if fetch_errors and fetch_errors.get('incidents') %}<br><small>{{ fetch_errors['incidents']|e }}</small>{% endif %}
                             </p>
                             <p class="text-muted mb-0"><small>Treat affected metrics as unknown, not zero.</small></p>
                             {% elif incidents_state == 'not_configured' %}
@@ -395,7 +397,8 @@
                             <h5>Maintenances source unavailable</h5>
                             <p class="text-danger mb-2">
                                 Could not load scheduled maintenances from storage.
-                                {% if fetch_errors and fetch_errors.get('maintenances') %}<br><small>{{ fetch_errors['maintenances'] }}</small>{% endif %}
+                                {# Round 13 / Phase 4.2: explicit |e on fetch_errors -- see incidents block. #}
+                                {% if fetch_errors and fetch_errors.get('maintenances') %}<br><small>{{ fetch_errors['maintenances']|e }}</small>{% endif %}
                             </p>
                             <p class="text-muted mb-0"><small>Treat affected metrics as unknown, not zero.</small></p>
                             {% elif maintenances_state == 'not_configured' %}
@@ -460,7 +463,8 @@
                             <h5>Bugs source unavailable</h5>
                             <p class="text-danger mb-2">
                                 Could not load bugs from storage.
-                                {% if fetch_errors and fetch_errors.get('bugs') %}<br><small>{{ fetch_errors['bugs'] }}</small>{% endif %}
+                                {# Round 13 / Phase 4.2: explicit |e on fetch_errors -- see incidents block. #}
+                                {% if fetch_errors and fetch_errors.get('bugs') %}<br><small>{{ fetch_errors['bugs']|e }}</small>{% endif %}
                             </p>
                             <p class="text-muted mb-0"><small>Treat affected metrics as unknown, not zero.</small></p>
                             {% elif bugs_state == 'not_configured' %}

@@ -132,7 +132,14 @@ def format_date(value: Any, style: str = "long") -> str:
         return "N/A"
     try:
         if isinstance(value, str):
-            value = pd.to_datetime(value, errors="coerce")
+            # Round 13 / Phase 2.6: parse with utc=True so an input
+            # carrying an explicit offset (e.g. ``2025-04-01T00:00:00-05:00``)
+            # is interpreted as that absolute moment and not silently
+            # shifted by the worker's local zone.  Without utc=True the
+            # parse returned a tz-aware Timestamp whose strftime then
+            # printed local-zone wall time, contradicting the report's
+            # UTC-anchored "Generated:" header.
+            value = pd.to_datetime(value, errors="coerce", utc=True)
         if pd.isna(value):
             return "N/A"
         if hasattr(value, "strftime"):

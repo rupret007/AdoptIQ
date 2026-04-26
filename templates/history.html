@@ -60,7 +60,16 @@
                                 </thead>
                                 <tbody>
                                     {% for analysis in analyses %}
-                                    <tr class="analysis-row hover-lift" data-analysis-id="{{ analysis.id }}">
+                                    {# Round 13 / Phase 4.6: avoid exposing the full analysis_id (which encodes
+                                       customer / manager / technology fragments) in the rendered DOM.  We
+                                       expose only a 12-char SHA-256 digest as ``data-analysis-id-digest``
+                                       for any DOM-side matching / hover styling.  Navigation buttons render
+                                       a server-side URL via ``url_for('progress', analysis_id=analysis.id)``
+                                       so the JS no longer needs the verbatim id.  ``analysis.id_digest`` is
+                                       provided by the route; if a stale source still passes only ``analysis.id``
+                                       we fall back to the first 12 chars (still better than the verbatim id). #}
+                                    {% set _aid_digest = analysis.id_digest if analysis.id_digest is defined and analysis.id_digest else (analysis.id[:12] if analysis.id else '') %}
+                                    <tr class="analysis-row hover-lift" data-analysis-id-digest="{{ _aid_digest }}">
                                         <td class="align-middle">
                                             <div class="d-flex align-items-center">
                                                 <div class="bg-primary bg-opacity-10 p-3 rounded-circle me-3 hover-scale">
@@ -108,14 +117,19 @@
                                         </td>
                                         <td class="align-middle">
                                             <div class="btn-group" role="group">
-                                                <button type="button" class="btn btn-sm btn-outline-primary view-results-btn hover-lift" 
-                                                        data-analysis-id="{{ analysis.id }}">
+                                                {# Round 13 / Phase 4.6: pre-render the navigation URL on the
+                                                   server side so the DOM no longer carries the full analysis_id.
+                                                   ``data-analysis-id-digest`` is exposed only for diagnostics. #}
+                                                <a class="btn btn-sm btn-outline-primary view-results-btn hover-lift"
+                                                   data-analysis-id-digest="{{ _aid_digest }}"
+                                                   href="{{ url_for('progress', analysis_id=analysis.id) }}">
                                                     <i class="fas fa-eye me-1"></i>View
-                                                </button>
-                                                <button type="button" class="btn btn-sm btn-outline-success download-btn hover-lift" 
-                                                        data-analysis-id="{{ analysis.id }}">
+                                                </a>
+                                                <a class="btn btn-sm btn-outline-success download-btn hover-lift"
+                                                   data-analysis-id-digest="{{ _aid_digest }}"
+                                                   href="{{ url_for('progress', analysis_id=analysis.id) }}">
                                                     <i class="fas fa-download me-1"></i>Download
-                                                </button>
+                                                </a>
                                             </div>
                                         </td>
                                     </tr>
@@ -212,21 +226,12 @@ document.addEventListener('DOMContentLoaded', function() {
     // Animate statistics on page load
     animateStatistics();
     
-    // View results button — progress page shows status and download links
-    document.querySelectorAll('.view-results-btn').forEach(btn => {
-        btn.addEventListener('click', function() {
-            const analysisId = this.dataset.analysisId;
-            window.location.href = `/progress/${encodeURIComponent(analysisId)}`;
-        });
-    });
-    
-    // Download button — progress page has Word/Excel download links
-    document.querySelectorAll('.download-btn').forEach(btn => {
-        btn.addEventListener('click', function() {
-            const analysisId = this.dataset.analysisId;
-            window.location.href = `/progress/${encodeURIComponent(analysisId)}`;
-        });
-    });
+    // Round 13 / Phase 4.6: navigation is now handled by the server-side
+    // rendered ``href`` on the anchor element, so the click handlers no
+    // longer have to read the verbatim analysis_id out of the DOM.  The
+    // visible ``data-analysis-id-digest`` is retained for any diagnostic
+    // matching but is intentionally non-routable.
+
     
     // Statistics animation
     function animateStatistics() {

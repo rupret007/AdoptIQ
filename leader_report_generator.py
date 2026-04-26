@@ -75,6 +75,40 @@ except Exception:  # pragma: no cover - defensive
     _R12_LRG_MED_HEX = 'ff7f0e'
     _R12_LRG_LOW_HEX = '2ca02c'
 
+def _r13_safe_doc_text(value: Any, max_len: int = 200) -> str:
+    """Round 13 / Phase 9.7: sanitize a string before docx ``add_run``
+    / cell.text assignment.
+
+    Mirrors helpers in ``app_simple._safe_doc_text`` /
+    ``compact_report_formatter._safe_doc_text`` /
+    ``advanced_renewal_analyzer._safe_doc_text`` /
+    ``executive_intelligence_formatter._r13_safe_doc_text``.
+    Strips XML-illegal control codes and surrogate code points,
+    collapses whitespace, and caps length.  Without this, a malformed
+    CSSM / customer name carrying a zero-width space, tab, or
+    surrogate from a Snowflake mojibake row produced a .docx Word
+    refused to open without "repair".
+    """
+    try:
+        s = "" if value is None else str(value)
+    except Exception:
+        return ""
+    cleaned: list[str] = []
+    for ch in s:
+        cp = ord(ch)
+        if cp < 0x20 and ch not in ('\t', '\n', '\r'):
+            continue
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        cleaned.append(ch)
+    s = ''.join(cleaned)
+    import re as _re_local
+    s = _re_local.sub(r'\s+', ' ', s).strip()
+    if max_len and len(s) > max_len:
+        s = s[: max_len - 1] + '\u2026'
+    return s
+
+
 def _r12_hex_to_rgb(_hex_str: str) -> RGBColor:
     try:
         _h = (_hex_str or '').lstrip('#')
@@ -1319,16 +1353,24 @@ class LeaderReportGenerator:
         # Filter by date if date column exists
         if date_col and date_col in csone_df.columns:
             try:
-                # Convert to datetime
-                csone_df[date_col] = pd.to_datetime(csone_df[date_col], errors='coerce')
-                
+                # Round 13 / Phase 2.1: parse with utc=True so date column
+                # values are tz-aware UTC, matching the UTC-aware
+                # ``cutoff_date`` computed above.  Without utc=True the
+                # parse produced naive timestamps and pandas raised
+                # "Cannot compare tz-naive and tz-aware" on the
+                # comparison below, which the broad except silently
+                # masked into "no filtering".
+                csone_df[date_col] = pd.to_datetime(
+                    csone_df[date_col], errors='coerce', utc=True
+                )
+
                 # Get date range before filtering
                 valid_dates = csone_df[csone_df[date_col].notna()]
                 if not valid_dates.empty:
                     min_date = valid_dates[date_col].min()
                     max_date = valid_dates[date_col].max()
                     logger.info(f"Date range in CSOne: {min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')}")
-                
+
                 # Apply filter
                 csone_filtered = csone_df[csone_df[date_col] >= cutoff_date].copy()
                 logger.info(f"OK: Filtered TAC cases from {len(csone_df)} to {len(csone_filtered)} (last {days} days)")
@@ -1678,10 +1720,19 @@ class LeaderReportGenerator:
             ratio = f"{num_customers}:1" if num_customers > 0 else "0:1"
             
             row_cells = table.rows[row_idx].cells
-            row_cells[0].text = cssm_name
-            row_cells[1].text = str(num_customers)
-            row_cells[2].text = str(num_css)
-            row_cells[3].text = ratio
+            # Round 13 / Phase 9.7: previously CSSM rows wrote raw
+            # ``cssm_name`` straight into ``row_cells[0].text`` with
+            # ``str(num_customers)`` / ``str(num_css)`` for the other
+            # cells.  An XML-illegal control code in a CSSM display
+            # name (zero-width space, tab, surrogate from a mojibake
+            # source row) produced a .docx Word refused to open
+            # without "repair".  Route every cell through the new
+            # ``_r13_safe_doc_text`` helper for parity with the
+            # sibling app_simple Word table at Phase 9.1.
+            row_cells[0].text = _r13_safe_doc_text(cssm_name, max_len=200)
+            row_cells[1].text = _r13_safe_doc_text(num_customers, max_len=20)
+            row_cells[2].text = _r13_safe_doc_text(num_css, max_len=20)
+            row_cells[3].text = _r13_safe_doc_text(ratio, max_len=20)
             
             for i in range(1, 4):
                 if row_cells[i].paragraphs:
@@ -2087,15 +2138,29 @@ class LeaderReportGenerator:
     def _add_bems_summary(self, team_data: Dict[str, Dict]):
         """Add BEMS escalation summary with details"""
         bems_heading = self.doc.add_heading('BEMS Escalation Details', level=2)
+        # Round 13 / Phase 5.1: previously the BEMS heading + warning
+        # used raw ``RGBColor(255, 0, 0)`` -- a saturated #FF0000 red
+        # that has no representation anywhere in
+        # ``canonical_metrics.RISK_BAND_COLORS``.  The matplotlib /
+        # Excel risk-band charts elsewhere in the same Word report
+        # render CRITICAL as ``#d62728``, so the same "this is a
+        # critical issue" semantic appeared in two different reds in
+        # one document.  Drive the BEMS color from the shared
+        # ``CANONICAL_RISK_HIGH_RGB`` (which is already resolved from
+        # ``RISK_BAND_COLORS["CRITICAL"]`` at module-import) so any
+        # future palette tweak lands in exactly one place.
         if bems_heading.runs:
-            bems_heading.runs[0].font.color.rgb = RGBColor(255, 0, 0)  # Red for attention
-        
+            bems_heading.runs[0].font.color.rgb = CANONICAL_RISK_HIGH_RGB
+
         # Warning paragraph
         warning_para = self.doc.add_paragraph()
         warning_run = warning_para.add_run('Warning: CRITICAL: BEMS (Back-End Engineering Management System) escalations detected!\n')
         warning_run.font.bold = True
         warning_run.font.size = Pt(11)
-        warning_run.font.color.rgb = RGBColor(255, 0, 0)
+        # Round 13 / Phase 5.1: align with the canonical CRITICAL hex
+        # so the BEMS warning paragraph and the BEMS heading share
+        # the exact same red as every CRITICAL bar in the chart pages.
+        warning_run.font.color.rgb = CANONICAL_RISK_HIGH_RGB
         
         warning_para.add_run('These escalations require immediate attention from backend engineering teams.\n\n')
         
@@ -2547,20 +2612,43 @@ class LeaderReportGenerator:
                 if row_cells[i].paragraphs:
                     row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             
-            # Color-code sentiment
+            # Round 13 / Phase 5.3: previously Positive/Negative pulse
+            # text colours were hand-mixed RGB (``(0,128,0)`` /
+            # ``(255,0,0)``) and the BEMS row shading was a hard-coded
+            # ``FFE6E6`` light-red.  None of these matched the canonical
+            # ``RISK_BAND_COLORS`` palette used by the matplotlib /
+            # Excel band fills, so the same "this is a low/high risk
+            # signal" semantic showed up in three different reds and
+            # two different greens across one report.  Resolve all
+            # three through the shared canonical map (LOW / CRITICAL +
+            # the historical 14% lighter tint of CRITICAL we use as
+            # ``#FFE6E6``-replacement) so the leader sentiment column
+            # and the chart pages render consistent risk colours.
             if row_cells[5].paragraphs and row_cells[5].paragraphs[0].runs:
                 if row_cells[5].paragraphs and row_cells[5].paragraphs[0].runs:
                     if team_sentiment == "Positive":
-                        row_cells[5].paragraphs[0].runs[0].font.color.rgb = RGBColor(0, 128, 0)  # Green
+                        row_cells[5].paragraphs[0].runs[0].font.color.rgb = CANONICAL_RISK_LOW_RGB
                     elif team_sentiment == "Negative":
-                        row_cells[5].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 0, 0)  # Red
+                        row_cells[5].paragraphs[0].runs[0].font.color.rgb = CANONICAL_RISK_HIGH_RGB
                     else:
-                        row_cells[5].paragraphs[0].runs[0].font.color.rgb = RGBColor(128, 128, 128)  # Gray
-            
+                        row_cells[5].paragraphs[0].runs[0].font.color.rgb = RGBColor(0x7f, 0x7f, 0x7f)
+
             # Highlight BEMS if > 0
             if num_bems > 0:
                 shading_elm = OxmlElement('w:shd')
-                shading_elm.set(qn('w:fill'), 'FFE6E6')  # Light red
+                # Round 13 / Phase 5.3: shade BEMS rows with the
+                # canonical CRITICAL hex pulled from
+                # ``RISK_BAND_COLORS`` (with the leading ``#`` stripped
+                # so the OOXML ``w:fill`` attribute is valid).  This
+                # replaces the hard-coded ``FFE6E6`` light-red so
+                # palette tweaks land in exactly one place.
+                try:
+                    _r13_bems_fill = (_R12_LRG_RBC.get('CRITICAL', '#d62728') or '#d62728').lstrip('#').upper()
+                    if len(_r13_bems_fill) != 6:
+                        _r13_bems_fill = 'D62728'
+                except Exception:
+                    _r13_bems_fill = 'D62728'
+                shading_elm.set(qn('w:fill'), _r13_bems_fill)
                 row_cells[4]._element.get_or_add_tcPr().append(shading_elm)
             
             # Add individual summary paragraph immediately after this team member's row
@@ -3131,14 +3219,31 @@ class LeaderReportGenerator:
         def _date(series: pd.Series) -> pd.Series:
             return pd.to_datetime(series, errors='coerce', utc=True)
 
+        # Round 13 / Phase 3.12: route BU_NAME through
+        # ``normalize_customer_name`` so cosmetic spelling variants
+        # collapse into a single account-health row instead of two
+        # rows that each only show part of the customer's stalled AP
+        # / oldest open AB / Customer Pulse signal.  Without this fix
+        # the leader's per-customer health table double-counted some
+        # customers and the rolled-up "Risk" call could disagree
+        # between the two rows.
+        try:
+            from data_normalization import normalize_customer_name as _r13_norm_cust_lr
+        except Exception:
+            _r13_norm_cust_lr = lambda v: v  # noqa: E731
+
         if ap is not None and not ap.empty and 'BU_NAME' in ap.columns:
             status_col = next((c for c in ('STATUS_C', 'STATUS') if c in ap.columns), None)
             date_col = next((c for c in ('LAST_MODIFIED_DATE', 'LASTMODIFIEDDATE', 'CREATED_DATE', 'CREATEDDATE') if c in ap.columns), None)
             if status_col and date_col:
-                open_ap = ap[ap[status_col].apply(self._is_status_open)]
+                open_ap = ap[ap[status_col].apply(self._is_status_open)].copy()
                 ages = (now - _date(open_ap[date_col])).dt.days
-                stalled = open_ap[ages > 30]
-                for name, count in stalled['BU_NAME'].dropna().astype(str).value_counts().items():
+                stalled = open_ap[ages > 30].copy()
+                if not stalled.empty:
+                    stalled['_bu_disp'] = (
+                        stalled['BU_NAME'].dropna().astype(str).apply(_r13_norm_cust_lr)
+                    )
+                for name, count in stalled['_bu_disp'].dropna().value_counts().items():
                     rows.setdefault(name, {"customer": name}).update({"stalled_aps": int(count)})
 
         if ab is not None and not ab.empty and 'BU_NAME' in ab.columns:
@@ -3181,17 +3286,21 @@ class LeaderReportGenerator:
                     # intent explicit prevents the leader account-health
                     # output from silently dropping customers with zero
                     # currently-open ABs after the upgrade.
+                    # Round 13 / Phase 3.12: groupby on the normalized
+                    # customer key so a customer with a cosmetic
+                    # spelling drift across rows still rolls up to one
+                    # "oldest open AB" entry.
                     oldest = (
                         open_ab.dropna(subset=['_age_days'])
                         .sort_values(_sort_cols, ascending=_sort_asc, kind='stable')
                         .groupby(
-                            open_ab['BU_NAME'].fillna('Unknown').astype(str),
+                            open_ab['BU_NAME'].fillna('Unknown').astype(str).apply(_r13_norm_cust_lr),
                             observed=False,
                         )
                         .head(1)
                     )
                     for _, ab_row in oldest.iterrows():
-                        name = str(ab_row.get('BU_NAME', 'Unknown'))
+                        name = _r13_norm_cust_lr(str(ab_row.get('BU_NAME', 'Unknown')))
                         entry = rows.setdefault(name, {"customer": name})
                         entry["oldest_open_ab_days"] = int(ab_row['_age_days'])
                         entry["oldest_open_ab_severity"] = str(ab_row.get('SEVERITY_C', '') or '')
@@ -3205,8 +3314,9 @@ class LeaderReportGenerator:
                 if not cp_work.empty:
                     # Round 6 / Phase 5.12: explicit ``observed=False`` for
                     # the same reason as the AB groupby above.
+                    # Round 13 / Phase 3.12: groupby on canonical name.
                     grouped = cp_work.groupby(
-                        cp_work['BU_NAME'].fillna('Unknown').astype(str),
+                        cp_work['BU_NAME'].fillna('Unknown').astype(str).apply(_r13_norm_cust_lr),
                         observed=False,
                     )[score_col]
                     for name, stats in grouped.agg(['min', 'max', 'last']).iterrows():
@@ -4412,15 +4522,34 @@ class LeaderReportGenerator:
         high_severity_count = severity_counts.get('High', 0) + severity_counts.get('Critical', 0)
         open_ab_count = status_counts.get('Open', 0) + status_counts.get('New', 0)
         
+        # Round 13 / Phase 5.2: previously the Account Health pill
+        # used hand-mixed ``RGBColor(0,128,0)`` / ``(255,165,0)`` /
+        # ``(255,0,0)``.  Those greens / oranges / reds are NOT the
+        # same hexes as the canonical ``RISK_BAND_COLORS`` map
+        # ("HEALTHY"=#28B463, "MEDIUM"=#ffd700, "CRITICAL"=#d62728)
+        # used by every chart and Excel band fill, so a "Healthy"
+        # pill on this page rendered a noticeably different green
+        # than the "Healthy" wedge on the same report's pie chart.
+        # Resolve through the shared canonical map (already loaded
+        # at module-import as ``CANONICAL_RISK_*_RGB``) so palette
+        # tweaks land in exactly one place.  ``MED`` is mapped to
+        # ``RISK_BAND_COLORS["MEDIUM"]`` and falls back to the
+        # historical orange when the lookup fails.
+        try:
+            _r13_health_healthy_rgb = _r12_hex_to_rgb(
+                (_R12_LRG_RBC.get('HEALTHY', '#28B463') or '#28B463').lstrip('#')
+            )
+        except Exception:
+            _r13_health_healthy_rgb = RGBColor(0x28, 0xB4, 0x63)
         if high_severity_count == 0 and open_ab_count <= 2:
             health_status = 'Healthy'
-            health_color = RGBColor(0, 128, 0)  # Green
+            health_color = _r13_health_healthy_rgb
         elif high_severity_count <= 2 and open_ab_count <= 5:
             health_status = 'Moderate'
-            health_color = RGBColor(255, 165, 0)  # Orange
+            health_color = CANONICAL_RISK_MED_RGB
         else:
             health_status = 'Attention Needed'
-            health_color = RGBColor(255, 0, 0)  # Red
+            health_color = CANONICAL_RISK_HIGH_RGB
         
         health_run = health_para.add_run(health_status)
         health_run.font.bold = True
@@ -5313,29 +5442,45 @@ class LeaderReportGenerator:
                 except (AttributeError, TypeError):
                     return False
             
+            # Round 13 / Phase 2.11: parse date columns with utc=True
+            # so the min/max strftime values reflect UTC calendar
+            # dates.  Without utc=True, rows that carried explicit
+            # offsets returned tz-aware Timestamps whose strftime
+            # printed local-zone wall date (off-by-one near midnight),
+            # while rows that did not produced naive timestamps -- so
+            # ``.min()`` raised "Cannot compare tz-naive and tz-aware"
+            # which the upstream broad except silently masked into a
+            # missing date_ranges entry.
+
             # Check Action Plans dates
             if safe_df_check(data.get('action_plans'), 'CREATED_DATE'):
-                dates = pd.to_datetime(data['action_plans']['CREATED_DATE'], errors='coerce')
+                dates = pd.to_datetime(
+                    data['action_plans']['CREATED_DATE'], errors='coerce', utc=True
+                )
                 if not dates.empty:
                     date_ranges['action_plans'] = {
                         'min': dates.min().strftime('%Y-%m-%d'),
                         'max': dates.max().strftime('%Y-%m-%d'),
                         'count': len(dates.dropna())
                     }
-            
+
             # Check Adoption Barriers dates
             if safe_df_check(data.get('adoption_barriers'), 'CREATED_DATE'):
-                dates = pd.to_datetime(data['adoption_barriers']['CREATED_DATE'], errors='coerce')
+                dates = pd.to_datetime(
+                    data['adoption_barriers']['CREATED_DATE'], errors='coerce', utc=True
+                )
                 if not dates.empty:
                     date_ranges['adoption_barriers'] = {
                         'min': dates.min().strftime('%Y-%m-%d'),
                         'max': dates.max().strftime('%Y-%m-%d'),
                         'count': len(dates.dropna())
                     }
-            
+
             # Check Customer Pulse dates
             if safe_df_check(data.get('customer_pulse'), 'CREATED_DATE'):
-                dates = pd.to_datetime(data['customer_pulse']['CREATED_DATE'], errors='coerce')
+                dates = pd.to_datetime(
+                    data['customer_pulse']['CREATED_DATE'], errors='coerce', utc=True
+                )
                 if not dates.empty:
                     date_ranges['customer_pulse'] = {
                         'min': dates.min().strftime('%Y-%m-%d'),
@@ -5473,7 +5618,14 @@ class LeaderReportGenerator:
                 
                 # Validate TAC case dates
                 if 'Date/Time Opened' in tac_cases.columns:
-                    dates = pd.to_datetime(tac_cases['Date/Time Opened'], errors='coerce')
+                    # Round 13 / Phase 2.11 + 2.12: parse with utc=True
+                    # so the validator (which runs against an
+                    # UTC-anchored expected window upstream) compares
+                    # apples to apples.  Mixed-offset rows used to
+                    # break ``.min()`` on tz-aware/tz-naive comparison.
+                    dates = pd.to_datetime(
+                        tac_cases['Date/Time Opened'], errors='coerce', utc=True
+                    )
                     if not dates.empty:
                         tac_validation['date_validation'][cssm_name] = {
                             'min_date': dates.min().strftime('%Y-%m-%d'),

@@ -54,31 +54,63 @@ if [[ ! -d "$APP_PATH" ]]; then
 fi
 
 echo
-echo "Creating OUTBOX..."
-mkdir -p OUTBOX
-rm -rf "OUTBOX/AdoptIQ.app"
-# Use ditto to faithfully copy the bundle (preserves Mach-O code signatures,
-# resource forks, ACLs, and extended attributes that `cp -R` can drop).
-ditto "$APP_PATH" "OUTBOX/AdoptIQ.app"
+echo "Signing dist/AdoptIQ.app..."
 # Strip stray extended attributes (e.g. com.apple.provenance, quarantine) that
 # would otherwise invalidate the deep code signature.
-xattr -cr "OUTBOX/AdoptIQ.app"
-# Re-apply an adhoc deep signature so the bundle that ships in OUTBOX/ is
-# guaranteed to be cleanly signed. Without this, Apple Silicon Gatekeeper /
+xattr -cr "$APP_PATH"
+# Apply an adhoc deep signature on the dist bundle so the .app that ends up
+# inside the DMG is the signed copy. Without this, Apple Silicon Gatekeeper /
 # AMFI silently kill the app on first launch (it bounces in the Dock and dies).
-codesign --force --deep --sign - --timestamp=none "OUTBOX/AdoptIQ.app"
-codesign --verify --deep --strict "OUTBOX/AdoptIQ.app"
-cp "README.md" "OUTBOX/README.md"
-echo "AdoptIQ v${ADOPTIQ_VERSION} build ${ADOPTIQ_BUILD}" > OUTBOX/build_info.txt
-echo "Built: $(date)" >> OUTBOX/build_info.txt
+codesign --force --deep --sign - --timestamp=none "$APP_PATH"
+codesign --verify --deep --strict "$APP_PATH"
 
-if [[ -x "dist/AdoptIQ/AdoptIQ" ]]; then
-  ditto "dist/AdoptIQ/AdoptIQ" "OUTBOX/AdoptIQ"
-fi
+echo
+echo "Staging DMG payload..."
+DMG_STAGE="$(mktemp -d -t adoptiq_dmg_stage)"
+trap 'rm -rf "$DMG_STAGE"' EXIT
+# ditto preserves the deep code signature, resource forks, and ACLs so the
+# .app remains valid once it lands inside the read-only DMG.
+ditto "$APP_PATH" "$DMG_STAGE/AdoptIQ.app"
+# Drag-to-install convention: Finder renders this symlink as a folder pointing
+# at /Applications so users can drop AdoptIQ.app onto it.
+ln -s /Applications "$DMG_STAGE/Applications"
+
+echo
+echo "Resetting OUTBOX..."
+mkdir -p OUTBOX
+# Remove prior loose artifacts and any stale DMGs from previous builds so the
+# directory always reflects the latest build only.
+rm -f  OUTBOX/AdoptIQ OUTBOX/build_info.txt OUTBOX/.DS_Store
+rm -rf OUTBOX/AdoptIQ.app
+rm -f  OUTBOX/AdoptIQ-v*.dmg
+
+echo
+echo "Building DMG..."
+DMG_NAME="AdoptIQ-v${ADOPTIQ_VERSION}-build${ADOPTIQ_BUILD}.dmg"
+DMG_PATH="OUTBOX/${DMG_NAME}"
+# UDZO == read-only, zlib-compressed; standard macOS distribution format.
+hdiutil create \
+  -volname "AdoptIQ" \
+  -srcfolder "$DMG_STAGE" \
+  -fs HFS+ \
+  -format UDZO \
+  -ov \
+  "$DMG_PATH"
+
+echo
+echo "Signing DMG..."
+codesign --force --sign - --timestamp=none "$DMG_PATH"
+codesign --verify --strict "$DMG_PATH"
+
+cp "README.md" "OUTBOX/README.md"
+
+# Finder may recreate .DS_Store while observing OUTBOX during the build;
+# strip it as the final action so the directory ships clean.
+rm -f OUTBOX/.DS_Store
 
 echo
 echo "Done."
-echo "OUTBOX/AdoptIQ.app"
+echo "$DMG_PATH"
 echo "OUTBOX/README.md"
 echo
-echo "Launch app and open http://localhost:5001"
+echo "Mount the DMG, drag AdoptIQ.app to Applications, then open and browse to http://localhost:5001"

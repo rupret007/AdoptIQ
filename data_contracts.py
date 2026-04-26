@@ -221,10 +221,17 @@ def validate_row_contract(
         if raise_on_missing:
             raise ValueError(error_message)
 
+    # Round 14 / Phase 2.1: previously this returned ``sorted(columns)``,
+    # but ``columns`` was never bound in this function -- the actual
+    # column list lives in ``columns_raw``.  Every caller that hit the
+    # success-return path (i.e. all required slots present) raised
+    # ``NameError``; the broad ``except`` in callers like
+    # ``annotate_with_contract`` turned it into a debug log and the
+    # contract drift signal was silently dropped.  Use ``columns_raw``.
     return {
         "is_valid": is_valid,
         "missing_slots": missing_slots,
-        "present_columns": sorted(columns),
+        "present_columns": sorted(columns_raw),
         "error_message": error_message,
     }
 

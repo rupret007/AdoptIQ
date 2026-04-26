@@ -62,22 +62,37 @@ body {
     border-color: var(--cisco-dark-blue, #005a9e);
 }
 
+/*
+ * Round 13 / Phase 5.8: previously the success / warning / danger
+ * buttons were hard-coded to the Bootstrap defaults
+ * (``#28a745`` / ``#ffc107`` / ``#dc3545``) which are NOT the same
+ * hexes as the canonical risk-band palette in
+ * ``canonical_metrics.RISK_BAND_COLORS`` (LOW=#2ca02c,
+ * MEDIUM=#ffd700, CRITICAL=#d62728) used by every chart and Excel
+ * band fill.  A "danger" badge in the HTML therefore rendered a
+ * subtly different red than the same semantic in the embedded
+ * matplotlib chart.  Drive these from the ``--risk-*`` CSS vars
+ * defined in ``templates/base.html`` so a future palette tweak in
+ * ``canonical_metrics`` (mirrored in the template ``--risk-*``
+ * vars) lands in exactly one place; the fallback hex preserves the
+ * canonical risk-band hex if the variable is undefined.
+ */
 .btn-success {
-    background-color: #28a745;
-    border-color: #28a745;
+    background-color: var(--risk-low, #2ca02c);
+    border-color: var(--risk-low, #2ca02c);
     border-radius: 6px;
 }
 
 .btn-warning {
-    background-color: #ffc107;
-    border-color: #ffc107;
+    background-color: var(--risk-medium, #ffd700);
+    border-color: var(--risk-medium, #ffd700);
     color: #212529;
     border-radius: 6px;
 }
 
 .btn-danger {
-    background-color: #dc3545;
-    border-color: #dc3545;
+    background-color: var(--risk-critical, #d62728);
+    border-color: var(--risk-critical, #d62728);
     border-radius: 6px;
 }
 

@@ -230,11 +230,20 @@ def main():
     print()
 
     # 5. Sample a few rows from SUPPORT_CASES (if exists and has data)
-    print("## 5. Sample rows from SUPPORT_CASES (first 3)")
+    print("## 5. Sample rows from SUPPORT_CASES (first 3, ordered by column 1)")
     print("-" * 70)
     try:
+        # Round 13 / Phase 7.5: previously this was ``LIMIT 3`` with
+        # no ``ORDER BY``, so the discovery script's "first 3 rows"
+        # snapshot returned different rows on every run -- which
+        # caused engineers checking schema documentation against the
+        # script's printed sample to chase phantom drifts.  Add
+        # ``ORDER BY 1 ASC`` so the sample is stable on the first
+        # column (typically CASE_ID); we don't need a meaningful
+        # ranking, only determinism for documentation parity.
         cur.execute("""
             SELECT * FROM CX_DB.CX_SWSSBST_BR.SUPPORT_CASES
+            ORDER BY 1 ASC
             LIMIT 3
         """)
         rows = cur.fetchall()

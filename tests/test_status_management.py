@@ -184,7 +184,11 @@ class TestGetStatusRoute:
             assert rv.status_code == 200
             data = rv.get_json()
             assert data["status"] == "running"
-            assert data["step_start_time"] == "2026-03-01T12:00:00"
+            # Round 13 / Phase 10.3: naive datetimes are now interpreted
+            # as UTC and serialized in explicit ISO-Z form
+            # (``YYYY-MM-DDTHH:MM:SSZ``) so downstream clients can parse
+            # the timestamp without ambiguity about the source zone.
+            assert data["step_start_time"] == "2026-03-01T12:00:00Z"
         finally:
             with app_mod.analysis_status_lock:
                 app_mod.analysis_status.clear()

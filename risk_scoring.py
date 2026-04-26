@@ -240,6 +240,14 @@ RENEWAL_ARR_THRESHOLDS = {
     # Round 7 / Phase 6.5; when ``is_multi_currency`` is True these
     # gates are not applied).  Numbers carried over from the legacy
     # inline literals so existing report semantics are preserved.
+    # Round 13 / Phase 1.7: explicitly stamp these gates as
+    # USD-equivalent so downstream callers know to either:
+    #   (a) skip the gate entirely when ``financial_metrics.currency``
+    #       is non-USD or ``is_multi_currency`` is True, or
+    #   (b) convert the customer's portfolio total to USD-equivalent
+    #       before comparing.  Mirrors the multi-currency disclosure
+    #       contract added in Phase 1.1/1.3.
+    "currency_basis": "USD",  # Round 13 / Phase 1.7
     "high_value_arr": 100_000,
     "low_value_arr": 10_000,
     "high_discount_pct": 50,
@@ -301,11 +309,19 @@ def _score_adoption_barriers(customer_ab: pd.DataFrame) -> Dict[str, Any]:
     if "open_age_days" not in use.columns:
         date_col = next((c for c in ("OPEN_DATE_C", "CREATED_DATE", "CREATED_DATE_C", "CREATEDDATE") if c in use.columns), None)
         if date_col:
-            dt = pd.to_datetime(use[date_col], errors="coerce")
-            # Round 7 / Phase 3.2: tz-aware UTC instead of naive utcnow().
-            use["open_age_days"] = (
-                pd.Timestamp(datetime.now(timezone.utc)).tz_localize(None) - dt
-            ).dt.days
+            # Round 7 / Phase 3.2: anchor the open-age comparison on
+            # ``datetime.now(timezone.utc)`` rather than the deprecated
+            # ``datetime.utcnow()``.  Round 13 / Phase 2.2: additionally
+            # parse the date column with ``utc=True`` so any rows
+            # carrying explicit offsets (e.g. "...-08:00") collapse to
+            # a tz-aware UTC timestamp rather than producing a mixed
+            # frame that the next subtraction strips back to naive via
+            # ``.tz_localize(None)``.  Compare against a tz-aware UTC
+            # ``now`` so ages reflect calendar-day-in-UTC, not the
+            # worker's local zone.
+            dt = pd.to_datetime(use[date_col], errors="coerce", utc=True)
+            _now_utc = pd.Timestamp(datetime.now(timezone.utc))
+            use["open_age_days"] = (_now_utc - dt).dt.days
         else:
             use["open_age_days"] = pd.NA
 
@@ -366,13 +382,19 @@ def _score_support_cases(
 
     recent_count = 0
     if "open_date" in use.columns:
-        # Round 7 / Phase 3.2: tz-aware UTC reference; .tz_localize(None)
-        # keeps the cutoff comparable to naive timestamps already in the
-        # frame.
+        # Round 13 / Phase 2.3: parse the lifecycle ``open_date`` with
+        # utc=True so rows that carry explicit offsets (or were already
+        # parsed tz-aware upstream) compare cleanly against a UTC
+        # cutoff.  The previous implementation forced everything to
+        # tz-naive via ``tz_localize(None)``, which both hid timezone
+        # bugs and shifted the cutoff by up to 24h depending on the
+        # worker's local zone.
         cutoff = pd.Timestamp(
             datetime.now(timezone.utc) - timedelta(days=int(recent_window_days))
-        ).tz_localize(None)
-        recent_count = int((pd.to_datetime(use["open_date"], errors="coerce") >= cutoff).sum())
+        )
+        recent_count = int(
+            (pd.to_datetime(use["open_date"], errors="coerce", utc=True) >= cutoff).sum()
+        )
     recent_points = min(float(recent_count) * 2.5, 15.0)
     score = _clamp(volume_points + escalated_points + bems_points + recent_points)
 

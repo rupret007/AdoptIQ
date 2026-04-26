@@ -3,6 +3,20 @@
  * Handles subscription search and selection
  */
 
+// Round 13 / Phase 4.8: debug-gated logging helper.  ``console.error``
+// from this file used to leak internal subscription row ids to the
+// browser console even on production-quiet desktop runs.  Gate the
+// noisy diagnostics on an explicit ``window.ADOPTIQ_DEBUG`` flag the
+// app sets only when verbose-debug mode is enabled.
+function _adoptiqSubDebugLog() {
+    try {
+        if (typeof window !== 'undefined' && window.ADOPTIQ_DEBUG === true) {
+            // eslint-disable-next-line no-console
+            console.error.apply(console, arguments);
+        }
+    } catch (_e) { /* ignore - never throw from a logger */ }
+}
+
 function setupSubscriptionSearch() {
     const searchBtn = document.getElementById('search-subscriptions-btn');
     const searchInput = document.getElementById('subscription-search');
@@ -207,7 +221,10 @@ function setupSubscriptionSearch() {
                         selectedSubscription = null;
                         useBtn.disabled = true;
                         selectedDiv.style.display = 'none';
-                        console.error('subscription-search: missing/invalid registry entry for row', _rowId);
+                        // Round 13 / Phase 4.8: gate the row-id diagnostic on
+                        // ``window.ADOPTIQ_DEBUG`` so production browsers no
+                        // longer log the internal registry row identifier.
+                        _adoptiqSubDebugLog('subscription-search: missing/invalid registry entry for row', _rowId);
                         return;
                     }
 
