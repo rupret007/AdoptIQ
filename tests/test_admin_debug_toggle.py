@@ -41,8 +41,28 @@ def test_admin_debug_proxy_post(monkeypatch):
         lambda *args, **kwargs: _FakeResp(200, {"success": True, "verbose_debug": False}),
     )
     client = admin_mod.admin_app.test_client()
-    rv = client.post("/api/debug/verbose", json={"enabled": False})
+    # Round 8 / Phase 4.7: api_debug_verbose POST now requires the
+    # per-session admin CSRF token.  Mint one via the session and
+    # forward it as the X-AdoptIQ-Admin-CSRF header.
+    with client.session_transaction() as sess:
+        sess['_admin_csrf'] = 'test-csrf-token'
+    rv = client.post(
+        "/api/debug/verbose",
+        json={"enabled": False},
+        headers={'X-AdoptIQ-Admin-CSRF': 'test-csrf-token'},
+    )
     assert rv.status_code == 200
     data = rv.get_json()
     assert data["success"] is True
     assert data["verbose_debug"] is False
+
+
+@pytest.mark.flask
+def test_admin_debug_proxy_post_rejects_missing_csrf():
+    """Round 8 / Phase 4.7 regression: a POST without the CSRF token
+    must be rejected with HTTP 403 to prevent cross-origin abuse of
+    the verbose-debug toggle.
+    """
+    client = admin_mod.admin_app.test_client()
+    rv = client.post("/api/debug/verbose", json={"enabled": False})
+    assert rv.status_code == 403

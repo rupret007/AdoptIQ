@@ -49,7 +49,21 @@ _DETAIL_TAIL_CHARS = 240
 
 @dataclass(frozen=True)
 class AnalysisErrorClassification:
-    """Structured classification of a failure thrown during an analysis run."""
+    """Structured classification of a failure thrown during an analysis run.
+
+    Round 5 / Phase 6.12: ``kind`` values are *namespaced* using
+    ``"<category>.<subcategory>.<reason>"`` so log scrapers, dashboards,
+    and the support runbook can group failures by category without
+    relying on substring matches.  Categories currently in use:
+
+    - ``analysis.keeper.*``    -- Cisco Keeper / HashiCorp Vault failures
+    - ``analysis.snowflake.*`` -- Snowflake connection / auth failures
+    - ``analysis.network.*``   -- generic network connectivity issues
+    - ``analysis.unknown``     -- unclassified analysis failure
+    - ``llm.*``                -- CircuIT / Azure OpenAI failures (set by
+                                  ``CircuitChatClient.chat`` and the
+                                  classifier's CircuIT branch)
+    """
 
     kind: str
     user_message: str
@@ -57,17 +71,22 @@ class AnalysisErrorClassification:
 
 
 def _safe_type_name(e: BaseException) -> str:
-    """Return ``module.ClassName`` when possible (so ``hvac.exceptions.InvalidRequest``
-    is distinguishable from a user-land ``InvalidRequest``), but fall back to
-    the bare class name if ``__module__`` is missing/stripped by PyInstaller.
+    """Return only the bare class name of the exception.
+
+    Round 6 / Phase 6.19: previously returned ``module.ClassName``
+    (e.g. ``hvac.exceptions.InvalidRequest``).  That is useful for
+    server-side debugging but the value is interpolated into
+    ``detail_tail``, which is read by the UI banner and the audit
+    JSONL mirror -- both end up in places where leaking internal
+    module paths gives an attacker free reconnaissance about which
+    third-party libraries are bundled and at what import paths.
+    Return only the short class name; full module qualification is
+    kept in the underlying exception traceback that the admin Errors
+    view (and structured log) still capture.
     """
 
     cls = type(e)
-    mod = getattr(cls, "__module__", "") or ""
-    name = getattr(cls, "__name__", "Exception")
-    if mod and mod not in ("builtins", "__main__"):
-        return f"{mod}.{name}"
-    return name
+    return getattr(cls, "__name__", "Exception")
 
 
 def _normalized_message(e: BaseException) -> str:
@@ -86,14 +105,32 @@ def _detail_tail(e: BaseException) -> str:
     """
 
     msg = _normalized_message(e)
+    import re as _re
+
     # Strip absolute Keeper secret paths and role IDs that might appear in
     # some hvac errors. Best-effort only.
     lowered = msg.lower()
     if "role_id" in lowered or "secret_id" in lowered:
         # Replace any alphanumeric run of length >= 20 with a placeholder.
-        import re
+        msg = _re.sub(r"[A-Za-z0-9\-]{20,}", "<redacted>", msg)
 
-        msg = re.sub(r"[A-Za-z0-9\-]{20,}", "<redacted>", msg)
+    # Round 6 / Phase 4.20: scrub absolute URLs and host:port pairs out
+    # of the user-facing detail tail.  Internal Cisco hostnames and
+    # path tokens (Keeper secret paths, Snowflake account names) are
+    # not useful to the end-user but ARE useful to attackers / leak
+    # internal infrastructure topology.  Logs still keep the full
+    # exception text via logger.exception()/logger.error.
+    msg = _re.sub(r"https?://[^\s'\"]+", "<url-redacted>", msg)
+    # Bare host:port like "internal-host.cisco.com:443" or IPv4 literal.
+    msg = _re.sub(
+        r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}(?::\d{1,5})?\b",
+        "<host-redacted>",
+        msg,
+    )
+    msg = _re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b", "<host-redacted>", msg)
+    # Filesystem-style absolute paths (cap at ~120 chars to avoid
+    # eating short field labels like "type=/path/to" prefixes).
+    msg = _re.sub(r"(?<!\w)/[A-Za-z0-9_\-./]{6,120}", "<path-redacted>", msg)
 
     head = f"{type(e).__name__}: {msg}"
     if len(head) > _DETAIL_TAIL_CHARS:
@@ -132,7 +169,7 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
         ),
     ):
         return AnalysisErrorClassification(
-            kind="keeper_dns_failed",
+            kind="analysis.keeper.dns_failed",
             user_message=(
                 "DNS lookup for keeper.cisco.com failed. You are likely not on a "
                 "network route that resolves internal Cisco hostnames. Connect to "
@@ -161,7 +198,7 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
         )
     ):
         return AnalysisErrorClassification(
-            kind="keeper_tls_cert_verify_failed",
+            kind="analysis.keeper.tls_cert_verify_failed",
             user_message=(
                 "TLS certificate verification to keeper.cisco.com failed. This "
                 "almost always means Cisco corporate TLS inspection is re-signing "
@@ -186,7 +223,7 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
         )
     ):
         return AnalysisErrorClassification(
-            kind="keeper_read_timeout",
+            kind="analysis.keeper.read_timeout",
             user_message=(
                 "Timed out waiting for a response from keeper.cisco.com. The VPN "
                 "appears connected but the Keeper service is slow or briefly "
@@ -217,7 +254,7 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
         # Only attribute this to Keeper if the message actually points at it.
         if "keeper.cisco.com" in message.lower():
             return AnalysisErrorClassification(
-                kind="keeper_unreachable",
+                kind="analysis.keeper.unreachable",
                 user_message=(
                     "Cannot reach keeper.cisco.com over TCP. VPN may be connected "
                     "but the Keeper service or its front door is unreachable from "
@@ -226,7 +263,7 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
                 detail_tail=detail,
             )
         return AnalysisErrorClassification(
-            kind="network_unreachable",
+            kind="analysis.network.unreachable",
             user_message=(
                 "A network connection was refused or dropped during analysis. "
                 "Retry; if it persists, check VPN and upstream Cisco service "
@@ -244,7 +281,7 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
         message, ("no handler for route", "preflight capability check returned 403")
     ):
         return AnalysisErrorClassification(
-            kind="keeper_secret_path_not_found",
+            kind="analysis.keeper.secret_path_not_found",
             user_message=(
                 "Keeper returned 'secret not found' for the configured path. The "
                 "embedded KEEPER_SECRET_PATH is wrong or the secret was moved. "
@@ -266,7 +303,7 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
         # classification below; otherwise attribute to Keeper.
         if "snowflake" not in message.lower():
             return AnalysisErrorClassification(
-                kind="keeper_forbidden",
+                kind="analysis.keeper.forbidden",
                 user_message=(
                     "Keeper rejected the request with 403 Forbidden. The AppRole "
                     "exists but the attached policy does not grant access to the "
@@ -289,16 +326,23 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
             ),
         )
     ):
+        # Round 7 / Phase 3.14: keep ``user_message`` generic and move
+        # internal script names (``embed_credentials.py``,
+        # ``build_mac.sh``) into ``detail_tail`` so they only appear in
+        # the admin Errors view, not in user-visible banners.
+        _approle_detail = (
+            f"Operator runbook: refresh KEEPER_ROLE_ID / KEEPER_SECRET_ID, "
+            f"update secrets.env, then re-run embed_credentials.py and "
+            f"build_mac.sh.  Original error tail: {detail}"
+        )
         return AnalysisErrorClassification(
-            kind="keeper_approle_unauthorized",
+            kind="analysis.keeper.approle_unauthorized",
             user_message=(
-                "Keeper rejected the bundled KEEPER_ROLE_ID / KEEPER_SECRET_ID as "
-                "invalid. They have almost certainly been rotated or revoked. "
-                "Ask the Keeper admin for a fresh AppRole secret and rebuild "
-                "AdoptIQ (update secrets.env and re-run embed_credentials.py + "
-                "build_mac.sh)."
+                "Authentication to the secrets service was rejected. "
+                "Please contact your AdoptIQ administrator to refresh the "
+                "service credentials."
             ),
-            detail_tail=detail,
+            detail_tail=_approle_detail,
         )
 
     # ------------------------------------------------------------------
@@ -313,7 +357,7 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
     ):
         if _contains_any(message, ("is not allowed to access Snowflake",)):
             return AnalysisErrorClassification(
-                kind="snowflake_access_denied",
+                kind="analysis.snowflake.access_denied",
                 user_message=(
                     "Snowflake denied the service account. Confirm the bundled "
                     "SNOWFLAKE_ROLE and warehouse are still granted to the ETL "
@@ -322,7 +366,7 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
                 detail_tail=detail,
             )
         return AnalysisErrorClassification(
-            kind="snowflake_error",
+            kind="analysis.snowflake.error",
             user_message=(
                 "Snowflake rejected or dropped the connection. Verify the "
                 "bundled SNOWFLAKE_USER / role / warehouse are still valid and "
@@ -343,7 +387,7 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
         or "concurrent.futures._base.TimeoutError" in type_name
     ):
         return AnalysisErrorClassification(
-            kind="snowflake_timeout",
+            kind="analysis.snowflake.timeout",
             user_message=(
                 "Timed out establishing a Snowflake session (30s). Keeper may "
                 "have answered but Snowflake itself is slow or the warehouse is "
@@ -358,7 +402,7 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
     # ------------------------------------------------------------------
     if "keeper.cisco.com" in message.lower():
         return AnalysisErrorClassification(
-            kind="keeper_generic",
+            kind="analysis.keeper.generic",
             user_message=(
                 "A call to Cisco Keeper failed. Run the connectivity self-test "
                 "from the Admin page (or GET /api/diag/connectivity) to see "
@@ -372,7 +416,7 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
     # ------------------------------------------------------------------
     if "CircuIT" in message or "AzureOpenAI" in message or "openai" in type_name.lower():
         return AnalysisErrorClassification(
-            kind="ai_service_error",
+            kind="llm.service_error",
             user_message=(
                 "The CircuIT AI service did not respond cleanly. Retry in a few "
                 "minutes; if it persists, check CircuIT status."
@@ -381,13 +425,22 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
         )
 
     # ------------------------------------------------------------------
-    # 10. Unknown - include the tail so users can surface it to support.
+    # 10. Unknown - include the tail in ``detail_tail`` (which is server
+    # logs / admin only) but keep ``user_message`` static and generic.
     # ------------------------------------------------------------------
+    # Round 6 / Phase 6.4: previously this branch concatenated the
+    # raw ``detail`` tail into ``user_message``, which is rendered in
+    # toasts and ultimately echoed to the browser.  Even after the
+    # Phase 4.20 redaction pass, the tail can still leak module
+    # paths / line numbers / partial exception strings that point at
+    # internal file layout.  Keep a single static sentence here and
+    # rely on the admin Errors view to read ``detail_tail`` from the
+    # log / audit mirror.
     return AnalysisErrorClassification(
-        kind="unknown",
+        kind="analysis.unknown",
         user_message=(
-            "An unexpected error occurred during analysis. Open the Admin page "
-            "for the full traceback. Summary: " + detail
+            "An unexpected error occurred during analysis. "
+            "Open the Admin page for the full traceback."
         ),
         detail_tail=detail,
     )

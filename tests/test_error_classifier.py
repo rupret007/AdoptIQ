@@ -25,7 +25,7 @@ from error_classifier import classify_analysis_error
 def test_classifier_dns_gaierror() -> None:
     e = socket.gaierror("nodename nor servname provided, or not known")
     result = classify_analysis_error(e)
-    assert result.kind == "keeper_dns_failed"
+    assert result.kind == "analysis.keeper.dns_failed"
     assert "DNS" in result.user_message
     assert "nodename nor servname" in result.detail_tail
 
@@ -33,7 +33,7 @@ def test_classifier_dns_gaierror() -> None:
 def test_classifier_dns_generic_message() -> None:
     e = RuntimeError("getaddrinfo failed for keeper.cisco.com")
     result = classify_analysis_error(e)
-    assert result.kind == "keeper_dns_failed"
+    assert result.kind == "analysis.keeper.dns_failed"
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +49,7 @@ def test_classifier_ssl_cert_verification_error() -> None:
     except ssl.SSLCertVerificationError as e:
         result = classify_analysis_error(e)
 
-    assert result.kind == "keeper_tls_cert_verify_failed"
+    assert result.kind == "analysis.keeper.tls_cert_verify_failed"
     assert "TLS" in result.user_message
     assert "corporate" in result.user_message.lower()
     # Must surface enough detail for support to identify the failure.
@@ -67,7 +67,7 @@ def test_classifier_requests_style_ssl_error() -> None:
         "certificate verify failed: unable to get local issuer certificate"
     )
     result = classify_analysis_error(e)
-    assert result.kind == "keeper_tls_cert_verify_failed"
+    assert result.kind == "analysis.keeper.tls_cert_verify_failed"
 
 
 # ---------------------------------------------------------------------------
@@ -81,8 +81,14 @@ def test_classifier_approle_invalid_request() -> None:
         "invalid role or secret ID, on post https://keeper.cisco.com/v1/auth/approle/login"
     )
     result = classify_analysis_error(e)
-    assert result.kind == "keeper_approle_unauthorized"
-    assert "rotated" in result.user_message.lower() or "revoked" in result.user_message.lower()
+    assert result.kind == "analysis.keeper.approle_unauthorized"
+    # Round 7 / Phase 3.14: the user-facing message is now generic and
+    # routes operators to the Admin page / runbook for specifics
+    # (rotation/revocation hints live in ``detail_tail``, not in the
+    # banner shown to end users).  We assert the banner is generic and
+    # the detail tail still carries the actionable runbook.
+    assert "secrets service" in result.user_message.lower() or "administrator" in result.user_message.lower()
+    assert "rotated" in (result.detail_tail or "").lower() or "refresh" in (result.detail_tail or "").lower()
 
 
 def test_classifier_approle_forbidden() -> None:
@@ -91,7 +97,7 @@ def test_classifier_approle_forbidden() -> None:
 
     e = Forbidden("permission denied, on post https://keeper.cisco.com/v1/auth/approle/login")
     result = classify_analysis_error(e)
-    assert result.kind == "keeper_forbidden"
+    assert result.kind == "analysis.keeper.forbidden"
 
 
 def test_classifier_secret_path_not_found() -> None:
@@ -100,7 +106,7 @@ def test_classifier_secret_path_not_found() -> None:
 
     e = InvalidPath("no handler for route secret/wrong/path")
     result = classify_analysis_error(e)
-    assert result.kind == "keeper_secret_path_not_found"
+    assert result.kind == "analysis.keeper.secret_path_not_found"
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +120,7 @@ def test_classifier_keeper_read_timeout() -> None:
         "HTTPSConnectionPool(host='keeper.cisco.com', port=443): Read timed out."
     )
     result = classify_analysis_error(e)
-    assert result.kind == "keeper_read_timeout"
+    assert result.kind == "analysis.keeper.read_timeout"
 
 
 def test_classifier_keeper_connection_refused() -> None:
@@ -126,7 +132,7 @@ def test_classifier_keeper_connection_refused() -> None:
         "(host='keeper.cisco.com'): connection refused"
     )
     result = classify_analysis_error(e)
-    assert result.kind == "keeper_unreachable"
+    assert result.kind == "analysis.keeper.unreachable"
 
 
 # ---------------------------------------------------------------------------
@@ -137,13 +143,13 @@ def test_classifier_snowflake_access_denied() -> None:
         "User CX_SWSSBST_ETL_SVC is not allowed to access Snowflake"
     )
     result = classify_analysis_error(e)
-    assert result.kind == "snowflake_access_denied"
+    assert result.kind == "analysis.snowflake.access_denied"
 
 
 def test_classifier_snowflake_connect_timeout() -> None:
     e = RuntimeError("Snowflake connection timed out after 30s")
     result = classify_analysis_error(e)
-    assert result.kind == "snowflake_timeout"
+    assert result.kind == "analysis.snowflake.timeout"
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +168,7 @@ def test_regression_tls_error_is_no_longer_attributed_to_vpn() -> None:
     )
     result = classify_analysis_error(e)
     assert "Please ensure you are connected to the Cisco VPN" not in result.user_message
-    assert result.kind == "keeper_tls_cert_verify_failed"
+    assert result.kind == "analysis.keeper.tls_cert_verify_failed"
 
 
 def test_regression_rotated_approle_is_not_attributed_to_vpn() -> None:
@@ -172,7 +178,7 @@ def test_regression_rotated_approle_is_not_attributed_to_vpn() -> None:
     e = InvalidRequest("invalid role or secret ID")
     result = classify_analysis_error(e)
     assert "Please ensure you are connected to the Cisco VPN" not in result.user_message
-    assert result.kind == "keeper_approle_unauthorized"
+    assert result.kind == "analysis.keeper.approle_unauthorized"
 
 
 # ---------------------------------------------------------------------------
@@ -181,8 +187,12 @@ def test_regression_rotated_approle_is_not_attributed_to_vpn() -> None:
 def test_classifier_unknown_error_preserves_detail() -> None:
     e = RuntimeError("something completely unexpected broke")
     result = classify_analysis_error(e)
-    assert result.kind == "unknown"
-    assert "something completely unexpected broke" in result.user_message
+    assert result.kind == "analysis.unknown"
+    # Round 7 / Phase 3.14: the user-facing message is now generic so
+    # exception strings (which can leak internal hostnames, query text,
+    # or secret tail bytes) cannot reach the UI.  The original message
+    # is preserved in ``detail_tail`` for the Admin page / log digest.
+    assert "something completely unexpected broke" in (result.detail_tail or "")
 
 
 def test_classifier_generic_keeper_fallback() -> None:
@@ -190,7 +200,7 @@ def test_classifier_generic_keeper_fallback() -> None:
         "Unhandled error calling https://keeper.cisco.com/v1/sys/health"
     )
     result = classify_analysis_error(e)
-    assert result.kind == "keeper_generic"
+    assert result.kind == "analysis.keeper.generic"
     assert "self-test" in result.user_message.lower()
 
 

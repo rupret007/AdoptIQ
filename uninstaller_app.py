@@ -6,7 +6,6 @@ deletes shortcuts, and optionally removes the installation folder.
 import os
 import sys
 import shutil
-import subprocess
 from pathlib import Path
 
 # Registry key for per-user uninstall (no admin required)

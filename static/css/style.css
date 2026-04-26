@@ -1,21 +1,30 @@
 /* AdoptIQ Executive Analyzer - Main Stylesheet */
 
+/*
+ * Round 6 / Phase 2.13: switch hard-coded hex literals to the
+ * ``--cisco-*`` CSS variables already defined in templates/base.html.
+ * This keeps the static stylesheet in lock-step with the rest of the
+ * theme and enables future dark-mode / theming work.  Fallback hex
+ * values are listed inside ``var(... , <hex>)`` so this file still
+ * renders correctly if loaded outside the base template.
+ */
+
 /* Global Styles */
 body {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background-color: #f8f9fa;
-    color: #333;
+    background-color: var(--cisco-light-gray, #f8f9fa);
+    color: var(--cisco-text, #333);
     line-height: 1.6;
 }
 
 /* Header Styles */
 .navbar-brand {
     font-weight: bold;
-    color: #007BC7 !important;
+    color: var(--cisco-accent-blue, #007BC7) !important;
 }
 
 .navbar {
-    background-color: #ffffff !important;
+    background-color: var(--cisco-white, #ffffff) !important;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
 }
 
@@ -33,24 +42,24 @@ body {
 }
 
 .card-header {
-    background-color: #007BC7;
-    color: white;
+    background-color: var(--cisco-accent-blue, #007BC7);
+    color: var(--cisco-white, white);
     border-radius: 8px 8px 0 0 !important;
     font-weight: bold;
 }
 
 /* Buttons */
 .btn-primary {
-    background-color: #007BC7;
-    border-color: #007BC7;
+    background-color: var(--cisco-accent-blue, #007BC7);
+    border-color: var(--cisco-accent-blue, #007BC7);
     border-radius: 6px;
     padding: 10px 20px;
     font-weight: 500;
 }
 
 .btn-primary:hover {
-    background-color: #005a9e;
-    border-color: #005a9e;
+    background-color: var(--cisco-dark-blue, #005a9e);
+    border-color: var(--cisco-dark-blue, #005a9e);
 }
 
 .btn-success {

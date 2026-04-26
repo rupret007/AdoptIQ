@@ -138,10 +138,18 @@ class TestClearStuckAnalyses:
         with app_mod.analysis_status_lock:
             original = dict(app_mod.analysis_status)
         try:
-            now = datetime.now()
+            # Round 8 / Phase 1.5: ``clear_stuck_analyses`` now anchors
+            # the cutoff on UTC and treats naive ISO ``start_time`` as
+            # UTC.  This test previously seeded ``start_time`` from
+            # ``datetime.now()`` (host-local naive), which on any
+            # non-UTC host made the "recent" entry look 7-8 hours old
+            # in UTC space and got it swept up as stuck.  Anchor the
+            # seeded times on UTC so we reflect the persisted format
+            # and the assertion is stable regardless of host timezone.
+            now = datetime.now(timezone.utc)
             old_iso = (now - timedelta(minutes=11)).isoformat()
             recent_iso = (now - timedelta(minutes=2)).isoformat()
-            old_aware_dt = datetime.now(timezone.utc) - timedelta(minutes=12)
+            old_aware_dt = now - timedelta(minutes=12)
 
             with app_mod.analysis_status_lock:
                 app_mod.analysis_status.clear()

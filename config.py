@@ -25,10 +25,83 @@ def _resolve_secret_key() -> str:
     return secrets.token_urlsafe(48)
 
 
+def _is_production_env() -> bool:
+    """Round 9 / Phase 1.4: shared production-readiness probe.
+
+    Centralises the truthy detection used by both ``Config.DEBUG`` and
+    ``Config.is_production_ready`` so the DEBUG-hardening guard below
+    can re-use the exact same definition.  Production is asserted by
+    either ``ADOPTIQ_PRODUCTION_READY=1`` or
+    ``FLASK_ENV/APP_ENV/ENVIRONMENT=production``.
+    """
+    if str(os.environ.get('ADOPTIQ_PRODUCTION_READY', '')).strip().lower() in {'1', 'true', 'yes', 'on'}:
+        return True
+    env_value = (
+        os.environ.get('FLASK_ENV')
+        or os.environ.get('APP_ENV')
+        or os.environ.get('ENVIRONMENT')
+        or ''
+    ).strip().lower()
+    return env_value in {'production', 'prod'}
+
+
+def _resolve_debug_flag() -> bool:
+    """Round 9 / Phase 1.4: hardened DEBUG resolver.
+
+    The previous form (``os.environ.get('DEBUG', 'false') in truthy``)
+    let an operator ship a Flask binary with ``DEBUG=True`` to
+    production by accident -- the classic Werkzeug-debugger-RCE
+    footgun.  When the production gate is asserted we now force
+    ``DEBUG=False`` regardless of env, log a warning to stderr so the
+    misconfiguration is visible, and (if the override is *also*
+    explicitly truthy) refuse to boot via :func:`enforce_production_safety`
+    rather than silently honour it.
+    """
+    raw = str(os.environ.get('DEBUG', 'false')).strip().lower()
+    requested = raw in {'true', '1', 'yes', 'on'}
+    if _is_production_env() and requested:
+        try:
+            import sys as _sys
+            print(
+                "[config] WARNING: DEBUG=true requested while ADOPTIQ_PRODUCTION_READY=1; "
+                "forcing DEBUG=False (Round 9 / Phase 1.4).",
+                file=_sys.stderr,
+            )
+        except Exception:
+            pass
+        return False
+    return requested
+
+
+def enforce_production_safety() -> None:
+    """Round 9 / Phase 1.4: hard-fail boot when production+DEBUG/TESTING.
+
+    Defence-in-depth on top of :func:`_resolve_debug_flag`: callers
+    (``app_simple.py`` startup) invoke this after ``Config`` is loaded
+    so that an operator who *also* mutated ``Config.DEBUG``/``TESTING``
+    after import (test fixture leaking into prod, custom subclass,
+    etc.) still gets refused at boot rather than running a debug
+    interpreter on a production socket.
+    """
+    if not _is_production_env():
+        return
+    if bool(getattr(Config, 'DEBUG', False)) or bool(getattr(Config, 'TESTING', False)):
+        raise RuntimeError(
+            "ADOPTIQ_PRODUCTION_READY=1 requires DEBUG=False and TESTING=False; "
+            "refusing to boot (Round 9 / Phase 1.4)."
+        )
+
+
 class Config:
     # Flask Configuration (SECRET_KEY from env; generated ephemeral key otherwise)
     SECRET_KEY = _resolve_secret_key()
-    DEBUG = os.environ.get('DEBUG', 'false').lower() in ('true', '1', 'yes')
+    # Round 9 / Phase 1.4: route DEBUG through the hardened resolver so
+    # ``ADOPTIQ_PRODUCTION_READY=1`` always wins over a stray
+    # ``DEBUG=true`` env entry.
+    DEBUG = _resolve_debug_flag()
+    # Round 9 / Phase 1.4: explicit TESTING flag participates in the same
+    # production safety gate as DEBUG.  Default false; tests opt in.
+    TESTING = str(os.environ.get('TESTING', 'false')).strip().lower() in {'true', '1', 'yes', 'on'} and not _is_production_env()
     VERBOSE_DEBUG = os.environ.get('ADOPTIQ_VERBOSE_DEBUG', 'false').lower() in ('true', '1', 'yes', 'on')
     FLASK_ENV = os.environ.get('FLASK_ENV', 'development')
     
@@ -51,15 +124,33 @@ class Config:
     )
     CSONE_ONEDRIVE_FOLDER = os.environ.get('CSONE_ONEDRIVE_FOLDER') or _default_csone_folder
 
-    # CSOne shared folder URL: opens in browser so users can download and upload when folder isn't synced.
-    # Override via CSONE_SHARED_FOLDER_URL env var.
-    CSONE_SHARED_FOLDER_URL = os.environ.get(
-        'CSONE_SHARED_FOLDER_URL',
-        'https://cisco-my.sharepoint.com/:f:/r/personal/jestory_cisco_com/Documents/AI%20Projects/AdoptIQ_CSOne_Reports?csf=1&web=1&e=7qL6tU'
+    # CSOne shared folder URL: opens in browser so users can download and
+    # upload when the OneDrive folder isn't synced.  Configure via
+    # ``CSONE_SHARED_FOLDER_URL``.  Round 7 / Phase 3.17: previously
+    # defaulted to a personal SharePoint URL belonging to a single user
+    # (``jestory_cisco_com``) which leaked operator identity into every
+    # deployment and broke for anyone else.  No baked-in default now --
+    # callers should treat ``None`` as "no shared folder configured".
+    CSONE_SHARED_FOLDER_URL = os.environ.get('CSONE_SHARED_FOLDER_URL') or None
+
+    # Round 7 / Phase 3.18: production-readiness gate is derived from the
+    # environment instead of hard-coded ``True``.  Operators opt in
+    # explicitly via ``ADOPTIQ_PRODUCTION_READY`` (truthy) or
+    # ``FLASK_ENV=production`` / ``ENVIRONMENT=production``.  The previous
+    # hard-coded ``True`` made it impossible to surface "not yet ready"
+    # in dev/test environments and silently bypassed downstream guards.
+    is_production_ready = (
+        str(os.environ.get('ADOPTIQ_PRODUCTION_READY', '')).strip().lower()
+        in {'1', 'true', 'yes', 'on'}
+    ) or (
+        (
+            os.environ.get('FLASK_ENV')
+            or os.environ.get('APP_ENV')
+            or os.environ.get('ENVIRONMENT')
+            or ''
+        ).strip().lower()
+        in {'production', 'prod'}
     )
-    
-    # Production readiness flag
-    is_production_ready = True
     
     # Keeper Configuration - from environment only (no defaults for secrets)
     KEEPER_CONFIG = {
@@ -91,42 +182,16 @@ class Config:
     DSM_TABLE = "CX_DB.CX_SWSSBST_BR.dsm_assignment_data"
     AB_TABLE = "EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW"
     
-    # Team Roster (LEGACY: app uses team_config.json via adoptiq_backend._load_team_config)
-    TEAM_ROSTER = [
-        # Dee Kindrick
-        ("Dee Kindrick", "Nate Hardy", "nahardy@cisco.com"),
-        ("Dee Kindrick", "Eli Walsh", "elwalsh@cisco.com"),
-        ("Dee Kindrick", "Cesar Ozuna", "ceozuna@cisco.com"),
-        ("Dee Kindrick", "Stephen Williams", "stepwil3@cisco.com"),
-        ("Dee Kindrick", "Asad Sarfaraz", "asarfara@cisco.com"),
-        ("Dee Kindrick", "Prabhakar Dakinedi", "pdakined@cisco.com"),
-        ("Dee Kindrick", "Michael Thompson", "mithomp2@cisco.com"),
-        ("Dee Kindrick", "Xavier Pena", "xpena@cisco.com"),
-        ("Dee Kindrick", "Christine Simrell", "chrsimre@cisco.com"),
-        ("Dee Kindrick", "Brice Mercer", "brimerce@cisco.com"),
-        # Brian Frazier
-        ("Brian Frazier", "Angelica Hernandez Becerra", "angelihe@cisco.com"),
-        ("Brian Frazier", "Jeffrey Story", "jestory@cisco.com"),
-        ("Brian Frazier", "Hector Gonzalez", "hectgon2@cisco.com"),
-        ("Brian Frazier", "Ujjwal Aneja", "uaneja@cisco.com"),
-        ("Brian Frazier", "Jose Nerio Chavarri Espinosa", "josencha@cisco.com"),
-        ("Brian Frazier", "Arpit Patel", "arpitpat@cisco.com"),
-        ("Brian Frazier", "Greg Dolberry", "gdolberr@cisco.com"),
-        ("Brian Frazier", "Haydee Hernandez Ceja", "hayherna@cisco.com"),
-        ("Brian Frazier", "William Phillips", "willphil@cisco.com"),
-        # Josh Horowitz
-        ("Josh Horowitz", "Michael Ramsey", "michrams@cisco.com"),
-        ("Josh Horowitz", "Anthony Ortiz", "antortiz@cisco.com"),
-        ("Josh Horowitz", "Nitish Sinha", "nitsinh2@cisco.com"),
-        ("Josh Horowitz", "Samuel Tamayo", "samtamay@cisco.com"),
-        ("Josh Horowitz", "Mario Pena", "marpena2@cisco.com"),
-        ("Josh Horowitz", "Tim Tyler", "tityler@cisco.com"),
-        ("Josh Horowitz", "Chris Clark", "christc3@cisco.com"),
-        ("Josh Horowitz", "Brandon Doan", "brdoan@cisco.com"),
-    ]
-    
-    # Managers (LEGACY: app uses team_config.json via adoptiq_backend)
-    MANAGERS = ["Dee Kindrick", "Brian Frazier", "Josh Horowitz", "All Managers"]
+    # Round 7 / Phase 3.17: removed the hard-coded ``TEAM_ROSTER`` and
+    # ``MANAGERS`` defaults that previously embedded ~30 personal email
+    # addresses (Cisco internal) directly into source control.  The
+    # runtime source of truth is ``team_config.json`` loaded via
+    # :func:`adoptiq_backend._load_team_config`; nothing in the app
+    # actually imported ``Config.TEAM_ROSTER`` / ``Config.MANAGERS`` so
+    # the only effect of these defaults was to leak PII through the
+    # repo and packaged binary.  Tests should populate
+    # ``team_config.json`` (or monkey-patch ``adoptiq_backend.TEAM_ROSTER``)
+    # rather than relying on a baked-in roster.
     
     # Technology Choices
     TECH_CHOICES = [

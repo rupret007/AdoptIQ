@@ -45,10 +45,21 @@ def test_get_customer_account_info_returns_meta_when_empty():
     assert "_meta" in result, (
         "_get_customer_account_info must include a ``_meta`` block "
         "even when no rows are returned, so callers can surface the "
-        "LIMIT 10 cap consistently."
+        "fetch cap consistently."
     )
     meta = result["_meta"]
-    assert meta["fetch_limit"] == 10
+    # Round 2 Phase 4.1 raised the per-customer fetch cap from 10 to
+    # 50 so that account-level collisions can be detected and logged
+    # rather than silently masked by a too-tight LIMIT.  The meta
+    # block must reflect whatever the implementation is actually
+    # using, so consumers can disclose the real cap.
+    from advanced_renewal_analyzer import AdvancedRenewalAnalyzer as _Cls
+    import inspect, re
+    src = inspect.getsource(_Cls._get_customer_account_info)
+    m = re.search(r"_FETCH_LIMIT\s*=\s*(\d+)", src)
+    assert m, "Could not locate _FETCH_LIMIT in _get_customer_account_info"
+    expected_limit = int(m.group(1))
+    assert meta["fetch_limit"] == expected_limit
     assert meta["was_truncated"] is False
     assert meta["rows_returned"] == 0
 

@@ -67,11 +67,29 @@ class TestDownloadFileRoute:
             app_mod._frozen = original_frozen
 
     @pytest.mark.flask
-    def test_secure_filename_fallback(self, client, tmp_path):
-        """Round 1 Fix 2 regression: files with spaces should still be downloadable
-        via the fallback that tries the original filename."""
+    def test_secure_filename_canonical_only(self, client, tmp_path):
+        """Round 8 / Phase 1.10 regression: ``download_file`` no longer
+        falls back to the un-sanitised filename when ``secure_filename``
+        rewrote the input.  The previous two-name behaviour
+        (canonical → original) let attackers smuggle filenames through
+        symlinks / Unicode glyphs that ``secure_filename`` rewrites
+        without rejecting.  Only the canonical sanitised name is
+        served, and we additionally verify containment via
+        ``os.path.realpath`` to defend against a symlink farm in the
+        outputs directory.
+
+        Concretely: if a file exists ON DISK under a name with spaces
+        (or any non-canonical glyph), the request for that literal
+        name must 404 because the route now resolves only the
+        sanitised path -- the legacy fallback that opened the
+        un-sanitised name is gone.
+        """
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
+        # File on disk has a literal space; the canonical sanitised
+        # name has an underscore in its place.  No canonical file
+        # exists, so the route must 404 instead of opening the
+        # literal-with-spaces file via the removed fallback.
         file_with_spaces = outputs_dir / "Report_Brian Frazier_90d.docx"
         file_with_spaces.write_bytes(b"spaced name content")
 
@@ -80,9 +98,9 @@ class TestDownloadFileRoute:
         try:
             app_mod._APP_SUPPORT = tmp_path
             app_mod._frozen = True
-            rv = client.get("/download-file/Report_Brian Frazier_90d.docx")
-            assert rv.status_code == 200
-            assert rv.data == b"spaced name content"
+
+            rv_legacy = client.get("/download-file/Report_Brian Frazier_90d.docx")
+            assert rv_legacy.status_code == 404
         finally:
             app_mod._APP_SUPPORT = original_app_support
             app_mod._frozen = original_frozen

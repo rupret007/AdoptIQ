@@ -31,17 +31,43 @@
         background: white;
         z-index: 1;
     }
-    .timeline-item.impact-high::before   { border-color: var(--cisco-danger); background: #fde8ec; }
-    .timeline-item.impact-medium::before { border-color: var(--cisco-warning); background: #fff5e6; }
-    .timeline-item.impact-low::before    { border-color: var(--cisco-success); background: #e6f9ef; }
+    /* Round 2 / Phase 5.5: 'critical' is its own impact band.
+       Round 6 / Phase 2.17: replace ad-hoc hex pairs with theme-aware
+       semantic tokens.  We keep the hard-coded "critical" maroon
+       (#7a0019) only because no equivalent semantic token exists yet;
+       its background pair lives in the same scope so it is easy to
+       theme later.  All other bands use ``var(--cisco-*)`` so the
+       badges/timeline dots track the rest of the theme palette and
+       any future dark-mode override automatically. */
+    .timeline-item.impact-critical::before {
+        border-color: var(--cisco-critical, #7a0019);
+        background: var(--cisco-critical-bg, #f8d7da);
+    }
+    .timeline-item.impact-high::before   {
+        border-color: var(--cisco-danger);
+        background: var(--cisco-danger-bg, #fde8ec);
+    }
+    .timeline-item.impact-medium::before {
+        border-color: var(--cisco-warning);
+        background: var(--cisco-warning-bg, #fff5e6);
+    }
+    .timeline-item.impact-low::before    {
+        border-color: var(--cisco-success);
+        background: var(--cisco-success-bg, #e6f9ef);
+    }
     .bug-row { transition: background 0.2s; }
     .bug-row:hover { background: var(--cisco-light-blue) !important; }
     .maint-row { transition: background 0.2s; }
     .maint-row:hover { background: var(--cisco-light-blue) !important; }
     .tab-content > .tab-pane { padding-top: 1.5rem; }
-    .impact-badge-high   { background: var(--cisco-danger);  color: #fff; }
-    .impact-badge-medium { background: var(--cisco-warning); color: #fff; }
-    .impact-badge-low    { background: var(--cisco-success); color: #fff; }
+    /* Round 2 / Phase 5.5: 'critical' is its own impact band */
+    .impact-badge-critical {
+        background: var(--cisco-critical, #7a0019);
+        color: var(--cisco-white, #fff);
+    }
+    .impact-badge-high   { background: var(--cisco-danger);  color: var(--cisco-white, #fff); }
+    .impact-badge-medium { background: var(--cisco-warning); color: var(--cisco-white, #fff); }
+    .impact-badge-low    { background: var(--cisco-success); color: var(--cisco-white, #fff); }
     .status-active    { color: var(--cisco-danger);  font-weight: 600; }
     .status-resolved  { color: var(--cisco-success); font-weight: 600; }
     .status-scheduled { color: var(--cisco-blue);    font-weight: 600; }
@@ -84,8 +110,17 @@
                             <div class="bg-danger bg-opacity-10 p-3 rounded-circle d-inline-flex mb-2 hover-scale">
                                 <i class="fas fa-exclamation-triangle text-danger fa-2x"></i>
                             </div>
-                            <h4 class="text-gradient mb-1" id="statTotalIncidents">{{ incident_stats.total }}</h4>
-                            <p class="text-muted mb-0 small">Tracked Incidents</p>
+                            {# Round 12 / Phase 4.4: pipe stat counts
+                               through the canonical ``format_number``
+                               Jinja filter so HTML thousands separators
+                               match the Word/Excel exports (e.g.
+                               ``1,234`` instead of ``1234``).  Same
+                               filter is registered in app_simple.py
+                               and falls back to a safe int formatter
+                               if ``report_utils`` is unavailable. #}
+                            <h4 class="text-gradient mb-1" id="statTotalIncidents">{% if incident_stats_failed %}n/a{% else %}{{ incident_stats.total | format_number }}{% endif %}</h4>
+                            <p class="text-muted mb-0 small">Tracked Incidents{% if list_truncated and list_truncated.get('incidents') %} (showing {{ list_fetch_limit | format_number }} of {{ incident_stats.total | format_number }}){% endif %}</p>
+                            {% if incident_stats_failed %}<p class="text-danger small mb-0"><i class="fas fa-exclamation-triangle"></i> source unavailable</p>{% endif %}
                         </div>
                     </div>
                 </div>
@@ -95,7 +130,7 @@
                             <div class="bg-danger bg-opacity-10 p-3 rounded-circle d-inline-flex mb-2 hover-scale">
                                 <i class="fas fa-bolt text-danger fa-2x"></i>
                             </div>
-                            <h4 class="text-gradient mb-1">{{ incident_stats.active }}</h4>
+                            <h4 class="text-gradient mb-1">{% if incident_stats_failed %}n/a{% else %}{{ incident_stats.active | format_number }}{% endif %}</h4>
                             <p class="text-muted mb-0 small">Active Incidents</p>
                         </div>
                     </div>
@@ -106,7 +141,7 @@
                             <div class="bg-success bg-opacity-10 p-3 rounded-circle d-inline-flex mb-2 hover-scale">
                                 <i class="fas fa-check-circle text-success fa-2x"></i>
                             </div>
-                            <h4 class="text-gradient mb-1">{{ incident_stats.resolved }}</h4>
+                            <h4 class="text-gradient mb-1">{% if incident_stats_failed %}n/a{% else %}{{ incident_stats.resolved | format_number }}{% endif %}</h4>
                             <p class="text-muted mb-0 small">Resolved</p>
                         </div>
                     </div>
@@ -117,8 +152,9 @@
                             <div class="bg-primary bg-opacity-10 p-3 rounded-circle d-inline-flex mb-2 hover-scale">
                                 <i class="fas fa-wrench text-primary fa-2x"></i>
                             </div>
-                            <h4 class="text-gradient mb-1">{{ maintenance_stats.total }}</h4>
-                            <p class="text-muted mb-0 small">Maintenances</p>
+                            <h4 class="text-gradient mb-1">{% if maintenance_stats_failed %}n/a{% else %}{{ maintenance_stats.total | format_number }}{% endif %}</h4>
+                            <p class="text-muted mb-0 small">Maintenances{% if list_truncated and list_truncated.get('maintenances') %} (showing {{ list_fetch_limit | format_number }} of {{ maintenance_stats.total | format_number }}){% endif %}</p>
+                            {% if maintenance_stats_failed %}<p class="text-danger small mb-0"><i class="fas fa-exclamation-triangle"></i> source unavailable</p>{% endif %}
                         </div>
                     </div>
                 </div>
@@ -128,8 +164,9 @@
                             <div class="bg-info bg-opacity-10 p-3 rounded-circle d-inline-flex mb-2 hover-scale">
                                 <i class="fas fa-bug text-info fa-2x"></i>
                             </div>
-                            <h4 class="text-gradient mb-1">{{ bug_stats.total }}</h4>
-                            <p class="text-muted mb-0 small">Tracked Bugs</p>
+                            <h4 class="text-gradient mb-1">{% if bug_stats_failed %}n/a{% else %}{{ bug_stats.total | format_number }}{% endif %}</h4>
+                            <p class="text-muted mb-0 small">Tracked Bugs{% if list_truncated and list_truncated.get('bugs') %} (showing {{ list_fetch_limit | format_number }} of {{ bug_stats.total | format_number }}){% endif %}</p>
+                            {% if bug_stats_failed %}<p class="text-danger small mb-0"><i class="fas fa-exclamation-triangle"></i> source unavailable</p>{% endif %}
                         </div>
                     </div>
                 </div>
@@ -167,10 +204,20 @@
             <!-- Search bar -->
             <div class="mb-3">
                 <div class="input-group search-box">
-                    <span class="input-group-text bg-white"><i class="fas fa-search text-muted"></i></span>
-                    <input type="text" id="intelSearch" class="form-control" placeholder="Search incidents, maintenances, bugs...">
-                    <button class="btn btn-outline-secondary" type="button" id="clearSearch" style="display:none;">
-                        <i class="fas fa-times"></i>
+                    <span class="input-group-text bg-white" aria-hidden="true"><i class="fas fa-search text-muted"></i></span>
+                    {# Round 7 / Phase 4.7: a11y -- the only label
+                       associated with the search input was the placeholder
+                       text, which is announced inconsistently and is
+                       cleared once the user starts typing.  An explicit
+                       aria-label gives screen readers a stable name.
+                       The clear-search button likewise had only a
+                       decorative ``fa-times`` glyph and was unlabeled. #}
+                    <input type="text" id="intelSearch" class="form-control"
+                           placeholder="Search incidents, maintenances, bugs..."
+                           aria-label="Search external intelligence (incidents, maintenances, bugs)">
+                    <button class="btn btn-outline-secondary" type="button" id="clearSearch"
+                            style="display:none;" aria-label="Clear search">
+                        <i class="fas fa-times" aria-hidden="true"></i>
                     </button>
                 </div>
                 <small class="text-muted mt-1 d-block" id="searchResultCount" style="display:none;"></small>
@@ -183,7 +230,7 @@
                             data-bs-target="#incidents-pane" type="button" role="tab">
                         <i class="fas fa-exclamation-circle me-1"></i>
                         Service Incidents
-                        <span class="badge bg-danger ms-1">{{ incidents|length }}</span>
+                        <span class="badge bg-danger ms-1" title="{% if list_truncated and list_truncated.get('incidents') %}Showing {{ incidents|length | format_number }} of {{ incident_stats.total | format_number }}{% else %}{{ (incident_stats.total if incident_stats and incident_stats.total is defined else incidents|length) | format_number }} total{% endif %}">{% if incident_stats_failed %}n/a{% else %}{{ (incident_stats.total if incident_stats and incident_stats.total is defined else incidents|length) | format_number }}{% endif %}{% if list_truncated and list_truncated.get('incidents') %}*{% endif %}</span>
                     </button>
                 </li>
                 <li class="nav-item" role="presentation">
@@ -191,7 +238,7 @@
                             data-bs-target="#maintenances-pane" type="button" role="tab">
                         <i class="fas fa-wrench me-1"></i>
                         Scheduled Maintenances
-                        <span class="badge bg-primary ms-1">{{ maintenances|length }}</span>
+                        <span class="badge bg-primary ms-1" title="{% if list_truncated and list_truncated.get('maintenances') %}Showing {{ maintenances|length | format_number }} of {{ maintenance_stats.total | format_number }}{% else %}{{ (maintenance_stats.total if maintenance_stats and maintenance_stats.total is defined else maintenances|length) | format_number }} total{% endif %}">{% if maintenance_stats_failed %}n/a{% else %}{{ (maintenance_stats.total if maintenance_stats and maintenance_stats.total is defined else maintenances|length) | format_number }}{% endif %}{% if list_truncated and list_truncated.get('maintenances') %}*{% endif %}</span>
                     </button>
                 </li>
                 <li class="nav-item" role="presentation">
@@ -199,7 +246,7 @@
                             data-bs-target="#bugs-pane" type="button" role="tab">
                         <i class="fas fa-bug me-1"></i>
                         Known Bugs
-                        <span class="badge bg-info ms-1">{{ bugs|length }}</span>
+                        <span class="badge bg-info ms-1" title="{% if list_truncated and list_truncated.get('bugs') %}Showing {{ bugs|length | format_number }} of {{ bug_stats.total | format_number }}{% else %}{{ (bug_stats.total if bug_stats and bug_stats.total is defined else bugs|length) | format_number }} total{% endif %}">{% if bug_stats_failed %}n/a{% else %}{{ (bug_stats.total if bug_stats and bug_stats.total is defined else bugs|length) | format_number }}{% endif %}{% if list_truncated and list_truncated.get('bugs') %}*{% endif %}</span>
                     </button>
                 </li>
                 <li class="nav-item" role="presentation">
@@ -241,7 +288,19 @@
                                         </div>
                                         <div class="d-flex gap-2 mt-1 mt-md-0">
                                             {% if inc.impact_level %}
-                                            <span class="badge impact-badge-{{ inc.impact_level|lower }} rounded-pill">
+                                            {# Round 11 / Phase 11.4: previously the badge label
+                                               showed only the impact word (high/medium/low/critical)
+                                               which is the *service* impact severity reported by
+                                               status.webex.com -- NOT the AdoptIQ portfolio risk
+                                               band.  Operators frequently conflated "high impact
+                                               incident" with "high risk customer".  Add a
+                                               tooltip glossary so hovering the badge clarifies
+                                               that this is service impact, distinct from the
+                                               canonical risk band shown elsewhere in the app. #}
+                                            <span class="badge impact-badge-{{ inc.impact_level|lower }} rounded-pill"
+                                                  data-bs-toggle="tooltip"
+                                                  data-bs-placement="top"
+                                                  title="Service impact severity reported by status.webex.com (incident scope / disruption level). This is NOT the AdoptIQ customer risk band; an incident with HIGH impact does not imply a HIGH-risk customer.">
                                                 {{ inc.impact_level }}
                                             </span>
                                             {% endif %}
@@ -263,11 +322,25 @@
                     {% else %}
                     <div class="card text-center py-5 fade-in shadow-cisco">
                         <div class="card-body">
+                            {% if incidents_state == 'failed' %}
+                            <i class="fas fa-triangle-exclamation fa-3x text-danger opacity-50 mb-3"></i>
+                            <h5>Incidents source unavailable</h5>
+                            <p class="text-danger mb-2">
+                                Could not load incidents from storage.
+                                {% if fetch_errors and fetch_errors.get('incidents') %}<br><small>{{ fetch_errors['incidents'] }}</small>{% endif %}
+                            </p>
+                            <p class="text-muted mb-0"><small>Treat affected metrics as unknown, not zero.</small></p>
+                            {% elif incidents_state == 'not_configured' %}
+                            <i class="fas fa-plug fa-3x text-muted opacity-25 mb-3"></i>
+                            <h5>Incidents source not configured</h5>
+                            <p class="text-muted mb-0">This deployment does not have the status.webex.com incident feed enabled.</p>
+                            {% else %}
                             <i class="fas fa-satellite-dish fa-3x text-muted opacity-25 mb-3"></i>
                             <h5>No Incidents Recorded Yet</h5>
                             <p class="text-muted mb-3">
                                 Click <strong>Refresh Live Data</strong> above to fetch incidents from status.webex.com.
                             </p>
+                            {% endif %}
                         </div>
                     </div>
                     {% endif %}
@@ -317,11 +390,25 @@
                     {% else %}
                     <div class="card text-center py-5 fade-in shadow-cisco">
                         <div class="card-body">
+                            {% if maintenances_state == 'failed' %}
+                            <i class="fas fa-triangle-exclamation fa-3x text-danger opacity-50 mb-3"></i>
+                            <h5>Maintenances source unavailable</h5>
+                            <p class="text-danger mb-2">
+                                Could not load scheduled maintenances from storage.
+                                {% if fetch_errors and fetch_errors.get('maintenances') %}<br><small>{{ fetch_errors['maintenances'] }}</small>{% endif %}
+                            </p>
+                            <p class="text-muted mb-0"><small>Treat affected metrics as unknown, not zero.</small></p>
+                            {% elif maintenances_state == 'not_configured' %}
+                            <i class="fas fa-plug fa-3x text-muted opacity-25 mb-3"></i>
+                            <h5>Maintenance feed not configured</h5>
+                            <p class="text-muted mb-0">This deployment does not have the status.webex.com maintenance feed enabled.</p>
+                            {% else %}
                             <i class="fas fa-wrench fa-3x text-muted opacity-25 mb-3"></i>
                             <h5>No Maintenances Recorded Yet</h5>
                             <p class="text-muted mb-3">
                                 Click <strong>Refresh Live Data</strong> above to fetch maintenance events from status.webex.com.
                             </p>
+                            {% endif %}
                         </div>
                     </div>
                     {% endif %}
@@ -368,11 +455,25 @@
                     {% else %}
                     <div class="card text-center py-5 fade-in shadow-cisco">
                         <div class="card-body">
+                            {% if bugs_state == 'failed' %}
+                            <i class="fas fa-triangle-exclamation fa-3x text-danger opacity-50 mb-3"></i>
+                            <h5>Bugs source unavailable</h5>
+                            <p class="text-danger mb-2">
+                                Could not load bugs from storage.
+                                {% if fetch_errors and fetch_errors.get('bugs') %}<br><small>{{ fetch_errors['bugs'] }}</small>{% endif %}
+                            </p>
+                            <p class="text-muted mb-0"><small>Treat affected metrics as unknown, not zero.</small></p>
+                            {% elif bugs_state == 'not_configured' %}
+                            <i class="fas fa-plug fa-3x text-muted opacity-25 mb-3"></i>
+                            <h5>Bug feed not configured</h5>
+                            <p class="text-muted mb-0">This deployment does not have the help.webex.com bug feed enabled.</p>
+                            {% else %}
                             <i class="fas fa-bug fa-3x text-muted opacity-25 mb-3"></i>
                             <h5>No Bugs Recorded Yet</h5>
                             <p class="text-muted mb-3">
                                 Click <strong>Refresh Live Data</strong> above to fetch known bugs from help.webex.com.
                             </p>
+                            {% endif %}
                         </div>
                     </div>
                     {% endif %}
@@ -410,6 +511,22 @@
                                             <p class="text-muted mt-2 mb-0">Analyzing your intelligence data...</p>
                                         </div>
                                         <div id="aiAnswer" class="ai-answer"></div>
+                                        {# Round 11 / Phase 11.3: previously the API returned
+                                           ``context_summary`` and ``canonical_headline`` blocks
+                                           that documented WHICH window / metrics the answer was
+                                           grounded against, but the page only rendered the free-form
+                                           ``answer`` string -- so two operators with different
+                                           windows would see identical-looking responses with no
+                                           way to tell them apart.  Render both metadata blocks
+                                           in a collapsible details element so the answer's
+                                           grounding is auditable without dominating the UI. #}
+                                        <details id="aiContextWrap" class="mt-3" style="display:none;">
+                                            <summary class="text-muted small" style="cursor:pointer;">
+                                                <i class="fas fa-info-circle me-1"></i>How was this answer grounded?
+                                            </summary>
+                                            <div id="aiContextSummary" class="small text-muted mt-2" style="display:none;"></div>
+                                            <pre id="aiCanonicalHeadline" class="small text-muted mt-2 mb-0" style="display:none; white-space:pre-wrap; background:#f8f9fa; padding:0.5rem; border-radius:4px;"></pre>
+                                        </details>
                                     </div>
                                 </div>
                             </div>
@@ -441,6 +558,28 @@
 {% block extra_js %}
 <script>
 document.addEventListener('DOMContentLoaded', function() {
+    /**
+     * Round 7 / Phase 4.3-4.5: shared JSON-only response gate for the
+     * three external-intel API calls (`refresh-external-intel`,
+     * `ask-intel`, `import-intel`).  Each call previously checked
+     * ``r.ok`` but immediately invoked ``r.json()``, so a hijacked
+     * route returning HTML (auth gateway login form, Flask debug page,
+     * proxy 5xx HTML) tripped the ``.catch`` with an opaque
+     * "unexpected token <" parse error and the user saw "Network
+     * error" even though the network was fine.  Validating the
+     * Content-Type lets the catch path show the real failure cause.
+     */
+    function _intelJson(res) {
+        if (!res.ok) {
+            throw new Error('HTTP ' + res.status + (res.statusText ? ' ' + res.statusText : ''));
+        }
+        var ctype = (res.headers.get('content-type') || '').toLowerCase();
+        if (ctype.indexOf('application/json') === -1) {
+            throw new Error('Server returned non-JSON response (content-type=' + (ctype || 'unknown') + ')');
+        }
+        return res.json();
+    }
+
     var refreshBtn = document.getElementById('refreshBtn');
     var refreshIcon = document.getElementById('refreshIcon');
 
@@ -450,21 +589,80 @@ document.addEventListener('DOMContentLoaded', function() {
         refreshBtn.innerHTML = '<i class="fas fa-sync-alt refresh-spin me-1"></i>Fetching\u2026';
 
         var csrfToken = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
-        fetch('/api/refresh-external-intel', { method: 'POST', headers: { 'X-CSRFToken': csrfToken } })
-            .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        // Round 9 / Phase 5.1: previously this fetch had no client
+        // timeout, so a stalled upstream feed (Cisco BST / PSIRT)
+        // could leave the spinner spinning indefinitely with no way
+        // for the operator to recover short of reloading the page.
+        // Mirror the 90 s ``AbortController`` pattern from
+        // ``static/js/ask_ai.js`` (Round 8 / Phase 5.1) so we get a
+        // deterministic abort + button restoration after the timeout.
+        var _refreshAbort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+        var _refreshTimer = null;
+        if (_refreshAbort) {
+            _refreshTimer = setTimeout(function () {
+                try { _refreshAbort.abort(); } catch (_e) { /* ignored */ }
+            }, 90000);
+        }
+        var _restoreBtn = function () {
+            if (_refreshTimer) { try { clearTimeout(_refreshTimer); } catch (_e) {} _refreshTimer = null; }
+            refreshBtn.disabled = false;
+            refreshBtn.innerHTML = '<i class="fas fa-sync-alt me-1"></i>Refresh Live Data';
+        };
+        var _fetchOpts = { method: 'POST', headers: { 'X-CSRFToken': csrfToken } };
+        if (_refreshAbort) { _fetchOpts.signal = _refreshAbort.signal; }
+        fetch('/api/refresh-external-intel', _fetchOpts)
+            .then(_intelJson)
             .then(function(data) {
-                if (data.ok) {
+                // Round 4 / Phase 2.3: consume the new envelope from
+                // /api/refresh-external-intel which carries
+                // ``state`` (per-feed counts / states) and
+                // ``fetch_errors`` (per-feed errors).  The previous
+                // handler only branched on ``data.ok`` and silently
+                // ignored partial-failure information, so a refresh
+                // that succeeded for incidents but failed for bugs
+                // was advertised as a clean reload.
+                if (data && data.ok) {
+                    var errs = (data.fetch_errors && typeof data.fetch_errors === 'object')
+                        ? data.fetch_errors : {};
+                    var errKeys = Object.keys(errs);
+                    if (errKeys.length > 0) {
+                        var msg = 'Refresh completed with partial failures:\n';
+                        for (var i = 0; i < errKeys.length; i++) {
+                            var k = errKeys[i];
+                            msg += '  - ' + k + ': ' + String(errs[k]).slice(0, 200) + '\n';
+                        }
+                        msg += '\nReloading page to show what we did fetch.';
+                        alert(msg);
+                    }
                     window.location.reload();
                 } else {
-                    alert('Refresh failed: ' + (data.error || 'unknown error'));
-                    refreshBtn.disabled = false;
-                    refreshBtn.innerHTML = '<i class="fas fa-sync-alt me-1"></i>Refresh Live Data';
+                    var reason = (data && data.error) || 'unknown error';
+                    var feedErrs = (data && data.fetch_errors && typeof data.fetch_errors === 'object')
+                        ? data.fetch_errors : null;
+                    if (feedErrs) {
+                        var feedKeys = Object.keys(feedErrs);
+                        if (feedKeys.length > 0) {
+                            reason += '\n\nPer-feed errors:';
+                            for (var j = 0; j < feedKeys.length; j++) {
+                                reason += '\n  - ' + feedKeys[j] + ': ' + String(feedErrs[feedKeys[j]]).slice(0, 200);
+                            }
+                        }
+                    }
+                    alert('Refresh failed: ' + reason);
+                    _restoreBtn();
                 }
+                if (_refreshTimer) { try { clearTimeout(_refreshTimer); } catch (_e) {} _refreshTimer = null; }
             })
             .catch(function(err) {
-                alert('Network error: ' + err);
-                refreshBtn.disabled = false;
-                refreshBtn.innerHTML = '<i class="fas fa-sync-alt me-1"></i>Refresh Live Data';
+                // Round 9 / Phase 5.1: handle the AbortError separately
+                // so the operator sees a meaningful "timed out" message
+                // rather than the raw "AbortError: signal is aborted".
+                if (err && err.name === 'AbortError') {
+                    alert('Refresh timed out after 90 seconds. Please try again.');
+                } else {
+                    alert('Network error: ' + err);
+                }
+                _restoreBtn();
             });
     });
 
@@ -481,33 +679,50 @@ document.addEventListener('DOMContentLoaded', function() {
         var q = query.trim().toLowerCase();
         clearBtn.style.display = q ? '' : 'none';
 
-        var selectors = [
-            { items: '#incidents-pane .timeline-item', textSel: 'h6, small, p' },
-            { items: '#maintenances-pane .maint-row', textSel: 'td' },
-            { items: '#bugs-pane .bug-row', textSel: 'td' },
+        // Round 5 / Phase 2.8: scope the "X of Y items match" counter to
+        // the *active* tab so the user isn't told there are 12 hits when
+        // only 3 are visible on the tab they're looking at.  Items in
+        // hidden tab panes still get filtered (so switching tabs shows
+        // the correct subset), but the headline counter only reflects
+        // what is currently on screen.
+        var paneSelectors = [
+            { pane: '#incidents-pane', items: '.timeline-item', textSel: 'h6, small, p' },
+            { pane: '#maintenances-pane', items: '.maint-row', textSel: 'td' },
+            { pane: '#bugs-pane', items: '.bug-row', textSel: 'td' },
         ];
-        var total = 0, visible = 0;
-        selectors.forEach(function(s) {
-            var items = document.querySelectorAll(s.items);
+        var activeTotal = 0, activeVisible = 0;
+        paneSelectors.forEach(function(s) {
+            var paneEl = document.querySelector(s.pane);
+            var paneIsActive = paneEl && paneEl.classList.contains('active');
+            var items = document.querySelectorAll(s.pane + ' ' + s.items);
             items.forEach(function(el) {
-                total++;
                 var text = '';
                 el.querySelectorAll(s.textSel).forEach(function(t) { text += ' ' + t.textContent; });
-                if (!q || text.toLowerCase().indexOf(q) !== -1) {
+                var matches = !q || text.toLowerCase().indexOf(q) !== -1;
+                if (matches) {
                     el.classList.remove('hidden-by-search');
-                    visible++;
                 } else {
                     el.classList.add('hidden-by-search');
+                }
+                if (paneIsActive) {
+                    activeTotal++;
+                    if (matches) activeVisible++;
                 }
             });
         });
         if (q) {
             resultCount.style.display = '';
-            resultCount.textContent = visible + ' of ' + total + ' items match "' + query.trim() + '"';
+            resultCount.textContent = activeVisible + ' of ' + activeTotal + ' items in this tab match "' + query.trim() + '"';
         } else {
             resultCount.style.display = 'none';
         }
     }
+
+    // Re-run the filter when the user switches tabs so the headline
+    // counter updates with the new active pane.
+    document.querySelectorAll('button[data-bs-toggle="tab"]').forEach(function(tabBtn) {
+        tabBtn.addEventListener('shown.bs.tab', function() { filterItems(searchInput.value); });
+    });
 
     searchInput.addEventListener('input', function() { filterItems(this.value); });
     clearBtn.addEventListener('click', function() {
@@ -523,33 +738,107 @@ document.addEventListener('DOMContentLoaded', function() {
     var aiLoading = document.getElementById('aiLoading');
     var aiAnswer = document.getElementById('aiAnswer');
 
+    // Round 7 / Phase 4.6: in-flight guard for the Ask AI request.
+    // Previously the only guard was disabling ``askBtn`` inside
+    // ``askAI``, which did not protect against:
+    //   - the Enter keybinding firing during a slow network request
+    //   - the suggestion-button bindings still being live before the
+    //     button-disable settled
+    //   - re-entry from a cached response (button can be re-enabled by
+    //     the .then before the .catch fires on a separate pending call)
+    // ``_askAiInFlight`` is a synchronous boolean that is flipped at
+    // the top of askAI() and only cleared in the settle path, so any
+    // re-entrant invocation (from any keybinding or click) is dropped
+    // before any ``fetch`` is initiated.
+    var _askAiInFlight = false;
+
     function askAI(question) {
         if (!question.trim()) return;
+        if (_askAiInFlight) {
+            return;
+        }
+        _askAiInFlight = true;
         aiArea.style.display = '';
         aiLoading.style.display = '';
         aiAnswer.textContent = '';
         askBtn.disabled = true;
 
         var csrfTok = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
+        // Round 11 / Phase 4.1: also send the operator-selected
+        // window so the backend grounds the answer on the same
+        // ``days_back`` the page is rendering.  Without this the
+        // /api/ask-intel handler defaulted to 90 days and the
+        // model could cite an incident absent from the visible
+        // table.  Fall back to 90 if the selector is missing
+        // for any reason.
+        var _daysSel = document.getElementById('daysFilter');
+        var _daysVal = 90;
+        if (_daysSel && _daysSel.value) {
+            var _parsed = parseInt(_daysSel.value, 10);
+            if (!isNaN(_parsed) && _parsed > 0) { _daysVal = _parsed; }
+        }
         fetch('/api/ask-intel', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfTok },
-            body: JSON.stringify({ question: question.trim() })
+            body: JSON.stringify({ question: question.trim(), days: _daysVal })
         })
-        .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        // Round 7 / Phase 4.4: validate JSON content-type before parse.
+        .then(_intelJson)
         .then(function(data) {
             aiLoading.style.display = 'none';
             askBtn.disabled = false;
             if (data.ok) {
                 aiAnswer.textContent = data.answer;
+                // Round 11 / Phase 11.3: render the grounding
+                // metadata so the operator can audit the window /
+                // dataset the answer was actually computed against.
+                try {
+                    var _ctxWrap = document.getElementById('aiContextWrap');
+                    var _ctxSum  = document.getElementById('aiContextSummary');
+                    var _ctxHead = document.getElementById('aiCanonicalHeadline');
+                    var _shown = false;
+                    if (_ctxSum) {
+                        if (data.context_summary) {
+                            _ctxSum.textContent = String(data.context_summary);
+                            _ctxSum.style.display = '';
+                            _shown = true;
+                        } else {
+                            _ctxSum.style.display = 'none';
+                            _ctxSum.textContent = '';
+                        }
+                    }
+                    if (_ctxHead) {
+                        if (data.canonical_headline && Object.keys(data.canonical_headline).length) {
+                            try {
+                                _ctxHead.textContent = JSON.stringify(data.canonical_headline, null, 2);
+                            } catch (_jerr) {
+                                _ctxHead.textContent = String(data.canonical_headline);
+                            }
+                            _ctxHead.style.display = '';
+                            _shown = true;
+                        } else {
+                            _ctxHead.style.display = 'none';
+                            _ctxHead.textContent = '';
+                        }
+                    }
+                    if (_ctxWrap) { _ctxWrap.style.display = _shown ? '' : 'none'; }
+                } catch (_metaErr) {
+                    // Defensive: never let metadata rendering crash
+                    // the primary answer display.
+                }
             } else {
                 aiAnswer.textContent = 'Error: ' + (data.error || 'Unknown error. Make sure CircuIT credentials are configured.');
+                var _ctxWrap2 = document.getElementById('aiContextWrap');
+                if (_ctxWrap2) { _ctxWrap2.style.display = 'none'; }
             }
         })
         .catch(function(err) {
             aiLoading.style.display = 'none';
             askBtn.disabled = false;
             aiAnswer.textContent = 'Network error: ' + err;
+        })
+        .finally(function() {
+            _askAiInFlight = false;
         });
     }
 
@@ -584,7 +873,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
         var csrfImport = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
         fetch('/api/import-intel', { method: 'POST', headers: { 'X-CSRFToken': csrfImport }, body: formData })
-            .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+            // Round 7 / Phase 4.5: validate JSON content-type before parse.
+            .then(_intelJson)
             .then(function(data) {
                 if (data.ok) {
                     var c = data.imported;
@@ -604,6 +894,21 @@ document.addEventListener('DOMContentLoaded', function() {
 
         importInput.value = '';
     });
+
+    // Round 11 / Phase 11.4: initialize Bootstrap tooltips for the
+    // impact-vs-risk glossary added on the impact badges.  The
+    // template ships Bootstrap 5 globally (cisco_layout) so this
+    // is a one-shot bootstrap of any data-bs-toggle="tooltip"
+    // elements present on this page.  Guarded with a typeof check
+    // so older bundles without the Tooltip class do not throw.
+    try {
+        if (typeof bootstrap !== 'undefined' && bootstrap.Tooltip) {
+            var _tipNodes = document.querySelectorAll('[data-bs-toggle="tooltip"]');
+            for (var _ti = 0; _ti < _tipNodes.length; _ti++) {
+                new bootstrap.Tooltip(_tipNodes[_ti]);
+            }
+        }
+    } catch (_tipErr) { /* defensive: never break the page */ }
 });
 </script>
 {% endblock %}

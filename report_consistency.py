@@ -66,6 +66,8 @@ def validate_report_consistency(
     expected_account_ids: Optional[list] = None,
     pulse_coverage_warn_threshold: float = 0.50,
     strict_mode: bool = False,
+    extra_frames: Optional[list] = None,
+    account_to_customer: Optional[Dict[str, str]] = None,
 ) -> ConsistencyResultContract:
     """
     Validate cross-report consistency and produce actionable diagnostics.
@@ -98,20 +100,55 @@ def validate_report_consistency(
     if customer_universe is not None:
         if isinstance(customer_universe, pd.DataFrame):
             metrics["total_customers"] = _cm.count_customers(
-                ab_df=customer_universe, csone_df=None
+                ab_df=customer_universe, csone_df=None,
+                extra_frames=extra_frames,
+                account_to_customer=account_to_customer,
             )
         else:
-            customer_set: set = set()
+            # Round 6 / Phase 5.14: previously this branch did its own
+            # ad-hoc set construction (normalize -> drop "Unknown" ->
+            # len()) which silently disagreed with ``cm.count_customers``
+            # on edge cases (NaN handling, "" vs "Unknown" treatment,
+            # how account_to_customer overrides apply).  Build a
+            # one-column synthetic DataFrame and route through
+            # ``cm.count_customers`` so the validator's customer
+            # universe ALWAYS uses the same counting rule that the
+            # reports themselves use.
             try:
-                for value in customer_universe:
-                    customer_set.add(normalize_customer_name(value))
+                _iter_values = list(customer_universe) if not isinstance(customer_universe, str) else [customer_universe]
             except TypeError:
-                customer_set.add(normalize_customer_name(customer_universe))
-            customer_set = {c for c in customer_set if c and c != "Unknown"}
-            metrics["total_customers"] = len(customer_set)
+                _iter_values = [customer_universe]
+            try:
+                _synthetic_universe = pd.DataFrame({"customer_name": _iter_values})
+                metrics["total_customers"] = _cm.count_customers(
+                    ab_df=_synthetic_universe, csone_df=None,
+                    extra_frames=extra_frames,
+                    account_to_customer=account_to_customer,
+                )
+            except Exception as _univ_err:
+                # Defensive fallback: if the synthetic universe path
+                # fails (e.g. unhashable values), fall back to the
+                # legacy normalize-set count and warn so ops can see
+                # which customer_universe shape caused it.
+                warnings.append(
+                    f"customer_universe canonical count failed; using legacy fallback "
+                    f"({_univ_err.__class__.__name__})."
+                )
+                customer_set: set = set()
+                for value in _iter_values:
+                    customer_set.add(normalize_customer_name(value))
+                customer_set = {c for c in customer_set if c and c != "Unknown"}
+                metrics["total_customers"] = len(customer_set)
     else:
+        # Round 2 / Phase 1.11: thread extra_frames + account_to_customer
+        # so the validator counts subscription-only / pulse-only / action
+        # plan-only customers in the same universe the report does.
+        # Without this the validator silently fails closed when the
+        # report includes customers that have no AB / no CSOne rows.
         metrics["total_customers"] = _cm.count_customers(
-            ab_df=ab_df, csone_df=csone_df
+            ab_df=ab_df, csone_df=csone_df,
+            extra_frames=extra_frames,
+            account_to_customer=account_to_customer,
         )
 
     if csone_df is not None and not csone_df.empty:
@@ -132,30 +169,18 @@ def validate_report_consistency(
         metrics["p4_cases"] = priority_buckets["P4"]
         metrics["unknown_priority_cases"] = priority_buckets["Unknown"]
 
-        # Round 4: open / closed TAC counts, derived via canonical
-        # status normalization so the validator and report templates
-        # cannot disagree on what "open" or "closed" means.
+        # Round 4 / Phase 3.3: open / closed TAC counts must come from
+        # the canonical helpers (`cm.count_open_tac` / `count_closed_tac`)
+        # rather than a status-set-only path.  The previous implementation
+        # only looked at ``status_norm`` membership and missed rows whose
+        # status was ``Unknown`` but whose ``closed_date`` made them
+        # closed (``add_case_lifecycle_fields`` flips ``is_closed=True``
+        # for that case).  Driving the validator from the same lifecycle
+        # fields the report builders use eliminates spurious validator
+        # failures and makes drift detectable.
         try:
-            from data_normalization import (
-                add_case_lifecycle_fields as _enrich,
-                normalize_status_label as _norm_status,
-            )
-            _status_enriched = _enrich(csone_df) if "status_norm" not in csone_df.columns else csone_df
-            if "status_norm" in _status_enriched.columns:
-                _status_norm = _status_enriched["status_norm"].astype(str)
-            else:
-                _status_col = next(
-                    (c for c in ("STATUS_C", "STATUS", "Status") if c in _status_enriched.columns),
-                    None,
-                )
-                _status_norm = (
-                    _status_enriched[_status_col].apply(_norm_status)
-                    if _status_col else pd.Series([], dtype=str)
-                )
-            _open_states = {"Open", "New", "InProgress", "WaitingOnCustomer", "Pending"}
-            _closed_states = {"Closed", "Resolved", "Cancelled"}
-            metrics["count_open_tac"] = int(_status_norm.isin(_open_states).sum())
-            metrics["count_closed_tac"] = int(_status_norm.isin(_closed_states).sum())
+            metrics["count_open_tac"] = _cm.count_open_tac(csone_df)
+            metrics["count_closed_tac"] = _cm.count_closed_tac(csone_df)
         except Exception as _open_close_err:
             metrics["count_open_tac"] = 0
             metrics["count_closed_tac"] = 0
@@ -439,15 +464,41 @@ def validate_report_consistency(
         )
         defect_by_customer = defects.get("defect_by_customer", {}) or {}
         known_customers = set()
-        for frame in (ab_df, csone_df):
-            if frame is None or frame.empty:
+        # Round 5 / Phase 5.8: previously we only sourced known
+        # customer names from ``ab_df`` and ``csone_df``.  That caused
+        # subscription-only customers (no AB rows, no TAC cases) to
+        # be flagged as "unknown defect customers" even though the
+        # leader path passes ``team_subs_df_unfiltered`` /
+        # ``customer_pulse`` etc. via ``extra_frames``.  Walk every
+        # extra frame so the validator's universe matches the
+        # report's universe.
+        _frames_to_scan = [ab_df, csone_df, customer_pulse_df]
+        if extra_frames:
+            try:
+                _frames_to_scan.extend(list(extra_frames))
+            except Exception:
+                pass
+        for frame in _frames_to_scan:
+            if frame is None or getattr(frame, "empty", True):
                 continue
-            for col in ("customer_name", "BU_NAME", "Customer Name"):
+            for col in ("customer_name", "BU_NAME", "Customer Name", "Account Name", "ACCOUNT_NAME"):
                 if col in frame.columns:
                     known_customers.update(
                         normalize_customer_name(v)
                         for v in frame[col].dropna().astype(str).tolist()
                     )
+        # Round 5: include the account_to_customer mapping values
+        # so subscription-only customers (resolved via account ID,
+        # not by a named column) are still in the known set.
+        if account_to_customer:
+            try:
+                known_customers.update(
+                    normalize_customer_name(v)
+                    for v in account_to_customer.values()
+                    if v
+                )
+            except Exception:
+                pass
         unknown_defect_customers = [
             normalize_customer_name(name)
             for name in defect_by_customer.keys()
@@ -478,6 +529,72 @@ def validate_report_consistency(
             f"{len(missing_sources)} factual claim(s) missing inline source attribution."
         )
         metrics["missing_inline_sources_samples"] = missing_sources[:5]
+
+    # Round 5 / Phase 5.10: in strict_mode, an empty / missing
+    # ``factual_claims`` payload is itself an error when there is
+    # actual portfolio activity to narrate.  Without this check, a
+    # report that fails to extract any claim text at all would
+    # silently pass strict consistency (because there are no claims
+    # to be missing inline sources for) and a downstream auditor
+    # would have no signal that the LLM never grounded the report.
+    if strict_mode and not factual_claims:
+        _has_activity = (
+            (ab_df is not None and not getattr(ab_df, "empty", True))
+            or (csone_df is not None and not getattr(csone_df, "empty", True))
+            or (customer_pulse_df is not None and not getattr(customer_pulse_df, "empty", True))
+        )
+        if _has_activity:
+            errors.append(
+                "strict_mode: factual_claims is empty/None but the input "
+                "frames contain narratable activity; the report appears "
+                "to be ungrounded."
+            )
+            metrics["strict_mode_factual_claims_missing"] = True
+
+    # Round 7 / Phase 3.7: assert that the reported high-risk count
+    # equals the canonical compute_high_risk_count value.  Previously
+    # the consistency check counted bands but never required parity
+    # with the canonical helper, so a portfolio_high_risk_fallback
+    # could ship without anyone noticing.
+    if portfolio_metrics is not None and risk_data is not None:
+        try:
+            from canonical_metrics import (
+                compute_high_risk_count as _cm_count_high,
+                RISK_SCALE_0_TO_100 as _CM_RISK_0_100,
+            )
+            canonical_high = int(_cm_count_high(risk_data, scale=_CM_RISK_0_100))
+        except Exception as _cm_err:
+            warnings.append(
+                f"Round 7 / Phase 3.7: could not compute canonical high-risk count "
+                f"({type(_cm_err).__name__}: {_cm_err}); invariant check skipped."
+            )
+            canonical_high = None
+        if canonical_high is not None and "high_risk_customers" in portfolio_metrics:
+            try:
+                reported_high = int(portfolio_metrics.get("high_risk_customers", 0))
+            except (TypeError, ValueError):
+                reported_high = -1
+            if reported_high != canonical_high:
+                errors.append(
+                    f"Round 7 / Phase 3.7: high_risk_customers invariant violated -- "
+                    f"portfolio_metrics.high_risk_customers={reported_high} but "
+                    f"canonical_metrics.compute_high_risk_count={canonical_high}."
+                )
+            metrics["canonical_high_risk_count"] = canonical_high
+        if portfolio_metrics.get("portfolio_high_risk_fallback"):
+            warnings.append(
+                "Round 7 / Phase 3.4: portfolio summary used the band-tally "
+                "fallback for high_risk_customers; canonical_metrics was "
+                "unavailable. Reason: "
+                + str(portfolio_metrics.get("portfolio_high_risk_fallback_reason", "unknown"))
+            )
+
+    # Round 7 / Phase 3.8: deterministic ordering of errors and
+    # warnings so dashboards/snapshots diff cleanly across runs.  The
+    # original lists preserved insertion order, which depended on
+    # dict iteration order from the upstream metrics dict.
+    errors = sorted(errors)
+    warnings = sorted(warnings)
 
     result = {
         "is_valid": len(errors) == 0,

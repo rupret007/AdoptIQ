@@ -3,13 +3,10 @@
 {% block title %}Run Analysis - AdoptIQ{% endblock %}
 
 {% block head %}
-<!-- Content Security Policy for enhanced security -->
-<meta http-equiv="Content-Security-Policy" 
-      content="default-src 'self'; 
-               script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; 
-               style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; 
-               img-src 'self' data: https:; 
-               font-src 'self' https://cdn.jsdelivr.net;">
+<!-- Round 6 / Phase 2.10: the strict CSP that used to live here is
+     now in templates/base.html so every page inherits it.  This block
+     keeps only page-specific head content (CSRF meta tag and the
+     subscription search helper script). -->
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <!-- Subscription Search Script -->
 <script src="{{ url_for('static', filename='js/subscription-search.js') }}"></script>
@@ -140,6 +137,16 @@
 
                     <form method="POST" action="{{ url_for('start_analysis') }}" enctype="multipart/form-data" id="analysisForm" novalidate>
                         {{ form.hidden_tag() }}
+                        {# Round 6 / Phase 2.11: explicit ``csrf_token``
+                           hidden field as a JS-off fallback.
+                           ``form.hidden_tag()`` already emits the
+                           Flask-WTF csrf_token, but a future refactor
+                           that swaps the form class for a plain HTML
+                           form (or one that does not subclass
+                           ``FlaskForm``) would silently drop it.  This
+                           explicit input mirrors leader_report_form.html
+                           and makes the JS-off path resilient. #}
+                        <input type="hidden" name="csrf_token" id="csrfToken" value="{{ csrf_token() }}">
                         
                         <!-- Manager Selection -->
                         <div class="mb-4" id="manager-section">
@@ -310,8 +317,9 @@
                                 <div class="alert alert-info d-flex align-items-center">
                                     <i class="fas fa-file-excel me-2" aria-hidden="true"></i>
                                     <span class="file-name"></span>
-                                    <button type="button" class="btn-close ms-auto" 
-                                            onclick="removeFile()"
+                                    {# Round 6 / Phase 2.14: removed inline ``onclick=`` for CSP. #}
+                                    <button type="button" class="btn-close ms-auto"
+                                            id="adoptiq-remove-file-btn"
                                             aria-label="Remove selected file"></button>
                                 </div>
                             </div>
@@ -328,8 +336,9 @@
                         
                         <!-- Test Button for Debugging -->
                         <div class="text-center mt-3">
-                            <button type="button" class="btn btn-outline-secondary btn-sm" 
-                                    onclick="testJavaScript()"
+                            {# Round 6 / Phase 2.14: removed inline ``onclick=`` for CSP. #}
+                            <button type="button" class="btn btn-outline-secondary btn-sm"
+                                    id="adoptiq-test-js-btn"
                                     aria-label="Test JavaScript functionality for debugging purposes"
                                     aria-describedby="test-help">
                                 <i class="fas fa-bug me-1" aria-hidden="true"></i>
@@ -533,7 +542,18 @@
 </style>
 
 <!-- ARIA live region for announcements -->
-<div id="notification-area" aria-live="polite" aria-atomic="true" class="sr-only"></div>
+{# Round 7 / Phase 4.16: Bootstrap 5 renamed ``.sr-only`` to
+   ``.visually-hidden`` (BS4 used both, BS5 ships only
+   ``.visually-hidden``).  Because the rest of the app already loads
+   Bootstrap 5, the legacy ``sr-only`` selector here had no rule
+   attached and the live region was effectively *visible* on screen
+   (a 0-width empty div is not visible, but as soon as any string is
+   appended via ``announceToScreenReader`` it would briefly flash
+   in the layout).  Switching to ``.visually-hidden`` keeps the
+   region accessible to assistive tech while reliably hiding the
+   visual flash.  ``visually-hidden-focusable`` is intentionally not
+   used because this region is never focusable. #}
+<div id="notification-area" aria-live="polite" aria-atomic="true" class="visually-hidden"></div>
 
 <script>
 /**
@@ -945,11 +965,20 @@ const AnalysisFormManager = (() => {
                     requestBody = formData;
                     contentType = 'multipart/form-data';
                 } else {
-                    // No file - use JSON (include subscription_id/customer_name for single-customer filter)
+                    // No file - use JSON (include subscription_id/customer_name for single-customer filter).
+                    // Round 6 / Phase 2.7: parse with explicit radix
+                    // 10 and a safe default so ``parseInt(undefined)``
+                    // (or a string with leading garbage) cannot turn
+                    // into ``NaN`` -> ``null`` in the JSON body, which
+                    // the backend rejects with a confusing error.
+                    var _daysRaw = parseInt(formData.get('days'), 10);
+                    if (!Number.isFinite(_daysRaw) || _daysRaw <= 0) {
+                        _daysRaw = 90;
+                    }
                     const jsonData = {
                         manager: formData.get('manager'),
                         technology: formData.get('technology'),
-                        days: parseInt(formData.get('days')),
+                        days: _daysRaw,
                         csone_file: '',
                         subscription_id: formData.get('subscription_id') || '',
                         customer_name: formData.get('customer_name') || ''
@@ -1035,36 +1064,68 @@ const AnalysisFormManager = (() => {
                 fetchOptions.headers['Content-Type'] = 'application/json';
             }
             
-            console.log(`📤 Sending request to: ${endpoint}`);
-            console.log(`📤 Content type: ${contentType}`);
-            console.log(`📤 Request body type: ${typeof requestBody}`);
-            
+            // Round 12 / Phase 4.2: previously these console.log /
+            // console.error lines emitted endpoint URLs, raw request
+            // bodies, response headers, and the first 500 chars of
+            // every response into browser devtools.  On a shared
+            // workstation, anyone with the devtools panel open could
+            // read CSRF tokens, customer / subscription identifiers,
+            // and analysis request payloads.  Gate the noisy
+            // diagnostics behind ``window.ADOPTIQ_DEBUG`` (set only
+            // when explicitly opted in via a debug build / query
+            // param) so production browsers stay clean.
+            const _r12_dbg = (typeof window !== 'undefined' && window.ADOPTIQ_DEBUG === true);
+            if (_r12_dbg) {
+                console.log(`Sending request to: ${endpoint}`);
+                console.log(`Content type: ${contentType}`);
+                console.log(`Request body type: ${typeof requestBody}`);
+            }
+
             const response = await fetch(endpoint, fetchOptions);
-            
+
             clearTimeout(timeoutId);
-            
-            console.log(`📋 Response status: ${response.status}`);
-            console.log(`📋 Response headers:`, Object.fromEntries(response.headers.entries()));
+
+            if (_r12_dbg) {
+                console.log(`Response status: ${response.status}`);
+            }
             
             // Check if response is OK
             if (!response.ok && response.status !== 200) {
+                // Round 12 / Phase 4.2: error-path body may include
+                // CSRF tokens / customer identifiers; only emit when
+                // explicitly opted in via the DEBUG flag.
                 const errorText = await response.text();
-                console.error(`❌ HTTP ${response.status}: ${response.statusText}`);
-                console.error(`❌ Error response: ${errorText}`);
+                if (_r12_dbg) {
+                    console.error(`HTTP ${response.status}: ${response.statusText}`);
+                    console.error(`Error response: ${errorText}`);
+                }
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
-            
-            // Server always returns JSON now - try to parse it
+
+            // Server always returns JSON now - try to parse it.
+            // Round 6 / Phase 2.3: explicitly validate the
+            // Content-Type before parsing so a 200 OK proxy/error
+            // page (HTML) cannot silently appear as parse errors.
             let data;
             const responseText = await response.text();
-            console.log(`📋 Response text (first 500 chars): ${responseText.substring(0, 500)}`);
-            console.log(`📋 Content-Type: ${response.headers.get('content-type')}`);
-            
+            const _ct = response.headers.get('content-type') || '';
+            if (_r12_dbg) {
+                console.log(`Response text (first 500 chars): ${responseText.substring(0, 500)}`);
+                console.log(`Content-Type: ${_ct}`);
+            }
+            if (_ct.indexOf('application/json') === -1) {
+                throw new Error(`Server returned non-JSON content-type: ${_ct || 'unknown'}`);
+            }
+
             try {
                 data = JSON.parse(responseText);
-                console.log(`📋 Successfully parsed JSON response:`, data);
+                if (_r12_dbg) {
+                    console.log(`Successfully parsed JSON response`);
+                }
             } catch (e) {
-                console.error(`❌ Failed to parse JSON. Response text:`, responseText.substring(0, 500));
+                if (_r12_dbg) {
+                    console.error(`Failed to parse JSON. Response text:`, responseText.substring(0, 500));
+                }
                 throw new Error(`Server returned non-JSON response. Expected JSON but got: ${response.headers.get('content-type') || 'unknown'}. Error: ${e.message}`);
             }
             
@@ -1115,8 +1176,17 @@ const AnalysisFormManager = (() => {
             data.analysis_id = finalAnalysisId;
             const finalRedirectUrl = `/progress/${finalAnalysisId}`;
             
-            // One final regex validation to ensure it's a valid URL format
-            if (!/^\/progress\/[a-zA-Z0-9_]+$/.test(finalRedirectUrl)) {
+            // Round 4 / Phase 2.1: align this client-side validation
+            // with the server's _ANALYSIS_ID_RE
+            // (^[A-Za-z0-9._-]{1,200}$). The previous regex only
+            // allowed [a-zA-Z0-9_] and rejected legitimate IDs that
+            // contained '.' or '-' (e.g. timestamped IDs like
+            // ``compact_2026-04-24_19.05.41`` or any hash variant
+            // with a dot/hyphen). The client raised a false
+            // "Final validation failed" error and stranded users on
+            // the analyze page even though the server had already
+            // accepted the analysis.
+            if (!/^\/progress\/[A-Za-z0-9._-]{1,200}$/.test(finalRedirectUrl)) {
                 throw new Error(`Final validation failed for redirect URL: ${finalRedirectUrl}`);
             }
             
@@ -1125,10 +1195,22 @@ const AnalysisFormManager = (() => {
             
             if (data.success) {
                 showNotification('Analysis started successfully! Redirecting to progress page...', 'success');
-                // Redirect to progress page using ONLY the validated URL
+                // Round 7 / Phase 4.1: keep ``isSubmitting = true`` and
+                // the button disabled across the 1s success window so a
+                // user cannot double-submit while we wait for the
+                // navigation to actually leave this page.  The previous
+                // ``finally`` block reset ``isSubmitting`` immediately
+                // after the success path scheduled ``setTimeout`` -- a
+                // determined click during that 1000ms delay would queue
+                // a second analysis even though the original was
+                // already accepted.  Returning here also skips the
+                // ``finally`` reset; if the navigation ever fails to
+                // happen (e.g. user blocks the redirect) the page is
+                // about to unload anyway, which is the safe state.
                 setTimeout(() => {
                     window.location.href = finalRedirectUrl;
                 }, 1000);
+                return;
             } else {
                 throw new Error(data.error || 'Unknown error occurred');
             }
@@ -1166,8 +1248,11 @@ const AnalysisFormManager = (() => {
             elements.submitBtn.innerHTML = originalButtonText;
             elements.submitBtn.disabled = false;
             elements.submitBtn.removeAttribute('aria-busy');
-        } finally {
-            // Always reset submission flag
+            // Round 7 / Phase 4.1: only the error path may re-enable
+            // submission.  The success branch returns above with the
+            // navigation pending, leaving ``isSubmitting`` true so
+            // duplicate analyses cannot be kicked off during the 1s
+            // redirect window.
             isSubmitting = false;
         }
     };
@@ -1357,6 +1442,36 @@ const AnalysisFormManager = (() => {
     };
 
     /**
+     * Round 7 / Phase 4.2: typeahead JSON-only fetch helper.
+     *
+     * The two typeaheads on this page (`customer_name` and
+     * `subscription_id`) historically called ``r.json()`` directly on
+     * the raw fetch response.  When the server returned an HTML 5xx
+     * page, a 401 redirect to a login form, or a Flask debug
+     * traceback, the JSON parse threw and the suggestions list
+     * silently disappeared with no actionable signal in the UI or
+     * console.  This wrapper gates the parse on
+     * ``response.ok`` AND a JSON content-type so the catch block
+     * always fires with a meaningful error string.
+     */
+    const fetchTypeaheadJson = (url, opts) => {
+        return fetch(url, opts).then((res) => {
+            if (!res.ok) {
+                throw new Error(
+                    'Typeahead request failed: ' + res.status + ' ' + (res.statusText || '')
+                );
+            }
+            const ctype = (res.headers.get('content-type') || '').toLowerCase();
+            if (!ctype.includes('application/json')) {
+                throw new Error(
+                    'Typeahead response was not JSON (content-type=' + (ctype || 'unknown') + ')'
+                );
+            }
+            return res.json();
+        });
+    };
+
+    /**
      * Customer name typeahead: search Snowflake, show list of matching customers for selection.
      * User selects exact BU_NAME so report matches CSOne data.
      */
@@ -1407,12 +1522,14 @@ const AnalysisFormManager = (() => {
             }
             debounceTimer = setTimeout(() => {
                 var _csrf1 = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
-                fetch('/search_subscriptions', {
+                // Round 7 / Phase 4.2: validate response.ok + JSON
+                // content-type before parsing.  See fetchTypeaheadJson
+                // above for the full rationale.
+                fetchTypeaheadJson('/search_subscriptions', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': _csrf1 },
                     body: JSON.stringify({ customer_name: q, limit: 50 })
                 })
-                    .then(r => r.json())
                     .then(data => {
                         var customers = data.success && data.customers && data.customers.length
                             ? data.customers
@@ -1429,7 +1546,7 @@ const AnalysisFormManager = (() => {
                         if (customers.length) showList(customers);
                         else hideList();
                     })
-                    .catch(() => hideList());
+                    .catch((err) => { console.warn('typeahead (customer):', err); hideList(); });
             }, DEBOUNCE_MS);
         });
 
@@ -1514,12 +1631,13 @@ const AnalysisFormManager = (() => {
             if (q.length < MIN_CHARS || isSubscriptionId(q)) { hideList(); return; }
             debounceTimer = setTimeout(() => {
                 var _csrf2 = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
-                fetch('/search_subscriptions', {
+                // Round 7 / Phase 4.2: validate response.ok + JSON
+                // content-type before parsing.
+                fetchTypeaheadJson('/search_subscriptions', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': _csrf2 },
                     body: JSON.stringify({ customer_name: q, limit: 50 })
                 })
-                    .then(r => r.json())
                     .then(data => {
                         var customers = data.success && data.customers && data.customers.length
                             ? data.customers
@@ -1536,7 +1654,7 @@ const AnalysisFormManager = (() => {
                         if (customers.length) showList(customers);
                         else hideList();
                     })
-                    .catch(() => hideList());
+                    .catch((err) => { console.warn('typeahead (subscription):', err); hideList(); });
             }, DEBOUNCE_MS);
         });
 
@@ -1640,10 +1758,25 @@ document.addEventListener('DOMContentLoaded', function() {
     AnalysisFormManager.init();
 });
 
-// Expose global functions for onclick handlers
+// Round 6 / Phase 2.14: window-level shims kept for backward compatibility
+// (other scripts may still reference them) but the analyze.html buttons no
+// longer use inline ``onclick=`` attributes -- they are wired below via
+// ``addEventListener`` so the strict CSP from base.html does not need
+// ``script-src 'unsafe-inline'`` for handler attributes.
 window.testJavaScript = AnalysisFormManager.testJavaScript;
 window.removeFile = AnalysisFormManager.removeFile;
 window.showNotification = AnalysisFormManager.showNotification;
 window.AnalysisFormManager = AnalysisFormManager;
+
+document.addEventListener('DOMContentLoaded', function() {
+    var _testBtn = document.getElementById('adoptiq-test-js-btn');
+    if (_testBtn) {
+        _testBtn.addEventListener('click', AnalysisFormManager.testJavaScript);
+    }
+    var _removeBtn = document.getElementById('adoptiq-remove-file-btn');
+    if (_removeBtn) {
+        _removeBtn.addEventListener('click', AnalysisFormManager.removeFile);
+    }
+});
 </script>
 {% endblock %}

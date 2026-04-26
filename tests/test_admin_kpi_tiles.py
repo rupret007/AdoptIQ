@@ -88,9 +88,15 @@ def test_get_total_count_returns_full_table_not_page_size(admin_module):
 
 
 def test_get_total_count_rejects_unknown_table(admin_module):
-    """Allow-list defends against arbitrary identifier injection."""
-    assert admin_module.get_total_count("sqlite_master") == 0
-    assert admin_module.get_total_count("'; DROP TABLE x;--") == 0
+    """Allow-list defends against arbitrary identifier injection.
+
+    Round 12 / Phase 10.7: ``get_total_count`` now returns ``None``
+    (not ``0``) for disallowed tables so callers can distinguish
+    "policy refused the query" from "table is genuinely empty".
+    The previous baseline conflated those two cases.
+    """
+    assert admin_module.get_total_count("sqlite_master") is None
+    assert admin_module.get_total_count("'; DROP TABLE x;--") is None
 
 
 def test_get_total_request_count_sums_all_ips(admin_module):

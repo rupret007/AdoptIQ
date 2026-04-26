@@ -18,7 +18,7 @@ import re
 import webbrowser
 from threading import Lock, RLock
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Optional as TypingOptional, Dict, Any, List, Union, Tuple
 import pandas as pd
 import numpy as np
@@ -34,12 +34,41 @@ if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
 # inspection no longer breaks Keeper / Snowflake calls with
 # "CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain".
 # Must run before any module creates an SSLContext (urllib3, requests, hvac).
+#
+# Round 5 / Phase 4.15: previously this swallowed every exception with a
+# bare ``pass``, which meant that a missing ``truststore`` package or an
+# import-time crash silently disabled corporate-CA verification and
+# users only found out via mysterious downstream
+# ``CERTIFICATE_VERIFY_FAILED`` errors.  Log a structured warning so
+# operators know corporate-MITM trust is NOT active and can either
+# install the dependency or switch to ``REQUESTS_CA_BUNDLE``.  The
+# inject failure is still non-fatal -- we don't want to block a fresh
+# install -- but it must not be invisible.
 try:  # pragma: no cover - platform / version dependent
     import truststore as _truststore
     _truststore.inject_into_ssl()
     os.environ.setdefault("ADOPTIQ_TRUSTSTORE_INJECTED", "1")
-except Exception:
-    pass
+except ImportError as _ts_imp_err:
+    # Use stderr because the logging system is configured later.
+    sys.stderr.write(
+        "[startup] truststore inject SKIPPED: package not installed "
+        f"({_ts_imp_err}). Corporate TLS-inspecting CAs may not be "
+        "trusted; expect CERTIFICATE_VERIFY_FAILED on Keeper / "
+        "Snowflake / status.webex.com calls. Install the 'truststore' "
+        "package or set REQUESTS_CA_BUNDLE to your corporate root CA "
+        "bundle to silence this.\n"
+    )
+    os.environ.setdefault("ADOPTIQ_TRUSTSTORE_INJECTED", "0")
+except Exception as _ts_err:
+    sys.stderr.write(
+        "[startup] truststore inject FAILED: "
+        f"{type(_ts_err).__name__}: {_ts_err}. Falling back to certifi's "
+        "CA bundle. Corporate TLS-inspecting roots may NOT be trusted; "
+        "expect CERTIFICATE_VERIFY_FAILED on internal endpoints. Set "
+        "REQUESTS_CA_BUNDLE to your corporate root CA bundle if you "
+        "see those errors downstream.\n"
+    )
+    os.environ.setdefault("ADOPTIQ_TRUSTSTORE_INJECTED", "0")
 
 from flask import Flask, request, jsonify, redirect, url_for, send_file, render_template, Response
 from werkzeug.utils import secure_filename
@@ -135,20 +164,38 @@ def auto_audit_report(analysis_id: str):
     """Automatically trigger audit after report completion"""
     if not AUDIT_ENABLED:
         return
-    
+
+    # Round 8 / Phase 1.9: ``analysis_id`` embeds customer / manager /
+    # technology fragments, so previous logger.info / logger.error lines
+    # leaked PII to shipped log files.  Compute a SHA-256 short digest
+    # locally (this function runs before ``_id_digest`` is defined further
+    # down in module load order) and surface only the digest at INFO /
+    # ERROR; verbatim id is available at DEBUG only.
+    try:
+        import hashlib as _h_p19
+        _aid_digest = _h_p19.sha256(str(analysis_id).encode("utf-8", errors="replace")).hexdigest()[:12]
+    except Exception:
+        _aid_digest = "unavailable"
+
     try:
         # Run audit in background thread to not block completion
         def run_audit():
             try:
                 result = trigger_audit(analysis_id)
-                logger.info(f"Auto-audit completed for {analysis_id}: {result.get('status')} ({result.get('score')}/100)")
+                logger.info(
+                    "Auto-audit completed aid_digest=%s status=%s score=%s/100",
+                    _aid_digest, result.get('status'), result.get('score'),
+                )
+                logger.debug("Auto-audit verbatim id=%s status=%s", analysis_id, result.get('status'))
             except Exception as e:
-                logger.error(f"Auto-audit failed for {analysis_id}: {e}")
-        
+                logger.error("Auto-audit failed aid_digest=%s err_kind=%s", _aid_digest, type(e).__name__)
+                logger.debug("Auto-audit failure verbatim id=%s", analysis_id, exc_info=True)
+
         audit_thread = threading.Thread(target=run_audit, daemon=True)
         audit_thread.start()
     except Exception as e:
-        logger.error(f"Failed to trigger auto-audit for {analysis_id}: {e}")
+        logger.error("Failed to trigger auto-audit aid_digest=%s err_kind=%s", _aid_digest, type(e).__name__)
+        logger.debug("Auto-audit trigger failure verbatim id=%s", analysis_id, exc_info=True)
 
 class AnalysisForm(FlaskForm):
     """Form for analysis configuration"""
@@ -220,7 +267,12 @@ from risk_scoring import compute_customer_risk_profile, compute_portfolio_risk_s
 from report_consistency import validate_report_consistency
 from report_utils import format_inline_source
 import canonical_metrics as cm
-from snowflake_prefetch import AnalysisRunContext, prefetch_comprehensive, prefetch_ask_ai
+from snowflake_prefetch import (
+    AnalysisRunContext,
+    prefetch_comprehensive,
+    prefetch_ask_ai,
+    collect_fetch_warnings,
+)
 from ask_ai_grounded import (
     AskAIRequest,
     is_grounded_ask_ai_enabled,
@@ -460,11 +512,76 @@ else:
 app.config['UPLOAD_FOLDER'] = str(_APP_SUPPORT / 'uploads')
 _max_file_size_mb = int(os.environ.get('MAX_FILE_SIZE', '50'))
 app.config['MAX_CONTENT_LENGTH'] = _max_file_size_mb * 1024 * 1024
+# Round 8 / Phase 1.11: single env-driven cap for intel export/import sizes.
+# Previously ``import_intel`` enforced a hard-coded 50 MB while
+# ``MAX_CONTENT_LENGTH`` (above) was already configurable via
+# ``MAX_FILE_SIZE`` -- two limits in two places drifted apart and made
+# the smaller of the two effectively silent.  Anchor on the same env
+# var so operators only have one knob to tune.
+INTEL_MAX_BYTES = _max_file_size_mb * 1024 * 1024
 
 # CSRF protection - enabled with extended timeout to prevent timeout issues
 app.config['WTF_CSRF_ENABLED'] = True
 app.config['WTF_CSRF_TIME_LIMIT'] = None  # No timeout limit for CSRF tokens
 app.jinja_env.globals['csrf_token'] = generate_csrf
+
+# Round 12 / Phase 4.4 + 4.5: ``format_number`` is the canonical
+# integer/decimal renderer used by the Word/Excel exports
+# (``report_utils.format_number``).  Several Jinja templates (most
+# notably ``external_intelligence.html`` and ``history.html``) were
+# rendering totals via raw ``{{ value }}`` so the same metric appeared
+# as ``1234`` in HTML but ``1,234`` in Word/Excel, and a 100k+ count
+# rendered without any thousands separator at all -- both an accuracy
+# regression vs the canonical surface and a readability regression
+# (e.g. "1234567 cases").  Register the helper as a Jinja filter so
+# templates can pipe through ``{{ value | format_number }}`` and stay
+# in lock-step with the export-side formatter.  Falls back to a safe
+# inline implementation if ``report_utils`` cannot be imported during
+# bootstrap (e.g. unit-test contexts that import this module without
+# the full dependency tree).
+try:
+    from report_utils import format_number as _r12_jinja_format_number  # type: ignore
+except Exception:  # pragma: no cover - defensive for partial test imports
+    def _r12_jinja_format_number(value, decimals=0, percent=False):  # type: ignore
+        try:
+            if value is None or value == '':
+                return 'N/A'
+            v = float(value)
+            if percent:
+                return f"{v:,.{decimals}f}%"
+            if decimals:
+                return f"{v:,.{decimals}f}"
+            return f"{int(round(v)):,}"
+        except (TypeError, ValueError):
+            return str(value)
+
+app.jinja_env.filters['format_number'] = _r12_jinja_format_number
+
+# Round 5 / Phase 2.15: explicitly set Flask session cookie attributes so
+# we never rely on framework defaults that vary across Flask releases.
+# - HttpOnly: blocks JS access to the cookie (defense-in-depth vs XSS).
+# - SameSite=Lax: blocks cross-site requests from carrying the cookie
+#   while still permitting top-level navigations (form posts from the
+#   same origin work; embedded cross-origin requests do not).
+# - Secure: only set when the deployment is HTTPS (controlled via
+#   ADOPTIQ_SECURE_COOKIES=1).  We default to True only when *not* in
+#   a local dev environment so a developer running over plain HTTP can
+#   still log in; production deploys must export the env var.
+app.config.setdefault('SESSION_COOKIE_HTTPONLY', True)
+app.config.setdefault('SESSION_COOKIE_SAMESITE', 'Lax')
+_secure_cookie_env = os.environ.get('ADOPTIQ_SECURE_COOKIES', '').strip().lower()
+if _secure_cookie_env in ('1', 'true', 'yes', 'on'):
+    app.config['SESSION_COOKIE_SECURE'] = True
+elif _secure_cookie_env in ('0', 'false', 'no', 'off'):
+    app.config['SESSION_COOKIE_SECURE'] = False
+else:
+    # Default: secure cookies in packaged builds, insecure in source-mode dev.
+    app.config['SESSION_COOKIE_SECURE'] = bool(_frozen)
+# Mirror onto the CSRF cookie so Flask-WTF's double-submit token rides
+# the same hardened transport.
+app.config.setdefault('REMEMBER_COOKIE_HTTPONLY', True)
+app.config.setdefault('REMEMBER_COOKIE_SAMESITE', 'Lax')
+app.config.setdefault('REMEMBER_COOKIE_SECURE', app.config['SESSION_COOKIE_SECURE'])
 
 # Verbose debug mode can be enabled via env and changed at runtime through local admin APIs.
 _VERBOSE_DEBUG_RUNTIME = None
@@ -473,6 +590,23 @@ _VERBOSE_DEBUG_LOCK = Lock()
 
 def _is_truthy_flag(value: Any) -> bool:
     return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _empty_df_with_fetch_marker(dataset: str, error: str) -> pd.DataFrame:
+    """
+    Phase 1.3a helper: return an empty DataFrame whose ``.attrs`` carry the
+    dataset name and failure reason. Mirrors ``adoptiq_backend.
+    _empty_df_with_fetch_error`` so app-level fetch wrappers (CSConsole
+    threadpool, CSOne loader, etc.) emit the same signal.
+    """
+    df = pd.DataFrame()
+    try:
+        df.attrs['fetch_error'] = str(error or '').strip() or 'unknown_error'
+        df.attrs['fetch_error_dataset'] = dataset
+    except Exception:
+        # Round 4: non-fatal; suppressed silently in original code
+        pass  # noqa: PIE790
+    return df
 
 
 def _is_verbose_debug_enabled() -> bool:
@@ -503,6 +637,45 @@ _SENSITIVE_ENDPOINTS = {
     'start_subscription_analysis', 'start_leader_report', 'cancel_analysis',
     'download_result', 'download_file', 'export_intel',
     'clear_stuck_analyses', 'simple_test', 'test_generate_report', 'verbose_debug_api',
+    # Round 5 / Phase 6.1: status / connectivity diagnostics expose
+    # report metadata (analysis IDs, counts, customer/sub data) and
+    # internal connectivity probe results -- both have routinely been
+    # used to enumerate active analyses and probe outbound network
+    # paths from a desktop deployment.  Restrict to localhost.
+    # Round 6 / Phase 6.16: ``get_status_alias`` was historically
+    # listed here for a planned ``/api/status/<id>`` alias route that
+    # was never implemented.  Keeping the stale entry in the
+    # localhost-only set masked the fact that no route actually used
+    # it; remove it and rely on the real ``get_status`` /
+    # ``get_all_status`` registrations below.  If a future alias is
+    # added, it MUST be re-registered here at the same time.
+    'get_status', 'get_all_status', 'api_diag_connectivity',
+    # Round 6 / Phase 6.1: extend the gate to every remaining
+    # data-reading / export / expensive endpoint that returns
+    # customer-, subscription-, intel- or analysis-level data.
+    # The desktop bundle is meant to be local-only; any of these
+    # endpoints reachable from a non-loopback origin would expose
+    # internal customer/account data, allow remote LLM cost burn,
+    # or let an attacker import / overwrite the local intel store.
+    # Pure UI shells (``index``, ``progress``, ``help``,
+    # ``ask_ai_page``, ``external_intelligence``,
+    # ``leader_report_form``, ``bst_psirt_search``) intentionally
+    # remain reachable so the user-facing pages keep rendering --
+    # only the JSON / data routes they call are restricted.
+    'progress',
+    'previous_reports',
+    'history',
+    'ask_ai_portfolio',
+    'refresh_external_intel',
+    'ask_intel',
+    'import_intel',
+    'search_subscriptions',
+    'subscription_analysis',
+    'subscription_renewal_risk',
+    'search_bst_defect',
+    'search_psirt_advisory',
+    'search_related_defects',
+    'search_related_vulnerabilities',
 }
 
 _ANALYSIS_ID_RE = re.compile(r'^[A-Za-z0-9._-]{1,200}$')
@@ -520,6 +693,51 @@ def _sanitize_analysis_id_part(value: Any, max_len: int = 60) -> str:
     cleaned = str(value).replace(" ", "_").replace("&", "and")
     cleaned = re.sub(r"[^A-Za-z0-9._-]", "", cleaned)
     return cleaned[:max_len]
+
+
+def _id_digest(value: Any, length: int = 12) -> str:
+    """Round 8 / Phase 1.7: deterministic short digest for log-friendly id surfacing.
+
+    Centralises the SHA-256 prefix pattern that ``download_result``
+    (Round 6 / Phase 6.7) uses inline so every other start / status /
+    auto-audit path can swap a raw ``analysis_id`` (which embeds
+    customer / manager / technology fragments) for an opaque digest at
+    INFO.  Verbatim values stay available at DEBUG via the same call
+    site.  Returns ``"unavailable"`` if the input cannot be encoded.
+    """
+    try:
+        import hashlib as _h
+        return _h.sha256(str(value).encode("utf-8", errors="replace")).hexdigest()[: max(4, length)]
+    except Exception:
+        return "unavailable"
+
+
+def _redact_form_data(data: Any) -> Dict[str, Any]:
+    """Round 8 / Phase 1.7: log-safe summary of an inbound JSON / form dict.
+
+    Returns a dict with a stable shape -- per-field length, whether the
+    field was non-empty, and a short digest -- but never the verbatim
+    value.  Avoids leaking customer name / manager / subscription id
+    into the log file when handlers want to confirm receipt of a
+    payload.  Booleans pass through; everything else is summarised.
+    """
+    if not isinstance(data, dict):
+        return {"_kind": type(data).__name__}
+    out: Dict[str, Any] = {}
+    for k, v in data.items():
+        if isinstance(v, bool) or v is None:
+            out[str(k)] = v
+        else:
+            try:
+                s = str(v)
+                out[str(k)] = {
+                    "len": len(s),
+                    "present": bool(s.strip()),
+                    "digest": _id_digest(s, length=8) if s else "",
+                }
+            except Exception:
+                out[str(k)] = {"len": -1, "present": False, "digest": "unavailable"}
+    return out
 
 
 def _client_ip_from_request(req) -> str:
@@ -543,23 +761,273 @@ def restrict_sensitive_routes_to_localhost():
     if endpoint in _SENSITIVE_ENDPOINTS and not _is_local_client(request):
         return jsonify({'success': False, 'error': 'Forbidden: local access only'}), 403
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+
+@app.after_request
+def add_security_headers_for_sensitive_routes(response):
+    """Round 6 / Phase 6.9: attach defensive response headers to every
+    sensitive route (downloads, status JSON, exports, intel, search,
+    analysis kick-off / cancel) so:
+
+    * ``Cache-Control: no-store`` keeps customer / analysis / intel
+      bytes out of any HTTP intermediary or browser disk cache;
+    * ``X-Content-Type-Options: nosniff`` prevents the browser from
+      reinterpreting a JSON / docx / xlsx body as HTML and running
+      stray script tags;
+    * ``X-Frame-Options: DENY`` blocks the desktop UI from being
+      iframed (clickjacking) on accidental localhost re-exposure;
+    * ``Referrer-Policy: no-referrer`` keeps the analysis_id out of
+      any referer header the browser would otherwise emit.
+
+    Centralizing this in ``after_request`` means every existing and
+    future sensitive route gets the same posture without each
+    handler having to remember to set the headers.  Public UI shells
+    (``index``, ``help``, ``ask_ai_page`` etc.) are intentionally not
+    decorated -- they may legitimately benefit from caching.
+    """
+    try:
+        endpoint = request.endpoint or ''
+    except Exception:
+        endpoint = ''
+    if endpoint in _SENSITIVE_ENDPOINTS:
+        try:
+            response.headers['Cache-Control'] = 'no-store'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['X-Content-Type-Options'] = 'nosniff'
+            response.headers['X-Frame-Options'] = 'DENY'
+            response.headers['Referrer-Policy'] = 'no-referrer'
+            # Round 8 / Phase 1.3: Strict-Transport-Security gated on an
+            # explicit env opt-in.  The desktop bundle defaults to plain
+            # ``http://localhost`` and an unconditional HSTS header would
+            # poison the browser into refusing future HTTP loads.  Only
+            # emit when ``ADOPTIQ_HSTS_ENABLED=1`` (set by deployments
+            # known to terminate TLS upstream).
+            if os.environ.get('ADOPTIQ_HSTS_ENABLED', '').strip().lower() in {'1', 'true', 'yes'}:
+                response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+            # Round 8 / Phase 1.3: tight per-response CSP on JSON sensitive
+            # endpoints.  ``base.html`` already ships an HTML CSP via
+            # ``<meta http-equiv>``, but JSON / docx / xlsx responses
+            # never go through a template and therefore had no policy at
+            # all.  ``default-src 'none'`` + ``frame-ancestors 'none'``
+            # is correct for non-HTML payloads (no scripts, no images,
+            # no fonts inside a JSON body) and double-locks the response
+            # against MIME sniffing into HTML.
+            ct = (response.headers.get('Content-Type') or '').lower()
+            if not ct.startswith('text/html'):
+                response.headers['Content-Security-Policy'] = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+            else:
+                # Round 9 / Phase 5.4: ship a nonce-only
+                # ``script-src`` via ``Content-Security-Policy-Report-Only``
+                # alongside the existing ``unsafe-inline`` enforced
+                # policy so we can measure the inline-script surface
+                # from production logs without breaking the live UI.
+                # Step 2 (after the page-by-page extraction completes)
+                # promotes the report-only policy to enforce.
+                response.headers['Content-Security-Policy-Report-Only'] = (
+                    "default-src 'self'; "
+                    "script-src 'self' https://cdn.jsdelivr.net; "
+                    "style-src 'self' https://cdn.jsdelivr.net; "
+                    "img-src 'self' data: https:; "
+                    "font-src 'self' https://cdn.jsdelivr.net; "
+                    "object-src 'none'; "
+                    "base-uri 'none'; "
+                    "form-action 'self'; "
+                    "frame-ancestors 'self'"
+                )
+        except Exception:
+            pass
+
+    # Round 12 / Phase 11.3: JSON responses across the app historically
+    # mixed two truthy keys -- ``ask_ai_portfolio`` / ``ask_intel`` /
+    # newer endpoints emit ``"ok": True/False`` while
+    # ``verbose_debug_api`` and several legacy callers emit
+    # ``"success": True/False``.  CLI scripts that parsed one were
+    # silently broken when they hit the other.  Mirror the missing key
+    # on every JSON response so callers can grep for either name and
+    # always get a consistent answer.  The body is only rewritten when
+    # exactly one of the two keys is present (so existing responses
+    # that already emit both -- e.g. our updated ``verbose_debug_api``
+    # -- pass through untouched).  Failure to parse / re-serialize
+    # silently no-ops so we never break a working endpoint.
+    try:
+        ct_for_shim = (response.headers.get('Content-Type') or '').lower()
+        if (
+            ct_for_shim.startswith('application/json')
+            and not response.direct_passthrough
+        ):
+            import json as _r12_json
+            raw = response.get_data(as_text=True)
+            if raw:
+                try:
+                    body = _r12_json.loads(raw)
+                except Exception:
+                    body = None
+                if isinstance(body, dict):
+                    has_ok = 'ok' in body
+                    has_success = 'success' in body
+                    if has_ok ^ has_success:
+                        if has_ok and not has_success:
+                            body['success'] = bool(body.get('ok'))
+                        else:
+                            body['ok'] = bool(body.get('success'))
+                        response.set_data(_r12_json.dumps(body))
+                        try:
+                            response.headers['Content-Length'] = str(len(response.get_data()))
+                        except Exception:
+                            pass
+    except Exception:
+        # Round 12 / Phase 11.3: never let the compatibility shim
+        # crash a response -- it is purely additive.
+        pass
+
+    return response
+
+# Configure logging.
+#
+# Round 5 / Phase 6.5: ``app_simple`` is the canonical entry point for
+# the Flask app and CLI launcher; downstream modules
+# (``adoptiq_backend``, ``compact_report_formatter``,
+# ``enhanced_admin_dashboard_v2``) historically each called
+# ``logging.basicConfig(...)`` at import time, which is a no-op once
+# the root logger already has handlers.  Whichever module imported
+# first won, and the configured format / level was nondeterministic
+# from build to build.  Use ``force=True`` so the entry-point
+# configuration is the authoritative one and any earlier silently-no-op
+# ``basicConfig`` is overridden in-place.
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s [%(name)s] %(message)s',
+    force=True,
+)
 logger = logging.getLogger(__name__)
+
+# Round 5 / Phase 6.6: previously the app only logged to stderr.  In
+# packaged / desktop builds nobody captures stderr, so the operator
+# loses every diagnostic message a few minutes after the report
+# completes -- and crash investigations are limited to whatever
+# happened to scroll by in the launcher window.  Add a
+# ``RotatingFileHandler`` with a hard size cap so we keep recent
+# history without ever growing without bound on long-lived
+# installations.  The path / size / backup count can be overridden
+# via env vars; default is ``~/.adoptiq/adoptiq.log``, 10 MB per
+# file, 5 backups (~50 MB total).
+try:
+    from logging.handlers import RotatingFileHandler as _RotatingFileHandler
+    _log_path = os.environ.get('ADOPTIQ_LOG_FILE', '').strip()
+    if not _log_path:
+        try:
+            _default_log_dir = os.path.join(os.path.expanduser('~'), '.adoptiq')
+            os.makedirs(_default_log_dir, exist_ok=True)
+            # Round 6 / Phase 6.12: tighten the per-user dir to 0700
+            # so other local accounts cannot list / read the audit
+            # mirror or rotated log backups even if they were created
+            # under a more permissive default umask.
+            try:
+                os.chmod(_default_log_dir, 0o700)
+            except Exception:
+                pass  # noqa: PIE790
+            # Round 6 / Phase 6.10: ``RotatingFileHandler`` uses
+            # ``os.rename`` on rotation, which is racy under
+            # concurrent-process writers (frozen launcher + CLI
+            # report run, browser launches, multi-window).  When two
+            # processes both attempt rotation, one of them will
+            # silently lose a chunk of records.  Make the live log
+            # path PID-suffixed by default so each process owns its
+            # own file and the handler's rename-based rotation is
+            # safe.  Operators who explicitly point ``ADOPTIQ_LOG_FILE``
+            # at a single shared file opt out of this.
+            _log_path = os.path.join(_default_log_dir, f'adoptiq.{os.getpid()}.log')
+        except Exception:
+            _log_path = ''
+    if _log_path:
+        try:
+            _max_bytes = int(os.environ.get('ADOPTIQ_LOG_MAX_BYTES', str(10 * 1024 * 1024)))
+        except Exception:
+            _max_bytes = 10 * 1024 * 1024
+        try:
+            _backup_count = int(os.environ.get('ADOPTIQ_LOG_BACKUP_COUNT', '5'))
+        except Exception:
+            _backup_count = 5
+        try:
+            # Round 6 / Phase 6.10: subclass so each rotation re-applies
+            # 0o600 to both the active file and the just-created
+            # backup.  ``RotatingFileHandler`` defaults to whatever
+            # umask was in effect at process start, which on macOS
+            # / Linux is typically 022 -> 0644 (group/world readable).
+            class _Owner600RotatingHandler(_RotatingFileHandler):
+                def doRollover(self):  # noqa: D401 - matches stdlib name
+                    super().doRollover()
+                    for _suffix in ("",) + tuple(f".{i}" for i in range(1, self.backupCount + 1)):
+                        _candidate = f"{self.baseFilename}{_suffix}"
+                        try:
+                            if os.path.exists(_candidate):
+                                os.chmod(_candidate, 0o600)
+                        except Exception:
+                            pass  # noqa: PIE790
+
+            _rfh = _Owner600RotatingHandler(
+                _log_path,
+                maxBytes=max(1024 * 1024, _max_bytes),
+                backupCount=max(0, _backup_count),
+                encoding='utf-8',
+            )
+            _rfh.setLevel(logging.INFO)
+            _rfh.setFormatter(logging.Formatter(
+                '%(asctime)s %(levelname)s [%(name)s] %(message)s'
+            ))
+            # Restrict the log file to owner only (defense in depth -- the
+            # log can carry analysis IDs / counts and should not be
+            # world-readable on shared machines).
+            try:
+                os.chmod(_log_path, 0o600)
+            except Exception:
+                pass  # noqa: PIE790
+            logging.getLogger().addHandler(_rfh)
+            logger.info(
+                "Rotating file log enabled at %s (max=%d bytes, backups=%d)",
+                _log_path, _max_bytes, _backup_count,
+            )
+        except Exception as _rfh_err:
+            logger.warning(
+                "Could not enable rotating file log at %s: %s",
+                _log_path, _rfh_err,
+            )
+except Exception as _log_init_err:
+    logger.debug("RotatingFileHandler init skipped: %s", _log_init_err)
+
 _apply_verbose_debug_mode()
 
 # Version and build (from config.py, updated by build_mac_dmg.sh)
 from config import ADOPTIQ_VERSION, ADOPTIQ_BUILD, version_string, Config
+# Round 9 / Phase 1.4: enforce DEBUG=False / TESTING=False under
+# ``ADOPTIQ_PRODUCTION_READY=1`` (or FLASK_ENV=production).  Hard-fails
+# boot if either is still truthy after Config import so a stray test
+# fixture or subclass can't silently re-enable the Werkzeug debugger.
+try:
+    from config import enforce_production_safety as _r9_enforce_prod_safety
+    _r9_enforce_prod_safety()
+except RuntimeError:
+    raise
+except Exception:
+    pass
 app.config['CSONE_ONEDRIVE_FOLDER'] = Config.CSONE_ONEDRIVE_FOLDER
 app.config['CSONE_SHARED_FOLDER_URL'] = Config.CSONE_SHARED_FOLDER_URL
 
 @app.context_processor
 def inject_version():
+    # Round 6 / Phase 2.16: also expose the current UTC year so the
+    # base template's footer copyright line does not silently lie when
+    # the calendar rolls over.  We compute this on every request which
+    # is cheap and avoids a stale module-import-time cache.
+    try:
+        _adoptiq_footer_year = str(datetime.now(timezone.utc).year)
+    except Exception:
+        _adoptiq_footer_year = '2025'
     return {
         'adoptiq_version': ADOPTIQ_VERSION,
         'adoptiq_build': ADOPTIQ_BUILD,
         'adoptiq_version_string': version_string(),
         'csone_shared_folder_url': app.config.get('CSONE_SHARED_FOLDER_URL', ''),
+        'adoptiq_footer_year': _adoptiq_footer_year,
     }
 
 # Import Document and Inches for Word report generation
@@ -590,6 +1058,183 @@ STATUS_DATETIME_FIELDS = (
 )
 INSIGHT_SUMMARY_MAX_CHARS = 200
 BROWSER_LAUNCH_DELAY_SECONDS = 1.5
+
+# Round 5 / Phase 3.10: Ask AI throttling.  The Ask AI endpoints
+# (/api/ask-ai-portfolio and /api/ask-intel) are expensive --
+# every call fans out to Snowflake, external intel feeds, and an
+# LLM round-trip, often costing tens of seconds.  Without a per-IP
+# / per-user limit a single bad client (or a refresh loop) can
+# saturate the LLM circuit and starve genuine traffic.  Implement a
+# minimal in-process sliding-window limiter.  This is *not* a
+# replacement for an upstream gateway throttle, but it prevents the
+# worst case (single client opening N tabs and DOS'ing the model).
+_ASK_AI_RATE_WINDOW_SEC = float(os.environ.get("ADOPTIQ_ASK_AI_RATE_WINDOW", "60"))
+_ASK_AI_RATE_MAX_CALLS = int(os.environ.get("ADOPTIQ_ASK_AI_RATE_MAX_CALLS", "10"))
+_ask_ai_rate_log: Dict[str, List[float]] = {}
+_ask_ai_rate_lock = Lock()
+
+
+def _ask_ai_throttle_key() -> str:
+    """Best-effort caller identity for throttling.
+
+    Prefer the authenticated user ID; fall back to client IP.  If
+    behind a proxy, ``X-Forwarded-For`` is honored only when the
+    request reached us through the local app's reverse-proxy
+    config -- otherwise headers are not trusted (a remote attacker
+    can spoof them).  We additionally trim to the first hop.
+
+    Round 7 / Phase 5.9: the throttle bookkeeping
+    (``_ask_ai_rate_log``) is an in-process dict guarded by a
+    ``threading.Lock``.  That is safe and accurate inside a single
+    Python process, but completely ineffective when the app is
+    deployed behind a multi-worker WSGI server (Gunicorn ``-w N``,
+    uWSGI workers, or any pre-fork setup) because each worker has
+    its own copy of the dict.  In that mode the *effective*
+    per-caller cap is ``_ASK_AI_RATE_MAX_CALLS * N``, not
+    ``_ASK_AI_RATE_MAX_CALLS``, and operators have been bitten by
+    this in production.  We emit a one-shot WARNING the first time
+    we are called when a multi-worker environment is detected, so
+    the limitation appears prominently in the logs even if the
+    sysadmin never reads this docstring.  The detection covers the
+    common pre-fork servers; we deliberately do not raise so the
+    throttle remains best-effort.
+    """
+    _warn_multi_worker_once()
+    try:
+        user = getattr(getattr(request, '_user', None), 'id', None)
+        if user:
+            return f"user:{user}"
+    except Exception:
+        pass  # noqa: PIE790
+    ip = (request.remote_addr or 'unknown').strip()
+    return f"ip:{ip}"
+
+
+_ask_ai_multi_worker_warned = False
+_ask_ai_multi_worker_warned_lock = Lock()
+
+
+def _warn_multi_worker_once() -> None:
+    """Round 7 / Phase 5.9: log once if Ask AI throttling is in a
+    multi-worker pre-fork environment where the in-process dict
+    cannot enforce a global cap.  Detection is heuristic (env vars
+    set by Gunicorn / uWSGI / Hypercorn) and should not raise.
+    """
+    global _ask_ai_multi_worker_warned
+    if _ask_ai_multi_worker_warned:
+        return
+    try:
+        with _ask_ai_multi_worker_warned_lock:
+            if _ask_ai_multi_worker_warned:
+                return
+            _gunicorn_workers = os.environ.get("GUNICORN_CMD_ARGS", "")
+            _server_software = os.environ.get("SERVER_SOFTWARE", "")
+            _is_gunicorn = (
+                "gunicorn" in _server_software.lower()
+                or "GUNICORN_WORKERS" in os.environ
+                or "-w" in _gunicorn_workers
+            )
+            _is_uwsgi = (
+                "uwsgi" in _server_software.lower()
+                or os.environ.get("UWSGI_ORIGINAL_PROC_NAME") is not None
+            )
+            _is_hypercorn = "hypercorn" in _server_software.lower()
+            if _is_gunicorn or _is_uwsgi or _is_hypercorn:
+                logger.warning(
+                    "[[WARNING]] Round 7 / Phase 5.9: Ask AI rate-limit "
+                    "bookkeeping is in-process only (server_software=%r). "
+                    "Per-caller throttle of %d req / %.0fs is enforced *per "
+                    "worker*; the effective cap is multiplied by the worker "
+                    "count.  Front the app with a shared store (Redis, "
+                    "memcached) or cap workers to 1 to enforce the documented "
+                    "rate limit.",
+                    _server_software or "<unknown>",
+                    _ASK_AI_RATE_MAX_CALLS,
+                    _ASK_AI_RATE_WINDOW_SEC,
+                )
+            _ask_ai_multi_worker_warned = True
+    except Exception:
+        # Never let the diagnostic break a real request.
+        _ask_ai_multi_worker_warned = True
+
+
+def _check_ask_ai_throttle() -> Optional[Tuple[Dict[str, Any], int]]:
+    """Return a (payload, status) tuple to short-circuit, or None.
+
+    Sliding window: at most ``_ASK_AI_RATE_MAX_CALLS`` requests per
+    ``_ASK_AI_RATE_WINDOW_SEC`` seconds per caller key.  Trims old
+    entries on every call so memory stays bounded for active keys.
+    """
+    if _ASK_AI_RATE_MAX_CALLS <= 0 or _ASK_AI_RATE_WINDOW_SEC <= 0:
+        return None  # disabled
+    key = _ask_ai_throttle_key()
+    # Round 12 / Phase 10.1: previously the sliding-window log used
+    # ``time.time()`` (wall clock).  An NTP step or operator-driven
+    # clock adjustment (DST migration, container clock skew on a
+    # paused VM that resumes hours later) could shrink or extend
+    # the throttle window arbitrarily -- shrinking it lets a burst
+    # bypass the cap, extending it permanently locks legitimate
+    # callers out because old entries stop expiring.  Use
+    # ``time.monotonic()`` so the window is anchored to a clock
+    # that only ever moves forward at a constant rate.
+    now = time.monotonic()
+    cutoff = now - _ASK_AI_RATE_WINDOW_SEC
+    with _ask_ai_rate_lock:
+        log = _ask_ai_rate_log.setdefault(key, [])
+        # Drop entries outside the window in-place.
+        while log and log[0] < cutoff:
+            log.pop(0)
+        if len(log) >= _ASK_AI_RATE_MAX_CALLS:
+            retry_after = max(1, int(log[0] + _ASK_AI_RATE_WINDOW_SEC - now))
+            return (
+                {
+                    'ok': False,
+                    'error': (
+                        f'Rate limit exceeded ({_ASK_AI_RATE_MAX_CALLS} requests '
+                        f'per {int(_ASK_AI_RATE_WINDOW_SEC)}s). Please wait '
+                        f'{retry_after}s and try again.'
+                    ),
+                    'retry_after_seconds': retry_after,
+                },
+                429,
+            )
+        log.append(now)
+    return None
+
+
+def _submit_with_context(executor, fn, *args, **kwargs):
+    """Round 6 / Phase 7.2: submit ``fn`` to ``executor`` with the
+    parent thread's ``contextvars.Context`` copied in.
+
+    ``ThreadPoolExecutor`` worker threads inherit nothing from the
+    submitting thread by default, so the ``analysis_id`` bound by
+    ``structured_logging.bind_analysis_id`` -- and any other
+    ``ContextVar`` carrying request-scoped state -- is silently
+    dropped on the floor inside calls like ``_connect_with_keeper``.
+    Wrapping the submission in ``contextvars.copy_context().run``
+    propagates the parent context for the lifetime of the worker
+    callable so the structured-logging adapter still emits
+    ``analysis_id=<id>`` from inside the worker.
+    """
+    import contextvars as _cv
+    _ctx = _cv.copy_context()
+    return executor.submit(_ctx.run, fn, *args, **kwargs)
+
+
+def _now_utc_iso_z() -> str:
+    """Round 6 / Phase 6.17: canonical UTC ISO-Z timestamp helper.
+
+    Every persisted status field (``start_time``, ``step_start_time``,
+    ``completion_time``, ``end_time``) MUST go through this helper so
+    the on-disk ``analysis_status.json`` and the audit JSONL mirror
+    use a single, unambiguous, lexically-sortable representation
+    (``YYYY-MM-DDTHH:MM:SS.ffffffZ``).  Mixing naive
+    ``_now_utc_iso_z()`` (which renders local time without
+    a tzinfo) with the audit table's UTC ISO-Z strings used to drift
+    by whatever the host's TZ offset was, breaking ordering and date
+    arithmetic in ``get_status`` and the admin KPI queries.
+    """
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _build_insights_payload(
@@ -664,14 +1309,29 @@ def _update_progress(status, progress, message, step, save=True):
     status['current_step'] = step
     status['sub_step'] = message
 
-    now = datetime.now()
+    # Round 5 / Phase 6.4: previously this used ``datetime.now()`` (local
+    # naive time) and parsed ``start_time`` with ``datetime.fromisoformat``
+    # which preserves any embedded tz.  When ``start_time`` carried a
+    # tz suffix (UTC) and ``now`` was naive, ``(now - t0)`` raised
+    # TypeError("can't subtract offset-naive and offset-aware datetimes")
+    # and the entire ETA branch was silently swallowed by the
+    # ``except`` -- so the UI never showed an ETA after the first
+    # tz-aware status was persisted.  Normalize BOTH sides to UTC.
+    now = datetime.now(timezone.utc)
     start_time = status.get('start_time')
     if start_time and progress > 0:
         try:
             if isinstance(start_time, str):
-                t0 = datetime.fromisoformat(start_time)
+                _raw = start_time.strip()
+                if _raw.endswith('Z'):
+                    _raw = _raw[:-1] + '+00:00'
+                t0 = datetime.fromisoformat(_raw)
             else:
                 t0 = start_time
+            if t0.tzinfo is None:
+                t0 = t0.replace(tzinfo=timezone.utc)
+            else:
+                t0 = t0.astimezone(timezone.utc)
             elapsed = (now - t0).total_seconds()
 
             history = status.get('_progress_history', [])
@@ -778,7 +1438,18 @@ def load_analysis_status():
 
             if cleaned_any:
                 save_analysis_status()
-            logger.info(f"Loaded {len(analysis_status)} analysis statuses from file: {status_file_path}")
+            # Round 5 / Phase 6.19: ``len(analysis_status)`` is read
+            # *outside* the lock above (in the legacy code) which
+            # races with concurrent worker threads that may have
+            # started inserting new statuses by the time this log
+            # line fires (status file load happens at import / app
+            # startup, but uvicorn / pytest hot-reload can re-enter
+            # this path while workers exist).  Re-acquire the lock
+            # for the snapshot count so the log message is consistent
+            # with what was actually loaded.
+            with analysis_status_lock:
+                _loaded_count = len(analysis_status)
+            logger.info(f"Loaded {_loaded_count} analysis statuses from file: {status_file_path}")
         else:
             logger.info(f"Status file not found at: {status_file_path} (this is normal for first run)")
     except Exception as e:
@@ -788,22 +1459,45 @@ def load_analysis_status():
 load_analysis_status()
 
 def validate_customer_name_input(customer_name: str) -> tuple[bool, str]:
-    """Validate customer name input"""
+    """Validate customer name input.
+
+    Round 5 / Phase 2.4: previously this rejected single quotes
+    (apostrophes) and double quotes outright as a coarse SQL/XSS guard,
+    which broke legitimate business names like ``O'Brien & Co.`` and
+    ``Macy's`` -- and the client-side validator had no equivalent rule,
+    so the form would submit and only the server would error, leaving
+    the user with a generic toast.
+
+    All downstream call sites bind ``customer_name`` as a parameter
+    (Snowflake / SQLite parameterized queries, pandas DataFrame
+    filters), so a literal apostrophe is not a SQL injection vector by
+    itself.  We instead block the *concatenation* patterns that signal
+    SQL/JS injection (``;``, ``--``, ``/*``, ``*/``, ``<script>``,
+    backticks, NUL bytes) and keep apostrophes and quotes available
+    for legitimate names.  This also matches the client-side regex
+    used in ``templates/analyze.html``.
+    """
     if not customer_name:
         return True, "Valid"  # Customer name is optional
-    
+
     if not isinstance(customer_name, str):
         return False, "Customer name must be text"
-    
+
     if len(customer_name) > 200:
         return False, "Customer name too long"
-    
-    # Check for dangerous characters (SQL/script fragments; no DROP/SELECT so "Dropbox", "Select Inc" allowed)
-    dangerous_substrings = ["'", '"', ";", "--", "/*", "*/", "<script>"]
+
+    # Reject NUL bytes outright (control-char injection).
+    if "\x00" in customer_name:
+        return False, "Invalid characters in customer name"
+
+    # Block concatenation / template-injection fragments while permitting
+    # apostrophes and quotes inside the name.  Keep the list tight to
+    # the patterns we actually want to block.
+    dangerous_substrings = [";", "--", "/*", "*/", "<script", "</script", "`", "\x1b"]
     cn_lower = customer_name.lower()
     if any(frag.lower() in cn_lower for frag in dangerous_substrings):
         return False, "Invalid characters in customer name"
-    
+
     return True, "Valid"
 
 def validate_file_input(filename: str) -> tuple[bool, str]:
@@ -897,11 +1591,19 @@ def get_latest_csone_from_folder() -> Optional[str]:
     Macro places reports here daily. Returns full path or None if folder missing/empty.
     """
     folder = app.config.get('CSONE_ONEDRIVE_FOLDER')
+    # Round 8 / Phase 1.8: previously these messages echoed the verbatim
+    # OneDrive folder path (e.g. ``C:\Users\jdoe\OneDrive - Cisco\...``)
+    # at INFO and the absolute path of the chosen file -- both leak the
+    # operator's local username / sync layout to shipped logs.  Log
+    # only the basename / a short folder digest at INFO; verbatim
+    # paths remain available at DEBUG for support.
     if not folder:
-        logger.info(f"[[ONEDRIVE]] CSOne folder not configured (CSONE_ONEDRIVE_FOLDER)")
+        logger.info("[[ONEDRIVE]] CSOne folder not configured (CSONE_ONEDRIVE_FOLDER)")
         return None
+    _folder_digest = _id_digest(folder)
     if not os.path.isdir(folder):
-        logger.info(f"[[ONEDRIVE]] CSOne shared folder does not exist or is not accessible: {folder}")
+        logger.info("[[ONEDRIVE]] CSOne shared folder unavailable folder_digest=%s", _folder_digest)
+        logger.debug("[[ONEDRIVE]] CSOne shared folder unavailable verbatim=%s", folder)
         return None
     try:
         xlsx_files = [
@@ -909,14 +1611,20 @@ def get_latest_csone_from_folder() -> Optional[str]:
             if f.lower().endswith(('.xlsx', '.xls')) and not f.startswith('~')
         ]
         if not xlsx_files:
-            logger.info(f"[[ONEDRIVE]] No .xlsx files found in CSOne folder: {folder}")
+            logger.info("[[ONEDRIVE]] No .xlsx files found in CSOne folder folder_digest=%s", _folder_digest)
+            logger.debug("[[ONEDRIVE]] No .xlsx files in folder verbatim=%s", folder)
             return None
         # Sort by modification time, newest first
         latest = max(xlsx_files, key=lambda p: os.path.getmtime(p))
-        logger.info(f"[[ONEDRIVE]] Using latest CSOne report from shared folder: {latest}")
+        logger.info(
+            "[[ONEDRIVE]] Using latest CSOne report folder_digest=%s basename=%s",
+            _folder_digest, os.path.basename(latest),
+        )
+        logger.debug("[[ONEDRIVE]] Verbatim latest CSOne report path=%s", latest)
         return latest
     except Exception as e:
-        logger.warning(f"[[ONEDRIVE]] Could not read CSOne folder {folder}: {e}")
+        logger.warning("[[ONEDRIVE]] Could not read CSOne folder folder_digest=%s err_kind=%s", _folder_digest, type(e).__name__)
+        logger.debug("[[ONEDRIVE]] CSOne folder read failure verbatim folder=%s", folder, exc_info=True)
         return None
 
 
@@ -1140,12 +1848,12 @@ def start_analysis():
                 'status': 'starting',
                 'progress': 0,
                 'message': 'Initializing AdoptIQ Ultra Intelligence System...',
-                'start_time': datetime.now().isoformat(),
+                'start_time': _now_utc_iso_z(),
                 'current_step': 'System Initialization',
                 'completed_steps': [],
                 'sub_step': '',
                 'total_steps': 12,
-                'step_start_time': datetime.now().isoformat(),
+                'step_start_time': _now_utc_iso_z(),
                 'estimated_completion': None,
                 'manager': manager,
                 'tech': tech,
@@ -1175,9 +1883,20 @@ def start_analysis():
         thread.daemon = True
         thread.start()
         
-        # Log the analysis ID for debugging
-        logger.info(f"[[START]] Started analysis with ID: {analysis_id}")
-        logger.info(f"[[DEBUG]] Analysis status keys in memory: {list(analysis_status.keys())}")
+        # Round 8 / Phase 1.4: previously this logged
+        # ``list(analysis_status.keys())`` *outside* ``analysis_status_lock``
+        # while worker threads concurrently mutate the dict, which can raise
+        # ``RuntimeError: dictionary changed size during iteration`` and at
+        # best produces a nonsensical snapshot.  Snapshot under the lock.
+        # Round 8 / Phase 1.7: do not log the raw ``analysis_id`` (it
+        # embeds customer/manager/technology fragments) or the verbatim
+        # status keys at INFO -- digest at INFO, verbatim at DEBUG, and
+        # only a count of in-flight analyses at INFO.
+        with analysis_status_lock:
+            _status_count = len(analysis_status)
+            _status_keys_snapshot = list(analysis_status.keys())
+        logger.info("[[START]] Started analysis aid_digest=%s in_flight=%d", _id_digest(analysis_id), _status_count)
+        logger.debug("[[DEBUG]] Analysis status keys in memory: %s", _status_keys_snapshot)
         
         # Always return JSON - the frontend handles the redirect
         return jsonify({
@@ -1291,7 +2010,6 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
     if csone_df is not None and not csone_df.empty:
         for _, row in csone_df.iterrows():
             csc_refs = []
-            bems_refs = []
             # Use flexible customer column lookup
             customer = 'Unknown'
             for col in ['Customer Name', 'customer_name', 'BU_NAME', 'Customer']:
@@ -1299,24 +2017,32 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
                     customer = normalize_customer_name(row[col])
                     break
             
-            # Check Transaction ID for CSC/BST and BEMS references
+            # Check Transaction ID for CSC/BST references (BEMS handled by canonical helper below)
             if 'Transaction ID' in csone_df.columns and pd.notna(row.get('Transaction ID', None)):
                 tx_id = str(row['Transaction ID'])
                 csc_refs.extend(_CSC_RE.findall(tx_id))
-                bems_refs.extend(_BEMS_RE.findall(tx_id))
             
-            # Check bemscsc_refs column
+            # Check bemscsc_refs column for CSC references
             if 'bemscsc_refs' in csone_df.columns and pd.notna(row.get('bemscsc_refs', None)):
                 refs_str = str(row['bemscsc_refs'])
                 csc_refs.extend(_CSC_RE.findall(refs_str))
-                bems_refs.extend(_BEMS_RE.findall(refs_str))
             
-            # Check Title and Problem Description
+            # Check Title and Problem Description for CSC
             title = str(row.get('Title', '')) if 'Title' in row.index else ''
             description = str(row.get('Problem Description', '')) if 'Problem Description' in row.index else ''
             combined_text = f"{title} {description}"
             csc_refs.extend(_CSC_RE.findall(combined_text))
-            bems_refs.extend(_BEMS_RE.findall(combined_text))
+            # Round 6 / Phase 5.10: route BEMS extraction through the
+            # canonical ``extract_bems_ids_from_row`` helper instead of
+            # the local ``_BEMS_RE`` so case insensitivity, suffix /
+            # punctuation handling, and the deduplication semantics
+            # match every other path that consumes BEMS references
+            # (compact / EI / leader / canonical_metrics).  Without
+            # this, the comprehensive software-defects payload could
+            # over- or under-count BEMS for the same row, depending
+            # on whether the canonical helper had additional
+            # normalization that the local regex missed.
+            bems_refs = list(extract_bems_ids_from_row(row))
             
             all_refs = [(rid, 'CSC') for rid in csc_refs] + [(rid, 'BEMS') for rid in bems_refs]
             
@@ -1351,7 +2077,6 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
     if ab_df is not None and not ab_df.empty:
         for _, row in ab_df.iterrows():
             csc_refs = []
-            bems_refs = []
             # Use flexible customer column lookup
             customer = 'Unknown'
             for col in ['customer_name', 'Customer Name', 'BU_NAME', 'Customer']:
@@ -1359,13 +2084,12 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
                     customer = normalize_customer_name(row[col])
                     break
             
-            # Check bemscsc_refs column
+            # Check bemscsc_refs column for CSC IDs
             if 'bemscsc_refs' in ab_df.columns and pd.notna(row.get('bemscsc_refs', None)):
                 refs_str = str(row['bemscsc_refs'])
                 csc_refs.extend(_CSC_RE.findall(refs_str))
-                bems_refs.extend(_BEMS_RE.findall(refs_str))
             
-            # Check title and description
+            # Check title and description for CSC IDs
             title = row.get('title', '') if 'title' in row.index else (
                 row.get('SUBJECT_C', '') if 'SUBJECT_C' in row.index else ''
             )
@@ -1374,7 +2098,9 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
             )
             combined_text = f"{title} {description}"
             csc_refs.extend(_CSC_RE.findall(combined_text))
-            bems_refs.extend(_BEMS_RE.findall(combined_text))
+            # Round 6 / Phase 5.10: BEMS via canonical helper (see
+            # CSOne branch above for rationale).
+            bems_refs = list(extract_bems_ids_from_row(row))
             
             all_refs = [(rid, 'CSC') for rid in csc_refs] + [(rid, 'BEMS') for rid in bems_refs]
             
@@ -1561,13 +2287,42 @@ def extract_psirt_vulnerabilities(csone_df: pd.DataFrame, ab_df: pd.DataFrame = 
                     vulnerabilities['vulnerability_by_customer'][customer] = []
                 vulnerabilities['vulnerability_by_customer'][customer].append(psirt.lower())
     
-    # Calculate totals
-    vulnerabilities['total_vulnerabilities'] = len(vulnerabilities['cve_ids']) + len(vulnerabilities['psirt_advisories'])
+    # Round 2 / Phase 5.3: a single security issue is often referenced
+    # both by its CVE id (e.g. ``CVE-2024-12345``) and by a Cisco
+    # PSIRT advisory id (e.g. ``cisco-sa-...``).  Summing the two id
+    # spaces double-counts those issues.  Expose the two id-space
+    # counts separately AND a deduped "distinct issues" count so
+    # downstream renderers can pick the metric that matches their
+    # narrative.
+    cve_count = len(vulnerabilities['cve_ids'])
+    psirt_count = len(vulnerabilities['psirt_advisories'])
+    distinct_issue_keys: set = set()
+    try:
+        for _customer, _ids in (vulnerabilities.get('vulnerability_by_customer') or {}).items():
+            for _vid in _ids or []:
+                if not _vid:
+                    continue
+                distinct_issue_keys.add(str(_vid).strip().lower())
+    except Exception:
+        distinct_issue_keys = set()
+    vulnerabilities['cve_count'] = cve_count
+    vulnerabilities['psirt_count'] = psirt_count
+    vulnerabilities['distinct_issues_count'] = len(distinct_issue_keys)
+    vulnerabilities['total_vulnerability_identifiers'] = cve_count + psirt_count
+    # Preserve the legacy key for backward compatibility but point it
+    # at the deduped count so existing call sites stop double-counting.
+    vulnerabilities['total_vulnerabilities'] = vulnerabilities['distinct_issues_count']
     vulnerabilities['total_cases_with_vulns'] = len(vulnerabilities['vulnerability_cases'])
     vulnerabilities['customers_with_vulns'] = sorted(list(vulnerabilities['customers_with_vulns']))
-    
-    logger.info(f"[[PSIRT]] Found {vulnerabilities['total_vulnerabilities']} vulnerabilities ({len(vulnerabilities['cve_ids'])} CVEs, {len(vulnerabilities['psirt_advisories'])} PSIRT advisories)")
-    
+
+    logger.info(
+        "[[PSIRT]] CVE count=%d, PSIRT count=%d, identifiers sum=%d, distinct issues=%d",
+        cve_count,
+        psirt_count,
+        vulnerabilities['total_vulnerability_identifiers'],
+        vulnerabilities['distinct_issues_count'],
+    )
+
     return vulnerabilities
 
 def detect_bems_escalations(csone_df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
@@ -1610,7 +2365,16 @@ def detect_bems_escalations(csone_df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     return bems_cases, bems_count
 
 def _clean_datetime_columns_for_excel(df):
-    """Remove timezone information from datetime columns for Excel compatibility"""
+    """Normalize datetime columns to wall-clock UTC for Excel compatibility.
+
+    Round 5 / Phase 1.16: Excel cells cannot carry tz-aware datetimes, so
+    we used to strip the tz with ``tz_convert(None)`` -- but that drops
+    the offset *without* converting, which silently shifts the wall-clock
+    value (e.g. a 2025-01-01T00:00:00+00:00 row in a frame stored as
+    ``-05:00`` would become 2025-01-01T05:00:00 in the workbook).  Convert
+    to UTC first, then drop the tz, so the value Excel sees is the
+    canonical UTC wall-clock that matches the rest of the report.
+    """
     if df is None or df.empty:
         return df if df is not None else pd.DataFrame()
     
@@ -1619,9 +2383,11 @@ def _clean_datetime_columns_for_excel(df):
         for col in df_clean.columns:
             if pd.api.types.is_datetime64_any_dtype(df_clean[col]):
                 try:
-                    # Strip timezone from tz-aware columns; tz-naive columns need no conversion
                     if hasattr(df_clean[col].dtype, 'tz') and df_clean[col].dtype.tz is not None:
-                        df_clean[col] = df_clean[col].dt.tz_convert(None)
+                        # Convert to UTC, then drop tz so Excel writes the
+                        # UTC wall-clock instead of the original offset's
+                        # wall-clock.
+                        df_clean[col] = df_clean[col].dt.tz_convert('UTC').dt.tz_localize(None)
                 except Exception as col_error:
                     logger.warning(f"Could not clean datetime column {col}: {col_error}")
                     # If we can't clean the column, convert to string
@@ -1631,6 +2397,215 @@ def _clean_datetime_columns_for_excel(df):
         logger.error(f"Error cleaning datetime columns: {e}")
         # Return original dataframe if cleaning fails
         return df
+
+
+# Round 6 / Phase 1.5: single source of truth for "high-impact"
+# external service incidents.  Both the renewal Word document
+# ("High-Impact Incidents" row in Customer Health Dashboard) and the
+# matplotlib "Service Incidents Timeline" chart (red-bar selection)
+# now route through this helper so the same incident set is labeled
+# consistently across surfaces.
+#
+# Round 11 / Phase 2.3: previously the helper recognized only the
+# three "active investigation" statuses (investigating / identified /
+# monitoring), but two other surfaces ALSO counted high-impact
+# incidents and used DIFFERENT definitions:
+#   - "Renewal Risk Correlation" prose (~8185) accepted ``active`` and
+#     ``major_outage`` plus ``impact_level in {high, critical, major}``
+#   - The per-incident bullet list (~8212) only flagged the original
+#     three.
+# That meant a customer could see "5 high-impact incidents" in the
+# correlation paragraph and "2 high-impact incidents" in the
+# Customer Health Dashboard table on the SAME page.  Expand the
+# helper to recognize the union of all four sites' criteria
+# (active investigation statuses ∪ ``active``/``major_outage`` ∪
+# ``impact_level`` HIGH/CRITICAL/MAJOR) and route every site
+# through it so the count agrees everywhere.  ``resolved`` /
+# ``completed`` are explicitly excluded because a resolved
+# incident is, by definition, no longer impacting the customer.
+_HIGH_IMPACT_INCIDENT_STATUSES = frozenset(
+    {
+        # Original "active investigation" set (kept for chart parity).
+        "investigating",
+        "identified",
+        "monitoring",
+        # Round 11 / Phase 2.3: added so the helper agrees with the
+        # renewal-correlation narrative and the per-row bullet list.
+        "active",
+        "major_outage",
+    }
+)
+_HIGH_IMPACT_INCIDENT_LEVELS = frozenset(
+    {"high", "critical", "major"}
+)
+_RESOLVED_INCIDENT_STATUSES = frozenset(
+    {"resolved", "completed", "closed", "postmortem"}
+)
+
+# Round 11 / Phase 5.3: single source of truth for the case-priority
+# pie palette so every chart renders the same color for the same
+# normalized priority.  Previously two pies disagreed on the
+# "Unknown" wedge color (``#9e9e9e`` vs ``#9aa0a6``) which made
+# them look like they were measuring different things.  Centralize
+# here so future tweaks land in exactly one place.
+SEVERITY_COLORS = {
+    'P1': '#d62728',
+    'P2': '#ff7f0e',
+    'P3': '#ffd700',
+    'P4': '#2ca02c',
+    'Unknown': '#9e9e9e',
+}
+SEVERITY_COLOR_DEFAULT = '#1f77b4'
+
+
+def _r10_autopct(p):
+    """Round 11 / Phase 8.4: shared autopct helper for severity/
+    risk pies.  Mirrors the same-named helper in
+    ``adoptiq_backend.py`` so a non-zero slice never renders as
+    ``0.0%`` and visible percents always sum to ~100.  ``%1.1f%%``
+    on its own would print ``0.0%`` for any slice below 0.05% and
+    actively mislead readers.
+    """
+    try:
+        p = float(p or 0.0)
+    except (TypeError, ValueError):
+        return ''
+    if p <= 0:
+        return ''
+    if p < 1.0:
+        return '<1%'
+    return f'{p:.1f}%'
+
+
+def _is_high_impact_incident(inc) -> bool:
+    """Return True when ``inc`` represents an active, high-impact
+    service incident.  Round 11 / Phase 2.3 expanded the criteria so
+    every call site (dashboard chart, customer health dashboard, the
+    renewal correlation paragraph at ~8185, and the per-row decoration
+    at ~8212) shares the same definition.
+    """
+    if not isinstance(inc, dict):
+        return False
+    try:
+        status = str(inc.get("status", "")).strip().lower()
+        impact = str(inc.get("impact_level", "")).strip().lower()
+    except Exception:
+        return False
+    # Resolved incidents are never high-impact regardless of the
+    # original ``impact_level`` annotation.
+    if status in _RESOLVED_INCIDENT_STATUSES:
+        return False
+    if status in _HIGH_IMPACT_INCIDENT_STATUSES:
+        return True
+    if impact in _HIGH_IMPACT_INCIDENT_LEVELS:
+        return True
+    return False
+
+
+def _count_high_impact_incidents(incidents) -> int:
+    if not incidents:
+        return 0
+    try:
+        return sum(1 for inc in incidents if _is_high_impact_incident(inc))
+    except Exception:
+        return 0
+
+
+def _safe_doc_text(value, max_len: int = 200) -> str:
+    """Round 6 / Phase 1.4: sanitize a string before docx.add_heading /
+    add_run.  Drops XML-illegal control codes, collapses whitespace,
+    and caps length so a malformed customer/manager string can't crash
+    the docx writer (or produce a Word repair-required document).
+    """
+    try:
+        s = "" if value is None else str(value)
+    except Exception:
+        return ""
+    cleaned = []
+    for ch in s:
+        cp = ord(ch)
+        if cp < 0x20 and ch not in ("\t", "\n", "\r"):
+            continue
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        cleaned.append(ch)
+    s = "".join(cleaned)
+    import re as _re_local
+    s = _re_local.sub(r"\s+", " ", s).strip()
+    if max_len and len(s) > max_len:
+        s = s[: max_len - 1] + "…"
+    return s
+
+
+# Round 6 / Phase 1.18: Excel cells have a hard 32767-character limit
+# (xlsxwriter raises silently or truncates).  When we clip a cell we
+# count it here so the workbook can append a footnote in
+# ``Report_Info`` describing how many cells overflowed and what cap
+# applied.  The counter is intentionally process-global because the
+# Excel writers are sequential per request.
+EXCEL_MAX_CELL_CHARS = 32767
+_EXCEL_TRUNCATION_COUNTER = {"cells_clipped": 0, "max_seen": 0}
+
+
+def _excel_safe_cell(value):
+    """Round 6 / Phase 1.2 + 1.18: coerce a cell value to something
+    xlsxwriter can serialize without rendering ``NaN`` / ``inf`` /
+    ``pd.NA`` / ``NaT`` as misleading text, AND clip oversized strings
+    to Excel's 32767-character cap with an explicit truncation marker
+    so the reader can tell the cell was clipped.
+
+    xlsxwriter writes ``float('nan')`` as a literal "nan" cell, not a
+    blank, which downstream consumers (and the auto-filter UI) mis-read
+    as a real value.  ``pd.NA`` raises in some xlsxwriter versions, and
+    ``inf`` / ``-inf`` blow past Excel's numeric range.  Normalize all
+    of these to ``None`` (Excel blank) and pass other values through
+    unchanged.
+    """
+    try:
+        if value is None:
+            return None
+        # pandas missing sentinels (works for pd.NA, NaT, NaN-of-various-dtypes)
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
+        # Reject non-finite floats (NaN already handled above; this catches inf)
+        if isinstance(value, float):
+            try:
+                import math as _math
+                if not _math.isfinite(value):
+                    return None
+            except Exception:
+                return None
+        # Round 6 / Phase 1.18: clip oversized text and record the
+        # truncation so the workbook can add a Report_Info footnote.
+        if isinstance(value, str) and len(value) > EXCEL_MAX_CELL_CHARS:
+            try:
+                _EXCEL_TRUNCATION_COUNTER["cells_clipped"] += 1
+                if len(value) > _EXCEL_TRUNCATION_COUNTER["max_seen"]:
+                    _EXCEL_TRUNCATION_COUNTER["max_seen"] = len(value)
+            except Exception:
+                pass
+            marker = " ...[TRUNCATED]"
+            keep = EXCEL_MAX_CELL_CHARS - len(marker)
+            return (value[:keep] if keep > 0 else value[:EXCEL_MAX_CELL_CHARS]) + marker
+        return value
+    except Exception:
+        return value
+
+
+def _excel_truncation_snapshot_and_reset():
+    """Return current truncation counter and reset to zero.
+
+    Round 6 / Phase 1.18: the workbook writer calls this *after* all
+    sheets are written so it can append a Report_Info footnote
+    describing how many cells were clipped at the 32767-char Excel cap.
+    """
+    snap = dict(_EXCEL_TRUNCATION_COUNTER)
+    _EXCEL_TRUNCATION_COUNTER["cells_clipped"] = 0
+    _EXCEL_TRUNCATION_COUNTER["max_seen"] = 0
+    return snap
 
 
 def _validate_excel_output(excel_path) -> bool:
@@ -1728,8 +2703,33 @@ def _has_customer_activity_for_deep_dive(
             return True
     return False
 
-def _generate_comprehensive_fallback_insights(ab_norm, csone_df, manager, technology):
-    """Generate comprehensive fallback insights when AI is unavailable"""
+def _generate_comprehensive_fallback_insights(
+    ab_norm,
+    csone_df,
+    manager,
+    technology,
+    *,
+    team_subs_df=None,
+    csconsole_action_plans=None,
+    csconsole_customer_pulse=None,
+    csconsole_success_priorities=None,
+    csconsole_adoption_barriers=None,
+    llm_error=None,
+):
+    """Generate non-AI fallback insights when the LLM is unavailable.
+
+    Phase 1.6: this code is NOT AI output and must not be labeled as such.
+    Callers should render the resulting bundle under a "Non-AI fallback
+    summary" heading and surface ``llm_error`` so the reader knows why the
+    AI summary is missing.
+
+    Also accepts the same multi-source customer frames the AI path uses so
+    the customer count in the fallback narrative agrees with the headline.
+    Without ``team_subs_df`` / CSConsole frames the fallback under-counts
+    any customer that exists only in subscription / pulse / action-plan
+    data (which is exactly the path that's been producing "12 in
+    dashboard, 9 in narrative" mismatches).
+    """
     insights = []
     ab_norm = ab_norm if ab_norm is not None else pd.DataFrame()
     csone_df = csone_df if csone_df is not None else pd.DataFrame()
@@ -1738,11 +2738,11 @@ def _generate_comprehensive_fallback_insights(ab_norm, csone_df, manager, techno
     all_customers_set = _get_all_customers_from_all_sources(
         ab_norm=ab_norm,
         csone_df=csone_df,
-        team_subs_df=None,  # Not available in fallback context
-        csconsole_action_plans=None,
-        csconsole_customer_pulse=None,
-        csconsole_success_priorities=None,
-        csconsole_adoption_barriers=None
+        team_subs_df=team_subs_df,
+        csconsole_action_plans=csconsole_action_plans,
+        csconsole_customer_pulse=csconsole_customer_pulse,
+        csconsole_success_priorities=csconsole_success_priorities,
+        csconsole_adoption_barriers=csconsole_adoption_barriers,
     )
     total_customers = len(all_customers_set)
     ab_count = len(ab_norm)
@@ -1817,49 +2817,95 @@ def _generate_comprehensive_fallback_insights(ab_norm, csone_df, manager, techno
     
     # Business impact
     insights.append("BUSINESS IMPACT: Addressing these issues proactively will improve customer satisfaction scores, reduce churn risk, and increase renewal rates. Executive engagement is critical for successful outcomes.")
-    
-    return " ".join(insights)
+
+    # Phase 1.6: prefix the bundle with an honesty header so any downstream
+    # renderer (compact / EI / leader) cannot pass this off as AI output.
+    header_lines = [
+        "[Non-AI fallback summary] The LLM did not return a usable response "
+        "for this run. The text below is rule-based output computed directly "
+        "from the canonical metrics (no model inference)."
+    ]
+    if llm_error:
+        header_lines.append(f"[LLM error] {str(llm_error).strip()}")
+    return " ".join(header_lines + [""] + insights)
 
 def _parse_markdown_for_fallback(doc, ai_text: str):
-    """Parse AI markdown and add clean content to Word document - CRITICAL FIX"""
+    """Parse AI markdown and add clean content to Word document - CRITICAL FIX
+
+    Round 12 / Phase 9.6: previously every ``doc.add_heading`` /
+    ``doc.add_paragraph`` / ``para.add_run`` in this fallback parser
+    was fed the raw AI string verbatim.  If the model emitted an
+    XML-illegal control byte (e.g. a stray 0x07 BEL or unpaired
+    surrogate from a quoted log fragment) the docx serializer would
+    raise on save and the entire fallback Word document would be
+    lost -- exactly the failure mode Round 8 hardened every other
+    AI->docx writer against by routing through ``_safe_doc_text`` /
+    ``_safe_add_run``.  Bring the markdown fallback path into Round
+    8 parity by sanitizing every text node before it reaches the
+    docx surface.  We deliberately re-use the existing helpers here
+    rather than calling ``docx`` directly so the same sanitization
+    rules (control-code drop, whitespace collapse, length cap)
+    apply uniformly.
+    """
     import re
     from docx.shared import Pt
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-    
+
+    # Round 12 / Phase 9.6: a missing/None ``ai_text`` previously
+    # crashed at ``.replace`` time -- guard the entry point so the
+    # fallback never blows up the document save.
+    if ai_text is None:
+        return
+    try:
+        ai_text = str(ai_text)
+    except Exception:
+        return
+
     # Remove instruction symbols
     ai_text = ai_text.replace('**YOUR MISSION:**', '').replace('**CRITICAL REQUIREMENTS:**', '')
     ai_text = ai_text.replace('**TECHNOLOGY FOCUS:**', '').replace('**DATA SOURCES:**', '')
-    
+
+    def _r12_safe_run(paragraph, text, *, bold=False, max_len=5000):
+        """Round 12 / Phase 9.6 inline ``_safe_add_run`` companion.
+        Routes ``text`` through ``_safe_doc_text`` so XML-illegal
+        control bytes and unpaired surrogates can never reach the
+        underlying docx run.
+        """
+        run = paragraph.add_run(_safe_doc_text(text, max_len=max_len))
+        if bold:
+            run.bold = True
+        return run
+
     lines = ai_text.split('\n')
     for line in lines:
         line = line.strip()
         if not line or any(x in line for x in ['YOUR MISSION:', 'CRITICAL REQUIREMENTS:']):
             continue
-        
+
         # Convert headings (remove ##)
         if line.startswith('#'):
             level = len(line) - len(line.lstrip('#'))
             heading_text = line.lstrip('#').replace('**', '').strip()
             if heading_text:
-                doc.add_heading(heading_text, min(level, 3))
-        
+                doc.add_heading(_safe_doc_text(heading_text, max_len=300), min(level, 3))
+
         # Handle separators
         elif line.startswith('---'):
             sep_para = doc.add_paragraph()
             sep_run = sep_para.add_run('_' * 50)
             sep_run.font.size = Pt(8)
             sep_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+
         # Handle bullets
         elif line.startswith(('• ', '* ', '- ')):
             text = line[2:].replace('**', '')
-            doc.add_paragraph(text, style='List Bullet')
-        
+            doc.add_paragraph(_safe_doc_text(text, max_len=5000), style='List Bullet')
+
         # Handle numbered lists
         elif re.match(r'^\d+[\.\)]\s', line):
             text = re.sub(r'^\d+[\.\)]\s*', '', line).replace('**', '')
-            doc.add_paragraph(text, style='List Number')
-        
+            doc.add_paragraph(_safe_doc_text(text, max_len=5000), style='List Number')
+
         # Regular paragraphs - handle bold text
         elif line:
             if '**' in line:
@@ -1867,12 +2913,11 @@ def _parse_markdown_for_fallback(doc, ai_text: str):
                 parts = re.split(r'(\*\*[^*]+\*\*)', line)
                 for part in parts:
                     if part.startswith('**') and part.endswith('**'):
-                        bold_run = para.add_run(part.strip('**'))
-                        bold_run.bold = True
+                        _r12_safe_run(para, part.strip('**'), bold=True)
                     elif part:
-                        para.add_run(part)
+                        _r12_safe_run(para, part)
             else:
-                doc.add_paragraph(line)
+                doc.add_paragraph(_safe_doc_text(line, max_len=5000))
 
 def create_executive_charts(
     ab_norm: pd.DataFrame,
@@ -1932,7 +2977,15 @@ def create_executive_charts(
                     )
                 plt.xticks(rotation=45, ha='right')
                 plt.tight_layout()
-                chart_path = f"outputs/support_cases_trend_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                # Round 12 / Phase 10.6: previously every chart filename in
+                # this module suffixed ``datetime.now().strftime('%Y%m%d_%H%M%S')``
+                # (HOST-LOCAL clock, no timezone marker), so two operators
+                # generating the same logical report on machines in
+                # different timezones would write artifacts under different
+                # filenames -- breaking cross-machine reproducibility for
+                # the audit trail.  Anchor on UTC and append a ``Z`` so the
+                # chart filename embeds an unambiguous timezone marker.
+                chart_path = f"outputs/support_cases_trend_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
                 plt.savefig(chart_path, dpi=300, bbox_inches='tight')
                 plt.close()
                 chart_paths.append(chart_path)
@@ -1962,25 +3015,25 @@ def create_executive_charts(
                 severity_counts = severity_counts[severity_counts > 0]
                 if not severity_counts.empty:
                     fig, ax = plt.subplots(figsize=(10, 8))
-                    color_map = {
-                        'P1': '#d62728',
-                        'P2': '#ff7f0e',
-                        'P3': '#ffd700',
-                        'P4': '#2ca02c',
-                        'Unknown': '#9e9e9e',
-                    }
-                    colors = [color_map.get(str(sev), '#1f77b4') for sev in severity_counts.index]
+                    # Round 11 / Phase 5.3: use the shared
+                    # ``SEVERITY_COLORS`` constant so this pie and
+                    # the renewal-health severity pie below cannot
+                    # disagree on the "Unknown" wedge hex.
+                    color_map = SEVERITY_COLORS
+                    colors = [color_map.get(str(sev), SEVERITY_COLOR_DEFAULT) for sev in severity_counts.index]
+                    # Round 11 / Phase 8.4: use shared _r10_autopct
+                    # so non-zero slices below 0.05% never render as "0.0%".
                     ax.pie(
                         severity_counts.values,
                         labels=[f'{sev} ({count})' for sev, count in zip(severity_counts.index, severity_counts.values)],
-                        autopct='%1.1f%%',
+                        autopct=_r10_autopct,
                         colors=colors,
                         startangle=90,
                         textprops={'fontsize': 11, 'weight': 'bold'},
                     )
                     ax.set_title('Case Severity Distribution (normalized P1-P4)', fontsize=14, fontweight='bold', pad=20)
                     plt.tight_layout()
-                    chart_path = f"outputs/severity_distribution_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                    chart_path = f"outputs/severity_distribution_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
                     plt.savefig(chart_path, dpi=300, bbox_inches='tight')
                     plt.close()
                     chart_paths.append(chart_path)
@@ -1988,8 +3041,42 @@ def create_executive_charts(
         # Chart 3: Top Customers by Case Volume
         if not csone_df.empty and cust_col:
             fig, ax = plt.subplots(figsize=(12, 8))
-            customer_cases = csone_df[cust_col].value_counts().head(10)
-            colors = ['#d62728' if count > 20 else '#ff7f0e' if count > 10 else '#2ca02c' for count in customer_cases.values]
+            # Round 10 / Phase 8.3: ``value_counts()`` does not specify
+            # tie-breaker order, so two customers with the same case
+            # count can swap positions between runs (and between
+            # Word/Excel renders that re-execute this block).  Sort
+            # the full count series with an explicit
+            # ``(-count, name.lower())`` key so the top-10 is
+            # deterministic on ties.
+            _cust_counts_full = csone_df[cust_col].value_counts()
+            try:
+                _cust_counts_sorted = pd.Series(
+                    {
+                        _name: int(_count)
+                        for _name, _count in sorted(
+                            _cust_counts_full.items(),
+                            key=lambda kv: (-int(kv[1] or 0), str(kv[0]).lower()),
+                        )
+                    }
+                )
+                customer_cases = _cust_counts_sorted.head(10)
+            except Exception:
+                customer_cases = _cust_counts_full.head(10)
+            # Round 11 / Phase 8.7: previous code mapped case volume
+            # to red/orange/green via fixed thresholds, which read as
+            # "risk" semantics (customer X is critical, customer Y is
+            # healthy) when the chart is just a count.  Use a neutral
+            # mono-hue colormap so volume bars stay agnostic about
+            # risk band membership.
+            try:
+                _vmin = float(min(customer_cases.values)) if len(customer_cases) else 0.0
+                _vmax = float(max(customer_cases.values)) if len(customer_cases) else 1.0
+                if _vmax <= _vmin:
+                    _vmax = _vmin + 1.0
+                _cmap = plt.get_cmap('Blues')
+                colors = [_cmap(0.35 + 0.55 * ((float(_v) - _vmin) / (_vmax - _vmin))) for _v in customer_cases.values]
+            except Exception:
+                colors = ['#1f77b4'] * len(customer_cases)
             bars = ax.barh(range(len(customer_cases)), customer_cases.values, color=colors)
             ax.set_title('Top 10 Customers by Support Case Volume', fontsize=14, fontweight='bold', pad=15)
             ax.set_xlabel('Number of Cases', fontsize=12, fontweight='bold')
@@ -2009,7 +3096,7 @@ def create_executive_charts(
             ax.invert_yaxis()
             ax.grid(axis='x', alpha=0.3)
             plt.tight_layout()
-            chart_path = f"outputs/top_customers_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            chart_path = f"outputs/top_customers_analysis_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
             plt.savefig(chart_path, dpi=300, bbox_inches='tight')
             plt.close()
             chart_paths.append(chart_path)
@@ -2019,9 +3106,40 @@ def create_executive_charts(
         bems_cust_col = next((c for c in ['customer_name', 'Customer Name', 'BU_NAME', 'Customer'] if c in bems_cases.columns), None) if not bems_cases.empty else None
         if not bems_cases.empty and bems_cust_col:
             fig, ax = plt.subplots(figsize=(12, 8))
-            bems_by_customer = bems_cases[bems_cust_col].value_counts().head(10)
+            # Round 11 / Phase 8.2: ``value_counts().head(10)`` does not
+            # guarantee an order on ties, so two customers with the
+            # same BEMS count can swap between runs.  Sort with an
+            # explicit ``(-count, name.lower())`` tie-breaker so the
+            # rendered bars are reproducible.  Round 11 / Phase 8.3:
+            # disclose truncation in the title when more than 10
+            # customers were eligible.
+            _bems_full = bems_cases[bems_cust_col].value_counts()
+            try:
+                _bems_sorted = pd.Series(
+                    {
+                        _name: int(_count)
+                        for _name, _count in sorted(
+                            _bems_full.items(),
+                            key=lambda kv: (-int(kv[1] or 0), str(kv[0]).lower()),
+                        )
+                    }
+                )
+                bems_by_customer = _bems_sorted.head(10)
+            except Exception:
+                bems_by_customer = _bems_full.head(10)
+            _bems_total_customers = int(_bems_full.shape[0]) if hasattr(_bems_full, 'shape') else len(_bems_full)
             bars = ax.barh(range(len(bems_by_customer)), bems_by_customer.values, color='#d62728')
-            ax.set_title('BEMS Escalations by Customer', fontsize=14, fontweight='bold', pad=15)
+            if _bems_total_customers > len(bems_by_customer):
+                _bems_more = _bems_total_customers - len(bems_by_customer)
+                ax.set_title(
+                    f'BEMS Escalations by Customer (Top {len(bems_by_customer)} of {_bems_total_customers}; +{_bems_more} more)',
+                    fontsize=14, fontweight='bold', pad=15,
+                )
+            else:
+                ax.set_title(
+                    f'BEMS Escalations by Customer (Top {len(bems_by_customer)})',
+                    fontsize=14, fontweight='bold', pad=15,
+                )
             ax.set_xlabel('Number of BEMS Cases', fontsize=12, fontweight='bold')
             ax.set_ylabel('Customer', fontsize=12, fontweight='bold')
             for bar, value in zip(bars, bems_by_customer.values):
@@ -2039,7 +3157,7 @@ def create_executive_charts(
             ax.invert_yaxis()
             ax.grid(axis='x', alpha=0.3)
             plt.tight_layout()
-            chart_path = f"outputs/bems_escalations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            chart_path = f"outputs/bems_escalations_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
             plt.savefig(chart_path, dpi=300, bbox_inches='tight')
             plt.close()
             chart_paths.append(chart_path)
@@ -2047,16 +3165,40 @@ def create_executive_charts(
         # Chart 5: Feature Request Volume by Customer
         if feature_requests.get('customer_examples'):
             fig, ax = plt.subplots(figsize=(12, 8))
+            # Round 10 / Phase 8.2: add a stable secondary sort on
+            # ``customer_name`` (case-insensitive) so two customers with
+            # the same ``request_count`` always render in the same
+            # order across rebuilds.  The previous sort dropped to
+            # arbitrary input order on ties, which produced spurious
+            # "the bar chart changed" diffs between consecutive runs
+            # on the same dataset.
+            # Round 11 / Phase 8.3: count the eligible customers
+            # before truncating to the top 10 so the title can
+            # disclose how many bars were dropped.
+            _fr_eligible = [c for c in feature_requests['customer_examples'] if c.get('request_count', 0) > 0]
+            _fr_total_customers = len(_fr_eligible)
             examples = sorted(
-                [c for c in feature_requests['customer_examples'] if c.get('request_count', 0) > 0],
-                key=lambda row: row.get('request_count', 0),
-                reverse=True,
+                _fr_eligible,
+                key=lambda row: (
+                    -int(row.get('request_count', 0) or 0),
+                    str(row.get('customer_name', '')).lower(),
+                ),
             )[:10]
             if examples:
                 customer_names = [c['customer_name'] for c in examples]
                 request_counts = [c.get('request_count', 0) for c in examples]
                 bars = ax.barh(range(len(customer_names)), request_counts, color='#1f77b4')
-                ax.set_title('Feature Requests by Customer', fontsize=14, fontweight='bold', pad=15)
+                if _fr_total_customers > len(examples):
+                    _fr_more = _fr_total_customers - len(examples)
+                    ax.set_title(
+                        f'Feature Requests by Customer (Top {len(examples)} of {_fr_total_customers}; +{_fr_more} more)',
+                        fontsize=14, fontweight='bold', pad=15,
+                    )
+                else:
+                    ax.set_title(
+                        f'Feature Requests by Customer (Top {len(examples)})',
+                        fontsize=14, fontweight='bold', pad=15,
+                    )
                 ax.set_xlabel('Number of Requests', fontsize=12, fontweight='bold')
                 ax.set_ylabel('Customer', fontsize=12, fontweight='bold')
                 for bar, req_count in zip(bars, request_counts):
@@ -2074,7 +3216,7 @@ def create_executive_charts(
                 ax.invert_yaxis()
                 ax.grid(axis='x', alpha=0.3)
                 plt.tight_layout()
-                chart_path = f"outputs/feature_request_volume_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                chart_path = f"outputs/feature_request_volume_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
                 plt.savefig(chart_path, dpi=300, bbox_inches='tight')
                 plt.close()
                 chart_paths.append(chart_path)
@@ -2127,31 +3269,59 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         # textual band ("CRITICAL"/"HIGH"/"MEDIUM"/"LOW"/"HEALTHY") can
         # never disagree (the previous inline 70/50/30 cutoffs did).
         from risk_scoring import RISK_BAND_THRESHOLDS as _RBT
+        # Round 12 / Phase 5.1: previously the LOW band wedge was
+        # hard-coded to ``#fff176`` (a light-yellow) while the
+        # downstream renewal panels (#2 risk distribution, #4 risk
+        # heatmap) and the canonical ``RISK_BAND_COLORS["LOW"]``
+        # constant in ``canonical_metrics`` already render LOW as
+        # ``#2ca02c`` (green).  The same band therefore appeared as
+        # two different colors inside the same Word document, which
+        # both broke the visual legend and made the donut suggest a
+        # higher risk than the panels showed.  Resolve every wedge
+        # color from the canonical palette so all four panels agree.
+        try:
+            from canonical_metrics import (
+                RISK_BAND_COLORS as _R12_RBC,
+                RISK_BAND_COLOR_DEFAULT as _R12_RBC_DEFAULT,
+            )
+        except Exception:
+            _R12_RBC = {
+                "CRITICAL": "#d62728",
+                "HIGH": "#ff7f0e",
+                "MEDIUM": "#ffd700",
+                "LOW": "#2ca02c",
+                "HEALTHY": "#28B463",
+            }
+            _R12_RBC_DEFAULT = "#1f77b4"
         sizes = [risk_score, 100 - risk_score]
         if risk_score >= _RBT["CRITICAL"]:
-            _wedge_color = '#d62728'  # CRITICAL
+            _wedge_color = _R12_RBC.get("CRITICAL", _R12_RBC_DEFAULT)
         elif risk_score >= _RBT["HIGH"]:
-            _wedge_color = '#ff7f0e'  # HIGH
+            _wedge_color = _R12_RBC.get("HIGH", _R12_RBC_DEFAULT)
         elif risk_score >= _RBT["MEDIUM"]:
-            _wedge_color = '#ffd700'  # MEDIUM
+            _wedge_color = _R12_RBC.get("MEDIUM", _R12_RBC_DEFAULT)
         elif risk_score >= _RBT["LOW"]:
-            _wedge_color = '#fff176'  # LOW
+            _wedge_color = _R12_RBC.get("LOW", _R12_RBC_DEFAULT)
         else:
-            _wedge_color = '#2ca02c'  # HEALTHY
+            _wedge_color = _R12_RBC.get("HEALTHY", _R12_RBC_DEFAULT)
         colors = [_wedge_color, '#f0f0f0']
         
         wedges, texts, autotexts = ax.pie(sizes, labels=['Risk Score', 'Remaining'], 
                                           autopct='', colors=colors, startangle=90,
                                           pctdistance=0.85, labeldistance=1.1)
         
-        # Add center text with risk score
-        ax.text(0, 0, f'{int(risk_score)}/100\n{risk_category}', 
+        # Round 10 / Phase 1.5: render the renewal-risk score with 1 decimal
+        # to match the DOCX renewal section which uses
+        # ``round(float(risk_score_raw), 1)``. ``int()`` previously truncated
+        # 73.7 to "73", so the gauge and the textual "Renewal Risk Score:
+        # 73.7/100" disagreed for the same customer.
+        ax.text(0, 0, f'{float(risk_score):.1f}/100\n{risk_category}',
                 ha='center', va='center', fontsize=24, fontweight='bold',
                 color=colors[0])
         
         ax.set_title('Renewal Risk Score\n(Visual Indicator)', fontsize=16, fontweight='bold', pad=20)
         plt.tight_layout()
-        chart_path = f"outputs/renewal_risk_score_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        chart_path = f"outputs/renewal_risk_score_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
         plt.savefig(chart_path, dpi=300, bbox_inches='tight')
         plt.close()
         chart_paths.append(chart_path)
@@ -2160,19 +3330,37 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         if not customer_csone.empty and 'Date/Time Opened' in customer_csone.columns:
             fig, ax = plt.subplots(figsize=(12, 6))
             
-            # Round 3: track how many cases we drop because the open date
-            # is missing/unparseable so the chart subtitle can disclose
-            # the gap. Without this the bars sum to less than the headline
-            # support_cases_count and looks like missing data.
-            _total_before_dt_filter = len(customer_csone)
-            customer_csone['Date/Time Opened'] = pd.to_datetime(customer_csone['Date/Time Opened'], errors='coerce')
-            customer_csone = customer_csone.dropna(subset=['Date/Time Opened'])
-            _dropped_no_date = _total_before_dt_filter - len(customer_csone)
-            
-            if len(customer_csone) > 0:
-                # Group by week
-                customer_csone['Week'] = customer_csone['Date/Time Opened'].dt.to_period('W')
-                weekly_cases = customer_csone.groupby('Week').size()
+            # Round 3 / Phase 1.2: do all parsing/filtering on a local
+            # ``work`` copy so we never mutate the caller's
+            # customer_csone. Previously the ``pd.to_datetime`` write
+            # below rewrote the caller's column dtype in place, then
+            # the ``dropna`` rebound only the local name -- so the
+            # caller kept rows with NaT dates against a converted
+            # dtype, which was easy to misread as the chart's
+            # filtered series in any later code path.
+            #
+            # Round 6 / Phase 1.1: previously the trend chart also did
+            # ``customer_csone = work`` here, which rebound the *function-
+            # local* name to the date-trimmed subset.  Subsequent panels
+            # (severity pie, multi-panel dashboard) then built off the
+            # trimmed series while the headline ``support_cases_count``
+            # in ``_calculate_simple_renewal_risk`` was computed on the
+            # full frame, so the dashboard could disagree with the top
+            # tile.  Keep ``customer_csone`` pointing at the original
+            # frame and use the local ``work`` only for this chart.
+            work = customer_csone.copy()
+            _total_before_dt_filter = len(work)
+            work['Date/Time Opened'] = pd.to_datetime(
+                work['Date/Time Opened'], errors='coerce'
+            )
+            work = work.dropna(subset=['Date/Time Opened'])
+            _dropped_no_date = _total_before_dt_filter - len(work)
+
+            if len(work) > 0:
+                # Group by week (use local ``work`` so caller's frame is
+                # untouched and downstream panels still see all rows).
+                work['Week'] = work['Date/Time Opened'].dt.to_period('W')
+                weekly_cases = work.groupby('Week').size()
                 
                 if len(weekly_cases) > 0:
                     weeks = [str(period) for period in weekly_cases.index]
@@ -2202,7 +3390,7 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                     
                     plt.xticks(rotation=45, ha='right')
                     plt.tight_layout()
-                    chart_path = f"outputs/renewal_support_trend_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                    chart_path = f"outputs/renewal_support_trend_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
                     plt.savefig(chart_path, dpi=300, bbox_inches='tight')
                     plt.close()
                     chart_paths.append(chart_path)
@@ -2217,7 +3405,14 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
             for inc in ext_incidents:
                 if inc.get('published'):
                     try:
-                        date = pd.to_datetime(inc.get('published', ''), errors='coerce')
+                        # Round 11 / Phase 8.8: parse with utc=True so
+                        # mixed-timezone "published" strings are
+                        # normalized to a single timezone *before* we
+                        # bucket into weekly periods.  Without this the
+                        # same UTC instant could land in different
+                        # ISO weeks depending on the source TZ offset
+                        # and shift incident counts between buckets.
+                        date = pd.to_datetime(inc.get('published', ''), errors='coerce', utc=True)
                         if pd.notna(date):
                             incident_dates.append(date)
                             status = inc.get('status', 'Unknown').lower()
@@ -2228,19 +3423,47 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
             if incident_dates:
                 # Group by week
                 incident_df = pd.DataFrame({'date': incident_dates, 'status': incident_statuses})
-                incident_df['week'] = incident_df['date'].dt.to_period('W')
+                # Round 11 / Phase 8.8: drop tz before to_period because
+                # PeriodIndex does not retain tz info; we already
+                # normalized to UTC above so the calendar week is
+                # computed against a single anchor.
+                try:
+                    _wseries = incident_df['date'].dt.tz_convert('UTC').dt.tz_localize(None)
+                except Exception:
+                    _wseries = incident_df['date']
+                incident_df['week'] = _wseries.dt.to_period('W')
                 weekly_incidents = incident_df.groupby('week').size()
                 
                 if len(weekly_incidents) > 0:
                     weeks = [str(period) for period in weekly_incidents.index]
                     incident_counts = weekly_incidents.values
                     
-                    # Color based on high-impact incidents
-                    high_impact_statuses = ['investigating', 'identified', 'monitoring']
+                    # Color based on high-impact incidents.
+                    # Round 6 / Phase 1.5: route the per-week count
+                    # through the shared definition (active investigation
+                    # only) so this chart and the renewal Word table
+                    # agree on what "high-impact" means.
+                    # Round 11 / Phase 2.3: build per-row dicts so the
+                    # shared ``_is_high_impact_incident`` helper sees
+                    # both ``status`` and ``impact_level`` (the chart
+                    # used to look only at status, which understated
+                    # high-impact weeks relative to the helper).
+                    _impact_col = 'impact_level' if 'impact_level' in incident_df.columns else None
                     colors = []
                     for week in weekly_incidents.index:
                         week_incidents = incident_df[incident_df['week'] == week]
-                        high_impact = sum(1 for s in week_incidents['status'] if s in high_impact_statuses)
+                        try:
+                            _records = []
+                            for _, _row in week_incidents.iterrows():
+                                _records.append({
+                                    'status': _row.get('status', ''),
+                                    'impact_level': (
+                                        _row.get(_impact_col, '') if _impact_col else ''
+                                    ),
+                                })
+                            high_impact = _count_high_impact_incidents(_records)
+                        except Exception:
+                            high_impact = 0
                         colors.append('#d62728' if high_impact > 0 else '#ff7f0e' if len(week_incidents) > 2 else '#2ca02c')
                     
                     bars = ax.bar(weeks, incident_counts, color=colors)
@@ -2266,7 +3489,7 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                     
                     plt.xticks(rotation=45, ha='right')
                     plt.tight_layout()
-                    chart_path = f"outputs/renewal_incidents_timeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                    chart_path = f"outputs/renewal_incidents_timeline_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
                     plt.savefig(chart_path, dpi=300, bbox_inches='tight')
                     plt.close()
                     chart_paths.append(chart_path)
@@ -2276,16 +3499,63 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         fig.suptitle('Renewal Health Dashboard - Comprehensive View', 
                      fontsize=16, fontweight='bold', y=0.995)
         
-        # Panel 1: Key Metrics Summary
+        # Panel 1: Key Metrics Summary.
+        # Round 10 / Phase 8.1: drive the "Support Cases" and "Service
+        # Incidents" headline counts from the *same* series the
+        # accompanying time-series panels plot (``work`` after dropna
+        # on ``Date/Time Opened`` for cases, ``incident_dates`` after
+        # parseable-date filter for incidents).  Otherwise the same
+        # figure can show "Service Incidents: 47" next to a bar chart
+        # that visibly sums to 32 because rows without parseable
+        # ``published`` dates are silently excluded from the bars but
+        # not from the headline ``len(ext_incidents)`` / raw
+        # ``support_cases_count``.
+        try:
+            # Round 11 / Phase 4.3: fall back to ``support_cases_count``
+            # whenever ``work`` is missing OR has zero rows after the
+            # date-based dropna.  Without this fallback the headline
+            # number went to 0 even when the renewal analysis carried
+            # a non-zero raw case count (e.g. all rows had blank
+            # ``Date/Time Opened``), which made the dashboard look
+            # like there were "no support cases" when there really
+            # were just no dated ones.
+            _scc_total = int(renewal_analysis.get('support_cases_count', 0) or 0)
+            if 'work' in locals() and work is not None:
+                _work_len = int(len(work))
+                _panel1_cases = _work_len if _work_len > 0 else _scc_total
+            else:
+                _panel1_cases = _scc_total
+        except Exception:
+            _panel1_cases = int(renewal_analysis.get('support_cases_count', 0) or 0)
+        try:
+            _panel1_incidents = (
+                int(len(incident_dates)) if 'incident_dates' in locals() and incident_dates is not None
+                else (int(len(ext_incidents)) if ext_incidents else 0)
+            )
+        except Exception:
+            _panel1_incidents = int(len(ext_incidents)) if ext_incidents else 0
         metrics = {
-            'Support Cases': renewal_analysis.get('support_cases_count', 0),
+            'Support Cases': _panel1_cases,
             'Adoption Barriers': renewal_analysis.get('adoption_barriers_count', 0),
             'BEMS Escalations': renewal_analysis.get('bems_escalations_count', 0),
-            'Service Incidents': len(ext_incidents) if ext_incidents else 0
+            'Service Incidents': _panel1_incidents,
         }
         
-        ax1.barh(list(metrics.keys()), list(metrics.values()), 
-                 color=['#d62728', '#ff7f0e', '#ffd700', '#2ca02c'])
+        # Round 12 / Phase 8.3: previously these four bars (Support
+        # Cases, Adoption Barriers, BEMS Escalations, Service
+        # Incidents) were colored with the canonical risk ramp
+        # ``['#d62728', '#ff7f0e', '#ffd700', '#2ca02c']`` -- exactly
+        # the CRITICAL/HIGH/MEDIUM/LOW palette every other risk
+        # chart in the report uses.  Because the four counts are
+        # mutually incomparable units (a barrier is not "less risky
+        # than" a TAC case), the ordinal red->green ramp implied a
+        # risk story that simply does not exist; readers parsed
+        # "Support Cases: red" as "Support Cases are critical
+        # risk".  Switch to a single-hue Cisco-blue magnitude
+        # ramp (darker = larger value visually) that cannot be
+        # mistaken for the risk-band palette.
+        ax1.barh(list(metrics.keys()), list(metrics.values()),
+                 color=['#0B3D67', '#1B6BA0', '#3899D1', '#7CC2EA'])
         ax1.set_title('Key Metrics Summary', fontweight='bold')
         ax1.set_xlabel('Count', fontweight='bold')
         for i, (key, value) in enumerate(metrics.items()):
@@ -2298,11 +3568,26 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         # the underlying numbers (band label is shown as the slice
         # caption, score is the headline).
         risk_cat = risk_category
-        risk_colors = {'CRITICAL': '#d62728', 'HIGH': '#ff7f0e', 'MEDIUM': '#ffd700', 'LOW': '#2ca02c'}
+        # Round 11 / Phase 5.1: import the shared palette so the
+        # dashboard, Word, and matplotlib outputs all paint the
+        # same color for the same band.  Falls back gracefully if
+        # canonical_metrics is missing the constant for any reason
+        # so we don't break older builds.
+        try:
+            from canonical_metrics import RISK_BAND_COLORS as _R11_RISK_BAND_COLORS, RISK_BAND_COLOR_DEFAULT as _R11_RISK_DEFAULT
+            risk_colors = dict(_R11_RISK_BAND_COLORS)
+            _risk_default_color = _R11_RISK_DEFAULT
+        except Exception:
+            risk_colors = {'CRITICAL': '#d62728', 'HIGH': '#ff7f0e', 'MEDIUM': '#ffd700', 'LOW': '#2ca02c', 'HEALTHY': '#28B463', 'UNKNOWN': '#7f7f7f'}
+            _risk_default_color = '#1f77b4'
+        # Round 11 / Phase 8.1: panels 1 and 4 render the risk score
+        # to one decimal place ("82.5/100") while panel 2 truncated
+        # to ``int`` and lost the same precision.  Format consistently.
+        # Round 11 / Phase 8.4: shared autopct.
         ax2.pie([risk_score, 100-risk_score],
-                labels=[f'{risk_cat} ({int(risk_score)}/100)', 'Remaining'],
-                autopct='%1.1f%%',
-                colors=[risk_colors.get(risk_cat, '#1f77b4'), '#f0f0f0'],
+                labels=[f'{risk_cat} ({float(risk_score):.1f}/100)', 'Remaining'],
+                autopct=_r10_autopct,
+                colors=[risk_colors.get(risk_cat, _risk_default_color), '#f0f0f0'],
                 startangle=90)
         ax2.set_title('Renewal Risk Score (out of 100)', fontweight='bold')
         
@@ -2324,17 +3609,17 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                 _raw = _sev_series.value_counts()
                 _slices = [(k, int(_raw.get(k, 0))) for k in _ordered if int(_raw.get(k, 0)) > 0]
                 if _slices:
-                    color_map = {
-                        'P1': '#d62728',
-                        'P2': '#ff7f0e',
-                        'P3': '#ffd700',
-                        'P4': '#2ca02c',
-                        'Unknown': '#9aa0a6',
-                    }
+                    # Round 11 / Phase 5.3: same shared palette as
+                    # the executive severity pie above so the two
+                    # cannot drift -- the previous "#9aa0a6" gray
+                    # for Unknown disagreed by one digit with
+                    # "#9e9e9e" elsewhere.
+                    color_map = SEVERITY_COLORS
                     labels = [f'{k} ({v})' for k, v in _slices]
                     sizes = [v for _, v in _slices]
-                    colors = [color_map[k] for k, _ in _slices]
-                    ax3.pie(sizes, labels=labels, autopct='%1.1f%%', colors=colors, startangle=90)
+                    colors = [color_map.get(k, SEVERITY_COLOR_DEFAULT) for k, _ in _slices]
+                    # Round 11 / Phase 8.4: shared _r10_autopct for parity.
+                    ax3.pie(sizes, labels=labels, autopct=_r10_autopct, colors=colors, startangle=90)
                     ax3.set_title('Case Severity Distribution', fontweight='bold')
                     _renewal_pie_built = True
         if not _renewal_pie_built:
@@ -2345,16 +3630,17 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         # Panel 4: Renewal Risk Score Gauge
         ax4.text(0.5, 0.7, 'RENEWAL RISK SCORE', ha='center', va='center',
                  transform=ax4.transAxes, fontsize=14, fontweight='bold')
-        ax4.text(0.5, 0.5, f'{int(risk_score)}/100', ha='center', va='center',
+        # Round 10 / Phase 1.5: 1 decimal to match DOCX (see gauge above).
+        ax4.text(0.5, 0.5, f'{float(risk_score):.1f}/100', ha='center', va='center',
                  transform=ax4.transAxes, fontsize=36, fontweight='bold',
-                 color=risk_colors.get(risk_cat, '#1f77b4'))
+                 color=risk_colors.get(risk_cat, _risk_default_color))
         ax4.text(0.5, 0.3, risk_cat, ha='center', va='center',
                  transform=ax4.transAxes, fontsize=16, fontweight='bold',
-                 color=risk_colors.get(risk_cat, '#1f77b4'))
+                 color=risk_colors.get(risk_cat, _risk_default_color))
         ax4.axis('off')
         
         plt.tight_layout()
-        chart_path = f"outputs/renewal_health_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        chart_path = f"outputs/renewal_health_dashboard_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
         plt.savefig(chart_path, dpi=300, bbox_inches='tight')
         plt.close()
         chart_paths.append(chart_path)
@@ -2397,12 +3683,50 @@ def enrich_csone_with_arr(csone_df: pd.DataFrame, arr_data: pd.DataFrame) -> pd.
                         # Sum ARR if customer appears multiple times
                         arr_lookup[customer] = arr_lookup.get(customer, 0) + arr_value
                 
-                # Add ARR column to CSOne data
+                # Add ARR column to CSOne data.
+                # Round 6 / Phase 1.6: every Customer_ARR-bearing
+                # column MUST be accompanied by a per-row
+                # ``ARR_Estimated`` boolean so downstream Excel/Word
+                # exports can disclose synthetic vs real ARR.  A row
+                # whose customer was not in the Snowflake ARR table is
+                # filled to ``0`` here -- still a fabricated value, so
+                # mark it ``True``.
                 enriched_df['Customer_ARR'] = enriched_df[cust_col].map(arr_lookup).fillna(0)
+                enriched_df['ARR_Estimated'] = ~enriched_df[cust_col].isin(arr_lookup.keys())
+                # Round 12 / Phase 1.5: when the row was matched
+                # against real Snowflake ARR, label its currency from
+                # the source ``CURRENCY_CODE`` (per BU_NAME); otherwise
+                # the row was filled to 0 with no real currency basis.
+                try:
+                    if 'CURRENCY_CODE' in arr_data.columns:
+                        _ccy_lookup = (
+                            arr_data[['BU_NAME', 'CURRENCY_CODE']]
+                            .dropna(subset=['BU_NAME'])
+                            .drop_duplicates(subset=['BU_NAME'])
+                            .set_index('BU_NAME')['CURRENCY_CODE']
+                            .to_dict()
+                        )
+                        enriched_df['ARR_Estimated_Currency'] = (
+                            enriched_df[cust_col]
+                            .map(_ccy_lookup)
+                            .fillna('UNKNOWN')
+                        )
+                    else:
+                        # No CURRENCY_CODE in source -> mark UNKNOWN
+                        # rather than asserting USD.
+                        enriched_df['ARR_Estimated_Currency'] = 'UNKNOWN'
+                except Exception:
+                    enriched_df['ARR_Estimated_Currency'] = 'UNKNOWN'
                 logger.info(f"[[OK]] Enriched {len(enriched_df)} CSOne records with ARR data")
             else:
-                # No match possible, add placeholder
+                # No match possible, add placeholder.
+                # Round 6 / Phase 1.6: this is wholly synthetic.
                 enriched_df['Customer_ARR'] = 0
+                enriched_df['ARR_Estimated'] = True
+                # Round 12 / Phase 1.5: stamp UNKNOWN here -- the
+                # placeholder ARR (0) has no real currency basis so
+                # we should not claim USD.
+                enriched_df['ARR_Estimated_Currency'] = 'UNKNOWN'
                 logger.warning(f"[[WARNING]] Could not match ARR data to customers - using placeholders")
         else:
             # No ARR data available - create estimated ARR based on case severity/volume
@@ -2470,25 +3794,63 @@ def enrich_csone_with_arr(csone_df: pd.DataFrame, arr_data: pd.DataFrame) -> pd.
                 
                 enriched_df['Customer_ARR'] = enriched_df[cust_col].map(arr_estimates).fillna(50000)
                 enriched_df['ARR_Estimated'] = True  # Flag that this is estimated
+                # Round 12 / Phase 1.5: the estimator above produces
+                # USD-shaped tier amounts (50K / 100K / 500K / 1M / 5M)
+                # but the caller had no way to know whether to label
+                # them as USD or as some other currency.  Stamp an
+                # explicit ``ARR_Estimated_Currency='ASSUMED_USD'`` so
+                # downstream renderers can either suppress the
+                # ``$`` prefix or surface a "(estimated, USD-shaped)"
+                # caveat next to the number.
+                enriched_df['ARR_Estimated_Currency'] = 'ASSUMED_USD'
                 logger.info(f"[[INFO]] Created estimated ARR for {len(arr_estimates)} customers")
             else:
                 enriched_df['Customer_ARR'] = 50000  # Default estimate
                 enriched_df['ARR_Estimated'] = True
+                # Round 12 / Phase 1.5: same rationale as the
+                # per-customer branch above.
+                enriched_df['ARR_Estimated_Currency'] = 'ASSUMED_USD'
     
     except Exception as e:
         logger.error(f"[[ERROR]] Failed to enrich CSOne with ARR: {e}")
         enriched_df['Customer_ARR'] = 0
         enriched_df['ARR_Estimated'] = False
+        # Round 12 / Phase 1.5: include the currency column on the
+        # error path too so downstream code can rely on the schema.
+        enriched_df['ARR_Estimated_Currency'] = 'UNKNOWN'
     
     return enriched_df
 
 def analyze_feature_requests(csone_df: pd.DataFrame, arr_data: pd.DataFrame = None) -> Dict[str, Any]:
     """Analyze feature requests from CSOne data and link to customer ARR"""
+    # Round 12 / Phase 1.1: detect multi-currency ARR up-front and
+    # gate ``total_arr_impact`` so the headline summary is honest.
+    # ``total_arr_impact`` summed ``ANNUAL_CONTRACT_VALUE`` across
+    # customers without checking the underlying currency mix.  When
+    # the portfolio contains a mix of (e.g.) USD/EUR/JPY rows that
+    # produces a meaningless number that downstream renderers would
+    # display with a ``$`` prefix.  Mirror the gate already used in
+    # ``adoptiq_backend.py`` (lines 3173, 4050) by stamping
+    # ``arr_impact_currencies`` / ``arr_impact_comparable`` on the
+    # returned dict so the renderer can hide / annotate the figure.
+    _is_multi_currency = False
+    _currencies_present: List[str] = []
+    try:
+        if arr_data is not None and hasattr(arr_data, 'attrs'):
+            _is_multi_currency = bool(arr_data.attrs.get('is_multi_currency'))
+            _ccys = arr_data.attrs.get('currencies_present') or []
+            _currencies_present = [str(c) for c in _ccys if c]
+    except Exception:
+        _is_multi_currency = False
+        _currencies_present = []
+
     feature_requests = {
         'total_requests': 0,
         'top_features': [],
         'customer_examples': [],
-        'total_arr_impact': 0
+        'total_arr_impact': 0,
+        'arr_impact_comparable': not _is_multi_currency,
+        'arr_impact_currencies': _currencies_present,
     }
     
     if csone_df is None or csone_df.empty:
@@ -2538,7 +3900,13 @@ def analyze_feature_requests(csone_df: pd.DataFrame, arr_data: pd.DataFrame = No
                         customer_arr = arr_data[arr_data['BU_NAME'] == customer]
                         if not customer_arr.empty and 'ANNUAL_CONTRACT_VALUE' in customer_arr.columns:
                             customer_info['arr'] = float(customer_arr['ANNUAL_CONTRACT_VALUE'].sum())
-                            feature_requests['total_arr_impact'] += customer_info['arr']
+                            # Round 12 / Phase 1.1: only accumulate the
+                            # portfolio-wide ``total_arr_impact`` when ARR
+                            # is single-currency.  When mixed, leave the
+                            # headline at 0 and let renderers consult
+                            # ``arr_impact_comparable`` to display "n/a".
+                            if not _is_multi_currency:
+                                feature_requests['total_arr_impact'] += customer_info['arr']
                     
                     # FIXED: Get ALL requests from this customer
                     customer_cases = feature_request_cases[feature_request_cases[feat_cust_col] == customer]
@@ -2583,10 +3951,44 @@ def analyze_feature_requests(csone_df: pd.DataFrame, arr_data: pd.DataFrame = No
 
 def calculate_arr_impact_for_issues(ab_norm: pd.DataFrame, arr_data: pd.DataFrame) -> Dict[str, Any]:
     """Calculate combined ARR for customers experiencing specific issues"""
+    # Round 12 / Phase 1.2: align this function's output contract with
+    # ``adoptiq_backend._get_financial_metrics`` (and Round 11 /
+    # Phase 1.x gates) so consumers know whether the headline
+    # ``total_arr`` / per-category ``arr`` numbers are safe to render.
+    # When the ARR frame spans multiple distinct currencies, we
+    # zero out the unsafe headline and surface
+    # ``is_multi_currency`` + ``totals_by_currency`` so callers can
+    # render a "n/a (mixed currencies: USD, EUR, ...)" affordance
+    # instead of a meaningless cross-currency sum.
+    _empty_payload: Dict[str, Any] = {
+        "total_arr": 0,
+        "total_mrr": 0,
+        "total_tcv": 0,
+        "issue_breakdown": {},
+        "top_issues": [],
+        "customer_count": 0,
+        "total_issues": 0,
+        "is_multi_currency": False,
+        "currencies_present": [],
+        "totals_by_currency": {},
+    }
     if ab_norm is None or arr_data is None:
-        return {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}
+        return dict(_empty_payload)
     if ab_norm.empty or arr_data.empty:
-        return {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}
+        return dict(_empty_payload)
+
+    # Round 12 / Phase 1.2: detect multi-currency ARR up-front using
+    # the attrs stamped by Snowflake normalization.
+    _is_multi_currency = False
+    _currencies_present: List[str] = []
+    try:
+        if hasattr(arr_data, 'attrs'):
+            _is_multi_currency = bool(arr_data.attrs.get('is_multi_currency'))
+            _ccys = arr_data.attrs.get('currencies_present') or []
+            _currencies_present = [str(c) for c in _ccys if c]
+    except Exception:
+        _is_multi_currency = False
+        _currencies_present = []
     
     try:
         # Check which ARR columns actually exist in the data
@@ -2600,12 +4002,69 @@ def calculate_arr_impact_for_issues(ab_norm: pd.DataFrame, arr_data: pd.DataFram
         if 'BU_NAME' in arr_data.columns:
             arr_cols_to_merge.append('BU_NAME')
         
-        # Merge adoption barriers with ARR data
-        merged_data = ab_norm.merge(
-            arr_data[arr_cols_to_merge], 
-            on='ACCOUNT_ID_C', 
-            how='left'
-        )
+        # Round 6 / Phase 5.11: pre-deduplicate the ARR view on
+        # ACCOUNT_ID_C and use ``validate='m:1'`` so the AB-level
+        # metrics computed below cannot be silently inflated by
+        # duplicate ARR rows for the same account (which would
+        # double-count adoption-barrier rows in ARR by-issue
+        # breakdowns).  Fall back to a plain merge with a logged
+        # warning if validation fails so we don't crash a previously
+        # working report just because upstream ARR has duplicates.
+        #
+        # Round 11 / Phase 1.2: ``drop_duplicates(subset=['ACCOUNT_ID_C'])``
+        # silently keeps the FIRST row per account and discards every
+        # additional subscription line item.  For accounts with
+        # multiple subscriptions (the common case for Cisco enterprise
+        # customers) that throws away real ARR.  Roll up
+        # numeric monetary columns (ANNUAL_CONTRACT_VALUE / MRR / TCV)
+        # with ``groupby(...).sum()`` so a customer with two
+        # $50k subscriptions correctly contributes $100k of ARR; keep
+        # ``BU_NAME`` as a label using ``first()``.
+        try:
+            _money_cols = [
+                c for c in ('ANNUAL_CONTRACT_VALUE', 'MRR', 'TCV')
+                if c in arr_cols_to_merge
+            ]
+            _label_cols = [
+                c for c in ('BU_NAME',)
+                if c in arr_cols_to_merge
+            ]
+            _arr_src = (
+                arr_data[arr_cols_to_merge]
+                .dropna(subset=['ACCOUNT_ID_C'])
+            )
+            if _money_cols or _label_cols:
+                _agg_spec: Dict[str, str] = {}
+                for _c in _money_cols:
+                    _agg_spec[_c] = 'sum'
+                for _c in _label_cols:
+                    _agg_spec[_c] = 'first'
+                _arr_view = (
+                    _arr_src.groupby('ACCOUNT_ID_C', as_index=False, sort=False)
+                    .agg(_agg_spec)
+                )
+            else:
+                # Defensive: if neither money nor label columns are
+                # present, fall back to the legacy dedupe so the
+                # merge still validates.
+                _arr_view = _arr_src.drop_duplicates(subset=['ACCOUNT_ID_C'])
+            merged_data = ab_norm.merge(
+                _arr_view,
+                on='ACCOUNT_ID_C',
+                how='left',
+                validate='m:1',
+            )
+        except Exception as _ab_arr_merge_err:
+            logger.warning(
+                "AB+ARR m:1 merge validation failed (%s); falling back to "
+                "plain left-merge but ARR-by-issue counts may be inflated.",
+                _ab_arr_merge_err,
+            )
+            merged_data = ab_norm.merge(
+                arr_data[arr_cols_to_merge],
+                on='ACCOUNT_ID_C',
+                how='left',
+            )
     except Exception as e:
         logger.error(f"[[ERROR]] Error merging ARR data: {e}")
         return {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}
@@ -2625,23 +4084,51 @@ def calculate_arr_impact_for_issues(ab_norm: pd.DataFrame, arr_data: pd.DataFram
         merged_data['TCV'] = merged_data['TCV'].fillna(0)
     else:
         merged_data['TCV'] = 0
-    
-    # Calculate total ARR
-    total_arr = merged_data['ANNUAL_CONTRACT_VALUE'].sum()
-    total_mrr = merged_data['MRR'].sum()
-    total_tcv = merged_data['TCV'].sum()
-    
-    # Group by issue type/category
+
+    # Round 11 / Phase 1.1: ``merged_data`` is the AB-level frame
+    # left-merged with one ARR row per account.  Summing
+    # ``ANNUAL_CONTRACT_VALUE`` over EVERY barrier row therefore
+    # double-counts an account's ARR once per barrier (an account
+    # with $100k ARR and 5 open barriers contributed $500k).  Round 6
+    # / Phase 5.11 made the merge ``m:1`` validated to prevent ARR
+    # duplicates from inflating the count, but did NOT prevent the
+    # AB row-multiplication itself.  Dedupe on ``ACCOUNT_ID_C``
+    # before summing so ``total_arr`` / ``total_mrr`` / ``total_tcv``
+    # really mean "ARR of customers experiencing >=1 issue."
+    try:
+        _per_account = merged_data.drop_duplicates(subset=['ACCOUNT_ID_C'])
+        total_arr = float(_per_account['ANNUAL_CONTRACT_VALUE'].sum())
+        total_mrr = float(_per_account['MRR'].sum())
+        total_tcv = float(_per_account['TCV'].sum())
+    except Exception as _per_acct_err:
+        logger.warning(
+            "Per-account ARR dedupe failed (%s); falling back to "
+            "barrier-row sums which may be inflated.",
+            _per_acct_err,
+        )
+        total_arr = float(merged_data['ANNUAL_CONTRACT_VALUE'].sum())
+        total_mrr = float(merged_data['MRR'].sum())
+        total_tcv = float(merged_data['TCV'].sum())
+
+    # Group by issue type/category.
+    # Round 11 / Phase 1.1: same dedupe rule applies inside each
+    # category so per-category ARR is "ARR of distinct customers
+    # who have at least one barrier in this category" rather than
+    # "ARR x number of barriers in this category."
     issue_breakdown = {}
     if 'AB_CATEGORY_C' in merged_data.columns:
         for category in merged_data['AB_CATEGORY_C'].dropna().unique():
             category_data = merged_data[merged_data['AB_CATEGORY_C'] == category]
+            try:
+                _cat_per_account = category_data.drop_duplicates(subset=['ACCOUNT_ID_C'])
+            except Exception:
+                _cat_per_account = category_data
             issue_breakdown[category] = {
-                'arr': category_data['ANNUAL_CONTRACT_VALUE'].sum(),
-                'mrr': category_data['MRR'].sum(),
-                'tcv': category_data['TCV'].sum(),
-                'customer_count': category_data['ACCOUNT_ID_C'].nunique(),
-                'issue_count': len(category_data)
+                'arr': float(_cat_per_account['ANNUAL_CONTRACT_VALUE'].sum()),
+                'mrr': float(_cat_per_account['MRR'].sum()),
+                'tcv': float(_cat_per_account['TCV'].sum()),
+                'customer_count': int(category_data['ACCOUNT_ID_C'].nunique()),
+                'issue_count': int(len(category_data)),
             }
     
     # FIXED: ALL issues by ARR impact
@@ -2650,14 +4137,72 @@ def calculate_arr_impact_for_issues(ab_norm: pd.DataFrame, arr_data: pd.DataFram
         sorted_issues = sorted(issue_breakdown.items(), key=lambda x: x[1]['arr'], reverse=True)
         top_issues = sorted_issues  # All issues by ARR impact
     
+    # Round 12 / Phase 1.2: build per-currency rollup so consumers can
+    # render a comparable breakdown even when the unsafe single
+    # headline is suppressed.  We re-merge ``CURRENCY_CODE`` from the
+    # raw ``arr_data`` per ACCOUNT_ID_C to avoid double-counting the
+    # AB row-multiplication.
+    totals_by_currency: Dict[str, Dict[str, float]] = {}
+    try:
+        if 'CURRENCY_CODE' in arr_data.columns:
+            _ccy_view = (
+                arr_data[['ACCOUNT_ID_C', 'CURRENCY_CODE']]
+                .dropna(subset=['ACCOUNT_ID_C'])
+                .drop_duplicates(subset=['ACCOUNT_ID_C'])
+            )
+            _per_acct_with_ccy = (
+                _per_account.merge(_ccy_view, on='ACCOUNT_ID_C', how='left')
+            )
+            for _ccy, _grp in _per_acct_with_ccy.groupby(
+                _per_acct_with_ccy['CURRENCY_CODE'].fillna('UNKNOWN'),
+                sort=True,
+            ):
+                totals_by_currency[str(_ccy)] = {
+                    'total_arr': float(_grp['ANNUAL_CONTRACT_VALUE'].sum()),
+                    'total_mrr': float(_grp['MRR'].sum()),
+                    'total_tcv': float(_grp['TCV'].sum()),
+                    'customer_count': int(_grp['ACCOUNT_ID_C'].nunique()),
+                }
+    except Exception as _ccy_err:
+        logger.warning(
+            "Per-currency ARR rollup failed (%s); leaving totals_by_currency empty.",
+            _ccy_err,
+        )
+
+    # Round 12 / Phase 1.2: when ARR spans multiple currencies, the
+    # naive cross-currency sums above are not comparable.  Zero the
+    # headline so renderers do not display a misleading "$X" figure
+    # and rely on ``totals_by_currency`` for the per-currency view.
+    if _is_multi_currency:
+        _safe_total_arr = 0.0
+        _safe_total_mrr = 0.0
+        _safe_total_tcv = 0.0
+        _safe_breakdown: Dict[str, Any] = {}
+        for _name, _row in issue_breakdown.items():
+            _row_safe = dict(_row)
+            _row_safe['arr'] = 0.0
+            _row_safe['mrr'] = 0.0
+            _row_safe['tcv'] = 0.0
+            _safe_breakdown[_name] = _row_safe
+        _safe_top_issues = [(n, _safe_breakdown[n]) for n, _ in top_issues if n in _safe_breakdown]
+    else:
+        _safe_total_arr = total_arr
+        _safe_total_mrr = total_mrr
+        _safe_total_tcv = total_tcv
+        _safe_breakdown = issue_breakdown
+        _safe_top_issues = top_issues
+
     return {
-        "total_arr": total_arr,
-        "total_mrr": total_mrr,
-        "total_tcv": total_tcv,
-        "issue_breakdown": issue_breakdown,
-        "top_issues": top_issues,
+        "total_arr": _safe_total_arr,
+        "total_mrr": _safe_total_mrr,
+        "total_tcv": _safe_total_tcv,
+        "issue_breakdown": _safe_breakdown,
+        "top_issues": _safe_top_issues,
         "customer_count": merged_data['ACCOUNT_ID_C'].nunique(),
-        "total_issues": len(merged_data)
+        "total_issues": len(merged_data),
+        "is_multi_currency": _is_multi_currency,
+        "currencies_present": _currencies_present,
+        "totals_by_currency": totals_by_currency,
     }
 
 def _create_enhanced_compact_report(base_path: str, manager: str, technology: str, days: int, 
@@ -2679,7 +4224,9 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
     doc = Document()
     
     # Title
-    title = doc.add_heading(f'AdoptIQ Portfolio Analysis - {manager}', 0)
+    # Round 6 / Phase 1.4: route through _safe_doc_text so a malformed
+    # ``manager`` string can't produce illegal XML in the heading.
+    title = doc.add_heading(_safe_doc_text(f'AdoptIQ Portfolio Analysis - {manager}'), 0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
     subtitle = doc.add_paragraph(f'{technology} - {days} Day Analysis')
@@ -2855,9 +4402,24 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
 
     
     # Add AI-generated summary
-    if ai_insights and 'executive_summary' in ai_insights:
-        summary_text = ai_insights['executive_summary']
-        # Parse markdown
+    # Round 3 / Phase 2.4: also accept the nested
+    # ``ai_insights["portfolio_summary"]["executive_summary"]`` shape
+    # used by the portfolio Word path. Previously only the top-level
+    # ``ai_insights["executive_summary"]`` key was honored, so a
+    # successful portfolio LLM call shaped under ``portfolio_summary``
+    # silently dropped the AI narrative from the comprehensive Word
+    # report (tables/charts shipped fine, but no AI prose).
+    summary_text = None
+    if isinstance(ai_insights, dict):
+        if isinstance(ai_insights.get('executive_summary'), str) and ai_insights['executive_summary'].strip():
+            summary_text = ai_insights['executive_summary']
+        else:
+            _ps = ai_insights.get('portfolio_summary')
+            if isinstance(_ps, dict) and isinstance(_ps.get('executive_summary'), str) and _ps['executive_summary'].strip():
+                summary_text = _ps['executive_summary']
+            elif isinstance(ai_insights.get('raw_response'), str) and ai_insights['raw_response'].strip():
+                summary_text = ai_insights['raw_response']
+    if summary_text:
         _parse_markdown_for_fallback(doc, summary_text)
     
     # Add Key Insights & Recommendations Section (Professional Executive Format)
@@ -2959,8 +4521,18 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         doc.add_heading('All Customers by Support Cases', level=2)
         
         customer_cases = csone_df[customer_col].value_counts()  # Show ALL customers
-        has_arr = False
-        
+        # Round 6 / Phase 1.21: drive ``has_arr`` from data presence
+        # instead of hardcoding ``False`` (which permanently disabled
+        # the Estimated ARR column even when ``Customer_ARR`` was
+        # available).  ``ARR_Estimated`` flag (Phase 1.6) tells us
+        # whether the value is synthetic; we surface that in the column
+        # header so the reader knows.
+        has_arr = 'Customer_ARR' in csone_df.columns
+        _arr_is_estimated = bool(
+            'ARR_Estimated' in csone_df.columns
+            and csone_df['ARR_Estimated'].fillna(False).astype(bool).any()
+        )
+
         # Create table
         table = doc.add_table(rows=len(customer_cases) + 1, cols=4 if has_arr else 3)
         table.style = 'Light Grid Accent 1'
@@ -2971,7 +4543,9 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         hdr_cells[1].text = 'Total Cases'
         hdr_cells[2].text = 'BEMS References'
         if has_arr:
-            hdr_cells[3].text = 'Estimated ARR'
+            hdr_cells[3].text = (
+                'Estimated ARR (synthetic)' if _arr_is_estimated else 'Customer ARR'
+            )
         
         for cell in hdr_cells:
             for paragraph in cell.paragraphs:
@@ -3080,16 +4654,33 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                     case_col = col
                     break
             
+            # Round 4 / Phase 3.6: dedupe BEMS/CSC reference IDs
+            # across rows for the same customer.  Previously the
+            # aggregator joined per-row strings without splitting,
+            # so ``BEMS-1234`` could appear N times when N rows
+            # mentioned it — making the table imply more distinct
+            # escalations than actually existed.
+            def _dedupe_bems_refs(values):
+                tokens = set()
+                for v in values:
+                    if not v:
+                        continue
+                    for tok in str(v).split(','):
+                        t = tok.strip()
+                        if t:
+                            tokens.add(t)
+                return ', '.join(sorted(tokens))
+
             if case_col:
                 bems_by_customer = bems_cases.groupby(customer_col_bems).agg({
-                    'bems_extracted': lambda x: ', '.join([ref for ref in x if ref and str(ref).strip()]),
+                    'bems_extracted': _dedupe_bems_refs,
                     case_col: 'count'
                 }).reset_index()
                 bems_by_customer.columns = [customer_col_bems, 'BEMS/CSC References', 'Case Count']
             else:
                 # Fallback if no case number column - count rows per customer instead
                 bems_by_customer = bems_cases.groupby(customer_col_bems).agg({
-                    'bems_extracted': lambda x: ', '.join([ref for ref in x if ref and str(ref).strip()]),
+                    'bems_extracted': _dedupe_bems_refs,
                     customer_col_bems: 'count'  # Count actual rows per customer
                 }).reset_index()
                 bems_by_customer.columns = [customer_col_bems, 'BEMS/CSC References', 'Case Count']
@@ -3295,11 +4886,67 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
     
     # Footer
     doc.add_paragraph()
-    footer = doc.add_paragraph(f"Report generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    # Round 12 / Phase 10.6: anchor the Word footer "Report generated on"
+    # line on UTC and tag the timezone so the footer is reproducible
+    # across operators in different host timezones.
+    footer = doc.add_paragraph(
+        f"Report generated on: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
+    )
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
     if footer.runs:
         footer.runs[0].italic = True
-    
+
+    # Phase 1.1: Run validate_report_consistency on the same frames the
+    # _create_enhanced_compact_report fallback rendered with, so this path
+    # surfaces drift the same way the EI / Compact formatters already do.
+    try:
+        _enh_extra_frames = [
+            f for f in (
+                team_subs_df,
+                csconsole_action_plans,
+                csconsole_customer_pulse,
+                csconsole_success_priorities,
+                csconsole_adoption_barriers,
+            )
+            if isinstance(f, pd.DataFrame) and not f.empty
+        ]
+        _enh_portfolio_metrics = cm.build_portfolio_metrics(
+            ab_df=ab_norm if isinstance(ab_norm, pd.DataFrame) else pd.DataFrame(),
+            csone_df=csone_df if isinstance(csone_df, pd.DataFrame) else pd.DataFrame(),
+            risk_profiles={},
+            risk_scale=cm.RISK_SCALE_0_TO_10,
+            extra_customer_frames=_enh_extra_frames or None,
+        )
+        # Round 6 / Phase 5.8: thread ``strict_mode`` and any
+        # factual_claims (LLM-derived narrative bullets) through the
+        # enhanced compact fallback so this path matches the comprehensive
+        # path's enforcement model -- the legacy code silently fell back
+        # to non-strict and never checked claims, so cross-source drift
+        # could pass here while failing downstream.
+        _enh_strict = (
+            str(os.getenv("ADOPTIQ_NONSTRICT_CONSISTENCY", "0")).strip().lower()
+            not in {"1", "true", "yes", "on"}
+        )
+        _enh_factual_claims = locals().get("factual_claims") or []
+        _enh_consistency = validate_report_consistency(
+            ab_norm if isinstance(ab_norm, pd.DataFrame) else pd.DataFrame(),
+            csone_df if isinstance(csone_df, pd.DataFrame) else pd.DataFrame(),
+            portfolio_metrics=_enh_portfolio_metrics,
+            customer_pulse_df=csconsole_customer_pulse,
+            strict_mode=_enh_strict,
+            factual_claims=_enh_factual_claims if isinstance(_enh_factual_claims, list) else None,
+        )
+        if not _enh_consistency.get('is_valid', True):
+            logger.error(
+                f"[[CONSISTENCY]] Enhanced compact fallback errors: {_enh_consistency.get('errors')}"
+            )
+        if _enh_consistency.get('warnings'):
+            logger.warning(
+                f"[[CONSISTENCY]] Enhanced compact fallback warnings: {_enh_consistency.get('warnings')}"
+            )
+    except Exception as _ecerr:
+        logger.warning(f"[[CONSISTENCY]] Enhanced compact consistency check skipped: {_ecerr}")
+
     # Save
     output_path = f"{base_path}_enhanced.docx"
     doc.save(output_path)
@@ -3317,7 +4964,8 @@ def _create_simple_fallback_report(base_path: str, manager: str, technology: str
         doc = Document()
         
         # Title
-        title = doc.add_heading(f'AdoptIQ Portfolio Analysis - {manager}', 0)
+        # Round 6 / Phase 1.4: sanitize manager string before heading.
+        title = doc.add_heading(_safe_doc_text(f'AdoptIQ Portfolio Analysis - {manager}'), 0)
         title.alignment = 1  # Center alignment
         
         # Subtitle
@@ -3343,7 +4991,10 @@ def _create_simple_fallback_report(base_path: str, manager: str, technology: str
         
         # Footer
         doc.add_paragraph("\n" + "="*50)
-        doc.add_paragraph(f"Report generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # Round 12 / Phase 10.6: anchor on UTC for cross-host reproducibility.
+        doc.add_paragraph(
+            f"Report generated on: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        )
         doc.add_paragraph("AdoptIQ Portfolio Analysis System")
         
         # Save the document
@@ -3363,7 +5014,10 @@ def _create_simple_fallback_report(base_path: str, manager: str, technology: str
                 f.write(f"{technology} - {days} Day Analysis\n\n")
                 f.write("Executive Summary:\n")
                 f.write(ai_insights.get('executive_summary', 'Analysis completed successfully.\n'))
-                f.write(f"\nReport generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                # Round 12 / Phase 10.6: anchor on UTC for cross-host reproducibility.
+                f.write(
+                    f"\nReport generated on: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+                )
                 f.write("AdoptIQ Portfolio Analysis System\n")
             logger.info(f"[[OK]] Text fallback report created: {output_path}")
             return output_path
@@ -3574,15 +5228,32 @@ def _generate_fallback_data_for_technology(technology, manager="Test Manager", c
 
 def run_compact_analysis(analysis_id):
     """Run compact analysis focused on renewal risk"""
+    # Round 5 / Phase 6.14: bind the analysis ID to a contextvar so any
+    # nested ``analysis_logger()`` calls inside this worker thread (and
+    # any sub-threads it spawns via ``copy_context().run``) automatically
+    # carry the correlation prefix, even when they only have a bare
+    # ``logging.getLogger()`` reference.
+    try:
+        from structured_logging import bind_analysis_id as _bind_aid
+        _bind_aid(analysis_id)
+    except Exception:
+        pass  # noqa: PIE790
     try:
         import os
-        logger.info(f"[[START]] Starting compact analysis: {analysis_id} (PID: {os.getpid()})")
+        # Round 8 / Phase 1.7: digest analysis_id at INFO; verbatim id only
+        # at DEBUG.  The value embeds manager / technology fragments.
+        logger.info("[[START]] Starting compact analysis aid_digest=%s (PID: %s)", _id_digest(analysis_id), os.getpid())
+        logger.debug("[[START]] Starting compact analysis verbatim id=%s", analysis_id)
         
         # Initialize variables that might not be set (prevents UnboundLocalError)
         arr_data = pd.DataFrame()
         arr_impact = {'total_arr': 0, 'at_risk_arr': 0, 'customers_analyzed': 0}
         chart_paths = []
         feature_requests = {'total_requests': 0, 'top_features': [], 'customer_examples': [], 'total_arr_impact': 0}
+        # Round 3 / Phase 5.1: track partial-data warnings for the
+        # compact analysis path too so the History page and Admin
+        # tile see the same caveats the report banner uses.
+        partial_data_warnings: list = []
         
         # Get analysis parameters
         with analysis_status_lock:
@@ -3592,9 +5263,17 @@ def run_compact_analysis(analysis_id):
             days = status['days']
             csone_file = status['csone_file']
             
-            # Debug logging for CSOne file
-            logger.info(f"[[SEARCH]] DEBUGGING - Analysis status CSOne file: '{csone_file}'")
-            logger.info(f"[[SEARCH]] DEBUGGING - Analysis status keys: {list(status.keys())}")
+            # Round 8 / Phase 1.7 / 1.8: csone_file path embeds the OneDrive
+            # username / sync layout; status keys are payload field names
+            # that include the manager / customer fragments.  Surface only
+            # presence / digest at INFO; verbatim only at DEBUG.
+            logger.info(
+                "[[SEARCH]] DEBUGGING - CSOne file present=%s basename=%s",
+                bool(csone_file), os.path.basename(csone_file) if csone_file else "",
+            )
+            logger.debug("[[SEARCH]] DEBUGGING - CSOne file verbatim path=%s", csone_file)
+            logger.info("[[SEARCH]] DEBUGGING - Analysis status field count=%d", len(status))
+            logger.debug("[[SEARCH]] DEBUGGING - Analysis status keys verbatim=%s", list(status.keys()))
         
         with analysis_status_lock:
             status['status'] = 'running'
@@ -3616,7 +5295,7 @@ def run_compact_analysis(analysis_id):
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
             
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_connect_with_keeper)
+                future = _submit_with_context(executor, _connect_with_keeper)
                 try:
                     ctx = future.result(timeout=30)  # 30 second timeout
                     logger.info(f"[[OK]] Successfully connected to Snowflake")
@@ -3726,7 +5405,7 @@ def run_compact_analysis(analysis_id):
                     logger.info(f"[[DEBUG]] Fetching team subscriptions with timeout...")
                     cssm_emails = [email for mgr, name, email in TEAM_ROSTER if mgr == manager or manager == "All Managers"]
                     with ThreadPoolExecutor(max_workers=1) as executor:
-                        future = executor.submit(get_subscriptions_for_team, ctx, cssm_emails)
+                        future = _submit_with_context(executor, get_subscriptions_for_team, ctx, cssm_emails)
                         try:
                             team_subs_df_unfiltered = future.result(timeout=30)  # 30 second timeout
                             logger.info(f"[[OK]] Retrieved {len(team_subs_df_unfiltered)} team subscriptions (UNFILTERED)")
@@ -3748,16 +5427,47 @@ def run_compact_analysis(analysis_id):
                                 team_subs_df = team_subs_df_unfiltered.copy()
                                 logger.info(f"[[FILTER]] No filter - using all {len(team_subs_df)} subscriptions")
                         except FutureTimeoutError:
+                            # Round 3 / Phase 3.3: stamp the empty
+                            # frame with attrs.fetch_error so any
+                            # downstream consumer (data validator,
+                            # collect_fetch_warnings, banner) can
+                            # distinguish "team has zero subs" from
+                            # "fetch failed" and surface
+                            # 'unavailable' rather than implying
+                            # zero.
                             logger.warning(f"[[TIMEOUT]] Team subscriptions query timed out after 30 seconds")
                             team_subs_df = pd.DataFrame()
+                            try:
+                                team_subs_df.attrs['fetch_error'] = (
+                                    "Team subscriptions query timed out after 30 seconds"
+                                )
+                                team_subs_df.attrs['fetch_error_dataset'] = 'team_subscriptions'
+                                team_subs_df.attrs['fetch_error_kind'] = 'timeout'
+                            except Exception:
+                                # Round 4: non-fatal; suppressed silently in original code
+                                pass  # noqa: PIE790
                             team_subs_df_unfiltered = pd.DataFrame()
                         except Exception as e:
                             logger.warning(f"[[WARNING]] Failed to get team subscriptions: {e}")
                             team_subs_df = pd.DataFrame()
+                            try:
+                                team_subs_df.attrs['fetch_error'] = str(e)
+                                team_subs_df.attrs['fetch_error_dataset'] = 'team_subscriptions'
+                                team_subs_df.attrs['fetch_error_kind'] = 'runtime'
+                            except Exception:
+                                # Round 4: non-fatal; suppressed silently in original code
+                                pass  # noqa: PIE790
                             team_subs_df_unfiltered = pd.DataFrame()
             except Exception as e:
                 logger.warning(f"[[WARNING]] Team subscriptions error: {e}")
                 team_subs_df = pd.DataFrame()
+                try:
+                    team_subs_df.attrs['fetch_error'] = str(e)
+                    team_subs_df.attrs['fetch_error_dataset'] = 'team_subscriptions'
+                    team_subs_df.attrs['fetch_error_kind'] = 'runtime'
+                except Exception:
+                    # Round 4: non-fatal; suppressed silently in original code
+                    pass  # noqa: PIE790
                 team_subs_df_unfiltered = pd.DataFrame()
         else:
             error_msg = (
@@ -3814,17 +5524,79 @@ def run_compact_analysis(analysis_id):
                 logger.info(f"[[DEBUG]] Days parameter: {days}")
                 
                 # Use timeout for adoption barriers query (longer timeout since this query can be slow)
+                # Round 4 / Phase 4.3: when the query times out or
+                # raises, stamp the resulting empty DataFrame with
+                # ``attrs['fetch_error']`` (via
+                # ``_empty_df_with_fetch_error``) and append a
+                # ``partial_data_warnings`` entry on the live status
+                # object.  Previously a timeout silently produced an
+                # empty AB frame and downstream code reported "0
+                # adoption barriers" instead of "AB source
+                # unavailable".
                 with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(fetch_adoption_barriers, ctx, account_ids, days)
+                    future = _submit_with_context(executor, fetch_adoption_barriers, ctx, account_ids, days)
                     try:
                         ab_raw = future.result(timeout=120)  # 2 minute timeout for slow queries
                         logger.info(f"[[DEBUG]] Raw adoption barriers query completed, got {len(ab_raw)} rows")
-                    except FutureTimeoutError:
+                    except FutureTimeoutError as _ab_timeout:
                         logger.warning(f"[[TIMEOUT]] Adoption barriers query timed out after 2 minutes")
-                        ab_raw = pd.DataFrame()
+                        try:
+                            from adoptiq_backend import _empty_df_with_fetch_error as _empty_df_fe
+                            ab_raw = _empty_df_fe("adoption_barriers", _ab_timeout)
+                            try:
+                                ab_raw.attrs["fetch_error_kind"] = "timeout"
+                            except Exception:
+                                # Round 4: non-fatal; suppressed silently in original code
+                                pass  # noqa: PIE790
+                        except Exception:
+                            ab_raw = pd.DataFrame()
+                            try:
+                                ab_raw.attrs["fetch_error"] = "Adoption barriers query timed out (120s)"
+                                ab_raw.attrs["fetch_error_dataset"] = "adoption_barriers"
+                                ab_raw.attrs["fetch_error_kind"] = "timeout"
+                            except Exception:
+                                # Round 4: non-fatal; suppressed silently in original code
+                                pass  # noqa: PIE790
+                        try:
+                            with analysis_status_lock:
+                                _pdw = status.setdefault('partial_data_warnings', [])
+                                _pdw.append({
+                                    'dataset': 'adoption_barriers',
+                                    'error': 'Adoption barriers query timed out (120s)',
+                                    'kind': 'timeout',
+                                    'effect': 'AB counts will read as zero; treat as unavailable, not zero.',
+                                })
+                                save_analysis_status()
+                        except Exception:
+                            # Round 4: non-fatal; suppressed silently in original code
+                            pass  # noqa: PIE790
                     except Exception as e:
                         logger.error(f"[[ERROR]] Failed to fetch adoption barriers: {e}")
-                        ab_raw = pd.DataFrame()
+                        try:
+                            from adoptiq_backend import _empty_df_with_fetch_error as _empty_df_fe
+                            ab_raw = _empty_df_fe("adoption_barriers", e)
+                        except Exception:
+                            ab_raw = pd.DataFrame()
+                            try:
+                                ab_raw.attrs["fetch_error"] = str(e).strip() or e.__class__.__name__
+                                ab_raw.attrs["fetch_error_dataset"] = "adoption_barriers"
+                                ab_raw.attrs["fetch_error_kind"] = "runtime"
+                            except Exception:
+                                # Round 4: non-fatal; suppressed silently in original code
+                                pass  # noqa: PIE790
+                        try:
+                            with analysis_status_lock:
+                                _pdw = status.setdefault('partial_data_warnings', [])
+                                _pdw.append({
+                                    'dataset': 'adoption_barriers',
+                                    'error': str(e).strip() or e.__class__.__name__,
+                                    'kind': 'runtime',
+                                    'effect': 'AB counts will read as zero; treat as unavailable, not zero.',
+                                })
+                                save_analysis_status()
+                        except Exception:
+                            # Round 4: non-fatal; suppressed silently in original code
+                            pass  # noqa: PIE790
                 
                 if not ab_raw.empty and "ACCOUNT_ID_C" in ab_raw.columns:
                     logger.info(f"[[DEBUG]] Merging adoption barriers with team data...")
@@ -3833,6 +5605,25 @@ def run_compact_analysis(analysis_id):
                 
                 ab_scoped = _apply_scope_filter_ab(ab_raw, technology, days)
                 logger.info(f"[[DEBUG]] Scope filter applied, now preparing AB data...")
+                # Round 4 / Phase 4.6: if the tech filter widened
+                # itself (insufficient matches) propagate that as a
+                # ``partial_data_warnings`` entry so the report does
+                # not silently surface an unfiltered AB population.
+                try:
+                    _ab_attrs = getattr(ab_scoped, 'attrs', {}) or {}
+                    if _ab_attrs.get('tech_filter_widened'):
+                        partial_data_warnings.append({
+                            'dataset': 'adoption_barriers',
+                            'error': str(_ab_attrs.get('tech_filter_warning')
+                                          or 'AB tech filter widened due to insufficient matches.'),
+                            'kind': 'tech_filter_widened',
+                            'tech_requested': _ab_attrs.get('tech_filter_requested'),
+                            'matched': _ab_attrs.get('tech_filter_matched'),
+                            'total': _ab_attrs.get('tech_filter_total'),
+                        })
+                except Exception:
+                    # Round 4: non-fatal; suppressed silently in original code
+                    pass  # noqa: PIE790
                 ab_norm = _prepare_ab(ab_scoped, team_subs_df)
                 logger.info(f"[[OK]] Retrieved {len(ab_norm)} adoption barriers")
                 
@@ -3877,6 +5668,14 @@ def run_compact_analysis(analysis_id):
                     else []
                 )
 
+                # Round 4 / Phase 5.1: capture ``data_retrieved_at``
+                # from the inner prefetch context so the compact path
+                # can render "Data as of <ts>" on the cover page.  The
+                # value is published via this nonlocal holder because
+                # the inner thread cannot directly assign to the outer
+                # function's locals().
+                _compact_prefetch_meta = {"data_retrieved_at": None}
+
                 def fetch_csconsole_data():
                     """Fetch CSConsole data in a separate thread"""
                     local_ctx = None
@@ -3884,7 +5683,12 @@ def run_compact_analysis(analysis_id):
                         logger.info(f"[[SEARCH]] Starting CSConsole data fetching...")
                         local_ctx = _connect_with_keeper()
                         if local_ctx is None:
-                            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+                            return (
+                                _empty_df_with_fetch_marker("csconsole_action_plans", "snowflake_connect_failed"),
+                                _empty_df_with_fetch_marker("csconsole_customer_pulse", "snowflake_connect_failed"),
+                                _empty_df_with_fetch_marker("csconsole_success_priorities", "snowflake_connect_failed"),
+                                _empty_df_with_fetch_marker("csconsole_adoption_barriers", "snowflake_connect_failed"),
+                            )
                         prefetch_ctx = AnalysisRunContext.build(
                             local_ctx,
                             account_ids,
@@ -3892,6 +5696,16 @@ def run_compact_analysis(analysis_id):
                             customer_names=customer_names,
                             owner_emails=team_owner_emails,
                         )
+                        # Round 4 / Phase 5.1: stamp the prefetch
+                        # ``data_retrieved_at`` so the outer scope can
+                        # surface it on the executive cover page.
+                        try:
+                            _compact_prefetch_meta["data_retrieved_at"] = getattr(
+                                prefetch_ctx, "data_retrieved_at", None
+                            )
+                        except Exception:
+                            # Round 4: non-fatal; suppressed silently in original code
+                            pass  # noqa: PIE790
                         csconsole_bundle = prefetch_comprehensive(prefetch_ctx)
                         csconsole_action_plans = csconsole_bundle.get("csconsole_action_plans", pd.DataFrame())
                         csconsole_customer_pulse = csconsole_bundle.get("csconsole_customer_pulse", pd.DataFrame())
@@ -3900,33 +5714,94 @@ def run_compact_analysis(analysis_id):
                         logger.info(f"[[OK]] Retrieved CSConsole data")
                         return csconsole_action_plans, csconsole_customer_pulse, csconsole_success_priorities, csconsole_adoption_barriers
                     except Exception as e:
+                        # Phase 1.3a: do NOT swallow the exception into a
+                        # silent empty DataFrame; mark each result with a
+                        # fetch_error attr so downstream code can render
+                        # "CSConsole unavailable" instead of "0 records".
                         logger.error(f"[[ERROR]] CSConsole data fetching failed: {e}")
-                        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+                        err_msg = str(e).strip() or e.__class__.__name__
+                        return (
+                            _empty_df_with_fetch_marker("csconsole_action_plans", err_msg),
+                            _empty_df_with_fetch_marker("csconsole_customer_pulse", err_msg),
+                            _empty_df_with_fetch_marker("csconsole_success_priorities", err_msg),
+                            _empty_df_with_fetch_marker("csconsole_adoption_barriers", err_msg),
+                        )
                     finally:
                         if local_ctx is not None:
                             try:
                                 local_ctx.close()
                             except Exception:
-                                pass
+                                # Round 4: non-fatal; suppressed silently in original code
+                                pass  # noqa: PIE790
                 
                 logger.info(f"[[TIME]] Starting CSConsole fetching with 90-second timeout...")
                 
                 with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(fetch_csconsole_data)
+                    future = _submit_with_context(executor, fetch_csconsole_data)
                     csconsole_action_plans, csconsole_customer_pulse, csconsole_success_priorities, csconsole_adoption_barriers = future.result(timeout=90)  # 90-second timeout for CSConsole
-                    
+                # Round 4 / Phase 4.4: mirror the comprehensive
+                # promotion pattern.  Scan each returned frame's
+                # ``attrs['fetch_error']`` and append a
+                # ``partial_data_warnings`` entry so the compact
+                # report no longer ships silent zeros after a
+                # CSConsole prefetch failure.
+                for _ds_name, _ds_df in (
+                    ("csconsole_action_plans", csconsole_action_plans),
+                    ("csconsole_customer_pulse", csconsole_customer_pulse),
+                    ("csconsole_success_priorities", csconsole_success_priorities),
+                    ("csconsole_adoption_barriers", csconsole_adoption_barriers),
+                ):
+                    try:
+                        _attrs = getattr(_ds_df, 'attrs', {}) or {}
+                        if _attrs.get('fetch_error'):
+                            partial_data_warnings.append({
+                                'dataset': _attrs.get('fetch_error_dataset') or _ds_name,
+                                'error': str(_attrs.get('fetch_error')),
+                                'kind': _attrs.get('fetch_error_kind') or 'runtime',
+                            })
+                    except Exception:
+                        # Round 4: non-fatal; suppressed silently in original code
+                        pass  # noqa: PIE790
+                # Round 4 / Phase 5.1: lift the prefetch
+                # ``data_retrieved_at`` into the outer compact-analysis
+                # scope so the executive cover page can render
+                # "Data as of <ts>" alongside "Generated <ts>".
+                try:
+                    _drt = (_compact_prefetch_meta or {}).get("data_retrieved_at")
+                    if _drt is not None:
+                        data_retrieved_at = _drt
+                except Exception:
+                    # Round 4: non-fatal; suppressed silently in original code
+                    pass  # noqa: PIE790
+
             except FutureTimeoutError:
                 logger.error(f"⏰ CSConsole data fetching timed out after 90 seconds")
-                csconsole_action_plans = pd.DataFrame()
-                csconsole_customer_pulse = pd.DataFrame()
-                csconsole_success_priorities = pd.DataFrame()
-                csconsole_adoption_barriers = pd.DataFrame()
+                # Phase 1.3a: mark the timeout so the report can show
+                # "CSConsole timed out" instead of an empty section.
+                csconsole_action_plans = _empty_df_with_fetch_marker("csconsole_action_plans", "timeout_after_90s")
+                csconsole_customer_pulse = _empty_df_with_fetch_marker("csconsole_customer_pulse", "timeout_after_90s")
+                csconsole_success_priorities = _empty_df_with_fetch_marker("csconsole_success_priorities", "timeout_after_90s")
+                csconsole_adoption_barriers = _empty_df_with_fetch_marker("csconsole_adoption_barriers", "timeout_after_90s")
+                # Round 4 / Phase 4.4: surface the CSConsole timeout
+                # in the visible warning list (compact path).
+                partial_data_warnings.append({
+                    'dataset': 'csconsole_bundle',
+                    'error': 'CSConsole prefetch timed out (90s)',
+                    'kind': 'timeout',
+                })
             except Exception as e:
                 logger.warning(f"[[WARNING]] Failed to fetch CSConsole data: {e}")
-                csconsole_action_plans = pd.DataFrame()
-                csconsole_customer_pulse = pd.DataFrame()
-                csconsole_success_priorities = pd.DataFrame()
-                csconsole_adoption_barriers = pd.DataFrame()
+                err_msg = str(e).strip() or e.__class__.__name__
+                csconsole_action_plans = _empty_df_with_fetch_marker("csconsole_action_plans", err_msg)
+                csconsole_customer_pulse = _empty_df_with_fetch_marker("csconsole_customer_pulse", err_msg)
+                csconsole_success_priorities = _empty_df_with_fetch_marker("csconsole_success_priorities", err_msg)
+                csconsole_adoption_barriers = _empty_df_with_fetch_marker("csconsole_adoption_barriers", err_msg)
+                # Round 4 / Phase 4.4: surface the runtime failure.
+                partial_data_warnings.append({
+                    'dataset': 'csconsole_bundle',
+                    'error': err_msg,
+                    'kind': 'runtime',
+                })
         else:
             # This should not happen if we validated above, but add safety check
             error_msg = (
@@ -3986,16 +5861,31 @@ def run_compact_analysis(analysis_id):
                                     available_files = os.listdir(uploads_dir)
                                     logger.info(f"[[SEARCH]] DEBUGGING - Available files in uploads: {available_files}")
                                     logger.warning(f"[[WARNING]] CSOne file '{csone_file_path}' not found in uploads directory")
-                                    
-                                    # Try to find any .xlsx file as fallback
-                                    xlsx_files = [f for f in available_files if f.lower().endswith('.xlsx')]
-                                    if xlsx_files:
-                                        fallback_file = xlsx_files[0]  # Use the first available xlsx file
-                                        fallback_path = os.path.join(uploads_dir, fallback_file)
-                                        logger.info(f"[[REFRESH]] Using fallback CSOne file: {fallback_path}")
-                                        csone_file_path = fallback_path
-                                    else:
-                                        logger.warning(f"[[WARNING]] No .xlsx files found in uploads directory")
+
+                                    # Round 4 / Phase 4.5: REMOVED the
+                                    # silent ``xlsx_files[0]`` fallback.
+                                    # Picking an arbitrary workbook from
+                                    # the uploads directory could load
+                                    # ANOTHER customer's data, which
+                                    # would be surfaced through the
+                                    # report as if it were the requested
+                                    # one.  Fail closed instead and
+                                    # append a partial-data warning so
+                                    # the operator notices.
+                                    try:
+                                        partial_data_warnings.append({
+                                            'dataset': 'csone',
+                                            'error': (
+                                                f"CSOne file '{os.path.basename(str(csone_file_path) or '')}' "
+                                                f"not found in uploads directory; loaded as empty (no silent xlsx fallback)."
+                                            ),
+                                            'kind': 'missing_input',
+                                            'effect': 'TAC counts will read as zero; treat as unavailable, not zero.',
+                                        })
+                                    except Exception:
+                                        # Round 4: non-fatal; suppressed silently in original code
+                                        pass  # noqa: PIE790
+                                    return pd.DataFrame()
                                 else:
                                     logger.error(f"[[ERROR]] Uploads directory does not exist: {uploads_dir}")
                             except Exception as e:
@@ -4050,7 +5940,7 @@ def run_compact_analysis(analysis_id):
             logger.info(f"[[TIME]] Starting CSOne processing with 60-second timeout...")
             
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(process_csone_data, csone_file)
+                future = _submit_with_context(executor, process_csone_data, csone_file)
                 csone_df = future.result(timeout=60)  # 60-second timeout for CSOne processing
                 
                 if csone_df is None:
@@ -4100,18 +5990,43 @@ def run_compact_analysis(analysis_id):
             _update_progress(status, 55, 'Gathering external intelligence (defects, incidents)...', 'External Intelligence')
         
         logger.info(f"[[WEB]] Gathering external intelligence...")
+        # Round 4 / Phase 4.4: separate the help.webex (bugs) and the
+        # status.webex (incidents) try/except so that a failure on one
+        # endpoint cannot zero out the other.  Each failure is now
+        # also logged to ``partial_data_warnings`` instead of being
+        # collapsed into a generic empty-list fallback.
+        ext_bugs = []
+        ext_incidents = []
+        matches = []
+        matched_df = pd.DataFrame()
         try:
             ext_bugs = fetch_help_webex_bugs()
-            ext_incidents = fetch_status_incidents()
-            matches = []
-            matched_df = pd.DataFrame()
-            logger.info(f"[[OK]] External intelligence gathered successfully")
         except Exception as e:
-            logger.warning(f"[[WARNING]] External intelligence gathering failed: {e}")
+            logger.warning(f"[[WARNING]] help.webex bug feed gathering failed: {e}")
+            partial_data_warnings.append({
+                'dataset': 'ext_bugs',
+                'error': str(e).strip() or e.__class__.__name__,
+                'kind': 'fetch_failed',
+                'effect': 'External defect / PSIRT correlation will be empty.',
+            })
             ext_bugs = []
+        try:
+            # Round 2 / Phase 1.7: thread the report window
+            _inc_days = int(days) if isinstance(locals().get('days'), (int, float)) and locals().get('days') else 365
+            ext_incidents = fetch_status_incidents(days_back=_inc_days)
+        except Exception as e:
+            logger.warning(f"[[WARNING]] status.webex incident feed gathering failed: {e}")
+            partial_data_warnings.append({
+                'dataset': 'ext_incidents',
+                'error': str(e).strip() or e.__class__.__name__,
+                'kind': 'fetch_failed',
+                'effect': 'Incident correlation / risk uplift will treat as zero.',
+            })
             ext_incidents = []
-            matches = []
-            matched_df = pd.DataFrame()
+        logger.info(
+            f"[[OK]] External intelligence gathered: {len(ext_bugs)} bugs, "
+            f"{len(ext_incidents)} incidents"
+        )
         
         with analysis_status_lock:
             _update_progress(status, 58, 'Extracting software defects and PSIRT vulnerabilities...', 'Defect Analysis')
@@ -4140,15 +6055,36 @@ def run_compact_analysis(analysis_id):
                 feature_requests=feature_requests if 'feature_requests' in locals() else None,
                 software_defects=software_defects if 'software_defects' in locals() else None,
                 psirt_vulns=psirt_vulns if 'psirt_vulns' in locals() else None,
+                # Round 4 / Phase 5.2: forward external intel so the
+                # compact briefing book lists status.webex incidents
+                # and help.webex bug references.  These were previously
+                # dropped, leaving the LLM blind and prone to invent
+                # incident IDs.
+                ext_incidents=ext_incidents if 'ext_incidents' in locals() else None,
+                ext_bugs=ext_bugs if 'ext_bugs' in locals() else None,
             )
         else:
             # Create minimal briefing book from whatever data we have
             logger.info(f"[[DATA]] Limited data available - creating minimal briefing book")
             briefing_book = _create_minimal_briefing_book(manager, ab_norm, team_subs_df, technology)
         
-        # Use a more focused prompt for compact executive analysis
-        ai_prompt = PROMPT_COMPACT_EXECUTIVE_TEMPLATE.format(MANAGER=manager, TECHNOLOGY=technology, data=briefing_book)
-        
+        # Round 6 / Phase 3.11: the compact executive template no longer
+        # accepts ``{data}``; the briefing book is now passed as the
+        # *user* message so the system prompt contains rules only.
+        # This keeps system/user trust frames separated, makes prompt
+        # injection easier to reason about, and matches the executive
+        # / customer paths which already split rules vs data this
+        # way.  Tolerate older versions of the template that still
+        # contain ``{data}`` by stripping it after format.
+        try:
+            ai_prompt = PROMPT_COMPACT_EXECUTIVE_TEMPLATE.format(
+                MANAGER=manager, TECHNOLOGY=technology
+            )
+        except KeyError:
+            ai_prompt = PROMPT_COMPACT_EXECUTIVE_TEMPLATE.format(
+                MANAGER=manager, TECHNOLOGY=technology, data=""
+            ).rstrip()
+
         logger.info(f"[[AI]] DEBUGGING - About to call AI with prompt length: {len(ai_prompt)} chars")
         logger.info(f"[[AI]] DEBUGGING - Briefing book length: {len(briefing_book)} chars")
         
@@ -4163,9 +6099,17 @@ def run_compact_analysis(analysis_id):
                 _update_progress(status, 63, '[AI] Sending to CircuIT (this may take up to 60 seconds)...', 'AI Analysis - CircuIT')
             
             logger.info(f"[[AI]] Starting AI analysis with timeout protection...")
+            # Round 6 / Phase 3.11: pass the briefing book as the user
+            # message; the system prompt now contains rules only.
             ai_insights_raw = generate_llm_response(ai_prompt, briefing_book)
             logger.info(f"[[AI]] AI insights generated: {type(ai_insights_raw)}")
-            logger.info(f"[[AI]] AI insights content: {str(ai_insights_raw)[:500]}...")
+            # Round 5 / Phase 3.14: dropped from INFO to DEBUG.  This
+            # log line dumps the first 500 chars of the LLM output to
+            # the operational log on every analysis -- which can leak
+            # customer narratives (and occasionally cited IDs / ARR
+            # phrases) into the default-INFO log file that ships off
+            # box.  Operators who need it can flip to DEBUG.
+            logger.debug(f"[[AI]] AI insights content: {str(ai_insights_raw)[:500]}...")
             
             # Check for cancellation after AI call
             if check_cancellation(analysis_id):
@@ -4184,8 +6128,21 @@ def run_compact_analysis(analysis_id):
                 }
             else:
                 logger.warning(f"[[WARNING]] AI insights generation failed or returned insufficient content: {ai_insights_raw}")
-                # Generate comprehensive fallback insights based on actual data
-                fallback_insights = _generate_comprehensive_fallback_insights(ab_norm, csone_df, manager, technology)
+                # Phase 1.6: Generate non-AI fallback insights using the same
+                # multi-source customer frames the AI path used so the
+                # customer count agrees with the headline.
+                fallback_insights = _generate_comprehensive_fallback_insights(
+                    ab_norm,
+                    csone_df,
+                    manager,
+                    technology,
+                    team_subs_df=team_subs_df if 'team_subs_df' in locals() else None,
+                    csconsole_action_plans=csconsole_action_plans if 'csconsole_action_plans' in locals() else None,
+                    csconsole_customer_pulse=csconsole_customer_pulse if 'csconsole_customer_pulse' in locals() else None,
+                    csconsole_success_priorities=csconsole_success_priorities if 'csconsole_success_priorities' in locals() else None,
+                    csconsole_adoption_barriers=csconsole_adoption_barriers if 'csconsole_adoption_barriers' in locals() else None,
+                    llm_error=str(ai_insights_raw)[:500] if ai_insights_raw else "LLM returned empty/short response",
+                )
                 logger.info(f"[[REFRESH]] Generated fallback insights: {len(fallback_insights)} characters")
                 
                 ai_insights = {
@@ -4203,8 +6160,21 @@ def run_compact_analysis(analysis_id):
                 update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
                 return
             
-            # Generate comprehensive fallback insights based on actual data
-            fallback_insights = _generate_comprehensive_fallback_insights(ab_norm, csone_df, manager, technology)
+            # Phase 1.6: Generate non-AI fallback insights using the same
+            # multi-source customer frames the AI path used so the
+            # customer count agrees with the headline.
+            fallback_insights = _generate_comprehensive_fallback_insights(
+                ab_norm,
+                csone_df,
+                manager,
+                technology,
+                team_subs_df=team_subs_df if 'team_subs_df' in locals() else None,
+                csconsole_action_plans=csconsole_action_plans if 'csconsole_action_plans' in locals() else None,
+                csconsole_customer_pulse=csconsole_customer_pulse if 'csconsole_customer_pulse' in locals() else None,
+                csconsole_success_priorities=csconsole_success_priorities if 'csconsole_success_priorities' in locals() else None,
+                csconsole_adoption_barriers=csconsole_adoption_barriers if 'csconsole_adoption_barriers' in locals() else None,
+                llm_error=str(ai_error),
+            )
             logger.info(f"[[REFRESH]] Generated fallback insights: {len(fallback_insights)} characters")
             
             ai_insights = {
@@ -4303,10 +6273,74 @@ def run_compact_analysis(analysis_id):
                 try:
                     logger.info(f"[EXEC-REPORT] === STARTING EXECUTIVE INTELLIGENCE REPORT ===")
                     logger.info(f"[EXEC-REPORT] Step 1/5: Calculating risk scores...")
-                    
-                    # Calculate risk scores and summary
-                    risk_scores = calculate_renewal_risk_scores(ab_norm, csone_df)
-                    logger.info(f"[EXEC-REPORT] Risk scores calculated: {len(risk_scores)} customers (NOTE: This only counts customers with barriers/cases)")
+
+                    # Round 2 / Phase 1.2: drive renewal-risk universe
+                    # from the same multi-source frames + account map
+                    # the headline ``total_customers`` already uses, so
+                    # subscription-only / pulse-only customers are not
+                    # silently dropped from the renewal table (which
+                    # would make the risk row count < total_customers).
+                    try:
+                        _ei_lookup = build_customer_lookup(
+                            team_subs_df_unfiltered if 'team_subs_df_unfiltered' in locals() else None
+                        )
+                        _ei_account_to_customer = (_ei_lookup or {}).get("account_to_customer", {}) or {}
+                        _ei_extra_frames = []
+                        for _df_name in (
+                            'team_subs_df_unfiltered',
+                            'csconsole_customer_pulse',
+                            'csconsole_success_priorities',
+                            'csconsole_adoption_barriers',
+                            # Round 10 / Phase 7.1: include
+                            # ``csconsole_action_plans`` (the variable
+                            # actually defined in
+                            # ``run_compact_analysis``) so action-plan-only
+                            # customers land in the renewal risk universe
+                            # the same way they do in the EI Word
+                            # dashboard. ``ap_df`` is kept for
+                            # back-compat with other call sites that
+                            # use that name.
+                            'csconsole_action_plans',
+                            'ap_df',
+                        ):
+                            if _df_name in locals():
+                                _val = locals()[_df_name]
+                                if isinstance(_val, pd.DataFrame) and not _val.empty:
+                                    _ei_extra_frames.append(_val)
+                        risk_scores = calculate_renewal_risk_scores(
+                            ab_norm,
+                            csone_df,
+                            extra_frames=_ei_extra_frames if _ei_extra_frames else None,
+                            account_to_customer=_ei_account_to_customer,
+                            # Phase 4.2: thread analysis horizon.
+                            recent_window_days=int(days) if 'days' in locals() and days else 30,
+                        )
+                    except Exception as _ei_rs_err:
+                        logger.debug(
+                            f"[EXEC-REPORT] Falling back to AB+CSOne-only risk universe: {_ei_rs_err}"
+                        )
+                        risk_scores = calculate_renewal_risk_scores(
+                            ab_norm,
+                            csone_df,
+                            recent_window_days=int(days) if 'days' in locals() and days else 30,
+                        )
+                    # Phase 1.2: assert risk row count >= total_customers floor.
+                    try:
+                        _ei_total_customers = cm.count_customers(
+                            ab_df=ab_norm,
+                            csone_df=csone_df,
+                            extra_frames=_ei_extra_frames if '_ei_extra_frames' in locals() else None,
+                            account_to_customer=_ei_account_to_customer if '_ei_account_to_customer' in locals() else None,
+                        )
+                        if _ei_total_customers and len(risk_scores) < _ei_total_customers:
+                            logger.warning(
+                                "[EXEC-REPORT] risk_scores rows (%d) < total_customers (%d); some customers missing from renewal universe",
+                                len(risk_scores), _ei_total_customers,
+                            )
+                    except Exception:
+                        # Round 4: non-fatal; suppressed silently in original code
+                        pass  # noqa: PIE790
+                    logger.info(f"[EXEC-REPORT] Risk scores calculated: {len(risk_scores)} customers")
                     
                     logger.info(f"[EXEC-REPORT] Step 2/5: Building risk summary...")
                     # Create risk summary.  Round 4: split the band-based
@@ -4323,10 +6357,33 @@ def run_compact_analysis(analysis_id):
                         if isinstance(v, dict) and 'score' in v:
                             score = v['score']
                             scores.append(score)
-                            if score >= 6:
+                            # Phase 1.5: route through cm.is_high_risk_profile so the
+                            # narrative table and the canonical headline ALWAYS agree.
+                            # The legacy ``score >= 6`` cutoff missed CRITICAL/HIGH band
+                            # rows whose 0-10 score was 5.5-5.99 and missed color="Red"
+                            # short-circuits, producing a "dashboard says 12 / table
+                            # shows 9" mismatch.
+                            if cm.is_high_risk_profile(v, scale=cm.RISK_SCALE_0_TO_10):
                                 high_risk_customers[k] = v
-                            elif 4 <= score < 6:
-                                moderate_risk_customers[k] = v
+                            else:
+                                # Round 6 / Phase 5.2: derive the
+                                # "Watch" band cutoffs from canonical
+                                # ``risk_scoring.RISK_BAND_THRESHOLDS``
+                                # (MEDIUM=35, HIGH=55 on the 0-100
+                                # scale; ie 3.5 / 5.5 on the 0-10
+                                # scale) so any future tuning of the
+                                # risk bands automatically flows here
+                                # instead of silently drifting from
+                                # the canonical labels.
+                                try:
+                                    from risk_scoring import RISK_BAND_THRESHOLDS as _RBT_WATCH
+                                    _watch_low = float(_RBT_WATCH["MEDIUM"]) / 10.0
+                                    _watch_high = float(_RBT_WATCH["HIGH"]) / 10.0
+                                except Exception:
+                                    _watch_low = 3.5
+                                    _watch_high = 5.5
+                                if _watch_low <= score < _watch_high:
+                                    moderate_risk_customers[k] = v
                             band = str(v.get('risk_band') or '').upper()
                             if band == 'CRITICAL':
                                 critical_band_customers[k] = v
@@ -4391,7 +6448,15 @@ def run_compact_analysis(analysis_id):
                             csconsole_success_priorities=csconsole_success_priorities if 'csconsole_success_priorities' in locals() else pd.DataFrame(),
                             csconsole_adoption_barriers=csconsole_adoption_barriers if 'csconsole_adoption_barriers' in locals() else pd.DataFrame(),
                             software_defects=software_defects if 'software_defects' in locals() else {'total_defects': 0, 'total_cases_with_defects': 0, 'defect_by_customer': {}},
-                            psirt_vulns=psirt_vulns if 'psirt_vulns' in locals() else {'total_vulnerabilities': 0, 'cve_ids': set(), 'psirt_advisories': set(), 'vulnerability_by_customer': {}}
+                            psirt_vulns=psirt_vulns if 'psirt_vulns' in locals() else {'total_vulnerabilities': 0, 'cve_ids': set(), 'psirt_advisories': set(), 'vulnerability_by_customer': {}},
+                            # Phase 1.3b: bubble fetch failures into the report
+                            # so the reader sees a banner instead of a confident
+                            # zero on the affected sections.
+                            partial_data_warnings=(partial_data_warnings if 'partial_data_warnings' in locals() else None),
+                            # Phase 3.1: render "Data as of" alongside
+                            # "Generated" so the cover page distinguishes
+                            # data freshness from render time.
+                            data_retrieved_at=(data_retrieved_at if 'data_retrieved_at' in locals() else None),
                         )
                     else:
                         logger.warning("[EXEC-REPORT] Executive formatter not available, using enhanced compact report fallback")
@@ -4480,34 +6545,133 @@ def run_compact_analysis(analysis_id):
                 """Generate the Excel report in a separate thread"""
                 try:
                     logger.info(" Calculating risk scores...")
-                    risk_scores = calculate_renewal_risk_scores(ab_norm, csone_df)
+                    # Round 2 / Phase 1.2: thread the multi-source
+                    # customer universe (subscriptions / pulse / etc.)
+                    # and account_to_customer map into the Excel risk
+                    # table so the Risk_Summary sheet covers the same
+                    # customers as the Word headline / Compact / EI.
+                    try:
+                        _xl_lookup = build_customer_lookup(
+                            team_subs_df_unfiltered if 'team_subs_df_unfiltered' in locals() else None
+                        )
+                        _xl_account_to_customer = (_xl_lookup or {}).get("account_to_customer", {}) or {}
+                        _xl_extra_frames = []
+                        for _df_name in (
+                            'team_subs_df_unfiltered',
+                            'csconsole_customer_pulse',
+                            'csconsole_success_priorities',
+                            'csconsole_adoption_barriers',
+                            # Round 10 / Phase 7.1: see EI loop above.
+                            'csconsole_action_plans',
+                            'ap_df',
+                        ):
+                            if _df_name in locals():
+                                _val = locals()[_df_name]
+                                if isinstance(_val, pd.DataFrame) and not _val.empty:
+                                    _xl_extra_frames.append(_val)
+                        risk_scores = calculate_renewal_risk_scores(
+                            ab_norm,
+                            csone_df,
+                            extra_frames=_xl_extra_frames if _xl_extra_frames else None,
+                            account_to_customer=_xl_account_to_customer,
+                            # Phase 4.2: thread analysis horizon.
+                            recent_window_days=int(days) if 'days' in locals() and days else 30,
+                        )
+                    except Exception as _xl_rs_err:
+                        logger.debug(
+                            f"[EXCEL] Falling back to AB+CSOne-only risk universe: {_xl_rs_err}"
+                        )
+                        risk_scores = calculate_renewal_risk_scores(
+                            ab_norm,
+                            csone_df,
+                            recent_window_days=int(days) if 'days' in locals() and days else 30,
+                        )
                     logger.info(f"[[CHART]] Risk scores calculated for {len(risk_scores)} customers")
+                    # Phase 1.2: floor assertion vs total_customers.
+                    try:
+                        _xl_total_customers = cm.count_customers(
+                            ab_df=ab_norm,
+                            csone_df=csone_df,
+                            extra_frames=_xl_extra_frames if '_xl_extra_frames' in locals() else None,
+                            account_to_customer=_xl_account_to_customer if '_xl_account_to_customer' in locals() else None,
+                        )
+                        if _xl_total_customers and len(risk_scores) < _xl_total_customers:
+                            logger.warning(
+                                "[EXCEL] risk_scores rows (%d) < total_customers (%d); Risk_Summary sheet will under-cover the portfolio",
+                                len(risk_scores), _xl_total_customers,
+                            )
+                    except Exception:
+                        # Round 4: non-fatal; suppressed silently in original code
+                        pass  # noqa: PIE790
                     return risk_scores
                 except Exception as e:
                     logger.error(f"[[ERROR]] Risk score calculation failed: {e}")
                     return {}
             
             logger.info(f"[[TIME]] Starting Excel generation with 60-second timeout...")
-            
+            # Round 4 / Phase 1.4: track WHY risk_scores ended up empty
+            # so the Excel dashboard can render n/a (instead of 0) and
+            # promote the failure to ``partial_data_warnings`` /
+            # ``Report_Info``.  The previous code silently fell back to
+            # an empty dict on timeout/exception, which then read out
+            # as "0 high-risk customers, 0/10 overall score" -- the
+            # workbook advertised a healthy portfolio when the truth
+            # was that we couldn't compute risk at all.
+            risk_scores_unavailable_reason = None
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(generate_excel)
+                future = _submit_with_context(executor, generate_excel)
                 risk_scores = future.result(timeout=60)  # 60-second timeout for Excel generation
                 
                 if not risk_scores:
                     logger.warning(f"[[WARNING]] Risk scores calculation failed, using empty dict")
                     risk_scores = {}
+                    risk_scores_unavailable_reason = (
+                        risk_scores_unavailable_reason
+                        or 'risk_scoring returned no profiles'
+                    )
                     
         except FutureTimeoutError:
             logger.error(f"⏰ Excel generation timed out after 60 seconds")
             risk_scores = {}
+            risk_scores_unavailable_reason = 'risk_scoring timed out (>60s)'
         except Exception as e:
             logger.error(f"[[ERROR]] Excel generation failed: {e}")
             risk_scores = {}
+            risk_scores_unavailable_reason = f'risk_scoring exception: {e}'
         
         with analysis_status_lock:
             _update_progress(status, 85, 'Building risk summary for Excel...', 'Excel Report Generation')
         logger.info(f"[[LIST]] Creating risk summary DataFrame...")
         risk_summary_data = []
+        # Round 4 / Phase 1.3: precompute normalized -> raw mappings for
+        # AB and CSOne so the per-customer counts join via
+        # ``normalize_customer_name`` instead of raw equality.  The
+        # legacy ``ab_norm[ab_norm['customer_name'] == customer]`` test
+        # silently dropped rows whenever the risk_scores key differed
+        # from the AB / CSOne string by case, whitespace, accent
+        # folding, or the variants normalize_customer_name absorbs
+        # (e.g. "ACME, Inc.", "Acme Inc", " acme inc."), producing
+        # under-counts in the Risk_Summary sheet.
+        try:
+            from data_normalization import normalize_customer_name as _norm_cust_name
+        except Exception:
+            def _norm_cust_name(value):
+                try:
+                    return str(value or '').strip().lower()
+                except Exception:
+                    return ''
+
+        _ab_norm_cust_series = (
+            ab_norm['customer_name'].astype(str).map(_norm_cust_name)
+            if (not ab_norm.empty and 'customer_name' in ab_norm.columns)
+            else pd.Series(dtype=str)
+        )
+        _csone_norm_cust_series = (
+            csone_df['customer_name'].astype(str).map(_norm_cust_name)
+            if (not csone_df.empty and 'customer_name' in csone_df.columns)
+            else pd.Series(dtype=str)
+        )
+
         for customer, risk_data in risk_scores.items():
             # Extract score from risk_data dictionary
             if isinstance(risk_data, dict) and 'score' in risk_data:
@@ -4527,16 +6691,42 @@ def run_compact_analysis(analysis_id):
             if isinstance(risk_data, dict):
                 band = str(risk_data.get('risk_band') or '').upper()
             if not band:
-                if score >= 7.5:
-                    band = 'CRITICAL'
-                elif score >= 5.5:
-                    band = 'HIGH'
-                elif score >= 3.5:
-                    band = 'MEDIUM'
-                elif score >= 1.5:
-                    band = 'LOW'
-                else:
-                    band = 'HEALTHY'
+                # Round 5 / Phase 1.11: defer to the canonical band helper
+                # in risk_scoring rather than re-encoding 7.5/5.5/3.5/1.5
+                # cuts here (which silently drift from RISK_BAND_THRESHOLDS
+                # when the canonical thresholds are tuned).  ``_risk_band``
+                # operates on the 0-100 scale, so multiply by 10.
+                #
+                # Round 6 / Phase 5.7: narrow the exception scope so we
+                # only swallow ``ImportError`` (the documented failure
+                # mode in frozen / partially-installed bundles).  The
+                # fallback now derives its cuts from
+                # ``RISK_BAND_THRESHOLDS`` rather than re-encoding
+                # 7.5/5.5/3.5/1.5 literals, and any other exception
+                # (e.g. a TypeError from ``float(score)``) is allowed
+                # to propagate so we don't silently mislabel rows.
+                try:
+                    from risk_scoring import _risk_band as _shared_risk_band
+                    band = _shared_risk_band(float(score) * 10.0)
+                except ImportError:
+                    try:
+                        from risk_scoring import RISK_BAND_THRESHOLDS as _RBT_RL
+                    except ImportError:
+                        _RBT_RL = {"CRITICAL": 75, "HIGH": 55, "MEDIUM": 35, "LOW": 15}
+                    _crit_cut = float(_RBT_RL["CRITICAL"]) / 10.0
+                    _high_cut = float(_RBT_RL["HIGH"]) / 10.0
+                    _med_cut = float(_RBT_RL["MEDIUM"]) / 10.0
+                    _low_cut = float(_RBT_RL["LOW"]) / 10.0
+                    if score >= _crit_cut:
+                        band = 'CRITICAL'
+                    elif score >= _high_cut:
+                        band = 'HIGH'
+                    elif score >= _med_cut:
+                        band = 'MEDIUM'
+                    elif score >= _low_cut:
+                        band = 'LOW'
+                    else:
+                        band = 'HEALTHY'
             _band_to_level = {
                 'CRITICAL': 'CRITICAL',
                 'HIGH': 'HIGH',
@@ -4545,13 +6735,26 @@ def run_compact_analysis(analysis_id):
                 'HEALTHY': 'HEALTHY',
             }
             risk_level = _band_to_level.get(band, 'LOW')
+            # Round 4 / Phase 1.3: join via normalize_customer_name so
+            # per-customer counts are not silently zeroed by case /
+            # whitespace / suffix differences between risk_scores keys
+            # and the AB / CSOne ``customer_name`` columns.
+            _cust_norm = _norm_cust_name(customer)
+            ab_count = (
+                int((_ab_norm_cust_series == _cust_norm).sum())
+                if not _ab_norm_cust_series.empty else 0
+            )
+            cs_count = (
+                int((_csone_norm_cust_series == _cust_norm).sum())
+                if not _csone_norm_cust_series.empty else 0
+            )
             risk_summary_data.append({
                 'Customer': customer,
                 'Risk_Score': round(score, 1),
                 'Risk_Level': risk_level,
                 'Risk_Band': band,
-                'Adoption_Barriers': len(ab_norm[ab_norm['customer_name'] == customer]) if not ab_norm.empty else 0,
-                'Support_Cases': len(csone_df[csone_df['customer_name'] == customer]) if not csone_df.empty else 0
+                'Adoption_Barriers': ab_count,
+                'Support_Cases': cs_count,
             })
         
         risk_summary_df = pd.DataFrame(
@@ -4560,15 +6763,68 @@ def run_compact_analysis(analysis_id):
         )
         logger.info(f"[[DATA]] Risk summary DataFrame created with {len(risk_summary_df)} rows")
 
-        # Round 4: keep the Excel "high risk" sub-table aligned with
-        # Risk_Level — anything labeled HIGH or CRITICAL is in scope so
-        # the Risk_Level column and this filter cannot disagree.
-        if 'Risk_Band' in risk_summary_df.columns:
+        # Round 4 / Phase 1.2: drive BOTH the dashboard
+        # ``high_risk_count`` cell and the ``High_Risk_Customers`` sheet
+        # row count from the canonical ``cm.is_high_risk_profile``
+        # predicate so they can never disagree.  The previous code
+        # filtered ``risk_summary_df`` by ``Risk_Band`` here (used for
+        # the dashboard cell) and then later rebuilt
+        # ``high_risk_customers`` via ``cm.is_high_risk_profile`` for
+        # the sheet — when the two disagreed the workbook silently
+        # advertised two different numbers in the same file.
+        try:
+            _canonical_high_risk_names = {
+                str(name)
+                for name, profile in (risk_scores or {}).items()
+                if isinstance(profile, dict)
+                and cm.is_high_risk_profile(profile, scale=cm.RISK_SCALE_0_TO_10)
+            }
+        except Exception as _chr_err:
+            logger.debug(
+                "[EXCEL] cm.is_high_risk_profile sweep failed: %s; falling back to Risk_Band filter",
+                _chr_err,
+            )
+            _canonical_high_risk_names = None
+
+        if _canonical_high_risk_names is not None:
+            if 'Customer' in risk_summary_df.columns and not risk_summary_df.empty:
+                # Round 12 / Phase 11.4: stable sort + ``Customer``
+                # tie-break so two accounts with the same Risk_Score
+                # always render in the same order across runs.
+                high_risk_customers = risk_summary_df[
+                    risk_summary_df['Customer'].astype(str).isin(_canonical_high_risk_names)
+                ].sort_values(
+                    ['Risk_Score', 'Customer'],
+                    ascending=[False, True],
+                    kind='stable',
+                )
+            else:
+                high_risk_customers = risk_summary_df.head(0)
+        elif 'Risk_Band' in risk_summary_df.columns:
+            # Round 12 / Phase 11.4: stable sort + tie-break.
             high_risk_customers = risk_summary_df[
                 risk_summary_df['Risk_Band'].isin(['HIGH', 'CRITICAL'])
-            ].sort_values('Risk_Score', ascending=False)
+            ].sort_values(
+                ['Risk_Score'] + (['Customer'] if 'Customer' in risk_summary_df.columns else []),
+                ascending=[False] + ([True] if 'Customer' in risk_summary_df.columns else []),
+                kind='stable',
+            )
         else:
-            high_risk_customers = risk_summary_df[risk_summary_df['Risk_Score'] >= 5.5].sort_values('Risk_Score', ascending=False)
+            # Round 6 / Phase 5.3: derive the high-risk cutoff from
+            # the canonical RISK_BAND_THRESHOLDS so this fallback
+            # cannot drift from the executive headline tile / Excel
+            # exec band when the canonical thresholds are tuned.
+            try:
+                from risk_scoring import RISK_BAND_THRESHOLDS as _RBT_HRF
+                _hrf_cut = float(_RBT_HRF["HIGH"]) / 10.0
+            except Exception:
+                _hrf_cut = 5.5
+            # Round 12 / Phase 11.4: stable sort + ``Customer`` tie-break.
+            high_risk_customers = risk_summary_df[risk_summary_df['Risk_Score'] >= _hrf_cut].sort_values(
+                ['Risk_Score'] + (['Customer'] if 'Customer' in risk_summary_df.columns else []),
+                ascending=[False] + ([True] if 'Customer' in risk_summary_df.columns else []),
+                kind='stable',
+            )
         logger.info(f"[[WARNING]] High-risk customers identified: {len(high_risk_customers)}")
         
         with analysis_status_lock:
@@ -4593,6 +6849,12 @@ def run_compact_analysis(analysis_id):
                 'csconsole_customer_pulse',
                 'csconsole_success_priorities',
                 'csconsole_adoption_barriers',
+                # Round 10 / Phase 7.1: include the actual variable name
+                # used in this scope (``csconsole_action_plans``) so the
+                # Excel total_customers headline matches the Word
+                # headline that already uses the same dataframe via
+                # ``cm.count_customers``.
+                'csconsole_action_plans',
                 'ap_df',
             ):
                 if _df_name in locals():
@@ -4606,18 +6868,104 @@ def run_compact_analysis(analysis_id):
                 account_to_customer=_account_to_customer,
             )
         except Exception as _tc_err:
-            logger.debug(
-                f"[EXCEL] Falling back to AB-only total_customers: {_tc_err}"
+            # Round 2 / Phase 1.14: fail closed instead of silently
+            # falling back to ``len(ab_norm.unique())`` which excludes
+            # subscription-only / pulse-only customers and silently
+            # disagrees with every other report's total customer count.
+            # Mark the workbook as partial; the dashboard will render
+            # "n/a" for total customers and the data sources sheet
+            # records the failure.
+            logger.error(
+                "[EXCEL] count_customers failed; marking workbook as PARTIAL: %s", _tc_err
             )
-            total_customers = len(ab_norm['customer_name'].unique()) if not ab_norm.empty else 0
+            total_customers = None
+            try:
+                _excel_partial_warnings = locals().get('_excel_partial_warnings') or []
+            except Exception:
+                _excel_partial_warnings = []
+            _excel_partial_warnings.append(
+                f"total_customers cell omitted: {_tc_err}"
+            )
         high_risk_count = len(high_risk_customers)
         
         critical_abs = cm.count_critical_barriers(
             ab_norm, mode=cm.CRITICAL_AB_MODE_CRITICAL_OR_HIGH
         )
         escalated_cases = cm.count_escalated(csone_df)
-            
-        overall_risk_score = risk_summary_df['Risk_Score'].mean() if not risk_summary_df.empty else 0
+
+        # Round 4 / Phase 1.4: when risk_scores is empty (timeout /
+        # exception in the risk_scoring path) we render n/a for the
+        # risk-derived dashboard cells and append a
+        # ``partial_data_warnings`` entry so the workbook does NOT
+        # silently advertise "0 high-risk customers, 0.0/10 overall
+        # score" as a healthy result.
+        try:
+            _risk_scores_empty = not bool(risk_scores)
+        except Exception:
+            _risk_scores_empty = True
+        if _risk_scores_empty:
+            try:
+                _excel_partial_warnings = locals().get('_excel_partial_warnings') or []
+            except Exception:
+                _excel_partial_warnings = []
+            _why = (
+                locals().get('risk_scores_unavailable_reason')
+                or 'risk_scores empty'
+            )
+            _excel_partial_warnings.append(f'risk_scores unavailable: {_why}')
+            try:
+                if 'partial_data_warnings' in locals() and isinstance(partial_data_warnings, list):
+                    partial_data_warnings.append({
+                        'source': 'executive_excel.risk_scores',
+                        'reason': str(_why),
+                        'effect': (
+                            'High-Risk Customers, Overall Risk Score, and '
+                            'High_Risk_Customers / Risk_Summary sheets render n/a'
+                        ),
+                    })
+            except Exception:
+                # Round 4: non-fatal; suppressed silently in original code
+                pass  # noqa: PIE790
+
+        # Round 10 / Phase 7.2: derive ``overall_risk_score`` directly
+        # from the raw ``risk_scores`` dict (the same source the Word
+        # executive dashboard uses on line ~5749) instead of taking the
+        # mean of ``risk_summary_df['Risk_Score']``.  Otherwise the two
+        # outputs can disagree whenever a row is dropped from
+        # ``risk_summary_df`` (e.g. missing Customer name) but is still
+        # present in the raw ``risk_scores`` dict, producing a Word
+        # headline ``5.4/10`` vs Excel headline ``5.7/10`` mismatch
+        # that operators have flagged.
+        try:
+            _raw_scores = [
+                float(_v.get('score', 0))
+                for _v in (risk_scores or {}).values()
+                if isinstance(_v, dict) and 'score' in _v
+                and _v.get('score') is not None
+            ]
+        except Exception:
+            _raw_scores = []
+        if _raw_scores:
+            overall_risk_score = float(np.mean(_raw_scores))
+        elif not risk_summary_df.empty:
+            overall_risk_score = risk_summary_df['Risk_Score'].mean()
+        else:
+            overall_risk_score = 0
+        # Round 2 / Phase 1.6: source HIGH/MEDIUM cuts from the
+        # canonical RISK_BAND_THRESHOLDS so the executive-tile band
+        # label below cannot drift away from the rest of the report.
+        # Round 6 / Phase 5.16: route the import-failure fallback
+        # through ``risk_scoring.get_default_risk_band_thresholds``
+        # so the fallback values cannot silently drift from the
+        # canonical mapping if HIGH / MEDIUM are ever retuned.
+        try:
+            from risk_scoring import RISK_BAND_THRESHOLDS as _RBT_0_100
+        except ImportError:
+            try:
+                from risk_scoring import get_default_risk_band_thresholds
+                _RBT_0_100 = get_default_risk_band_thresholds()
+            except ImportError:
+                _RBT_0_100 = {"CRITICAL": 75, "HIGH": 55, "MEDIUM": 35, "LOW": 15}
         
         # Create executive dashboard sheet
         dashboard_data = {
@@ -4633,22 +6981,54 @@ def run_compact_analysis(analysis_id):
                 'Report Generated'
             ],
             'Value': [
-                total_customers,
-                high_risk_count,
+                # Round 2 / Phase 1.14: render n/a (omit cell) instead
+                # of falling back to AB-only count when canonical
+                # ``cm.count_customers`` could not be computed.
+                ('n/a' if total_customers is None else total_customers),
+                # Round 4 / Phase 1.4: when risk_scores could not be
+                # computed render n/a for the risk-derived cells (vs
+                # silently rendering 0).
+                ('n/a' if _risk_scores_empty else high_risk_count),
                 critical_abs,
                 escalated_cases,
-                f"{overall_risk_score:.1f}/10",
+                ('n/a' if _risk_scores_empty else f"{overall_risk_score:.1f}/10"),
                 days,
                 technology,
                 manager,
-                datetime.now().strftime("%Y-%m-%d %H:%M")
+                datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             ],
             'Status': [
-                ' Portfolio Overview',
-                '[CRITICAL] Immediate Attention' if high_risk_count > 0 else '[OK] Under Control',
+                ('[PARTIAL] Total customers unavailable' if total_customers is None else ' Portfolio Overview'),
+                # Round 4 / Phase 1.4: PARTIAL marker when risk_scores
+                # is unavailable so the operator can see the n/a is
+                # not "zero high-risk customers".
+                (
+                    '[PARTIAL] Risk scores unavailable'
+                    if _risk_scores_empty
+                    else ('[CRITICAL] Immediate Attention' if high_risk_count > 0 else '[OK] Under Control')
+                ),
                 '[WARNING] Monitor Closely' if critical_abs > 0 else '[OK] No Critical Issues',
                 '[ALERT] Escalation Required' if escalated_cases > 0 else '[OK] Normal Operations',
-                '[HIGH] High Risk' if overall_risk_score >= 7 else '[MOD] Moderate Risk' if overall_risk_score >= 4 else '[LOW] Low Risk',
+                # Round 2 / Phase 1.6 hardening: derive label from the
+                # canonical RISK_BAND_THRESHOLDS (HIGH=55, MEDIUM=35
+                # on a 0-100 scale; ie 5.5 / 3.5 on the 0-10 scale)
+                # so the Excel summary tile agrees with the rest of
+                # the report instead of using the legacy >=7 / >=4
+                # cuts that disagreed at the 5.5-7.0 range.
+                # Round 4 / Phase 1.4: when risk_scores empty, mark
+                # the band cell PARTIAL so the operator does not read
+                # ``Low Risk`` from a missing-data 0.0/10.
+                (
+                    '[PARTIAL] Risk scores unavailable'
+                    if _risk_scores_empty
+                    else (
+                        '[HIGH] High Risk'
+                        if overall_risk_score >= (_RBT_0_100["HIGH"] / 10.0)
+                        else '[MOD] Moderate Risk'
+                        if overall_risk_score >= (_RBT_0_100["MEDIUM"] / 10.0)
+                        else '[LOW] Low Risk'
+                    )
+                ),
                 '[TIME] Analysis Period',
                 '[TECH] Technology Focus',
                 '[MGR] Portfolio Manager',
@@ -4725,49 +7105,115 @@ def run_compact_analysis(analysis_id):
                 escalated_cases = pd.DataFrame(columns=csone_df.columns)
                 logger.info(f"   - case_priority_norm unavailable, escalated case count set to 0")
         
-        # Create high-risk customers based on data availability
+        # Round 2 / Phase 1.5: drive the High_Risk_Customers sheet from
+        # the canonical ``cm.is_high_risk_profile`` predicate so this
+        # sheet's row count matches the executive_dashboard
+        # ``High-Risk Customers`` cell (which is len(high_risk_customers)
+        # filtered by Risk_Band IN ('HIGH','CRITICAL')).  The previous
+        # Excel logic used a raw issue-count heuristic that silently
+        # disagreed with both the dashboard cell and the EI/Word
+        # narrative.
         high_risk_customers = pd.DataFrame()
-        if not ab_norm.empty or not csone_df.empty:
-            # Get customers with multiple issues (flexible column names)
-            customer_issue_counts = {}
-            ab_cust_col = next((c for c in ['customer_name', 'Customer Name', 'BU_NAME', 'Customer'] if c in ab_norm.columns), None) if not ab_norm.empty else None
-            csone_cust_col = next((c for c in ['customer_name', 'Customer Name', 'BU_NAME', 'Customer'] if c in csone_df.columns), None) if not csone_df.empty else None
-            
-            if not ab_norm.empty and ab_cust_col:
-                ab_counts = ab_norm[ab_cust_col].value_counts()
-                for customer, count in ab_counts.items():
-                    customer_issue_counts[customer] = customer_issue_counts.get(customer, 0) + count
-            
-            if not csone_df.empty and csone_cust_col:
-                case_counts = csone_df[csone_cust_col].value_counts()
-                for customer, count in case_counts.items():
-                    customer_issue_counts[customer] = customer_issue_counts.get(customer, 0) + count
-            
-            # FIXED: Get ALL customers with issues
-            if customer_issue_counts:
-                sorted_customers = sorted(customer_issue_counts.items(), key=lambda x: x[1], reverse=True)
-                high_risk_customer_names = [name for name, count in sorted_customers]  # All customers
-                
-                # Create high-risk customers dataframe
-                high_risk_data = []
-                for customer in high_risk_customer_names:
-                    ab_count = len(ab_norm[ab_norm[ab_cust_col] == customer]) if not ab_norm.empty and ab_cust_col else 0
-                    case_count = len(csone_df[csone_df[csone_cust_col] == customer]) if not csone_df.empty and csone_cust_col else 0
-                    total_issues = customer_issue_counts[customer]
-                    
-                    high_risk_data.append({
-                        'Customer Name': customer,
-                        'Adoption Barriers': ab_count,
-                        'Support Cases': case_count,
-                        'Total Issues': total_issues,
-                        'Risk Level': 'High' if total_issues >= 5 else 'Medium' if total_issues >= 3 else 'Low'
-                    })
-                
-                high_risk_customers = pd.DataFrame(high_risk_data)
-                logger.info(f"   - High-risk customers identified: {len(high_risk_customers)} customers")
+        try:
+            ab_cust_col = next(
+                (c for c in ['customer_name', 'Customer Name', 'BU_NAME', 'Customer'] if c in ab_norm.columns),
+                None,
+            ) if not ab_norm.empty else None
+            csone_cust_col = next(
+                (c for c in ['customer_name', 'Customer Name', 'BU_NAME', 'Customer'] if c in csone_df.columns),
+                None,
+            ) if not csone_df.empty else None
+
+            # Round 6 / Phase 1.7: join the high-risk record counts on a
+            # normalized customer name on BOTH sides instead of exact
+            # string equality.  Otherwise "Acme, Inc." in risk_scores
+            # vs "Acme Inc" in ab_norm silently scored 0 issues even
+            # though the same customer is high-risk.  We pre-compute
+            # the normalized series once per side rather than per row.
+            try:
+                from data_normalization import normalize_customer_name as _norm_cust_for_join
+            except Exception:
+                def _norm_cust_for_join(v):
+                    return str(v or '').strip().lower()
+            ab_norm_keys = (
+                ab_norm[ab_cust_col].map(_norm_cust_for_join)
+                if not ab_norm.empty and ab_cust_col else None
+            )
+            csone_norm_keys = (
+                csone_df[csone_cust_col].map(_norm_cust_for_join)
+                if not csone_df.empty and csone_cust_col else None
+            )
+
+            high_risk_records: List[Dict[str, Any]] = []
+            for cust_name, profile in (risk_scores or {}).items():
+                if not isinstance(profile, dict):
+                    continue
+                if not cm.is_high_risk_profile(profile, scale=cm.RISK_SCALE_0_TO_10):
+                    continue
+                _norm_cust = _norm_cust_for_join(cust_name)
+                ab_count = (
+                    int((ab_norm_keys == _norm_cust).sum())
+                    if ab_norm_keys is not None else 0
+                )
+                case_count = (
+                    int((csone_norm_keys == _norm_cust).sum())
+                    if csone_norm_keys is not None else 0
+                )
+                high_risk_records.append({
+                    'Customer Name': cust_name,
+                    'Risk Score (0-10)': round(float(profile.get('score', 0) or 0), 1),
+                    'Risk Score (0-100)': float(profile.get('risk_score_0_100', 0) or 0),
+                    'Risk Band': profile.get('risk_band', ''),
+                    'Adoption Barriers': ab_count,
+                    'Support Cases': case_count,
+                    'Total Issues': ab_count + case_count,
+                })
+            if high_risk_records:
+                # Round 5 / Phase 1.14: add a Customer Name tiebreaker so the
+                # high_risk_customers sheet is deterministic across runs
+                # when score and issue counts collide (otherwise sort is
+                # input-order dependent and diff churn appears in repeat
+                # runs).  Note Customer Name is sorted *ascending* even
+                # though score / issues are descending, so we negate the
+                # numeric keys instead of using ``reverse=True``.
+                high_risk_records.sort(
+                    key=lambda r: (
+                        -(float(r.get('Risk Score (0-100)', 0) or 0)),
+                        -(int(r.get('Total Issues', 0) or 0)),
+                        str(r.get('Customer Name', '')).lower(),
+                    ),
+                )
+                high_risk_customers = pd.DataFrame(high_risk_records)
+                logger.info(
+                    f"   - High-risk customers (canonical cm.is_high_risk_profile): {len(high_risk_customers)}"
+                )
+                # Round 4 / Phase 1.2 parity check: the sheet row count
+                # MUST equal the dashboard ``high_risk_count`` cell so
+                # the workbook cannot show two different numbers in the
+                # same file.  Both are now derived from
+                # ``cm.is_high_risk_profile`` upstream; this check is a
+                # belt-and-braces guard.
+                try:
+                    if len(high_risk_customers) != int(high_risk_count):
+                        logger.warning(
+                            "[EXCEL] High_Risk_Customers sheet (%d) != dashboard high_risk_count cell (%d); "
+                            "expect both to be driven from cm.is_high_risk_profile",
+                            len(high_risk_customers), high_risk_count,
+                        )
+                except Exception:
+                    # Round 4: non-fatal; suppressed silently in original code
+                    pass  # noqa: PIE790
+        except Exception as _hrc_err:
+            logger.debug(f"[EXCEL] High_Risk_Customers canonical build failed: {_hrc_err}")
+            high_risk_customers = pd.DataFrame()
         
         sheets = {
-            " Executive_Dashboard": dashboard_df,
+            # Round 5 / Phase 1.15: drop the leading-space typo in the
+            # sheet key so callers can refer to the dashboard by its
+            # natural name and downstream lookups don't have to special-
+            # case `' Executive_Dashboard'` (with an embedded leading
+            # space) vs `'Executive_Dashboard'`.
+            "Executive_Dashboard": dashboard_df,
             "Risk_Summary": risk_summary_df,
             "High_Risk_Customers": high_risk_customers,
             "Critical_Adoption_Barriers": critical_abs,
@@ -4791,21 +7237,31 @@ def run_compact_analysis(analysis_id):
         logger.info(f"[[SEARCH]] DEBUGGING - Non-empty sheets: {non_empty_sheets}")
         if not non_empty_sheets:
             logger.warning(f"[[WARNING]] WARNING - ALL SHEETS ARE EMPTY! Creating fallback summary sheet.")
-            # Create a fallback summary sheet with analysis information
+            # Create a fallback summary sheet with analysis information.
+            # Round 5 / Phase 1.4: replace the misleading
+            # "In a production environment, this would contain real
+            # customer data." line with an explicit "no dataset rows
+            # in this run" message so users do not infer the workbook
+            # is showing test/placeholder data.
             summary_data = pd.DataFrame({
                 'Analysis Information': [
                     f'Manager: {manager}',
                     f'Technology: {technology}',
                     f'Analysis Period: {days} days',
-                    f'Report Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+                    f'Report Generated (UTC): {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")}',
                     f'Analysis ID: {analysis_id}',
                     '',
-                    'Note: Some optional data sources may be empty.',
-                    'In a production environment, this would contain real customer data.'
+                    'Note: All dataset queries returned zero rows for this scope/window.',
+                    'No dataset rows are available for this run; see Report_Info / partial_data_warnings for fetch context.'
                 ],
                 'Value': ['', '', '', '', '', '', '', '']
             })
-            sheets[' Analysis_Summary'] = summary_data
+            # Round 6 / Phase 1.11: drop the leading-space typo in the
+            # fallback sheet key so callers can refer to this sheet by
+            # its natural name and downstream lookups don't have to
+            # special-case `' Analysis_Summary'` (with embedded leading
+            # space) vs `'Analysis_Summary'`.
+            sheets['Analysis_Summary'] = summary_data
             logger.info(f"[[REFRESH]] Created fallback summary sheet with {len(summary_data)} rows")
         
         # Create Excel file directly for compact analysis
@@ -4876,8 +7332,14 @@ def run_compact_analysis(analysis_id):
                 })
             
                 # Date formatting
+                # Round 6 / Phase 1.8: standardize on ISO ``yyyy-mm-dd``
+                # for cross-locale unambiguity.  The previous US-locale
+                # ``mm/dd/yyyy`` mixed with ISO text dates elsewhere in
+                # the same workbook (e.g. UTC ISO timestamps in
+                # Report_Info), which made cross-sheet comparisons
+                # error-prone for non-US readers.
                 date_format = workbook.add_format({
-                    'num_format': 'mm/dd/yyyy',
+                    'num_format': 'yyyy-mm-dd',
                     'border': 1,
                     'align': 'center'
                 })
@@ -4913,29 +7375,40 @@ def run_compact_analysis(analysis_id):
                         df_clean.to_excel(writer, sheet_name=dashboard_sheet_name, index=False, startrow=1)
                         worksheet = writer.sheets[dashboard_sheet_name]
                         title_text = f" {dashboard_sheet_name.replace('_', ' ')} - {manager} Portfolio Analysis"
+                        # Round 5 / Phase 1.8: previously the multi-column
+                        # dashboard branch only set the merge_range title;
+                        # header_format, column autosize, autofilter, and
+                        # data_format were all only applied in the
+                        # ``len(columns) == 1`` branch.  Apply them in
+                        # both branches so the multi-column Executive_
+                        # Dashboard renders consistently.
                         if len(df_clean.columns) > 1:
                             worksheet.merge_range(0, 0, 0, len(df_clean.columns)-1, title_text, title_format)
-                        elif len(df_clean.columns) == 1:
+                        else:
                             worksheet.write(0, 0, title_text, title_format)
-                            for col_num, value in enumerate(df_clean.columns.values):
-                                worksheet.write(1, col_num, value, header_format)
-                            for row_idx in range(2, len(df_clean) + 2):
-                                for col_idx in range(len(df_clean.columns)):
-                                    cell_value = df_clean.iloc[row_idx-2, col_idx]
-                                    worksheet.write(row_idx, col_idx, cell_value, data_format)
-                            for i, col in enumerate(df_clean.columns):
-                                if df_clean.empty:
-                                    max_length = len(str(col))
-                                else:
-                                    try:
-                                        content_max = df_clean[col].astype(str).map(len).max()
-                                        content_max = content_max if pd.notna(content_max) else 0
-                                    except (ValueError, TypeError):
-                                        content_max = 0
-                                    max_length = max(content_max, len(str(col)))
-                                worksheet.set_column(i, i, min(max_length + 2, 50))
-                            if not df_clean.empty and len(df_clean) > 0:
-                                worksheet.autofilter(1, 0, len(df_clean), len(df_clean.columns)-1)
+                        for col_num, value in enumerate(df_clean.columns.values):
+                            worksheet.write(1, col_num, value, header_format)
+                        for row_idx in range(2, len(df_clean) + 2):
+                            for col_idx in range(len(df_clean.columns)):
+                                # Round 6 / Phase 1.2: coerce non-finite
+                                # numerics (NaN/inf/pd.NA) to blank to
+                                # avoid xlsxwriter rendering them as
+                                # literal "nan" / out-of-range numbers.
+                                cell_value = _excel_safe_cell(df_clean.iloc[row_idx-2, col_idx])
+                                worksheet.write(row_idx, col_idx, cell_value, data_format)
+                        for i, col in enumerate(df_clean.columns):
+                            if df_clean.empty:
+                                max_length = len(str(col))
+                            else:
+                                try:
+                                    content_max = df_clean[col].astype(str).map(len).max()
+                                    content_max = content_max if pd.notna(content_max) else 0
+                                except (ValueError, TypeError):
+                                    content_max = 0
+                                max_length = max(content_max, len(str(col)))
+                            worksheet.set_column(i, i, min(max_length + 2, 50))
+                        if not df_clean.empty and len(df_clean) > 0:
+                            worksheet.autofilter(1, 0, len(df_clean), len(df_clean.columns)-1)
                         worksheet.freeze_panes(2, 0)
                         logger.info(f"[[OK]] Dashboard sheet '{dashboard_sheet_name}' written successfully")
                     except Exception as dash_error:
@@ -4957,7 +7430,38 @@ def run_compact_analysis(analysis_id):
                     logger.info(f"[[WRITE]] Writing sheet '{sheet_name}' with {len(df)} rows...")
                     logger.info(f"[[SEARCH]] DEBUGGING - Sheet '{sheet_name}' empty: {df.empty}")
                     logger.info(f"[[SEARCH]] DEBUGGING - Sheet '{sheet_name}' columns: {list(df.columns) if not df.empty else 'N/A'}")
-                
+
+                    # Round 2 / Phase 2.1: surface fetch_error tristate
+                    # (parallel to docx renderers from Round 1 Phase 3.2).
+                    # Render a single ``Data_Unavailable`` row instead of
+                    # a blank sheet so consumers can distinguish "fetch
+                    # failed" from "no rows in window".
+                    _fetch_error = None
+                    _fetch_error_kind = None
+                    try:
+                        _fetch_error = df.attrs.get('fetch_error') if hasattr(df, 'attrs') else None
+                        _fetch_error_kind = df.attrs.get('fetch_error_kind') if hasattr(df, 'attrs') else None
+                    except Exception:
+                        _fetch_error = None
+                    if _fetch_error:
+                        try:
+                            unavailable_df = pd.DataFrame([
+                                {
+                                    'Status': 'Data Unavailable',
+                                    'Dataset': sheet_name,
+                                    'Reason': str(_fetch_error_kind or 'fetch_error'),
+                                    'Detail': str(_fetch_error)[:512],
+                                    'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
+                                }
+                            ])
+                            unavailable_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
+                            worksheet = writer.sheets[sheet_name]
+                            worksheet.write(0, 0, f"{sheet_name.replace('_', ' ')} — Data Unavailable", title_format)
+                            logger.warning(f"[EXCEL] Sheet '{sheet_name}' rendered as Data_Unavailable: {_fetch_error}")
+                        except Exception as _du_err:
+                            logger.error(f"[EXCEL] Failed to write Data_Unavailable for '{sheet_name}': {_du_err}")
+                        continue
+
                     if not df.empty:
                         # Clean datetime columns for Excel compatibility
                         logger.info(f"[[CLEAN]] Cleaning datetime columns for sheet '{sheet_name}'...")
@@ -4984,14 +7488,38 @@ def run_compact_analysis(analysis_id):
                     
                         # Apply conditional formatting based on sheet type
                         if 'Risk' in sheet_name or 'High_Risk' in sheet_name:
-                            # Apply risk-based formatting to risk-related sheets
+                            # Round 2 / Phase 1.6: derive cond-format
+                            # cutoffs from canonical RISK_BAND_THRESHOLDS
+                            # so the Excel coloring matches the canonical
+                            # band labels used by EI / Compact / Leader.
+                            # Threshold map (0-100 axis) is converted to
+                            # 0-10 axis for compatibility with legacy
+                            # Risk_Score columns that use the 0-10 scale.
+                            try:
+                                from risk_scoring import RISK_BAND_THRESHOLDS as _RBT
+                            except Exception:
+                                _RBT = {'CRITICAL': 75, 'HIGH': 55, 'MEDIUM': 35, 'LOW': 15}
+                            _high_cut_100 = float(_RBT.get('HIGH', 55))
+                            _med_cut_100 = float(_RBT.get('MEDIUM', 35))
+                            _high_cut_10 = _high_cut_100 / 10.0  # e.g. 5.5 (HIGH band start)
+                            _med_cut_10 = _med_cut_100 / 10.0    # e.g. 3.5 (MEDIUM band start)
                             for row_idx in range(2, len(df_clean) + 2):
                                 for col_idx in range(len(df_clean.columns)):
-                                    cell_value = df_clean.iloc[row_idx-2, col_idx]
-                                    if isinstance(cell_value, (int, float)) and 'risk' in str(df_clean.columns[col_idx]).lower():
-                                        if cell_value >= 7:
+                                    # Round 6 / Phase 1.2: coerce non-finite
+                                    # numerics to blank (see _excel_safe_cell).
+                                    cell_value = _excel_safe_cell(df_clean.iloc[row_idx-2, col_idx])
+                                    col_name_lower = str(df_clean.columns[col_idx]).lower()
+                                    if isinstance(cell_value, (int, float)) and 'risk' in col_name_lower:
+                                        # Detect axis: 0-100 vs 0-10.
+                                        if '100' in col_name_lower or float(cell_value) > 10.0:
+                                            high_cut = _high_cut_100
+                                            med_cut = _med_cut_100
+                                        else:
+                                            high_cut = _high_cut_10
+                                            med_cut = _med_cut_10
+                                        if cell_value >= high_cut:
                                             worksheet.write(row_idx, col_idx, cell_value, high_risk_format)
-                                        elif cell_value >= 4:
+                                        elif cell_value >= med_cut:
                                             worksheet.write(row_idx, col_idx, cell_value, medium_risk_format)
                                         else:
                                             worksheet.write(row_idx, col_idx, cell_value, low_risk_format)
@@ -5026,14 +7554,86 @@ def run_compact_analysis(analysis_id):
                     
                         logger.info(f"[[OK]] Sheet '{sheet_name}' formatted with enhanced styling")
                     else:
-                        # Create empty sheet with title
+                        # Round 6 / Phase 1.9: route empty-success
+                        # fetches through ``classify_data_state`` so the
+                        # workbook can distinguish "feature not
+                        # configured" / "fetch failed" / "empty window"
+                        # instead of a generic "No data available"
+                        # string that the user cannot act on.
                         logger.info(f"[[DOC]] Creating empty sheet '{sheet_name}'...")
-                        empty_df = pd.DataFrame({'Message': ['No data available for this analysis']})
+                        try:
+                            from report_utils import classify_data_state as _classify_state
+                            from report_utils import render_empty_state_message as _render_state
+                            _state = _classify_state(df)
+                            _msg = _render_state(_state, source_label=sheet_name.replace('_', ' '))
+                        except Exception:
+                            _state = 'empty'
+                            _msg = 'No records in the analysis window'
+                        empty_df = pd.DataFrame([
+                            {
+                                'Status': _state.upper() if isinstance(_state, str) else 'EMPTY',
+                                'Dataset': sheet_name,
+                                'Message': _msg,
+                                'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
+                            }
+                        ])
                         empty_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
                         worksheet = writer.sheets[sheet_name]
                         worksheet.write(0, 0, f"{sheet_name.replace('_', ' ')} - {manager} Portfolio Analysis", title_format)
-                        logger.info(f"[[OK]] Empty sheet '{sheet_name}' created")
+                        logger.info(f"[[OK]] Empty sheet '{sheet_name}' created (state={_state})")
             
+                # Round 4 / Phase 1.4: surface the workbook-level
+                # partial warnings (risk_scores unavailable,
+                # total_customers omitted, etc.) as a dedicated
+                # ``Report_Info`` sheet INSIDE the writer context so
+                # consumers can detect partial workbooks without
+                # parsing logs.  We add it last so it sits at the end
+                # and never collides with caller sheet names.
+                try:
+                    _excel_partial_warnings = locals().get('_excel_partial_warnings') or []
+                except Exception:
+                    _excel_partial_warnings = []
+                # Round 6 / Phase 1.18: append a truncation footnote
+                # if any cell exceeded the 32767-char Excel cap, so the
+                # reader knows the workbook clipped some long text
+                # rather than the writer silently failing.
+                _trunc_snap = _excel_truncation_snapshot_and_reset()
+                _trunc_rows = []
+                if _trunc_snap.get("cells_clipped", 0) > 0:
+                    _trunc_rows.append(
+                        f"{int(_trunc_snap['cells_clipped'])} cell(s) clipped at "
+                        f"Excel cap {EXCEL_MAX_CELL_CHARS} chars (max seen "
+                        f"{int(_trunc_snap.get('max_seen', 0))})"
+                    )
+                if _excel_partial_warnings or _trunc_rows:
+                    try:
+                        _info_records = []
+                        for w in _excel_partial_warnings or []:
+                            _info_records.append({
+                                'Status': 'PARTIAL',
+                                'Warning': str(w)[:512],
+                                'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
+                            })
+                        for t in _trunc_rows:
+                            _info_records.append({
+                                'Status': 'TRUNCATION',
+                                'Warning': str(t)[:512],
+                                'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
+                            })
+                        report_info_df = pd.DataFrame(_info_records)
+                        report_info_df.to_excel(writer, sheet_name='Report_Info', index=False)
+                        logger.warning(
+                            "[EXCEL] Report_Info sheet written with %d row(s) (%d partial-data, %d truncation)",
+                            len(_info_records),
+                            len(_excel_partial_warnings or []),
+                            len(_trunc_rows),
+                        )
+                    except Exception as _ri_err:
+                        logger.error(
+                            "[EXCEL] Failed to write Report_Info partial-data ledger: %s",
+                            _ri_err,
+                        )
+
                 # Ensure we have at least one sheet with meaningful content
                 logger.info(f"[[SEARCH]] DEBUGGING - Total sheets written: {len(writer.sheets)}")
                 for sheet_name in writer.sheets.keys():
@@ -5041,8 +7641,21 @@ def run_compact_analysis(analysis_id):
             
                 logger.info(f"[[OK]] Excel file created successfully: {excel_path}")
 
-            # Validate only after ExcelWriter closes and flushes the workbook to disk.
-            _validate_excel_output(excel_path)
+            # Round 2 / Phase 2.5: honor _validate_excel_output's
+            # boolean return value.  A workbook that opens corrupt is
+            # *not* a successful artifact; re-raising puts the request
+            # on the failure path so we do not advertise a broken file
+            # to the user.
+            if not _validate_excel_output(excel_path):
+                try:
+                    if os.path.exists(excel_path):
+                        os.remove(excel_path)
+                except Exception:
+                    # Round 4: non-fatal; suppressed silently in original code
+                    pass  # noqa: PIE790
+                raise RuntimeError(
+                    f"Excel validation failed for {excel_path}; refusing to advertise broken artifact"
+                )
             
         except Exception as excel_error:
             logger.error(f"[[ERROR]] Error creating Excel file: {excel_error}")
@@ -5054,7 +7667,7 @@ def run_compact_analysis(analysis_id):
         with analysis_status_lock:
             _update_progress(status, 100, 'Compact analysis completed successfully!', 'Completed')
             status['status'] = 'completed'
-            status['completion_time'] = datetime.now().isoformat()
+            status['completion_time'] = _now_utc_iso_z()
             completion_time = status['completion_time']
             report_type = status.get('report_type', 'compact')
             manager = status.get('manager', '')
@@ -5063,15 +7676,46 @@ def run_compact_analysis(analysis_id):
             start_time = status.get('start_time', '')
             status['word_report'] = exec_report_path
             status['excel_report'] = excel_path
+            # Round 3 / Phase 5.1: persist partial_data_warnings.
+            try:
+                _pdw = list(partial_data_warnings) if partial_data_warnings else []
+                status['partial_data_warnings'] = _pdw
+                if isinstance(status.get('results'), dict):
+                    status['results']['partial_data_warnings'] = _pdw
+                if _pdw:
+                    logger.info(
+                        "[PARTIAL_DATA] Persisted %d partial-data warning(s) on compact analysis %s",
+                        len(_pdw), analysis_id,
+                    )
+            except Exception as _pdw_err:
+                logger.debug(
+                    "Could not persist partial_data_warnings on compact status: %s",
+                    _pdw_err,
+                )
 
-        # Persist outside lock to reduce lock contention during file I/O.
-        save_analysis_status()  # Save final status
+            # Round 5 / Phase 6.7: persist *under* the lock so the on-disk
+            # JSON snapshot is a consistent view of the in-memory state at
+            # the moment the report is marked complete.  Persisting after
+            # releasing the lock leaves a window where a concurrent worker
+            # could mutate ``analysis_status`` (e.g. setting an error
+            # field) and we would write a stale snapshot that disagrees
+            # with what subsequent readers observe.  ``save_analysis_status``
+            # only writes a single JSON file, so the marginal lock-hold
+            # cost is small compared to the consistency guarantee.
+            save_analysis_status()  # Save final status (under lock)
 
         # Run non-locking side effects after releasing status lock
         auto_audit_report(analysis_id)
+        # Round 3 / Phase 5.4: pass days, paths, and warnings.
         record_report_completion(
             analysis_id, report_type, manager, technology, customer_name,
-            'completed', start_time, completion_time
+            'completed', start_time, completion_time,
+            days=days,
+            word_path=exec_report_path,
+            excel_path=excel_path,
+            partial_data_warnings=(
+                list(partial_data_warnings) if partial_data_warnings else None
+            ),
         )
         try:
             store_report_insights(
@@ -5134,6 +7778,10 @@ def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame
         customer_action_plans=pd.DataFrame(),
         customer_subs=customer_subs,
         ext_incidents=ext_incidents,
+        # Round 3 / Phase 4.2: thread the report's analysis horizon
+        # so the support-case "recent" window matches the period
+        # the rest of the report is talking about.
+        recent_window_days=int(days) if days else 30,
     )
 
     bems_ids = []
@@ -5151,7 +7799,7 @@ def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame
         'renewal_risk_score': profile['risk_score_0_100'],
         'renewal_risk_score_10': profile['risk_score_0_10'],
         'renewal_risk_category': profile['risk_band'],
-        'analysis_date': datetime.now().isoformat(),
+        'analysis_date': _now_utc_iso_z(),
         'key_findings': profile['key_findings'],
         'risk_factors': profile['risk_factors'],
         'recommendations': profile['recommendations'],
@@ -5278,10 +7926,15 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         return 'N/A'
 
     # Title
+    # Round 6 / Phase 1.4: sanitize customer_name before heading.
     if portfolio_mode:
-        title = doc.add_heading(f'Portfolio Renewal Analysis: {customer_name}', 0)
+        title = doc.add_heading(
+            _safe_doc_text(f'Portfolio Renewal Analysis: {customer_name}'), 0
+        )
     else:
-        title = doc.add_heading(f'Customer Renewal Analysis: {customer_name}', 0)
+        title = doc.add_heading(
+            _safe_doc_text(f'Customer Renewal Analysis: {customer_name}'), 0
+        )
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
     # Subtitle
@@ -5291,11 +7944,43 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     run.font.size = Pt(12)
     run.font.color.rgb = RGBColor(100, 100, 100)
     
+    # Round 10 / Phase 9.5: switch the simple renewal cover to the
+    # same UTC ``Generated`` + optional ``Data as of`` pattern used
+    # by the compact / executive intelligence title pages.  The old
+    # cover used naive local ``datetime.now()`` which silently shifted
+    # by the host timezone and omitted the prefetch instant entirely,
+    # so an operator could not tell whether the displayed date was
+    # the build clock or a real data-retrieval timestamp.
     date_para = doc.add_paragraph()
     date_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = date_para.add_run(f'Generated: {datetime.now().strftime("%B %d, %Y at %H:%M")}')
+    run = date_para.add_run(
+        f'Generated: {datetime.now(timezone.utc).strftime("%B %d, %Y %I:%M %p UTC")}'
+    )
     run.font.size = Pt(10)
     run.font.color.rgb = RGBColor(150, 150, 150)
+    # Render an explicit ``Data as of`` row when the caller threads a
+    # ``data_retrieved_at`` through ``renewal_analysis``.  Otherwise
+    # mark the row ``(render-time)`` so the operator can tell the
+    # freshness stamp came from the build clock instead of a real
+    # prefetch instant.
+    try:
+        _renewal_data_as_of = renewal_analysis.get('data_retrieved_at') if isinstance(renewal_analysis, dict) else None
+    except Exception:
+        _renewal_data_as_of = None
+    data_para = doc.add_paragraph()
+    data_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    if _renewal_data_as_of is not None:
+        try:
+            _data_str = _renewal_data_as_of.strftime("%B %d, %Y %I:%M %p UTC")
+        except Exception:
+            _data_str = str(_renewal_data_as_of)
+        _data_run = data_para.add_run(f'Data as of: {_data_str}')
+    else:
+        _data_run = data_para.add_run(
+            f'Data as of: {datetime.now(timezone.utc).strftime("%B %d, %Y %I:%M %p UTC")} (render-time)'
+        )
+    _data_run.font.size = Pt(9)
+    _data_run.font.color.rgb = RGBColor(150, 150, 150)
     doc.add_paragraph()
     data_sources_line = doc.add_paragraph()
     data_sources_line.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -5370,18 +8055,30 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     correlated_incidents = 0
     
     if ext_incidents:
-        # Count high-impact incidents (status: investigating, identified, monitoring, or resolved with impact)
-        high_impact_statuses = ['investigating', 'identified', 'monitoring', 'resolved']
-        high_impact_incidents = sum(1 for inc in ext_incidents 
-                                    if inc.get('status', '').lower() in high_impact_statuses)
+        # Round 6 / Phase 1.5: previously this Word table classified
+        # ``resolved`` as a "high-impact" status while the matplotlib
+        # chart at line ~2640 only colors red on *active investigation*
+        # statuses (investigating / identified / monitoring).  Both are
+        # rendered under the same "High Impact" label in the same
+        # report, so a customer could see the table claim N high-impact
+        # incidents while the chart shows zero red bars.  Use the
+        # shared helper so both surfaces agree.
+        high_impact_incidents = _count_high_impact_incidents(ext_incidents)
         
         # Count incidents that might correlate with support cases (based on timing and keywords)
         if not customer_csone.empty:
-            # Simple correlation: incidents within the analysis period
-            analysis_start = datetime.now() - timedelta(days=days)
-            correlated_incidents = sum(1 for inc in ext_incidents 
-                                       if inc.get('published') and 
-                                       pd.to_datetime(inc.get('published', ''), errors='coerce') >= analysis_start)
+            # Round 10 / Phase 1.6: anchor the correlation window in UTC so it
+            # matches the rest of the analysis chain (Round 8 / Phase 1.x
+            # already moved the renewal cover and case windows onto
+            # ``datetime.now(timezone.utc)``). ``datetime.now()`` was reading
+            # the host TZ which silently shifted the cutoff up to a day in
+            # either direction depending on the operator's locale.
+            analysis_start = datetime.now(timezone.utc) - timedelta(days=days)
+            correlated_incidents = sum(
+                1 for inc in ext_incidents
+                if inc.get('published') and
+                pd.to_datetime(inc.get('published', ''), errors='coerce', utc=True) >= analysis_start
+            )
     
     # Create dashboard table (matches example format)
     from docx.enum.table import WD_TABLE_ALIGNMENT
@@ -5392,13 +8089,18 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     # row matches the subtitle's analysis period (was hardcoded "Last
     # 90 Days" regardless of the user's selected window).
     _support_cases_label = f'Support Cases (Last {days} Days)'
+    # Round 11 / Phase 9.6: dashboard rows previously rendered raw
+    # ``str(int)`` while the executive summary above used
+    # ``format_number()`` for the same metrics, producing visible
+    # drift between "1234" (here) and "1,234" (there) on the same
+    # page.  Use the shared helper for parity.
     dashboard_data = [
-        (_support_cases_label, str(case_count)),
-        ('Active Adoption Barriers', str(ab_count)),
-        ('BEMS Escalations', str(bems_count)),
-        ('Service Incidents (status.webex.com)', str(incident_count)),
-        ('High-Impact Incidents', str(high_impact_incidents)),
-        ('Correlated Service Incidents', str(correlated_incidents)),
+        (_support_cases_label, format_number(case_count)),
+        ('Active Adoption Barriers', format_number(ab_count)),
+        ('BEMS Escalations', format_number(bems_count)),
+        ('Service Incidents (status.webex.com)', format_number(incident_count)),
+        ('High-Impact Incidents', format_number(high_impact_incidents)),
+        ('Correlated Service Incidents', format_number(correlated_incidents)),
         ('Overall Risk Score', f'{risk_score:.1f}/100'),
         ('Risk Category', risk_category)
     ]
@@ -5867,11 +8569,36 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         vuln_para.add_run(f'Security Vulnerabilities Identified: ').bold = True
         vuln_para.add_run(f'{vuln_count} total ({cve_count} CVEs, {psirt_count} PSIRT advisories).\n')
         
-        # Show vulnerabilities by customer
-        vuln_by_customer = psirt_vulns.get('vulnerability_by_customer', {})
-        if vuln_by_customer and customer_name in vuln_by_customer:
-            vulns = sorted(set(vuln_by_customer[customer_name]))
-            vuln_para.add_run(f'Vulnerability IDs: {", ".join([f"[{v}]" for v in vulns])}\n')
+        # Show vulnerabilities by customer.
+        # Round 11 / Phase 9.8: previous logic only printed per-customer
+        # vulnerability IDs when ``customer_name`` was a literal key in
+        # ``vulnerability_by_customer``.  In portfolio mode the
+        # ``customer_name`` is the manager / portfolio label, so the
+        # whole per-customer block silently never rendered.  In
+        # portfolio mode iterate the dict's own keys instead so each
+        # customer in scope gets a labeled line.
+        vuln_by_customer = psirt_vulns.get('vulnerability_by_customer', {}) or {}
+        try:
+            _is_portfolio = bool(portfolio_mode)
+        except NameError:
+            _is_portfolio = False
+        if vuln_by_customer:
+            if _is_portfolio:
+                for _vc_name, _vc_ids in sorted(
+                    vuln_by_customer.items(),
+                    key=lambda kv: str(kv[0] or '').lower(),
+                ):
+                    if not _vc_ids:
+                        continue
+                    _vc_unique = sorted(set(_vc_ids))
+                    vuln_para.add_run(
+                        f'Vulnerability IDs ({_vc_name}): '
+                        + ", ".join([f"[{v}]" for v in _vc_unique])
+                        + '\n'
+                    )
+            elif customer_name in vuln_by_customer:
+                vulns = sorted(set(vuln_by_customer[customer_name]))
+                vuln_para.add_run(f'Vulnerability IDs: {", ".join([f"[{v}]" for v in vulns])}\n')
     
     # FIXED: Add CSConsole Data Sections (Action Plans, Customer Pulse, Success Priorities) – customer name + source
     if customer_action_plans is not None and not customer_action_plans.empty:
@@ -5897,7 +8624,32 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                 f'Showing {_ap_sample_limit} of {_ap_total} action plans (most recent first; full list available in raw exports).'
             )
             _ap_run.italic = True
-        for i, (_, row) in enumerate(customer_action_plans.head(_ap_sample_limit).iterrows(), 1):
+        # Round 11 / Phase 9.7: previous code claimed "most recent
+        # first" but called ``.head(10)`` on an unsorted frame, so the
+        # printed sample reflected source-row order, not recency. Sort
+        # by CREATED_DATE desc with a stable tie-break on Id/NAME.
+        try:
+            _ap_sort_cols = []
+            _ap_sort_asc = []
+            for _c in ('CREATED_DATE', 'CREATEDDATE', 'OPEN_DATE_C'):
+                if _c in customer_action_plans.columns:
+                    _ap_sort_cols.append(_c)
+                    _ap_sort_asc.append(False)
+                    break
+            for _tc in ('Id', 'ID', 'NAME'):
+                if _tc in customer_action_plans.columns:
+                    _ap_sort_cols.append(_tc)
+                    _ap_sort_asc.append(True)
+                    break
+            if _ap_sort_cols:
+                _customer_action_plans_sorted = customer_action_plans.sort_values(
+                    by=_ap_sort_cols, ascending=_ap_sort_asc, kind='mergesort', na_position='last'
+                )
+            else:
+                _customer_action_plans_sorted = customer_action_plans
+        except Exception:
+            _customer_action_plans_sorted = customer_action_plans
+        for i, (_, row) in enumerate(_customer_action_plans_sorted.head(_ap_sample_limit).iterrows(), 1):
             p = doc.add_paragraph(style='List Number')
             cust_label = ''
             if portfolio_mode and all_customers:
@@ -5944,7 +8696,31 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                 f'Showing {_cp_sample_limit} of {_cp_total} pulse records (most recent first; full list available in raw exports).'
             )
             _cp_run.italic = True
-        for i, (_, row) in enumerate(customer_customer_pulse.head(_cp_sample_limit).iterrows(), 1):
+        # Round 11 / Phase 9.7: see above; sort the pulse frame by
+        # CREATED_DATE desc with a stable tie-break before sampling
+        # so the disclosed "most recent first" matches reality.
+        try:
+            _cp_sort_cols = []
+            _cp_sort_asc = []
+            for _c in ('CREATED_DATE', 'CREATEDDATE'):
+                if _c in customer_customer_pulse.columns:
+                    _cp_sort_cols.append(_c)
+                    _cp_sort_asc.append(False)
+                    break
+            for _tc in ('Id', 'ID', 'NAME'):
+                if _tc in customer_customer_pulse.columns:
+                    _cp_sort_cols.append(_tc)
+                    _cp_sort_asc.append(True)
+                    break
+            if _cp_sort_cols:
+                _customer_customer_pulse_sorted = customer_customer_pulse.sort_values(
+                    by=_cp_sort_cols, ascending=_cp_sort_asc, kind='mergesort', na_position='last'
+                )
+            else:
+                _customer_customer_pulse_sorted = customer_customer_pulse
+        except Exception:
+            _customer_customer_pulse_sorted = customer_customer_pulse
+        for i, (_, row) in enumerate(_customer_customer_pulse_sorted.head(_cp_sample_limit).iterrows(), 1):
             p = doc.add_paragraph(style='List Number')
             cust_label = ''
             if portfolio_mode and all_customers:
@@ -5989,7 +8765,53 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                 f"Showing 10 of {len(customer_success_priorities)} (table truncated; "
                 "see source CSConsole export for the full list)."
             ).italic = True
-        for i, (_, row) in enumerate(customer_success_priorities.head(10).iterrows(), 1):
+        # Round 12 / Phase 9.4: previously this iteration ran
+        # ``customer_success_priorities.head(10)`` over the upstream
+        # frame's arbitrary ordering, even though the section
+        # heading explicitly says "Recent Success Priorities".  The
+        # rendered 10 rows could include older, stale priorities
+        # while the table label promised the most recent ones.
+        # Round 11 / Phase 9.7 already fixed Action Plans and
+        # Customer Pulse the same way; bring this CSConsole panel
+        # into parity by sorting on ``CREATED_DATE`` descending
+        # with a stable id tie-break before the ``head(10)`` slice.
+        try:
+            _date_col = next(
+                (c for c in ('CREATED_DATE', 'CREATEDDATE', 'OPEN_DATE_C', 'LASTMODIFIEDDATE')
+                 if c in customer_success_priorities.columns),
+                None,
+            )
+            _id_col = next(
+                (c for c in ('ID', 'Id', 'NAME', 'SUCCESS_PRIORITY_ID__C', 'SUBJECT_C')
+                 if c in customer_success_priorities.columns),
+                None,
+            )
+            if _date_col is not None and _id_col is not None:
+                _sp_sorted = customer_success_priorities.sort_values(
+                    [_date_col, _id_col],
+                    ascending=[False, True],
+                    na_position='last',
+                    kind='mergesort',
+                )
+            elif _date_col is not None:
+                _sp_sorted = customer_success_priorities.sort_values(
+                    _date_col,
+                    ascending=False,
+                    na_position='last',
+                    kind='mergesort',
+                )
+            elif _id_col is not None:
+                _sp_sorted = customer_success_priorities.sort_values(
+                    _id_col,
+                    ascending=True,
+                    na_position='last',
+                    kind='mergesort',
+                )
+            else:
+                _sp_sorted = customer_success_priorities
+        except Exception:  # Round 12 / Phase 9.4 defensive
+            _sp_sorted = customer_success_priorities
+        for i, (_, row) in enumerate(_sp_sorted.head(10).iterrows(), 1):
             p = doc.add_paragraph(style='List Number')
             cust_label = ''
             if portfolio_mode and all_customers:
@@ -6031,8 +8853,14 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         # Renewal Risk Correlation Analysis
         incident_para.add_run('Renewal Risk Correlation: ').bold = True
         if len(ext_incidents) > 0:
-            high_impact_count = sum(1 for inc in ext_incidents 
-                                    if inc.get('status', '').lower() in ['investigating', 'identified', 'monitoring'])
+            # Round 2 / Phase 1.8: align with normalized status emitted
+            # by adoptiq_backend.fetch_status_incidents (active/resolved
+            # + impact_level High/Medium/Low) so this narrative cell
+            # matches risk_scoring._score_incidents.high_impact_count.
+            # Round 11 / Phase 2.3: route through the centralized
+            # ``_count_high_impact_incidents`` so the count cannot
+            # drift from the chart / Customer Health Dashboard table.
+            high_impact_count = _count_high_impact_incidents(ext_incidents)
             
             if high_impact_count > 5:
                 incident_para.add_run(f'⚠️ HIGH RISK: {high_impact_count} high-impact incidents detected. Multiple service-impacting incidents can significantly impact customer satisfaction and renewal probability. ')
@@ -6054,8 +8882,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                 status = incident.get('status', 'N/A')
                 link = incident.get('link', '')
                 
-                # Highlight high-impact incidents
-                is_high_impact = status.lower() in ['investigating', 'identified', 'monitoring']
+                # Highlight high-impact incidents.
+                # Round 11 / Phase 2.3: use the shared helper so the
+                # per-row 🚨 decoration / [HIGH IMPACT] label agrees
+                # with the count rendered in the Renewal Risk
+                # Correlation paragraph immediately above.
+                is_high_impact = _is_high_impact_incident(incident)
                 if is_high_impact:
                     p.add_run('🚨 ').bold = True
                 
@@ -6097,13 +8929,23 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                     if cn and cn != 'N/A':
                         troubled.add(normalize_customer_name(cn))
         # High barrier count (>=3 open barriers per customer)
+        # Round 11 / Phase 3.1: compare normalized keys so spelling
+        # variants (e.g. "ACME, Inc." vs "Acme Inc") of the same
+        # customer all map to the same bucket.
         if not customer_ab.empty:
             cc = 'customer_name' if 'customer_name' in customer_ab.columns else ('BU_NAME' if 'BU_NAME' in customer_ab.columns else None)
             if cc:
+                try:
+                    _ab_norm = customer_ab[cc].astype(str).map(
+                        lambda v: normalize_customer_name(v) or ''
+                    )
+                except Exception:
+                    _ab_norm = customer_ab[cc].astype(str)
                 for cust in all_customers:
-                    cust_ab = customer_ab[customer_ab[cc] == cust]
+                    _cust_norm = normalize_customer_name(cust) or ''
+                    cust_ab = customer_ab[_ab_norm == _cust_norm]
                     if len(cust_ab) >= 3:
-                        troubled.add(normalize_customer_name(cust))
+                        troubled.add(_cust_norm or normalize_customer_name(cust))
         # Customers with linked defects
         defect_map_norm = {}
         if software_defects and software_defects.get('defect_by_customer'):
@@ -6125,14 +8967,38 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             intro = doc.add_paragraph()
             intro.add_run('The following accounts show elevated renewal risk based on Red customer pulse, “Customer Considering Competitor” or “Intent to Opt Out” adoption barriers, high open barrier count, linked software defects, or BEMS (engineering) escalations. ')
             intro.add_run('For each account we summarize drivers, data sources, and recommended actions you can take now to reduce churn risk.\n')
+            # Round 11 / Phase 3.1: ``troubled_list`` entries are
+            # ``normalize_customer_name``'d, but the per-subsection
+            # filters used to compare RAW column values (e.g.
+            # ``pulse_cust['BU_NAME'] == cust``).  When the dataframe
+            # row stored "ACME, Inc." and ``cust`` was "Acme Inc",
+            # the filter silently returned an empty subset and the
+            # deep-dive bullets dropped data the operator could see
+            # in the upstream tables.  Build a single normalized key
+            # via ``_r11_cust_key`` (matching the R10 / Phase 9.2
+            # pattern) and use it for ALL subsection filters in this
+            # block.
+            def _r11_cust_key(value):
+                try:
+                    if value is None:
+                        return ''
+                    return normalize_customer_name(str(value)) or ''
+                except Exception:
+                    return ''
+
             for cust in troubled_list[:30]:  # cap at 30 for report length
                 doc.add_heading(cust, level=2)
                 reasons = []
+                _cust_key = _r11_cust_key(cust)
                 if customer_customer_pulse is not None and not customer_customer_pulse.empty:
                     pulse_cust = customer_customer_pulse
                     bn = 'BU_NAME' if 'BU_NAME' in pulse_cust.columns else ('CUSTOMER_NAME' if 'CUSTOMER_NAME' in pulse_cust.columns else None)
-                    if bn and cust in (pulse_cust[bn].dropna().unique() if hasattr(pulse_cust[bn], 'dropna') else []):
-                        subset = pulse_cust[pulse_cust[bn] == cust]
+                    if bn:
+                        try:
+                            _pulse_keys = pulse_cust[bn].astype(str).map(_r11_cust_key)
+                            subset = pulse_cust[_pulse_keys == _cust_key]
+                        except Exception:
+                            subset = pulse_cust[pulse_cust[bn] == cust]
                         for _, r in subset.iterrows():
                             rating = _pulse_rating(_first_avail(r, ['CUSTOMER_PULSE__C', 'PULSE_RATING__C'], 'N/A'))
                             if str(rating or '').upper() == 'RED':
@@ -6140,7 +9006,11 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                                 break
                 if not customer_ab.empty and ('customer_name' in customer_ab.columns or 'BU_NAME' in customer_ab.columns):
                     cc = 'customer_name' if 'customer_name' in customer_ab.columns else 'BU_NAME'
-                    cust_ab = customer_ab[customer_ab[cc] == cust] if cc in customer_ab.columns else pd.DataFrame()
+                    try:
+                        _ab_keys = customer_ab[cc].astype(str).map(_r11_cust_key)
+                        cust_ab = customer_ab[_ab_keys == _cust_key]
+                    except Exception:
+                        cust_ab = customer_ab[customer_ab[cc] == cust] if cc in customer_ab.columns else pd.DataFrame()
                     if len(cust_ab) > 0:
                         reasons.append(f'{len(cust_ab)} adoption barrier(s) (Source: CSConsole/Snowflake)')
                         barrier_titles = []
@@ -6162,7 +9032,15 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                 if not bems_cases.empty:
                     bc_col = next((c for c in ['customer_name', 'Customer Name', 'BU_NAME'] if c in bems_cases.columns), None)
                     if bc_col:
-                        cust_bems = bems_cases[bems_cases[bc_col].astype(str).str.strip() == str(cust).strip()]
+                        # Round 11 / Phase 3.1: normalize on both
+                        # sides so case / punctuation differences
+                        # (e.g. "Acme, Inc.") don't drop BEMS rows
+                        # for the same account.
+                        try:
+                            _bems_keys = bems_cases[bc_col].astype(str).map(_r11_cust_key)
+                            cust_bems = bems_cases[_bems_keys == _cust_key]
+                        except Exception:
+                            cust_bems = bems_cases[bems_cases[bc_col].astype(str).str.strip() == str(cust).strip()]
                         if len(cust_bems) > 0:
                             reasons.append(f'BEMS escalation(s): {len(cust_bems)} case(s) (Source: CSOne)')
                             refs = []
@@ -6230,6 +9108,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
 
 def run_customer_renewal_analysis(analysis_id):
     """Run customer-specific or portfolio renewal analysis"""
+    # Round 5 / Phase 6.14: bind the analysis ID for correlated logs.
+    try:
+        from structured_logging import bind_analysis_id as _bind_aid
+        _bind_aid(analysis_id)
+    except Exception:
+        pass  # noqa: PIE790
     # Ensure datetime is available (imported at module level)
     from datetime import datetime, timedelta
     try:
@@ -6248,14 +9132,30 @@ def run_customer_renewal_analysis(analysis_id):
                 renewal_type = 'renewal_single'  # Form sends 'renewal' for single-customer
             csone_file = status['csone_file']
             
-        logger.info(f"[[SEARCH]] DEBUGGING - Renewal Analysis starting:")
-        logger.info(f"   - Renewal Type: {renewal_type}")
-        logger.info(f"   - Manager: {manager}")
-        logger.info(f"   - Technology: {technology}")
-        logger.info(f"   - Subscription ID: {subscription_id}")
-        logger.info(f"   - Customer Name: {customer_name}")
-        logger.info(f"   - Days: {days}")
-        logger.info(f"   - CSOne File: {csone_file}")
+        # Round 6 / Phase 6.8: keep INFO logs free of identifying
+        # parameters (manager, customer name, csone file path).  Log
+        # only non-identifying metadata at INFO; expose the verbatim
+        # parameters at DEBUG only.  Manager / customer / file-path
+        # values can leak PII into shipped logs and into the audit
+        # mirror downstream consumers parse for INFO-level lines.
+        logger.info(
+            "[[SEARCH]] Renewal analysis starting: type=%s tech=%s days=%s "
+            "manager_set=%s customer_set=%s sub_set=%s csone_file_set=%s",
+            renewal_type,
+            technology,
+            days,
+            bool(manager),
+            bool(customer_name),
+            bool(subscription_id),
+            bool(csone_file),
+        )
+        logger.debug(
+            "[[SEARCH]] Renewal analysis starting (verbose): "
+            "renewal_type=%s manager=%s technology=%s subscription_id=%s "
+            "customer_name=%s days=%s csone_file=%s",
+            renewal_type, manager, technology, subscription_id,
+            customer_name, days, csone_file,
+        )
         
         with analysis_status_lock:
             status['status'] = 'running'
@@ -6544,7 +9444,49 @@ def run_customer_renewal_analysis(analysis_id):
                 elif 'customer_name' in customer_ab.columns:
                     missing = customer_ab['customer_name'].isna() | (customer_ab['customer_name'].astype(str).str.strip() == '')
                     if missing.any() and 'ACCOUNT_ID_C' in customer_ab.columns and not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns:
-                        id_to_bu = team_subs_df.drop_duplicates('ACCOUNT_ID_C').set_index('ACCOUNT_ID_C')['BU_NAME']
+                        # Round 11 / Phase 3.6: when an account has
+                        # multiple subscription rows with different
+                        # ``BU_NAME`` spellings, the previous
+                        # ``drop_duplicates('ACCOUNT_ID_C')`` kept
+                        # whichever row Snowflake happened to return
+                        # first – making barrier customer labels
+                        # non-deterministic across runs.  Pick the
+                        # row with the highest ARR (so the customer
+                        # most committed to the spelling wins) and
+                        # break ties lexicographically on
+                        # ``BU_NAME`` for a fully reproducible
+                        # mapping.
+                        try:
+                            _candidate_cols = ['ACCOUNT_ID_C', 'BU_NAME']
+                            if 'ANNUAL_CONTRACT_VALUE' in team_subs_df.columns:
+                                _candidate_cols.append('ANNUAL_CONTRACT_VALUE')
+                            _id_to_bu_src = team_subs_df[_candidate_cols].copy()
+                            _id_to_bu_src['BU_NAME'] = _id_to_bu_src['BU_NAME'].fillna('').astype(str)
+                            if 'ANNUAL_CONTRACT_VALUE' in _id_to_bu_src.columns:
+                                _id_to_bu_src['ANNUAL_CONTRACT_VALUE'] = pd.to_numeric(
+                                    _id_to_bu_src['ANNUAL_CONTRACT_VALUE'], errors='coerce'
+                                ).fillna(0.0)
+                                _id_to_bu_src = _id_to_bu_src.sort_values(
+                                    by=['ACCOUNT_ID_C', 'ANNUAL_CONTRACT_VALUE', 'BU_NAME'],
+                                    ascending=[True, False, True],
+                                    kind='mergesort',
+                                )
+                            else:
+                                _id_to_bu_src = _id_to_bu_src.sort_values(
+                                    by=['ACCOUNT_ID_C', 'BU_NAME'],
+                                    ascending=[True, True],
+                                    kind='mergesort',
+                                )
+                            id_to_bu = _id_to_bu_src.drop_duplicates(
+                                'ACCOUNT_ID_C', keep='first'
+                            ).set_index('ACCOUNT_ID_C')['BU_NAME']
+                        except Exception as _id_to_bu_err:
+                            logger.debug(
+                                "Round 11 / Phase 3.6: deterministic id_to_bu "
+                                "fallback failed (%s); using legacy "
+                                "drop_duplicates.", _id_to_bu_err,
+                            )
+                            id_to_bu = team_subs_df.drop_duplicates('ACCOUNT_ID_C').set_index('ACCOUNT_ID_C')['BU_NAME']
                         customer_ab = customer_ab.copy()
                         customer_ab.loc[missing, 'customer_name'] = customer_ab.loc[missing, 'ACCOUNT_ID_C'].map(id_to_bu)
                     if 'BU_NAME' in customer_ab.columns:
@@ -6629,7 +9571,14 @@ def run_customer_renewal_analysis(analysis_id):
                 # Portfolio: use all cases, not filtered by customer
                 customer_csone = csone_df.copy() if not csone_df.empty else pd.DataFrame()
             else:
-                # Single customer: filter for specific customer (exact match, then case-insensitive fallback)
+                # Single customer: filter for specific customer.
+                # Round 6 / Phase 5.4: in addition to exact and
+                # case-insensitive fallback, route through
+                # ``normalize_customer_name`` so trailing/embedded
+                # punctuation (e.g. "Acme, Inc." vs "Acme Inc"),
+                # extra whitespace, and corporate-suffix variants
+                # ("LLC"/"L.L.C."/"Ltd"/"Limited") cannot silently
+                # drop case rows for the selected customer.
                 if not csone_df.empty and customer_name:
                     exact = csone_df[csone_df['customer_name'].astype(str).str.strip() == str(customer_name).strip()]
                     if not exact.empty:
@@ -6641,14 +9590,70 @@ def run_customer_renewal_analysis(analysis_id):
                             customer_csone = ci_match
                             logger.info(f"[[RENEWAL]] Single customer: matched {len(customer_csone)} cases via case-insensitive customer name")
                         else:
-                            customer_csone = pd.DataFrame()
+                            try:
+                                from data_normalization import normalize_customer_name as _norm_cust_name_renewal
+                                _target_norm = _norm_cust_name_renewal(customer_name)
+                                _csone_norm_series = csone_df['customer_name'].astype(str).map(_norm_cust_name_renewal)
+                                norm_match = csone_df[_csone_norm_series == _target_norm]
+                                if not norm_match.empty:
+                                    customer_csone = norm_match
+                                    logger.info(
+                                        "[[RENEWAL]] Single customer: matched %d cases "
+                                        "via normalize_customer_name (handles suffix / "
+                                        "punctuation differences).",
+                                        len(customer_csone),
+                                    )
+                                else:
+                                    customer_csone = pd.DataFrame()
+                            except Exception as _norm_err:
+                                logger.debug(
+                                    "Single-customer renewal normalize_customer_name "
+                                    "fallback failed: %s",
+                                    _norm_err,
+                                )
+                                customer_csone = pd.DataFrame()
                 else:
                     customer_csone = pd.DataFrame()
             logger.info(f"[[RENEWAL]] CSOne: {len(customer_csone)} cases for report (file had {len(csone_df_prepared)} raw, {len(csone_df)} after scope filter)")
         else:
             # No CSOne file: try Snowflake SUPPORT_CASES so support case count and list can be populated when table exists
             try:
-                sf_cases = fetch_support_cases_snowflake(ctx, account_ids, days)
+                # Round 2 / Phase 1.4: when a single-customer renewal is
+                # being generated, narrow the Snowflake SUPPORT_CASES
+                # fetch to ONLY that customer's account_ids.  Previously
+                # ``account_ids`` covered the entire team's portfolio,
+                # so a single-customer renewal report would tally every
+                # team customer's open cases against the selected one.
+                _sf_account_ids = account_ids
+                if (
+                    renewal_type == 'renewal_single'
+                    and customer_name
+                    and not team_subs_df.empty
+                    and 'BU_NAME' in team_subs_df.columns
+                    and 'ACCOUNT_ID_C' in team_subs_df.columns
+                ):
+                    _norm_target = normalize_customer_name(customer_name)
+                    _matched_subs = team_subs_df[
+                        team_subs_df['BU_NAME'].fillna('').astype(str).apply(normalize_customer_name) == _norm_target
+                    ]
+                    _scoped_ids = (
+                        _matched_subs['ACCOUNT_ID_C'].dropna().astype(str).str.strip().unique().tolist()
+                    )
+                    _scoped_ids = [aid for aid in _scoped_ids if aid]
+                    if _scoped_ids:
+                        _sf_account_ids = _scoped_ids
+                        logger.info(
+                            f"[[RENEWAL]] Single-customer Snowflake SUPPORT_CASES scoped to {len(_sf_account_ids)} account_id(s) for {customer_name}"
+                        )
+                    else:
+                        logger.warning(
+                            f"[[RENEWAL]] Single-customer renewal: no team_subs account_ids found for {customer_name}; SUPPORT_CASES query will be skipped"
+                        )
+                        _sf_account_ids = []
+                if not _sf_account_ids:
+                    sf_cases = pd.DataFrame()
+                else:
+                    sf_cases = fetch_support_cases_snowflake(ctx, _sf_account_ids, days)
                 if not sf_cases.empty and 'ACCOUNT_ID' in sf_cases.columns:
                     merge_df = team_subs_df[['ACCOUNT_ID_C', 'BU_NAME']].drop_duplicates()
                     sf_cases = sf_cases.merge(merge_df, left_on='ACCOUNT_ID', right_on='ACCOUNT_ID_C', how='left')
@@ -6657,6 +9662,24 @@ def run_customer_renewal_analysis(analysis_id):
                         'CASE_ID': 'Case #', 'SUBJECT': 'Title', 'STATUS': 'Status',
                         'SEVERITY': 'Severity', 'CREATED_DATE': 'Date/Time Opened'
                     })
+                    # Phase 1.4 belt-and-suspenders: if scoped fetch
+                    # returned mixed customers (e.g. account_id collides
+                    # across BU_NAMEs), filter the rendered frame to the
+                    # selected customer.
+                    if (
+                        renewal_type == 'renewal_single'
+                        and customer_name
+                        and 'customer_name' in sf_cases.columns
+                    ):
+                        _norm_target = normalize_customer_name(customer_name)
+                        _before = len(sf_cases)
+                        sf_cases = sf_cases[
+                            sf_cases['customer_name'].fillna('').astype(str).apply(normalize_customer_name) == _norm_target
+                        ]
+                        if len(sf_cases) != _before:
+                            logger.info(
+                                f"[[RENEWAL]] Phase 1.4: dropped {_before - len(sf_cases)} non-target Snowflake support cases for single-customer view"
+                            )
                     customer_csone = sf_cases
                     support_cases_from_snowflake = True
                     logger.info(f"[[RENEWAL]] Using {len(customer_csone)} support cases from Snowflake (no CSOne file provided)")
@@ -6682,9 +9705,11 @@ def run_customer_renewal_analysis(analysis_id):
                                     status['data_truncated'] = True
                                     save_analysis_status()
                             except Exception:
-                                pass
+                                # Round 4: non-fatal; suppressed silently in original code
+                                pass  # noqa: PIE790
                     except Exception:
-                        pass
+                        # Round 4: non-fatal; suppressed silently in original code
+                        pass  # noqa: PIE790
             except Exception as e:
                 logger.warning(f"[[WARNING]] Snowflake support cases fetch failed: {e}")
         
@@ -6693,12 +9718,21 @@ def run_customer_renewal_analysis(analysis_id):
         logger.info(f"[[VALIDATION]] Validating data sources for renewal report (type: {renewal_type})...")
         try:
             # Use 'renewal' as the report_type for validation (validator handles both 'renewal' and 'renewal_portfolio' the same way)
+            # Round 2 / Phase 4.3: surface whether the operator
+            # actually uploaded a CSOne file for this job so the
+            # validator can make ``csone`` required when an upload
+            # silently produced zero rows.
+            _csone_file_provided = bool(
+                (csone_file if 'csone_file' in locals() else None)
+                or (csone_path if 'csone_path' in locals() else None)
+            )
             raise_validation_error_if_invalid(
                 report_type='renewal' if renewal_type == 'renewal_single' else 'renewal_portfolio',
                 snowflake_ctx=ctx,
                 team_subs_df=team_subs_df,
                 ab_data=customer_ab,
-                csone_data=customer_csone
+                csone_data=customer_csone,
+                csone_file_provided=_csone_file_provided,
             )
             logger.info(f"[[VALIDATION]] All required data sources validated successfully")
         except DataSourceValidationError as e:
@@ -6721,7 +9755,8 @@ def run_customer_renewal_analysis(analysis_id):
         logger.info(f"[[WEB]] Gathering external intelligence for renewal report...")
         try:
             ext_bugs = fetch_help_webex_bugs()
-            ext_incidents = fetch_status_incidents()
+            _inc_days = int(days) if isinstance(locals().get('days'), (int, float)) and locals().get('days') else 365
+            ext_incidents = fetch_status_incidents(days_back=_inc_days)
             logger.info(f"[[OK]] External intelligence gathered: {len(ext_bugs)} bugs, {len(ext_incidents)} incidents")
         except Exception as e:
             logger.warning(f"[[WARNING]] External intelligence gathering failed: {e}")
@@ -6778,10 +9813,17 @@ def run_customer_renewal_analysis(analysis_id):
             # ``risk_scoring.RISK_BAND_THRESHOLDS`` (75/55/35/15) — a score
             # of 72 was CRITICAL here but HIGH in the donut.
             from risk_scoring import RISK_BAND_THRESHOLDS as _RBT
+            # Round 10 / Phase 1.2: ``risk_scoring._risk_band`` distinguishes
+            # HEALTHY (below the LOW cut) from LOW so the donut/legends can
+            # surface 'green' accounts. The portfolio aggregate path was
+            # collapsing both into the LOW bucket, so a portfolio averaging
+            # below 15/100 was reported as "LOW risk" while the underlying
+            # bands rendered HEALTHY. Mirror the canonical band cuts.
             if avg_risk_score >= _RBT['CRITICAL']:   port_category = 'CRITICAL'
             elif avg_risk_score >= _RBT['HIGH']:     port_category = 'HIGH'
             elif avg_risk_score >= _RBT['MEDIUM']:   port_category = 'MEDIUM'
-            else:                                    port_category = 'LOW'
+            elif avg_risk_score >= _RBT['LOW']:      port_category = 'LOW'
+            else:                                    port_category = 'HEALTHY'
             # Aggregate counts and key findings so report shows real data (fix "not getting all the data")
             tot_ab = len(customer_ab)
             tot_cases = len(customer_csone)
@@ -6932,13 +9974,65 @@ def run_customer_renewal_analysis(analysis_id):
                 _val = locals()[_df_name]
                 if isinstance(_val, pd.DataFrame) and not _val.empty:
                     _ren_extra_frames.append(_val)
+        # Round 5 / Phase 5.14: previously this call passed
+        # ``risk_profiles=None`` so the renewal portfolio metrics
+        # never carried ``high_risk_customers`` /
+        # ``critical_risk_customers`` / band counts -- and the
+        # consistency check downstream had no risk dimension to
+        # validate against.  When portfolio renewal analyses exist,
+        # adapt them into the canonical profile shape so the
+        # validator can compare its derived counts against
+        # ``portfolio_metrics`` and catch drift.
+        _ren_risk_profiles: Optional[Dict[str, Dict[str, Any]]] = None
+        try:
+            _src_analyses = locals().get('portfolio_renewal_analyses') or {}
+            if isinstance(_src_analyses, dict) and _src_analyses:
+                _ren_risk_profiles = {}
+                for _cn, _a in _src_analyses.items():
+                    if not isinstance(_a, dict):
+                        continue
+                    _score_0_100 = (
+                        _a.get('renewal_risk_score')
+                        if _a.get('renewal_risk_score') is not None
+                        else _a.get('overall_risk_score')
+                    )
+                    try:
+                        _score_0_100 = float(_score_0_100) if _score_0_100 is not None else None
+                    except (TypeError, ValueError):
+                        _score_0_100 = None
+                    _band = _a.get('renewal_risk_category') or _a.get('risk_band') or ''
+                    _ren_risk_profiles[_cn] = {
+                        'risk_score_0_100': _score_0_100,
+                        'risk_score_0_10': (round(_score_0_100 / 10.0, 2) if isinstance(_score_0_100, (int, float)) else None),
+                        'risk_band': str(_band).upper(),
+                        'score': (round(_score_0_100 / 10.0, 2) if isinstance(_score_0_100, (int, float)) else None),
+                    }
+        except Exception as _ren_rp_err:
+            logger.debug(
+                "Renewal risk_profiles adapter failed; falling back to None: %s",
+                _ren_rp_err,
+            )
+            _ren_risk_profiles = None
+
         renewal_portfolio_metrics = cm.build_portfolio_metrics(
             ab_df=customer_ab if customer_ab is not None else pd.DataFrame(),
             csone_df=_renewal_csone_norm,
-            risk_profiles=None,
+            risk_profiles=_ren_risk_profiles,
             defects=software_defects if isinstance(software_defects, dict) else None,
             extra_customer_frames=_ren_extra_frames if _ren_extra_frames else None,
             account_to_customer=_ren_account_to_customer,
+            risk_scale=cm.RISK_SCALE_0_TO_100,
+        )
+        # Round 6 / Phase 5.9: thread ``strict_mode`` through the
+        # renewal path the same way the comprehensive path enforces it.
+        # The legacy renewal call did not pass ``strict_mode``, so the
+        # validator's default (False) hid claim-source drift that the
+        # comprehensive path would have caught.  Honor the same env
+        # toggle (ADOPTIQ_NONSTRICT_CONSISTENCY) so on-call runbooks
+        # don't need a separate switch.
+        _renewal_strict = (
+            str(os.getenv("ADOPTIQ_NONSTRICT_CONSISTENCY", "0")).strip().lower()
+            not in {"1", "true", "yes", "on"}
         )
         consistency_check = validate_report_consistency(
             customer_ab,
@@ -6946,6 +10040,7 @@ def run_customer_renewal_analysis(analysis_id):
             portfolio_metrics=renewal_portfolio_metrics,
             defects=software_defects,
             factual_claims=factual_claims,
+            strict_mode=_renewal_strict,
         )
         if not consistency_check["is_valid"]:
             raise ValueError(f"Renewal consistency checks failed: {'; '.join(consistency_check['errors'])}")
@@ -7023,8 +10118,11 @@ def run_customer_renewal_analysis(analysis_id):
         # Map analyzer keys to expected keys (handle key name differences)
         overall_risk_score = renewal_analysis.get('overall_risk_score') or renewal_analysis.get('renewal_risk_score', 0)
         risk_level = renewal_analysis.get('risk_level') or renewal_analysis.get('renewal_risk_category', 'UNKNOWN')
-        analysis_date = renewal_analysis.get('analysis_date', datetime.now().isoformat())
-        next_review_date = renewal_analysis.get('next_review_date', (datetime.now() + timedelta(days=30)).isoformat())
+        analysis_date = renewal_analysis.get('analysis_date', _now_utc_iso_z())
+        # Round 8 / Phase 1.5: anchor on UTC so the fallback ``next_review_date``
+        # matches the storage convention used by the rest of the analysis chain
+        # (``_now_utc_iso_z``).  Local-clock fallback drifted by the host TZ.
+        next_review_date = renewal_analysis.get('next_review_date', (datetime.now(timezone.utc) + timedelta(days=30)).isoformat())
         
         # Create renewal analysis summary DataFrame
         if renewal_type == 'renewal_portfolio':
@@ -7032,8 +10130,24 @@ def run_customer_renewal_analysis(analysis_id):
             renewal_summary_data = []
             customer_analyses = renewal_analysis.get('customer_analyses', {})
             for cust_name, cust_analysis in customer_analyses.items():
-                cust_risk_score = cust_analysis.get('overall_risk_score', 0)
-                cust_risk_level = cust_analysis.get('risk_level', 'UNKNOWN')
+                # Round 10 / Phase 1.1: ``_calculate_simple_renewal_risk`` writes
+                # ``renewal_risk_score`` / ``renewal_risk_category`` (it predates
+                # the ``overall_risk_score`` / ``risk_level`` keys produced by
+                # the deeper ``RenewalAnalyzer`` paths). The portfolio Excel
+                # path was reading the analyzer-only keys, which silently
+                # rendered "0 / UNKNOWN" for every row while the matching DOCX
+                # surfaced the real values. Fall back to the simple-analyzer
+                # keys so the Excel and Word outputs agree.
+                cust_risk_score = (
+                    cust_analysis.get('overall_risk_score')
+                    if cust_analysis.get('overall_risk_score') is not None
+                    else cust_analysis.get('renewal_risk_score', 0)
+                )
+                cust_risk_level = (
+                    cust_analysis.get('risk_level')
+                    or cust_analysis.get('renewal_risk_category')
+                    or 'UNKNOWN'
+                )
                 renewal_summary_data.append({
                     'Customer': cust_name,
                     'Overall_Risk_Score': cust_risk_score,
@@ -7062,32 +10176,26 @@ def run_customer_renewal_analysis(analysis_id):
                         'Details': component_data.get('details', 'N/A'),
                         'Trend': component_data.get('trend', 'N/A')
                     })
-        # If no risk components, create from analysis metrics
-        if not risk_components_data:
-            # Create risk components from available analysis data
-            if renewal_analysis.get('financial_metrics'):
-                risk_components_data.append({
-                    'Risk_Component': 'Financial Health',
-                    'Score': 5,
-                    'Details': 'Based on contract and portfolio context',
-                    'Trend': 'Stable'
-                })
-            if renewal_analysis.get('usage_metrics'):
-                risk_components_data.append({
-                    'Risk_Component': 'Usage & Adoption',
-                    'Score': 5,
-                    'Details': 'Based on product usage data',
-                    'Trend': 'Stable'
-                })
-            if renewal_analysis.get('support_metrics'):
-                risk_components_data.append({
-                    'Risk_Component': 'Support Health',
-                    'Score': 5,
-                    'Details': 'Based on support case history',
-                    'Trend': 'Stable'
-                })
+        # Round 4 / Phase 1.6: when ``risk_components`` is missing from
+        # the renewal analyzer output, do NOT fabricate
+        # ``Score=5 / Trend=Stable`` rows.  The previous code synthesized
+        # 1-3 fake "Stable" rows whenever any of ``financial_metrics``,
+        # ``usage_metrics``, or ``support_metrics`` was non-empty -- the
+        # Excel ``Risk_Components`` sheet then read out as a real
+        # component breakdown when in fact every row was a hardcoded
+        # placeholder.  Leaving the list empty here lets the sheet
+        # builder below fall back to a clearly-labeled
+        # ``Data_Unavailable`` row instead of silently advertising
+        # placeholder data as a component score.
+        # (intentionally no synthetic rows added)
         
         # Create recommendations DataFrame
+        # Round 5 / Phase 1.2: do NOT fabricate a default
+        # "Review customer engagement and schedule account review" row
+        # when the analyzer returned no recommendations - that
+        # silently advertises a generated action as if a real one
+        # were produced.  Mirror the Round 4 Risk_Components
+        # honesty pattern and emit a single Data_Unavailable row.
         recommendations_data = []
         recommendations = renewal_analysis.get('recommendations', [])
         if recommendations:
@@ -7098,8 +10206,8 @@ def run_customer_renewal_analysis(analysis_id):
                 })
         else:
             recommendations_data.append({
-                'Priority': 1,
-                'Recommendation': 'Review customer engagement and schedule account review'
+                'Priority': 'n/a',
+                'Recommendation': 'Data_Unavailable: renewal analyzer returned no recommendations for this customer.'
             })
         
         # Build key metrics from available data
@@ -7113,9 +10221,69 @@ def run_customer_renewal_analysis(analysis_id):
                 'Recommendations': len(recommendations)
             }
         
+        # Round 5 / Phase 1.6: emit a Report_Info ledger sheet so the
+        # renewal customer Excel mirrors the leader / compact pattern of
+        # disclosing report metadata + any partial_data_warnings that
+        # accrued during this run.  Without this, consumers of the
+        # renewal Excel had no in-workbook way to see that (e.g.) AB
+        # data fell back due to a fetch error.
+        try:
+            _ren_status = analysis_status.get(analysis_id, {}) if isinstance(analysis_status, dict) else {}
+        except Exception:
+            _ren_status = {}
+        _ren_pdw = []
+        try:
+            _pdw_src = _ren_status.get('partial_data_warnings') or []
+            if isinstance(_pdw_src, list):
+                _ren_pdw = _pdw_src
+        except Exception:
+            _ren_pdw = []
+        _report_info_rows = [
+            {'Field': 'Report_Type', 'Value': str(renewal_type or 'renewal')},
+            {'Field': 'Customer_Name', 'Value': str(customer_name_for_report)},
+            {'Field': 'Technology', 'Value': str(technology or 'n/a')},
+            {'Field': 'Manager', 'Value': str(manager or 'n/a')},
+            {'Field': 'Days', 'Value': str(days)},
+            {'Field': 'Analysis_Id', 'Value': str(analysis_id)},
+            {'Field': 'Generated_At_UTC', 'Value': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')},
+            {'Field': 'Partial_Data_Warning_Count', 'Value': str(len(_ren_pdw))},
+        ]
+        if _ren_pdw:
+            for _i, _w in enumerate(_ren_pdw, 1):
+                try:
+                    _ds = (_w.get('dataset') if isinstance(_w, dict) else None) or 'n/a'
+                    _kind = (_w.get('kind') if isinstance(_w, dict) else None) or 'n/a'
+                    _err = (_w.get('error') if isinstance(_w, dict) else str(_w))
+                    _report_info_rows.append({
+                        'Field': f'Partial_Data_Warning_{_i}',
+                        'Value': f'{_ds} | {_kind} | {str(_err)[:200]}'
+                    })
+                except Exception:
+                    continue
+        report_info_df = pd.DataFrame(_report_info_rows)
         sheets = {
+            "Report_Info": report_info_df,
             "Renewal_Summary": pd.DataFrame(renewal_summary_data),
-            "Risk_Components": pd.DataFrame(risk_components_data) if risk_components_data else pd.DataFrame([{'Risk_Component': 'Overall', 'Score': overall_risk_score, 'Details': 'Analysis complete', 'Trend': 'N/A'}]),
+            # Round 4 / Phase 1.6: if the analyzer did not produce
+            # per-component risk scores, render a single
+            # ``Data_Unavailable`` row instead of inventing an
+            # ``Overall: <score> / Analysis complete`` line that
+            # silently looks like a real component breakdown.  This
+            # keeps the workbook honest about what was and wasn't
+            # computed.
+            "Risk_Components": (
+                pd.DataFrame(risk_components_data)
+                if risk_components_data
+                else pd.DataFrame([{
+                    'Risk_Component': 'Data_Unavailable',
+                    'Score': 'n/a',
+                    'Details': (
+                        'risk_components were not produced by the renewal analyzer; '
+                        'see Renewal_Summary.Overall_Risk_Score for the headline number.'
+                    ),
+                    'Trend': 'n/a',
+                }])
+            ),
             "Recommendations": pd.DataFrame(recommendations_data),
             "Customer_Adoption_Barriers": customer_ab if not customer_ab.empty else pd.DataFrame(),
             "Customer_Support_Cases": customer_csone if not customer_csone.empty else pd.DataFrame(),
@@ -7188,14 +10356,48 @@ def run_customer_renewal_analysis(analysis_id):
                 })
             
                 # Date formatting
+                # Round 6 / Phase 1.8: standardize on ISO ``yyyy-mm-dd``
+                # for cross-locale unambiguity.  The previous US-locale
+                # ``mm/dd/yyyy`` mixed with ISO text dates elsewhere in
+                # the same workbook (e.g. UTC ISO timestamps in
+                # Report_Info), which made cross-sheet comparisons
+                # error-prone for non-US readers.
                 date_format = workbook.add_format({
-                    'num_format': 'mm/dd/yyyy',
+                    'num_format': 'yyyy-mm-dd',
                     'border': 1,
                     'align': 'center'
                 })
             
                 # Write each sheet
                 for sheet_name, df in sheets.items():
+                    # Round 2 / Phase 2.1: surface fetch_error tristate
+                    # so a fetch failure cannot masquerade as an empty
+                    # renewal section.
+                    _fetch_error = None
+                    _fetch_error_kind = None
+                    try:
+                        _fetch_error = df.attrs.get('fetch_error') if hasattr(df, 'attrs') else None
+                        _fetch_error_kind = df.attrs.get('fetch_error_kind') if hasattr(df, 'attrs') else None
+                    except Exception:
+                        _fetch_error = None
+                    if _fetch_error:
+                        try:
+                            unavailable_df = pd.DataFrame([
+                                {
+                                    'Status': 'Data Unavailable',
+                                    'Dataset': sheet_name,
+                                    'Reason': str(_fetch_error_kind or 'fetch_error'),
+                                    'Detail': str(_fetch_error)[:512],
+                                    'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
+                                }
+                            ])
+                            unavailable_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
+                            worksheet = writer.sheets[sheet_name]
+                            worksheet.write(0, 0, f"{sheet_name.replace('_', ' ')} — Data Unavailable", title_format)
+                            logger.warning(f"[RENEWAL EXCEL] Sheet '{sheet_name}' rendered as Data_Unavailable: {_fetch_error}")
+                        except Exception as _du_err:
+                            logger.error(f"[RENEWAL EXCEL] Failed to write Data_Unavailable for '{sheet_name}': {_du_err}")
+                        continue
                     if not df.empty:
                         # Clean datetime columns for Excel compatibility
                         df_clean = _clean_datetime_columns_for_excel(df)
@@ -7204,8 +10406,17 @@ def run_customer_renewal_analysis(analysis_id):
                         # Format the sheet
                         worksheet = writer.sheets[sheet_name]
                     
-                        # Write title
-                        worksheet.write(0, 0, f"{sheet_name.replace('_', ' ')} - {customer_name} Renewal Analysis", title_format)
+                        # Round 5 / Phase 1.9: use ``merge_range`` across the
+                        # full column span so the sheet title is centered
+                        # over the data rather than pinned to column A.
+                        # ``merge_range`` requires >= 2 columns, so fall
+                        # back to ``write`` for single-column sheets.
+                        _renewal_title_text = f"{sheet_name.replace('_', ' ')} - {customer_name} Renewal Analysis"
+                        _renewal_n_cols = len(df_clean.columns)
+                        if _renewal_n_cols > 1:
+                            worksheet.merge_range(0, 0, 0, _renewal_n_cols - 1, _renewal_title_text, title_format)
+                        else:
+                            worksheet.write(0, 0, _renewal_title_text, title_format)
                     
                         # Format headers
                         for col_num, value in enumerate(df_clean.columns.values):
@@ -7225,7 +10436,13 @@ def run_customer_renewal_analysis(analysis_id):
                         empty_df = pd.DataFrame({'Message': ['No data available for this analysis']})
                         empty_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
                         worksheet = writer.sheets[sheet_name]
-                        worksheet.write(0, 0, f"{sheet_name.replace('_', ' ')} - {customer_name} Renewal Analysis", title_format)
+                        # Round 5 / Phase 1.9: merge across columns when possible.
+                        _empty_title_text = f"{sheet_name.replace('_', ' ')} - {customer_name} Renewal Analysis"
+                        _empty_cols = len(empty_df.columns)
+                        if _empty_cols > 1:
+                            worksheet.merge_range(0, 0, 0, _empty_cols - 1, _empty_title_text, title_format)
+                        else:
+                            worksheet.write(0, 0, _empty_title_text, title_format)
         except Exception as excel_error:
             logger.error(f"[[ERROR]] Renewal Excel generation failed: {excel_error}", exc_info=True)
             raise excel_error
@@ -7233,7 +10450,7 @@ def run_customer_renewal_analysis(analysis_id):
         with analysis_status_lock:
             _update_progress(status, 100, 'Customer renewal analysis completed successfully!', 'Completed')
             status['status'] = 'completed'
-            status['completion_time'] = datetime.now().isoformat()
+            status['completion_time'] = _now_utc_iso_z()
             completion_time = status['completion_time']
             report_type = status.get('report_type', 'renewal')
             manager = status.get('manager', '')
@@ -7249,12 +10466,19 @@ def run_customer_renewal_analysis(analysis_id):
                 'customer': customer_name,
                 'analysis_date': analysis_date
             }
+            # Round 5 / Phase 6.7: persist *under* the lock so the on-disk
+            # JSON snapshot matches the in-memory completion state.
+            save_analysis_status()
 
         # Run non-locking side effects after releasing status lock
         auto_audit_report(analysis_id)
+        # Round 3 / Phase 5.4: pass days, paths, and warnings.
         record_report_completion(
             analysis_id, report_type, manager, technology, customer_name_val,
-            'completed', start_time, completion_time
+            'completed', start_time, completion_time,
+            days=status.get('days') if isinstance(status, dict) else None,
+            word_path=renewal_word_path if 'renewal_word_path' in locals() else '',
+            excel_path=excel_path if 'excel_path' in locals() and excel_path else '',
         )
         try:
             insights_payload = _build_insights_payload(status, 'Renewal analysis completed')
@@ -7290,6 +10514,12 @@ def run_customer_renewal_analysis(analysis_id):
 
 def run_comprehensive_analysis(analysis_id):
     """Run analysis using EXACT logic from working script with enhanced prompts"""
+    # Round 5 / Phase 6.14: bind the analysis ID for correlated logs.
+    try:
+        from structured_logging import bind_analysis_id as _bind_aid
+        _bind_aid(analysis_id)
+    except Exception:
+        pass  # noqa: PIE790
     try:
         # Enhanced error handling and logging
         logger.info(f"Starting comprehensive analysis for {analysis_id}")
@@ -7306,7 +10536,13 @@ def run_comprehensive_analysis(analysis_id):
             status['status'] = 'running'
             status['completed_steps'] = []
             _update_progress(status, 8, 'Connecting to Snowflake Data Warehouse...', 'Database Connection')
-        
+
+        # Phase 1.3b: collector for fetch failures discovered along the way.
+        # Each entry is ``{'dataset': str, 'error': str, 'kind': str}`` and is
+        # surfaced to formatters / report metadata so the user sees a banner
+        # instead of a confident zero on the affected section.
+        partial_data_warnings: list = []
+
         # [EXACT SAME LOGIC AS YOUR WORKING SCRIPT - SHORTENED FOR BREVITY]
         # Get team roster for the selected manager
         # Get status values we need (thread-safe)
@@ -7321,13 +10557,20 @@ def run_comprehensive_analysis(analysis_id):
             team_roster_df = team_roster_df[team_roster_df["manager_name"] == manager_name]
         cssm_emails = team_roster_df["cssm_email"].dropna().unique().tolist()
         
-        # Update status (thread-safe)
+        # Round 8 / Phase 1.5: every ``estimated_completion`` builder in this
+        # file used the naive local-clock ``datetime.now()`` while the rest
+        # of the status payload (``step_start_time`` etc.) is already UTC
+        # via ``_now_utc_iso_z``.  On non-UTC hosts the computed ETA was off
+        # by the local UTC offset, so the progress page either reported
+        # negative remaining time or claimed completion in the past.  Anchor
+        # every ETA builder on ``datetime.now(timezone.utc)`` so the maths
+        # stays internally consistent end-to-end.
         update_analysis_status(analysis_id, {
             'progress': 20,
             'message': ' Fetching team subscriptions and customer data...',
             'current_step': 'Team Data Retrieval',
-            'step_start_time': datetime.now().isoformat(),
-            'estimated_completion': (datetime.now() + timedelta(minutes=12)).isoformat()
+            'step_start_time': _now_utc_iso_z(),
+            'estimated_completion': (datetime.now(timezone.utc) + timedelta(minutes=12)).isoformat()
         })
         
         # Connect to Snowflake and get subscriptions
@@ -7450,6 +10693,24 @@ def run_comprehensive_analysis(analysis_id):
         # Fetch adoption barriers
         ab_raw = fetch_adoption_barriers(ctx, account_ids, days)
         ab_raw_empty = ab_raw is None or (hasattr(ab_raw, 'empty') and ab_raw.empty)
+        # Phase 1.3b: even when the result frame is empty, the fetcher may
+        # have attached a fetch_error attr (Phase 1.3a) telling us *why*. We
+        # promote that into partial_data_warnings so the report renders
+        # "adoption barriers unavailable" instead of "0 barriers".
+        try:
+            _ab_attrs = getattr(ab_raw, 'attrs', {}) or {}
+            if _ab_attrs.get('fetch_error'):
+                partial_data_warnings.append({
+                    'dataset': _ab_attrs.get('fetch_error_dataset') or 'adoption_barriers',
+                    'error': str(_ab_attrs.get('fetch_error')),
+                    'kind': _ab_attrs.get('fetch_error_kind') or 'runtime',
+                })
+                logger.warning(
+                    "[[PARTIAL_DATA]] adoption_barriers failed: %s",
+                    _ab_attrs.get('fetch_error'),
+                )
+        except Exception as _ab_err:
+            logger.debug("AB fetch_error scan skipped: %s", _ab_err)
         if not ab_raw_empty and "ACCOUNT_ID_C" in ab_raw.columns:
             ab_raw = ab_raw.merge(team_subs_df[["ACCOUNT_ID_C","BU_NAME","CSSM_EMAIL"]].drop_duplicates(), on="ACCOUNT_ID_C", how="left")
         
@@ -7483,24 +10744,65 @@ def run_comprehensive_analysis(analysis_id):
                 customer_names=customer_names,
                 owner_emails=comprehensive_owner_emails,
             )
+            # Phase 3.1: capture the data fetch timestamp so the
+            # executive intelligence formatter can render "Data as of"
+            # alongside "Generated".
+            data_retrieved_at = comprehensive_prefetch_ctx.data_retrieved_at
             csconsole_bundle = prefetch_comprehensive(comprehensive_prefetch_ctx)
             csconsole_action_plans = csconsole_bundle.get("csconsole_action_plans", pd.DataFrame())
             csconsole_customer_pulse = csconsole_bundle.get("csconsole_customer_pulse", pd.DataFrame())
             csconsole_success_priorities = csconsole_bundle.get("csconsole_success_priorities", pd.DataFrame())
             csconsole_adoption_barriers = csconsole_bundle.get("csconsole_adoption_barriers", pd.DataFrame())
+            # Phase 1.3b: pull any fetch_error markers out of the bundle so we
+            # can render a "partial data" banner downstream and never let
+            # silent zeros look like real zero-rows.
+            try:
+                _bundle_warnings = collect_fetch_warnings(csconsole_bundle)
+                if _bundle_warnings:
+                    partial_data_warnings.extend(_bundle_warnings)
+                    for _w in _bundle_warnings:
+                        logger.warning(
+                            "[[PARTIAL_DATA]] %s failed: %s",
+                            _w.get('dataset'), _w.get('error'),
+                        )
+            except Exception as _wc_err:
+                logger.debug("collect_fetch_warnings (csconsole) skipped: %s", _wc_err)
         except Exception as e:
             logger.warning(f"[[WARNING]] Comprehensive CSConsole prefetch failed: {e}")
-            csconsole_action_plans = pd.DataFrame()
-            csconsole_customer_pulse = pd.DataFrame()
-            csconsole_success_priorities = pd.DataFrame()
-            csconsole_adoption_barriers = pd.DataFrame()
+            csconsole_action_plans = _empty_df_with_fetch_marker("csconsole_action_plans", str(e))
+            csconsole_customer_pulse = _empty_df_with_fetch_marker("csconsole_customer_pulse", str(e))
+            csconsole_success_priorities = _empty_df_with_fetch_marker("csconsole_success_priorities", str(e))
+            csconsole_adoption_barriers = _empty_df_with_fetch_marker("csconsole_adoption_barriers", str(e))
+            partial_data_warnings.append({
+                'dataset': 'csconsole_bundle',
+                'error': str(e) or 'prefetch_failed',
+                'kind': 'runtime',
+            })
         
         logger.info(f" Found {len(csconsole_action_plans)} action plans, {len(csconsole_customer_pulse)} customer pulse records, "
                     f"{len(csconsole_success_priorities)} success priorities, and {len(csconsole_adoption_barriers)} adoption barriers from CSConsole.")
         
         ab_scoped = _apply_scope_filter_ab(ab_raw, tech, days)
+        # Round 4 / Phase 4.6: comprehensive path -- propagate the AB
+        # tech-filter widening warning so the workbook documents that
+        # the unfiltered AB set was used instead of the requested tech.
+        try:
+            _ab_attrs = getattr(ab_scoped, 'attrs', {}) or {}
+            if _ab_attrs.get('tech_filter_widened'):
+                partial_data_warnings.append({
+                    'dataset': 'adoption_barriers',
+                    'error': str(_ab_attrs.get('tech_filter_warning')
+                                  or 'AB tech filter widened due to insufficient matches.'),
+                    'kind': 'tech_filter_widened',
+                    'tech_requested': _ab_attrs.get('tech_filter_requested'),
+                    'matched': _ab_attrs.get('tech_filter_matched'),
+                    'total': _ab_attrs.get('tech_filter_total'),
+                })
+        except Exception:
+            # Round 4: non-fatal; suppressed silently in original code
+            pass  # noqa: PIE790
         ab_norm = _prepare_ab(ab_scoped, team_subs_df)
-        
+
         # Update status (thread-safe)
         update_analysis_status(analysis_id, {
             'progress': 50,
@@ -7594,7 +10896,8 @@ def run_comprehensive_analysis(analysis_id):
         # External intelligence
         try:
             ext_bugs = fetch_help_webex_bugs()
-            ext_incidents = fetch_status_incidents()
+            _inc_days = int(days) if isinstance(locals().get('days'), (int, float)) and locals().get('days') else 365
+            ext_incidents = fetch_status_incidents(days_back=_inc_days)
         except Exception as e:
             logger.warning(f"[[WARNING]] External intelligence gathering failed: {e}")
             ext_bugs = []
@@ -7732,6 +11035,11 @@ def run_comprehensive_analysis(analysis_id):
                 customer_action_plans=c_action,
                 customer_subs=c_subs,
                 ext_incidents=ext_incidents,
+                # Round 3 / Phase 4.2: align the support-case
+                # "recent" window with the comprehensive report's
+                # analysis horizon (default 90) instead of the
+                # hardcoded 30-day fallback.
+                recent_window_days=int(days) if days else 30,
             )
 
         portfolio_risk_summary = compute_portfolio_risk_summary(risk_profiles)
@@ -7739,6 +11047,16 @@ def run_comprehensive_analysis(analysis_id):
         medium_risk_customers = int(portfolio_risk_summary.get("medium_risk_customers", 0))
         low_risk_customers = int(portfolio_risk_summary.get("low_risk_customers", 0))
         healthy_customers = int(portfolio_risk_summary.get("healthy_customers", 0))
+        # Round 10 / Phase 3.7: thread the critical / high-only band split
+        # into ``portfolio_metrics`` so ``add_executive_visual_dashboard``
+        # can render its 5-slice pie (Critical / High / Medium / Low /
+        # Healthy) instead of falling through to the legacy 4-slice pie.
+        # The 4-slice fallback collapsed CRITICAL into HIGH and so the
+        # dashboard understated the most-urgent band relative to the
+        # narrative section using the same risk profiles.
+        _band_counts = portfolio_risk_summary.get("risk_band_counts", {}) or {}
+        critical_risk_customers = int(_band_counts.get("CRITICAL", 0))
+        high_only_risk_customers = int(_band_counts.get("HIGH", 0))
 
         # Canonical priority and case-type counts so the comprehensive
         # report agrees with Compact / EI / Leader / Renewal byte-for-byte.
@@ -7759,6 +11077,11 @@ def run_comprehensive_analysis(analysis_id):
             'medium_risk_customers': medium_risk_customers,
             'low_risk_customers': low_risk_customers,
             'healthy_customers': healthy_customers,
+            # Round 10 / Phase 3.7: critical / high-only split for the
+            # 5-slice pie in ``add_executive_visual_dashboard``.
+            'critical_risk_customers': critical_risk_customers,
+            'high_only_risk_customers': high_only_risk_customers,
+            'risk_band_counts': dict(_band_counts) if _band_counts else {},
             'p1_cases': p1_cases,
             'p2_cases': p2_cases,
             'p3_cases': p3_cases,
@@ -7769,7 +11092,14 @@ def run_comprehensive_analysis(analysis_id):
             'break_fix_cases': break_fix_count,
             'provisioning_cases': provisioning_count,
             'health_score': 'B' if healthy_customers >= high_risk_customers else 'C',
-            'trend_direction': 'Stable'  # Default
+            # Round 3 / Phase 1.3: do NOT ship a hardcoded
+            # "Stable" trend label that reads as a data-derived
+            # signal next to real metrics. Until a comparable
+            # prior-period trend computation is wired in, mark the
+            # field as not computed so any downstream renderer can
+            # show "n/a" instead of fabricating "Stable".
+            'trend_direction': None,
+            'trend_direction_reason': 'not_computed',
         }
         factual_claims = []
         for profile in risk_profiles.values():
@@ -7777,7 +11107,20 @@ def run_comprehensive_analysis(analysis_id):
                 factual_claims.extend(profile.get("key_findings", []) or [])
                 factual_claims.extend(profile.get("risk_factors", []) or [])
         consistency_unknown_threshold = 1.01 if status.get('tech') == 'All Contact Center' else 0.60
-        strict_consistency = str(os.getenv("ADOPTIQ_STRICT_CONSISTENCY", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        # Phase 1.2: Comprehensive reports now default to strict consistency.
+        # Set ADOPTIQ_NONSTRICT_CONSISTENCY=1 to opt out (e.g. emergency hotfix);
+        # the legacy ADOPTIQ_STRICT_CONSISTENCY=0 toggle is also honored as an
+        # opt-out for the same reason so existing on-call runbooks keep working.
+        _legacy_strict_off = (
+            "ADOPTIQ_STRICT_CONSISTENCY" in os.environ
+            and str(os.environ.get("ADOPTIQ_STRICT_CONSISTENCY", "1")).strip().lower()
+            in {"0", "false", "no", "off"}
+        )
+        _nonstrict_consistency = (
+            str(os.getenv("ADOPTIQ_NONSTRICT_CONSISTENCY", "0")).strip().lower()
+            in {"1", "true", "yes", "on"}
+        ) or _legacy_strict_off
+        strict_consistency = not _nonstrict_consistency
         consistency = validate_report_consistency(
             _ab,
             _cs_norm,
@@ -7787,12 +11130,26 @@ def run_comprehensive_analysis(analysis_id):
             factual_claims=factual_claims,
             customer_universe=all_customers_comprehensive,
             max_other_unknown_ratio=consistency_unknown_threshold,
-            strict_mode=strict_consistency,
+            strict_mode=False,  # we enforce below so we can produce a uniform error
         )
         if not consistency["is_valid"]:
             logger.error(f"[[CONSISTENCY]] Errors: {consistency['errors']}")
         if consistency["warnings"]:
             logger.warning(f"[[CONSISTENCY]] Warnings: {consistency['warnings']}")
+        if not consistency.get("is_valid", True) and strict_consistency:
+            err_msg = (
+                "Comprehensive report consistency checks failed: "
+                + "; ".join(consistency.get("errors", []) or ["unknown"])
+            )
+            logger.error(f"[[CONSISTENCY]] Blocking comprehensive report: {err_msg}")
+            update_analysis_status(analysis_id, {
+                'status': 'error',
+                'progress': 0,
+                'message': 'Report consistency check failed',
+                'error': err_msg,
+                'current_step': 'Consistency Check Failed',
+            })
+            return
         
         # Add professional title page
         report_builder.add_title_page(status['manager'], status['tech'], status['days'], portfolio_metrics)
@@ -7902,7 +11259,18 @@ def run_comprehensive_analysis(analysis_id):
             # FIXED: Show ALL customers by engagement
             engagement = pd.merge(ab_counts, csone_counts, on='customer_name', how='outer').fillna(0)
             engagement['total_engagements'] = engagement['ab_count'] + engagement['csone_count']
-            engagement_summary = engagement.sort_values('total_engagements', ascending=False)
+            # Round 12 / Phase 11.4: previously sorted with default
+            # (quicksort) algorithm and no tie-break, so two customers
+            # with identical engagement totals could swap positions
+            # between runs and any downstream ``head(N)`` slice would
+            # render a non-reproducible "Top customers" list.  Use a
+            # stable kind with ``customer_name`` as a tie-break so
+            # equal totals always resolve in alphabetical order.
+            engagement_summary = engagement.sort_values(
+                ['total_engagements', 'customer_name'],
+                ascending=[False, True],
+                kind='stable',
+            )
 
             # Extract software defects and PSIRT for briefing (comprehensive flow)
             try:
@@ -7958,8 +11326,8 @@ def run_comprehensive_analysis(analysis_id):
         status['progress'] = 75
         status['message'] = ' Generating AI-powered customer deep dives and storyboards...'
         status['current_step'] = 'AI Customer Analysis'
-        status['step_start_time'] = datetime.now().isoformat()
-        status['estimated_completion'] = (datetime.now() + timedelta(minutes=8)).isoformat()
+        status['step_start_time'] = _now_utc_iso_z()
+        status['estimated_completion'] = (datetime.now(timezone.utc) + timedelta(minutes=8)).isoformat()
         
         # FIXED: Use comprehensive function to get ALL customers from ALL available data sources
         # Use UNFILTERED team_subs_df for customer counting (we want ALL customers, not just filtered ones)
@@ -7981,7 +11349,24 @@ def run_comprehensive_analysis(analysis_id):
             logger.info("No customer activity found in any data sources. No deep dives to generate.")
         else:
             logger.info(f"[[DATA]] Combined unique customers from ALL sources: {len(all_customers)}")
-            logger.info(f"[[DATA]] Customer names: {all_customers}")
+            # Round 6 / Phase 6.3: do not log the full ``all_customers``
+            # roster at INFO -- BU / customer names are PII-adjacent
+            # and end up in shipped log files.  Surface a one-line
+            # hashed digest at INFO and the verbatim list only at
+            # DEBUG, where operators have to opt in.
+            try:
+                import hashlib as _h_p63
+                _names_blob = "|".join(sorted(str(c) for c in all_customers))
+                _names_digest = _h_p63.sha256(
+                    _names_blob.encode("utf-8", errors="replace")
+                ).hexdigest()[:12] if _names_blob else "empty"
+            except Exception:
+                _names_digest = "unavailable"
+            logger.info(
+                "[[DATA]] Customer roster digest=%s (full list at DEBUG only).",
+                _names_digest,
+            )
+            logger.debug("[[DATA]] Customer names: %s", all_customers)
 
         logger.info(f"[[BULLSEYE]] Found {len(all_customers)} customers with activity. Generating AI-powered deep dives...")
         
@@ -7989,19 +11374,34 @@ def run_comprehensive_analysis(analysis_id):
         status['progress'] = 75
         status['message'] = f" Found {len(all_customers)} customers with activity. Generating AI-powered deep dives..."
         
-        # Calculate ETA based on customers remaining
+        # Calculate ETA based on customers remaining.
+        # Round 6 / Phase 6.2: clamp ``remaining_time`` to >= 0 and use a
+        # tz-aware UTC clock for both ``elapsed_time`` and the
+        # ``estimated_completion`` timestamp.  Without this the clients
+        # could see negative ETAs (e.g. when the writer outpaced the
+        # 75% checkpoint), and ``datetime.now() - datetime.fromisoformat
+        # ('...+00:00')`` would raise ``TypeError: can't subtract
+        # offset-naive and offset-aware datetimes`` on any persisted
+        # status that already used UTC ISO-Z.
         elapsed_time = 0
         if status.get('start_time'):
             try:
                 start_str = str(status.get('start_time', '')).replace('Z', '+00:00')
                 if start_str:
-                    elapsed_time = (datetime.now() - datetime.fromisoformat(start_str)).total_seconds()
+                    _start_dt = datetime.fromisoformat(start_str)
+                    if _start_dt.tzinfo is None:
+                        _start_dt = _start_dt.replace(tzinfo=timezone.utc)
+                    elapsed_time = (datetime.now(timezone.utc) - _start_dt).total_seconds()
             except (ValueError, TypeError):
                 pass
+        if elapsed_time < 0:
+            elapsed_time = 0
         estimated_total_time = elapsed_time / 0.75  # We're at 75% progress
-        remaining_time = estimated_total_time - elapsed_time
+        remaining_time = max(0.0, estimated_total_time - elapsed_time)
         status['eta_seconds'] = int(remaining_time)
-        status['estimated_completion'] = (datetime.now() + timedelta(seconds=remaining_time)).isoformat()
+        status['estimated_completion'] = (
+            datetime.now(timezone.utc) + timedelta(seconds=remaining_time)
+        ).isoformat()
         
         # Add customer processing progress
         status['customer_progress'] = {
@@ -8018,7 +11418,17 @@ def run_comprehensive_analysis(analysis_id):
             customer_progress = 75 + int((i / max(len(all_customers), 1)) * 15)  # 75-90% range
             status['progress'] = customer_progress
             status['customer_progress']['completed'] = i - 1
-            status['customer_progress']['current'] = customer_name
+            # Round 11 / Phase 10.5: normalize the displayed customer
+            # name so the progress page matches the spelling used by
+            # downstream tables / Word headings (which already pass
+            # through ``normalize_customer_name``). Without this the
+            # progress UI could show "ACME, Inc." while the report
+            # body says "ACME" for the same customer.
+            try:
+                _disp_current = normalize_customer_name(str(customer_name)) or str(customer_name)
+            except Exception:
+                _disp_current = str(customer_name)
+            status['customer_progress']['current'] = _disp_current
             
             # Check for cancellation before each customer analysis
             if check_cancellation(analysis_id):
@@ -8030,10 +11440,10 @@ def run_comprehensive_analysis(analysis_id):
             
             status['message'] = f' ({i}/{len(all_customers)}) Generating AI StoryBoard for: {customer_name}...'
             status['current_step'] = f'AI Customer Analysis ({i}/{len(all_customers)})'
-            status['step_start_time'] = datetime.now().isoformat()
+            status['step_start_time'] = _now_utc_iso_z()
             remaining_customers = len(all_customers) - i
             estimated_minutes = remaining_customers * 0.5  # Estimate 30 seconds per customer
-            status['estimated_completion'] = (datetime.now() + timedelta(minutes=estimated_minutes)).isoformat()
+            status['estimated_completion'] = (datetime.now(timezone.utc) + timedelta(minutes=estimated_minutes)).isoformat()
             
             logger.info(f"  [[LIST]] ({i}/{len(all_customers)}) Generating AI StoryBoard for: {customer_name}...")
             ab_norm_safe_check = ab_norm is not None and (hasattr(ab_norm, 'columns') and 'customer_name' in ab_norm.columns)
@@ -8155,7 +11565,7 @@ def run_comprehensive_analysis(analysis_id):
                     if customers_actually_analyzed > 0:
                         report_builder._add_customer_separator()
                     # Add a fallback section with clean formatting
-                    report_builder.add_heading(f"{customer_name} Analysis", level=2)
+                    report_builder.add_heading(_safe_doc_text(f"{customer_name} Analysis"), level=2)
                     report_builder.add_paragraph("AI analysis temporarily unavailable. Customer data processed successfully.")
                     report_builder.add_paragraph(f"Customer: {customer_name}", bold_sections=["Customer:"])
                     report_builder.add_paragraph(f"CSSM: {cssm_name}", bold_sections=["CSSM:"])
@@ -8169,7 +11579,7 @@ def run_comprehensive_analysis(analysis_id):
                 if customers_actually_analyzed > 0:
                     report_builder._add_customer_separator()
                 # Add a fallback section with clean formatting
-                report_builder.add_heading(f"{customer_name} Analysis", level=2)
+                report_builder.add_heading(_safe_doc_text(f"{customer_name} Analysis"), level=2)
                 report_builder.add_paragraph("AI analysis encountered an error. Customer data processed successfully.")
                 report_builder.add_paragraph(f"Customer: {customer_name}", bold_sections=["Customer:"])
                 report_builder.add_paragraph(f"CSSM: {cssm_name}", bold_sections=["CSSM:"])
@@ -8185,8 +11595,8 @@ def run_comprehensive_analysis(analysis_id):
         status['progress'] = 90
         status['message'] = ' Finalizing comprehensive AI-powered report and generating outputs...'
         status['current_step'] = 'Report Generation'
-        status['step_start_time'] = datetime.now().isoformat()
-        status['estimated_completion'] = (datetime.now() + timedelta(minutes=2)).isoformat()
+        status['step_start_time'] = _now_utc_iso_z()
+        status['estimated_completion'] = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
         
         logger.info(f"[[DOC]] Saving main Word document with clean formatting (NO markdown symbols)...")
         docx_path = f"{base}.docx"
@@ -8198,8 +11608,8 @@ def run_comprehensive_analysis(analysis_id):
             status['progress'] = 92
             status['message'] = ' Creating enhanced executive Word report with detailed technology analysis...'
             status['current_step'] = 'Enhanced Report Generation'
-            status['step_start_time'] = datetime.now().isoformat()
-            status['estimated_completion'] = (datetime.now() + timedelta(minutes=1)).isoformat()
+            status['step_start_time'] = _now_utc_iso_z()
+            status['estimated_completion'] = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
             
             logger.info(f"[[ENHANCED]] Generating enhanced Word report with technology focus...")
             # Create enhanced Word report
@@ -8223,8 +11633,8 @@ def run_comprehensive_analysis(analysis_id):
             status['progress'] = 95
             status['message'] = ' Writing comprehensive Excel workbook with detailed data analysis...'
             status['current_step'] = 'Excel Report Generation'
-            status['step_start_time'] = datetime.now().isoformat()
-            status['estimated_completion'] = (datetime.now() + timedelta(seconds=30)).isoformat()
+            status['step_start_time'] = _now_utc_iso_z()
+            status['estimated_completion'] = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
             
             logger.info(f"[[DATA]] Writing comprehensive Excel workbook...")
             
@@ -8268,8 +11678,8 @@ def run_comprehensive_analysis(analysis_id):
             status['progress'] = 98
             status['message'] = ' Finalizing analysis results and updating status...'
             status['current_step'] = 'Final Status Update'
-            status['step_start_time'] = datetime.now().isoformat()
-            status['estimated_completion'] = (datetime.now() + timedelta(seconds=10)).isoformat()
+            status['step_start_time'] = _now_utc_iso_z()
+            status['estimated_completion'] = (datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()
             
             logger.info(f"[[SUCCESS]] Updating final status with comprehensive results...")
             
@@ -8289,7 +11699,7 @@ def run_comprehensive_analysis(analysis_id):
                 status['progress'] = 100
                 status['message'] = f' COMPREHENSIVE AI-POWERED ANALYSIS COMPLETED! Generated detailed report with CircuIT AI analysis for {customers_analyzed} of {len(all_customers)} customers (some customers had no data to analyze). Each analyzed customer received a full AI-powered deep dive with strategic insights and recommendations.'
                 status['current_step'] = 'Analysis Complete'
-            status['completion_time'] = status.get('completion_time') or datetime.now().isoformat()
+            status['completion_time'] = status.get('completion_time') or _now_utc_iso_z()
             completion_time = status['completion_time']
             report_type = status.get('report_type', 'comprehensive')
             manager = status.get('manager', '')
@@ -8320,10 +11730,37 @@ def run_comprehensive_analysis(analysis_id):
             # Also set the individual report paths for download compatibility
             status['word_report'] = docx_path
             status['excel_report'] = xlsx_path
+            # Round 3 / Phase 5.1: persist any partial-data warnings
+            # we accumulated during this run so the History page,
+            # Admin tile, and Ask AI grounded prompt can all surface
+            # the same caveats. Previously these only existed in
+            # local memory and were lost as soon as the worker
+            # thread exited, which made the UI claim "completed"
+            # for runs that actually shipped degraded data.
+            try:
+                _pdw = list(partial_data_warnings) if partial_data_warnings else []
+                status['partial_data_warnings'] = _pdw
+                if 'results' in status and isinstance(status['results'], dict):
+                    status['results']['partial_data_warnings'] = _pdw
+                if _pdw:
+                    logger.info(
+                        "[PARTIAL_DATA] Persisted %d partial-data warning(s) on analysis %s",
+                        len(_pdw), analysis_id,
+                    )
+            except Exception as _pdw_err:
+                logger.debug(
+                    "Could not persist partial_data_warnings on status: %s",
+                    _pdw_err,
+                )
             logger.info(f"[[OK]] Status updated successfully")
 
-            # Persist status snapshot after final completion update.
-            save_analysis_status()
+            # Round 5 / Phase 6.7: persist *under* the lock so the on-disk
+            # JSON snapshot matches the in-memory completion state.  The
+            # comprehensive worker mutates ``status`` in-place without
+            # holding the lock for performance reasons, so the persist
+            # must briefly acquire the lock before serializing.
+            with analysis_status_lock:
+                save_analysis_status()
 
             insights_payload = _build_insights_payload(
                 status,
@@ -8337,9 +11774,18 @@ def run_comprehensive_analysis(analysis_id):
 
             # Run non-locking side effects after state is finalized.
             auto_audit_report(analysis_id)
+            # Round 3 / Phase 5.4: pass days, paths, and warnings.
             record_report_completion(
                 analysis_id, report_type, manager, technology, customer_name,
-                'completed', start_time, completion_time
+                'completed', start_time, completion_time,
+                days=days if 'days' in locals() else None,
+                word_path=docx_path if 'docx_path' in locals() else '',
+                excel_path=xlsx_path if 'xlsx_path' in locals() else '',
+                partial_data_warnings=(
+                    list(partial_data_warnings)
+                    if 'partial_data_warnings' in locals() and partial_data_warnings
+                    else None
+                ),
             )
             try:
                 store_report_insights(
@@ -8351,13 +11797,40 @@ def run_comprehensive_analysis(analysis_id):
             logger.error(f"[[ERROR]] Status update failed: {status_error}")
             raise status_error
         
-        logger.info(f"[[SUCCESS]] SUCCESS: Comprehensive AI-powered analysis completed at {docx_path}")
-        
+        # Round 9 / Phase 1.1: previously logged the full ``docx_path`` --
+        # an absolute filesystem path that on shipped desktop installs
+        # embeds the operator's home directory, the OneDrive sync root,
+        # and customer / manager folder fragments.  Centralised log
+        # ingestion then echoed those into shared dashboards / support
+        # tickets.  Surface only the basename at INFO; full path stays
+        # at DEBUG for local troubleshooting.
+        try:
+            _docx_basename = os.path.basename(str(docx_path)) if 'docx_path' in locals() else ''
+        except Exception:
+            _docx_basename = ''
+        logger.info(f"[[SUCCESS]] SUCCESS: Comprehensive AI-powered analysis completed (file={_docx_basename})")
+        if 'docx_path' in locals():
+            logger.debug(f"[[SUCCESS]] full docx_path={docx_path}")
+
     except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        logger.error(f"[[ERROR]] Analysis failed: {str(e)}")
-        logger.error(f"[[LIST]] Full traceback: {error_details}")
+        # Round 9 / Phase 1.2: the previous handler logged the full
+        # ``traceback.format_exc()`` at ERROR on every analysis failure.
+        # Stack frames in this code path can include local variable
+        # references (env config dicts, secrets-manager fragments) and
+        # blow up centralised log volume on partial-data failures.
+        # Demote the verbatim traceback to DEBUG; keep a stable
+        # ``error_kind`` + 1-line reason at ERROR so operators still
+        # have a scannable failure signal.  ``logger.exception`` /
+        # ``exc_info`` is reserved for the structured INFO/WARNING
+        # below (see classifier block) so the full trace lives in
+        # exactly one place when DEBUG is enabled.
+        try:
+            from error_classifier import classify_analysis_error as _cae_log_only
+            _kind_for_log = _cae_log_only(e).kind
+        except Exception:
+            _kind_for_log = type(e).__name__
+        logger.error(f"[[ERROR]] Analysis failed (kind={_kind_for_log}): {type(e).__name__}")
+        logger.debug("[[LIST]] Full traceback for analysis failure", exc_info=True)
         
         # Get status safely
         try:
@@ -8385,8 +11858,23 @@ def run_comprehensive_analysis(analysis_id):
                 "An unexpected error occurred during analysis. "
                 "Please check the Admin page for details."
             )
-            status['error_kind'] = 'unknown'
-            status['error_detail'] = f"{type(e).__name__}: {e}"[:240]
+            status['error_kind'] = 'analysis.unknown'  # Round 5 / Phase 6.12
+            # Round 9 / Phase 6.6: previously the classifier-fallback path
+            # wrote ``f"{type(e).__name__}: {e}"[:240]`` straight into the
+            # status dict.  Raw ``{e}`` can include absolute URLs, internal
+            # hostnames, Keeper secret paths and AppRole IDs -- exactly
+            # what ``_detail_tail`` was added to scrub for the happy
+            # path.  Always run the same scrubber here so a failure of
+            # ``classify_analysis_error`` itself can't reintroduce raw
+            # exception text into the UI banner / audit row.
+            try:
+                from error_classifier import _detail_tail as _classifier_detail_tail
+                status['error_detail'] = _classifier_detail_tail(e)
+            except Exception:
+                # Last-ditch fallback: type name only (no exception body)
+                # so we can never leak raw secrets even if the scrubber
+                # itself can't be imported.
+                status['error_detail'] = f"{type(e).__name__}: <classifier-and-scrubber-unavailable>"[:240]
         
         status['status'] = 'error'
         status['progress'] = 0
@@ -8421,6 +11909,116 @@ def get_report_type_display(report_type):
     return report_type_map.get(report_type, ' Custom Report')
 
 
+def _build_status_from_report_history(analysis_id: str):
+    """Round 4 / Phase 5.4: rehydrate a minimal analysis status dict from
+    the persistent ``report_history`` audit table when the volatile
+    ``status.json`` no longer has the entry.
+
+    The volatile status file is intentionally truncated (idle TTL
+    + max-entries cap) so the in-memory progress map cannot grow
+    unbounded.  But every completed run is also persisted to
+    ``report_history`` with the artifact paths and the
+    ``partial_data_warnings_json``.  When a user shares a
+    ``/progress/<id>`` URL after that eviction, we want them to see
+    a real status page with download links and warnings instead of a
+    bare 404.
+
+    Returns ``None`` if the audit row does not exist or the lookup
+    fails so the caller can fall back to the existing 404 path.
+    """
+    try:
+        from enhanced_admin_dashboard_v2 import db_connection
+    except Exception as _imp_err:
+        logger.debug("report_history fallback unavailable: %s", _imp_err)
+        return None
+    try:
+        with db_connection() as _conn:
+            _cur = _conn.cursor()
+            try:
+                _cur.execute(
+                    """
+                    SELECT request_id, report_type, manager, technology, customer_name,
+                           status, start_time, end_time, error_message, created_at,
+                           days, word_path, excel_path, word_hash, excel_hash,
+                           partial_data_warnings_json
+                    FROM report_history
+                    WHERE request_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (analysis_id,),
+                )
+                _row = _cur.fetchone()
+            except Exception:
+                _cur.execute(
+                    """
+                    SELECT request_id, report_type, manager, technology, customer_name,
+                           status, start_time, end_time, error_message, created_at
+                    FROM report_history
+                    WHERE request_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (analysis_id,),
+                )
+                _row = _cur.fetchone()
+                if _row is not None:
+                    _row = tuple(list(_row) + [None] * 6)
+        if not _row:
+            return None
+        _pdw = []
+        try:
+            # Round 5 / Phase 4.10: cap the persisted JSON blob before
+            # ``json.loads`` so a corrupted / oversized
+            # ``partial_data_warnings_json`` row cannot turn a status
+            # lookup into a multi-MB allocation (e.g. if a malformed
+            # writer stored the entire briefing as warnings).  10 MB
+            # is generous; real PDW lists are kilobytes.
+            _PDW_BLOB_CAP = int(os.environ.get("ADOPTIQ_PDW_BLOB_CAP_BYTES", str(10 * 1024 * 1024)))
+            _blob = _row[15]
+            if _blob:
+                _blob_len = len(_blob)
+                if _blob_len > _PDW_BLOB_CAP:
+                    logger.warning(
+                        "report_history.partial_data_warnings_json for %s exceeds cap "
+                        "(%d > %d bytes); refusing to deserialize",
+                        analysis_id, _blob_len, _PDW_BLOB_CAP,
+                    )
+                else:
+                    _parsed = json.loads(_blob)
+                    if isinstance(_parsed, list):
+                        _pdw = _parsed
+        except Exception:
+            _pdw = []
+        _is_completed = str(_row[5] or "").lower() in ("completed", "success", "done")
+        _status_dict = {
+            "analysis_id": _row[0],
+            "report_type": _row[1],
+            "manager": _row[2],
+            "technology": _row[3],
+            "customer_name": _row[4],
+            "status": "completed" if _is_completed else (_row[5] or "unknown"),
+            "progress": 100 if _is_completed else 0,
+            "start_time": _row[6],
+            "end_time": _row[7],
+            "error": _row[8],
+            "created_at": _row[9],
+            "days": _row[10],
+            "word_path": _row[11],
+            "excel_path": _row[12],
+            "word_hash": _row[13],
+            "excel_hash": _row[14],
+            "partial_data_warnings": _pdw,
+            "_rehydrated_from_audit": True,
+        }
+        return _status_dict
+    except Exception as _err:
+        logger.debug(
+            "report_history fallback for %s failed: %s", analysis_id, _err
+        )
+        return None
+
+
 @app.route('/progress/<analysis_id>')
 def progress(analysis_id):
     """Simple progress page"""
@@ -8448,10 +12046,34 @@ def progress(analysis_id):
                             analysis_status[analysis_id] = loaded_entry
                             status = dict(analysis_status[analysis_id])
                     else:
-                        # Log available IDs for debugging
-                        available_ids = list(loaded_status.keys())[:5]  # First 5 for debugging
-                        logger.warning(f"Analysis ID '{analysis_id}' not found in status file. Available IDs (sample): {available_ids}")
-                        return f"<h1>Analysis not found</h1><p>Analysis ID: {analysis_id_safe}</p><a href='/'>Start New Analysis</a>", 404
+                        # Round 4 / Phase 5.4: status.json no longer
+                        # has the entry (eviction / TTL cleanup), but
+                        # ``report_history`` is the durable audit
+                        # store.  Try to reconstruct a minimal status
+                        # from the audit row before returning 404 so
+                        # the operator can still download the artifact
+                        # and see the partial-data warnings.
+                        _audit_status = _build_status_from_report_history(analysis_id)
+                        if _audit_status is not None:
+                            with analysis_status_lock:
+                                analysis_status[analysis_id] = _audit_status
+                                status = dict(analysis_status[analysis_id])
+                        else:
+                            # Round 8 / Phase 1.7: digest the requested
+                            # id and the in-flight key sample at WARNING
+                            # so the log line keeps its triage value
+                            # without leaking customer / manager fragments.
+                            available_ids_digest = [_id_digest(_aid) for _aid in list(loaded_status.keys())[:5]]
+                            logger.warning(
+                                "Analysis aid_digest=%s not found in status file or report_history. "
+                                "Available aid_digests (sample): %s",
+                                _id_digest(analysis_id), available_ids_digest,
+                            )
+                            logger.debug(
+                                "Verbatim analysis id=%r not found; verbatim available sample=%r",
+                                analysis_id, list(loaded_status.keys())[:5],
+                            )
+                            return f"<h1>Analysis not found</h1><p>Analysis ID: {analysis_id_safe}</p><a href='/'>Start New Analysis</a>", 404
             else:
                 logger.warning(f"Status file not found at: {status_file_path}. Current directory: {os.getcwd()}")
                 # Check if analysis is in memory (might have been created but not saved yet)
@@ -8459,8 +12081,29 @@ def progress(analysis_id):
                     if analysis_id in analysis_status:
                         status = dict(analysis_status[analysis_id])
                     else:
-                        logger.error(f"Analysis ID '{analysis_id}' not found in memory or file. Available in memory: {list(analysis_status.keys())[:5]}")
-                        return f"<h1>Analysis not found</h1><p>Analysis ID: {analysis_id_safe}</p><a href='/'>Start New Analysis</a>", 404
+                        # Round 4 / Phase 5.4: same audit fallback
+                        # path when the on-disk status file itself is
+                        # missing (fresh container, wiped tmp, etc.).
+                        _audit_status = _build_status_from_report_history(analysis_id)
+                        if _audit_status is not None:
+                            analysis_status[analysis_id] = _audit_status
+                            status = dict(analysis_status[analysis_id])
+                        else:
+                            # Round 8 / Phase 1.4 + 1.7: snapshot keys under the
+                            # lock and digest both the requested id and the
+                            # available sample.  Verbatim values still flow at
+                            # DEBUG.
+                            _available_sample_digests = [_id_digest(_aid) for _aid in list(analysis_status.keys())[:5]]
+                            logger.error(
+                                "Analysis aid_digest=%s not found in memory, file, or report_history. "
+                                "Available aid_digests (sample): %s",
+                                _id_digest(analysis_id), _available_sample_digests,
+                            )
+                            logger.debug(
+                                "Verbatim analysis id=%r not found; verbatim available sample=%r",
+                                analysis_id, list(analysis_status.keys())[:5],
+                            )
+                            return f"<h1>Analysis not found</h1><p>Analysis ID: {analysis_id_safe}</p><a href='/'>Start New Analysis</a>", 404
         except Exception as e:
             logger.error(f"Error loading analysis status from file: {e}", exc_info=True)
             return f"<h1>Analysis not found</h1><p>The analysis could not be loaded.</p><a href='/'>Start New Analysis</a>", 404
@@ -8475,6 +12118,7 @@ def progress(analysis_id):
         <title>Analysis Progress - AdoptIQ</title>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="csrf-token" content="{csrf_token_value}">
         <style>
             body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; max-width: 1000px; margin: 40px auto; padding: 20px; color: #1a1a2e; }}
             .header {{ text-align: center; margin-bottom: 30px; }}
@@ -8521,11 +12165,28 @@ def progress(analysis_id):
                 const sec = s % 60;
                 return m > 0 ? m + 'm ' + sec + 's' : sec + 's';
             }}
+            // Round 5 / Phase 2.17: track the server-audited elapsed
+            // duration (set by the status payload's ``duration_seconds``
+            // / ``elapsed_seconds`` field) so the displayed elapsed
+            // time can fall back to the server clock once the run
+            // completes -- otherwise the page shows the *browser*
+            // wall-clock since the page was opened, which can drift
+            // from the actual analysis duration if the user navigated
+            // away and back, or opened the page mid-run.
+            window._serverElapsedMs = null;
             function _esc(s) {{ var d=document.createElement('div'); d.textContent=String(s); return d.innerHTML; }}
             function refreshStatus() {{
                 fetch('/status/' + ANALYSIS_ID)
                 .then(r => {{ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }})
                 .then(data => {{
+                    // Round 5 / Phase 2.17: capture any server-audited
+                    // elapsed/duration field so updateElapsed() can use
+                    // it instead of the browser-local START_TS.
+                    var _ds = data.duration_seconds;
+                    if (_ds == null) _ds = data.elapsed_seconds;
+                    if (typeof _ds === 'number' && isFinite(_ds) && _ds >= 0) {{
+                        window._serverElapsedMs = Math.floor(_ds * 1000);
+                    }}
                     const bar = document.getElementById('progress');
                     const pct = document.getElementById('progress-pct');
                     if (bar) bar.style.width = data.progress + '%';
@@ -8570,16 +12231,88 @@ def progress(analysis_id):
                         }}
                     }}
 
+                    // Round 12 / Phase 4.3: refresh the Report
+                    // Provenance strip from the polling payload so the
+                    // inline page picks up ``data_retrieved_at`` /
+                    // ``report_generated_at`` once the worker stamps
+                    // them, mirroring the canonical metadata block in
+                    // the Word/Excel exports.  Falls back to the
+                    // server-rendered "pending" placeholder if the
+                    // status payload has not yet attached the field.
+                    try {{
+                        var _doa = document.getElementById('provenance-data-as-of');
+                        if (_doa) {{
+                            var _v = data.data_retrieved_at;
+                            if (_v) {{ _doa.textContent = String(_v).substring(0, 19); }}
+                        }}
+                        var _dga = document.getElementById('provenance-generated-at');
+                        if (_dga) {{
+                            var _v2 = data.report_generated_at;
+                            if (_v2) {{ _dga.textContent = String(_v2).substring(0, 19); }}
+                        }}
+                    }} catch (e) {{ /* non-fatal */ }}
+
                     // CSOne status
                     if (data.csone_import_status) {{
                         const cs = document.getElementById('csone-status');
                         if (cs) {{ cs.textContent = data.csone_import_message; cs.className = 'csone-status csone-' + data.csone_import_status; }}
                     }}
 
-                    // Status box class
+                    // Round 5 / Phase 2.10: when the server reports
+                    // ``completed`` but ``partial_data_warnings`` is
+                    // non-empty, downgrade the visual treatment to the
+                    // amber "running" colour and append a "with
+                    // warnings" suffix to the status label so the user
+                    // doesn't read a green "Completed" pill and assume
+                    // the run was clean when AB / CSOne / risk_scores
+                    // actually fell back.
+                    var _hasPdw = (data.partial_data_warnings && data.partial_data_warnings.length > 0);
                     const sb = document.getElementById('status-box');
                     if (sb) {{
-                        sb.className = 'status-box ' + (data.status === 'completed' ? 'completed' : data.status === 'error' ? 'error' : 'running');
+                        if (data.status === 'completed' && _hasPdw) {{
+                            sb.className = 'status-box running';
+                        }} else {{
+                            sb.className = 'status-box ' + (data.status === 'completed' ? 'completed' : data.status === 'error' ? 'error' : 'running');
+                        }}
+                    }}
+                    if (data.status === 'completed' && _hasPdw) {{
+                        var stEl = document.getElementById('status');
+                        if (stEl && stEl.textContent.indexOf('with warnings') === -1) {{
+                            stEl.textContent = stEl.textContent + ' (with warnings)';
+                        }}
+                    }}
+
+                    // Round 4 / Phase 2.2: render partial_data_warnings
+                    // so the user sees data-quality caveats (e.g. AB
+                    // fetch failed, risk_scores unavailable, intel
+                    // feed timed out) instead of believing a 100%-
+                    // progress completion is a clean run.
+                    const pdwBox = document.getElementById('partial-warnings-box');
+                    const pdwList = document.getElementById('partial-warnings-list');
+                    if (pdwBox && pdwList) {{
+                        var warnings = data.partial_data_warnings || [];
+                        if (warnings && warnings.length > 0) {{
+                            var html = '';
+                            for (var i = 0; i < warnings.length; i++) {{
+                                var w = warnings[i];
+                                var label;
+                                if (typeof w === 'string') {{
+                                    label = w;
+                                }} else if (w && typeof w === 'object') {{
+                                    var src = w.source || w.kind || w.type || '';
+                                    var reason = w.reason || w.message || w.detail || '';
+                                    var effect = w.effect || w.impact || '';
+                                    label = (src ? src + ': ' : '') + reason + (effect ? ' (' + effect + ')' : '');
+                                }} else {{
+                                    label = String(w);
+                                }}
+                                html += '<li>' + _esc(label) + '</li>';
+                            }}
+                            pdwList.innerHTML = html;
+                            pdwBox.style.display = 'block';
+                        }} else {{
+                            pdwBox.style.display = 'none';
+                        }}
                     }}
 
                     if (data.status === 'completed') {{
@@ -8595,6 +12328,21 @@ def progress(analysis_id):
                                 xlsNote.style.display = 'block';
                             }}
                         }}
+                        // Round 5 / Phase 2.11: same gating for the
+                        // Word link so we don't offer a docx download
+                        // that would 404.  ``word_available`` is sent
+                        // by the server alongside ``excel_available``.
+                        var docLink = document.getElementById('docx-download');
+                        var docNote = document.getElementById('docx-unavailable');
+                        if (docLink && docNote) {{
+                            if (data.word_available) {{
+                                docLink.style.display = '';
+                                docNote.style.display = 'none';
+                            }} else {{
+                                docLink.style.display = 'none';
+                                docNote.style.display = 'block';
+                            }}
+                        }}
                         document.getElementById('cancel-btn').style.display = 'none';
                         clearInterval(window.refreshInterval);
                         clearInterval(window.elapsedInterval);
@@ -8608,6 +12356,21 @@ def progress(analysis_id):
                         if (msg) msg.textContent = 'Cancellation requested...';
                         document.getElementById('cancel-btn').style.display = 'none';
                     }}
+                }})
+                .catch(function(err) {{
+                    // Round 5 / Phase 2.1: surface polling failures
+                    // (404 after eviction, 5xx, network drop, JSON
+                    // parse) instead of silently leaving the UI
+                    // frozen at the last successful tick.  We do
+                    // *not* clear the interval here so transient
+                    // hiccups self-recover; a persistent failure is
+                    // visible via the message strip.
+                    var msg2 = document.getElementById('message');
+                    if (msg2) {{
+                        msg2.textContent = 'Status update failed: ' + ((err && err.message) ? err.message : 'unknown error') + ' (will retry)';
+                    }}
+                    var sb2 = document.getElementById('status-box');
+                    if (sb2) {{ sb2.className = 'status-box error'; }}
                 }});
             }}
             function cancelAnalysis() {{
@@ -8632,7 +12395,16 @@ def progress(analysis_id):
             }}
             function updateElapsed() {{
                 const el = document.getElementById('elapsed');
-                if (el) el.textContent = 'Elapsed: ' + fmtElapsed(Date.now() - START_TS);
+                if (!el) return;
+                // Round 5 / Phase 2.17: prefer the server-audited
+                // duration when present so the final number printed on
+                // a completed page reflects the actual analysis runtime
+                // rather than (now - page_open_time).
+                if (window._serverElapsedMs != null) {{
+                    el.textContent = 'Elapsed: ' + fmtElapsed(window._serverElapsedMs);
+                }} else {{
+                    el.textContent = 'Elapsed: ' + fmtElapsed(Date.now() - START_TS);
+                }}
             }}
             window.onload = function() {{
                 refreshStatus();
@@ -8655,13 +12427,32 @@ def progress(analysis_id):
                 <p><strong>Manager:</strong> {html_module.escape(str(status.get('manager', 'N/A')))}</p>
                 <p><strong>Technology:</strong> {html_module.escape(str(status.get('technology', 'N/A')))}</p>
                 <p><strong>Period:</strong> {html_module.escape(str(status.get('days', 'N/A')))} days</p>
-                <p><strong>Started:</strong> {html_module.escape(str(status.get('start_time', 'N/A'))[:19] if status.get('start_time') else 'N/A')}</p>
+                <p><strong>Started (UTC):</strong> {html_module.escape(str(status.get('start_time', 'N/A'))[:19] if status.get('start_time') else 'N/A')} UTC</p>
             </div>
             <div class="info-card">
                 <h3>Current Status</h3>
                 <p><strong>Status:</strong> <span id="status">{html_module.escape(str(status['status']))}</span></p>
                 <p><strong>Step:</strong> <span id="current-step">{html_module.escape(str(status.get('current_step', 'N/A')))}</span></p>
             </div>
+        </div>
+
+        <!-- Round 12 / Phase 4.3: previously the inline progress page
+             dropped the user at the download links with no on-page
+             "Data as of" / "Report generated at" / disclaimer banner,
+             even though the matching Word and Excel artifacts always
+             stamp those values.  A user reading "Completed" on this
+             page therefore had no way to tell *when* the underlying
+             Snowflake/CSOne data was retrieved or that the figures
+             carry the same internal-use caveats as the downloadable
+             reports.  Surface a parity metadata strip here, populated
+             both server-side (initial render) and client-side from
+             the polling loop once ``status['status'] == 'completed'``,
+             so the inline view agrees with the canonical exports. -->
+        <div class="info-card" id="report-provenance" style="margin: 0 0 16px 0; border-left-color: #6366f1;">
+            <h3>Report Provenance &amp; Disclaimer</h3>
+            <p><strong>Data as of (UTC):</strong> <span id="provenance-data-as-of">{html_module.escape(str(status.get('data_retrieved_at', 'pending'))[:19] if status.get('data_retrieved_at') else 'pending')}</span></p>
+            <p><strong>Report generated (UTC):</strong> <span id="provenance-generated-at">{html_module.escape(str(status.get('report_generated_at', 'pending'))[:19] if status.get('report_generated_at') else 'pending')}</span></p>
+            <p style="margin-top: 8px; font-size: 12px; color: #4b5563;"><em>For internal use only. Figures are derived from Snowflake CSOne, CSSM action plans and ARR sources at the timestamp above; downstream Word/Excel exports stamp the identical metadata. Multi-currency portfolios disclose per-currency totals in the body of the canonical artifacts; do not aggregate currency-mixed sums from the headline.</em></p>
         </div>
         
         <div class="csone-status csone-{html_module.escape(str(status.get('csone_import_status', 'checking')))}" id="csone-status" style="{'display: block;' if status.get('csone_import_status') in ['checking', 'uploaded', 'processing'] else 'display: none;'}">
@@ -8670,6 +12461,18 @@ def progress(analysis_id):
         
         <div class="status-box {'completed' if status['status'] == 'completed' else 'error' if status['status'] == 'error' else 'running'}" id="status-box">
             <p style="margin:0;"><strong>Current Activity:</strong> <span id="message">{html_module.escape(str(status['message']))}</span></p>
+        </div>
+
+        <!-- Round 4 / Phase 2.2: partial_data_warnings panel.  Hidden
+             by default; the polling loop populates and reveals it
+             whenever the backend reports data-quality caveats
+             (e.g. AB fetch failed, risk_scores unavailable, intel
+             feed errored).  Rendering happens client-side so the
+             user is told the truth even if the page was loaded
+             before the warning was attached. -->
+        <div id="partial-warnings-box" style="display:none; margin: 12px 0; padding: 12px 16px; background-color: #fffbeb; border-left: 4px solid #f59e0b; border-radius: 8px;">
+            <div style="font-weight: 600; color: #92400e; margin-bottom: 6px; font-size: 14px;">Data Quality Warnings</div>
+            <ul id="partial-warnings-list" style="margin: 4px 0 0 18px; padding: 0; color: #78350f; font-size: 13px;"></ul>
         </div>
         
         <div class="progress-bar">
@@ -8699,7 +12502,8 @@ def progress(analysis_id):
         
         <div id="downloads" class="download-links" style="display: {'block' if status['status'] == 'completed' else 'none'};">
             <h3>Download Your Report:</h3>
-            <a href="/download/{analysis_id_safe}/docx" onclick="return checkDownload('docx')">Download Word Report</a>
+            <a id="docx-download" href="/download/{analysis_id_safe}/docx" onclick="return checkDownload('docx')">Download Word Report</a>
+            <span id="docx-unavailable" style="display: none; color: #6b7280; font-size: 13px; margin-left: 8px;">Word document not available for this report.</span>
             <a id="xlsx-download" href="/download/{analysis_id_safe}/xlsx" onclick="return checkDownload('xlsx')">Download Excel Data</a>
             <span id="xlsx-unavailable" style="display: none; color: #6b7280; font-size: 13px; margin-left: 8px;">Excel data not available for this report.</span>
         </div>
@@ -8752,6 +12556,26 @@ def get_status(analysis_id):
                         status = analysis_status[analysis_id]
                         status_copy = {k: v for k, v in status.items() if not k.startswith('_') and k not in _EXCLUDE_FROM_STATUS_API}
                         status_copy['excel_available'] = bool(status.get('excel_report'))
+                        # Round 5 / Phase 2.11: expose ``word_available``
+                        # alongside ``excel_available`` so the progress
+                        # page can hide the Word download link when no
+                        # docx was produced (e.g. the Word writer
+                        # failed but Excel succeeded).  Same pattern as
+                        # the Excel flag above.
+                        status_copy['word_available'] = bool(status.get('word_report') or status.get('report_path'))
+                        # Round 5 / Phase 6.8: error wins over 'completed'
+                        # in the surface state.  See comment in the
+                        # main get_status path below.
+                        try:
+                            _err = status_copy.get('error')
+                            if (
+                                status_copy.get('status') == 'completed'
+                                and isinstance(_err, str)
+                                and _err.strip()
+                            ):
+                                status_copy['status'] = 'error'
+                        except Exception:
+                            pass  # noqa: PIE790
                         return jsonify(status_copy)
                     else:
                         logger.warning(f"Analysis ID not found in memory or file")
@@ -8773,7 +12597,34 @@ def get_status(analysis_id):
             else:
                 status_copy[key] = value
     status_copy['excel_available'] = bool(status.get('excel_report'))
-    
+    # Round 5 / Phase 2.11: see comment in the on-disk path above.
+    status_copy['word_available'] = bool(status.get('word_report') or status.get('report_path'))
+
+    # Round 5 / Phase 6.8: an error and a "completed" status are mutually
+    # exclusive from the user's point of view.  Several worker paths
+    # historically set ``status['status'] = 'completed'`` and *then*
+    # discovered a downstream failure (e.g. Word writer threw, Excel
+    # validation rejected the workbook) and recorded ``status['error']``
+    # without resetting the headline status -- so the History page and
+    # progress UI both saw "completed" while the API simultaneously
+    # returned an error string.  Treat any non-empty ``error`` field as
+    # authoritative and downgrade the surface state to ``'error'`` so
+    # the UI never advertises a broken artifact as a successful run.
+    try:
+        _err = status_copy.get('error')
+        if (
+            status_copy.get('status') == 'completed'
+            and isinstance(_err, str)
+            and _err.strip()
+        ):
+            logger.debug(
+                "Downgrading completed→error for %s because error field is set",
+                analysis_id,
+            )
+            status_copy['status'] = 'error'
+    except Exception:
+        pass  # noqa: PIE790  (defensive; never fail status serialization)
+
     return jsonify(status_copy)
 
 @app.route('/api/status/all')
@@ -8798,11 +12649,43 @@ def get_all_status():
                         status_copy[key] = str(value)
                 
                 status_copy['analysis_id'] = analysis_id
-                
+
                 # Add IP address if available
                 if 'ip_address' not in status_copy:
                     status_copy['ip_address'] = 'N/A'
-                
+
+                # Round 11 / Phase 11.2: previously this batch
+                # endpoint omitted ``excel_available`` /
+                # ``word_available`` even though the per-id
+                # ``/status/<analysis_id>`` endpoint already
+                # surfaced both.  The admin console therefore had
+                # no reliable way to render "Excel ready" /
+                # "Word ready" badges from a single batch poll
+                # and had to issue a per-id fan-out, which both
+                # over-loaded the status lock and drifted in
+                # whether a docx/xlsx had actually been written.
+                # Mirror the same booleans here so consumers of
+                # both endpoints see the same artifact-readiness
+                # signal.
+                status_copy['excel_available'] = bool(status.get('excel_report'))
+                status_copy['word_available'] = bool(
+                    status.get('word_report') or status.get('report_path')
+                )
+
+                # Round 5 / Phase 6.8: error wins over 'completed' here
+                # too so the admin console agrees with the per-id
+                # /status endpoint.
+                try:
+                    _err = status_copy.get('error')
+                    if (
+                        status_copy.get('status') == 'completed'
+                        and isinstance(_err, str)
+                        and _err.strip()
+                    ):
+                        status_copy['status'] = 'error'
+                except Exception:
+                    pass  # noqa: PIE790
+
                 all_statuses.append(status_copy)
             
             return jsonify(all_statuses)
@@ -8814,15 +12697,55 @@ def get_all_status():
 @app.route('/api/debug/verbose', methods=['GET', 'POST'])
 def verbose_debug_api():
     """Inspect or toggle verbose debug mode at runtime (local-only via before_request)."""
+    # Round 8 / Phase 1.1: POST flips a global runtime flag (verbose debug,
+    # query metrics).  Apply CSRF on POST only -- GET stays read-only and
+    # therefore does not require it.
+    if request.method == 'POST' and app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token') or request.form.get('csrf_token'))
+        except Exception:
+            return jsonify({'error': 'CSRF validation failed'}), 403
+    # Round 12 / Phase 11.2: previously this endpoint exposed the
+    # Snowflake query log but not the prefetch cache layer, so support
+    # could see "we ran 14 queries" while having no signal on whether
+    # the prefetch context was *replaying cache* or *re-fetching
+    # everything*.  Pull the live cache_hits / queries / errors per
+    # dataset and the cache_key_count from
+    # ``snowflake_prefetch.get_active_prefetch_metrics`` so the same
+    # endpoint answers both questions in one round-trip.
+    def _r12_prefetch_payload() -> Dict[str, Any]:
+        try:
+            from snowflake_prefetch import get_active_prefetch_metrics
+            return get_active_prefetch_metrics()
+        except Exception as _pf_err:
+            logger.debug("verbose_debug_api: prefetch metrics unavailable: %s", _pf_err)
+            return {
+                'context_count': 0,
+                'cache_key_count': 0,
+                'metrics': {},
+                'unavailable_reason': 'prefetch metrics not loaded',
+            }
+
     try:
         if request.method == 'GET':
             query_metrics = get_snowflake_query_metrics()
+            prefetch_payload = _r12_prefetch_payload()
             return jsonify({
+                # Round 12 / Phase 11.3: standardize on ``ok`` (the key
+                # used by ``ask_ai_portfolio`` and ``ask_intel``) but keep
+                # the legacy ``success`` key as a compatibility shim so
+                # existing CLIs / scripts that grep for ``success`` keep
+                # working.  Both fields always carry the same value.
+                'ok': True,
                 'success': True,
                 'verbose_debug': _is_verbose_debug_enabled(),
                 'source': 'runtime' if _VERBOSE_DEBUG_RUNTIME is not None else 'env',
                 'snowflake_query_count': query_metrics.get('count', 0),
                 'snowflake_query_samples': query_metrics.get('samples', []),
+                # Round 12 / Phase 11.2: prefetch cache visibility.
+                'prefetch_metrics': prefetch_payload.get('metrics', {}),
+                'cache_key_count': prefetch_payload.get('cache_key_count', 0),
+                'prefetch_context_count': prefetch_payload.get('context_count', 0),
             })
 
         payload = request.get_json(silent=True) or {}
@@ -8830,21 +12753,33 @@ def verbose_debug_api():
             reset_snowflake_query_metrics()
         enabled_val = payload.get('enabled')
         if enabled_val is None:
-            return jsonify({'success': False, 'error': "Missing 'enabled' boolean field"}), 400
+            # Round 12 / Phase 11.3: emit both ``ok`` and ``success``
+            # so callers that adopted either key see consistent
+            # error semantics.
+            return jsonify({'ok': False, 'success': False, 'error': "Missing 'enabled' boolean field"}), 400
 
         enabled = enabled_val if isinstance(enabled_val, bool) else _is_truthy_flag(enabled_val)
         active = _set_verbose_debug_mode(enabled, source='api')
         query_metrics = get_snowflake_query_metrics()
+        prefetch_payload = _r12_prefetch_payload()
         return jsonify({
+            # Round 12 / Phase 11.3: ``ok`` is canonical; ``success``
+            # remains as a compatibility shim.
+            'ok': True,
             'success': True,
             'verbose_debug': active,
             'source': 'runtime',
             'snowflake_query_count': query_metrics.get('count', 0),
             'snowflake_query_samples': query_metrics.get('samples', []),
+            # Round 12 / Phase 11.2: prefetch cache visibility on POST too.
+            'prefetch_metrics': prefetch_payload.get('metrics', {}),
+            'cache_key_count': prefetch_payload.get('cache_key_count', 0),
+            'prefetch_context_count': prefetch_payload.get('context_count', 0),
         })
     except Exception as e:
         logger.error("Verbose debug API failed: %s", e, exc_info=True)
-        return jsonify({'success': False, 'error': 'Failed to update verbose debug mode'}), 500
+        # Round 12 / Phase 11.3: emit both keys for compatibility.
+        return jsonify({'ok': False, 'success': False, 'error': 'Failed to update verbose debug mode'}), 500
 
 
 @app.route('/api/diag/connectivity', methods=['GET'])
@@ -8880,11 +12815,17 @@ def api_diag_connectivity():
         status_code = 200 if result.get('ok') else 503
         return jsonify(result), status_code
     except Exception as e:
+        # Round 8 / Phase 1.2: previously the response payload included
+        # ``detail = f'{type(e).__name__}: {e}'[:240]`` which leaked driver
+        # exception text (paths, hostnames, library tracebacks) to whoever
+        # could reach the endpoint.  Match the Round 7 / Phase 3.14 pattern:
+        # generic ``error_kind`` for the client, full traceback only in the
+        # operator-facing log.
         logger.error("Connectivity diagnostics endpoint failed: %s", e, exc_info=True)
         return jsonify({
             'ok': False,
             'error': 'Connectivity diagnostics harness itself failed',
-            'detail': f'{type(e).__name__}: {e}'[:240],
+            'error_kind': 'diag.harness.unhandled',
         }), 500
 
 
@@ -8983,7 +12924,24 @@ def previous_reports():
                 logger.warning(f"Could not get file info for {file_path}: {e}")
         
         # Sort reports by modification time (newest first)
-        sorted_reports = sorted(report_groups.items(), key=lambda x: x[1]['modified'], reverse=True)
+        # Round 11 / Phase 11.1: secondary tie-break on the
+        # report_id key so two reports written within the same
+        # filesystem mtime second (frequent on fast SSDs / signed
+        # bundle deploys) get a deterministic, reproducible order
+        # in the listing instead of relying on dict insertion
+        # order.  Use ascending report_id within a tie so the
+        # alphabetically first id wins, matching how the rest of
+        # the app sorts deterministic ties.
+        sorted_reports = sorted(
+            report_groups.items(),
+            key=lambda x: (
+                # primary: newest mtime first => negate timestamp so
+                # ascending sort matches reverse=True ordering
+                -(x[1]['modified'].timestamp() if x[1].get('modified') else 0.0),
+                # secondary: stable lexicographic on report_id
+                str(x[0] or ''),
+            ),
+        )
         
         # Create HTML page
         html = f"""
@@ -9041,8 +12999,13 @@ def previous_reports():
                 # Create readable name from report ID
                 readable_name = report_id.replace('_', ' ').title()
                 
-                # Format modification time
-                modified_str = report_data['modified'].strftime('%Y-%m-%d %H:%M:%S') if report_data['modified'] else 'Unknown'
+                # Round 5 / Phase 2.6: include explicit timezone label so
+                # the Modified column is unambiguous; ``os.stat`` mtime
+                # is naive local time on the host.
+                modified_str = (
+                    report_data['modified'].strftime('%Y-%m-%d %H:%M:%S') + ' (local)'
+                    if report_data['modified'] else 'Unknown'
+                )
                 
                 # Calculate total size
                 total_size_mb = (report_data['total_size'] / 1024 / 1024) if report_data['total_size'] > 0 else 0
@@ -9112,6 +13075,30 @@ def history():
     raw = get_report_history() if callable(get_report_history) else []
     if raw is None or not isinstance(raw, list):
         raw = []
+    # Round 2 / Phase 1.13: history page tile must reflect the full
+    # COUNT(*) from report_history (not the LIMIT 50 list length).
+    # ``get_report_history`` now stamps ``_total_analyses`` on each row.
+    # Round 4 / Phase 2.4: also surface ``_total_last_7_days`` and
+    # ``_total_managers`` so the "Last 7 Reports" and "Active
+    # Managers" tiles show server-side totals instead of values
+    # computed from the truncated 50-row page slice.
+    total_analyses = 0
+    total_last_7_days = 0
+    total_managers = 0
+    if raw:
+        try:
+            total_analyses = int(raw[0].get('_total_analyses') or 0)
+        except (TypeError, ValueError):
+            total_analyses = 0
+        try:
+            total_last_7_days = int(raw[0].get('_total_last_7_days') or 0)
+        except (TypeError, ValueError):
+            total_last_7_days = 0
+        try:
+            total_managers = int(raw[0].get('_total_managers') or 0)
+        except (TypeError, ValueError):
+            total_managers = 0
+    list_truncated = total_analyses > len([r for r in raw if not r.get('_placeholder')])
     analyses = [
         {
             'id': r.get('request_id', ''),
@@ -9123,9 +13110,31 @@ def history():
             'customer_name': r.get('customer_name', ''),
             'status': r.get('status', ''),
         }
-        for r in raw
+        for r in raw if not r.get('_placeholder')
     ]
-    return render_template('history.html', analyses=analyses)
+    # Round 5 / Phase 2.5: when the aggregate ``_total_*`` columns came
+    # back as 0 but we *did* materialize a non-empty ``analyses`` list,
+    # the tile would say "0 analyses" while the table below showed
+    # rows.  Fall back to ``len(analyses)`` (still bounded by the
+    # ``list_fetch_limit`` page size, which we expose to the template
+    # so it can render an "(at least)" caveat).  Manager fallback uses
+    # the visible page's distinct manager count.
+    if total_analyses == 0 and analyses:
+        total_analyses = len(analyses)
+    if total_managers == 0 and analyses:
+        try:
+            total_managers = len({(a.get('manager') or '').strip().lower() for a in analyses if (a.get('manager') or '').strip()})
+        except Exception:
+            total_managers = len(analyses)
+    return render_template(
+        'history.html',
+        analyses=analyses,
+        total_analyses=total_analyses,
+        total_last_7_days=total_last_7_days,
+        total_managers=total_managers,
+        list_truncated=list_truncated,
+        list_fetch_limit=50,
+    )
 
 @app.route('/ask-ai')
 def ask_ai_page():
@@ -9146,6 +13155,10 @@ def ask_ai_portfolio():
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
         except Exception:
             return jsonify({'ok': False, 'error': 'CSRF validation failed'}), 403
+    # Round 5 / Phase 3.10: per-IP/per-user sliding-window throttle.
+    _throttle = _check_ask_ai_throttle()
+    if _throttle is not None:
+        return jsonify(_throttle[0]), _throttle[1]
     try:
         data = request.get_json(silent=True) or {}
         question = str(data.get('question') or '').strip()
@@ -9173,12 +13186,47 @@ def ask_ai_portfolio():
                     'ok': True,
                     'answer': grounded_result.get('answer') or 'No response generated.',
                     'context_summary': grounded_result.get('context_summary', 'Data: grounded pipeline'),
+                    'mode': 'grounded',
+                    'evidence_truncated': bool(grounded_result.get('evidence_truncated')),
+                    'account_batch_truncated': bool(grounded_result.get('account_batch_truncated')),
+                    'evidence_records_used': grounded_result.get('evidence_records_used'),
+                    'evidence_records_total': grounded_result.get('evidence_records_total'),
+                    'account_batch_size': grounded_result.get('account_batch_size'),
+                    'account_total': grounded_result.get('account_total'),
+                    'partial_data_warnings': grounded_result.get('partial_data_warnings') or [],
+                    'canonical_headline': grounded_result.get('canonical_headline') or {},
                 })
-            if grounded_result.get('fallback_to_legacy'):
+            # Phase 2.4: only fall back to the legacy ungrounded LLM when
+            # the caller explicitly opts in (request flag or env var).
+            # Default behavior is now to surface the grounded failure so
+            # the user knows that the answer they would have seen was
+            # ungrounded and uncited.
+            _allow_legacy_fallback = (
+                bool(data.get('allow_legacy_fallback'))
+                or os.environ.get('ADOPTIQ_ASK_AI_ALLOW_LEGACY_FALLBACK', '0') == '1'
+            )
+            if grounded_result.get('fallback_to_legacy') and _allow_legacy_fallback:
                 logger.warning(
-                    "Ask-AI grounded mode fallback to legacy path: %s",
+                    "Ask-AI grounded mode fallback to legacy path (opt-in): %s",
                     grounded_result.get('reason', 'unspecified'),
                 )
+            elif grounded_result.get('fallback_to_legacy'):
+                logger.warning(
+                    "Ask-AI grounded mode failed; refusing silent legacy fallback: %s",
+                    grounded_result.get('reason', 'unspecified'),
+                )
+                return jsonify({
+                    'ok': False,
+                    'mode': 'grounded',
+                    'fallback_available': True,
+                    'reason': grounded_result.get('reason', 'unspecified'),
+                    'error': (
+                        'Grounded Ask-AI is unavailable for this query and the '
+                        'legacy ungrounded path is disabled by default. '
+                        'Retry, or set allow_legacy_fallback=true to receive '
+                        'an ungrounded answer (no source citations enforced).'
+                    ),
+                }), 503
             else:
                 status_code = int(grounded_result.get('status_code', 500))
                 return jsonify({
@@ -9246,8 +13294,50 @@ def ask_ai_portfolio():
                 sections.append(f"Total subscriptions: {n_subs} | Unique customers: {n_customers}")
 
                 if 'BU_NAME' in team_subs_df.columns:
-                    top_customers = team_subs_df['BU_NAME'].value_counts().head(15)
+                    # Round 12 / Phase 3.7: ``value_counts()`` on the
+                    # raw ``BU_NAME`` column splits a single account
+                    # whose label appears with case / whitespace /
+                    # NBSP variants into multiple rows, so the LLM
+                    # context block double-counts it as two distinct
+                    # "Top customers".  Project the column through
+                    # ``normalize_customer_name`` so the bullets
+                    # collapse on the canonical key.
+                    try:
+                        from data_normalization import normalize_customer_name as _r12_norm_cust
+                        _r12_norm_series = (
+                            team_subs_df['BU_NAME']
+                            .fillna('')
+                            .astype(str)
+                            .map(_r12_norm_cust)
+                        )
+                        _r12_norm_series = _r12_norm_series[_r12_norm_series != '']
+                        # Round 12 / Phase 9.9: capture the *unique*
+                        # post-normalization population BEFORE the
+                        # ``head(15)`` slice so we can disclose how
+                        # many distinct accounts the LLM is missing.
+                        _r12_distinct_total = int(_r12_norm_series.nunique())
+                        top_customers = _r12_norm_series.value_counts().head(15)
+                    except Exception:
+                        _r12_distinct_total = (
+                            int(team_subs_df['BU_NAME'].nunique())
+                            if 'BU_NAME' in team_subs_df.columns else 0
+                        )
+                        top_customers = team_subs_df['BU_NAME'].value_counts().head(15)
                     cust_lines = [f"  - {cust}: {cnt} subs" for cust, cnt in top_customers.items()]
+                    # Round 12 / Phase 9.9: previously the bullet block
+                    # ended after ``head(15)`` with no "+N more"
+                    # disclosure, so when the portfolio held more
+                    # than 15 distinct customers the LLM treated the
+                    # 15 it could see as the *entire* customer list
+                    # and reasoned about portfolio coverage off a
+                    # silently truncated tail.  Stamp an explicit
+                    # truncation footer so the model can phrase its
+                    # narrative as "top 15 of N" rather than
+                    # "all customers".
+                    if _r12_distinct_total > len(top_customers):
+                        cust_lines.append(
+                            f"  - ... and {_r12_distinct_total - len(top_customers)} more distinct customers (top {len(top_customers)} shown)"
+                        )
                     sections.append("Top customers:\n" + "\n".join(cust_lines))
 
                 if not account_ids:
@@ -9598,7 +13688,28 @@ def ask_ai_portfolio():
 
                     # --- Section 15: BARRIER AGING ANALYSIS ---
                     try:
-                        aging = compute_barrier_aging(ab_df, pd.DataFrame())
+                        # Round 12 / Phase 6.6: previously this call
+                        # passed an empty ``pd.DataFrame()`` for the
+                        # ``arr_data`` argument so the Round 11 multi-
+                        # currency ``account_arr`` / ``account_arr_currency``
+                        # / ``account_arr_by_currency`` fields ALWAYS
+                        # came back ``None`` for the Ask-AI grounded
+                        # context, even though we already have the
+                        # full subscriptions frame in ``team_subs_df``
+                        # (with ``ANNUAL_CONTRACT_VALUE`` and
+                        # ``CURRENCY_CODE``).  Pass the real frame so
+                        # the LLM gets per-account ARR context for
+                        # stale barriers and the multi-currency
+                        # disclosure stays in lock-step with the
+                        # canonical Word/Excel report.
+                        try:
+                            _r12_arr_input = team_subs_df if (
+                                team_subs_df is not None
+                                and not team_subs_df.empty
+                            ) else pd.DataFrame()
+                        except Exception:
+                            _r12_arr_input = pd.DataFrame()
+                        aging = compute_barrier_aging(ab_df, _r12_arr_input)
                         if aging and aging.get('total_open', 0) > 0:
                             sections.append(f"\n=== BARRIER AGING ANALYSIS ===")
                             sections.append(f"Total open barriers: {aging['total_open']}")
@@ -9653,18 +13764,57 @@ def ask_ai_portfolio():
                 for rpt in hist:
                     sections.append(f"Report: {rpt['filename']} (Date: {rpt.get('date', 'unknown')})")
                     for sheet, m in rpt.get('metrics', {}).items():
-                        parts = [f"Sheet '{sheet}': {m.get('rows', 0)} rows"]
+                        # Round 12 / Phase 6.4: previously these per-sheet
+                        # bars were appended to the LLM context with NO
+                        # truncation tag, so a 200-row scan of a 30k-row
+                        # historical workbook fed the model a partial
+                        # severity / category / customer distribution
+                        # that the model then narrated as the full
+                        # historical portfolio.  Phase 6.1 now stamps a
+                        # ``distribution_sample_only`` flag on the scan
+                        # output -- prefix the headline (and per-line
+                        # captions for the affected aggregates) with a
+                        # ``[SAMPLE/SCAN CAP]`` tag so the LLM treats
+                        # the bars as a sample rather than a full
+                        # canonical fact.
+                        _was_truncated = bool(m.get('was_truncated'))
+                        _dist_sample_only = bool(m.get('distribution_sample_only'))
+                        _sample_size = m.get('distribution_sample_size') or m.get('rows_scanned')
+                        _sample_cap_tag = ''
+                        if _was_truncated:
+                            try:
+                                _sample_cap_tag = (
+                                    f" [SAMPLE/SCAN CAP: {int(_sample_size)} of {int(m.get('rows_total', 0))} rows]"
+                                    if _sample_size and m.get('rows_total')
+                                    else " [SAMPLE/SCAN CAP]"
+                                )
+                            except Exception:
+                                _sample_cap_tag = " [SAMPLE/SCAN CAP]"
+                        parts = [f"Sheet '{sheet}': {m.get('rows', 0)} rows{_sample_cap_tag}"]
                         if 'unique_customers' in m:
                             parts.append(f"{m['unique_customers']} customers")
+                        elif 'unique_customers_sampled' in m:
+                            parts.append(f"{m['unique_customers_sampled']} customers [SAMPLE]")
                         if 'severity_distribution' in m:
-                            parts.append(f"Severity: {m['severity_distribution']}")
+                            _sev_tag = " [SAMPLE]" if _dist_sample_only else ""
+                            parts.append(f"Severity{_sev_tag}: {m['severity_distribution']}")
                         if 'category_distribution' in m:
-                            parts.append(f"Categories: {m['category_distribution']}")
+                            _cat_tag = " [SAMPLE]" if _dist_sample_only else ""
+                            parts.append(f"Categories{_cat_tag}: {m['category_distribution']}")
                         sections.append("  " + " | ".join(parts))
                         if m.get('top_customers_by_count'):
-                            sections.append("    Top customers: " + ", ".join(f"{c}: {v}" for c, v in list(m['top_customers_by_count'].items())[:5]))
-                        if m.get('sample_subjects'):
-                            sections.append("    Sample issues: " + " | ".join(m['sample_subjects'][:5]))
+                            _tc_tag = " [SAMPLE]" if _was_truncated else ""
+                            sections.append(f"    Top customers{_tc_tag}: " + ", ".join(f"{c}: {v}" for c, v in list(m['top_customers_by_count'].items())[:5]))
+                        # Round 12 / Phase 6.5: ``sample_subjects`` is now
+                        # ALWAYS a head() slice of the scan window, so
+                        # ``sample_subjects_truncated`` (set by Phase 6.5
+                        # downstream) replaces the old key when the slice
+                        # does not cover the full set.  Honor either name
+                        # with explicit "[SAMPLE]" tag in the LLM context.
+                        _subj_payload = m.get('sample_subjects_truncated') or m.get('sample_subjects')
+                        if _subj_payload:
+                            _subj_tag = " [SAMPLE]" if (m.get('sample_subjects_truncated') or _was_truncated) else ""
+                            sections.append(f"    Sample issues{_subj_tag}: " + " | ".join(_subj_payload[:5]))
                 context_summary_parts.append(f"{len(hist)} past reports")
 
                 # Cross-report trend analysis
@@ -9695,6 +13845,19 @@ def ask_ai_portfolio():
 
         briefing = "\n".join(sections) if sections else "No portfolio data available."
         if len(briefing) > 80000:
+            # Round 5 / Phase 3.12: capture any leading data-quality
+            # preface (the prose ABOVE the first ``=== HEADER ===`` block
+            # — it documents partial data warnings, fetch errors, and
+            # scope) so the trim logic ALWAYS preserves it.  Previously
+            # the splitting on ``\n===`` discarded this preface (it had
+            # no header to match against), and the LLM ended up
+            # narrating against trimmed data without knowing the data
+            # quality caveats — exactly the failure mode that caused
+            # confidently-wrong portfolio answers.
+            _preface = ''
+            _first_header_idx = briefing.find('===')
+            if _first_header_idx > 0:
+                _preface = briefing[:_first_header_idx].rstrip() + "\n\n"
             priority_headers = [
                 '=== PORTFOLIO OVERVIEW ===',
                 '=== BEMS ESCALATIONS REFERENCED',
@@ -9743,6 +13906,17 @@ def ask_ai_portfolio():
                 if '\n===' + sec not in rebuilt:
                     trimmed_names.append(first_line)
 
+            # Round 5 / Phase 3.12: prepend the captured preface AFTER
+            # rebuilding (so the budget calculation already accounted
+            # for ``rebuilt``).  If the preface itself is huge (very
+            # rare), still cap to fit -- never silently drop the
+            # data-quality block; if it must be clipped, mark it.
+            if _preface:
+                _preface_max = max(0, 80000 - len(rebuilt) - 80)
+                if len(_preface) > _preface_max and _preface_max > 0:
+                    _preface = _preface[:_preface_max] + "\n[data-quality preface truncated]\n\n"
+                rebuilt = _preface + rebuilt
+
             if len(rebuilt) > 80000:
                 rebuilt = rebuilt[:80000]
 
@@ -9761,7 +13935,18 @@ def ask_ai_portfolio():
             "2. CROSS-CORRELATE: Connect adoption barriers, support cases, pulse trends, and contract timelines "
             "to identify concentrated risk and urgency. "
             "Connect external incidents with customer cases to identify systemic issues.\n"
-            "3. QUANTIFY everything: specific percentages, counts, and trends.\n"
+            # Round 5 / Phase 3.4: removed the legacy "QUANTIFY
+            # everything: specific percentages, counts, and trends"
+            # instruction.  It directly contradicts the Round 4 hard
+            # rules that forbid extrapolating percentages or rates that
+            # were not explicitly cited in the briefing -- the LLM was
+            # being told both "do not invent rates" and "quantify
+            # everything", and would invariably choose the latter.
+            "3. QUANTIFY ONLY what the briefing explicitly provides: cite the exact "
+            "counts, percentages, and totals shown in the data sections above. Do "
+            "NOT compute new percentages or rates that are not directly stated; if "
+            "a number is not in the briefing, write 'not provided' instead of "
+            "estimating.\n"
             "4. COMPARE: current vs historical baselines, period-over-period changes, "
             "barrier velocity vs creation rate, team workload distribution.\n"
             "5. SURFACE HIDDEN PATTERNS:\n"
@@ -9777,6 +13962,11 @@ def ask_ai_portfolio():
             "Include customer names and dates. Citations build trust in the analysis.\n"
             "8. RECOMMEND: provide specific, actionable next steps ranked by urgency and impact.\n"
             "9. FLAG GAPS: if data is missing or insufficient, state what's needed and why it matters.\n\n"
+            "Round 4 / Phase 6.4 — NEGATIVE CONSTRAINTS (HARD RULES):\n"
+            "- Do NOT invent ARR / revenue / dollar figures. If 'ARR' or '$' does not appear in the briefing, write 'ARR data not provided' and never estimate or extrapolate.\n"
+            "- Do NOT invent percentages. If a percentage is not present in the briefing, write '(% not available)'.\n"
+            "- Do NOT cite TAC, AB, BEMS, CSC, action plan, or incident IDs that are not literally present in the briefing.\n"
+            "- If a section is labeled 'data unavailable', 'NOT supplied', or 'fetch_error' in the briefing, write 'data unavailable' rather than implying zero or improvising numbers.\n\n"
             "ANALYTICAL EXAMPLES (follow this depth of cross-correlation):\n"
             "- Risk-Correlation: 'Acme Corp has 4 critical barriers and 2 P1 cases about the same "
             "Webex Calling feature. Combined with a pulse score of 3.2 and contract expiring in 60 days, "
@@ -9800,10 +13990,19 @@ def ask_ai_portfolio():
             logger.error(f"Ask-AI portfolio LLM failure: {answer}")
             return jsonify({'ok': False, 'error': 'Unable to generate a response. Please try again later.'})
 
+        # Phase 2.4: legacy ungrounded path is reached only when the
+        # caller explicitly opted in. Tag the response so the UI can
+        # render an "ungrounded answer" banner.
         return jsonify({
             'ok': True,
             'answer': answer or 'No response generated.',
             'context_summary': f"Data: {context_summary}",
+            'mode': 'legacy_ungrounded',
+            'ungrounded_warning': (
+                'This answer used the legacy ungrounded LLM path. Source IDs '
+                'are not enforced and headline numbers may not match the '
+                'corresponding report.'
+            ),
         })
 
     except Exception as e:
@@ -9821,7 +14020,19 @@ def external_intelligence():
 
     inc_stats = get_incident_statistics()
     maint_stats = get_maintenance_statistics()
-    stale_threshold = (datetime.now() - timedelta(hours=6)).strftime('%Y-%m-%d %H:%M:%S')
+    # Round 2 / Phase 5.7: ``incident_storage`` writes ``last_seen`` as
+    # ``datetime.utcnow()`` strings (UTC, no tz suffix), but the prior
+    # threshold was ``datetime.now()`` (local clock). On any host whose
+    # local timezone is not UTC, this either marked fresh data as
+    # stale and triggered spurious refreshes, or marked stale data as
+    # fresh and skipped legitimate refreshes. Standardize end-to-end
+    # on UTC so the comparison string-matches the storage format.
+    # Round 8 / Phase 1.6 + 6.8: drop the deprecated ``datetime.utcnow()``
+    # (PEP 706 / Py 3.12+) for the timezone-aware
+    # ``datetime.now(timezone.utc)``; ``strftime`` already strips the
+    # tz suffix so the string still matches the writer-side format
+    # exactly.
+    stale_threshold = (datetime.now(timezone.utc) - timedelta(hours=6)).strftime('%Y-%m-%d %H:%M:%S')
     total_items = inc_stats['total'] + maint_stats['total']
     newest = max(inc_stats.get('newest', ''), maint_stats.get('newest', ''))
     needs_refresh = total_items < 10 or (newest < stale_threshold)
@@ -9836,6 +14047,36 @@ def external_intelligence():
             logger.warning(f"Auto-refresh of external intelligence failed: {e}")
 
     intel = get_all_external_intel(days_back=days_back)
+
+    # Phase 3.2 / Round 2 Phase 1.10: classify each section as failed /
+    # not_configured / empty / present so the template can stop
+    # rendering "no records" when the underlying fetcher actually
+    # crashed.  Round 2 mirrors the behavior on the SUMMARY tab cards
+    # by also treating a stats dict with ``fetch_error`` set as a
+    # failed state, and propagates the per-fetch ``list_truncated`` /
+    # ``list_fetch_limit`` flags so the template can disclose
+    # "showing N of M (capped)" instead of treating the cap as
+    # authoritative.
+    fetch_errors = intel.get('fetch_errors') or {}
+    not_configured = intel.get('not_configured') or {}
+    list_truncated = intel.get('list_truncated') or {}
+    list_fetch_limit = intel.get('list_fetch_limit')
+
+    def _stats_failed(stats) -> bool:
+        try:
+            return bool(stats and isinstance(stats, dict) and stats.get('fetch_error'))
+        except Exception:
+            return False
+
+    def _state(key: str, items, stats=None) -> str:
+        if not_configured.get(key):
+            return 'not_configured'
+        if fetch_errors.get(key) or _stats_failed(stats):
+            return 'failed'
+        if not items:
+            return 'empty'
+        return 'present'
+
     return render_template(
         'external_intelligence.html',
         incidents=intel['incidents'],
@@ -9845,23 +14086,102 @@ def external_intelligence():
         bug_stats=intel['bug_stats'],
         maintenance_stats=intel['maintenance_stats'],
         days_back=days_back,
+        incidents_state=_state('incidents', intel.get('incidents'), intel.get('incident_stats')),
+        bugs_state=_state('bugs', intel.get('bugs'), intel.get('bug_stats')),
+        maintenances_state=_state('maintenances', intel.get('maintenances'), intel.get('maintenance_stats')),
+        fetch_errors=fetch_errors,
+        list_truncated=list_truncated,
+        list_fetch_limit=list_fetch_limit,
+        incident_stats_failed=_stats_failed(intel.get('incident_stats')),
+        bug_stats_failed=_stats_failed(intel.get('bug_stats')),
+        maintenance_stats_failed=_stats_failed(intel.get('maintenance_stats')),
     )
 
 
 @app.route('/api/refresh-external-intel', methods=['POST'])
 def refresh_external_intel():
-    """Trigger a live fetch of incidents, bugs, and maintenances, then return counts."""
+    """Trigger a live fetch of incidents, bugs, and maintenances, then return counts.
+
+    Round 3 / Phase 5.6: previously this endpoint returned only the
+    successful counts even when one of the upstream feeds had failed
+    to fetch. Callers (the Refresh button JS, automations) therefore
+    treated a partial-failure response as success and silently
+    showed a fresh "0 bugs" badge after a 503 from help.webex.com.
+    Now also surface ``state`` (present / empty / failed) and any
+    ``fetch_errors`` carried on the returned list-likes so the UI
+    and any automation can show the same caveats the External
+    Intelligence page already shows.
+    """
     if app.config.get('WTF_CSRF_ENABLED', True):
         try:
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
         except Exception:
             return jsonify({'ok': False, 'error': 'CSRF validation failed'}), 403
     try:
-        from adoptiq_backend import fetch_status_incidents, fetch_help_webex_bugs, fetch_status_maintenances
+        from adoptiq_backend import (
+            fetch_status_incidents,
+            fetch_help_webex_bugs,
+            fetch_status_maintenances,
+        )
         incidents = fetch_status_incidents(timeout=20) or []
         bugs = fetch_help_webex_bugs(timeout=20) or []
         maintenances = fetch_status_maintenances(timeout=20) or []
-        return jsonify({'ok': True, 'incidents': len(incidents), 'bugs': len(bugs), 'maintenances': len(maintenances)})
+
+        def _meta(items):
+            errs = []
+            try:
+                _errs = getattr(items, 'fetch_errors', None)
+                if _errs:
+                    for _e in _errs:
+                        if isinstance(_e, dict):
+                            errs.append({
+                                'url': _e.get('url') or _e.get('source') or '',
+                                'error': str(_e.get('error') or '')[:240],
+                                'kind': _e.get('kind') or 'fetch_error',
+                            })
+                        else:
+                            errs.append({'error': str(_e)[:240]})
+            except Exception:
+                # Round 4: non-fatal; suppressed silently in original code
+                pass  # noqa: PIE790
+            try:
+                all_failed = bool(getattr(items, 'all_sources_failed', False))
+            except Exception:
+                all_failed = False
+            count = len(items)
+            if all_failed and not count:
+                state = 'failed'
+            elif errs and not count:
+                state = 'failed'
+            elif not count:
+                state = 'empty'
+            else:
+                state = 'present'
+            return {'count': count, 'state': state, 'fetch_errors': errs}
+
+        incidents_meta = _meta(incidents)
+        bugs_meta = _meta(bugs)
+        maintenances_meta = _meta(maintenances)
+
+        any_failure = any(
+            m['state'] == 'failed' for m in (incidents_meta, bugs_meta, maintenances_meta)
+        )
+
+        return jsonify({
+            'ok': True,
+            'partial': any_failure,
+            'incidents': incidents_meta['count'],
+            'bugs': bugs_meta['count'],
+            'maintenances': maintenances_meta['count'],
+            'incidents_state': incidents_meta['state'],
+            'bugs_state': bugs_meta['state'],
+            'maintenances_state': maintenances_meta['state'],
+            'fetch_errors': {
+                'incidents': incidents_meta['fetch_errors'],
+                'bugs': bugs_meta['fetch_errors'],
+                'maintenances': maintenances_meta['fetch_errors'],
+            },
+        })
     except Exception as e:
         logger.error(f"Error refreshing external intel: {e}", exc_info=True)
         return jsonify({'ok': False, 'error': 'Failed to refresh external intelligence'}), 500
@@ -9873,9 +14193,48 @@ def export_intel():
     import json as _json
     from incident_storage import export_all_data
     try:
-        payload = _sanitize_for_json(export_all_data())
+        # Round 12 / Phase 11.8: ``incident_storage.export_all_data``
+        # documents ``page`` as **0-indexed** (page=0 -> first slice).
+        # If a future UI wrapper / curl caller passes a 1-indexed
+        # ``page`` query string for "first page" without subtracting,
+        # the export would silently skip the first ``page_size`` rows
+        # and there is no easy diagnostic.  Normalize at the API
+        # boundary: accept either an explicit ``index=0|1`` query
+        # parameter (default 0-indexed for backwards compatibility) so
+        # callers that prefer the 1-indexed convention have an
+        # opt-in escape hatch, and clamp negatives to 0.
+        try:
+            _r12_page_raw = request.args.get('page', '0')
+            _r12_page = int(_r12_page_raw) if str(_r12_page_raw).strip() else 0
+        except Exception:
+            # Round 12 / Phase 11.8: defensive: bad ``page`` query
+            # strings should not 500 the export endpoint.
+            _r12_page = 0
+        _r12_index_mode = (request.args.get('index', '0') or '0').strip()
+        if _r12_index_mode == '1' and _r12_page >= 1:
+            _r12_page = _r12_page - 1
+        if _r12_page < 0:
+            _r12_page = 0
+        try:
+            _r12_page_size_raw = request.args.get('page_size')
+            _r12_page_size = (
+                int(_r12_page_size_raw) if _r12_page_size_raw not in (None, '') else None
+            )
+        except Exception:
+            # Round 12 / Phase 11.8: defensive: bad ``page_size``
+            # strings should not 500 the export endpoint either.
+            _r12_page_size = None
+        payload = _sanitize_for_json(
+            export_all_data(page=_r12_page, page_size=_r12_page_size)
+        )
         json_bytes = _json.dumps(payload, indent=2, default=str).encode('utf-8')
-        date_str = datetime.now().strftime('%Y-%m-%d')
+        # Round 6 / Phase 6.18: build the export filename from a UTC
+        # datetime, not local ``datetime.now()``.  The file is meant
+        # to be portable / archived; using the host's local-time date
+        # made cross-region exports diverge (a 6 PM PT export and a
+        # 9 PM ET export from the same data state would land in
+        # different filenames) and confused the audit history.
+        date_str = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')
         filename = f"AdoptIQ-Intel-Export-{date_str}.json"
         return Response(
             json_bytes,
@@ -9895,6 +14254,10 @@ def ask_intel():
             validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
         except Exception:
             return jsonify({'ok': False, 'error': 'CSRF validation failed'}), 403
+    # Round 5 / Phase 3.10: per-IP/per-user sliding-window throttle.
+    _throttle = _check_ask_ai_throttle()
+    if _throttle is not None:
+        return jsonify(_throttle[0]), _throttle[1]
     try:
         data = request.get_json(silent=True) or {}
         question = str(data.get('question') or '').strip()
@@ -9923,12 +14286,36 @@ def ask_intel():
                     'ok': True,
                     'answer': grounded_result.get('answer') or 'No response generated.',
                     'context_summary': grounded_result.get('context_summary', ''),
+                    'mode': 'grounded',
                 })
-            if grounded_result.get('fallback_to_legacy'):
+            # Phase 2.4: same guardrail for Ask-Intel — never silently
+            # downgrade to the ungrounded path.
+            _allow_legacy_fallback_intel = (
+                bool(data.get('allow_legacy_fallback'))
+                or os.environ.get('ADOPTIQ_ASK_AI_ALLOW_LEGACY_FALLBACK', '0') == '1'
+            )
+            if grounded_result.get('fallback_to_legacy') and _allow_legacy_fallback_intel:
                 logger.warning(
-                    "Ask-Intel grounded mode fallback to legacy path: %s",
+                    "Ask-Intel grounded mode fallback to legacy path (opt-in): %s",
                     grounded_result.get('reason', 'unspecified'),
                 )
+            elif grounded_result.get('fallback_to_legacy'):
+                logger.warning(
+                    "Ask-Intel grounded mode failed; refusing silent legacy fallback: %s",
+                    grounded_result.get('reason', 'unspecified'),
+                )
+                return jsonify({
+                    'ok': False,
+                    'mode': 'grounded',
+                    'fallback_available': True,
+                    'reason': grounded_result.get('reason', 'unspecified'),
+                    'error': (
+                        'Grounded Ask-Intel is unavailable for this query and the '
+                        'legacy ungrounded path is disabled by default. Retry, '
+                        'or set allow_legacy_fallback=true to receive an '
+                        'ungrounded answer (no source citations enforced).'
+                    ),
+                }), 503
             else:
                 status_code = int(grounded_result.get('status_code', 500))
                 return jsonify({
@@ -10001,19 +14388,29 @@ def ask_intel():
                     try:
                         _ctx.close()
                     except Exception:
-                        pass
+                        # Round 4: non-fatal; suppressed silently in original code
+                        pass  # noqa: PIE790
         except Exception as e:
             logger.debug(f"Ask-Intel: Portfolio context skipped: {e}")
 
         briefing = "\n".join(context_parts) if context_parts else "No intelligence data is currently stored."
 
+        # Round 5 / Phase 3.16: align the legacy Ask-Intel system
+        # prompt with the Round 4 hard rules used by the grounded
+        # path.  The previous instructions allowed the model to
+        # narrate "patterns", "correlations", and "recurrence" without
+        # constraining it to numbers/IDs that actually appear in the
+        # context block -- so a legacy fallback could confidently
+        # quote made-up incident IDs or invented percentages.  These
+        # negative constraints mirror the grounded prompt and give
+        # the user-visible ``ungrounded_warning`` real teeth.
         system_prompt = (
             "You are AdoptIQ's external intelligence analyst. You specialize in analyzing Webex "
             "service incidents, scheduled maintenances, and known bugs/defects, AND correlating "
             "them with portfolio customer impact.\n\n"
             "INSTRUCTIONS:\n"
-            "1. Answer based ONLY on the data provided below.\n"
-            "2. Identify patterns: recurring incidents, frequently affected services, time-based trends.\n"
+            "1. Answer based ONLY on the data provided below. Treat anything not in the data as 'not provided'.\n"
+            "2. Identify patterns ONLY when supported by multiple cited records: recurring incidents, frequently affected services, time-based trends.\n"
             "3. Assess impact: which incidents are most severe and how they correlate with customer issues.\n"
             "4. CORRELATE with portfolio: when possible, connect external incidents/bugs with active "
             "customer support cases. Identify which portfolio customers may be affected by incidents.\n"
@@ -10024,6 +14421,12 @@ def ask_intel():
             "8. Identify recurrence patterns: are certain services or components repeatedly affected?\n"
             "9. Highlight any ongoing/unresolved incidents that need immediate attention.\n"
             "10. If data is insufficient, clearly state what's missing.\n\n"
+            "Round 4 / Phase 6.4 — NEGATIVE CONSTRAINTS (HARD RULES):\n"
+            "- Do NOT invent incident IDs, bug IDs (CSCxx#####), case numbers, or any identifier that is not literally present in the data above.\n"
+            "- Do NOT invent percentages (%), rates, counts, or 'X of Y' figures. If a percentage or rate is not in the data, write '(not provided)'.\n"
+            "- Do NOT extrapolate trends across periods unless the data explicitly compares periods.\n"
+            "- Do NOT estimate ARR / revenue / dollar impact -- this prompt provides no ARR data.\n"
+            "- If a question cannot be answered with the data provided, say so explicitly. Do not guess.\n\n"
             "FORMAT: Start with a 2-3 sentence executive summary of the most critical finding. "
             "Use **headings**, bullet points, and **bold** for key findings. End with recommended actions.\n\n"
             "CITATION REQUIREMENT: Always cite data identifiers when referencing specific records. "
@@ -10039,7 +14442,16 @@ def ask_intel():
             logger.error(f"Ask-Intel LLM failure: {answer}")
             return jsonify({'ok': False, 'error': 'Unable to generate a response. Please try again later.'})
 
-        return jsonify({'ok': True, 'answer': answer or 'No response generated.'})
+        return jsonify({
+            'ok': True,
+            'answer': answer or 'No response generated.',
+            'mode': 'legacy_ungrounded',
+            'ungrounded_warning': (
+                'This answer used the legacy ungrounded LLM path. Source IDs '
+                'are not enforced and headline numbers may not match the '
+                'corresponding report.'
+            ),
+        })
     except Exception as e:
         logger.error(f"Error in ask-intel: {e}")
         return jsonify({'ok': False, 'error': 'An error occurred processing your question. Please try again.'}), 500
@@ -10062,8 +14474,11 @@ def import_intel():
         if not f.filename or not f.filename.lower().endswith('.json'):
             return jsonify({'ok': False, 'error': 'File must be a .json file'}), 400
         raw = f.read()
-        if len(raw) > 50 * 1024 * 1024:
-            return jsonify({'ok': False, 'error': 'File too large (max 50 MB)'}), 400
+        # Round 8 / Phase 1.11: anchor on the shared ``INTEL_MAX_BYTES``
+        # so this cap and ``MAX_CONTENT_LENGTH`` are always governed by
+        # the same env knob (``MAX_FILE_SIZE``).
+        if len(raw) > INTEL_MAX_BYTES:
+            return jsonify({'ok': False, 'error': f'File too large (max {INTEL_MAX_BYTES // (1024 * 1024)} MB)'}), 400
         data = _json.loads(raw)
         if not isinstance(data, dict) or 'schema_version' not in data:
             return jsonify({'ok': False, 'error': 'Invalid AdoptIQ export file (missing schema_version)'}), 400
@@ -10101,26 +14516,30 @@ def download_file(filename):
         if not safe_filename:
             return "Invalid filename", 400
         
-        # Use canonical outputs dir when frozen (Application Support) so path is stable
+        # Round 8 / Phase 1.10: previously, when ``secure_filename(filename)``
+        # rewrote the input (e.g. dropped Unicode chars), the route fell back
+        # to ``os.path.join(outputs_dir, filename)`` -- the *original*
+        # un-sanitised value -- if the sanitised path didn't exist on disk.
+        # That two-name behaviour was fragile and gave attackers a chance to
+        # smuggle through any filename ``secure_filename`` happened to alter
+        # but not reject (e.g. internationalised glyphs that round-trip to a
+        # symlink).  Drop the fallback; resolve only the canonical sanitised
+        # name and double-check containment with ``os.path.realpath`` (which
+        # also follows symlinks) to defend against a symlink farm planted in
+        # the outputs directory.
         outputs_dir = str(_APP_SUPPORT / "outputs") if _frozen else os.path.abspath("outputs")
-        outputs_abs = os.path.abspath(outputs_dir)
-        outputs_prefix = outputs_abs + os.sep
-        file_path = os.path.join(outputs_dir, safe_filename)
-        resolved_path = os.path.abspath(file_path)
-        if not resolved_path.startswith(outputs_prefix):
+        outputs_real = os.path.realpath(outputs_dir)
+        outputs_prefix = outputs_real + os.sep
+        file_path = os.path.join(outputs_real, safe_filename)
+        resolved_path = os.path.realpath(file_path)
+        if not (resolved_path == outputs_real or resolved_path.startswith(outputs_prefix)):
             return "Access denied", 403
-        if not os.path.exists(file_path):
-            original_path = os.path.join(outputs_dir, filename)
-            original_resolved = os.path.abspath(original_path)
-            if (original_resolved.startswith(outputs_prefix)
-                    and os.path.exists(original_resolved)):
-                file_path = original_resolved
-            else:
-                return f"File not found: {safe_filename}", 404
-        
-        dl_name = secure_filename(os.path.basename(file_path)) or "download"
+        if not os.path.isfile(resolved_path):
+            return f"File not found: {safe_filename}", 404
+
+        dl_name = secure_filename(os.path.basename(resolved_path)) or "download"
         try:
-            return send_file(file_path, as_attachment=True, download_name=dl_name)
+            return send_file(resolved_path, as_attachment=True, download_name=dl_name)
         except (FileNotFoundError, OSError):
             return "File no longer available. It may have been cleaned up.", 404
         
@@ -10144,13 +14563,22 @@ def cancel_analysis(analysis_id):
             )
         except Exception:
             return jsonify({'error': 'CSRF validation failed'}), 403
+    # Round 6 / Phase 6.5: snapshot the live status under the lock,
+    # then release before returning so the global ``analysis_status_lock``
+    # (an RLock used by every status / writer / progress path in the
+    # process) is never held across a Flask ``return`` -- which would
+    # otherwise stall every other status reader behind ``send_response``
+    # / network teardown for the cancel call.  The previous version
+    # returned the 404 / 400 jsonify with the lock still held.
     with analysis_status_lock:
         live = analysis_status.get(analysis_id)
-        if live is None:
-            return jsonify({'error': 'Analysis not found'}), 404
-        if live and live.get('status') not in ['starting', 'running', 'cancelling']:
-            return jsonify({'error': 'Analysis is not running'}), 400
-    
+        _live_status = live.get('status') if isinstance(live, dict) else None
+        _live_present = live is not None
+    if not _live_present:
+        return jsonify({'error': 'Analysis not found'}), 404
+    if _live_status not in ('starting', 'running', 'cancelling'):
+        return jsonify({'error': 'Analysis is not running'}), 400
+
     # Set cancellation flag (thread-safe)
     with cancellation_flags_lock:
         cancellation_flags[analysis_id] = True
@@ -10269,10 +14697,10 @@ def start_compact_analysis():
                 'csone_file': csone_file,
                 'subscription_id': subscription_id,
                 'customer_name': customer_name,
-                'start_time': datetime.now().isoformat(),
+                'start_time': _now_utc_iso_z(),
                 'current_step': 'Initialization',
-                'step_start_time': datetime.now().isoformat(),
-                'estimated_completion': (datetime.now() + timedelta(minutes=5)).isoformat(),
+                'step_start_time': _now_utc_iso_z(),
+                'estimated_completion': (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
                 'report_type': 'compact'
             }
         
@@ -10286,7 +14714,7 @@ def start_compact_analysis():
                 
                 # Use ThreadPoolExecutor with timeout to prevent hanging
                 with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(run_analysis)
+                    future = _submit_with_context(executor, run_analysis)
                     future.result(timeout=300)  # 5-minute timeout for entire analysis
                     
             except FutureTimeoutError:
@@ -10341,8 +14769,13 @@ def start_customer_renewal_analysis():
                 return jsonify({'success': False, 'error': 'CSRF validation failed'}), 400
 
         data = request.get_json() or {}
-        logger.info(f"[[DEBUG]] Renewal analysis request data: {data}")
-        
+        # Round 8 / Phase 1.7: previously logged the entire payload (manager,
+        # customer_name, subscription_id, csone_file path) at INFO.  Keep the
+        # observability signal but drop the verbatim PII -- summarise via
+        # ``_redact_form_data`` and emit only a short technology / renewal
+        # type / day-window summary that has no customer fingerprint.
+        logger.info("[[DEBUG]] Renewal analysis request shape=%s", _redact_form_data(data))
+
         manager = (data.get('manager') or '').strip()
         technology = (data.get('technology') or '').strip()
         try:
@@ -10353,8 +14786,21 @@ def start_customer_renewal_analysis():
         customer_name = (data.get('customer_name') or '').strip()
         renewal_type = (data.get('renewal_type') or 'renewal').strip()  # 'renewal' or 'renewal_portfolio'
         csone_file = (data.get('csone_file') or '')
-        
-        logger.info(f"[[DEBUG]] Parsed values - renewal_type: '{renewal_type}', manager: '{manager}', tech: '{technology}', days: {days}, sub_id: '{subscription_id}', customer: '{customer_name}'")
+
+        # Round 8 / Phase 1.7: digest customer / subscription / manager id
+        # at INFO; verbatim values continue to flow at DEBUG for support.
+        logger.info(
+            "[[DEBUG]] Renewal analysis: renewal_type=%s tech=%s days=%s "
+            "manager_digest=%s sub_id_digest=%s customer_digest=%s",
+            renewal_type, technology, days,
+            _id_digest(manager) if manager else "",
+            _id_digest(subscription_id) if subscription_id else "",
+            _id_digest(customer_name) if customer_name else "",
+        )
+        logger.debug(
+            "[[DEBUG]] Renewal analysis verbatim: manager=%r tech=%r days=%s sub_id=%r customer=%r",
+            manager, technology, days, subscription_id, customer_name,
+        )
         
         if not technology:
             logger.warning(f"[[VALIDATION]] Technology is empty")
@@ -10413,10 +14859,10 @@ def start_customer_renewal_analysis():
                 'customer_name': customer_name,
                 'renewal_type': renewal_type,
                 'csone_file': csone_file,
-                'start_time': datetime.now().isoformat(),
+                'start_time': _now_utc_iso_z(),
                 'current_step': 'Initialization',
-                'step_start_time': datetime.now().isoformat(),
-                'estimated_completion': (datetime.now() + timedelta(minutes=5 if renewal_type == 'renewal_portfolio' else 3)).isoformat(),
+                'step_start_time': _now_utc_iso_z(),
+                'estimated_completion': (datetime.now(timezone.utc) + timedelta(minutes=5 if renewal_type == 'renewal_portfolio' else 3)).isoformat(),
                 'report_type': 'customer_renewal'
             }
             save_analysis_status()
@@ -10468,22 +14914,72 @@ def search_subscriptions():
         
         # Search for subscriptions (Snowflake DSM)
         subscriptions = search_subscriptions_by_customer(customer_name, limit)
-        # Unique customer names (BU_NAME) for dropdown—user picks exact name for report
-        seen = set()
-        customers = []
+        # Round 5 / Phase 4.13: branch on the search-error sentinel so
+        # an upstream Snowflake failure surfaces as a real error to
+        # the user instead of an empty "no subscriptions" UI.
+        if (
+            subscriptions
+            and isinstance(subscriptions[0], dict)
+            and subscriptions[0].get('_search_error')
+        ):
+            return jsonify({
+                'error': subscriptions[0].get('_search_error'),
+                'failure_kind': subscriptions[0].get('_failure_kind'),
+                'success': False,
+            }), 502
+        # Round 11 / Phase 4.2: collapse the typeahead list by the
+        # canonical customer key so spelling/casing variants for the
+        # same customer (e.g. "ACME" vs "Acme  Inc.") show as one
+        # row.  Also expose ``unique_customer_count`` so the UI
+        # shows how many *distinct* customers a query returned, not
+        # the row count of the underlying subscription rows.  Pick
+        # the most common raw spelling per group so the dropdown
+        # still says what Snowflake stores.
+        from collections import Counter
+        _norm_to_raw_counts = {}
+        _norm_order = []
         for s in subscriptions:
             bu = (s.get('BU_NAME') or '').strip()
-            if bu and bu not in seen:
-                seen.add(bu)
-                customers.append(bu)
-        
+            if not bu:
+                continue
+            try:
+                _key = normalize_customer_name(bu) or bu
+            except Exception:
+                _key = bu
+            if _key not in _norm_to_raw_counts:
+                _norm_to_raw_counts[_key] = Counter()
+                _norm_order.append(_key)
+            _norm_to_raw_counts[_key][bu] += 1
+        customers = []
+        for _key in _norm_order:
+            ctr = _norm_to_raw_counts[_key]
+            try:
+                _display = ctr.most_common(1)[0][0]
+            except Exception:
+                _display = _key
+            customers.append(_display)
+        unique_customer_count = len(customers)
+
+        # Round 12 / Phase 4.1: when ``len(subscriptions) >= limit``
+        # the underlying Snowflake query was capped, but the JSON
+        # response had no field telling the UI / API caller "this
+        # may not be the full set".  Surface explicit
+        # ``results_truncated`` / ``may_have_more`` / ``limit``
+        # fields so the typeahead / API consumer can show a "showing
+        # N of many" hint and either widen the limit or refine the
+        # search instead of treating the cap as truth.
+        _r12_truncated = bool(subscriptions and len(subscriptions) >= limit)
         return jsonify({
             'success': True,
             'subscriptions': subscriptions,
             'customers': customers,
-            'count': len(subscriptions)
+            'unique_customer_count': unique_customer_count,
+            'count': len(subscriptions),
+            'limit': limit,
+            'results_truncated': _r12_truncated,
+            'may_have_more': _r12_truncated,
         })
-        
+
     except Exception as e:
         logger.error(f"Error searching subscriptions: {e}")
         return jsonify({'error': 'Failed to search subscriptions'}), 500
@@ -10533,10 +15029,19 @@ def subscription_renewal_risk(subscription_id):
         
         # Get renewal risk analysis
         risk_analysis = get_subscription_renewal_risk(subscription_id, days)
-        
+
+        # Round 3 / Phase 5.3: when the subscription truly cannot be
+        # scored (e.g. ID was not found), return a 404 envelope that
+        # explicitly carries ``risk_score=null`` and ``state`` so the
+        # client cannot quietly render "0" as a real risk reading.
         if 'error' in risk_analysis:
-            return jsonify({'error': risk_analysis['error']}), 404
-        
+            return jsonify({
+                'error': risk_analysis['error'],
+                'risk_score': risk_analysis.get('risk_score'),
+                'risk_level': risk_analysis.get('risk_level', 'UNKNOWN'),
+                'state': risk_analysis.get('state', 'unavailable'),
+            }), 404
+
         return jsonify({
             'success': True,
             'renewal_analysis': risk_analysis
@@ -10588,9 +15093,9 @@ def start_subscription_analysis():
                 'subscription_id': subscription_id,
                 'days': days,
                 'report_type': report_type,
-                'start_time': datetime.now().isoformat(),
+                'start_time': _now_utc_iso_z(),
                 'current_step': 'Initialization',
-                'step_start_time': datetime.now().isoformat()
+                'step_start_time': _now_utc_iso_z()
             }
         
         # Start analysis in background thread
@@ -10614,6 +15119,12 @@ def start_subscription_analysis():
 
 def run_subscription_analysis(analysis_id):
     """Run subscription-based analysis"""
+    # Round 5 / Phase 6.14: bind the analysis ID for correlated logs.
+    try:
+        from structured_logging import bind_analysis_id as _bind_aid
+        _bind_aid(analysis_id)
+    except Exception:
+        pass  # noqa: PIE790
     try:
         logger.info(f"[[START]] Starting subscription analysis: {analysis_id}")
         
@@ -10642,6 +15153,37 @@ def run_subscription_analysis(analysis_id):
             _update_progress(status, 20, f'Loading customer context for {sub_data.get("customer_name", "")}...', 'Data Retrieval')
         
         ab_df = pd.DataFrame(sub_data['adoption_barriers']) if sub_data['adoption_barriers'] else pd.DataFrame()
+        # Phase 1.1: validate the data sources required to author a
+        # subscription analysis. We require the subscription record to
+        # have been found above (already enforced) and at least one
+        # piece of customer context to be populated.  Without this
+        # check the report could ship as-zero on a Snowflake outage.
+        try:
+            _subscription_team_subs = pd.DataFrame([{
+                'BU_NAME': sub_data.get('customer_name', ''),
+                'ACCOUNT_ID_C': sub_data.get('account_id', ''),
+                'SUBSCRIPTION_ID': subscription_id,
+            }])
+            raise_validation_error_if_invalid(
+                report_type='subscription',
+                snowflake_ctx=None,  # subscription path uses pre-fetched data
+                team_subs_df=_subscription_team_subs,
+                ab_data=ab_df,
+                csone_data=pd.DataFrame(),
+                required_sources=['team_subscriptions'],
+            )
+        except DataSourceValidationError as ve:
+            logger.error(f"[[VALIDATION]] Subscription analysis validation failed: {ve}")
+            with analysis_status_lock:
+                status['status'] = 'error'
+                status['error'] = 'Subscription analysis data validation failed'
+                status['message'] = (
+                    f"Subscription analysis cannot proceed: "
+                    f"{', '.join(ve.missing_sources)} missing or empty."
+                )
+                status['completion_time'] = _now_utc_iso_z()
+                save_analysis_status()
+            return
         ap_df = pd.DataFrame(sub_data['action_plans']) if sub_data['action_plans'] else pd.DataFrame()
         cp_df = pd.DataFrame(sub_data['customer_pulse']) if sub_data['customer_pulse'] else pd.DataFrame()
         sp_df = pd.DataFrame(sub_data['success_priorities']) if sub_data['success_priorities'] else pd.DataFrame()
@@ -10665,6 +15207,23 @@ def run_subscription_analysis(analysis_id):
             # describe a 200-item section as "complete"; section header
             # already shows the true total ``len(items)``.
             _SUB_BRIEF_ITEM_LIMIT = 50
+            # Round 5 / Phase 3.11: cap each per-field value to a
+            # bounded length before joining.  A single rogue
+            # description (e.g. a giant pasted email or stack trace
+            # in adoption barrier notes) could otherwise push a single
+            # subscription briefing past the LLM context budget,
+            # forcing aggressive downstream truncation that drops
+            # entirely unrelated sections.  Bound at 600 chars per
+            # field; append a marker so the LLM knows the value was
+            # clipped and not "the entire content".
+            _SUB_BRIEF_FIELD_CAP = int(os.environ.get("ADOPTIQ_SUB_BRIEF_FIELD_CAP", "600"))
+
+            def _cap_field(_v: Any) -> str:
+                _s = '' if _v is None else str(_v)
+                if len(_s) > _SUB_BRIEF_FIELD_CAP:
+                    return _s[:_SUB_BRIEF_FIELD_CAP] + f"… (truncated, {len(_s)} chars total)"
+                return _s
+
             for section_key in ('adoption_barriers', 'action_plans', 'customer_pulse', 'success_priorities'):
                 items = sub_data.get(section_key, [])
                 if items:
@@ -10678,9 +15237,11 @@ def run_subscription_analysis(analysis_id):
                     )
                     for item in items[:_SUB_BRIEF_ITEM_LIMIT]:
                         if isinstance(item, dict):
-                            briefing_parts.append(f"- {', '.join(f'{k}: {v}' for k, v in item.items() if v)}")
+                            briefing_parts.append(
+                                f"- {', '.join(f'{k}: {_cap_field(v)}' for k, v in item.items() if v)}"
+                            )
                         else:
-                            briefing_parts.append(f"- {item}")
+                            briefing_parts.append(f"- {_cap_field(item)}")
             briefing_book = "\n".join(briefing_parts)
             
             with analysis_status_lock:
@@ -10707,7 +15268,10 @@ def run_subscription_analysis(analysis_id):
         output_dir = _APP_SUPPORT / "outputs" if _frozen else Path("outputs")
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Round 12 / Phase 10.6: anchor artifact filename suffix on UTC and
+        # tag with ``Z`` so subscription analysis filenames are deterministic
+        # across host timezones.
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
         safe_customer_name = "".join(c for c in (sub_data.get('customer_name') or 'Unknown') if c.isalnum() or c in (' ', '-', '_')).rstrip()
         safe_subscription_id = subscription_id.replace(':', '_').replace('/', '_')
         
@@ -10722,7 +15286,11 @@ def run_subscription_analysis(analysis_id):
             title = doc.add_heading(f'Subscription Analysis: {sub_data.get("customer_name") or "Unknown"}', 0)
             subtitle = doc.add_heading(f'Subscription ID: {subscription_id}', level=1)
             details = doc.add_paragraph()
-            details.add_run(f'Analysis Date: {datetime.now().strftime("%B %d, %Y")}\n').bold = True
+            # Round 12 / Phase 10.6: anchor on UTC and tag the timezone so
+            # subscription Word details show one consistent date across hosts.
+            details.add_run(
+                f'Analysis Date: {datetime.now(timezone.utc).strftime("%B %d, %Y")} UTC\n'
+            ).bold = True
             details.add_run(f'Analysis Period: {days} days\n').bold = True
             details.add_run(f'Technology: {sub_data.get("technology", "N/A")} | Sub-Technology: {sub_data.get("sub_technology", "N/A")}\n').bold = True
             details.add_run(f'Status: {sub_data.get("status", "N/A")}\n').bold = True
@@ -10816,15 +15384,44 @@ def run_subscription_analysis(analysis_id):
                 # window (``days``) so this sentence matches the report's
                 # subtitle. The previous hardcoded 30 silently disagreed
                 # with the rest of the document for any non-30-day run.
-                if 'CREATED_DATE' in ab_df.columns:
+                # Round 11 / Phase 2.2: ``datetime.now()`` returns the
+                # LOCAL clock, so the window cut-off drifted by the
+                # operator's UTC offset (e.g. up to ~24h short for
+                # west-coast US runs).  Switch to a UTC-anchored
+                # cut-off so the count agrees with the
+                # Snowflake-side ``_utc_window_start_iso`` predicate.
+                # Also COALESCE OPEN_DATE_C → CREATED_DATE → CREATED_DATE_C
+                # to match the canonical AB date expression used by
+                # ``fetch_adoption_barriers`` (Round 11 / Phase 2.1).
+                _ab_date_cols = [
+                    c for c in ('OPEN_DATE_C', 'CREATED_DATE', 'CREATED_DATE_C')
+                    if c in ab_df.columns
+                ]
+                if _ab_date_cols:
                     try:
-                        ab_df['CREATED_DATE'] = pd.to_datetime(ab_df['CREATED_DATE'], errors='coerce')
                         try:
                             _recent_window = int(days)
                         except (TypeError, NameError, ValueError):
                             _recent_window = 30
-                        recent_cutoff = datetime.now() - timedelta(days=_recent_window)
-                        recent_ab = ab_df[ab_df['CREATED_DATE'] >= recent_cutoff]
+                        # ``pd.Timestamp.now('UTC').tz_localize(None)`` aligns
+                        # with the tz-stripped UTC values produced by
+                        # ``parse_datetime_series`` elsewhere.
+                        recent_cutoff = (
+                            pd.Timestamp.now('UTC').tz_localize(None)
+                            - pd.Timedelta(days=_recent_window)
+                        )
+                        _parsed_cols = []
+                        for _c in _ab_date_cols:
+                            _parsed = pd.to_datetime(
+                                ab_df[_c], errors='coerce', utc=True
+                            ).dt.tz_convert('UTC').dt.tz_localize(None)
+                            _parsed_cols.append(_parsed)
+                        # Coalesce: for each row pick the FIRST non-null
+                        # parsed date in priority order.
+                        _ab_canonical_date = _parsed_cols[0].copy()
+                        for _p in _parsed_cols[1:]:
+                            _ab_canonical_date = _ab_canonical_date.fillna(_p)
+                        recent_ab = ab_df[_ab_canonical_date >= recent_cutoff]
                         if not recent_ab.empty:
                             ab_p.add_run(f' {len(recent_ab)} barriers created in the last {_recent_window} days.')
                     except Exception as _dt_err:
@@ -10901,6 +15498,44 @@ def run_subscription_analysis(analysis_id):
             
             with analysis_status_lock:
                 _update_progress(status, 85, 'Saving Word document...', 'Report Generation')
+
+            # Phase 1.1: Validate cross-source consistency for the subscription
+            # report before persisting the docx. Subscription only has
+            # adoption_barriers + customer_pulse for the single sub, so we feed
+            # those through validate_report_consistency to catch obvious drift
+            # (BEMS w/o cases, missing customer counts, etc).
+            try:
+                # Round 6 / Phase 5.8: thread ``strict_mode`` and any
+                # available factual_claims (e.g. ai_response narrative
+                # bullets) through the subscription path so the same
+                # env toggle ADOPTIQ_NONSTRICT_CONSISTENCY governs
+                # every report's strictness.
+                _sub_strict = (
+                    str(os.getenv("ADOPTIQ_NONSTRICT_CONSISTENCY", "0")).strip().lower()
+                    not in {"1", "true", "yes", "on"}
+                )
+                _sub_factual_claims = []
+                _sub_ai_resp = locals().get("ai_response")
+                if isinstance(_sub_ai_resp, str) and _sub_ai_resp.strip():
+                    _sub_factual_claims = [_sub_ai_resp.strip()]
+                _sub_consistency = validate_report_consistency(
+                    ab_df,
+                    pd.DataFrame(),
+                    customer_pulse_df=cp_df if isinstance(cp_df, pd.DataFrame) and not cp_df.empty else None,
+                    strict_mode=_sub_strict,
+                    factual_claims=_sub_factual_claims or None,
+                )
+                if not _sub_consistency.get('is_valid', True):
+                    logger.error(
+                        f"[[CONSISTENCY]] Subscription report errors: {_sub_consistency.get('errors')}"
+                    )
+                if _sub_consistency.get('warnings'):
+                    logger.warning(
+                        f"[[CONSISTENCY]] Subscription report warnings: {_sub_consistency.get('warnings')}"
+                    )
+            except Exception as _scerr:
+                logger.warning(f"[[CONSISTENCY]] Subscription consistency check skipped: {_scerr}")
+
             doc.save(word_path)
             
         except Exception as e:
@@ -10926,7 +15561,8 @@ def run_subscription_analysis(analysis_id):
                             safe_df[col] = series.dt.tz_localize(None)
                             continue
                     except Exception:
-                        pass
+                        # Round 4: non-fatal; suppressed silently in original code
+                        pass  # noqa: PIE790
                     if series.dtype == object:
                         try:
                             safe_df[col] = series.apply(
@@ -10971,10 +15607,19 @@ def run_subscription_analysis(analysis_id):
                 })
                 
                 # Summary sheet
+                # Round 5 / Phase 1.12: normalize the Customer Name so the
+                # subscription Summary sheet matches the canonical name used
+                # by Leader / Renewal / Executive reports (avoids Cisco vs
+                # Cisco Inc. drift surfaced by report_consistency).
+                _raw_cust_name_summary = sub_data.get('customer_name') or 'Unknown'
+                try:
+                    _norm_cust_name_summary = normalize_customer_name(_raw_cust_name_summary) or _raw_cust_name_summary
+                except Exception:
+                    _norm_cust_name_summary = _raw_cust_name_summary
                 summary_data = {
                     'Metric': ['Customer Name', 'Subscription ID', 'Technology', 'Sub-Technology', 'Status', 
                                'Analysis Period (Days)', 'Renewal Risk Score', 'Risk Level'],
-                    'Value': [sub_data.get('customer_name') or 'Unknown', subscription_id, sub_data.get('technology', 'N/A'), 
+                    'Value': [_norm_cust_name_summary, subscription_id, sub_data.get('technology', 'N/A'), 
                               sub_data.get('sub_technology', 'N/A'), sub_data.get('status', 'N/A'), days,
                               renewal_analysis.get('overall_risk_score', renewal_analysis.get('risk_score', 0)), renewal_analysis.get('risk_level', 'Unknown')]
                 }
@@ -11006,40 +15651,119 @@ def run_subscription_analysis(analysis_id):
                         'Count': count_value
                     })
                 risk_df = pd.DataFrame(risk_data)
+                # Round 5 / Phase 1.1: when no risk_components are returned
+                # (e.g. risk scoring did not run because data was unavailable),
+                # do not write a blank sheet - emit an explicit
+                # ``Data_Unavailable`` row matching the renewal portfolio
+                # honesty pattern at app_simple.py:8069-8080 / Round 4 1.6.
+                if risk_df.empty:
+                    risk_df = pd.DataFrame([{
+                        'Component': 'Data_Unavailable',
+                        'Score': 'n/a',
+                        'Count': 'n/a',
+                        'Reason': 'Risk components not returned by scoring pipeline (see Report_Info / partial_data_warnings).',
+                    }])
                 risk_df.to_excel(writer, sheet_name='Risk_Components', index=False)
                 
-                # Data sheets - Always create tabs even if empty
+                # Round 2 / Phase 2.6: derive empty-tab placeholder
+                # columns from the live schema (the same df we would
+                # have written if it had rows) so a "no data" tab and
+                # a "data" tab share the same column shape.  When the
+                # frame is empty AND has no schema (e.g. fetch failed
+                # before columns were known), surface a
+                # ``Data_Unavailable`` row that includes any
+                # ``attrs['fetch_error']`` so the consumer can
+                # distinguish "no rows in window" from "fetch failed
+                # before schema known".
+                def _write_empty_or_placeholder(empty_or_df, sheet, fallback_cols):
+                    fetch_err = None
+                    fetch_err_kind = None
+                    try:
+                        fetch_err = empty_or_df.attrs.get('fetch_error') if hasattr(empty_or_df, 'attrs') else None
+                        fetch_err_kind = empty_or_df.attrs.get('fetch_error_kind') if hasattr(empty_or_df, 'attrs') else None
+                    except Exception:
+                        fetch_err = None
+                    if fetch_err:
+                        unavailable_df = pd.DataFrame([
+                            {
+                                'Status': 'Data Unavailable',
+                                'Dataset': sheet,
+                                'Reason': str(fetch_err_kind or 'fetch_error'),
+                                'Detail': str(fetch_err)[:512],
+                                'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
+                            }
+                        ])
+                        unavailable_df.to_excel(writer, sheet_name=sheet, index=False)
+                        return
+                    # Round 6 / Phase 1.10: a header-only sheet still
+                    # leaves the consumer guessing whether the window
+                    # was empty or the call simply hadn't been wired.
+                    # Mirror the Data_Unavailable shape with an
+                    # explicit empty-window message so subscription
+                    # workbooks never ship a silent-blank sheet.
+                    cols = list(empty_or_df.columns) if hasattr(empty_or_df, 'columns') and len(empty_or_df.columns) > 0 else fallback_cols
+                    pd.DataFrame(columns=cols).to_excel(writer, sheet_name=sheet, index=False)
+                    try:
+                        from report_utils import (
+                            classify_data_state as _classify_state,
+                            render_empty_state_message as _render_state,
+                        )
+                        _state = _classify_state(empty_or_df)
+                        _msg = _render_state(_state, source_label=sheet.replace('_', ' '))
+                    except Exception:
+                        _state = 'empty'
+                        _msg = 'No records in the analysis window'
+                    try:
+                        ws = writer.sheets[sheet]
+                        # Write the empty-window message a few rows
+                        # below the header so it is unmistakable in the
+                        # rendered workbook.
+                        ws.write(2, 0, f"{sheet.replace('_', ' ')} - {_state.upper()}")
+                        ws.write(3, 0, _msg)
+                        ws.write(
+                            4, 0,
+                            f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+                        )
+                    except Exception:
+                        # Fall back silently; primary signal is the
+                        # header-only frame already written above.
+                        pass
+
                 # Adoption Barriers
                 if not ab_df.empty:
                     ab_df.to_excel(writer, sheet_name='Adoption_Barriers', index=False)
                 else:
-                    # Create empty sheet with headers
-                    empty_ab_df = pd.DataFrame(columns=['ID', 'SUBJECT_C', 'SEVERITY_C', 'AB_STATUS_C', 'ASSIGNEE_C', 'CREATED_DATE', 'DESCRIPTION_C'])
-                    empty_ab_df.to_excel(writer, sheet_name='Adoption_Barriers', index=False)
-                
+                    _write_empty_or_placeholder(
+                        ab_df, 'Adoption_Barriers',
+                        ['ID', 'SUBJECT_C', 'SEVERITY_C', 'AB_STATUS_C', 'ASSIGNEE_C', 'CREATED_DATE', 'DESCRIPTION_C'],
+                    )
+
                 # Action Plans
                 if not ap_df.empty:
                     ap_df.to_excel(writer, sheet_name='Action_Plans', index=False)
                 else:
-                    # Create empty sheet with headers
-                    empty_ap_df = pd.DataFrame(columns=['ID', 'ACTION_PLAN_TITLE_C', 'STATUS_C', 'ASSIGNEE_C', 'CREATED_DATE', 'DESCRIPTION_C'])
-                    empty_ap_df.to_excel(writer, sheet_name='Action_Plans', index=False)
-                
+                    _write_empty_or_placeholder(
+                        ap_df, 'Action_Plans',
+                        ['ID', 'ACTION_PLAN_TITLE_C', 'STATUS_C', 'ASSIGNEE_C', 'CREATED_DATE', 'DESCRIPTION_C'],
+                    )
+
                 # Customer Pulse
                 if not cp_df.empty:
                     cp_df.to_excel(writer, sheet_name='Customer_Pulse', index=False)
                 else:
-                    # Create empty sheet with headers
-                    empty_cp_df = pd.DataFrame(columns=['ID', 'PULSE_RATING__C', 'COMMENTS__C', 'CREATEDDATE', 'ACCOUNT__C'])
-                    empty_cp_df.to_excel(writer, sheet_name='Customer_Pulse', index=False)
-                
+                    _write_empty_or_placeholder(
+                        cp_df, 'Customer_Pulse',
+                        ['ID', 'PULSE_RATING__C', 'COMMENTS__C', 'CREATEDDATE', 'ACCOUNT__C'],
+                    )
+
                 # Success Priorities
                 if not sp_df.empty:
                     sp_df.to_excel(writer, sheet_name='Success_Priorities', index=False)
                 else:
-                    # Create empty sheet with headers
-                    empty_sp_df = pd.DataFrame(columns=['ID', 'SUCCESS_PRIORITY_TITLE__C', 'STATUS__C', 'CREATEDDATE', 'RELATED_CUSTOMER__C'])
-                    empty_sp_df.to_excel(writer, sheet_name='Success_Priorities', index=False)
+                    _write_empty_or_placeholder(
+                        sp_df, 'Success_Priorities',
+                        ['ID', 'SUCCESS_PRIORITY_TITLE__C', 'STATUS__C', 'CREATEDDATE', 'RELATED_CUSTOMER__C'],
+                    )
                 
                 # Format sheets
                 for sheet_name in writer.sheets:
@@ -11051,6 +15775,15 @@ def run_subscription_analysis(analysis_id):
                         # Format summary sheet headers
                         for col_num, value in enumerate(summary_df.columns.values):
                             worksheet.write(0, col_num, value, header_format)
+                    elif sheet_name == 'Risk_Components':
+                        # Round 5 / Phase 1.5: Risk_Components was previously
+                        # left unformatted; format its headers (including the
+                        # Data_Unavailable placeholder added in Phase 1.1).
+                        try:
+                            for col_num, value in enumerate(risk_df.columns.values):
+                                worksheet.write(0, col_num, value, header_format)
+                        except Exception:
+                            pass  # noqa: PIE790
                     else:
                         # Format other sheets - check if they have data
                         if sheet_name in ['Adoption_Barriers', 'Action_Plans', 'Customer_Pulse', 'Success_Priorities']:
@@ -11093,7 +15826,7 @@ def run_subscription_analysis(analysis_id):
             status['excel_file'] = excel_filename
             status['word_report'] = str(word_path) if word_path else None
             status['excel_report'] = str(excel_path) if excel_path else None
-            status['end_time'] = datetime.now().isoformat()
+            status['end_time'] = _now_utc_iso_z()
             status['completion_time'] = status['end_time']
             report_type = status.get('report_type', 'renewal')
             manager = status.get('manager', '')
@@ -11107,9 +15840,13 @@ def run_subscription_analysis(analysis_id):
         save_analysis_status()
 
         auto_audit_report(analysis_id)
+        # Round 3 / Phase 5.4: pass days, paths.
         record_report_completion(
             analysis_id, report_type, manager, technology, customer_name,
-            'completed', start_time, end_time
+            'completed', start_time, end_time,
+            days=status.get('days') if isinstance(status, dict) else None,
+            word_path=str(word_path) if 'word_path' in locals() and word_path else '',
+            excel_path=str(excel_path) if 'excel_path' in locals() and excel_path else '',
         )
         try:
             store_report_insights(
@@ -11139,8 +15876,23 @@ def download_result(analysis_id, file_type):
     """Download analysis results with enhanced error handling and logging"""
     from urllib.parse import unquote
     analysis_id = unquote(analysis_id)
-    logger.info(f"[[DOWNLOAD]] Download request: {analysis_id}/{file_type}")
-    
+    # Round 6 / Phase 6.7: do not log the raw ``analysis_id`` at INFO
+    # -- it carries customer / manager / technology fragments and
+    # ends up in shipped log files.  Surface a short SHA-256 prefix
+    # at INFO and the verbatim id only at DEBUG.
+    try:
+        import hashlib as _h_p67
+        _aid_digest = _h_p67.sha256(
+            str(analysis_id).encode("utf-8", errors="replace")
+        ).hexdigest()[:12]
+    except Exception:
+        _aid_digest = "unavailable"
+    logger.info(
+        "[[DOWNLOAD]] Download request: aid_digest=%s file_type=%s",
+        _aid_digest, file_type,
+    )
+    logger.debug("[[DOWNLOAD]] Download request (verbose): %s/%s", analysis_id, file_type)
+
     # Validate file_type (whitelist)
     if file_type not in ('docx', 'xlsx'):
         return jsonify({'error': 'Invalid file type. Use docx or xlsx.', 'available_files': ['docx', 'xlsx']}), 404
@@ -11161,18 +15913,28 @@ def download_result(analysis_id, file_type):
                             analysis_status[analysis_id] = loaded_entry
                             status = analysis_status[analysis_id]
             if status is None:
-                return jsonify({'error': 'Analysis not found', 'analysis_id': analysis_id}), 404
+                # Round 9 / Phase 1.3: previous error JSON echoed the raw
+                # ``analysis_id`` route fragment (which embeds customer /
+                # manager / technology slugs) back to the caller -- a
+                # cross-tenant disclosure if a misrouted client happens
+                # to surface the body.  Project to the same digest used
+                # for INFO logging so the operator can correlate via the
+                # log without exposing the embedded PII to the client.
+                return jsonify({'error': 'Analysis not found', 'analysis_id_digest': _aid_digest}), 404
         except Exception as e:
             logger.error(f"[[ERROR]] Error loading analysis status from file: {e}", exc_info=True)
-            return jsonify({'error': 'Analysis not found', 'analysis_id': analysis_id}), 404
-    logger.info(f"[[DATA]] Analysis status: {status.get('status', 'unknown')}")
+            return jsonify({'error': 'Analysis not found', 'analysis_id_digest': _aid_digest}), 404
+    # Round 6 / Phase 6.7: keep state label only at INFO.  Do not
+    # log the entire status dict or analysis id verbatim alongside.
+    logger.info("[[DATA]] Analysis status: %s", status.get('status', 'unknown'))
     
     # Check if analysis is completed
     if status.get('status') != 'completed':
         logger.error(f"[[ERROR]] Analysis not completed: {status.get('status', 'unknown')}")
+        # Round 9 / Phase 1.3: digest the analysis_id in the error body.
         return jsonify({
             'error': f'Analysis not completed. Current status: {status.get("status", "unknown")}',
-            'analysis_id': analysis_id,
+            'analysis_id_digest': _aid_digest,
             'current_status': status.get('status', 'unknown')
         }), 400
     
@@ -11188,15 +15950,26 @@ def download_result(analysis_id, file_type):
             excel_report = results.get('excel_report')
     
     if not word_report and not excel_report:
-        logger.error(f"[[ERROR]] No reports available for analysis: {analysis_id}")
+        logger.error(f"[[ERROR]] No reports available for analysis (digest=%s)", _aid_digest)
         logger.info(f"[[DATA]] Status structure: {status.keys()}")
+        # Round 9 / Phase 1.3: digest the analysis_id in the error body
+        # (raw id stays in server-side DEBUG logs for correlation).
         return jsonify({
             'error': 'No results available for this analysis',
-            'analysis_id': analysis_id,
+            'analysis_id_digest': _aid_digest,
             'status_keys': list(status.keys())
         }), 400
     
-    logger.info(f"[[FILE]] Available reports - Word: {word_report}, Excel: {excel_report}")
+    # Round 6 / Phase 6.7: paths reveal customer / report names.
+    # Keep them at DEBUG; surface a presence-only summary at INFO.
+    logger.info(
+        "[[FILE]] Available reports - Word: %s, Excel: %s",
+        bool(word_report), bool(excel_report),
+    )
+    logger.debug(
+        "[[FILE]] Available reports (verbose) - Word: %s, Excel: %s",
+        word_report, excel_report,
+    )
     
     # Canonical outputs dir (Application Support when frozen) so download works even if status stored wrong path
     _out_dir = _APP_SUPPORT / "outputs" if _frozen else Path(os.path.abspath("outputs"))
@@ -11263,6 +16036,16 @@ def download_result(analysis_id, file_type):
 @app.route('/simple_test', methods=['POST'])
 def simple_test():
     """Ultra-simple test endpoint"""
+    # Round 8 / Phase 1.1: CSRF parity with other state-changing POST routes.
+    # The endpoint is a no-op success acknowledgement, but accepting unauthenticated
+    # cross-site POSTs makes it usable as an oracle / health probe for attackers
+    # mapping the loopback surface area.  Validate via the same header/body
+    # pattern used by ``start_subscription_analysis`` etc.
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token') or request.form.get('csrf_token'))
+        except Exception:
+            return jsonify({'error': 'CSRF validation failed'}), 403
     try:
         logger.info(f"[[SEARCH]] Simple test endpoint called")
         return jsonify({'success': True, 'message': 'Simple test successful'})
@@ -11273,13 +16056,24 @@ def simple_test():
 @app.route('/test_generate_report', methods=['POST'])
 def test_generate_report():
     """Test endpoint that returns success immediately"""
+    # Round 8 / Phase 1.1: CSRF parity.  This route writes into ``analysis_status``
+    # and persists it -- a cross-site POST could populate the live status dict
+    # with attacker-controlled manager/technology values.
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token') or request.form.get('csrf_token'))
+        except Exception:
+            return jsonify({'error': 'CSRF validation failed'}), 403
     try:
         logger.info(f"[[SEARCH]] Test generate report endpoint called")
-        
+
         # Handle both JSON and form data
         if request.is_json:
             data = request.get_json() or {}
-            logger.info(f"[[LIST]] JSON data received: {data}")
+            # Round 8 / Phase 1.7: do not echo the raw payload (manager,
+            # technology, etc.) at INFO; summarise via the redactor so the
+            # log line still proves receipt without exposing the values.
+            logger.info("[[LIST]] JSON data received shape=%s", _redact_form_data(data))
         else:
             # Handle form data
             try:
@@ -11291,19 +16085,21 @@ def test_generate_report():
                 'technology': request.form.get('technology', 'Cisco UCCE'),
                 'days': days_val
             }
-            logger.info(f"[[LIST]] Form data received: {data}")
-        
+            logger.info("[[LIST]] Form data received shape=%s", _redact_form_data(data))
+
         manager = data.get('manager', 'Test Manager')
         technology = data.get('technology', 'Cisco UCCE')
         days = data.get('days', 30)
-        
+
         # Create a test analysis ID
         analysis_id = (
             f"Test_{_sanitize_analysis_id_part(manager)}_"
             f"{_sanitize_analysis_id_part(technology)}_{days}d_{int(time.time())}"
         )
-        
-        logger.info(f"[[LIST]] Created analysis ID: {analysis_id}")
+
+        # Round 8 / Phase 1.7: digest at INFO; verbatim id only at DEBUG.
+        logger.info("[[LIST]] Created analysis aid_digest=%s", _id_digest(analysis_id))
+        logger.debug("[[LIST]] Created analysis verbatim id=%s", analysis_id)
         
         # Set up minimal status
         with analysis_status_lock:
@@ -11314,13 +16110,15 @@ def test_generate_report():
                 'manager': manager,
                 'technology': technology,
                 'days': days,
-                'start_time': datetime.now().isoformat(),
+                'start_time': _now_utc_iso_z(),
                 'current_step': 'Test Complete',
                 'report_type': 'compact'
             }
             save_analysis_status()
         
-        logger.info(f"[[OK]] Test analysis completed: {analysis_id}")
+        # Round 8 / Phase 1.7: digest at INFO; verbatim id only at DEBUG.
+        logger.info("[[OK]] Test analysis completed aid_digest=%s", _id_digest(analysis_id))
+        logger.debug("[[OK]] Test analysis completed verbatim id=%s", analysis_id)
         
         return jsonify({
             'success': True,
@@ -11336,11 +16134,28 @@ def test_generate_report():
 @app.route('/clear_stuck_analyses', methods=['POST'])
 def clear_stuck_analyses():
     """Clear any stuck analyses that might be blocking new ones"""
+    # Round 8 / Phase 1.1: state-changing route was missing CSRF parity with
+    # ``cancel_analysis`` / ``start_subscription_analysis``.  Without it any
+    # cross-site POST that the browser sends with the session cookie can wipe
+    # the in-flight analyses dict.
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token') or request.form.get('csrf_token'))
+        except Exception:
+            return jsonify({'error': 'CSRF validation failed'}), 403
     try:
         with analysis_status_lock:
             cleared_count = 0
-            current_time = datetime.now()
-            
+            # Round 8 / Phase 1.5: previously this fell back to a *naive*
+            # local-clock ``datetime.now()`` when the persisted ``start_time``
+            # didn't carry a tzinfo, then subtracted UTC-derived values from
+            # local time -- on a non-UTC host the "stuck" cutoff drifted by
+            # the local offset (PT analyses looked 7-8h newer than they were
+            # and never tripped the 10-minute threshold).  Anchor on
+            # ``datetime.now(timezone.utc)`` so every comparison is on the
+            # same UTC clock as the persisted ISO ``Z`` ``start_time``.
+            current_time = datetime.now(timezone.utc)
+
             for analysis_id, status in list(analysis_status.items()):
                 # Clear analyses that have been running for more than 10 minutes
                 if status.get('status') in ('running', 'starting', 'cancelling'):
@@ -11359,7 +16174,12 @@ def clear_stuck_analyses():
                             cleared_count += 1
                             continue
 
-                        now_for_age = datetime.now(start_time.tzinfo) if start_time.tzinfo else current_time
+                        # Round 8 / Phase 1.5: if the parsed ``start_time``
+                        # is naive, treat it as already-UTC (legacy rows) so
+                        # both sides are tz-aware before subtraction.
+                        if start_time.tzinfo is None:
+                            start_time = start_time.replace(tzinfo=timezone.utc)
+                        now_for_age = current_time
                         if (now_for_age - start_time).total_seconds() > 600:  # 10 minutes
                             status['status'] = 'cancelled'
                             status['message'] = 'Analysis cancelled - was stuck'
@@ -11439,7 +16259,7 @@ def start_leader_report():
                 'status': 'starting',
                 'progress': 0,
                 'message': ' Initializing Leader Report Generation...',
-                'start_time': datetime.now().isoformat(),
+                'start_time': _now_utc_iso_z(),
                 'current_step': 'Initialization',
                 'manager': manager,
                 'days': days,
@@ -11468,6 +16288,12 @@ def start_leader_report():
 
 def run_leader_report_generation(analysis_id):
     """Background thread to generate leader report"""
+    # Round 5 / Phase 6.14: bind the analysis ID for correlated logs.
+    try:
+        from structured_logging import bind_analysis_id as _bind_aid
+        _bind_aid(analysis_id)
+    except Exception:
+        pass  # noqa: PIE790
     ctx = None
     try:
         with analysis_status_lock:
@@ -11510,7 +16336,7 @@ def run_leader_report_generation(analysis_id):
                         'Without VPN connection, the report cannot access team member subscriptions, '
                         'customers, or CSConsole activities from Snowflake.'
                     )
-                    status['completion_time'] = datetime.now().isoformat()
+                    status['completion_time'] = _now_utc_iso_z()
                     save_analysis_status()
                 
                 return
@@ -11533,7 +16359,46 @@ def run_leader_report_generation(analysis_id):
                 logger.info(f"[[OK]] Retrieved {len(team_subs_df)} team subscriptions for {manager}")
         except Exception as e:
             logger.warning(f"[[WARNING]] Failed to fetch team subscriptions: {e}")
-        
+
+        # Phase 1.1: Validate required data sources for the leader report.
+        # Leader requires Snowflake connectivity + at least one team subscription;
+        # CSOne is layered in below and treated as optional (handled by
+        # leader_report_generator), so it is intentionally not in required_sources.
+        logger.info("[[VALIDATION]] Validating data sources for leader report...")
+        try:
+            # Round 2 / Phase 4.3: when the operator uploaded a CSOne
+            # file for the leader job, treat ``csone`` as required so
+            # the report fails loud if the upload produced zero rows
+            # rather than silently shipping a leader report without
+            # TAC evidence.
+            _leader_csone_provided = bool(
+                (csone_file if 'csone_file' in locals() else None)
+                or (csone_path if 'csone_path' in locals() else None)
+            )
+            _leader_required = ['snowflake', 'team_subscriptions']
+            raise_validation_error_if_invalid(
+                report_type='leader',
+                snowflake_ctx=ctx,
+                team_subs_df=team_subs_df,
+                ab_data=pd.DataFrame(),
+                csone_data=pd.DataFrame(),
+                required_sources=_leader_required,
+                csone_file_provided=_leader_csone_provided,
+            )
+            logger.info("[[VALIDATION]] Leader report data sources validated")
+        except DataSourceValidationError as ve:
+            logger.error(f"[[VALIDATION]] Leader data validation failed: {ve}")
+            with analysis_status_lock:
+                status['status'] = 'error'
+                status['error'] = 'Leader report data validation failed'
+                status['message'] = (
+                    f"Leader report cannot be generated: {', '.join(ve.missing_sources)} "
+                    "missing or empty. See logs for details."
+                )
+                status['completion_time'] = _now_utc_iso_z()
+                save_analysis_status()
+            return
+
         with analysis_status_lock:
             _update_progress(status, 8, 'Loading and scoping CSOne data...', 'CSOne Processing')
         
@@ -11572,7 +16437,8 @@ def run_leader_report_generation(analysis_id):
         logger.info(f"[[WEB]] Gathering external intelligence for leader report...")
         try:
             ext_bugs = fetch_help_webex_bugs()
-            ext_incidents = fetch_status_incidents()
+            _inc_days = int(days) if isinstance(locals().get('days'), (int, float)) and locals().get('days') else 365
+            ext_incidents = fetch_status_incidents(days_back=_inc_days)
             logger.info(f"[[OK]] External intelligence gathered: {len(ext_bugs)} bugs, {len(ext_incidents)} incidents")
         except Exception as e:
             logger.warning(f"[[WARNING]] External intelligence gathering failed: {e}")
@@ -11620,7 +16486,162 @@ def run_leader_report_generation(analysis_id):
         
         with analysis_status_lock:
             _update_progress(status, 82, 'Generating Excel workbook...', 'Excel Report Generation')
-        
+
+        # Phase 1.1: Run validate_report_consistency on the aggregated leader
+        # bundle so the leader report path is contract-checked the same way the
+        # comprehensive / compact / EI paths already are.
+        try:
+            agg_ab_frames = []
+            agg_tac_frames = []
+            agg_pulse_frames = []
+            for _cssm_name, _data in (team_data or {}).items():
+                _ab = _data.get('adoption_barriers', pd.DataFrame())
+                if isinstance(_ab, pd.DataFrame) and not _ab.empty:
+                    agg_ab_frames.append(_ab)
+                _tac = _data.get('tac_cases', pd.DataFrame())
+                if isinstance(_tac, pd.DataFrame) and not _tac.empty:
+                    agg_tac_frames.append(_tac)
+                _pulse = _data.get('customer_pulse', pd.DataFrame())
+                if isinstance(_pulse, pd.DataFrame) and not _pulse.empty:
+                    agg_pulse_frames.append(_pulse)
+            agg_ab = pd.concat(agg_ab_frames, ignore_index=True) if agg_ab_frames else pd.DataFrame()
+            agg_tac = pd.concat(agg_tac_frames, ignore_index=True) if agg_tac_frames else pd.DataFrame()
+            agg_pulse = pd.concat(agg_pulse_frames, ignore_index=True) if agg_pulse_frames else pd.DataFrame()
+            # Round 2 / Phase 4.5: ``pd.concat`` drops ``DataFrame.attrs``
+            # so the per-customer ``fetch_error`` / ``row_contract`` flags
+            # would be silently lost on the aggregate frame.  Re-stamp:
+            #   * ``fetch_error`` becomes the union of any per-frame
+            #     fetch errors so consistency checks can detect
+            #     "some customers' AB fetch failed" instead of treating
+            #     a partial aggregate as fully successful.
+            #   * ``row_contract`` is re-derived via
+            #     ``annotate_with_contract`` so the contract dashboard
+            #     reflects the aggregate's real columns.
+            try:
+                from data_contracts import annotate_with_contract as _annotate
+            except Exception:
+                _annotate = None  # type: ignore
+
+            def _restamp_aggregate(agg_df: 'pd.DataFrame', source_frames: 'list[pd.DataFrame]', dataset: 'Optional[str]') -> 'pd.DataFrame':
+                if not isinstance(agg_df, pd.DataFrame):
+                    return agg_df
+                # Union per-frame fetch_error attrs onto the aggregate so
+                # downstream renderers can detect partial failures.
+                fetch_errors = []
+                fetch_kinds = []
+                for _src in source_frames or []:
+                    _attrs = getattr(_src, 'attrs', {}) or {}
+                    _err = _attrs.get('fetch_error')
+                    if _err:
+                        fetch_errors.append(str(_err))
+                    _kind = _attrs.get('fetch_error_kind')
+                    if _kind:
+                        fetch_kinds.append(str(_kind))
+                if fetch_errors:
+                    try:
+                        agg_df.attrs['fetch_error'] = '; '.join(sorted(set(fetch_errors)))
+                        if fetch_kinds:
+                            agg_df.attrs['fetch_error_kind'] = (
+                                'partial_aggregate'
+                                if len(set(fetch_kinds)) > 1
+                                else fetch_kinds[0]
+                            )
+                        agg_df.attrs['fetch_error_partial'] = True
+                    except Exception:
+                        # Round 4: non-fatal; suppressed silently in original code
+                        pass  # noqa: PIE790
+                if dataset and _annotate is not None and not agg_df.empty:
+                    try:
+                        _annotate(agg_df, dataset=dataset)
+                    except Exception:
+                        # Round 4: non-fatal; suppressed silently in original code
+                        pass  # noqa: PIE790
+                return agg_df
+
+            agg_ab = _restamp_aggregate(agg_ab, agg_ab_frames, 'adoption_barriers')
+            agg_tac = _restamp_aggregate(agg_tac, agg_tac_frames, 'tac_cases')
+            agg_pulse = _restamp_aggregate(agg_pulse, agg_pulse_frames, 'customer_pulse')
+            # Round 2 / Phase 1.11: thread extra_frames + the
+            # account_to_customer mapping so the validator counts
+            # subscription-only / pulse-only customers in the same
+            # universe the leader report does.
+            try:
+                _leader_lookup = build_customer_lookup(
+                    team_subs_df_unfiltered if 'team_subs_df_unfiltered' in locals() else pd.DataFrame()
+                )
+                _leader_a2c = (_leader_lookup or {}).get('account_to_customer', {}) or {}
+            except Exception:
+                _leader_a2c = {}
+            _leader_extra_frames = []
+            for _name in (
+                'team_subs_df_unfiltered',
+                'csconsole_customer_pulse',
+                'csconsole_success_priorities',
+                'csconsole_adoption_barriers',
+                'ap_df',
+            ):
+                _val = locals().get(_name)
+                if isinstance(_val, pd.DataFrame) and not _val.empty:
+                    _leader_extra_frames.append(_val)
+            # Round 5 / Phase 5.1: previously the leader path called
+            # ``validate_report_consistency`` WITHOUT a
+            # ``portfolio_metrics=`` kwarg, which meant the validator
+            # had to re-derive customer counts / risk distributions
+            # from the AB+TAC frames alone.  That re-derivation does
+            # not see subscription-only customers and disagrees with
+            # the canonical metrics that the EI / compact paths
+            # publish, so the leader report could pass consistency
+            # while the same dataset failed it on every other path.
+            # Build a leader-scope ``PortfolioMetrics`` first and
+            # thread it through so all paths use the same source of
+            # truth.
+            try:
+                _leader_portfolio_metrics = cm.build_portfolio_metrics(
+                    customer_subs=team_subs_df_unfiltered if 'team_subs_df_unfiltered' in locals() and isinstance(team_subs_df_unfiltered, pd.DataFrame) else pd.DataFrame(),
+                    ab_df=agg_ab,
+                    csone_df=agg_tac,
+                    customer_pulse_df=agg_pulse if not agg_pulse.empty else None,
+                    risk_scale=cm.RISK_SCALE_0_TO_10,
+                    extra_customer_frames=_leader_extra_frames or None,
+                    account_to_customer=_leader_a2c or None,
+                )
+            except Exception as _lpm_err:
+                logger.debug(
+                    "Leader portfolio_metrics build failed; falling back to validator's "
+                    "internal derivation: %s",
+                    _lpm_err,
+                )
+                _leader_portfolio_metrics = None
+            # Round 6 / Phase 5.8: thread ``strict_mode`` and any
+            # leader-narrative factual_claims through the validator so
+            # the leader path matches the comprehensive path's enforcement
+            # model and a single env toggle governs all reports.
+            _leader_strict = (
+                str(os.getenv("ADOPTIQ_NONSTRICT_CONSISTENCY", "0")).strip().lower()
+                not in {"1", "true", "yes", "on"}
+            )
+            _leader_factual_claims: list = []
+            for _claim_attr in ("leader_factual_claims", "factual_claims", "leader_key_findings"):
+                _claim_val = locals().get(_claim_attr)
+                if isinstance(_claim_val, list):
+                    _leader_factual_claims.extend([str(c) for c in _claim_val if c])
+            leader_consistency = validate_report_consistency(
+                agg_ab,
+                agg_tac,
+                customer_pulse_df=agg_pulse if not agg_pulse.empty else None,
+                extra_frames=_leader_extra_frames or None,
+                account_to_customer=_leader_a2c or None,
+                portfolio_metrics=_leader_portfolio_metrics,
+                strict_mode=_leader_strict,
+                factual_claims=_leader_factual_claims or None,
+            )
+            if not leader_consistency.get('is_valid', True):
+                logger.error(f"[[CONSISTENCY]] Leader report errors: {leader_consistency.get('errors')}")
+            if leader_consistency.get('warnings'):
+                logger.warning(f"[[CONSISTENCY]] Leader report warnings: {leader_consistency.get('warnings')}")
+        except Exception as _lcerr:
+            logger.warning(f"[[CONSISTENCY]] Leader consistency check skipped: {_lcerr}")
+
         # Generate Excel file with team data
         excel_path = None
         try:
@@ -11681,15 +16702,26 @@ def run_leader_report_generation(analysis_id):
             # Always build a Team_Summary sheet so the Excel file is never empty
             summary_rows = []
             for cssm_name, data in team_data.items():
+                # Round 10 / Phase 7.3: ``Num_Subscriptions`` previously
+                # held ``len(data['subscriptions'])`` which is a row
+                # count of the subscriptions DataFrame -- one customer
+                # with five subscriptions counted as five.  That made
+                # the Team_Summary sheet disagree with every customer-
+                # level Word/Excel section that uses *distinct
+                # customer counts*.  Add an explicit ``Num_Customers``
+                # column derived from the deduped ``customers`` list
+                # so the leader can compare like-for-like.
+                _customers_list = data.get('customers', []) or []
                 summary_rows.append({
                     'Team_Member': cssm_name,
+                    'Num_Customers': len(_customers_list),
                     'Num_Subscriptions': len(data.get('subscriptions', pd.DataFrame())),
                     'Num_Action_Plans': len(data.get('action_plans', pd.DataFrame())),
                     'Num_Adoption_Barriers': len(data.get('adoption_barriers', pd.DataFrame())),
                     'Num_Customer_Pulse': len(data.get('customer_pulse', pd.DataFrame())),
                     'Num_Success_Priorities': len(data.get('success_priorities', pd.DataFrame())),
                     'Num_TAC_Cases': len(data.get('tac_cases', pd.DataFrame())),
-                    'Customers': ', '.join(data.get('customers', []))
+                    'Customers': ', '.join(_customers_list),
                 })
             if summary_rows:
                 sheets['Team_Summary'] = pd.DataFrame(summary_rows)
@@ -11716,16 +16748,30 @@ def run_leader_report_generation(analysis_id):
             if software_defects and software_defects.get('total_defects', 0) > 0:
                 defect_rows = []
                 for cust, ids in (software_defects.get('defect_by_customer') or {}).items():
+                    # Round 5 / Phase 1.13: normalize customer name so leader
+                    # Software_Defects rows match the same canonical name
+                    # used by Customer_Pulse / Action_Plans / Subscriptions
+                    # sheets and by report_consistency parity checks.
+                    try:
+                        _cust_norm = normalize_customer_name(cust) or cust
+                    except Exception:
+                        _cust_norm = cust
                     for did in (ids if isinstance(ids, (list, set)) else [ids]):
-                        defect_rows.append({'Customer': cust, 'Defect_ID': did})
+                        defect_rows.append({'Customer': _cust_norm, 'Defect_ID': did})
                 if defect_rows:
                     sheets['Software_Defects'] = pd.DataFrame(defect_rows)
             # PSIRT vulnerabilities (from CSOne/Adoption Barriers)
             if psirt_vulns and psirt_vulns.get('total_vulnerabilities', 0) > 0:
                 vuln_rows = []
                 for cust, ids in (psirt_vulns.get('vulnerability_by_customer') or {}).items():
+                    # Round 5 / Phase 1.13: normalize customer name (see
+                    # Software_Defects above).
+                    try:
+                        _cust_norm = normalize_customer_name(cust) or cust
+                    except Exception:
+                        _cust_norm = cust
                     for vid in (ids if isinstance(ids, (list, set)) else [ids]):
-                        vuln_rows.append({'Customer': cust, 'Vulnerability_ID': vid})
+                        vuln_rows.append({'Customer': _cust_norm, 'Vulnerability_ID': vid})
                 for vid in (psirt_vulns.get('cve_ids') or set()):
                     vuln_rows.append({'Customer': '', 'Vulnerability_ID': vid, 'Type': 'CVE'})
                 for vid in (psirt_vulns.get('psirt_advisories') or set()):
@@ -11737,6 +16783,17 @@ def run_leader_report_generation(analysis_id):
             if sheets:
                 logger.info(f"[[WRITE]] Writing Excel file with {len(sheets)} sheets: {list(sheets.keys())}")
                 sheets_written = 0
+                # Round 4 / Phase 1.1: initialize the failed-sheets
+                # ledger BEFORE the writer context so the
+                # ``Report_Info`` write at the end of the context
+                # still has scope. The previous code initialized
+                # this inside the ``except sheet_error`` branch
+                # via ``locals().get('_failed_sheets') or []`` and
+                # then tried to write ``Report_Info`` *after* the
+                # ``with`` block exited — which closed the writer
+                # and silently dropped the partial-completion
+                # ledger.
+                _failed_sheets: list = []
                 with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
                     workbook = writer.book
                     
@@ -11762,6 +16819,36 @@ def run_leader_report_generation(analysis_id):
                     })
                     
                     for sheet_name, df in sheets.items():
+                        # Round 2 / Phase 2.1: surface fetch_error
+                        # tristate so a failed fetch is rendered as
+                        # ``Data_Unavailable`` rather than dropped to a
+                        # silent zero-row sheet.
+                        _fetch_error = None
+                        _fetch_error_kind = None
+                        try:
+                            _fetch_error = df.attrs.get('fetch_error') if hasattr(df, 'attrs') else None
+                            _fetch_error_kind = df.attrs.get('fetch_error_kind') if hasattr(df, 'attrs') else None
+                        except Exception:
+                            _fetch_error = None
+                        if _fetch_error:
+                            try:
+                                unavailable_df = pd.DataFrame([
+                                    {
+                                        'Status': 'Data Unavailable',
+                                        'Dataset': sheet_name,
+                                        'Reason': str(_fetch_error_kind or 'fetch_error'),
+                                        'Detail': str(_fetch_error)[:512],
+                                        'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
+                                    }
+                                ])
+                                unavailable_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
+                                worksheet = writer.sheets[sheet_name]
+                                worksheet.write(0, 0, f"{sheet_name.replace('_', ' ')} — Data Unavailable", title_format)
+                                sheets_written += 1
+                                logger.warning(f"[LEADER EXCEL] Sheet '{sheet_name}' rendered as Data_Unavailable: {_fetch_error}")
+                            except Exception as _du_err:
+                                logger.error(f"[LEADER EXCEL] Failed to write Data_Unavailable for '{sheet_name}': {_du_err}")
+                            continue
                         if not df.empty:
                             try:
                                 # Clean datetime columns for Excel compatibility
@@ -11797,10 +16884,85 @@ def run_leader_report_generation(analysis_id):
                                 
                                 sheets_written += 1
                             except Exception as sheet_error:
+                                # Round 2 / Phase 2.7: track per-sheet
+                                # write failures so the final
+                                # ``Report_Info`` sheet can list them
+                                # and downstream consumers can tell
+                                # "0 rows" from "write threw".
                                 logger.warning(f"[[WARNING]] Failed to write sheet '{sheet_name}': {sheet_error}")
-                
-                if sheets_written > 0:
+                                _failed_sheets.append({
+                                    'sheet': sheet_name,
+                                    'error': str(sheet_error)[:512],
+                                })
+
+                    # Round 5 / Phase 1.7: always write Report_Info with
+                    # the run metadata (manager / days / analysis_id /
+                    # generated_at_UTC), partial_data_warnings ledger,
+                    # and per-sheet failure ledger.  Round 4 only wrote
+                    # this when ``_failed_sheets`` was non-empty; that
+                    # silently dropped the partial_data_warnings + meta
+                    # context whenever every sheet wrote successfully.
+                    try:
+                        _leader_pdw = []
+                        try:
+                            _ldr_status = analysis_status.get(analysis_id, {}) if isinstance(analysis_status, dict) else {}
+                            _src = _ldr_status.get('partial_data_warnings') or []
+                            if isinstance(_src, list):
+                                _leader_pdw = _src
+                        except Exception:
+                            _leader_pdw = []
+                        _info_rows = [
+                            {'Field': 'Status', 'Value': 'PARTIAL' if _failed_sheets else 'OK',
+                             'Detail': '', 'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')},
+                            {'Field': 'Manager', 'Value': str(manager or 'n/a'),
+                             'Detail': '', 'Generated_At': ''},
+                            {'Field': 'Days', 'Value': str(days),
+                             'Detail': '', 'Generated_At': ''},
+                            {'Field': 'Analysis_Id', 'Value': str(analysis_id),
+                             'Detail': '', 'Generated_At': ''},
+                            {'Field': 'Sheets_Written', 'Value': str(sheets_written),
+                             'Detail': '', 'Generated_At': ''},
+                            {'Field': 'Partial_Data_Warning_Count', 'Value': str(len(_leader_pdw)),
+                             'Detail': '', 'Generated_At': ''},
+                        ]
+                        for _i, _w in enumerate(_leader_pdw, 1):
+                            try:
+                                _ds = (_w.get('dataset') if isinstance(_w, dict) else None) or 'n/a'
+                                _kind = (_w.get('kind') if isinstance(_w, dict) else None) or 'n/a'
+                                _err = (_w.get('error') if isinstance(_w, dict) else str(_w))
+                                _info_rows.append({
+                                    'Field': f'Partial_Data_Warning_{_i}',
+                                    'Value': _ds,
+                                    'Detail': f'{_kind}: {str(_err)[:200]}',
+                                    'Generated_At': '',
+                                })
+                            except Exception:
+                                continue
+                        for fs in _failed_sheets:
+                            _info_rows.append({
+                                'Field': 'Failed_Sheet',
+                                'Value': fs['sheet'],
+                                'Detail': fs['error'],
+                                'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
+                            })
+                        report_info_df = pd.DataFrame(_info_rows)
+                        report_info_df.to_excel(writer, sheet_name='Report_Info', index=False)
+                    except Exception as _ri_err:
+                        logger.error(f"[LEADER EXCEL] Failed to write Report_Info: {_ri_err}")
+
+                if sheets_written > 0 and not _failed_sheets:
                     logger.info(f"[[OK]] Excel file created successfully ({sheets_written} sheets): {excel_path}")
+                elif sheets_written > 0 and _failed_sheets:
+                    # Workbook is PARTIAL — log loudly so the request
+                    # path can flag it instead of advertising it as
+                    # success.  We still keep the file so the user
+                    # gets the sheets that did write, but we expose
+                    # the ledger via ``Report_Info``.
+                    logger.error(
+                        f"[[PARTIAL]] Excel file created with {sheets_written} sheets and "
+                        f"{len(_failed_sheets)} failed sheets: {excel_path}; failed: "
+                        f"{[f['sheet'] for f in _failed_sheets]}"
+                    )
                 else:
                     logger.error(f"[[ERROR]] All sheets failed to write, removing empty Excel file")
                     try:
@@ -11819,7 +16981,7 @@ def run_leader_report_generation(analysis_id):
         with analysis_status_lock:
             _update_progress(status, 100, 'Leader report generated successfully!', 'Complete')
             status['status'] = 'completed'
-            status['completion_time'] = datetime.now().isoformat()
+            status['completion_time'] = _now_utc_iso_z()
             completion_time = status['completion_time']
             report_type = status.get('report_type', 'leader')
             manager = status.get('manager', '')
@@ -11834,14 +16996,19 @@ def run_leader_report_generation(analysis_id):
                 'excel_report': excel_path if excel_path else None,
                 'success_message': success_msg
             }
-
-        # Persist outside lock to reduce lock contention during file I/O.
-        save_analysis_status()
+            # Round 5 / Phase 6.7: persist *under* the lock so the on-disk
+            # JSON snapshot matches the in-memory completion state.  See
+            # the matching comment in the compact-report worker.
+            save_analysis_status()
 
         auto_audit_report(analysis_id)
+        # Round 3 / Phase 5.4: pass days, paths.
         record_report_completion(
             analysis_id, report_type, manager, technology, customer_name,
-            'completed', start_time, completion_time
+            'completed', start_time, completion_time,
+            days=status.get('days') if isinstance(status, dict) else None,
+            word_path=filepath if 'filepath' in locals() and filepath else '',
+            excel_path=excel_path if 'excel_path' in locals() and excel_path else '',
         )
         try:
             store_report_insights(
@@ -11864,7 +17031,15 @@ def run_leader_report_generation(analysis_id):
             analysis_status[analysis_id]['status'] = 'error'
             analysis_status[analysis_id]['error'] = "Leader report generation failed. Please check the Admin page for details."
             analysis_status[analysis_id]['message'] = 'Error during leader report generation'
-            analysis_status[analysis_id]['completion_time'] = datetime.now().isoformat()
+            # Round 5 / Phase 6.9: a failed run has an *end* time, not a
+            # *completion* time -- callers (History page, admin tile)
+            # use the presence of ``completion_time`` as a soft signal
+            # that the artifact is downloadable, so leaving it set on
+            # the failure path made failed leader reports show up next
+            # to successful ones in some surfaces.  Use ``end_time``
+            # instead and stop populating ``completion_time`` for the
+            # failure path.
+            analysis_status[analysis_id]['end_time'] = _now_utc_iso_z()
             save_analysis_status()
     finally:
         if ctx:
@@ -12146,6 +17321,21 @@ def _check_port_available(port):
     """Return (available: bool, pid: int|None, process_name: str|None)."""
     import socket
     import subprocess
+    # Round 8 / Phase 1.12: defence-in-depth -- clamp port to the legal
+    # TCP range before passing it to ``socket.bind`` and ``lsof -i :%s``.
+    # No untrusted call site exists today, but if one ever appeared a
+    # negative or 70000+ value would either raise from socket directly
+    # (OK) or, in the lsof fallback, end up as ``-i :-1`` / ``-i :70000``
+    # which lsof interprets unpredictably.  Reject early with the same
+    # ``(False, None, None)`` signal the caller already handles for an
+    # in-use port.
+    try:
+        port_int = int(port)
+    except (TypeError, ValueError):
+        return (False, None, None)
+    if not (0 <= port_int <= 65535):
+        return (False, None, None)
+    port = port_int
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.bind(('', port))
@@ -12199,6 +17389,20 @@ atexit.register(_shutdown_handler)
 
 
 if __name__ == '__main__':
+    # Round 7 / Phase 3.12: incident_storage no longer initialises its
+    # SQLite database as a module-level side effect.  Bootstrap the
+    # schema explicitly here so the first browser request doesn't race
+    # with table creation.
+    try:
+        from incident_storage import init_db as _incident_init_db
+        _incident_init_db()
+    except Exception as _init_err:  # pragma: no cover - defensive only
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "Round 7 / Phase 3.12: explicit incident_storage.init_db() at "
+            "bootstrap raised: %s",
+            _init_err,
+        )
     PORT = 5001
     print("AdoptIQ Simple - AI-Powered Executive Analytics")
     print(version_string())
@@ -12330,4 +17534,27 @@ if __name__ == '__main__':
 
     threading.Thread(target=_open_browser, daemon=True).start()
 
-    app.run(debug=False, host='0.0.0.0', port=PORT, use_reloader=False)
+    # Round 8 / Phase 1.13: bind-address sanity check.  ``_SENSITIVE_ENDPOINTS``
+    # is gated by ``_is_local_client`` (loopback only), but if the bind host
+    # is non-loopback the entire sensitive surface (download_result,
+    # cancel_analysis, intel export/import, status JSON, etc.) is exposed
+    # to anyone who can reach the host on PORT.  ``ADOPTIQ_BIND_HOST`` lets
+    # operators override (e.g. ``127.0.0.1`` for the desktop bundle), and
+    # we hard-warn at boot when the chosen host is non-loopback while the
+    # sensitive surface is enabled, so the misconfiguration is impossible
+    # to miss in stdout / shipped logs.
+    _bind_host = os.environ.get('ADOPTIQ_BIND_HOST', '0.0.0.0').strip() or '0.0.0.0'
+    _loopback_hosts = {'127.0.0.1', '::1', 'localhost'}
+    if _bind_host not in _loopback_hosts and _SENSITIVE_ENDPOINTS:
+        _msg = (
+            "[[BIND-WARNING]] AdoptIQ is binding %s while %d sensitive endpoints "
+            "rely on loopback-only protection. Set ADOPTIQ_BIND_HOST=127.0.0.1 "
+            "for desktop deployments, or front the app with a reverse proxy "
+            "that strips/normalises X-Forwarded-For before exposing publicly."
+        ) % (_bind_host, len(_SENSITIVE_ENDPOINTS))
+        print(_msg)
+        try:
+            logger.warning(_msg)
+        except Exception:
+            pass
+    app.run(debug=False, host=_bind_host, port=PORT, use_reloader=False)

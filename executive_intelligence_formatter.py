@@ -11,15 +11,26 @@ from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
-from datetime import datetime
+from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Any, Optional
 import logging
 import re
-from data_normalization import add_case_lifecycle_fields, detect_bems_mask, extract_bems_ids_from_row
+from data_normalization import (
+    add_case_lifecycle_fields,
+    detect_bems_mask,
+    extract_bems_ids_from_row,
+    normalize_customer_name,
+)
 from report_consistency import validate_report_consistency
-from report_utils import format_inline_source, format_metric_with_source
+from report_utils import (
+    format_inline_source,
+    format_metric_with_source,
+    format_number,
+    format_ratio_percent,
+    format_percent_points,
+)
 import canonical_metrics as cm
 
 logger = logging.getLogger(__name__)
@@ -113,8 +124,16 @@ class ExecutiveIntelligenceFormatter:
         
         return text.strip()
     
-    def add_title_page(self, manager: str, technology: str, days: int):
-        """Add executive title page"""
+    def add_title_page(self, manager: str, technology: str, days: int,
+                        data_retrieved_at: Optional[datetime] = None):
+        """Add executive title page.
+
+        Phase 3.1: ``data_retrieved_at`` (UTC) is propagated from the
+        ``AnalysisRunContext`` so the cover page can render both the
+        render time (``Generated``) and the data fetch time
+        (``Data as of``). This is the difference between blaming the
+        report for stale numbers vs. blaming the source.
+        """
         # Logo/Branding
         logo_para = self.doc.add_paragraph()
         logo_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -147,10 +166,40 @@ class ExecutiveIntelligenceFormatter:
         self.doc.add_paragraph()
         date_para = self.doc.add_paragraph()
         date_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        date_run = date_para.add_run(f"Generated: {datetime.now().strftime('%B %d, %Y')}")
+        # Round 7 / Phase 1.3: render the cover-page "Generated"
+        # timestamp in UTC so it agrees with the "Data as of" line
+        # below (which is already labelled UTC).  Local timezone here
+        # made the cover page disagree with itself depending on the
+        # server's locale.
+        date_run = date_para.add_run(
+            f"Generated: {datetime.now(timezone.utc).strftime('%B %d, %Y')} UTC"
+        )
         date_run.font.name = 'Segoe UI'
         date_run.font.size = Pt(11)
         date_run.font.color.rgb = CISCO_GRAY
+
+        if data_retrieved_at is not None:
+            data_para = self.doc.add_paragraph()
+            data_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            # Round 7 / Phase 1.10: narrow this except so unexpected
+            # failures are logged + propagated.  ``strftime`` only
+            # raises ``AttributeError`` (non-datetime input) or
+            # ``ValueError`` (locale issue); anything else here is a
+            # real bug we want to see in logs rather than silently
+            # converting to ``str(data_retrieved_at)``.
+            try:
+                _data_str = data_retrieved_at.strftime('%B %d, %Y at %H:%M UTC')
+            except (AttributeError, ValueError) as _strftime_err:
+                logger.warning(
+                    "Round 7 / Phase 1.10: data_retrieved_at strftime "
+                    "failed (type=%s): %s",
+                    type(data_retrieved_at).__name__, _strftime_err,
+                )
+                _data_str = str(data_retrieved_at)
+            data_run = data_para.add_run(f"Data as of: {_data_str}")
+            data_run.font.name = 'Segoe UI'
+            data_run.font.size = Pt(10)
+            data_run.font.color.rgb = CISCO_GRAY
     
     def add_executive_dashboard(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame,
                                risk_scores: Dict[str, Any], risk_summary: Dict[str, Any],
@@ -195,8 +244,32 @@ class ExecutiveIntelligenceFormatter:
             logger.info(f"[[CUSTOMER_COUNT]] Team subscriptions (PRIMARY SOURCE): {len(team_subs_df['BU_NAME'].unique()) if team_subs_df is not None and not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns else 0} customers")
             logger.info(f"[[CUSTOMER_COUNT]] Team subscriptions DataFrame has {len(team_subs_df) if team_subs_df is not None else 0} rows")
             if team_subs_df is not None and not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns:
-                sample_customers = team_subs_df['BU_NAME'].dropna().unique()[:5].tolist()
-                logger.info(f"[[CUSTOMER_COUNT]] Sample customers from team_subs_df: {sample_customers}")
+                # Round 7 / Phase 1.9: redact BU_NAME samples in
+                # INFO logs.  This line previously printed the raw
+                # first 5 customer names which is PII for shared log
+                # destinations (Splunk / cloud aggregator).  At INFO
+                # we now emit a count + a hashed digest; the full
+                # sample is moved to DEBUG behind a feature flag so
+                # operators can still pull it locally when
+                # troubleshooting.
+                _bu_unique = team_subs_df['BU_NAME'].dropna().unique()
+                _sample_n = min(5, len(_bu_unique))
+                try:
+                    import hashlib as _hl
+                    _digest = _hl.sha256(
+                        '|'.join(sorted(str(x) for x in _bu_unique[:_sample_n])).encode('utf-8')
+                    ).hexdigest()[:8]
+                except Exception:
+                    _digest = "unavailable"
+                logger.info(
+                    "[[CUSTOMER_COUNT]] team_subs_df sample: count=%d digest=%s",
+                    _sample_n, _digest,
+                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "[[CUSTOMER_COUNT]] Sample customers from team_subs_df: %s",
+                        _bu_unique[:_sample_n].tolist(),
+                    )
         except (ImportError, AttributeError) as e:
             logger.warning(f"[[WARNING]] Could not import _get_all_customers_from_all_sources, using cm.count_customers fallback: {e}")
             # Canonical fallback: union of normalized names across every
@@ -293,10 +366,41 @@ class ExecutiveIntelligenceFormatter:
         
         # Risk Summary
         if risk_summary:
+            # Round 7 / Phase 1.4: route counts/scores through the
+            # shared ``format_number`` / ``format_ratio_percent``
+            # helpers so the EI Word matches the rounding/percent
+            # convention used by every other report.  Previously we
+            # printed ``risk_summary['overall_risk_score']`` raw,
+            # which surfaced floats like ``5.123456789`` and integers
+            # without thousands separators.
             risk_para = self.doc.add_paragraph()
             risk_para.add_run('Risk Summary: ').font.bold = True
-            risk_para.add_run(f"Overall Risk Score: {risk_summary.get('overall_risk_score', 'N/A')} | ")
-            risk_para.add_run(f"High Risk Customers: {risk_summary.get('high_risk_customers', 0)} | ")
+            _overall = risk_summary.get('overall_risk_score')
+            _overall_str = (
+                'N/A' if _overall in (None, 'N/A')
+                else format_number(_overall, decimals=1)
+            )
+            risk_para.add_run(f"Overall Risk Score: {_overall_str} | ")
+            # Round 10 / Phase 4.1: derive the headline high-risk count from
+            # the *same* ``cm.is_high_risk_profile`` predicate that
+            # ``add_risk_analysis_section`` uses to populate the
+            # high-risk-customer table. Previously this read
+            # ``risk_summary['high_risk_customers']`` which can disagree
+            # with the predicate (the summary may be sourced from a
+            # different scale / fallback path), so the dashboard would
+            # claim "12 high-risk customers" while the table below it
+            # listed only 9. Re-derive from ``risk_scores`` so the two
+            # surfaces always agree.
+            try:
+                _ei_high_count = sum(
+                    1 for _v in (risk_scores or {}).values()
+                    if cm.is_high_risk_profile(_v, scale=cm.RISK_SCALE_0_TO_10)
+                )
+            except Exception:
+                _ei_high_count = int(risk_summary.get('high_risk_customers', 0) or 0)
+            risk_para.add_run(
+                f"High Risk Customers: {format_number(_ei_high_count, decimals=0)} | "
+            )
             # Round 4: clarify the legacy ``moderate_risk_customers`` key
             # (score 4-6 on 0-10 scale) is the score-range "Watch" bucket
             # and is *not* the same as the canonical band MEDIUM
@@ -305,15 +409,17 @@ class ExecutiveIntelligenceFormatter:
             # ties out with the executive donut.
             _medium_band = risk_summary.get('medium_risk_customers')
             if _medium_band is not None:
-                risk_para.add_run(f"Medium Risk (band): {_medium_band}")
+                risk_para.add_run(
+                    f"Medium Risk (band): {format_number(_medium_band, decimals=0)}"
+                )
                 _watch = risk_summary.get('moderate_risk_customers')
                 if _watch is not None and _watch != _medium_band:
                     risk_para.add_run(
-                        f" | Score 4-6 (Watch, 0-10 scale): {_watch}"
+                        f" | Score 4-6 (Watch, 0-10 scale): {format_number(_watch, decimals=0)}"
                     )
             else:
                 risk_para.add_run(
-                    f"Score 4-6 (Watch, 0-10 scale): {risk_summary.get('moderate_risk_customers', 0)}"
+                    f"Score 4-6 (Watch, 0-10 scale): {format_number(risk_summary.get('moderate_risk_customers', 0), decimals=0)}"
                 )
     
     def add_executive_summary(self, ai_insights: Dict[str, Any]):
@@ -335,8 +441,41 @@ class ExecutiveIntelligenceFormatter:
             clean_text = self._clean_text(summary_text)
             self._parse_and_add_content(clean_text)
         else:
+            # Round 3 / Phase 2.2: this branch fires AFTER a completed
+            # run. The previous "AI-generated insights are being
+            # processed. Please check back shortly." copy implied a
+            # transient pipeline state and invited readers to refresh.
+            # In reality the LLM either returned no parsable summary
+            # or the call failed entirely. Be honest so a reader does
+            # not assume content is on the way.
             para = self.doc.add_paragraph()
-            para.add_run("AI-generated insights are being processed. Please check back shortly.")
+            run = para.add_run(
+                "AI summary unavailable for this run."
+            )
+            run.bold = True
+            _err_text = ""
+            if isinstance(ai_insights, dict):
+                _err_text = (
+                    str(
+                        ai_insights.get("llm_error")
+                        or ai_insights.get("error")
+                        or ai_insights.get("failure_reason")
+                        or ""
+                    ).strip()
+                )
+            if _err_text:
+                detail = self.doc.add_paragraph()
+                detail_run = detail.add_run(f"Reason: {_err_text}")
+                detail_run.italic = True
+            else:
+                detail = self.doc.add_paragraph()
+                detail_run = detail.add_run(
+                    "The model did not return a parsable executive summary "
+                    "for this run. The metrics, tables, and charts elsewhere "
+                    "in this report remain accurate; only the AI narrative "
+                    "is missing."
+                )
+                detail_run.italic = True
         provenance = self.doc.add_paragraph()
         provenance.add_run(
             "Severity provenance: TAC severity comes from CSOne case priority/severity fields; "
@@ -364,10 +503,38 @@ class ExecutiveIntelligenceFormatter:
                 if not line:
                     continue
                 
-                # Section headers
-                if line.endswith(':') and len(line) < 80:
-                    header_text = line.rstrip(':')
-                    header = self.doc.add_heading(header_text, level=2)
+                # Round 11 / Phase 9.5: previous rule treated *any*
+                # short line ending in ``:`` as an H2 heading, so LLM
+                # prose like ``Caution:`` or ``Note:`` got promoted
+                # to a section heading and broke document structure.
+                # Require an explicit markdown ``##``/``###`` prefix
+                # OR a Title-Cased label that is short, contains no
+                # internal sentence punctuation, and is followed by
+                # nothing (the colon is the entire payload, not the
+                # lead-in to a sentence).
+                _heading_md = re.match(r'^(#{2,3})\s+(.+)$', line)
+                _heading_label = (
+                    line.endswith(':')
+                    and len(line) < 60
+                    and ':' == line[-1]
+                    and ',' not in line
+                    and ';' not in line
+                    and '.' not in line[:-1]
+                    and line.rstrip(':').strip()[:1].isupper()
+                    and not line.lower().startswith((
+                        'caution:', 'note:', 'warning:', 'tip:',
+                        'example:', 'example -', 'context:', 'reminder:',
+                        'important:', 'fyi:', 'as of:', 'see:',
+                    ))
+                )
+                if _heading_md or _heading_label:
+                    if _heading_md:
+                        _level = len(_heading_md.group(1)) - 1
+                        header_text = _heading_md.group(2).strip()
+                    else:
+                        _level = 2
+                        header_text = line.rstrip(':')
+                    header = self.doc.add_heading(header_text, level=_level)
                     if header.runs:
                         header.runs[0].font.color.rgb = CISCO_DARK_BLUE
                         header.runs[0].font.size = Pt(12)
@@ -451,11 +618,32 @@ class ExecutiveIntelligenceFormatter:
                 # FIXED: Show ALL high-risk customers
                 for customer, data in sorted(high_risk.items(), key=lambda x: x[1].get('score', 0), reverse=True):
                     row = table.add_row().cells
-                    row[0].text = str(customer)  # Full customer name
-                    _score = data.get('score', 0)
-                    if _score is None or (isinstance(_score, float) and (_score != _score)):
-                        _score = 0
-                    row[1].text = f"{_score}/10"
+                    # Round 11 / Phase 3.4: normalize the displayed
+                    # cell so spelling variants of the same account
+                    # collapse to a single canonical label – matches
+                    # the dashboard / Word body normalization.
+                    try:
+                        _disp = normalize_customer_name(str(customer)) or str(customer)
+                    except Exception:
+                        _disp = str(customer)
+                    row[0].text = _disp  # Full normalized customer name
+                    # Round 7 / Phase 1.7: render N/A for missing /
+                    # NaN / non-finite scores instead of coercing to
+                    # ``0`` and printing ``0/10``.  A literal "0/10"
+                    # in this column reads as "lowest possible risk"
+                    # to executives, which is the exact opposite of
+                    # "score not computed" -- the row was selected
+                    # for inclusion precisely because the canonical
+                    # band classifier flagged it as HIGH/CRITICAL.
+                    _score = data.get('score')
+                    _score_is_missing = (
+                        _score is None
+                        or (isinstance(_score, float) and not (_score == _score))
+                    )
+                    if _score_is_missing:
+                        row[1].text = "N/A"
+                    else:
+                        row[1].text = f"{format_number(_score, decimals=1)}/10"
                     
                     # Key issues
                     issues = []
@@ -492,13 +680,35 @@ class ExecutiveIntelligenceFormatter:
             bems_mask = detect_bems_mask(csone_norm)
             bems_cases = csone_norm[bems_mask]
             total_bems = len(bems_cases)
-            if 'case_type_class' in csone_norm.columns:
-                break_fix_total = int((csone_norm['case_type_class'] == 'break_fix_technical').sum())
-                provisioning_total = int((csone_norm['case_type_class'] == 'provisioning_request').sum())
+            # Round 10 / Phase 4.2: ``break_fix_total`` and
+            # ``provisioning_total`` were previously computed across the
+            # ENTIRE ``csone_norm`` frame (every TAC case in scope) but
+            # then rendered under the BEMS subheading and labelled "TAC
+            # Case Type Split". Readers reasonably interpreted those as
+            # BEMS-only counts. Restrict to the BEMS subset so the
+            # numbers match the surrounding section, matching the
+            # principle of least surprise.
+            if 'case_type_class' in bems_cases.columns and not bems_cases.empty:
+                break_fix_total = int((bems_cases['case_type_class'] == 'break_fix_technical').sum())
+                provisioning_total = int((bems_cases['case_type_class'] == 'provisioning_request').sum())
+            else:
+                break_fix_total = 0
+                provisioning_total = 0
             
             # Group by customer
             if not bems_cases.empty and 'customer_name' in bems_cases.columns:
-                bems_by_customer = bems_cases.groupby('customer_name').size().to_dict()
+                # Round 7 / Phase 1.5: normalize customer_name before
+                # the groupby so spelling variants ("Acme, Inc.",
+                # "ACME INC", "Acme Inc.") collapse into a single
+                # bucket the same way every other Round 6/7 surface
+                # already does.  Otherwise the BEMS-by-customer
+                # rollup over-counts unique customers vs. the
+                # dashboard tile.
+                _bems_norm = bems_cases.copy()
+                _bems_norm['customer_name'] = (
+                    _bems_norm['customer_name'].apply(normalize_customer_name)
+                )
+                bems_by_customer = _bems_norm.groupby('customer_name').size().to_dict()
                 
                 # Extract BEMS IDs
                 for _, row in bems_cases.iterrows():
@@ -517,10 +727,11 @@ class ExecutiveIntelligenceFormatter:
         )
         metrics_para.add_run(f'\n• Customers Affected: {len(bems_by_customer)}\n')
         metrics_para.add_run(
-            f"• TAC Case Type Split: break-fix/technical={break_fix_total}, provisioning requests={provisioning_total} "
-            f"{format_inline_source('Support Cases (TAC)', fields=['Case #', 'Title', 'Status'])}\n"
+            # Round 10 / Phase 4.2: relabel + scope clearly to BEMS-only.
+            f"• BEMS Case Type Split: break-fix/technical={break_fix_total}, provisioning requests={provisioning_total} "
+            f"{format_inline_source('BEMS Escalations', fields=['Case #', 'Title', 'Status'])}\n"
         )
-        self.doc.add_paragraph('TAC Case Type Breakdown', style='Heading 3')
+        self.doc.add_paragraph('BEMS Case Type Breakdown', style='Heading 3')
         split_table = self.doc.add_table(rows=3, cols=2)
         split_table.style = 'Light Grid Accent 1'
         split_table.rows[0].cells[0].text = "Case Type"
@@ -533,7 +744,50 @@ class ExecutiveIntelligenceFormatter:
         if not csone_norm.empty:
             self.doc.add_paragraph('TAC Lifecycle Snapshot (Opened / Closed / Days Open)', style='Heading 3')
             _LIFECYCLE_SAMPLE_LIMIT = 20
-            sample = csone_norm.head(_LIFECYCLE_SAMPLE_LIMIT)
+            # Round 12 / Phase 9.2: previously this snapshot took
+            # ``csone_norm.head(20)`` over an arbitrary upstream sort,
+            # so two consecutive runs of the same report could surface
+            # different "first 20" cases in the lifecycle table -- the
+            # truncation disclosure footer became factually unstable
+            # because there was no canonical 20.  Sort by opened-date
+            # descending (most recent first, the natural lifecycle
+            # snapshot semantic) with a stable identifier tie-break
+            # so the rendered slice is deterministic and reproducible.
+            try:
+                _date_col = next(
+                    (c for c in ('open_date', 'Date/Time Opened', 'OpenedDate') if c in csone_norm.columns),
+                    None,
+                )
+                _id_col = next(
+                    (c for c in ('Case #', 'SR Number', 'CaseNumber', 'case_id') if c in csone_norm.columns),
+                    None,
+                )
+                if _date_col is not None and _id_col is not None:
+                    _sorted = csone_norm.sort_values(
+                        [_date_col, _id_col],
+                        ascending=[False, True],
+                        na_position='last',
+                        kind='mergesort',
+                    )
+                elif _date_col is not None:
+                    _sorted = csone_norm.sort_values(
+                        _date_col,
+                        ascending=False,
+                        na_position='last',
+                        kind='mergesort',
+                    )
+                elif _id_col is not None:
+                    _sorted = csone_norm.sort_values(
+                        _id_col,
+                        ascending=True,
+                        na_position='last',
+                        kind='mergesort',
+                    )
+                else:
+                    _sorted = csone_norm
+            except Exception:  # Round 12 / Phase 9.2 defensive
+                _sorted = csone_norm
+            sample = _sorted.head(_LIFECYCLE_SAMPLE_LIMIT)
             _total_for_lifecycle = len(csone_norm)
             lifecycle_table = self.doc.add_table(rows=len(sample) + 1, cols=7)
             lifecycle_table.style = 'Light Grid Accent 1'
@@ -542,7 +796,15 @@ class ExecutiveIntelligenceFormatter:
                 lifecycle_table.rows[0].cells[idx].text = header_text
             for ridx, (_, row) in enumerate(sample.iterrows(), 1):
                 lifecycle_table.rows[ridx].cells[0].text = str(row.get('Case #', row.get('SR Number', 'N/A')))
-                lifecycle_table.rows[ridx].cells[1].text = str(row.get('customer_name', row.get('Customer Name', 'N/A')))
+                # Round 11 / Phase 3.4: normalize the customer cell
+                # so the TAC lifecycle table agrees with the BEMS
+                # rollup / dashboard tile.
+                _raw_cust = row.get('customer_name', row.get('Customer Name', 'N/A'))
+                try:
+                    _norm_cust = normalize_customer_name(str(_raw_cust)) or str(_raw_cust)
+                except Exception:
+                    _norm_cust = str(_raw_cust)
+                lifecycle_table.rows[ridx].cells[1].text = _norm_cust
                 lifecycle_table.rows[ridx].cells[2].text = str(row.get('case_status_norm', row.get('Status', 'N/A')))
                 lifecycle_table.rows[ridx].cells[3].text = str(row.get('open_date', row.get('Date/Time Opened', 'N/A')))
                 lifecycle_table.rows[ridx].cells[4].text = str(row.get('closed_date', 'N/A'))
@@ -608,7 +870,13 @@ class ExecutiveIntelligenceFormatter:
             for idx, (customer, defects) in enumerate(sorted(defect_by_customer.items()), 1):
                 defect_list = sorted(set(defects or []))
                 row = table.rows[idx].cells
-                row[0].text = str(customer)
+                # Round 11 / Phase 3.4: normalize displayed customer
+                # so duplicate-spelling rows collapse visually.
+                try:
+                    _disp_cust = normalize_customer_name(str(customer)) or str(customer)
+                except Exception:
+                    _disp_cust = str(customer)
+                row[0].text = _disp_cust
                 row[1].text = str(len(defect_list))
                 row[2].text = ", ".join([f"[{d}]" for d in defect_list])
     
@@ -623,8 +891,20 @@ class ExecutiveIntelligenceFormatter:
         psirt_advisories = psirt_vulns.get('psirt_advisories', set())
         
         summary_para = self.doc.add_paragraph()
-        summary_para.add_run(f'Total Vulnerabilities Identified: ').bold = True
-        summary_para.add_run(f'{vuln_count} ({len(cve_ids)} CVEs, {len(psirt_advisories)} PSIRT advisories).')
+        summary_para.add_run(f'Total Vulnerability References: ').bold = True
+        # Round 10 / Phase 4.3: ``vuln_count`` (``total_vulnerabilities``)
+        # counts every CVE / PSIRT *occurrence* across cases (duplicates
+        # included), while ``cve_ids`` / ``psirt_advisories`` are
+        # de-duplicated sets of distinct identifiers. The previous label
+        # ("Total Vulnerabilities Identified: 47 (12 CVEs, 8 PSIRT
+        # advisories)") read as if 47 = 12 + 8 + something, which it
+        # never does and confused executives reading the section. Make
+        # the relationship explicit so readers can reconcile the two
+        # numbers without having to read the source code.
+        summary_para.add_run(
+            f'{vuln_count} reference(s) across cases / extracts; '
+            f'{len(cve_ids)} distinct CVEs and {len(psirt_advisories)} distinct PSIRT advisories.'
+        )
         
         if cve_ids:
             self.doc.add_paragraph()
@@ -641,7 +921,16 @@ class ExecutiveIntelligenceFormatter:
         vulnerability_by_customer = psirt_vulns.get('vulnerability_by_customer', {})
         if vulnerability_by_customer:
             self.doc.add_paragraph()
-            for customer, vulns in vulnerability_by_customer.items():
+            # Round 7 / Phase 1.6: iterate via explicit ``sorted(...)``
+            # so the rendered order is deterministic across runs (Python
+            # dict insertion order is stable per-process but depends on
+            # upstream join ordering).  The sibling defects block
+            # already does the same; bring this section into parity so
+            # diffs across two consecutive runs of the same data don't
+            # show spurious row-order changes.
+            for customer, vulns in sorted(
+                vulnerability_by_customer.items(), key=lambda _kv: str(_kv[0]).lower()
+            ):
                 vuln_list = sorted(set(vulns))
                 customer_para = self.doc.add_paragraph()
                 customer_para.add_run(f'• {customer}: ').bold = True
@@ -678,8 +967,18 @@ class ExecutiveIntelligenceFormatter:
                 if source:
                     bug_para.add_run(f'\n  Source: {source}').font.size = Pt(9)
         else:
+            # Phase 3.2: route the "no defects" copy through the
+            # tristate classifier so a fetch failure is rendered as
+            # "unavailable" instead of "no defects detected".
+            from report_utils import classify_data_state, render_empty_state_message
+            _state = classify_data_state(ext_bugs)
             no_defects = self.doc.add_paragraph()
-            no_defects.add_run('✅ No publicly documented software defects detected affecting this portfolio.')
+            if _state == "present":
+                no_defects.add_run('✅ No publicly documented software defects detected affecting this portfolio.')
+            else:
+                no_defects.add_run(render_empty_state_message(
+                    _state, source_label='Software defects feed (help.webex.com)'
+                ))
     
     def add_service_incidents_section(self, ext_incidents: List = None):
         """Add Service Incidents section from status.webex.com"""
@@ -691,11 +990,35 @@ class ExecutiveIntelligenceFormatter:
         intro.add_run("Recent service incidents from status.webex.com that may have impacted portfolio customers:")
         
         if ext_incidents and len(ext_incidents) > 0:
+            # Round 4 / Phase 5.5: surface "served from local cache" so
+            # readers know the live status.webex feed was unreachable
+            # for this run and the section reflects the SQLite cache.
+            try:
+                _cache_only = (
+                    bool(ext_incidents[0].get('_served_from_local_cache'))
+                    or bool(
+                        (ext_incidents[-1].get('_window_meta') or {})
+                        .get('served_from_local_cache')
+                    )
+                )
+            except Exception:
+                _cache_only = False
+            if _cache_only:
+                cache_para = self.doc.add_paragraph()
+                cache_run = cache_para.add_run(
+                    "[Notice] These incidents were served from the local cache because the live "
+                    "status.webex feed was unreachable for this run. Treat freshness "
+                    "with caution; counts and IDs reflect the most recent successful poll."
+                )
+                cache_run.bold = True
+
             # Summary
             summary_para = self.doc.add_paragraph()
             summary_para.add_run(f'Total Incidents: ').bold = True
             summary_para.add_run(f'{len(ext_incidents)}')
-            
+            if _cache_only:
+                summary_para.add_run(' (cached)')
+
             # FIXED: Display ALL incidents for complete visibility
             self.doc.add_paragraph()
             for incident in ext_incidents:
@@ -708,24 +1031,83 @@ class ExecutiveIntelligenceFormatter:
                 inc_run.bold = True
                 inc_para.add_run(f'{title} ({date})')
         else:
+            # Phase 3.2: tristate empty-state classification
+            from report_utils import classify_data_state, render_empty_state_message
+            _state = classify_data_state(ext_incidents)
             no_incidents = self.doc.add_paragraph()
-            no_incidents.add_run('✅ No significant service incidents detected in this analysis period.')
+            if _state == "present":
+                no_incidents.add_run('✅ No significant service incidents detected in this analysis period.')
+            else:
+                no_incidents.add_run(render_empty_state_message(
+                    _state, source_label='Service incidents feed (status.webex.com)'
+                ))
     
     def add_recommendations_section(self, ai_insights: Dict[str, Any]):
-        """Add strategic recommendations section"""
+        """Add strategic recommendations section.
+
+        Round 3 / Phase 2.1: previously this method accepted
+        ``ai_insights`` and never read it; the same five canned
+        bullets shipped under the "Strategic Recommendations"
+        header regardless of model output, sitting next to real
+        AI sections. Now we prefer model-derived recommendations
+        when present and explicitly label the canned playbook
+        list as static when we fall back.
+        """
         header = self.doc.add_heading('Strategic Recommendations', level=1)
         if header.runs:
             header.runs[0].font.color.rgb = CISCO_BLUE
-        
-        # Default recommendations
+
+        ai_recs: List[str] = []
+        if isinstance(ai_insights, dict):
+            for key in (
+                "recommendations",
+                "strategic_recommendations",
+                "next_steps",
+                "actions",
+            ):
+                _v = ai_insights.get(key)
+                if isinstance(_v, list):
+                    ai_recs.extend([str(x).strip() for x in _v if str(x).strip()])
+                elif isinstance(_v, str) and _v.strip():
+                    ai_recs.append(_v.strip())
+            # Some pipelines nest under portfolio_summary.
+            _ps = ai_insights.get("portfolio_summary")
+            if isinstance(_ps, dict):
+                for key in (
+                    "recommendations",
+                    "strategic_recommendations",
+                    "next_steps",
+                ):
+                    _v = _ps.get(key)
+                    if isinstance(_v, list):
+                        ai_recs.extend(
+                            [str(x).strip() for x in _v if str(x).strip()]
+                        )
+
+        if ai_recs:
+            for rec in ai_recs:
+                para = self.doc.add_paragraph(style='List Bullet')
+                run = para.add_run(rec)
+                run.font.name = 'Segoe UI'
+                run.font.size = Pt(11)
+            return
+
+        label_para = self.doc.add_paragraph()
+        label_run = label_para.add_run(
+            "Static playbook (no AI-generated recommendations available for this run):"
+        )
+        label_run.italic = True
+        label_run.font.name = 'Segoe UI'
+        label_run.font.size = Pt(10)
+
         recommendations = [
             "Prioritize resolution of high-severity adoption barriers",
             "Implement proactive outreach for high-risk customers",
             "Schedule executive business reviews for customers with BEMS escalations",
             "Develop targeted success plans for moderate-risk accounts",
-            "Monitor renewal dates and initiate early engagement strategy"
+            "Monitor renewal dates and initiate early engagement strategy",
         ]
-        
+
         for rec in recommendations:
             para = self.doc.add_paragraph(style='List Bullet')
             run = para.add_run(rec)
@@ -762,12 +1144,21 @@ class ExecutiveIntelligenceFormatter:
         self.doc.add_paragraph()
         rec_para = self.doc.add_paragraph()
         rec_para.add_run("Record counts in this run:").bold = True
+        # Round 10 / Phase 4.4: spell out the unit on each line so a
+        # reader can answer "is this rows in the source export, distinct
+        # cases, or distinct customers?" without having to open the
+        # source code. Previously several rows said "records" (which is
+        # ambiguous between rows and entities) and others didn't say
+        # anything at all (BEMS / RSS / AI). Make the units explicit and
+        # mark known-non-numeric rows as such.
+        _csone_rows = len(csone_data) if csone_data is not None and not csone_data.empty else 0
+        _ab_rows = len(ab_data) if ab_data is not None and not ab_data.empty else 0
         citations = [
-            f"• CSOne TAC Cases: {len(csone_data) if csone_data is not None and not csone_data.empty else 0} records",
-            f"• Adoption Barriers: {len(ab_data) if ab_data is not None and not ab_data.empty else 0} records",
-            "• BEMS: Extracted from CSOne Transaction ID / bemscsc_refs",
-            "• Service Incidents: status.webex.com RSS feed",
-            "• AI Insights: CircuIT AI using above data sources"
+            f"• CSOne TAC Cases: {_csone_rows} row(s) (each row = one TAC case in scope window)",
+            f"• Adoption Barriers: {_ab_rows} row(s) (each row = one adoption-barrier task in scope window)",
+            "• BEMS Escalations: extracted from CSOne Transaction ID / bemscsc_refs (counted per BEMS ID, not per case)",
+            "• Service Incidents: status.webex.com RSS feed (counted per published incident entry)",
+            "• AI Insights: CircuIT AI narrative grounded in the above sources (no independent counts)",
         ]
         for cite in citations:
             cite_para = self.doc.add_paragraph()
@@ -783,7 +1174,18 @@ class ExecutiveIntelligenceFormatter:
         save_path = filepath or self.output_path
         if save_path:
             self.doc.save(save_path)
-            logger.info(f"Executive Intelligence Report saved to: {save_path}")
+            # Round 9 / Phase 6.4: ``save_path`` is host-absolute and on
+            # shipped desktop installs embeds the operator's home /
+            # OneDrive root + customer folder slugs.  Surface only the
+            # basename at INFO; full path stays at DEBUG for local
+            # troubleshooting (parity with app_simple Phase 1.1).
+            try:
+                import os as _os_p64
+                _save_basename = _os_p64.path.basename(str(save_path))
+            except Exception:
+                _save_basename = ''
+            logger.info(f"Executive Intelligence Report saved (file={_save_basename})")
+            logger.debug(f"Executive Intelligence Report saved to (verbose): {save_path}")
             return save_path
         else:
             raise ValueError("No output path specified")
@@ -801,10 +1203,13 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
                                         csconsole_customer_pulse: pd.DataFrame = None,
                                         csconsole_success_priorities: pd.DataFrame = None,
                                         csconsole_adoption_barriers: pd.DataFrame = None,
-                                        software_defects: Dict = None, psirt_vulns: Dict = None) -> str:
+                                        software_defects: Dict = None, psirt_vulns: Dict = None,
+                                        partial_data_warnings: List[Dict[str, Any]] = None,
+                                        data_retrieved_at: Optional[datetime] = None,
+                                        strict_mode: bool = False) -> str:
     """
     Create an Executive Intelligence Report.
-    
+
     Args:
         analysis_id: Unique analysis identifier
         manager: Manager name
@@ -818,21 +1223,108 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
         risk_scores: Risk scores dictionary (optional)
         risk_summary: Risk summary dictionary (optional)
         output_path: Output file path
-        arr_data: ARR data DataFrame (optional)
-        arr_impact: ARR impact dictionary (optional)
         chart_paths: Chart image paths (optional)
-        feature_requests: Feature requests dictionary (optional)
-    
+        team_subs_df: Subscription roster (optional, used for customer counting)
+        partial_data_warnings: Per-source fetch warning rows (optional)
+        data_retrieved_at: Timestamp of upstream fetch (optional)
+        strict_mode: When True, missing canonical inputs raise instead of
+            silently degrading (Round 7 / Phase 1.8).
+
+    Round 7 / Phase 1.1: ``arr_data``, ``arr_impact``, and
+    ``feature_requests`` remain in the signature for backward
+    compatibility with existing callers (notably ``app_simple.py``),
+    but they are intentionally **NOT** wired into the EI Word output --
+    the executive intelligence report derives ARR / impact / feature
+    context from the canonical helpers and the AI insights payload, not
+    from these standalone frames.  Passing non-None values for them
+    used to give callers a false sense of coverage; the function now
+    emits a WARNING when that happens so the discrepancy is visible
+    instead of silent.  If a future audit decides to render these in
+    the EI doc, do it explicitly here -- do not just remove the
+    warning.
+
     Returns:
         Path to the saved report
     """
+    # Round 7 / Phase 1.8: when ``strict_mode=True`` the caller has
+    # opted into "fail loud on missing canonical inputs" semantics
+    # (matches the renewal/leader strict-mode contract added in Round
+    # 6 / Phase 1.5).  Validate the canonical inputs the EI report
+    # cannot meaningfully render without, and raise rather than
+    # silently fall through to a placeholder report.
+    if strict_mode:
+        _missing = []
+        if ab_data is None:
+            _missing.append("ab_data")
+        if csone_data is None:
+            _missing.append("csone_data")
+        if not isinstance(ai_insights, (dict, str)) or not ai_insights:
+            _missing.append("ai_insights")
+        if _missing:
+            raise ValueError(
+                "Round 7 / Phase 1.8: strict_mode=True but the "
+                "executive intelligence report is missing canonical "
+                f"inputs: {', '.join(_missing)}.  Refusing to render a "
+                "partial executive document."
+            )
+
+    # Round 7 / Phase 1.1: surface the "accepted but not rendered"
+    # mismatch instead of silently dropping the inputs.
+    _unused_inputs = []
+    if arr_data is not None and getattr(arr_data, "empty", True) is False:
+        _unused_inputs.append("arr_data")
+    if arr_impact:
+        _unused_inputs.append("arr_impact")
+    if feature_requests:
+        _unused_inputs.append("feature_requests")
+    if _unused_inputs:
+        logger.warning(
+            "[EI-REPORT] Round 7 / Phase 1.1: caller passed non-empty "
+            "values for %s but the EI Word writer does not render those "
+            "frames; ARR/feature coverage is sourced from "
+            "ai_insights/risk_scores instead.  Either drop these args "
+            "from the call site or add an explicit section here.",
+            ", ".join(_unused_inputs),
+        )
+
     formatter = ExecutiveIntelligenceFormatter(output_path)
     
     # Add title page
-    formatter.add_title_page(manager, technology, days)
+    formatter.add_title_page(manager, technology, days, data_retrieved_at=data_retrieved_at)
     
     # Add page break after title
     formatter.doc.add_page_break()
+
+    # Phase 1.3b: render a "Partial Data" banner up front so any reader sees
+    # which sources failed to load before they trust any number below. The
+    # warning list is the ``{'dataset', 'error', 'kind'}`` shape produced by
+    # ``snowflake_prefetch.collect_fetch_warnings``.
+    if partial_data_warnings:
+        try:
+            warn_heading = formatter.doc.add_heading("⚠ Partial Data Warning", level=1)
+            formatter.doc.add_paragraph(
+                "One or more upstream data sources failed to load for this run. "
+                "Sections that depend on the affected sources are rendered as "
+                "\"unavailable\" rather than \"zero\". Rerun the report once the "
+                "source(s) are reachable for a complete picture."
+            )
+            for _w in partial_data_warnings:
+                _ds = str(_w.get('dataset') or 'unknown')
+                _err = str(_w.get('error') or 'unknown error')
+                _kind = str(_w.get('kind') or 'runtime')
+                formatter.doc.add_paragraph(f"• {_ds} ({_kind}): {_err}", style='List Bullet')
+            formatter.doc.add_paragraph("")
+        except Exception as _banner_err:
+            # Round 7 / Phase 1.10: keep the broad except (we're in a
+            # banner that cannot fail the whole report), but log with
+            # ``exc_info`` so the underlying type/traceback reaches
+            # the operator instead of just the str() rendering.
+            logger.warning(
+                "Round 7 / Phase 1.10: could not render partial-data "
+                "banner (type=%s): %s",
+                type(_banner_err).__name__, _banner_err,
+                exc_info=True,
+            )
     
     # Add executive dashboard with all data sources for accurate customer counting
     formatter.add_executive_dashboard(ab_data, csone_data, risk_scores or {}, risk_summary or {},
@@ -870,7 +1362,40 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
     
     # Add recommendations
     formatter.add_recommendations_section(ai_insights)
-    
+
+    # Round 3 / Phase 1.1: embed any matplotlib chart PNGs the caller
+    # generated for this run. Previously ``chart_paths`` was accepted
+    # in the signature and documented but never written into the
+    # document, so EI Word reports silently shipped without the
+    # charts adjacent surfaces (Compact, Comprehensive) embedded.
+    if chart_paths:
+        try:
+            import os as _os
+            from docx.shared import Inches as _Inches
+            visual_heading_added = False
+            for _cp in chart_paths:
+                if not _cp:
+                    continue
+                if not _os.path.exists(_cp):
+                    logger.warning(
+                        "Chart path missing during EI embed: %s", _cp
+                    )
+                    continue
+                try:
+                    if not visual_heading_added:
+                        formatter.doc.add_heading("Visual Analysis", level=1)
+                        visual_heading_added = True
+                    formatter.doc.add_picture(_cp, width=_Inches(6.5))
+                except Exception as _pic_err:
+                    logger.warning(
+                        "Could not embed chart %s in EI report: %s",
+                        _cp, _pic_err,
+                    )
+        except Exception as _charts_err:
+            logger.warning(
+                "Could not render Visual Analysis section: %s", _charts_err
+            )
+
     # Add Data Citations section (NEW - enables data verification)
     formatter.add_data_citations_section(ab_data, csone_data)
 
@@ -911,12 +1436,31 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
     # matches the headline tile bit-for-bit. Previously this call only
     # passed (ab_df, csone_df) and so subscription-only customers were
     # counted in the dashboard but not in the validator/portfolio total.
+    # Round 7 / Phase 1.2: surface a partial-data warning row whenever
+    # the account-to-customer lookup cannot be built.  Previously this
+    # except branch silently set ``_account_to_customer = {}``, which
+    # let the downstream count_customers refinement fall back to the
+    # account-map-blind tally and silently disagree with the dashboard
+    # / validator parity that this section is supposed to enforce.
     try:
         from app_simple import build_customer_lookup as _build_cust_lookup
         _cust_lookup = _build_cust_lookup(team_subs_df)
         _account_to_customer = _cust_lookup.get("account_to_customer", {}) or {}
-    except Exception:
+    except Exception as _acc_lookup_err:
         _account_to_customer = {}
+        logger.warning(
+            "Round 7 / Phase 1.2: build_customer_lookup failed; "
+            "executive total_customers will fall back to the "
+            "account-map-blind count: %s",
+            _acc_lookup_err,
+        )
+        if not isinstance(partial_data_warnings, list):
+            partial_data_warnings = []
+        partial_data_warnings.append({
+            "dataset": "account_to_customer",
+            "kind": "lookup_failed",
+            "error": "Account-to-customer lookup unavailable; subscription-only customers may be undercounted in totals.",
+        })
     _ei_extra_frames = [
         f for f in (
             team_subs_df,
@@ -938,6 +1482,10 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
     # because build_portfolio_metrics' count_customers call doesn't
     # expose account_to_customer; route this single value through the
     # canonical helper directly to ensure parity with the dashboard.
+    # Phase 3.3: do NOT silently swallow count_customers failures here.
+    # That bypassed the canonical helper and let
+    # build_portfolio_metrics' (account-map-blind) count win, which
+    # disagreed with the leader/renewal dashboards. Surface the failure.
     try:
         portfolio_metrics["total_customers"] = cm.count_customers(
             ab_df=ab_for_check,
@@ -945,8 +1493,20 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
             extra_frames=_ei_extra_frames,
             account_to_customer=_account_to_customer,
         )
-    except Exception:
-        pass
+    except Exception as _cc_exc:
+        logger.error(
+            "Canonical count_customers refinement failed for executive report: %s",
+            _cc_exc,
+            exc_info=True,
+        )
+        # Mark the metric as unavailable rather than letting the
+        # account-map-blind count silently win. Downstream
+        # validate_report_consistency already raises on missing
+        # totals, which is the correct loud failure mode.
+        portfolio_metrics["total_customers_error"] = str(_cc_exc)
+        portfolio_metrics.setdefault("partial_data_warnings", []).append(
+            f"Total customer count unavailable: {_cc_exc}"
+        )
     consistency = validate_report_consistency(
         ab_for_check,
         csone_for_check,

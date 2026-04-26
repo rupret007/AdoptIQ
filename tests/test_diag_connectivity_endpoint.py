@@ -171,7 +171,10 @@ def test_tls_cert_verify_failure_classified(monkeypatch):
     assert result["ok"] is False
     assert result["checks"][0]["status"] == "ok"
     assert result["checks"][1]["status"] == "fail"
-    assert result["checks"][1]["error_kind"] == "tls_cert_verify_failed"
+    # Round 7 / Phase 3.15: error_kind is now namespaced
+    # ("diag.tls.cert_verify_failed") so a single regex over UI logs
+    # cleanly tells "diag.*" apart from "analysis.*".
+    assert result["checks"][1]["error_kind"] == "diag.tls.cert_verify_failed"
     for c in result["checks"][2:]:
         assert c["status"] == "skipped"
     assert "tls" in result["hint"].lower() or "cert" in result["hint"].lower()
@@ -189,7 +192,8 @@ def test_approle_unauthorized_gives_actionable_hint(monkeypatch):
 
     result = cd.run_connectivity_diagnostics(BASE_SECRETS)
     assert result["ok"] is False
-    assert result["checks"][2]["error_kind"] == "approle_unauthorized"
+    # Round 7 / Phase 3.15: error_kind namespaced under "diag.*".
+    assert result["checks"][2]["error_kind"] == "diag.approle.unauthorized"
     assert result["checks"][3]["status"] == "skipped"
     assert result["checks"][4]["status"] == "skipped"
     assert "rotated" in result["hint"].lower() or "revoked" in result["hint"].lower()
@@ -207,7 +211,8 @@ def test_snowflake_timeout_surfaced(monkeypatch):
 
     result = cd.run_connectivity_diagnostics(BASE_SECRETS)
     assert result["ok"] is False
-    assert result["checks"][-1]["error_kind"] == "snowflake_timeout"
+    # Round 7 / Phase 3.15: error_kind namespaced under "diag.*".
+    assert result["checks"][-1]["error_kind"] == "diag.snowflake.timeout"
     assert "snowflake" in result["hint"].lower() or "timed out" in result["hint"].lower()
 
 

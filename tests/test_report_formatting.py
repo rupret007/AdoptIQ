@@ -92,7 +92,11 @@ class TestFormatNumber:
         assert format_number(-42) == "-42"
 
     def test_string_fallback(self):
-        assert format_number("abc") == "abc"
+        # Round 6 / Phase 1.20: an unparseable string returns ``"N/A"`` so
+        # callers cannot accidentally surface raw object reprs in
+        # user-facing Word/Excel cells when an upstream type sneaks
+        # through.  Previously this returned ``str(value)``.
+        assert format_number("abc") == "N/A"
 
 
 # ── format_currency ──────────────────────────────────────────────────────
@@ -117,7 +121,11 @@ class TestFormatCurrency:
         assert format_currency(500) == "$500.00"
 
     def test_string_fallback(self):
-        assert format_currency("abc") == "abc"
+        # Round 7 / Phase 3.10: an unparseable string returns ``"N/A"``
+        # to match ``format_number``.  Previously this returned
+        # ``str(value)`` which leaked unparseable strings (e.g.
+        # ``"USD 2.5MM"``) into financial Word cells as literal text.
+        assert format_currency("abc") == "N/A"
 
 
 # ── get_risk_scoring_explanation ─────────────────────────────────────────

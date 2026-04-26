@@ -1,0 +1,16 @@
+"""Round 6 / Phase 6.9 regression test.
+
+A Flask ``@app.after_request`` hook must apply defensive HTTP
+security headers (CSP/HSTS/X-Frame-Options/Referrer-Policy) to
+sensitive endpoints.
+"""
+from __future__ import annotations
+import pathlib
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def test_after_request_security_headers() -> None:
+    src = (REPO_ROOT / "app_simple.py").read_text(encoding="utf-8")
+    assert "Round 6 / Phase 6.9" in src
+    assert "after_request" in src

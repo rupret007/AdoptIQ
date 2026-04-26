@@ -66,7 +66,17 @@ class TestValidateDataSources:
         assert missing == []
 
     def test_missing_account_id_column(self):
-        bad_subs = pd.DataFrame({'BU_NAME': ['Acme']})
+        # Round 7 / Phase 2.8: the validator now resolves the
+        # ``customer`` slot for the ``subscriptions`` dataset through
+        # ``data_contracts.ROW_CONTRACT_ALIASES``.  ``BU_NAME`` is a
+        # documented alias for the customer slot, so a frame with only
+        # ``BU_NAME`` is now a *valid* subscriptions frame -- the old
+        # behaviour (which insisted on ``ACCOUNT_ID_C`` literally)
+        # silently disagreed with the row contract and rejected fetchers
+        # that legitimately produced ``BU_NAME``.  We now assert the
+        # *opposite* invariant: a frame with no aliases at all (e.g.
+        # only an unrelated ``RANDOM_COL``) is the case that must fail.
+        bad_subs = pd.DataFrame({'RANDOM_COL': ['Acme']})
         ok, missing, details = validate_data_sources_for_report(
             'compact', snowflake_ctx=object(),
             team_subs_df=bad_subs,
@@ -74,7 +84,31 @@ class TestValidateDataSources:
         )
         assert ok is False
         assert 'team_subscriptions' in missing
-        assert 'ACCOUNT_ID_C' in details['team_subscriptions']
+        # The error message lists the accepted aliases so operators can fix it.
+        assert 'BU_NAME' in details['team_subscriptions'] or 'ACCOUNT_ID_C' in details['team_subscriptions']
+
+    def test_legacy_account_id_column_still_accepted(self):
+        # Round 7 / Phase 2.8: ``ACCOUNT_ID_C`` is the legacy literal
+        # alias and must keep working.
+        legacy_subs = pd.DataFrame({'ACCOUNT_ID_C': ['A1']})
+        ok, _missing, _details = validate_data_sources_for_report(
+            'compact', snowflake_ctx=object(),
+            team_subs_df=legacy_subs,
+            ab_data=self._make_ab(), csone_data=self._make_csone(),
+        )
+        assert ok is True
+
+    def test_bu_name_only_subs_now_accepted(self):
+        # Round 7 / Phase 2.8: a frame whose customer slot is filled
+        # solely by ``BU_NAME`` must validate (mirrors live fetcher
+        # output that uses ``BU_NAME`` as its customer label).
+        bu_only = pd.DataFrame({'BU_NAME': ['Acme']})
+        ok, _missing, _details = validate_data_sources_for_report(
+            'compact', snowflake_ctx=object(),
+            team_subs_df=bu_only,
+            ab_data=self._make_ab(), csone_data=self._make_csone(),
+        )
+        assert ok is True
 
     def test_custom_required_sources(self):
         ok, missing, _ = validate_data_sources_for_report(

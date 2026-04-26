@@ -21,8 +21,18 @@
                 <a href="{{ url_for('index') }}" class="btn btn-primary btn-lg">
                     <i class="fas fa-home me-2"></i>Go to Dashboard
                 </a>
-                <button onclick="window.location.reload()" class="btn btn-outline-primary btn-lg">
-                    <i class="fas fa-redo me-2"></i>Try Again
+                {# Round 6 / Phase 2.14 + Round 7 / Phase 4.8: the
+                   "Try Again" button uses a JS event handler (no
+                   inline ``onclick=``) and the script is moved into
+                   the ``extra_js`` block so it picks up a future
+                   per-request nonce when ``base.html`` switches off
+                   ``'unsafe-inline'``.  The script must also be
+                   resilient to ``base.html`` already having attached
+                   global delegated handlers (it idempotently no-ops
+                   when the button is missing). #}
+                <button id="adoptiq-500-retry-btn" type="button" class="btn btn-outline-primary btn-lg"
+                        data-action="adoptiq-500-retry">
+                    <i class="fas fa-redo me-2" aria-hidden="true"></i>Try Again
                 </button>
             </div>
             
@@ -63,4 +73,33 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{# Round 7 / Phase 4.8: register the retry handler in extra_js so it
+   inherits the CSP nonce that base.html will attach when it tightens
+   script-src.  Using event delegation off ``document`` means the
+   button can be removed/re-added by client code without losing the
+   handler. #}
+{% block extra_js %}
+<script{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %}>
+    (function () {
+        document.addEventListener('click', function (evt) {
+            var target = evt.target;
+            while (target && target !== document) {
+                if (target.getAttribute && target.getAttribute('data-action') === 'adoptiq-500-retry') {
+                    evt.preventDefault();
+                    try {
+                        window.location.reload();
+                    } catch (e) {
+                        if (window.console && console.warn) {
+                            console.warn('500 retry: reload threw:', e);
+                        }
+                    }
+                    return;
+                }
+                target = target.parentNode;
+            }
+        });
+    })();
+</script>
 {% endblock %}

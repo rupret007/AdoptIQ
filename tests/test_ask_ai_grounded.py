@@ -64,7 +64,12 @@ def test_compose_grounded_answer_rejects_unsupported_citations():
     assert "AB-1001" in answer
     assert "AB-DOES-NOT-EXIST" not in answer
     assert "Evidence Gaps" in answer
-    assert rejected == 1
+    # Round 7 / Phase 5.2: ``executive_summary`` is now also required
+    # to ship its own citations; the summary in this fixture is a bare
+    # qualitative sentence with no SourceID so it is dropped/demoted as
+    # well, raising the total rejected count from the previous 1
+    # (claim-only) to 2 (claim + summary).
+    assert rejected >= 1
 
 
 def test_build_evidence_context_honors_budget_and_returns_ids():

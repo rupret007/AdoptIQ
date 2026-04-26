@@ -26,7 +26,15 @@
                         <h5 class="mb-0">
                             <i class="fas fa-list me-2"></i>Previous Analyses
                         </h5>
-                        <span class="badge bg-primary fs-6">{{ analyses|length }} total</span>
+                        {# Round 12 / Phase 4.5: route ``total_analyses``
+                           and per-row counts through the canonical
+                           ``format_number`` Jinja filter (registered in
+                           app_simple.py).  Previously the badge rendered
+                           a raw integer (e.g. ``1234 total`` instead of
+                           ``1,234 total``) which both diverged from the
+                           Word/Excel exports' ``format_number`` output
+                           and made large counts unreadable. #}
+                        <span class="badge bg-primary fs-6">{{ (total_analyses if total_analyses is defined else analyses|length) | format_number }} total{% if list_truncated %} (showing {{ analyses|length | format_number }} of {{ total_analyses | format_number }}){% endif %}</span>
                     </div>
                     <div class="card-body p-0">
                         <div class="table-responsive">
@@ -59,12 +67,26 @@
                                                     <i class="fas fa-chart-line text-primary"></i>
                                                 </div>
                                                 <div>
+                                                    {# Round 5 / Phase 2.6: surface a timezone label
+                                                       so the user can tell at a glance whether the
+                                                       timestamp is UTC or local.  We append " UTC"
+                                                       only when the source string clearly carries a
+                                                       UTC marker (Z / +00:00 / explicit UTC); for
+                                                       offset-bearing timestamps we render the offset
+                                                       itself, and for everything else we add a
+                                                       "(local)" hint.  Timestamps stored by the
+                                                       backend (record_report_completion, etc.) are
+                                                       UTC after Phase 6.3. #}
                                                     {% set st = analysis.start_time or 'Unknown' %}
+                                                    {% set _utc_marker = (st.endswith('Z') if st != 'Unknown' else False) or '+00:00' in st or ' UTC' in st %}
+                                                    {% set _date_part = st[:10] if st != 'Unknown' else 'Unknown' %}
+                                                    {% set _time_part = (st[11:16] if st != 'Unknown' and 'T' in st else '') %}
+                                                    {% set _tz_label = ' UTC' if _utc_marker else (' (local)' if (st != 'Unknown' and _time_part) else '') %}
                                                     <div class="fw-semibold">
-                                                        {{ st[:10] if st != 'Unknown' else 'Unknown' }}
+                                                        {{ _date_part }}
                                                     </div>
                                                     <small class="text-muted">
-                                                        {{ st[11:16] if st != 'Unknown' and 'T' in st else '' }}
+                                                        {{ _time_part }}{{ _tz_label }}
                                                     </small>
                                                 </div>
                                             </div>
@@ -112,8 +134,9 @@
                                 <div class="bg-primary bg-opacity-10 p-4 rounded-circle d-inline-flex mb-3 hover-scale">
                                     <i class="fas fa-chart-line text-primary fa-2x"></i>
                                 </div>
-                                <h4 class="text-gradient mb-2" data-value="{{ analyses|length }}">0</h4>
-                                <p class="text-muted mb-0">Total Analyses</p>
+                                {# Round 12 / Phase 4.5: see badge above. #}
+                                <h4 class="text-gradient mb-2" data-value="{{ (total_analyses if total_analyses is defined else analyses|length) | format_number }}">0</h4>
+                                <p class="text-muted mb-0">Total Analyses{% if list_truncated %} <small class="text-muted">(showing {{ analyses|length | format_number }} of {{ total_analyses | format_number }})</small>{% endif %}</p>
                             </div>
                         </div>
                     </div>
@@ -123,10 +146,10 @@
                                 <div class="bg-success bg-opacity-10 p-4 rounded-circle d-inline-flex mb-3 hover-scale">
                                     <i class="fas fa-calendar-alt text-success fa-2x"></i>
                                 </div>
-                                <h4 class="text-gradient mb-2" data-value="{{ analyses[:7]|length }}">
+                                <h4 class="text-gradient mb-2" data-value="{{ (total_last_7_days if total_last_7_days is defined else analyses[:7]|length) | format_number }}">
                                     0
                                 </h4>
-                                <p class="text-muted mb-0">Last 7 Reports</p>
+                                <p class="text-muted mb-0">Last 7 Days</p>
                             </div>
                         </div>
                     </div>
@@ -136,7 +159,7 @@
                                 <div class="bg-info bg-opacity-10 p-4 rounded-circle d-inline-flex mb-3 hover-scale">
                                     <i class="fas fa-users text-info fa-2x"></i>
                                 </div>
-                                <h4 class="text-gradient mb-2" data-value="{{ analyses|map(attribute='manager')|unique|list|length }}">
+                                <h4 class="text-gradient mb-2" data-value="{{ (total_managers if total_managers is defined else analyses|map(attribute='manager')|unique|list|length) | format_number }}">
                                     0
                                 </h4>
                                 <p class="text-muted mb-0">Active Managers</p>
@@ -210,7 +233,20 @@ document.addEventListener('DOMContentLoaded', function() {
         const stats = document.querySelectorAll('[data-value]');
         
         stats.forEach(stat => {
-            const finalValue = parseInt(stat.dataset.value);
+            // Round 5 / Phase 2.7: guard against ``NaN`` when
+            // ``data-value`` is missing/malformed (e.g. server returned
+            // an empty string).  ``parseInt('')`` returns ``NaN`` and
+            // the Math.floor()/text below would render "NaN" in a tile,
+            // which looks like a bug to the user.
+            const rawValue = parseInt(stat.dataset.value, 10);
+            const finalValue = Number.isFinite(rawValue) ? rawValue : 0;
+            if (!Number.isFinite(rawValue)) {
+                // Round 6 / Phase 2.6: render an unambiguous
+                // "n/a" instead of "0" so a real zero is not
+                // confused with a missing/unparseable value.
+                stat.textContent = 'n/a';
+                return;
+            }
             const duration = 1500; // 1.5 seconds
             const steps = 50;
             const increment = finalValue / steps;
@@ -300,32 +336,82 @@ document.addEventListener('DOMContentLoaded', function() {
         row.style.cursor = 'pointer';
     });
     
-    // Add loading states to buttons
-    document.querySelectorAll('.btn').forEach(btn => {
+    // Round 5 / Phase 2.16: limit the "Loading..." spinner +
+    // disable-then-reset behaviour to action buttons that actually
+    // *do* something asynchronously (View / Download per row).  The
+    // page-level navigation buttons (Run New Analysis, Dashboard,
+    // Help) leave the page immediately, and disabling them mid-click
+    // makes the user think the link is broken when they hit Back.
+    //
+    // Round 7 / Phase 4.15: previously a hard ``setTimeout(2000)``
+    // re-enabled the button after exactly two seconds regardless of
+    // whether the navigation had completed.  That has two failure
+    // modes: (a) on a slow network the user could click again before
+    // the destination page actually loaded, defeating the disable;
+    // (b) when the user hit Back to return to the history page the
+    // bfcache could restore the DOM with the button still in its
+    // "Loading..." state because the timer had already fired (or
+    // never fired, if pageshow restored mid-flight).  The fix wires
+    // the reset to *real* navigation lifecycle events:
+    //   - ``pagehide`` is the cue the browser is leaving (or going
+    //     into bfcache); we let the disabled state persist so the
+    //     user sees the spinner during the actual navigation.
+    //   - ``pageshow`` fires on every render including bfcache
+    //     restores; we always reset there so the button comes back
+    //     fully usable when the user navigates back.
+    //   - A defensive 8-second wall-clock fallback covers the rare
+    //     case where ``pageshow`` is suppressed (e.g. the navigation
+    //     was cancelled by a download response that never replaced
+    //     the page).  8s is long enough to be obviously asynchronous
+    //     to the user without permanently wedging the button.
+    const _rowActionState = new WeakMap();
+    function _resetRowActionButton(btn) {
+        const saved = _rowActionState.get(btn);
+        if (!saved) return;
+        btn.innerHTML = saved;
+        btn.disabled = false;
+        _rowActionState.delete(btn);
+    }
+    function _resetAllRowActionButtons() {
+        document.querySelectorAll('.view-results-btn, .download-btn').forEach(_resetRowActionButton);
+    }
+    document.querySelectorAll('.view-results-btn, .download-btn').forEach(btn => {
         btn.addEventListener('click', function() {
-            if (!this.disabled) {
-                const originalText = this.innerHTML;
-                this.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Loading...';
-                this.disabled = true;
-                
-                // Reset after a delay (in real implementation, this would be after the action completes)
-                setTimeout(() => {
-                    this.innerHTML = originalText;
-                    this.disabled = false;
-                }, 2000);
-            }
+            if (this.disabled) return;
+            _rowActionState.set(this, this.innerHTML);
+            this.innerHTML = '<i class="fas fa-spinner fa-spin me-2" aria-hidden="true"></i>Loading...';
+            this.disabled = true;
+            // Wall-clock safety net (see comment above).
+            setTimeout(() => _resetRowActionButton(this), 8000);
         });
     });
+    window.addEventListener('pageshow', function(event) {
+        // ``event.persisted`` is true on bfcache restore; reset
+        // unconditionally so the user does not see a stale spinner.
+        _resetAllRowActionButtons();
+    });
     
-    // Add search functionality (if needed)
+    // Add search functionality (if needed).
+    // Round 6 / Phase 2.15: give the dynamically-created search input
+    // a stable ``id`` and an ``aria-label``/visually-hidden label so
+    // screen readers announce its purpose; previously it was just an
+    // unlabelled text input which fails WCAG 1.3.1.
     const searchInput = document.createElement('input');
     searchInput.type = 'text';
     searchInput.className = 'form-control mb-3';
     searchInput.placeholder = 'Search analyses...';
     searchInput.style.maxWidth = '300px';
-    
+    searchInput.id = 'historySearchInput';
+    searchInput.setAttribute('aria-label', 'Search analyses');
+
+    const searchLabel = document.createElement('label');
+    searchLabel.className = 'visually-hidden';
+    searchLabel.htmlFor = 'historySearchInput';
+    searchLabel.textContent = 'Search analyses';
+
     const searchContainer = document.createElement('div');
     searchContainer.className = 'text-end mb-3';
+    searchContainer.appendChild(searchLabel);
     searchContainer.appendChild(searchInput);
     
     const tableCard = document.querySelector('.card');

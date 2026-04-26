@@ -1,6 +1,6 @@
 import os, sys, json, re, time, math, logging, threading
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any, Iterable, Tuple
 import warnings
 
@@ -47,7 +47,17 @@ from data_normalization import (
     parse_datetime_series,
 )
 from risk_scoring import compute_customer_risk_profile
-from report_utils import format_inline_source
+from report_utils import (
+    format_inline_source,
+    format_number as _r12_format_number,
+    # Round 12 / Phase 11.1: Round 11 / Phase 11.8 added ``round_percent``
+    # as the canonical percentage rounding helper but no production
+    # module imported it.  Pull it in here so the legacy ``round(x, 1)``
+    # call sites in this module can be migrated to a single
+    # half-away-from-zero implementation (banker's rounding surprises
+    # CSSMs reading "0%" for genuinely 0.5%+ risk percentages).
+    round_percent as _r12_round_percent,
+)
 from snowflake_table_policy import TablePolicyViolation, guard_sql, guard_table, is_table_blocked
 from config import Config
 
@@ -116,6 +126,129 @@ def _log_snowflake_fallback(context: str, exc: Exception) -> None:
         logger.warning("%s skipped due to Snowflake access/schema limitations: %s", context, str(exc).strip())
     else:
         logger.error("%s failed: %s", context, exc)
+
+
+def _stable_failure_kind(exc: BaseException) -> str:
+    """Round 6 / Phase 7.4: map an exception to a small, stable enum.
+
+    Previously the per-subsection failure dicts emitted
+    ``failure_kind = type(e).__name__``.  That value was useful for
+    server-side debugging but it leaks bundled-driver class names
+    (``SnowflakeAccessIssue``, ``ProgrammingError``,
+    ``InternalServerError``) directly into structured outputs that
+    downstream code or dashboards may render to operators or even
+    ship to the LLM as part of a briefing.  Collapse to a small,
+    stable enum so the public contract is portable across driver
+    upgrades and so the mapping cannot accidentally surface internal
+    layout to an end user.
+
+    Allowed return values:
+      * ``"snowflake"`` - the failure originated in the Snowflake
+        client / EDW path (access issue or programmatic error).
+      * ``"value"``     - a generic ``ValueError`` / ``TypeError`` /
+        ``KeyError`` that signals bad upstream data shape.
+      * ``"unknown"``   - everything else.
+
+    The original class name is still recoverable from the bundled
+    log line; only the *serialized* enum is normalized.
+    """
+    try:
+        if _is_snowflake_access_issue(exc):
+            return "snowflake"
+    except Exception:
+        pass  # noqa: PIE790
+    _name = (getattr(type(exc), "__name__", "") or "").lower()
+    if "snowflake" in _name or "programming" in _name or "operational" in _name:
+        return "snowflake"
+    if isinstance(exc, (ValueError, TypeError, KeyError)):
+        return "value"
+    return "unknown"
+
+
+def _utc_window_start_iso(days: int) -> str:
+    """Round 8 / Phase 2.3: compute an explicit UTC window-start date.
+
+    Snowflake's ``CURRENT_DATE()`` is evaluated in the *session* time
+    zone, which means a leader report run at 02:00 UTC by an account
+    whose Snowflake session sits in a non-UTC TZ silently slid the
+    lookback window into the wrong day.  Round 7 / Phase 2.1 fixed
+    this in ``enhanced_snowflake_insights.py`` but left equivalent
+    ``DATEADD(day, -%s, CURRENT_DATE())`` patterns here.  Use this
+    helper to compute ``today_utc - days`` in Python and bind the
+    resulting ISO date as a parameter, so the returned data set is
+    independent of Snowflake session TZ.
+    """
+    try:
+        _days = int(days)
+    except (TypeError, ValueError):
+        _days = 0
+    if _days < 0:
+        _days = 0
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=_days)
+    return cutoff.isoformat()
+
+
+def _utc_today_iso() -> str:
+    """Round 8 / Phase 2.3: explicit UTC ``today`` for SERVICE_END_DATE
+    style filters that previously used ``CURRENT_DATE()``."""
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _safe_div(num: Any, den: Any, default: float = 0.0) -> float:
+    """Round 9 / Phase 2.3: NaN-safe / zero-safe ratio helper.
+
+    Centralises the ``num / den`` guard previously open-coded at every
+    ARR-share, case-rate, and pulse-ratio site in this module.  Returns
+    ``default`` when either operand is ``None``, non-finite (``NaN`` /
+    ``inf``), or when the denominator is zero / negative -- exactly the
+    contract the new ``total_arr`` and HHI guards (Phase 2.1 / 2.2)
+    rely on.  The previous open-coded form (``num / den if den > 0 else 0``)
+    silently fell through on ``NaN > 0 == False`` *and* propagated
+    ``NaN`` through later arithmetic, which is how the misleading 73 %
+    concentration figures were ending up in the report when a single
+    customer row had a missing ARR value.
+
+    Importantly, this helper *does not* raise on bad input -- callers
+    use it inside the LLM-facing insight payload where a thrown
+    exception would lose the rest of the section.
+    """
+    try:
+        n = float(num)
+        d = float(den)
+    except (TypeError, ValueError):
+        return float(default)
+    if not (math.isfinite(n) and math.isfinite(d)):
+        return float(default)
+    if d <= 0:
+        return float(default)
+    result = n / d
+    if not math.isfinite(result):
+        return float(default)
+    return float(result)
+
+
+def _empty_df_with_fetch_error(dataset: str, exc: Exception) -> pd.DataFrame:
+    """
+    Return an empty DataFrame whose ``.attrs`` carries the source dataset
+    name and the failure reason. This is the canonical signal Phase 1.3a
+    introduces so downstream code (snowflake_prefetch, validators, formatters)
+    can distinguish "source failed" from "source returned zero rows".
+
+    Use whenever an exception in a Snowflake / CSConsole / external fetcher
+    would previously have returned ``pd.DataFrame()`` silently.
+    """
+    df = pd.DataFrame()
+    try:
+        df.attrs["fetch_error"] = str(exc).strip() or exc.__class__.__name__
+        df.attrs["fetch_error_dataset"] = dataset
+        df.attrs["fetch_error_kind"] = (
+            "access_or_schema" if _is_snowflake_access_issue(exc) else "runtime"
+        )
+    except Exception:
+        # ``DataFrame.attrs`` is a plain dict but be defensive in case a
+        # downstream pandas patch breaks assignment; never raise from here.
+        pass
+    return df
 
 
 class _InstrumentedSnowflakeCursor:
@@ -597,22 +730,67 @@ def load_csone_excel(path: Optional[Path]) -> pd.DataFrame:
         _title = df[title_col].fillna("").astype(str) if title_col else pd.Series([""] * len(df), index=df.index)
         _desc = df[desc_col].fillna("").astype(str) if desc_col else pd.Series([""] * len(df), index=df.index)
         df["bemscsc_refs"] = (_title + " " + _desc).apply(_extract_refs)
+        # Round 2 / Phase 4.4: stamp tac_cases and bems_rows row
+        # contracts on the CSOne load so consistency / contract drift
+        # detectors fire here just as they do on the Snowflake
+        # prefetch path.  Without this, an upstream column rename in
+        # the Excel template would silently zero out TAC/BEMS counts
+        # downstream.
+        try:
+            from data_contracts import annotate_with_contract as _annotate
+            _annotate(df, dataset="tac_cases")
+            _annotate(df, dataset="bems_rows")
+        except Exception as _annot_err:
+            logger.debug("annotate_with_contract(csone) skipped: %s", _annot_err)
         return df
     except Exception as e:
         logger.error(f"Failed to load CSOne Excel file: {e}")
-        return pd.DataFrame()
+        empty = pd.DataFrame()
+        try:
+            empty.attrs["fetch_error"] = str(e).strip() or e.__class__.__name__
+            empty.attrs["fetch_error_dataset"] = "csone_excel"
+            empty.attrs["fetch_error_kind"] = "load_failure"
+        except Exception:
+            pass
+        return empty
 
 def newest_csone(folder: Path) -> Optional[Path]:
     cands = sorted(Path(folder).glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True)
     return cands[0] if cands else None
 
 def load_db_profile() -> Optional[dict]:
-    """Loads an optional database profile JSON file for richer context."""
-    profile_path = Path("database_profile.json")
-    if profile_path.exists():
-        logger.info("Found database_profile.json, loading for enhanced context...")
-        with open(profile_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+    """Loads an optional database profile JSON file for richer context.
+
+    Round 6 / Phase 4.18: previously this resolved ``database_profile.json``
+    relative to the *current working directory*, which silently lost the
+    file the moment the user launched the frozen Mac app from outside the
+    bundle (e.g. by double-clicking the .app while their shell cwd was
+    ``$HOME``).  Resolve relative to this module's location first (which
+    is inside the PyInstaller bundle for the frozen app), then fall back
+    to the cwd for legacy dev usage.
+    """
+    candidates: List[Path] = []
+    try:
+        candidates.append(Path(__file__).resolve().parent / "database_profile.json")
+    except Exception:
+        pass
+    # Frozen executables expose the bundle directory via sys._MEIPASS.
+    _meipass = getattr(sys, "_MEIPASS", None)
+    if _meipass:
+        try:
+            candidates.append(Path(_meipass) / "database_profile.json")
+        except Exception:
+            pass
+    candidates.append(Path("database_profile.json"))
+
+    for profile_path in candidates:
+        try:
+            if profile_path.exists():
+                logger.info("Found %s, loading for enhanced context...", profile_path)
+                with open(profile_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as exc:
+            logger.warning("Failed to load DB profile %s: %s", profile_path, exc)
     return None
 
 # --------------------------- Snowflake ---------------------------
@@ -622,9 +800,48 @@ AB_TABLE  = "EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW"
 # Cache stores (columns, fetched_at_monotonic). TTL bounds staleness so that
 # schema additions (e.g. a new owner-email column) are picked up within an hour
 # without requiring a process restart.
-_TABLE_COLUMN_CACHE: Dict[str, Tuple[set[str], float]] = {}
+# Round 8 / Phase 2.11: cap the schema cache with an LRU policy so
+# that pathological callers (e.g. a code path that builds dynamic
+# fully-qualified table names from user input or from a wide
+# catalog scan) cannot grow this cache without bound and leak
+# process memory.  ``OrderedDict`` gives us cheap LRU eviction by
+# popping from the front when we exceed the cap.
+from collections import OrderedDict as _OrderedDictForSchemaCache  # noqa: E402
+
+_TABLE_COLUMN_CACHE: "OrderedDict[str, Tuple[set[str], float]]" = _OrderedDictForSchemaCache()
 _TABLE_COLUMN_CACHE_LOCK = threading.Lock()
 _TABLE_COLUMN_CACHE_TTL_SECONDS = int(os.environ.get("ADOPTIQ_TABLE_COLUMN_CACHE_TTL", "3600"))
+_TABLE_COLUMN_CACHE_MAX_ENTRIES = max(
+    16, int(os.environ.get("ADOPTIQ_TABLE_COLUMN_CACHE_MAX", "256"))
+)
+# Phase 4.2: a separate (much shorter) TTL for *failed* introspections.
+# A 1-hour cache of an empty column set silently strips owner-aware
+# filters from every query in that hour. Re-try quickly so a transient
+# Snowflake hiccup does not poison the next 60 minutes of queries.
+_TABLE_COLUMN_CACHE_FAIL_TTL_SECONDS = int(
+    os.environ.get("ADOPTIQ_TABLE_COLUMN_CACHE_FAIL_TTL", "60")
+)
+# Module-level registry of recent introspection failures so other
+# layers (prefetch, leader report) can surface them as
+# partial_data_warnings instead of treating an empty column set as
+# "this column simply does not exist".
+_TABLE_COLUMN_INTROSPECTION_FAILURES: Dict[str, Tuple[str, float]] = {}
+
+
+def get_recent_column_introspection_failures(max_age_seconds: int = 3600) -> Dict[str, str]:
+    """Return ``{table: error_message}`` for introspection failures that
+    happened within ``max_age_seconds``.  Used by report assemblers to
+    annotate ``partial_data_warnings``.
+    """
+    now = time.monotonic()
+    out: Dict[str, str] = {}
+    with _TABLE_COLUMN_CACHE_LOCK:
+        for table, (msg, ts) in list(_TABLE_COLUMN_INTROSPECTION_FAILURES.items()):
+            if now - ts <= max_age_seconds:
+                out[table] = msg
+            else:
+                _TABLE_COLUMN_INTROSPECTION_FAILURES.pop(table, None)
+    return out
 
 
 def _normalize_table_name(table_name: str) -> str:
@@ -657,31 +874,91 @@ def _get_table_columns(ctx, table_name: str) -> set[str]:
         entry = _TABLE_COLUMN_CACHE.get(cache_key)
         if entry is not None:
             cached_cols, cached_at = entry
-            if now - cached_at < _TABLE_COLUMN_CACHE_TTL_SECONDS:
+            # Round 8 / Phase 2.11: touch the entry so it stays MRU.
+            try:
+                _TABLE_COLUMN_CACHE.move_to_end(cache_key)
+            except Exception:
+                pass
+            # Phase 4.2: use the short failure TTL when the cached
+            # entry is the sentinel empty set, so a Snowflake hiccup
+            # does not poison the next hour of queries with stripped
+            # owner-aware filters.
+            ttl = (
+                _TABLE_COLUMN_CACHE_FAIL_TTL_SECONDS
+                if not cached_cols
+                else _TABLE_COLUMN_CACHE_TTL_SECONDS
+            )
+            if now - cached_at < ttl:
                 return set(cached_cols)
             # Expired — fall through and refresh.
 
-    cur = None
-    try:
-        guard_table(table_name)
-        cur = ctx.cursor()
-        cur.execute(f"SELECT * FROM {table_name} LIMIT 1")
-        cols = set()
-        for meta in (cur.description or []):
-            if not meta:
-                continue
-            col_name = str(meta[0] or "").strip().upper()
-            if col_name:
-                cols.add(col_name)
+    def _attempt() -> Tuple[bool, set, str]:
+        cur_local = None
+        try:
+            guard_table(table_name)
+            cur_local = ctx.cursor()
+            cur_local.execute(f"SELECT * FROM {table_name} LIMIT 1")
+            cols_local: set = set()
+            for meta in (cur_local.description or []):
+                if not meta:
+                    continue
+                col_name = str(meta[0] or "").strip().upper()
+                if col_name:
+                    cols_local.add(col_name)
+            return True, cols_local, ""
+        except Exception as exc:  # noqa: BLE001
+            return False, set(), str(exc)
+        finally:
+            if cur_local is not None:
+                try:
+                    cur_local.close()
+                except Exception:
+                    pass
+
+    ok, cols, err_msg = _attempt()
+    if not ok:
+        # Phase 4.2: retry once before caching the empty sentinel so a
+        # transient connection error doesn't strip owner-aware filters
+        # for ``_TABLE_COLUMN_CACHE_FAIL_TTL_SECONDS`` either.
+        logger.warning(
+            "Column introspection for %s failed: %s — retrying once.",
+            table_name,
+            err_msg,
+        )
+        ok, cols, err_msg = _attempt()
+
+    if ok:
         with _TABLE_COLUMN_CACHE_LOCK:
             _TABLE_COLUMN_CACHE[cache_key] = (set(cols), time.monotonic())
+            try:
+                _TABLE_COLUMN_CACHE.move_to_end(cache_key)
+                # Round 8 / Phase 2.11: enforce LRU cap.
+                while len(_TABLE_COLUMN_CACHE) > _TABLE_COLUMN_CACHE_MAX_ENTRIES:
+                    _TABLE_COLUMN_CACHE.popitem(last=False)
+            except Exception:
+                pass
+            _TABLE_COLUMN_INTROSPECTION_FAILURES.pop(cache_key, None)
         return cols
-    except Exception as schema_err:
-        logger.warning("Could not introspect columns for %s: %s", table_name, schema_err)
-        return set()
-    finally:
-        if cur:
-            cur.close()
+
+    logger.warning(
+        "Could not introspect columns for %s after retry: %s. "
+        "Returning empty column set; downstream queries will be more "
+        "permissive (Phase 4.2 surfaces this in partial_data_warnings).",
+        table_name,
+        err_msg,
+    )
+    with _TABLE_COLUMN_CACHE_LOCK:
+        _TABLE_COLUMN_CACHE[cache_key] = (set(), time.monotonic())
+        try:
+            _TABLE_COLUMN_CACHE.move_to_end(cache_key)
+            # Round 8 / Phase 2.11: enforce LRU cap on the failure
+            # sentinel path as well.
+            while len(_TABLE_COLUMN_CACHE) > _TABLE_COLUMN_CACHE_MAX_ENTRIES:
+                _TABLE_COLUMN_CACHE.popitem(last=False)
+        except Exception:
+            pass
+        _TABLE_COLUMN_INTROSPECTION_FAILURES[cache_key] = (err_msg, time.monotonic())
+    return set()
 
 
 def _column_or_default_expr(available_columns: set[str], column_name: str, default_sql: Optional[str], alias: Optional[str] = None) -> Optional[str]:
@@ -781,12 +1058,29 @@ def _build_owner_match_clause(
             col_exprs.append(f"LOWER(TRIM({alias_prefix}{col_u}))")
     if not col_exprs:
         return "", []
-    placeholders = ",".join(["%s"] * len(owner_emails))
-    ors = [f"{expr} IN ({placeholders})" for expr in col_exprs]
-    fragment = "(" + " OR ".join(ors) + ")"
+
+    # Round 6 / Phase 4.9: chunk the email list so the resulting
+    # IN(...) clause does not blow past Snowflake's per-statement
+    # parameter limits (~16k binds). For small lists this is identical
+    # to the previous single-IN behaviour.
+    try:
+        _chunk_size = int(os.environ.get("ADOPTIQ_OWNER_EMAIL_IN_CHUNK_SIZE", "500"))
+    except Exception:
+        _chunk_size = 500
+    if _chunk_size <= 0:
+        _chunk_size = 500
+    emails = list(owner_emails)
+    chunks = [emails[i:i + _chunk_size] for i in range(0, len(emails), _chunk_size)]
+
+    fragments: List[str] = []
     params: List[Any] = []
-    for _ in col_exprs:
-        params.extend(owner_emails)
+    for chunk in chunks:
+        placeholders = ",".join(["%s"] * len(chunk))
+        ors = [f"{expr} IN ({placeholders})" for expr in col_exprs]
+        fragments.append("(" + " OR ".join(ors) + ")")
+        for _ in col_exprs:
+            params.extend(chunk)
+    fragment = "(" + " OR ".join(fragments) + ")"
     return fragment, params
 
 def _connect_snowflake_direct():
@@ -823,8 +1117,14 @@ def _connect_snowflake_direct():
     except FutureTimeoutError:
         raise RuntimeError("Snowflake connection timed out after 30 seconds")
     except Exception as e:
-        logger.error(f"Error connecting to Snowflake: {e}")
-        raise RuntimeError(f"Failed to connect to Snowflake: {e}")
+        # Round 8 / Phase 2.1: previously the ``RuntimeError`` message embedded
+        # the verbatim driver exception text (account hostnames, library
+        # tracebacks, file paths) and bubbled all the way to HTTP error
+        # bodies / client logs.  Strip the driver text from the user-facing
+        # message and chain the original via ``from e`` so it is still
+        # available to logging.error(..., exc_info=True) for support.
+        logger.error("Error connecting to Snowflake", exc_info=True)
+        raise RuntimeError("Failed to connect to Snowflake") from e
 
 
 def _connect_with_keeper():
@@ -864,8 +1164,10 @@ def _connect_with_keeper():
                 warehouse=SNOWFLAKE_CONFIG["warehouse"],
             )
         except Exception as e:
-            logger.error(f"Error connecting to Snowflake: {e}")
-            raise RuntimeError(f"Failed to connect to Snowflake: {e}")
+            # Round 8 / Phase 2.1: same redaction as ``_connect_snowflake_direct``;
+            # do not propagate driver detail in the public ``RuntimeError`` text.
+            logger.error("Error connecting to Snowflake (Keeper path)", exc_info=True)
+            raise RuntimeError("Failed to connect to Snowflake") from e
 
     try:
         logger.info("Starting Snowflake connection with Keeper (30-second timeout)...")
@@ -878,8 +1180,11 @@ def _connect_with_keeper():
         logger.warning("Snowflake connection timed out after 30 seconds")
         raise RuntimeError("Snowflake connection timed out - database may be unavailable")
     except Exception as e:
-        logger.error(f"Error connecting to Snowflake: {e}")
-        raise RuntimeError(f"Failed to connect to Snowflake: {e}")
+        # Round 8 / Phase 2.1: do not include verbatim ``e`` in the
+        # publicly-rendered ``RuntimeError``; chain via ``from e`` so logs
+        # keep the driver detail.
+        logger.error("Error connecting to Snowflake (Keeper outer)", exc_info=True)
+        raise RuntimeError("Failed to connect to Snowflake") from e
 
 def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, Any]:
     """
@@ -894,7 +1199,9 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
     """
     ctx = None
     try:
-        logger.info(f"[[SEARCH]] Fetching subscription data for: {subscription_id}")
+        # Round 5 / Phase 6.2: subscription IDs are customer-attributable
+        # in the operator log stream; demote to DEBUG.
+        logger.debug(f"[[SEARCH]] Fetching subscription data for: {subscription_id}")
         
         # Connect to Snowflake
         ctx = _connect_with_keeper()
@@ -905,7 +1212,14 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         dsm_columns = _get_table_columns(ctx, DSM_TABLE)
 
         # First, get account information from subscription (schema-aware column selection)
-        logger.info(f"[[LIST]] Looking up account information for subscription: {subscription_id}")
+        logger.debug(f"[[LIST]] Looking up account information for subscription: {subscription_id}")
+        # Round 3 / Phase 3.2: also pull RENEWAL_RISK_CATEGORY so the
+        # downstream contract-risk scorer in compute_customer_risk_profile
+        # actually receives the DSM signal. Previously this column was
+        # never selected, so ``customer_subs[RENEWAL_RISK_CATEGORY]``
+        # was always blank and the contract risk component scored 0
+        # for every subscription regardless of DSM's own renewal
+        # category (CRITICAL/HIGH/MEDIUM/LOW).
         account_select_exprs = [
             _column_or_default_expr(dsm_columns, "ACCOUNT_ID_C", "NULL"),
             _column_or_default_expr(dsm_columns, "BU_NAME", "'Unknown Customer'"),
@@ -913,19 +1227,76 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
             _column_or_default_expr(dsm_columns, "TECHNOLOGY_C", "'Unknown'"),
             _column_or_default_expr(dsm_columns, "SUB_TECHNOLOGY_C", "'Unknown'"),
             _column_or_default_expr(dsm_columns, "STATUS_C", "'Unknown'"),
+            _column_or_default_expr(dsm_columns, "RENEWAL_RISK_CATEGORY", "NULL"),
         ]
+        # Round 3 / Phase 3.1: ``LIMIT 1`` without a deterministic
+        # ``ORDER BY`` returns whichever DSM row Snowflake decides to
+        # surface first. With multiple rows for the same SUBSCRIPTION_ID
+        # (line items, status history, etc.) different runs can land
+        # on different account_id / customer_name pairs and produce
+        # subtly different reports. Fetch up to 5 rows, pick the
+        # newest-modified, and warn on duplicates so the lookup is
+        # deterministic and visible.
         account_query = f"""
-        SELECT {", ".join(e for e in account_select_exprs if e)}
+        SELECT {", ".join(e for e in account_select_exprs if e)},
+               {_column_or_default_expr(dsm_columns, "MODIFIED_DATE", "NULL")} AS _ROW_MODIFIED_DATE,
+               {_column_or_default_expr(dsm_columns, "CREATED_DATE", "NULL")} AS _ROW_CREATED_DATE
         FROM {DSM_TABLE}
         WHERE SUBSCRIPTION_ID = %s
-        LIMIT 1
+        ORDER BY MODIFIED_DATE DESC NULLS LAST,
+                 CREATED_DATE DESC NULLS LAST,
+                 ACCOUNT_ID_C
+        LIMIT 5
         """
-        
+
         cur.execute(account_query, (subscription_id,))
-        account_result = cur.fetchone()
-        
+        _account_rows = cur.fetchall() or []
+        if len(_account_rows) > 1:
+            try:
+                _distinct_accts = {
+                    str((r or {}).get("ACCOUNT_ID_C") or "")
+                    for r in _account_rows
+                }
+                _distinct_accts.discard("")
+                if len(_distinct_accts) > 1:
+                    logger.warning(
+                        "Subscription %s maps to %d distinct ACCOUNT_ID_C values in %s "
+                        "(%s); taking the newest-modified row to keep this lookup "
+                        "deterministic. Investigate DSM data quality.",
+                        subscription_id,
+                        len(_distinct_accts),
+                        DSM_TABLE,
+                        sorted(_distinct_accts),
+                    )
+                else:
+                    logger.info(
+                        "Subscription %s has %d DSM rows but they share a single account; "
+                        "using newest-modified row.",
+                        subscription_id,
+                        len(_account_rows),
+                    )
+            except Exception as _dup_err:
+                logger.debug(
+                    "Could not summarize duplicate DSM rows for %s: %s",
+                    subscription_id,
+                    _dup_err,
+                )
+        account_result = _account_rows[0] if _account_rows else None
+
         if not account_result:
-            logger.warning(f"No account found for Subscription ID: {subscription_id}")
+            # Round 8 / Phase 2.12: redact the raw Subscription ID
+            # in WARNING-level logs (which routinely flow into
+            # shared aggregators).  We log a short SHA-256 digest
+            # so support can still correlate without leaking the
+            # raw identifier in plain text.  The full ID remains
+            # available at DEBUG.
+            try:
+                import hashlib as _h
+                _sub_digest = _h.sha256(str(subscription_id).encode('utf-8', 'replace')).hexdigest()[:12]
+            except Exception:
+                _sub_digest = '?'
+            logger.warning("No account found for Subscription ID (digest=%s)", _sub_digest)
+            logger.debug("No account found for Subscription ID: %s", subscription_id)
             return {
                 'subscription_id': subscription_id,
                 'customer_name': 'Unknown Customer',
@@ -939,13 +1310,28 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         technology = account_result.get('TECHNOLOGY_C', 'Unknown')
         sub_technology = account_result.get('SUB_TECHNOLOGY_C', 'Unknown')
         status = account_result.get('STATUS_C', 'Unknown')
+        # Round 3 / Phase 3.2: capture DSM's renewal_risk_category so
+        # downstream contract scoring can read it.
+        renewal_risk_category = account_result.get('RENEWAL_RISK_CATEGORY')
         
-        logger.info(f"[[OK]] Found account: {customer_name} (ID: {account_id})")
-        logger.info(f"[[DATA]] Technology: {technology} | Sub-Technology: {sub_technology} | Status: {status}")
+        # Round 5 / Phase 6.2: customer name + account ID is PII (or
+        # at least customer-attributable internal data) and should
+        # not appear at INFO in the steady-state log stream.  Keep
+        # the operator-friendly "found" signal at INFO without
+        # identifiers and stash the identifying detail at DEBUG.
+        logger.info("[[OK]] Subscription account resolved")
+        logger.debug(
+            "[[OK]] Found account: %s (ID: %s) | Technology: %s | Sub-Technology: %s | Status: %s",
+            customer_name, account_id, technology, sub_technology, status,
+        )
         
-        # Set up date filters with parameterized queries
-        date_filter_task = "AND DATE(CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())"
-        date_filter_pulse_priority = "AND DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())"
+        # Set up date filters with parameterized queries.
+        # Round 8 / Phase 2.3: bind an explicit Python-computed UTC
+        # window-start date instead of ``DATEADD(day, -%s, CURRENT_DATE())``
+        # so the lookback window is independent of Snowflake session TZ.
+        date_filter_task = "AND DATE(CREATED_DATE) >= %s"
+        date_filter_pulse_priority = "AND DATE(CREATEDDATE) >= %s"
+        _window_start = _utc_window_start_iso(days)
         
         # Fetch all related data
         logger.info(f"[[CHART]] Fetching adoption barriers...")
@@ -956,7 +1342,7 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         AND ACCOUNT_ID_C = %s 
         {date_filter_task}
         """
-        cur.execute(ab_query, (account_id, days))
+        cur.execute(ab_query, (account_id, _window_start))
         adoption_barriers = cur.fetchall()
         
         logger.info(f"[[LIST]] Fetching action plans...")
@@ -967,7 +1353,7 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         AND ACCOUNT_ID_C = %s 
         {date_filter_task}
         """
-        cur.execute(ap_query, (account_id, days))
+        cur.execute(ap_query, (account_id, _window_start))
         action_plans = cur.fetchall()
         
         logger.info(f"[EMOJI] Fetching customer pulse...")
@@ -977,7 +1363,7 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         WHERE ACCOUNT__C = %s 
         {date_filter_pulse_priority}
         """
-        cur.execute(cp_query, (account_id, days))
+        cur.execute(cp_query, (account_id, _window_start))
         customer_pulse = cur.fetchall()
         
         success_priorities = []
@@ -991,7 +1377,7 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
             WHERE RELATED_CUSTOMER__C = %s 
             {date_filter_pulse_priority}
             """
-            cur.execute(sp_query, (customer_name, days))
+            cur.execute(sp_query, (customer_name, _window_start))
             success_priorities = cur.fetchall()
         
         # Get team information using schema-aware select expressions.
@@ -1002,10 +1388,18 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
             _column_or_default_expr(dsm_columns, "CSSM_MANAGER", "NULL"),
             _column_or_default_expr(dsm_columns, "CSSM_MANAGER_EMAIL", "NULL"),
         ]
+        # Round 11 / Phase 7.4: ``team_data[0]`` was previously
+        # picked from an unordered result set; if a subscription
+        # has multiple historical owner rows the first one
+        # depended on Snowflake's internal storage order.  Order
+        # by CSSM_EMAIL plus most-recent MODIFIED_DATE so the
+        # primary owner picked here is reproducible across runs.
         team_query = f"""
         SELECT {", ".join(e for e in team_select_exprs if e)}
         FROM {DSM_TABLE}
         WHERE SUBSCRIPTION_ID = %s
+        ORDER BY CSSM_EMAIL ASC NULLS LAST,
+                 {_column_or_default_expr(dsm_columns, "MODIFIED_DATE", "NULL")} DESC NULLS LAST
         """
         cur.execute(team_query, (subscription_id,))
         team_data = cur.fetchall()
@@ -1027,12 +1421,17 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
             'customer_pulse': customer_pulse,
             'success_priorities': success_priorities,
             'total_records': len(adoption_barriers) + len(action_plans) + len(customer_pulse) + len(success_priorities),
+            # Round 3 / Phase 3.2: surface DSM's renewal_risk_category
+            # so the renewal_risk endpoint can feed it into
+            # compute_customer_risk_profile via customer_subs.
+            'renewal_risk_category': renewal_risk_category,
             'summary': {
                 'adoption_barriers_count': len(adoption_barriers),
                 'action_plans_count': len(action_plans),
                 'customer_pulse_count': len(customer_pulse),
                 'success_priorities_count': len(success_priorities),
-                'team_members_count': len(team_data)
+                'team_members_count': len(team_data),
+                'renewal_risk_category': renewal_risk_category,
             }
         }
         
@@ -1047,13 +1446,41 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         return subscription_data
         
     except Exception as e:
-        logger.error(f"[[ERROR]] Error fetching subscription data: {e}")
+        # Round 5 / Phase 4.3: include a structured ``failure_kind`` /
+        # ``error_code`` so the UI and validators can distinguish a
+        # connection failure from a query failure from a not-found
+        # result.  The vague "An error occurred" string is fine for
+        # display, but downstream code (and ops dashboards) need the
+        # exception type and the underlying error code (when the
+        # driver provides one) to triage without grepping logs.
+        # Round 6 / Phase 7.4: serialize ``failure_kind`` as a stable
+        # enum so the JSON response we hand back to the UI cannot leak
+        # internal driver class names (``ProgrammingError`` etc.) to
+        # the customer-facing path.  The verbose class name is still
+        # logged below for ops triage.
+        _failure_kind = _stable_failure_kind(e)
+        _failure_kind_internal = type(e).__name__
+        _error_code = None
+        for _attr in ('errno', 'sqlcode', 'errno', 'code'):
+            try:
+                _v = getattr(e, _attr, None)
+                if _v not in (None, ''):
+                    _error_code = str(_v)
+                    break
+            except Exception:
+                continue
+        logger.error(
+            f"[[ERROR]] Error fetching subscription data: {e} "
+            f"(failure_kind={_failure_kind} failure_kind_internal={_failure_kind_internal} error_code={_error_code})"
+        )
         return {
             'subscription_id': subscription_id,
             'customer_name': 'Error',
             'account_id': None,
             'found': False,
-            'error': 'An error occurred while fetching subscription data. Please try again.'
+            'error': 'An error occurred while fetching subscription data. Please try again.',
+            'failure_kind': _failure_kind,
+            'error_code': _error_code,
         }
     finally:
         if 'cur' in locals() and cur is not None:
@@ -1081,30 +1508,100 @@ def search_subscriptions_by_customer(customer_name: str, limit: int = 10) -> Lis
     """
     ctx = None
     try:
-        logger.info(f"[[SEARCH]] Searching subscriptions for customer: {customer_name}")
+        # Round 5 / Phase 6.2: customer name is PII-adjacent; demote to DEBUG.
+        # Round 12 / Phase 11.6: even at DEBUG, raw customer names
+        # routinely flow into log aggregators that long-outlive the
+        # process and are read by audiences with broader access than
+        # the analyst running the search.  Log a SHA-256 digest of
+        # the customer name (matching the redaction pattern Round 8
+        # / Phase 2.12 established for Subscription IDs) so support
+        # can still correlate without leaking the raw identifier.
+        try:
+            import hashlib as _r12_h
+            _r12_cust_digest = _r12_h.sha256(
+                str(customer_name or '').encode('utf-8', 'replace')
+            ).hexdigest()[:12]
+        except Exception:
+            _r12_cust_digest = '?'
+        logger.debug(
+            "[[SEARCH]] Searching subscriptions for customer (digest=%s)",
+            _r12_cust_digest,
+        )
         
         ctx = _connect_with_keeper()
         cur = ctx.cursor(snowflake.connector.DictCursor)
         try:
+            # Round 12 / Phase 4.1: Snowflake LIMIT is enforced
+            # server-side, but this function only returned the raw
+            # row list with no signal that the result set was capped.
+            # Callers therefore could not distinguish "complete set"
+            # from "truncated to N rows" -- the typeahead silently
+            # showed a partial answer.  We keep the function
+            # signature stable (still returns ``List[Dict]``) and
+            # rely on the caller to detect truncation via
+            # ``len(results) >= limit``; the matching JSON layer in
+            # ``app_simple.search_subscriptions`` now exposes
+            # ``results_truncated`` / ``may_have_more`` / ``limit``
+            # so the UI can render a "showing N of many" hint.
             search_query = """
             SELECT SUBSCRIPTION_ID, ACCOUNT_ID_C, BU_NAME
             FROM CX_DB.CX_SWSSBST_BR.dsm_assignment_data
             WHERE UPPER(BU_NAME) LIKE UPPER(%s)
-            ORDER BY BU_NAME
+            ORDER BY BU_NAME, ACCOUNT_ID_C, SUBSCRIPTION_ID
             LIMIT %s
             """
-            
-            cur.execute(search_query, (f'%{customer_name}%', limit))
+            # Round 8 / Phase 2.4: pre-normalize the LIKE needle through
+            # ``normalize_customer_name`` (NFKC + whitespace collapse +
+            # internal-suffix stripping) so the search matches the same
+            # canonical form used by ``data_normalization`` merge logic.
+            # Previously a name with a stray U+00A0 (non-breaking space)
+            # or full-width characters would hit Snowflake unchanged and
+            # silently miss its row, while the post-fetch merge would
+            # have matched it.
+            try:
+                _needle = normalize_customer_name(customer_name) if customer_name else ''
+            except Exception:
+                _needle = (customer_name or '')
+            if not _needle or _needle == 'Unknown':
+                _needle = (customer_name or '').strip()
+            cur.execute(search_query, (f'%{_needle}%', limit))
             results = cur.fetchall()
             
-            logger.info(f"[[OK]] Found {len(results)} subscriptions for customer: {customer_name}")
+            logger.info(f"[[OK]] Found {len(results)} subscriptions for customer search")
+            # Round 12 / Phase 11.6: redact via SHA-256 digest as above.
+            logger.debug(
+                "[[OK]] Subscription search customer (digest=%s)",
+                _r12_cust_digest,
+            )
             return results
         finally:
             cur.close()
         
     except Exception as e:
+        # Round 5 / Phase 4.13: previously this returned ``[]`` on any
+        # exception, which is identical to "no subscriptions matched
+        # the customer name".  The UI then showed "No matches" for
+        # what was actually a Snowflake outage / auth failure /
+        # malformed query, hiding a real problem from the user.
+        # Return a single-element sentinel list whose record carries
+        # ``_search_error`` so the caller can branch:
+        #   results = search_subscriptions_by_customer(...)
+        #   if results and isinstance(results[0], dict) and results[0].get('_search_error'):
+        #       # surface upstream failure
+        # The first element is intentionally NOT a real subscription
+        # row, so any code that iterates and accesses
+        # ``SUBSCRIPTION_ID`` will get ``None`` (and existing
+        # ``len(results)`` checks still see "1 result" -> the UI
+        # should show the error string instead of a fake match).
         logger.error(f"[[ERROR]] Error searching subscriptions: {e}")
-        return []
+        return [{
+            '_search_error': 'An error occurred while searching subscriptions. Please try again.',
+            # Round 6 / Phase 7.4: stable enum, not raw class name.
+            '_failure_kind': _stable_failure_kind(e),
+            'SUBSCRIPTION_ID': None,
+            'ACCOUNT_ID_C': None,
+            'BU_NAME': None,
+        }]
     finally:
         if ctx is not None:
             try:
@@ -1125,17 +1622,23 @@ def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[
         Renewal risk analysis for the subscription
     """
     try:
-        logger.info(f"[[BULLSEYE]] Calculating renewal risk for subscription: {subscription_id}")
+        logger.debug(f"[[BULLSEYE]] Calculating renewal risk for subscription: {subscription_id}")
         
         # Get subscription data
         sub_data = fetch_subscription_data(subscription_id, days)
         
         if not sub_data['found']:
+            # Round 3 / Phase 5.3: return ``null`` and a state field
+            # instead of ``risk_score=0`` when we genuinely don't
+            # know the score. Callers / dashboards were treating
+            # the literal ``0`` as a real "no risk" reading and
+            # silently bucketing missing subscriptions as healthy.
             return {
                 'subscription_id': subscription_id,
                 'error': sub_data.get('error', 'Subscription not found'),
-                'risk_score': 0,
-                'risk_level': 'UNKNOWN'
+                'risk_score': None,
+                'risk_level': 'UNKNOWN',
+                'state': 'unavailable',
             }
         
         # Convert to DataFrames for analysis
@@ -1154,29 +1657,48 @@ def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[
                 "STATUS_C": sub_data.get("status", ""),
             }]),
             ext_incidents=None,
+            # Round 3 / Phase 4.2: thread the subscription's analysis
+            # window so the support-case "recent" component lines up
+            # with the period being scored. Default 30 retained
+            # for back-compat when ``days`` is not provided.
+            recent_window_days=int(days) if days else 30,
         )
         risk_components = profile["components"]
         overall_risk = profile["risk_score_0_10"]
         risk_level = profile["risk_band"]
         
-        # Generate recommendations
+        # Round 8 / Phase 2.7: drive the recommendation buckets off
+        # the canonical risk band (``risk_band`` field, populated by
+        # ``risk_scoring._risk_band`` against
+        # ``RISK_BAND_THRESHOLDS``) instead of arbitrary >=7/>=4
+        # cutoffs on the 0-10 score.  Previously a customer scored
+        # 6.9 (canonically HIGH) would silently fall into the
+        # "MEDIUM/check-ins" bucket while the headline label said
+        # HIGH.  Aligning here removes that contradiction and makes
+        # band re-tuning a single-source change in
+        # ``risk_scoring.RISK_BAND_THRESHOLDS``.
         recommendations = []
-        if overall_risk >= 7:
+        _band_norm = (risk_level or 'UNKNOWN').upper().strip()
+        if _band_norm in ('CRITICAL', 'HIGH'):
             recommendations.extend([
                 "Schedule immediate executive-level customer meeting",
                 "Assign dedicated Customer Success Manager",
                 "Create emergency adoption plan with weekly reviews"
             ])
-        elif overall_risk >= 4:
+        elif _band_norm == 'MEDIUM':
             recommendations.extend([
                 "Increase touch frequency to bi-weekly check-ins",
                 "Provide targeted training and enablement resources",
                 "Address open adoption barriers within 60 days"
             ])
-        else:
+        elif _band_norm in ('LOW', 'HEALTHY'):
             recommendations.extend([
                 "Continue current engagement model",
                 "Schedule quarterly business review"
+            ])
+        else:
+            recommendations.extend([
+                "Risk band is UNKNOWN; investigate scoring inputs before recommending action."
             ])
         
         renewal_analysis = {
@@ -1193,20 +1715,40 @@ def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[
             'risk_components': risk_components,
             'recommendations': recommendations,
             'summary': sub_data['summary'],
-            'analysis_date': datetime.now().isoformat()
+            # Round 8 / Phase 2.8: emit ``analysis_date`` as a
+            # timezone-aware UTC ISO-8601 string instead of a naive
+            # local timestamp.  Naive timestamps were previously
+            # being concatenated into Snowflake-side ISO comparisons
+            # and audit logs, where a missing TZ would either be
+            # interpreted as UTC or as the Snowflake session TZ
+            # depending on context, drifting +/- the wall-clock
+            # offset.
+            'analysis_date': datetime.now(timezone.utc).isoformat()
         }
         
-        logger.info(f"[[OK]] Renewal risk analysis complete for {sub_data['customer_name']}: {risk_level} risk ({overall_risk:.1f}/10)")
+        logger.info(f"[[OK]] Renewal risk analysis complete: {risk_level} risk ({overall_risk:.1f}/10)")
+        logger.debug(f"[[OK]] Renewal risk customer: {sub_data['customer_name']}")
         
         return renewal_analysis
         
     except Exception as e:
+        # Round 5 / Phase 4.1: align the exception path with the
+        # ``not found`` path -- return ``risk_score=None`` /
+        # ``risk_level='UNKNOWN'`` and an explicit
+        # ``state='unavailable'`` instead of ``risk_score=0``.
+        # Returning a literal zero risk on a fetch / scoring failure
+        # was indistinguishable from "this subscription is in great
+        # health" and silently bucketed errored subscriptions into
+        # the safe band, masking the real failure mode.
         logger.error(f"[[ERROR]] Error calculating subscription renewal risk: {e}")
         return {
             'subscription_id': subscription_id,
             'error': 'An error occurred while calculating renewal risk. Please try again.',
-            'risk_score': 0,
-            'risk_level': 'ERROR'
+            'risk_score': None,
+            'risk_level': 'UNKNOWN',
+            'state': 'unavailable',
+            # Round 6 / Phase 7.4: stable enum, not raw class name.
+            'failure_kind': _stable_failure_kind(e),
         }
 
 
@@ -1238,27 +1780,74 @@ def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
             return pd.DataFrame(columns=["SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"])
 
         # Use proper parameterized query to prevent SQL injection
-        placeholders = ','.join(['%s'] * len(emails))
         select_exprs = [
             _column_or_default_expr(available_columns, "SUBSCRIPTION_ID", "NULL"),
             _column_or_default_expr(available_columns, "ACCOUNT_ID_C", "NULL"),
             _column_or_default_expr(available_columns, "BU_NAME", "''"),
             f"{email_col} AS CSSM_EMAIL",
         ]
-        sql = f"""SELECT DISTINCT {", ".join(e for e in select_exprs if e)}
-                  FROM {DSM_TABLE}
-                  WHERE {email_col} IN ({placeholders})"""
-        
-        cur.execute(sql, emails)
-        rows = cur.fetchall()
-        df = pd.DataFrame(rows, columns=[c[0] for c in cur.description])
+        select_clause = ", ".join(e for e in select_exprs if e)
+
+        # Round 6 / Phase 4.1: chunk the email IN clause.  Snowflake's
+        # ``IN`` clause has practical limits and many database
+        # connectors emit one bind per placeholder, which can hit
+        # both the parser bind-count limit and the network-batch limit
+        # for very large teams.  We split the email list into
+        # batches and union the results client-side, deduplicating on
+        # SUBSCRIPTION_ID + ACCOUNT_ID_C + BU_NAME + CSSM_EMAIL so a
+        # single subscription that matches via two emails is not
+        # counted twice in callers downstream.
+        EMAIL_CHUNK_SIZE = 500
+        rows: List[Any] = []
+        col_descr: Optional[List[Any]] = None
+        deduped_emails: List[str] = []
+        _seen_emails = set()
+        for _e in emails:
+            _ek = str(_e).strip().lower()
+            if not _ek or _ek in _seen_emails:
+                continue
+            _seen_emails.add(_ek)
+            deduped_emails.append(_e)
+        for i in range(0, len(deduped_emails), EMAIL_CHUNK_SIZE):
+            chunk = deduped_emails[i:i + EMAIL_CHUNK_SIZE]
+            placeholders = ','.join(['%s'] * len(chunk))
+            sql = (
+                f"SELECT DISTINCT {select_clause} "
+                f"FROM {DSM_TABLE} "
+                f"WHERE {email_col} IN ({placeholders})"
+            )
+            cur.execute(sql, chunk)
+            chunk_rows = cur.fetchall()
+            if col_descr is None:
+                col_descr = cur.description
+            rows.extend(chunk_rows)
+        if col_descr is None:
+            return pd.DataFrame(columns=["SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"])
+        df = pd.DataFrame(rows, columns=[c[0] for c in col_descr])
+        if not df.empty:
+            try:
+                df = df.drop_duplicates(
+                    subset=[c for c in ("SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL") if c in df.columns]
+                ).reset_index(drop=True)
+            except Exception:
+                df = df.drop_duplicates().reset_index(drop=True)
         for required_col in ("SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"):
             if required_col not in df.columns:
                 df[required_col] = ""
+        # Round 2 / Phase 4.4: stamp the row contract so downstream
+        # callers (consistency validator, contracts dashboard) can
+        # detect schema drift on this load path.  Previously only the
+        # snowflake_prefetch path called annotate_with_contract, so
+        # direct fetch_team_subscriptions consumers had no contract.
+        try:
+            from data_contracts import annotate_with_contract as _annotate
+            _annotate(df, dataset="subscriptions")
+        except Exception as _annot_err:
+            logger.debug("annotate_with_contract(subscriptions) skipped: %s", _annot_err)
         return df
     except Exception as e:
         _log_snowflake_fallback("Team subscriptions query", e)
-        return pd.DataFrame()
+        return _empty_df_with_fetch_error("team_subscriptions", e)
     finally:
         if cur:
             cur.close()
@@ -1278,13 +1867,21 @@ def fetch_arr_data(ctx, account_ids: List[str]) -> pd.DataFrame:
             return pd.DataFrame(columns=[
                 'ACCOUNT_ID_C', 'BU_NAME', 'SUBSCRIPTION_ID', 'TECHNOLOGY_C', 'SUB_TECHNOLOGY_C',
                 'STATUS_C', 'CSSM_EMAIL', 'CSSM_NAME', 'CSSM_MANAGER',
-                'ANNUAL_CONTRACT_VALUE', 'MRR', 'TCV', 'LICENSE_COUNT'
+                'ANNUAL_CONTRACT_VALUE', 'MRR', 'TCV', 'LICENSE_COUNT',
+                'CURRENCY_CODE'
             ])
         normalized = df.copy()
         text_defaults = {
             'ACCOUNT_ID_C': '', 'BU_NAME': '', 'SUBSCRIPTION_ID': '',
             'TECHNOLOGY_C': 'Unknown', 'SUB_TECHNOLOGY_C': 'Unknown',
-            'STATUS_C': '', 'CSSM_EMAIL': '', 'CSSM_NAME': '', 'CSSM_MANAGER': ''
+            'STATUS_C': '', 'CSSM_EMAIL': '', 'CSSM_NAME': '', 'CSSM_MANAGER': '',
+            # Round 2 / Phase 1.1: every row carries its CURRENCY_CODE so
+            # downstream sums can bucket by currency rather than blindly
+            # adding values across mixed currencies.  When the source
+            # column is missing we fall back to 'UNKNOWN' (NOT 'USD'),
+            # so callers can opt to either drop the row from totals or
+            # surface a multi-currency warning.
+            'CURRENCY_CODE': 'UNKNOWN',
         }
         numeric_defaults = {
             'ANNUAL_CONTRACT_VALUE': 0, 'MRR': 0, 'TCV': 0, 'LICENSE_COUNT': 0
@@ -1292,10 +1889,29 @@ def fetch_arr_data(ctx, account_ids: List[str]) -> pd.DataFrame:
         for col, default in text_defaults.items():
             if col not in normalized.columns:
                 normalized[col] = default
+        # Normalize currency code casing so downstream groupby is stable.
+        try:
+            normalized['CURRENCY_CODE'] = (
+                normalized['CURRENCY_CODE'].astype(str).str.strip().str.upper().replace('', 'UNKNOWN')
+            )
+        except Exception:
+            pass
         for col, default in numeric_defaults.items():
             if col not in normalized.columns:
                 normalized[col] = default
             normalized[col] = pd.to_numeric(normalized[col], errors='coerce').fillna(default)
+
+        # Stamp a multi-currency warning on the frame attrs so any
+        # renderer that sums across rows can detect the situation
+        # without re-discovering it.
+        try:
+            ccys = sorted(c for c in normalized['CURRENCY_CODE'].dropna().unique() if c)
+            distinct_ccys = [c for c in ccys if c and c != 'UNKNOWN']
+            normalized.attrs['currencies_present'] = ccys
+            normalized.attrs['is_multi_currency'] = len(distinct_ccys) > 1
+        except Exception:
+            normalized.attrs['currencies_present'] = []
+            normalized.attrs['is_multi_currency'] = False
         return normalized
 
     # Normalize/clean IDs up-front and cap batch size for query stability.
@@ -1334,9 +1950,33 @@ def fetch_arr_data(ctx, account_ids: List[str]) -> pd.DataFrame:
             logger.warning("ACCOUNT_ID_C column unavailable in %s; cannot fetch ARR data", DSM_TABLE)
             return _normalize_arr_df(pd.DataFrame())
 
-        status_filter = "AND STATUS_C = 'ACTIVE'" if "STATUS_C" in available_columns else ""
+        # Round 10 / Phase 5.3: case-fold + trim STATUS_C so rows whose
+        # provider stamps the column as ``Active``, ``active``, or
+        # ``ACTIVE `` (trailing space, common on CSV-derived ETLs) all
+        # match. Previously the literal-equal predicate silently dropped
+        # those rows, undercounting ARR vs the source system.
+        status_filter = "AND UPPER(TRIM(STATUS_C)) = 'ACTIVE'" if "STATUS_C" in available_columns else ""
         if not status_filter:
             logger.info("STATUS_C column unavailable in %s; skipping active-status filter", DSM_TABLE)
+
+        # Round 10 / Phase 9.3: track which monetary columns were
+        # missing from the introspected schema so we can stamp an
+        # ``arr_schema_degraded`` warning on the returned DataFrame's
+        # ``attrs``.  Without this, a Snowflake column rename or a
+        # downstream view that drops ``ANNUAL_CONTRACT_VALUE_C``
+        # produces a frame full of ``0`` ARR values with no
+        # ``fetch_error`` -- the report would silently advertise a
+        # "$0 portfolio" headline even though the data is simply
+        # missing the field.
+        _missing_monetary_columns: list[str] = []
+        if "ANNUAL_CONTRACT_VALUE_C" not in available_columns:
+            _missing_monetary_columns.append("ANNUAL_CONTRACT_VALUE_C")
+        if "MONTHLY_RECURRING_REVENUE_C" not in available_columns:
+            _missing_monetary_columns.append("MONTHLY_RECURRING_REVENUE_C")
+        if "TOTAL_CONTRACT_VALUE_C" not in available_columns:
+            _missing_monetary_columns.append("TOTAL_CONTRACT_VALUE_C")
+        if "LICENSE_COUNT_C" not in available_columns:
+            _missing_monetary_columns.append("LICENSE_COUNT_C")
 
         select_exprs = [
             _column_or_default_expr(available_columns, "ACCOUNT_ID_C", "NULL"),
@@ -1368,26 +2008,120 @@ def fetch_arr_data(ctx, account_ids: List[str]) -> pd.DataFrame:
                 if "LICENSE_COUNT_C" in available_columns
                 else "0 AS LICENSE_COUNT"
             ),
+            # Round 2 / Phase 1.1: surface the per-row currency so
+            # ARR/MRR/TCV totals can be bucketed by currency rather
+            # than summed blindly across mixed currencies.  Try a few
+            # known column names; default to 'UNKNOWN' if none is
+            # present so the renderer can mark the metric as untrusted.
+            (
+                "UPPER(COALESCE(CURRENCY_CODE_C, '')) AS CURRENCY_CODE"
+                if "CURRENCY_CODE_C" in available_columns
+                else (
+                    "UPPER(COALESCE(CURRENCY_C, '')) AS CURRENCY_CODE"
+                    if "CURRENCY_C" in available_columns
+                    else (
+                        "UPPER(COALESCE(CURRENCY, '')) AS CURRENCY_CODE"
+                        if "CURRENCY" in available_columns
+                        else "'UNKNOWN' AS CURRENCY_CODE"
+                    )
+                )
+            ),
         ]
+        # Round 11 / Phase 7.5: ``SELECT DISTINCT`` collapses
+        # duplicates but is non-deterministic when one
+        # (ACCOUNT_ID_C, SUBSCRIPTION_ID) tuple has multiple
+        # historical rows that differ on at least one
+        # non-key column (CSSM_EMAIL change, CSSM_NAME
+        # rebrand, ARR adjustment).  In that case DISTINCT
+        # yields *all* of them and downstream dedupe picks an
+        # arbitrary representative, so the same query can
+        # return slightly different ARR per account on
+        # successive runs.  Replace with a windowed query
+        # that keeps the most recently modified row per
+        # (ACCOUNT_ID_C, SUBSCRIPTION_ID), with a fallback
+        # ordering when MODIFIED_DATE is unavailable.
+        _modified_date_expr = _column_or_default_expr(
+            available_columns, "MODIFIED_DATE", "NULL"
+        )
+        _created_date_expr = _column_or_default_expr(
+            available_columns, "CREATED_DATE", "NULL"
+        )
+        _subscription_id_expr = (
+            "SUBSCRIPTION_ID" if "SUBSCRIPTION_ID" in available_columns else "''"
+        )
         sql_with_arr = f"""
-        SELECT DISTINCT
+        SELECT
           {", ".join(e for e in select_exprs if e)}
         FROM {DSM_TABLE}
         WHERE ACCOUNT_ID_C IN ({placeholders})
           {status_filter}
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY ACCOUNT_ID_C, {_subscription_id_expr}
+            ORDER BY {_modified_date_expr} DESC NULLS LAST,
+                     {_created_date_expr} DESC NULLS LAST,
+                     ACCOUNT_ID_C
+        ) = 1
         """
 
         logger.debug("Executing schema-aware ARR SQL query")
         cur.execute(sql_with_arr, cleaned_ids)
         rows = cur.fetchall()
         if not rows:
-            return _normalize_arr_df(pd.DataFrame())
+            empty = _normalize_arr_df(pd.DataFrame())
+            try:
+                from data_contracts import annotate_with_contract as _annotate
+                _annotate(empty, dataset="subscriptions")
+            except Exception as _annot_err:
+                logger.debug("annotate_with_contract(arr empty) skipped: %s", _annot_err)
+            return empty
         cols = [c[0] for c in cur.description]
-        return _normalize_arr_df(pd.DataFrame(rows, columns=cols))
+        result = _normalize_arr_df(pd.DataFrame(rows, columns=cols))
+        # Round 2 / Phase 4.4: stamp the row contract on the ARR
+        # frame so the same drift detection that works on the
+        # snowflake_prefetch path also fires when callers reach
+        # fetch_arr_data directly.
+        try:
+            from data_contracts import annotate_with_contract as _annotate
+            _annotate(result, dataset="subscriptions")
+        except Exception as _annot_err:
+            logger.debug("annotate_with_contract(arr) skipped: %s", _annot_err)
+        # Round 10 / Phase 9.3: stamp ``arr_schema_degraded`` on the
+        # frame's ``attrs`` when one or more monetary columns were
+        # absent from the introspected schema and we substituted
+        # ``0 AS ...``.  Downstream report assembly (the headline
+        # ARR sentence in particular) MUST consult this flag and
+        # add a ``partial_data_warnings`` entry instead of rendering
+        # "$0 portfolio" as a real number.
+        if _missing_monetary_columns:
+            try:
+                result.attrs['arr_schema_degraded'] = True
+                result.attrs['arr_schema_missing_columns'] = list(_missing_monetary_columns)
+                result.attrs['partial_data_warning'] = (
+                    f"fetch_arr_data: monetary columns missing from schema "
+                    f"({', '.join(_missing_monetary_columns)}); ARR/MRR/TCV/license "
+                    "columns substituted with literal 0 -- portfolio-value totals "
+                    "are NOT trustworthy until the source schema is restored."
+                )
+                logger.warning(
+                    "fetch_arr_data: schema degraded; missing columns: %s",
+                    ", ".join(_missing_monetary_columns),
+                )
+            except Exception as _attr_err:
+                logger.debug("could not stamp arr_schema_degraded attrs: %s", _attr_err)
+        return result
 
     except Exception as e:
         _log_snowflake_fallback("ARR data query", e)
-        return _normalize_arr_df(pd.DataFrame())
+        normalized_empty = _normalize_arr_df(pd.DataFrame())
+        try:
+            normalized_empty.attrs["fetch_error"] = str(e).strip() or e.__class__.__name__
+            normalized_empty.attrs["fetch_error_dataset"] = "arr_data"
+            normalized_empty.attrs["fetch_error_kind"] = (
+                "access_or_schema" if _is_snowflake_access_issue(e) else "runtime"
+            )
+        except Exception:
+            pass
+        return normalized_empty
     finally:
         if cur:
             cur.close()
@@ -1408,14 +2142,26 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
 
     Returns empty DataFrame on error or if table/columns are missing.
     """
+    # Round 2 / Phase 1.12: when SUPPORT_CASES cannot be fetched
+    # (missing context, invalid days, blocked by table policy), return
+    # a normalized empty frame whose ``attrs`` carry an explicit
+    # ``fetch_error`` and ``fetch_error_kind`` so downstream renderers
+    # (renewal narrative, Ask AI grounded prompt) can show "support
+    # cases unavailable" instead of treating zero rows as zero cases.
+    def _empty_with_error(kind: str, message: str) -> pd.DataFrame:
+        empty = pd.DataFrame()
+        empty.attrs['fetch_error'] = message
+        empty.attrs['fetch_error_kind'] = kind
+        return empty
+
     if not ctx or not account_ids:
-        return pd.DataFrame()
+        return pd.DataFrame()  # genuinely empty (no scope) -> not an error
     if not isinstance(days, int) or days < 1 or days > 365:
         logger.warning(f"[[RENEWAL]] Invalid days parameter: {days}")
-        return pd.DataFrame()
+        return _empty_with_error('invalid_days', f"Invalid days parameter: {days}")
     if not isinstance(limit, int) or limit < 1:
         logger.warning(f"[[RENEWAL]] Invalid limit parameter: {limit}")
-        return pd.DataFrame()
+        return _empty_with_error('invalid_limit', f"Invalid limit parameter: {limit}")
     # Hard ceiling stays at 100k for memory safety, but this is well above
     # any real-world portfolio (largest manager < 5k cases / 90d).
     limit = min(limit, 100000)
@@ -1432,15 +2178,54 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         for col in expected:
             if col not in normalized.columns:
                 normalized[col] = None
-        normalized["case_status_norm"] = normalized["STATUS"].apply(normalize_status_label)
-        normalized["case_priority_norm"] = normalized["SEVERITY"].apply(normalize_priority_label)
-        normalized["open_date"] = parse_datetime_series(normalized["CREATED_DATE"])
-        normalized["closed_date"] = parse_datetime_series(normalized["CLOSED_DATE"])
-        normalized["is_open"] = normalized["case_status_norm"].eq("Open")
-        normalized["open_age_days"] = (
-            (pd.Timestamp(datetime.utcnow()) - normalized["open_date"]).dt.days.where(normalized["is_open"], other=pd.NA)
-        )
-        out = normalized[expected + derived]
+        # Round 5 / Phase 5.4: previously we re-implemented status /
+        # priority / open-date normalization inline.  That duplicated
+        # the rules baked into ``add_case_lifecycle_fields`` (which
+        # also handles the "status unknown but closed_date present =>
+        # closed" edge case, severity bucketing, BEMS detection,
+        # customer-name resolution, etc.) and the two paths drifted.
+        # Route through the canonical helper and project back down
+        # to the schema this fetcher promises to its callers.
+        try:
+            enriched = add_case_lifecycle_fields(normalized)
+        except Exception as _enrich_err:
+            logger.debug(
+                "Renewal cases _normalize_cases_df: add_case_lifecycle_fields "
+                "fell back to inline normalization (%s)",
+                _enrich_err,
+            )
+            enriched = normalized.copy()
+            enriched["case_status_norm"] = enriched["STATUS"].apply(normalize_status_label)
+            enriched["case_priority_norm"] = enriched["SEVERITY"].apply(normalize_priority_label)
+            enriched["open_date"] = parse_datetime_series(enriched["CREATED_DATE"])
+            enriched["closed_date"] = parse_datetime_series(enriched["CLOSED_DATE"])
+            enriched["is_open"] = enriched["case_status_norm"].eq("Open")
+            # Round 6 / Phase 4.14: tz-aware UTC reference so the
+            # subtraction does not warn / coerce when ``open_date``
+            # carries a timezone, and so the age does not silently
+            # shift by the host's local UTC offset.
+            _now_utc = pd.Timestamp(datetime.now(timezone.utc))
+            _open_dt = enriched["open_date"]
+            try:
+                # Make sure both sides are tz-aware (UTC) so the
+                # subtraction is unambiguous.
+                if getattr(_open_dt.dt, 'tz', None) is None:
+                    _open_dt = _open_dt.dt.tz_localize('UTC')
+                else:
+                    _open_dt = _open_dt.dt.tz_convert('UTC')
+            except Exception:
+                pass
+            enriched["open_age_days"] = (
+                (_now_utc - _open_dt).dt.days.where(enriched["is_open"], other=pd.NA)
+            )
+        # ``add_case_lifecycle_fields`` does not include the legacy
+        # ``open_age_days`` projection if open_date is NaT for the
+        # whole frame; ensure all promised columns exist before
+        # subsetting.
+        for _need in derived:
+            if _need not in enriched.columns:
+                enriched[_need] = pd.NA
+        out = enriched[expected + derived]
         # Surface truncation so report code can warn the user.
         out.attrs['was_truncated'] = bool(len(out) >= limit)
         out.attrs['fetch_limit'] = limit
@@ -1453,7 +2238,12 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
 
     if is_table_blocked("CX_DB.CX_SWSSBST_BR.SUPPORT_CASES"):
         logger.info("[[RENEWAL]] SUPPORT_CASES disabled by Snowflake table policy; returning empty support cases.")
-        return _normalize_cases_df(pd.DataFrame())
+        # Round 2 / Phase 1.12: tag the empty frame so renderers
+        # render an "unavailable" tristate instead of "zero cases".
+        _blocked = _normalize_cases_df(pd.DataFrame())
+        _blocked.attrs['fetch_error'] = 'SUPPORT_CASES blocked by Snowflake table policy'
+        _blocked.attrs['fetch_error_kind'] = 'table_policy_violation'
+        return _blocked
 
     # Normalize IDs and dedupe
     account_ids_clean = []
@@ -1482,12 +2272,39 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         merged = pd.concat(frames, ignore_index=True)
         merged = merged.drop_duplicates(subset=['CASE_ID', 'ACCOUNT_ID'], keep='first')
         if 'CREATED_DATE' in merged.columns:
-            merged = merged.sort_values('CREATED_DATE', ascending=False, na_position='last')
+            # Round 12 / Phase 11.4: previously ``sort_values`` ran in
+            # the default (quicksort) algorithm, which is *not* stable
+            # -- two rows with the same ``CREATED_DATE`` could swap on
+            # repeat runs and the ``head(limit)`` slice would then
+            # return a different "Top N" set even when the underlying
+            # data was identical.  Use ``kind='stable'`` and add a
+            # ``CASE_ID`` (or ``ACCOUNT_ID``) tie-break so equal
+            # timestamps always resolve in lexicographic order.
+            _r12_secondary = next(
+                (c for c in ('CASE_ID', 'CASE_NUMBER', 'ACCOUNT_ID') if c in merged.columns),
+                None,
+            )
+            if _r12_secondary is not None:
+                merged = merged.sort_values(
+                    ['CREATED_DATE', _r12_secondary],
+                    ascending=[False, True],
+                    na_position='last',
+                    kind='stable',
+                )
+            else:
+                merged = merged.sort_values(
+                    'CREATED_DATE', ascending=False, na_position='last', kind='stable'
+                )
         return _normalize_cases_df(merged.head(limit))
 
     cur = None
     placeholders = ','.join(['%s'] * len(account_ids_clean))
-    params = list(account_ids_clean) + [days, limit]
+    # Round 8 / Phase 2.3: bind explicit Python-computed UTC window
+    # start instead of ``DATEADD(day, -%s, CURRENT_DATE())`` so the
+    # support-cases lookback window is independent of Snowflake
+    # session TZ.
+    _support_window_start = _utc_window_start_iso(days)
+    params = list(account_ids_clean) + [_support_window_start, limit]
 
     # Round 4: detect a real ``CLOSED_DATE`` column (or known synonyms)
     # so case-resolution analytics actually have a closure timestamp
@@ -1521,7 +2338,7 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE, {_close_select}, s.SEVERITY
         FROM {_SUPPORT_CASES_TABLE} s
         WHERE s.ACCOUNT_ID IN ({placeholders})
-          AND s.CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
+          AND s.CREATED_DATE >= %s
         ORDER BY s.CREATED_DATE DESC
         LIMIT %s
         """
@@ -1553,7 +2370,7 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         SELECT CASE_ID, ACCOUNT_ID_C AS ACCOUNT_ID, SUBJECT, STATUS, CREATED_DATE, {_close_select_unaliased}, SEVERITY
         FROM {_SUPPORT_CASES_TABLE}
         WHERE ACCOUNT_ID_C IN ({placeholders})
-          AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
+          AND CREATED_DATE >= %s
         ORDER BY CREATED_DATE DESC
         LIMIT %s
         """
@@ -1584,7 +2401,7 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         FROM {_SUPPORT_CASES_TABLE} s
         INNER JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data d ON TRIM(s.ACCOUNT_ID) = TRIM(d.ACCOUNT_ID_C)
         WHERE d.ACCOUNT_ID_C IN ({placeholders})
-          AND s.CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
+          AND s.CREATED_DATE >= %s
         ORDER BY s.CREATED_DATE DESC
         LIMIT %s
         """
@@ -1639,11 +2456,13 @@ def fetch_adoption_barriers(ctx, account_ids: List[str], days: int) -> pd.DataFr
         SELECT *
         FROM {AB_TABLE}
         WHERE ACCOUNT_ID_C IN ({placeholders})
-          AND {date_expr} >= DATEADD(day, -%s, CURRENT_DATE())
+          AND {date_expr} >= %s
           AND RECORD_TYPE_ID = '0122T000000GJfTQAW'
         """
+        # Round 8 / Phase 2.3: bind explicit Python-computed UTC window
+        # start (TZ-independent) instead of ``DATEADD(day, -%s, CURRENT_DATE())``.
         logger.debug("Executing SQL query...")
-        cur.execute(sql, [*account_ids, days])
+        cur.execute(sql, [*account_ids, _utc_window_start_iso(days)])
         logger.debug("Query executed, fetching results...")
         rows = cur.fetchall()
         logger.debug(f"Fetched {len(rows)} rows from adoption barriers query")
@@ -1653,7 +2472,7 @@ def fetch_adoption_barriers(ctx, account_ids: List[str], days: int) -> pd.DataFr
         return pd.DataFrame(rows, columns=cols)
     except Exception as e:
         _log_snowflake_fallback("Adoption barriers query", e)
-        return pd.DataFrame()
+        return _empty_df_with_fetch_error("adoption_barriers", e)
     finally:
         if cur:
             cur.close()
@@ -1674,12 +2493,30 @@ def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_
         
         # Use parameterized query to prevent SQL injection
         # Column names are hardcoded constants, so this is safe
-        account_query = "SELECT ACCOUNT_ID_C, BU_NAME FROM CX_DB.CX_SWSSBST_BR.dsm_assignment_data WHERE SUBSCRIPTION_ID = %s LIMIT 1"
+        # Round 11 / Phase 7.3: when a subscription has multiple
+        # rows in ``dsm_assignment_data`` (e.g. historical
+        # snapshots), the previous ``LIMIT 1`` returned an
+        # arbitrary row.  Match the convention used by
+        # ``fetch_subscription_data`` and prefer the most
+        # recently modified row.  ``MODIFIED_DATE`` is allowed
+        # to be NULL, so push NULLs to the bottom and use
+        # ACCOUNT_ID_C as a stable secondary key.
+        account_query = (
+            "SELECT ACCOUNT_ID_C, BU_NAME FROM CX_DB.CX_SWSSBST_BR.dsm_assignment_data "
+            "WHERE SUBSCRIPTION_ID = %s "
+            "ORDER BY MODIFIED_DATE DESC NULLS LAST, ACCOUNT_ID_C ASC "
+            "LIMIT 1"
+        )
         cur.execute(account_query, (subscription_id,))
         account_result = cur.fetchone()
         if not account_result:
             # Backward-compatible fallback for environments that still expose SUBSCRIPTION_ID_C.
-            legacy_query = "SELECT ACCOUNT_ID_C, BU_NAME FROM CX_DB.CX_SWSSBST_BR.dsm_assignment_data WHERE SUBSCRIPTION_ID_C = %s LIMIT 1"
+            legacy_query = (
+                "SELECT ACCOUNT_ID_C, BU_NAME FROM CX_DB.CX_SWSSBST_BR.dsm_assignment_data "
+                "WHERE SUBSCRIPTION_ID_C = %s "
+                "ORDER BY MODIFIED_DATE DESC NULLS LAST, ACCOUNT_ID_C ASC "
+                "LIMIT 1"
+            )
             cur.execute(legacy_query, (subscription_id,))
             account_result = cur.fetchone()
         
@@ -1692,23 +2529,43 @@ def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_
         customer_name = account_result['BU_NAME']
         logging.info(f"Found Account ID: {account_id} for Customer: {customer_name}. Fetching related records for the last {days} days...")
 
-        # Use parameterized queries to prevent SQL injection
-        ap_query = "SELECT *, 'Action Plan' as RECORD_SOURCE FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW WHERE record_type_id = '0122T000000QHBGQA4' AND ACCOUNT_ID_C = %s AND DATE(CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())"
-        ab_query = "SELECT *, 'Adoption Barrier' as RECORD_SOURCE FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW WHERE record_type_id = '0122T000000GJfTQAW' AND ACCOUNT_ID_C = %s AND DATE(CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())"
-        cp_query = "SELECT *, 'Customer Pulse' as RECORD_SOURCE FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C WHERE ACCOUNT__C = %s AND DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())"
-        sp_query = "SELECT *, 'Success Priority' as RECORD_SOURCE FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C WHERE RELATED_CUSTOMER__C = %s AND DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())"
+        # Use parameterized queries to prevent SQL injection.
+        # Round 8 / Phase 2.3: bind explicit Python-computed UTC window
+        # start instead of ``DATEADD(day, -%s, CURRENT_DATE())`` so the
+        # lookback window is independent of Snowflake session TZ.
+        # Round 11 / Phase 2.1: AB rows previously filtered on
+        # ``DATE(CREATED_DATE)`` only, while the canonical
+        # ``fetch_adoption_barriers`` path uses
+        # ``DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))``
+        # (Round 6 work).  That meant a barrier whose ``OPEN_DATE_C``
+        # was inside the window but ``CREATED_DATE`` was outside (or
+        # null) would be visible in the portfolio path but invisible
+        # in the per-subscription path.  Reuse the canonical
+        # COALESCE expression so the two surfaces agree.
+        ab_date_expr = "DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))"
+        ap_query = "SELECT *, 'Action Plan' as RECORD_SOURCE FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW WHERE record_type_id = '0122T000000QHBGQA4' AND ACCOUNT_ID_C = %s AND DATE(CREATED_DATE) >= %s"
+        ab_query = (
+            "SELECT *, 'Adoption Barrier' as RECORD_SOURCE "
+            "FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW "
+            "WHERE record_type_id = '0122T000000GJfTQAW' "
+            "AND ACCOUNT_ID_C = %s "
+            f"AND {ab_date_expr} >= %s"
+        )
+        cp_query = "SELECT *, 'Customer Pulse' as RECORD_SOURCE FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C WHERE ACCOUNT__C = %s AND DATE(CREATEDDATE) >= %s"
+        sp_query = "SELECT *, 'Success Priority' as RECORD_SOURCE FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C WHERE RELATED_CUSTOMER__C = %s AND DATE(CREATEDDATE) >= %s"
+        _legacy_window_start = _utc_window_start_iso(days)
 
-        cur.execute(ap_query, (account_id, days))
+        cur.execute(ap_query, (account_id, _legacy_window_start))
         action_plans = cur.fetchall()
-        cur.execute(ab_query, (account_id, days))
+        cur.execute(ab_query, (account_id, _legacy_window_start))
         adoption_barriers = cur.fetchall()
-        cur.execute(cp_query, (account_id, days))
+        cur.execute(cp_query, (account_id, _legacy_window_start))
         customer_pulse = cur.fetchall()
         success_priorities = []
         if is_table_blocked("EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C"):
             logger.info("Success priorities query skipped by Snowflake table policy.")
         else:
-            cur.execute(sp_query, (customer_name, days))
+            cur.execute(sp_query, (customer_name, _legacy_window_start))
             success_priorities = cur.fetchall()
         
         logging.info(f"Found {len(action_plans)} action plans, {len(adoption_barriers)} adoption barriers, {len(customer_pulse)} pulse records, and {len(success_priorities)} success priorities.")
@@ -1729,6 +2586,47 @@ def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_
             ctx.close()
         except Exception as e:
             logger.debug(f"Error closing connection: {e}")
+
+# Round 6 / Phase 4.2: shared chunk size for CSConsole IN clauses.
+# Snowflake's bind/parser limits make extremely large IN clauses
+# fragile (and many connectors batch binds in network packets).
+# 500 keeps a healthy safety margin while still cutting round-trips
+# for the typical 1k-5k-account portfolios.
+_CSCONSOLE_IN_CHUNK_SIZE = 500
+
+
+def _execute_in_chunks(cur, sql_template: str, in_values: List[Any], extra_params_before: Optional[List[Any]] = None, extra_params_after: Optional[List[Any]] = None, chunk_size: int = _CSCONSOLE_IN_CHUNK_SIZE) -> Tuple[List[Any], Optional[List[Any]]]:
+    """Run ``sql_template`` once per chunk of ``in_values``.
+
+    Round 6 / Phase 4.2 helper.  ``sql_template`` MUST contain
+    exactly one ``{IN_CLAUSE}`` token where the ``IN (..)``
+    placeholders are spliced.  The helper executes the template once
+    per chunk, prepending ``extra_params_before`` and appending
+    ``extra_params_after`` to the bind list each time.  The combined
+    rows and the cursor description from the last successful execute
+    are returned; the caller is responsible for de-duplicating rows
+    that may appear in more than one chunk.
+    """
+    rows: List[Any] = []
+    description: Optional[List[Any]] = None
+    if not in_values:
+        return rows, description
+    pre = list(extra_params_before or [])
+    post = list(extra_params_after or [])
+    n = len(in_values)
+    for i in range(0, n, max(int(chunk_size or 1), 1)):
+        chunk = in_values[i:i + chunk_size]
+        placeholders = ','.join(['%s'] * len(chunk))
+        sql = sql_template.replace("{IN_CLAUSE}", f"({placeholders})")
+        params = pre + list(chunk) + post
+        cur.execute(sql, params)
+        chunk_rows = cur.fetchall()
+        if chunk_rows:
+            rows.extend(chunk_rows)
+        if description is None:
+            description = cur.description
+    return rows, description
+
 
 def fetch_csconsole_action_plans(
     ctx,
@@ -1751,53 +2649,67 @@ def fetch_csconsole_action_plans(
     cur = None
     try:
         cur = ctx.cursor()
-        predicates: List[str] = []
-        params: List[Any] = []
-
+        # Round 6 / Phase 4.2: split the original "OR account-IN OR owner-clause"
+        # query into two independent queries so the account_ids IN
+        # clause can be chunked.  Combine results and dedupe by ID.
+        all_rows: List[Any] = []
+        descr: Optional[List[Any]] = None
         if account_ids:
-            placeholders = ','.join(['%s'] * len(account_ids))
-            predicates.append(f"ap.ACCOUNT_ID_C IN ({placeholders})")
-            params.extend(account_ids)
-
+            sql_template = """
+            SELECT ap.*, dsm.BU_NAME, 'Action Plan' as RECORD_SOURCE
+            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW ap
+            LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm
+                   ON ap.ACCOUNT_ID_C = dsm.ACCOUNT_ID_C
+            WHERE ap.record_type_id = '0122T000000QHBGQA4'
+              AND ap.ACCOUNT_ID_C IN {IN_CLAUSE}
+              AND DATE(ap.CREATED_DATE) >= %s
+            """
+            # Round 8 / Phase 2.3: bind explicit Python-computed UTC
+            # window start instead of session-TZ ``CURRENT_DATE()``.
+            rows, d = _execute_in_chunks(
+                cur, sql_template, list(account_ids), extra_params_after=[_utc_window_start_iso(days)]
+            )
+            if rows:
+                all_rows.extend(rows)
+            if d is not None:
+                descr = d
         if normalized_owners:
             task_cols = _get_table_columns(ctx, "EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW")
             owner_sql, owner_params = _build_owner_match_clause(
                 task_cols, normalized_owners, TASK_OWNER_EMAIL_COLUMNS, table_alias="ap"
             )
             if owner_sql:
-                predicates.append(owner_sql)
-                params.extend(owner_params)
+                sql_owner = f"""
+                SELECT ap.*, dsm.BU_NAME, 'Action Plan' as RECORD_SOURCE
+                FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW ap
+                LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm
+                       ON ap.ACCOUNT_ID_C = dsm.ACCOUNT_ID_C
+                WHERE ap.record_type_id = '0122T000000QHBGQA4'
+                  AND ({owner_sql})
+                  AND DATE(ap.CREATED_DATE) >= %s
+                """
+                # Round 8 / Phase 2.3: bind UTC window start.
+                cur.execute(sql_owner, [*owner_params, _utc_window_start_iso(days)])
+                owner_rows = cur.fetchall()
+                if owner_rows:
+                    all_rows.extend(owner_rows)
+                if descr is None:
+                    descr = cur.description
             else:
                 logger.info(
                     "Action Plans: no owner-like columns available in task view; "
                     "skipping owner-based expansion."
                 )
-
-        if not predicates:
+        if not all_rows or descr is None:
             return pd.DataFrame()
-
-        where_clause = " OR ".join(predicates)
-        sql = f"""
-        SELECT ap.*, dsm.BU_NAME, 'Action Plan' as RECORD_SOURCE
-        FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW ap
-        LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm ON ap.ACCOUNT_ID_C = dsm.ACCOUNT_ID_C
-        WHERE ap.record_type_id = '0122T000000QHBGQA4'
-          AND ({where_clause})
-          AND DATE(ap.CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())
-        """
-        params.append(days)
-        cur.execute(sql, params)
-        rows = cur.fetchall()
-        if not rows:
-            return pd.DataFrame()
-        cols = [c[0] for c in cur.description]
-        df = pd.DataFrame(rows, columns=cols)
+        cols = [c[0] for c in descr]
+        df = pd.DataFrame(all_rows, columns=cols)
         if "ID" in df.columns:
             df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
         return df
     except Exception as e:
         _log_snowflake_fallback("CSConsole action plans query", e)
-        return pd.DataFrame()
+        return _empty_df_with_fetch_error("csconsole_action_plans", e)
     finally:
         if cur:
             cur.close()
@@ -1823,52 +2735,63 @@ def fetch_csconsole_customer_pulse(
     cur = None
     try:
         cur = ctx.cursor()
-        predicates: List[str] = []
-        params: List[Any] = []
-
+        # Round 6 / Phase 4.2: chunk the account IN clause; run the
+        # owner-clause as a second query when present.
+        all_rows: List[Any] = []
+        descr: Optional[List[Any]] = None
         if account_ids:
-            placeholders = ','.join(['%s'] * len(account_ids))
-            predicates.append(f"cp.ACCOUNT__C IN ({placeholders})")
-            params.extend(account_ids)
-
+            sql_template = """
+            SELECT cp.*, dsm.BU_NAME, 'Customer Pulse' as RECORD_SOURCE
+            FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C cp
+            LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm
+                   ON cp.ACCOUNT__C = dsm.ACCOUNT_ID_C
+            WHERE cp.ACCOUNT__C IN {IN_CLAUSE}
+              AND DATE(cp.CREATEDDATE) >= %s
+            """
+            # Round 8 / Phase 2.3: bind UTC window start.
+            rows, d = _execute_in_chunks(
+                cur, sql_template, list(account_ids), extra_params_after=[_utc_window_start_iso(days)]
+            )
+            if rows:
+                all_rows.extend(rows)
+            if d is not None:
+                descr = d
         if normalized_owners:
             pulse_cols = _get_table_columns(ctx, "EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C")
             owner_sql, owner_params = _build_owner_match_clause(
                 pulse_cols, normalized_owners, PULSE_OWNER_EMAIL_COLUMNS, table_alias="cp"
             )
             if owner_sql:
-                predicates.append(owner_sql)
-                params.extend(owner_params)
+                sql_owner = f"""
+                SELECT cp.*, dsm.BU_NAME, 'Customer Pulse' as RECORD_SOURCE
+                FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C cp
+                LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm
+                       ON cp.ACCOUNT__C = dsm.ACCOUNT_ID_C
+                WHERE ({owner_sql})
+                  AND DATE(cp.CREATEDDATE) >= %s
+                """
+                # Round 8 / Phase 2.3: bind UTC window start.
+                cur.execute(sql_owner, [*owner_params, _utc_window_start_iso(days)])
+                owner_rows = cur.fetchall()
+                if owner_rows:
+                    all_rows.extend(owner_rows)
+                if descr is None:
+                    descr = cur.description
             else:
                 logger.info(
                     "Customer Pulse: no owner-like columns available in pulse table; "
                     "skipping owner-based expansion."
                 )
-
-        if not predicates:
+        if not all_rows or descr is None:
             return pd.DataFrame()
-
-        where_clause = " OR ".join(predicates)
-        sql = f"""
-        SELECT cp.*, dsm.BU_NAME, 'Customer Pulse' as RECORD_SOURCE
-        FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C cp
-        LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm ON cp.ACCOUNT__C = dsm.ACCOUNT_ID_C
-        WHERE ({where_clause})
-          AND DATE(cp.CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())
-        """
-        params.append(days)
-        cur.execute(sql, params)
-        rows = cur.fetchall()
-        if not rows:
-            return pd.DataFrame()
-        cols = [c[0] for c in cur.description]
-        df = pd.DataFrame(rows, columns=cols)
+        cols = [c[0] for c in descr]
+        df = pd.DataFrame(all_rows, columns=cols)
         if "ID" in df.columns:
             df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
         return df
     except Exception as e:
         _log_snowflake_fallback("CSConsole customer pulse query", e)
-        return pd.DataFrame()
+        return _empty_df_with_fetch_error("csconsole_customer_pulse", e)
     finally:
         if cur:
             cur.close()
@@ -1886,22 +2809,29 @@ def fetch_csconsole_success_priorities(ctx, customer_identifiers: List[str], day
     cur = None
     try:
         cur = ctx.cursor()
-        placeholders = ','.join(['%s'] * len(customer_identifiers))
-        sql = f"""
+        # Round 6 / Phase 4.2: chunk the RELATED_CUSTOMER__C IN list
+        # so very wide portfolios do not hit Snowflake's IN-clause
+        # bind limit.  Dedupe by ID after combining chunks.
+        sql_template = """
         SELECT *, 'Success Priority' as RECORD_SOURCE
-        FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C 
-        WHERE RELATED_CUSTOMER__C IN ({placeholders})
-          AND DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())
+        FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C
+        WHERE RELATED_CUSTOMER__C IN {IN_CLAUSE}
+          AND DATE(CREATEDDATE) >= %s
         """
-        cur.execute(sql, [*customer_identifiers, days])
-        rows = cur.fetchall()
-        if not rows: 
+        # Round 8 / Phase 2.3: bind UTC window start.
+        rows, descr = _execute_in_chunks(
+            cur, sql_template, list(customer_identifiers), extra_params_after=[_utc_window_start_iso(days)]
+        )
+        if not rows or descr is None:
             return pd.DataFrame()
-        cols = [c[0] for c in cur.description]
-        return pd.DataFrame(rows, columns=cols)
+        cols = [c[0] for c in descr]
+        df = pd.DataFrame(rows, columns=cols)
+        if "ID" in df.columns:
+            df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
+        return df
     except Exception as e:
         _log_snowflake_fallback("CSConsole success priorities query", e)
-        return pd.DataFrame()
+        return _empty_df_with_fetch_error("csconsole_success_priorities", e)
     finally:
         if cur:
             cur.close()
@@ -1927,57 +2857,63 @@ def fetch_csconsole_adoption_barriers(
     cur = None
     try:
         cur = ctx.cursor()
-        predicates: List[str] = []
-        params: List[Any] = []
-
+        # Round 6 / Phase 4.2: chunk the account-id IN clause and run
+        # the owner clause separately.  Combine and dedupe by ID.
+        all_rows: List[Any] = []
+        descr: Optional[List[Any]] = None
         if account_ids:
-            placeholders = ','.join(['%s'] * len(account_ids))
-            predicates.append(f"ACCOUNT_ID_C IN ({placeholders})")
-            params.extend(account_ids)
-
+            sql_template = """
+            SELECT *, 'Adoption Barrier' as RECORD_SOURCE
+            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
+            WHERE record_type_id = '0122T000000GJfTQAW'
+              AND ACCOUNT_ID_C IN {IN_CLAUSE}
+              AND DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
+                  >= %s
+            """
+            # Round 8 / Phase 2.3: bind UTC window start.
+            rows, d = _execute_in_chunks(
+                cur, sql_template, list(account_ids), extra_params_after=[_utc_window_start_iso(days)]
+            )
+            if rows:
+                all_rows.extend(rows)
+            if d is not None:
+                descr = d
         if normalized_owners:
             task_cols = _get_table_columns(ctx, "EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW")
             owner_sql, owner_params = _build_owner_match_clause(
                 task_cols, normalized_owners, TASK_OWNER_EMAIL_COLUMNS, table_alias=None
             )
             if owner_sql:
-                predicates.append(owner_sql)
-                params.extend(owner_params)
+                sql_owner = f"""
+                SELECT *, 'Adoption Barrier' as RECORD_SOURCE
+                FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
+                WHERE record_type_id = '0122T000000GJfTQAW'
+                  AND ({owner_sql})
+                  AND DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
+                      >= %s
+                """
+                # Round 8 / Phase 2.3: bind UTC window start.
+                cur.execute(sql_owner, [*owner_params, _utc_window_start_iso(days)])
+                owner_rows = cur.fetchall()
+                if owner_rows:
+                    all_rows.extend(owner_rows)
+                if descr is None:
+                    descr = cur.description
             else:
                 logger.info(
                     "Adoption Barriers: no owner-like columns available in task view; "
                     "skipping owner-based expansion."
                 )
-
-        if not predicates:
+        if not all_rows or descr is None:
             return pd.DataFrame()
-
-        where_clause = " OR ".join(predicates)
-        # Align AB date window with fetch_adoption_barriers / period and
-        # velocity queries (COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C)).
-        # Using CREATED_DATE only here previously caused CSConsole reports
-        # to under-count vs. the renewal/Snowflake report on the same window.
-        sql = f"""
-        SELECT *, 'Adoption Barrier' as RECORD_SOURCE
-        FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
-        WHERE record_type_id = '0122T000000GJfTQAW'
-          AND ({where_clause})
-          AND DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
-              >= DATEADD(day, -%s, CURRENT_DATE())
-        """
-        params.append(days)
-        cur.execute(sql, params)
-        rows = cur.fetchall()
-        if not rows:
-            return pd.DataFrame()
-        cols = [c[0] for c in cur.description]
-        df = pd.DataFrame(rows, columns=cols)
+        cols = [c[0] for c in descr]
+        df = pd.DataFrame(all_rows, columns=cols)
         if "ID" in df.columns:
             df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
         return df
     except Exception as e:
         _log_snowflake_fallback("CSConsole adoption barriers query", e)
-        return pd.DataFrame()
+        return _empty_df_with_fetch_error("csconsole_adoption_barriers", e)
     finally:
         if cur:
             cur.close()
@@ -1994,54 +2930,109 @@ def fetch_period_comparison(ctx, account_ids, days):
         return {}
 
     comparison = {}
-    placeholders = ", ".join(["%s"] * len(account_ids))
     cur = None
+    # Round 6 / Phase 4.2: chunk the account-id list and aggregate
+    # the per-chunk results in Python so very wide portfolios do not
+    # exceed Snowflake's IN-clause bind limit.  For SUM aggregates
+    # we can simply add chunk results together; for AVG we collect
+    # SUM + COUNT per chunk and recompute AVG = sum/count overall.
+    account_ids = list(account_ids)
+    _chunks = [
+        account_ids[i:i + _CSCONSOLE_IN_CHUNK_SIZE]
+        for i in range(0, len(account_ids), _CSCONSOLE_IN_CHUNK_SIZE)
+    ] or [account_ids]
     try:
         cur = ctx.cursor()
 
         # Adoption barriers: current vs previous
-        ab_query = f"""
-            SELECT
-                SUM(CASE WHEN DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
-                         >= DATEADD(day, -%s, CURRENT_DATE()) THEN 1 ELSE 0 END) AS current_period,
-                SUM(CASE WHEN DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
-                         BETWEEN DATEADD(day, -%s, CURRENT_DATE())
-                                 AND DATEADD(day, -%s, CURRENT_DATE()) THEN 1 ELSE 0 END) AS previous_period
-            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
-            WHERE ACCOUNT_ID_C IN ({placeholders})
-              AND RECORD_TYPE_ID = '0122T000000GJfTQAW'
-              AND DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
-                  >= DATEADD(day, -%s, CURRENT_DATE())
-        """
-        cur.execute(ab_query, (days, days * 2, days, *account_ids, days * 2))
-        row = cur.fetchone()
-        if row:
-            curr, prev = int(row[0] or 0), int(row[1] or 0)
-            pct = round(((curr - prev) / prev * 100) if prev > 0 else 0, 1)
-            comparison['adoption_barriers'] = {
-                'current': curr, 'previous': prev,
-                'change_pct': pct,
-                'trend': 'increasing' if pct > 10 else 'decreasing' if pct < -10 else 'stable'
-            }
+        # Round 3 / Phase 4.1: make the two windows disjoint so the
+        # boundary day (today - days) is not counted in both buckets.
+        # New convention:
+        #   current:  D >= today - days
+        #   previous: D >= today - 2*days  AND  D < today - days
+        # Round 8 / Phase 2.3: compute the window edges in Python (UTC)
+        # so the buckets do not slide with Snowflake session TZ.
+        _curr_start = _utc_window_start_iso(days)
+        _prev_start = _utc_window_start_iso(days * 2)
+        ab_curr_total = 0
+        ab_prev_total = 0
+        for _chunk in _chunks:
+            _ph = ", ".join(["%s"] * len(_chunk))
+            ab_query = f"""
+                SELECT
+                    SUM(CASE WHEN DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
+                             >= %s THEN 1 ELSE 0 END) AS current_period,
+                    SUM(CASE WHEN DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
+                             >= %s
+                         AND DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
+                             <  %s THEN 1 ELSE 0 END) AS previous_period
+                FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
+                WHERE ACCOUNT_ID_C IN ({_ph})
+                  AND RECORD_TYPE_ID = '0122T000000GJfTQAW'
+                  AND DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
+                      >= %s
+            """
+            cur.execute(ab_query, (_curr_start, _prev_start, _curr_start, *_chunk, _prev_start))
+            row = cur.fetchone()
+            if row:
+                ab_curr_total += int(row[0] or 0)
+                ab_prev_total += int(row[1] or 0)
+        curr, prev = ab_curr_total, ab_prev_total
+        # Round 12 / Phase 11.1: route percent change through canonical
+        # ``_r12_round_percent`` helper.
+        pct = _r12_round_percent(((curr - prev) / prev * 100) if prev > 0 else 0, 1)
+        comparison['adoption_barriers'] = {
+            'current': curr, 'previous': prev,
+            'change_pct': pct,
+            'trend': 'increasing' if pct > 10 else 'decreasing' if pct < -10 else 'stable'
+        }
 
         # Customer pulse: average score current vs previous
         try:
-            pulse_query = f"""
-                SELECT
-                    AVG(CASE WHEN DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())
-                             THEN SCORE__C END) AS current_avg,
-                    AVG(CASE WHEN DATE(CREATEDDATE) BETWEEN DATEADD(day, -%s, CURRENT_DATE())
-                                                        AND DATEADD(day, -%s, CURRENT_DATE())
-                             THEN SCORE__C END) AS previous_avg
-                FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C
-                WHERE ACCOUNT__C IN ({placeholders})
-                  AND DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())
-            """
-            cur.execute(pulse_query, (days, days * 2, days, *account_ids, days * 2))
-            row = cur.fetchone()
-            if row and row[0] is not None:
-                curr_avg = float(row[0])
-                prev_avg = float(row[1]) if row[1] is not None else curr_avg
+            # Phase 4.1 / Phase 4.2: disjoint current / previous
+            # windows; chunked + Python-side aggregation.  We pull
+            # SUM and COUNT per window so the global AVG is correct
+            # across chunks (a simple AVG-of-AVGs would weight chunks
+            # unequally if they contained different row counts).
+            curr_sum = 0.0
+            curr_cnt = 0
+            prev_sum = 0.0
+            prev_cnt = 0
+            for _chunk in _chunks:
+                _ph = ", ".join(["%s"] * len(_chunk))
+                pulse_query = f"""
+                    SELECT
+                        SUM(CASE WHEN DATE(CREATEDDATE) >= %s
+                                 THEN SCORE__C END) AS curr_sum,
+                        COUNT(CASE WHEN DATE(CREATEDDATE) >= %s
+                                   AND SCORE__C IS NOT NULL THEN 1 END) AS curr_cnt,
+                        SUM(CASE WHEN DATE(CREATEDDATE) >= %s
+                                  AND DATE(CREATEDDATE) <  %s
+                                 THEN SCORE__C END) AS prev_sum,
+                        COUNT(CASE WHEN DATE(CREATEDDATE) >= %s
+                                    AND DATE(CREATEDDATE) <  %s
+                                    AND SCORE__C IS NOT NULL THEN 1 END) AS prev_cnt
+                    FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C
+                    WHERE ACCOUNT__C IN ({_ph})
+                      AND DATE(CREATEDDATE) >= %s
+                """
+                # Round 8 / Phase 2.3: bind Python-computed UTC window
+                # edges instead of session-TZ DATEADD().
+                cur.execute(
+                    pulse_query,
+                    (_curr_start, _curr_start, _prev_start, _curr_start, _prev_start, _curr_start, *_chunk, _prev_start),
+                )
+                row = cur.fetchone()
+                if row:
+                    if row[0] is not None:
+                        curr_sum += float(row[0])
+                    curr_cnt += int(row[1] or 0)
+                    if row[2] is not None:
+                        prev_sum += float(row[2])
+                    prev_cnt += int(row[3] or 0)
+            if curr_cnt > 0:
+                curr_avg = curr_sum / curr_cnt
+                prev_avg = prev_sum / prev_cnt if prev_cnt > 0 else curr_avg
                 comparison['customer_pulse'] = {
                     'current_avg': round(curr_avg, 1),
                     'previous_avg': round(prev_avg, 1),
@@ -2049,35 +3040,85 @@ def fetch_period_comparison(ctx, account_ids, days):
                     'trend': 'improving' if curr_avg > prev_avg else 'declining' if curr_avg < prev_avg else 'stable'
                 }
         except Exception as _trend_err:
-            logger.debug(f"Trend calculation skipped: {_trend_err}")
+            # Round 5 / Phase 4.14: the customer-pulse subsection
+            # used to swallow its exception and silently leave
+            # ``comparison['customer_pulse']`` unset, indistinguishable
+            # from "no pulse activity in the window".  Surface the
+            # subsection failure on a structured ``subsection_errors``
+            # dict so downstream callers / dashboards can render
+            # "pulse trend unavailable due to data fetch error" rather
+            # than treating the missing field as healthy data.
+            # Round 8 / Phase 2.2: previously the dict carried the raw
+            # ``str(_trend_err)`` which leaks SQLState codes, hostnames,
+            # and library traceback fragments to anyone reading the JSON
+            # result.  Replace the verbatim text with a stable
+            # ``error_kind`` and a generic user-facing message; full
+            # detail still lives in the WARNING log below.
+            logger.warning("Period comparison customer_pulse subsection failed", exc_info=True)
+            comparison.setdefault('subsection_errors', {})['customer_pulse'] = {
+                'error_kind': _stable_failure_kind(_trend_err),
+                'user_message': 'See logs for details',
+                # Round 6 / Phase 7.4: keep the legacy ``failure_kind``
+                # alias for downstream consumers that already key off it.
+                'failure_kind': _stable_failure_kind(_trend_err),
+            }
 
         # Action plans: current vs previous
         try:
-            ap_query = f"""
-                SELECT
-                    SUM(CASE WHEN DATE(CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE()) THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN DATE(CREATED_DATE) BETWEEN DATEADD(day, -%s, CURRENT_DATE())
-                                                        AND DATEADD(day, -%s, CURRENT_DATE()) THEN 1 ELSE 0 END)
-                FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
-                WHERE record_type_id = '0122T000000QHBGQA4'
-                  AND ACCOUNT_ID_C IN ({placeholders})
-                  AND DATE(CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())
-            """
-            cur.execute(ap_query, (days, days * 2, days, *account_ids, days * 2))
-            row = cur.fetchone()
-            if row:
-                curr, prev = int(row[0] or 0), int(row[1] or 0)
-                pct = round(((curr - prev) / prev * 100) if prev > 0 else 0, 1)
-                comparison['action_plans'] = {
-                    'current': curr, 'previous': prev,
-                    'change_pct': pct,
-                    'trend': 'increasing' if pct > 10 else 'decreasing' if pct < -10 else 'stable'
-                }
+            # Phase 4.1: disjoint windows; Phase 4.2: chunk + Python-side aggregation.
+            ap_curr_total = 0
+            ap_prev_total = 0
+            for _chunk in _chunks:
+                _ph = ", ".join(["%s"] * len(_chunk))
+                ap_query = f"""
+                    SELECT
+                        SUM(CASE WHEN DATE(CREATED_DATE) >= %s THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN DATE(CREATED_DATE) >= %s
+                                  AND DATE(CREATED_DATE) <  %s THEN 1 ELSE 0 END)
+                    FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
+                    WHERE record_type_id = '0122T000000QHBGQA4'
+                      AND ACCOUNT_ID_C IN ({_ph})
+                      AND DATE(CREATED_DATE) >= %s
+                """
+                # Round 8 / Phase 2.3: bind Python-computed UTC window edges.
+                cur.execute(ap_query, (_curr_start, _prev_start, _curr_start, *_chunk, _prev_start))
+                row = cur.fetchone()
+                if row:
+                    ap_curr_total += int(row[0] or 0)
+                    ap_prev_total += int(row[1] or 0)
+            curr, prev = ap_curr_total, ap_prev_total
+            # Round 12 / Phase 11.1: canonical percent rounding.
+            pct = _r12_round_percent(((curr - prev) / prev * 100) if prev > 0 else 0, 1)
+            comparison['action_plans'] = {
+                'current': curr, 'previous': prev,
+                'change_pct': pct,
+                'trend': 'increasing' if pct > 10 else 'decreasing' if pct < -10 else 'stable'
+            }
         except Exception as e:
-            logger.debug(f"Period comparison action plans error: {e}")
+            # Round 5 / Phase 4.14: same disambiguation for the
+            # action-plans subsection.
+            # Round 8 / Phase 2.2: same redaction as customer_pulse above.
+            logger.warning("Period comparison action_plans subsection failed", exc_info=True)
+            comparison.setdefault('subsection_errors', {})['action_plans'] = {
+                'error_kind': _stable_failure_kind(e),
+                'user_message': 'See logs for details',
+                'failure_kind': _stable_failure_kind(e),
+            }
 
     except Exception as e:
-        logger.debug(f"Period comparison query error: {e}")
+        # Phase 1.3a: surface the failure so the prefetch / formatter layer
+        # can distinguish "no comparison available because of error" from
+        # "no comparison available because period had zero activity".
+        # Round 8 / Phase 2.2: ``fetch_error`` previously held ``str(e)``;
+        # this ended up serialized into JSON responses and surfaced driver
+        # exception text to clients.  Replace with the same structured
+        # ``error_kind`` payload used by subsection errors.
+        logger.warning("Period comparison query failed", exc_info=True)
+        comparison['fetch_error'] = {
+            'error_kind': _stable_failure_kind(e),
+            'user_message': 'See logs for details',
+        }
+        comparison['fetch_error_dataset'] = 'period_comparison'
     finally:
         if cur:
             try:
@@ -2096,33 +3137,68 @@ def fetch_barrier_velocity(ctx, account_ids, days):
     if ctx is None or not account_ids:
         return {}
 
-    placeholders = ", ".join(["%s"] * len(account_ids))
     velocity = {}
     cur = None
+    # Round 6 / Phase 4.2: chunk the IN clause and merge per-week
+    # counts in Python so wide portfolios do not exceed Snowflake's
+    # IN-clause bind limit.  GROUP BY week_start across chunks is
+    # re-aggregated by adding new + closed per week_start.
+    account_ids = list(account_ids)
+    _chunks = [
+        account_ids[i:i + _CSCONSOLE_IN_CHUNK_SIZE]
+        for i in range(0, len(account_ids), _CSCONSOLE_IN_CHUNK_SIZE)
+    ] or [account_ids]
     try:
         cur = ctx.cursor()
-        query = f"""
-            SELECT
-                DATE_TRUNC('week', COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C)) AS week_start,
-                COUNT(*) AS new_barriers,
-                SUM(CASE WHEN UPPER(STATUS_C) IN ('CLOSED', 'RESOLVED', 'COMPLETED') THEN 1 ELSE 0 END) AS closed_barriers
-            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
-            WHERE ACCOUNT_ID_C IN ({placeholders})
-              AND RECORD_TYPE_ID = '0122T000000GJfTQAW'
-              AND DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
-                  >= DATEADD(day, -%s, CURRENT_DATE())
-            GROUP BY week_start
-            ORDER BY week_start DESC
-        """
-        cur.execute(query, (*account_ids, days))
-        rows = cur.fetchall()
+        merged: Dict[str, Dict[str, int]] = {}
+        for _chunk in _chunks:
+            _ph = ", ".join(["%s"] * len(_chunk))
+            query = f"""
+                SELECT
+                    DATE_TRUNC('week', COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C)) AS week_start,
+                    COUNT(*) AS new_barriers,
+                    SUM(CASE WHEN UPPER(STATUS_C) IN ('CLOSED', 'RESOLVED', 'COMPLETED') THEN 1 ELSE 0 END) AS closed_barriers
+                FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
+                WHERE ACCOUNT_ID_C IN ({_ph})
+                  AND RECORD_TYPE_ID = '0122T000000GJfTQAW'
+                  AND DATE(COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C))
+                      >= %s
+                GROUP BY week_start
+                ORDER BY week_start DESC
+            """
+            # Round 8 / Phase 2.3: bind UTC window start.
+            cur.execute(query, (*_chunk, _utc_window_start_iso(days)))
+            for row in cur.fetchall():
+                # Round 12 / Phase 2.4: ``str(row[0])[:10]`` brittle-slices
+                # the first 10 chars of whatever the Snowflake driver
+                # decides to return for ``DATE_TRUNC('week', ...)``.
+                # Different driver versions / connection types return
+                # ``date`` / ``datetime`` / ``str`` here -- under a
+                # numpy.datetime64 path that string slice yields
+                # ``"2025-04-2"`` (truncated 9-char) for some weeks and
+                # silently corrupts the dict key.  Parse to a real
+                # ``pd.Timestamp`` and emit a canonical ``YYYY-MM-DD``
+                # string regardless of source representation.
+                if row[0] is None:
+                    wk = 'Unknown'
+                else:
+                    try:
+                        wk_ts = pd.to_datetime(row[0], errors='coerce', utc=True)
+                        if pd.isna(wk_ts):
+                            wk = 'Unknown'
+                        else:
+                            wk = wk_ts.strftime('%Y-%m-%d')
+                    except Exception:
+                        wk = str(row[0])[:10] or 'Unknown'
+                bucket = merged.setdefault(wk, {'new': 0, 'closed': 0})
+                bucket['new'] += int(row[1] or 0)
+                bucket['closed'] += int(row[2] or 0)
 
         weeks = []
         total_new = total_closed = 0
-        for row in rows:
-            wk = str(row[0])[:10] if row[0] else 'Unknown'
-            new_ct = int(row[1] or 0)
-            closed_ct = int(row[2] or 0)
+        for wk in sorted(merged.keys(), reverse=True):
+            new_ct = merged[wk]['new']
+            closed_ct = merged[wk]['closed']
             weeks.append({'week': wk, 'new': new_ct, 'closed': closed_ct, 'net': new_ct - closed_ct})
             total_new += new_ct
             total_closed += closed_ct
@@ -2135,14 +3211,23 @@ def fetch_barrier_velocity(ctx, account_ids, days):
             'weeks_total': len(weeks),
             'weeks_displayed': min(len(weeks), 12),
             'weeks_truncated': len(weeks) > 12,
-            'avg_new_per_week': round(total_new / n_weeks, 1),
-            'avg_closed_per_week': round(total_closed / n_weeks, 1),
-            'net_velocity_per_week': round((total_new - total_closed) / n_weeks, 1),
-            'resolution_rate_pct': round(total_closed / total_new * 100 if total_new > 0 else 0, 1),
+            # Round 12 / Phase 11.1: route percentage / per-week averages
+            # through ``_r12_round_percent`` so all callers share a
+            # single half-away-from-zero rounding (Python's banker's
+            # rounding surprises CSSMs reading "0%" for 0.5%+ risk).
+            'avg_new_per_week': _r12_round_percent(total_new / n_weeks, 1),
+            'avg_closed_per_week': _r12_round_percent(total_closed / n_weeks, 1),
+            'net_velocity_per_week': _r12_round_percent((total_new - total_closed) / n_weeks, 1),
+            'resolution_rate_pct': _r12_round_percent(total_closed / total_new * 100 if total_new > 0 else 0, 1),
         }
 
     except Exception as e:
-        logger.debug(f"Barrier velocity query error: {e}")
+        # Phase 1.3a: same rationale as fetch_period_comparison; record the
+        # error in the returned dict so callers can show "barrier velocity
+        # unavailable" instead of an empty chart.
+        logger.warning(f"Barrier velocity query failed: {e}")
+        velocity['fetch_error'] = str(e).strip() or e.__class__.__name__
+        velocity['fetch_error_dataset'] = 'barrier_velocity'
     finally:
         if cur:
             try:
@@ -2171,49 +3256,174 @@ def calculate_arr_at_risk(arr_df, ab_df, cases_df=None):
         if not arr_col or not acct_col:
             return {}
 
+        # Round 2 / Phase 1.1: detect mixed-currency ARR rows.  Summing
+        # USD + EUR + JPY blindly produces a meaningless headline; we
+        # surface a flag so renderers can either restrict to one
+        # currency or render a per-currency breakdown.
+        currency_col = 'CURRENCY_CODE' if 'CURRENCY_CODE' in arr_df.columns else None
+        per_currency_breakdown: Dict[str, float] = {}
+        is_multi_currency = bool(arr_df.attrs.get('is_multi_currency')) if hasattr(arr_df, 'attrs') else False
+        if currency_col:
+            try:
+                grouped = (
+                    arr_df.groupby(currency_col, dropna=False)[arr_col]
+                    .sum(min_count=0)
+                    .to_dict()
+                )
+                per_currency_breakdown = {
+                    str(k or 'UNKNOWN'): float(v or 0.0) for k, v in grouped.items()
+                }
+                distinct_known = [c for c in per_currency_breakdown.keys() if c and c != 'UNKNOWN']
+                is_multi_currency = is_multi_currency or len(distinct_known) > 1
+            except Exception:
+                per_currency_breakdown = {}
+        result['arr_by_currency'] = per_currency_breakdown
+        result['is_multi_currency'] = bool(is_multi_currency)
+        if per_currency_breakdown:
+            result['currencies_present'] = sorted(per_currency_breakdown.keys())
+
         total_arr = arr_df[arr_col].sum(skipna=True)
         if pd.isna(total_arr):
             total_arr = 0.0
-        result['total_portfolio_arr'] = float(total_arr)
+        # When mixed currencies are present, leave the headline at 0
+        # and rely on ``arr_by_currency`` so consumers do not display a
+        # misleading single number.  Single-currency portfolios behave
+        # exactly as before.
+        if is_multi_currency:
+            result['total_portfolio_arr'] = 0.0
+            result['total_portfolio_arr_unsafe_sum'] = float(total_arr)
+        else:
+            result['total_portfolio_arr'] = float(total_arr)
 
         troubled_accounts = set()
         critical_accounts = set()
 
+        # Round 5 / Phase 5.3: previously, ANY adoption barrier on an
+        # account marked it "at risk" and inflated the headline ARR
+        # number with closed / resolved / informational barriers from
+        # months ago.  Restrict to OPEN, customer-impacting barriers
+        # so the ARR-at-risk figure reflects current exposure.
+        # Status normalisation reuses ``normalize_status_label`` /
+        # ``add_case_lifecycle_fields`` heuristics: open => not in
+        # the closed/resolved/withdrawn set.
+        _CLOSED_STATUS_TOKENS = {
+            'closed', 'resolved', 'completed', 'cancelled', 'withdrawn',
+            'rejected', 'duplicate', 'won-not-fixed',
+        }
+
+        def _is_open_status(val: Any) -> bool:
+            try:
+                s = str(val or '').strip().lower()
+            except Exception:
+                return True  # if we can't tell, keep counting (safer)
+            if not s:
+                return True
+            for tok in _CLOSED_STATUS_TOKENS:
+                if tok in s:
+                    return False
+            return True
+
         if not ab_df.empty and 'ACCOUNT_ID_C' in ab_df.columns:
-            troubled_accounts.update(ab_df['ACCOUNT_ID_C'].dropna().unique())
+            ab_open_df = ab_df
+            status_col = next(
+                (c for c in ('AB_STATUS_C', 'STATUS_C', 'status_norm', 'STATUS', 'Status')
+                 if c in ab_df.columns),
+                None,
+            )
+            if status_col:
+                try:
+                    open_mask = ab_df[status_col].apply(_is_open_status)
+                    ab_open_df = ab_df.loc[open_mask]
+                except Exception:
+                    ab_open_df = ab_df
+            troubled_accounts.update(ab_open_df['ACCOUNT_ID_C'].dropna().unique())
             try:
                 from data_normalization import normalize_severity_label as _norm_sev
                 sev_col = next(
                     (c for c in ('severity_norm', 'SEVERITY_C', 'severity_c', 'Severity', 'PRIORITY')
-                     if c in ab_df.columns),
+                     if c in ab_open_df.columns),
                     None,
                 )
                 if sev_col:
                     if sev_col == 'severity_norm':
-                        sev_norm = ab_df[sev_col].fillna('').astype(str)
+                        sev_norm = ab_open_df[sev_col].fillna('').astype(str)
                     else:
-                        sev_norm = ab_df[sev_col].apply(_norm_sev).fillna('').astype(str)
+                        sev_norm = ab_open_df[sev_col].apply(_norm_sev).fillna('').astype(str)
                     crit_mask = sev_norm.isin(['Critical', 'High'])
-                    critical_accounts.update(ab_df.loc[crit_mask, 'ACCOUNT_ID_C'].dropna().unique())
+                    critical_accounts.update(ab_open_df.loc[crit_mask, 'ACCOUNT_ID_C'].dropna().unique())
             except Exception:
                 pass
 
         if not cases_df.empty:
             case_acct = 'ACCOUNT_ID' if 'ACCOUNT_ID' in cases_df.columns else 'ACCOUNT_ID_C' if 'ACCOUNT_ID_C' in cases_df.columns else None
             if case_acct:
-                troubled_accounts.update(cases_df[case_acct].dropna().unique())
+                # Round 5 / Phase 5.3: only OPEN cases count for
+                # ARR-at-risk -- a long-resolved case from a year ago
+                # should not put the customer's renewal in jeopardy
+                # today.
+                cases_open = cases_df
+                case_status_col = next(
+                    (c for c in ('STATUS', 'Status', 'CASE_STATUS', 'STATUS_C', 'status_norm')
+                     if c in cases_df.columns),
+                    None,
+                )
+                if case_status_col:
+                    try:
+                        cases_open = cases_df.loc[cases_df[case_status_col].apply(_is_open_status)]
+                    except Exception:
+                        cases_open = cases_df
+                troubled_accounts.update(cases_open[case_acct].dropna().unique())
 
-        at_risk_mask = arr_df[acct_col].isin(troubled_accounts)
-        arr_at_risk = arr_df.loc[at_risk_mask, arr_col].sum()
+        # Round 5 / Phase 5.3: filter the ARR base to ACTIVE
+        # subscriptions before summing.  An account whose only
+        # subscription is already terminated / cancelled has no ARR
+        # to put at risk.  The filter is applied conservatively:
+        # if no STATUS_C / SUBSCRIPTION_STATUS column is present we
+        # leave the ARR base alone (back-compat with callers that
+        # already pre-filter).
+        arr_active_df = arr_df
+        sub_status_col = next(
+            (c for c in ('STATUS_C', 'SUBSCRIPTION_STATUS', 'STATUS', 'Status')
+             if c in arr_df.columns),
+            None,
+        )
+        if sub_status_col:
+            try:
+                arr_active_df = arr_df.loc[arr_df[sub_status_col].apply(_is_open_status)]
+            except Exception:
+                arr_active_df = arr_df
+        result['active_subs_excluded_count'] = int(len(arr_df) - len(arr_active_df))
 
-        critical_mask = arr_df[acct_col].isin(critical_accounts)
-        arr_critical = arr_df.loc[critical_mask, arr_col].sum()
+        at_risk_mask = arr_active_df[acct_col].isin(troubled_accounts)
+        arr_at_risk = arr_active_df.loc[at_risk_mask, arr_col].sum()
 
-        result['arr_at_risk'] = float(arr_at_risk)
-        result['arr_critical'] = float(arr_critical)
-        result['arr_healthy'] = float(total_arr - arr_at_risk)
-        result['pct_at_risk'] = round(arr_at_risk / total_arr * 100 if total_arr > 0 else 0, 1)
-        result['pct_critical'] = round(arr_critical / total_arr * 100 if total_arr > 0 else 0, 1)
+        critical_mask = arr_active_df[acct_col].isin(critical_accounts)
+        arr_critical = arr_active_df.loc[critical_mask, arr_col].sum()
+
+        # Round 2 / Phase 1.1: when the portfolio is multi-currency,
+        # all aggregate amounts are unsafe sums; expose them as
+        # ``*_unsafe_sum`` and zero the safe headline so the report
+        # is forced to show the per-currency breakdown instead.
+        if is_multi_currency:
+            result['arr_at_risk'] = 0.0
+            result['arr_at_risk_unsafe_sum'] = float(arr_at_risk)
+            result['arr_critical'] = 0.0
+            result['arr_critical_unsafe_sum'] = float(arr_critical)
+            result['arr_healthy'] = 0.0
+            result['pct_at_risk'] = 0.0
+            result['pct_critical'] = 0.0
+        else:
+            result['arr_at_risk'] = float(arr_at_risk)
+            result['arr_critical'] = float(arr_critical)
+            result['arr_healthy'] = float(total_arr - arr_at_risk)
+            # Round 12 / Phase 11.1: route ARR-at-risk percentages through
+            # ``_r12_round_percent`` for half-away-from-zero parity.
+            result['pct_at_risk'] = _r12_round_percent(
+                arr_at_risk / total_arr * 100 if total_arr > 0 else 0, 1
+            )
+            result['pct_critical'] = _r12_round_percent(
+                arr_critical / total_arr * 100 if total_arr > 0 else 0, 1
+            )
         result['troubled_account_count'] = len(troubled_accounts)
         result['critical_account_count'] = len(critical_accounts)
 
@@ -2310,6 +3520,20 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
                     cust_col_name = None
                     arr_col_name = None
                     subj_col_name = None
+                    # Round 12 / Phase 6.1: previously the per-sheet
+                    # ``severity_distribution`` / ``status_distribution`` /
+                    # ``category_distribution`` were always populated even
+                    # on a 200-row sample, with no sibling flag to tell
+                    # ``build_cross_report_trends`` (or any LLM reader)
+                    # that the bars represented a slice rather than the
+                    # full portfolio.  Round 11 / Phase 6.1 only fixed
+                    # ``total_arr`` / ``unique_customers`` in this same
+                    # block.  Stamp ``distribution_sample_only`` once so
+                    # downstream trend math and prompt builders can prefix
+                    # the chart with "[SAMPLE]" or skip the comparison.
+                    if _was_truncated:
+                        metrics['distribution_sample_only'] = True
+                        metrics['distribution_sample_size'] = len(df)
                     for col in df.columns:
                         col_lower = str(col).lower()
                         if any(k in col_lower for k in ['severity', 'sev', 'priority']):
@@ -2317,15 +3541,41 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
                         elif any(k in col_lower for k in ['status', 'state']):
                             metrics['status_distribution'] = {str(k): int(v) for k, v in df[col].value_counts().head(8).items()}
                         elif any(k in col_lower for k in ['customer', 'bu_name', 'account']):
-                            metrics['unique_customers'] = int(df[col].nunique())
+                            # Round 10 / Phase 3.2: when the sheet was
+                            # truncated to ``_SCAN_ROW_LIMIT`` rows we only
+                            # see a slice of the customer column, so
+                            # ``df[col].nunique()`` reports a sampled count
+                            # — feeding that into ``build_cross_report_trends``
+                            # produced "unique_customers dropped 70%" alarms
+                            # whenever a recent report happened to be larger
+                            # than 200 rows. Stamp ``unique_customers`` only
+                            # when the full column was scanned, and expose
+                            # the sampled count separately so callers can
+                            # opt in if they really want it.
                             cust_col_name = col
+                            _nunique = int(df[col].nunique())
+                            if _was_truncated:
+                                metrics['unique_customers_sampled'] = _nunique
+                            else:
+                                metrics['unique_customers'] = _nunique
                         elif any(k in col_lower for k in ['arr', 'annual_contract', 'revenue']):
+                            arr_col_name = col
                             try:
                                 arr_sum = pd.to_numeric(df[col], errors='coerce').sum()
-                                metrics['total_arr'] = 0.0 if pd.isna(arr_sum) else float(arr_sum)
-                                arr_col_name = col
+                                arr_value = 0.0 if pd.isna(arr_sum) else float(arr_sum)
                             except Exception as _arr_err:
                                 logger.debug("ARR sum failed for col %s: %s", col, _arr_err)
+                                arr_value = None
+                            # Round 10 / Phase 3.2: same rationale as
+                            # ``unique_customers`` above. ``total_arr`` from
+                            # a 200-row sample is meaningless as a portfolio
+                            # total. Keep the sampled value under a separate
+                            # key so downstream trend math can ignore it.
+                            if arr_value is not None:
+                                if _was_truncated:
+                                    metrics['total_arr_sampled'] = arr_value
+                                else:
+                                    metrics['total_arr'] = arr_value
                         elif any(k in col_lower for k in ['subject', 'name', 'title', 'description']):
                             if subj_col_name is None:
                                 subj_col_name = col
@@ -2334,19 +3584,102 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
 
                     if cust_col_name and arr_col_name:
                         try:
-                            cust_arr = df.groupby(cust_col_name)[arr_col_name].apply(
-                                lambda x: float(pd.to_numeric(x, errors='coerce').sum())
-                            ).sort_values(ascending=False).head(10)
-                            metrics['top_customers_by_arr'] = {str(k): v for k, v in cust_arr.items() if v > 0}
+                            # Round 12 / Phase 3.6: this scan grouped on
+                            # the raw historical-Excel customer column, so
+                            # case / whitespace / NBSP variants
+                            # ("Acme Co" vs "acme co.") produced two
+                            # entries in ``top_customers_by_arr`` /
+                            # ``top_customers_by_count`` for what is the
+                            # same logical account.  Project the column
+                            # through ``normalize_customer_name`` once,
+                            # group on the normalized key, and drop the
+                            # helper column afterward so callers only see
+                            # the canonical labels.
+                            try:
+                                _norm_key_col = '__r12_cust_norm'
+                                df[_norm_key_col] = (
+                                    df[cust_col_name].fillna('').astype(str).map(normalize_customer_name)
+                                )
+                                cust_arr = df.groupby(_norm_key_col)[arr_col_name].apply(
+                                    lambda x: float(pd.to_numeric(x, errors='coerce').sum())
+                                ).sort_values(ascending=False).head(10)
+                                # Drop the empty-string key (rows with no
+                                # customer label) so it does not surface
+                                # as an "Unknown" leader entry.
+                                if '' in cust_arr.index:
+                                    cust_arr = cust_arr.drop(index='')
+                            except Exception:
+                                cust_arr = df.groupby(cust_col_name)[arr_col_name].apply(
+                                    lambda x: float(pd.to_numeric(x, errors='coerce').sum())
+                                ).sort_values(ascending=False).head(10)
+                            # Round 11 / Phase 6.1: when the source
+                            # frame was capped (sample mode), the
+                            # "top by ARR" leaderboard cannot claim
+                            # to reflect the real portfolio.  Stamp
+                            # the value under ``_sampled`` and add an
+                            # explicit ``sample_only=True`` flag so
+                            # report writers can label it correctly
+                            # ("sample of 200 rows") instead of
+                            # silently presenting it as the truth.
+                            _top_arr_payload = {str(k): v for k, v in cust_arr.items() if v > 0}
+                            if _was_truncated:
+                                metrics['top_customers_by_arr_sampled'] = _top_arr_payload
+                                metrics['top_customers_by_arr_sample_only'] = True
+                            else:
+                                metrics['top_customers_by_arr'] = _top_arr_payload
+                                metrics['top_customers_by_arr_sample_only'] = False
                         except Exception as _cust_err:
                             logger.debug("Top customers by ARR failed: %s", _cust_err)
                     elif cust_col_name:
-                        metrics['top_customers_by_count'] = {str(k): int(v) for k, v in df[cust_col_name].value_counts().head(10).items()}
+                        # Round 12 / Phase 3.6: ``value_counts`` on the
+                        # raw column has the same fragmentation problem;
+                        # normalize the column first and only count the
+                        # non-empty canonical keys.
+                        try:
+                            _normed = (
+                                df[cust_col_name].fillna('').astype(str).map(normalize_customer_name)
+                            )
+                            _normed = _normed[_normed != '']
+                            _vc = _normed.value_counts().head(10)
+                        except Exception:
+                            _vc = df[cust_col_name].value_counts().head(10)
+                        _top_count_payload = {str(k): int(v) for k, v in _vc.items()}
+                        if _was_truncated:
+                            metrics['top_customers_by_count_sampled'] = _top_count_payload
+                            metrics['top_customers_by_count_sample_only'] = True
+                        else:
+                            metrics['top_customers_by_count'] = _top_count_payload
+                            metrics['top_customers_by_count_sample_only'] = False
 
                     if subj_col_name:
                         try:
                             subjects = df[subj_col_name].dropna().astype(str).head(10).tolist()
-                            metrics['sample_subjects'] = [s[:120] for s in subjects if s.strip()]
+                            _subjects_clean = [s[:120] for s in subjects if s.strip()]
+                            # Round 12 / Phase 6.5: previously this key
+                            # was ``sample_subjects`` regardless of
+                            # whether the head(10) slice covered the
+                            # entire population or only the first 10 of
+                            # a much larger truncated scan window.
+                            # Downstream LLM context built off this key
+                            # could not tell whether the listed
+                            # "Sample issues" represented EVERY subject
+                            # or just the first ten of a 200-row
+                            # sample of a 30k-row workbook -- so the
+                            # model would narrate them as
+                            # representative.  Stamp a separate
+                            # ``sample_subjects_truncated`` key (and a
+                            # ``sample_subjects_are_sample`` flag) when
+                            # the underlying scan was truncated, so the
+                            # Ask-AI prompt builder (Phase 6.4) can
+                            # tag the line with ``[SAMPLE]``.  Keep
+                            # ``sample_subjects`` populated for full
+                            # scans so existing readers stay happy.
+                            if _was_truncated:
+                                metrics['sample_subjects_truncated'] = _subjects_clean
+                                metrics['sample_subjects_are_sample'] = True
+                            else:
+                                metrics['sample_subjects'] = _subjects_clean
+                                metrics['sample_subjects_are_sample'] = False
                         except Exception as _subj_err:
                             logger.debug("Sample subjects extraction failed: %s", _subj_err)
 
@@ -2392,37 +3725,97 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
             _ACCOUNT_BATCH_LIMIT,
             len(account_ids),
         )
+    # Round 11 / Phase 10.7: track per-subsection errors so callers
+    # can surface "renewals subsection failed; counts shown without
+    # those rows" instead of silently rendering a partial dataset as
+    # if it were complete.  Each subsection's ``except`` block
+    # appends to this dict (key = subsection name, value = error
+    # string).  Empty dict => no subsection failed.
     result['_meta'] = {
         'account_batch_size': len(batch),
         'account_batch_total': len(account_ids),
         'account_batch_limit': _ACCOUNT_BATCH_LIMIT,
         'account_batch_truncated': _account_batch_truncated,
+        'subsection_errors': {},
     }
     cur = None
     try:
         cur = ctx.cursor()
 
         # 1. Account summary with renewal risk
+        # Round 6 / Phase 4.3: add explicit LIMIT + truncation flag so a
+        # COLLAB_ACCOUNT_SUMMARY row explosion (e.g. duplicate rows
+        # per account) cannot quietly inflate counts in the briefing.
+        # The previous query was effectively unbounded once the IN
+        # clause returned, which made ``count`` and the distribution
+        # buckets sensitive to upstream duplicates.
         try:
+            _ACCT_SUMMARY_LIMIT = 500
+            # Round 10 / Phase 5.4: pull ``ACCOUNT_ID_C`` so we can
+            # deduplicate before bucketing. ``COLLAB_ACCOUNT_SUMMARY``
+            # can emit multiple rows per account (one per contract /
+            # subscription view) with different
+            # ``RENEWAL_RISK_CATEGORY`` / ``CONTRACT_STATUS`` /
+            # ``CISCO_TIER_RANKING__C`` values; without dedupe the
+            # ``risk_dist`` and ``tier_dist`` rollups over-count
+            # accounts and the executive headlines disagree with the
+            # source-of-truth account list. Keep the most recent row
+            # per ``ACCOUNT_ID_C`` based on row order returned by
+            # Snowflake, which is by descending modification time for
+            # this view.
+            # Round 11 / Phase 7.1: add explicit ORDER BY before
+            # LIMIT so the truncation is reproducible across runs
+            # (otherwise Snowflake is free to return the same set
+            # in any order, and the dedupe-by-first-occurrence
+            # logic above silently picks a different
+            # representative row each run).  Order by ACCOUNT_ID_C
+            # plus BU_ACCOUNT_NAME so we always keep a stable
+            # window of accounts when the LIMIT bites.
             cur.execute(f"""
-                SELECT BU_ACCOUNT_NAME, RENEWAL_RISK_CATEGORY,
+                SELECT ACCOUNT_ID_C, BU_ACCOUNT_NAME, RENEWAL_RISK_CATEGORY,
                        CONTRACT_STATUS, CISCO_TIER_RANKING__C, ABC_CATEGORY__C
                 FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY
                 WHERE ACCOUNT_ID_C IN ({placeholders})
+                ORDER BY ACCOUNT_ID_C, BU_ACCOUNT_NAME
+                LIMIT {_ACCT_SUMMARY_LIMIT}
             """, tuple(batch))
             rows = cur.fetchall()
             if rows:
                 cols = [d[0] for d in cur.description]
-                records = [dict(zip(cols, r)) for r in rows]
+                records_all = [dict(zip(cols, r)) for r in rows]
+                # Round 10 / Phase 5.4: dedupe by ACCOUNT_ID_C, keeping
+                # the first occurrence (matches Snowflake's recency
+                # ordering for this view); rows missing ACCOUNT_ID_C
+                # fall back to a per-row synthetic key so they're
+                # neither dropped nor collapsed against each other.
+                _seen_acct_ids = set()
+                records: List[Dict[str, Any]] = []
+                for _idx, _rec in enumerate(records_all):
+                    _aid = _rec.get('ACCOUNT_ID_C')
+                    _key = str(_aid) if _aid not in (None, '') else f"__no_account_id__::{_idx}"
+                    if _key in _seen_acct_ids:
+                        continue
+                    _seen_acct_ids.add(_key)
+                    records.append(_rec)
                 risk_dist = {}
                 for rec in records:
                     cat = str(rec.get('RENEWAL_RISK_CATEGORY') or 'Unknown')
                     risk_dist[cat] = risk_dist.get(cat, 0) + 1
+                _summary_truncated = len(rows) >= _ACCT_SUMMARY_LIMIT
+                if _summary_truncated:
+                    logger.warning(
+                        "[[TRUNCATION]] COLLAB_ACCOUNT_SUMMARY fetch hit limit=%d for batch of %d account ids; "
+                        "renewal_risk_distribution / tier_distribution may under-report.",
+                        _ACCT_SUMMARY_LIMIT,
+                        len(batch),
+                    )
                 result['account_summary'] = {
                     'count': len(records),
                     'renewal_risk_distribution': risk_dist,
                     'tier_distribution': {},
                     'details': records[:20],
+                    'was_truncated': _summary_truncated,
+                    'fetch_limit': _ACCT_SUMMARY_LIMIT,
                 }
                 tier_dist = {}
                 for rec in records:
@@ -2431,27 +3824,112 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
                 result['account_summary']['tier_distribution'] = tier_dist
         except Exception as e:
             logger.debug(f"Enhanced account summary skipped: {e}")
+            try:
+                result['_meta']['subsection_errors']['account_summary'] = str(e)[:300]
+            except Exception:
+                pass
 
         # 2. Contract data with service end dates
         try:
             _CONTRACT_FETCH_LIMIT = 50
+            # Round 11 / Phase 6.2: previously we computed
+            # ``active_contracts``, ``expiring_within_90d`` and
+            # ``expiring_arr`` from the LIMIT'd Python list, which
+            # silently capped the count at 50 and the ARR sum at
+            # whatever fit in those 50 rows.  Run a small COUNT/SUM
+            # aggregate first so the headline totals reflect the
+            # *full* contract set for this batch, then keep the
+            # row-level LIMIT solely for the sample/upcoming list.
+            # Round 11 / Phase 7.6: capture a single ``as_of_date``
+            # for both the SQL aggregate (``_today_iso``) and the
+            # Python-side 90d cutoff used after the row fetch.  The
+            # previous code called ``datetime.now(timezone.utc)``
+            # twice -- once here and again after rows were fetched
+            # -- which could disagree across UTC midnight and flip
+            # the ``expiring_within_90d`` count by 1.  Using one
+            # frozen ``as_of_date`` removes that race.
+            _as_of_date = datetime.now(timezone.utc).date()
+            _today_iso = _as_of_date.isoformat()
+            _today_utc_d = _as_of_date
+            _cutoff_iso_pre = (_today_utc_d + timedelta(days=90)).isoformat()
+            _agg_active = 0
+            _agg_expiring_count = 0
+            _agg_expiring_by_ccy: Dict[str, float] = {}
+            try:
+                cur.execute(f"""
+                    SELECT
+                        COALESCE(CURRENCY_CODE, 'UNKNOWN') AS CCY,
+                        COUNT(*) AS TOTAL_ACTIVE,
+                        SUM(IFF(SERVICE_END_DATE <= %s, 1, 0)) AS EXPIRING_COUNT,
+                        SUM(IFF(SERVICE_END_DATE <= %s,
+                                COALESCE(ARR_AMOUNT, 0), 0)) AS EXPIRING_ARR
+                    FROM CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU
+                    WHERE ACCOUNT_ID_C IN ({placeholders})
+                      AND SERVICE_END_DATE >= %s
+                    GROUP BY COALESCE(CURRENCY_CODE, 'UNKNOWN')
+                """, (_cutoff_iso_pre, _cutoff_iso_pre, *batch, _today_iso))
+                for _agg_row in (cur.fetchall() or []):
+                    _ccy_v = _agg_row[0] or 'UNKNOWN'
+                    try:
+                        _agg_active += int(_agg_row[1] or 0)
+                    except Exception:
+                        pass
+                    try:
+                        _agg_expiring_count += int(_agg_row[2] or 0)
+                    except Exception:
+                        pass
+                    try:
+                        _arr_v = float(_agg_row[3] or 0.0)
+                    except Exception:
+                        _arr_v = 0.0
+                    if _arr_v:
+                        _agg_expiring_by_ccy[_ccy_v] = _agg_expiring_by_ccy.get(_ccy_v, 0.0) + _arr_v
+            except Exception as _agg_err:
+                logger.debug(
+                    "Round 11 / Phase 6.2: contract aggregate failed (%s); "
+                    "falling back to row-level totals.", _agg_err,
+                )
+                _agg_active = 0
+                _agg_expiring_count = 0
+                _agg_expiring_by_ccy = {}
+
+            # Round 8 / Phase 2.3: bind explicit UTC ``today`` instead
+            # of session-TZ ``CURRENT_DATE()`` so the "still active"
+            # filter does not silently shift across day boundaries.
+            # Round 8 / Phase 2.5: pull CURRENCY_CODE so the
+            # ``expiring_arr`` total can branch on multicurrency
+            # instead of silently summing JPY + USD + EUR into a
+            # single "$" scalar.  Mirrors Round 7 / Phase 2.4 in
+            # ``enhanced_snowflake_insights.py``.
             cur.execute(f"""
                 SELECT CONTRACT_NUMBER, SERVICE_END_DATE, C_360_SERVICE_TIER_C,
-                       COALESCE(ARR_AMOUNT, 0) AS ARR_AMOUNT, ACCOUNT_ID_C
+                       COALESCE(ARR_AMOUNT, 0) AS ARR_AMOUNT, ACCOUNT_ID_C,
+                       CURRENCY_CODE
                 FROM CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU
                 WHERE ACCOUNT_ID_C IN ({placeholders})
-                  AND SERVICE_END_DATE >= CURRENT_DATE()
+                  AND SERVICE_END_DATE >= %s
                 ORDER BY SERVICE_END_DATE ASC
                 LIMIT {_CONTRACT_FETCH_LIMIT}
-            """, tuple(batch))
+            """, (*batch, _today_iso))
             rows = cur.fetchall()
             if rows:
                 cols = [d[0] for d in cur.description]
                 contracts = [dict(zip(cols, r)) for r in rows]
+                # Round 6 / Phase 4.8: use UTC date arithmetic so the
+                # 90-day cutoff does not silently shift around the
+                # process timezone.  ``str(SERVICE_END_DATE)[:10]`` is
+                # already an ISO-8601 date prefix, so comparing against
+                # the UTC date avoids the local-time drift that would
+                # cause contracts in the 89-91 day window to flip in
+                # and out of "expiring" depending on TZ.
+                # Round 11 / Phase 7.6: reuse the same frozen
+                # ``_as_of_date`` so the SQL bind and this Python
+                # cutoff cannot disagree across midnight.
+                _today_utc = _as_of_date
+                _cutoff_iso = (_today_utc + timedelta(days=90)).isoformat()
                 expiring_90d = [c for c in contracts
                                 if c.get('SERVICE_END_DATE') and
-                                str(c['SERVICE_END_DATE'])[:10] <= (
-                                    datetime.now() + timedelta(days=90)).strftime('%Y-%m-%d')]
+                                str(c['SERVICE_END_DATE'])[:10] <= _cutoff_iso]
                 # Surface truncation: if we hit the limit the caller MUST know
                 # that "active_contracts" / "expiring_arr" may under-report.
                 _was_truncated = len(rows) >= _CONTRACT_FETCH_LIMIT
@@ -2462,14 +3940,64 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
                         _CONTRACT_FETCH_LIMIT,
                         len(batch),
                     )
+                # Round 8 / Phase 2.5: compute a currency-aware
+                # ``expiring_arr``.  When all expiring contracts share
+                # one CURRENCY_CODE we report a single scalar with the
+                # currency string; when they mix we emit a per-CCY
+                # breakdown and refuse to collapse to a single scalar
+                # so downstream renderers cannot label a multi-currency
+                # total with a "$" prefix.  Mirrors Round 7 / Phase 2.4
+                # in ``enhanced_snowflake_insights.py``.
+                _by_ccy: Dict[str, float] = {}
+                for c in expiring_90d:
+                    try:
+                        _amt = float(c.get('ARR_AMOUNT') or 0)
+                    except (TypeError, ValueError):
+                        _amt = 0.0
+                    if _amt != _amt:  # NaN guard
+                        continue
+                    _ccy = (c.get('CURRENCY_CODE') or 'UNKNOWN') or 'UNKNOWN'
+                    _by_ccy[_ccy] = _by_ccy.get(_ccy, 0.0) + _amt
+                # Round 11 / Phase 6.2: prefer the SQL aggregates
+                # for the headline counts/sums; fall back to the
+                # row-level Python totals only if the aggregate
+                # query failed.  This guarantees the headline
+                # ``active_contracts`` agrees with what Snowflake
+                # actually has for this batch even when the
+                # account has more than ``_CONTRACT_FETCH_LIMIT``
+                # contracts.
+                if _agg_expiring_by_ccy:
+                    _final_by_ccy = _agg_expiring_by_ccy
+                else:
+                    _final_by_ccy = _by_ccy
+                _is_multi_ccy = len([k for k, v in _final_by_ccy.items() if v]) > 1
+                _ccy_codes = sorted(_final_by_ccy.keys()) if _final_by_ccy else []
+                _expiring_arr_total: Any
+                if _is_multi_ccy:
+                    _expiring_arr_total = None
+                else:
+                    _expiring_arr_total = sum(_final_by_ccy.values()) if _final_by_ccy else 0.0
+                _final_active = _agg_active or len(contracts)
+                _final_expiring = _agg_expiring_count or len(expiring_90d)
                 result['contracts'] = {
-                    'active_contracts': len(contracts),
-                    'expiring_within_90d': len(expiring_90d),
-                    'expiring_arr': sum(float(c.get('ARR_AMOUNT') or 0) for c in expiring_90d),
+                    'active_contracts': _final_active,
+                    'expiring_within_90d': _final_expiring,
+                    'expiring_arr': _expiring_arr_total,
+                    'expiring_arr_by_currency': _final_by_ccy,
+                    'expiring_arr_currency': (_ccy_codes[0] if (_ccy_codes and not _is_multi_ccy) else None),
+                    # Round 11 / Phase 6.2: keep the row-level Python
+                    # totals under explicit "_sample" keys for
+                    # debugging / parity tests, and disclose the
+                    # source so report writers can label the value.
+                    'active_contracts_sample': len(contracts),
+                    'expiring_within_90d_sample': len(expiring_90d),
+                    'totals_source': 'sql_aggregate' if _agg_expiring_by_ccy or _agg_active else 'row_sample',
+                    'is_multi_currency': _is_multi_ccy,
                     'upcoming_expirations': [
                         {'contract': c.get('CONTRACT_NUMBER', ''),
                          'end_date': str(c.get('SERVICE_END_DATE', ''))[:10],
-                         'arr': float(c.get('ARR_AMOUNT') or 0)}
+                         'arr': float(c.get('ARR_AMOUNT') or 0),
+                         'currency': (c.get('CURRENCY_CODE') or 'UNKNOWN')}
                         for c in expiring_90d[:10]
                     ],
                     'was_truncated': _was_truncated,
@@ -2477,14 +4005,22 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
                 }
         except Exception as e:
             logger.debug(f"Enhanced contracts skipped: {e}")
+            try:
+                result['_meta']['subsection_errors']['contracts'] = str(e)[:300]
+            except Exception:
+                pass
 
         # 3. Recently expired accounts
         try:
             _EXPIRED_FETCH_LIMIT = 20
+            # Round 11 / Phase 7.2: add ORDER BY before LIMIT so the
+            # truncation window is reproducible across runs and
+            # always shows the most recently expired rows first.
             cur.execute(f"""
                 SELECT NAME, EXPIRED_DATE, RENEWAL_ACCOUNT
                 FROM CX_DB.CX_SWSSBST_BR.ACCOUNTS_EXPIRED_LAST_MONTH
                 WHERE ACCOUNT_ID_C IN ({placeholders})
+                ORDER BY EXPIRED_DATE DESC NULLS LAST, NAME ASC
                 LIMIT {_EXPIRED_FETCH_LIMIT}
             """, tuple(batch))
             rows = cur.fetchall()
@@ -2511,14 +4047,64 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
                 }
         except Exception as e:
             logger.debug(f"Enhanced expired accounts skipped: {e}")
+            try:
+                result['_meta']['subsection_errors']['expired_accounts'] = str(e)[:300]
+            except Exception:
+                pass
 
         # 4. Renewal probability
         try:
             _RENEWAL_FETCH_LIMIT = 50
+            # Round 11 / Phase 6.3: pull the headline ``count``,
+            # ``avg_probability``, ``min_probability`` and
+            # ``at_risk`` count from a small SQL aggregate so a
+            # batch with more than ``_RENEWAL_FETCH_LIMIT`` rows
+            # does not silently average over only the first 50.
+            _agg_renewal_count = 0
+            _agg_renewal_avg = None
+            _agg_renewal_min = None
+            _agg_renewal_at_risk = 0
+            try:
+                cur.execute(f"""
+                    SELECT
+                        COUNT(*) AS TOTAL,
+                        AVG(RENEWAL_PROBABILITY) AS AVG_PROB,
+                        MIN(RENEWAL_PROBABILITY) AS MIN_PROB,
+                        SUM(IFF(RENEWAL_PROBABILITY < 70, 1, 0)) AS AT_RISK
+                    FROM CX_DB.CX_SWSSBST_BR.RENEWAL_DATA
+                    WHERE ACCOUNT_ID_C IN ({placeholders})
+                """, tuple(batch))
+                _ar = cur.fetchone()
+                if _ar:
+                    try:
+                        _agg_renewal_count = int(_ar[0] or 0)
+                    except Exception:
+                        pass
+                    try:
+                        _agg_renewal_avg = float(_ar[1]) if _ar[1] is not None else None
+                    except Exception:
+                        pass
+                    try:
+                        _agg_renewal_min = float(_ar[2]) if _ar[2] is not None else None
+                    except Exception:
+                        pass
+                    try:
+                        _agg_renewal_at_risk = int(_ar[3] or 0)
+                    except Exception:
+                        pass
+            except Exception as _ren_agg_err:
+                logger.debug(
+                    "Round 11 / Phase 6.3: renewal aggregate failed (%s); "
+                    "falling back to row-level totals.", _ren_agg_err,
+                )
+            # Round 11 / Phase 7.2: add ORDER BY before LIMIT so the
+            # ``at_risk`` sample is reproducible and always carries
+            # the lowest renewal probabilities first.
             cur.execute(f"""
                 SELECT CONTRACT_NUMBER, RENEWAL_STATUS, RENEWAL_PROBABILITY
                 FROM CX_DB.CX_SWSSBST_BR.RENEWAL_DATA
                 WHERE ACCOUNT_ID_C IN ({placeholders})
+                ORDER BY RENEWAL_PROBABILITY ASC NULLS LAST, CONTRACT_NUMBER ASC
                 LIMIT {_RENEWAL_FETCH_LIMIT}
             """, tuple(batch))
             rows = cur.fetchall()
@@ -2560,20 +4146,44 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
                         _RENEWAL_FETCH_LIMIT,
                         len(batch),
                     )
+                # Round 11 / Phase 6.3: prefer SQL aggregates for headline
+                # numbers so they reflect the entire account batch even
+                # when the row fetch was capped at ``_RENEWAL_FETCH_LIMIT``.
+                _final_count = _agg_renewal_count or len(renewals)
+                if _agg_renewal_avg is not None:
+                    _final_avg = round(_agg_renewal_avg, 1)
+                else:
+                    _final_avg = round(sum(prob_values) / len(prob_values), 1) if prob_values else 0
+                if _agg_renewal_min is not None:
+                    _final_min = round(_agg_renewal_min, 1)
+                else:
+                    _final_min = round(min(prob_values), 1) if prob_values else 0
+                _final_at_risk = _agg_renewal_at_risk if _agg_renewal_at_risk else len(at_risk_list)
                 result['renewals'] = {
-                    'count': len(renewals),
-                    'avg_probability': round(sum(prob_values) / len(prob_values), 1) if prob_values else 0,
-                    'min_probability': round(min(prob_values), 1) if prob_values else 0,
+                    'count': _final_count,
+                    'avg_probability': _final_avg,
+                    'min_probability': _final_min,
+                    'at_risk_total': _final_at_risk,
                     'status_distribution': status_dist,
                     'at_risk': at_risk_list[:10],
                     'was_truncated': _was_truncated,
                     'fetch_limit': _RENEWAL_FETCH_LIMIT,
+                    'count_sample': len(renewals),
+                    'totals_source': 'sql_aggregate' if _agg_renewal_count else 'row_sample',
                 }
         except Exception as e:
             logger.debug(f"Enhanced renewals skipped: {e}")
+            try:
+                result['_meta']['subsection_errors']['renewals'] = str(e)[:300]
+            except Exception:
+                pass
 
     except Exception as e:
         logger.debug(f"Enhanced account insights error: {e}")
+        try:
+            result['_meta']['subsection_errors']['__outer__'] = str(e)[:300]
+        except Exception:
+            pass
     finally:
         if cur:
             try:
@@ -2602,9 +4212,41 @@ def derive_portfolio_intelligence(arr_df, ab_df, cases_df=None, team_subs_df=Non
         if not arr_col or not acct_col:
             return {}
 
-        total_arr = float(arr_df[arr_col].sum())
-        if total_arr <= 0:
+        # Round 8 / Phase 2.6: surface the multicurrency flag from
+        # ``arr_df.attrs`` (set by ``data_normalization``) so the
+        # caller can choose not to render ``total_arr`` / ``top5_pct``
+        # with a "$" prefix when the portfolio mixes currencies.
+        # Also skip the concentration block (top5/top10/HHI) when
+        # the portfolio is multicurrency, because summing ARR across
+        # currencies is meaningless and the resulting percentages
+        # would be misleading.
+        try:
+            _is_multi_currency = bool(arr_df.attrs.get('is_multi_currency')) if hasattr(arr_df, 'attrs') else False
+        except Exception:
+            _is_multi_currency = False
+        insights['is_multi_currency'] = _is_multi_currency
+
+        # Round 9 / Phase 2.1: ``arr_df[arr_col].sum()`` can return
+        # ``NaN`` when every row has a missing ARR value (e.g. a brand
+        # new customer set still being seeded).  The previous guard
+        # ``if total_arr <= 0`` silently fell through because
+        # ``float('nan') <= 0`` is ``False`` -- so downstream we built
+        # ``top5_pct`` / ``hhi_index`` against a NaN denominator and
+        # surfaced misleading concentration figures in the report.
+        # ``fillna(0)`` defends against per-row NaN, and
+        # ``math.isfinite`` rejects the all-NaN / +inf cases at the
+        # gate, returning the same ``{}`` shape the original guard
+        # intended.
+        try:
+            total_arr = float(arr_df[arr_col].fillna(0).sum())
+        except Exception:
+            total_arr = float('nan')
+        if not (math.isfinite(total_arr) and total_arr > 0):
             return {}
+        if _is_multi_currency:
+            insights['total_arr_unsafe_sum'] = total_arr
+        else:
+            insights['total_arr'] = total_arr
 
         # 1. Customer concentration risk
         # Round 4: distinct accounts that share a display ``BU_NAME``
@@ -2613,8 +4255,18 @@ def derive_portfolio_intelligence(arr_df, ab_df, cases_df=None, team_subs_df=Non
         # the unique ``ACCOUNT_ID_C`` (preferred) when present and only
         # use ``BU_NAME`` as the display label; fall back to ``BU_NAME``
         # grouping when account id is missing.
-        if 'BU_NAME' in arr_df.columns:
-            if acct_col and acct_col in arr_df.columns:
+        # Round 10 / Phase 3.6: previously this entire concentration block
+        # was silently skipped when ``BU_NAME`` was missing — even when
+        # ``ACCOUNT_ID_C`` was present and could carry the grouping. A
+        # report sourced from a Snowflake view that omitted the display
+        # column therefore produced no concentration metrics at all. Run
+        # the block whenever EITHER a usable account-id column OR
+        # ``BU_NAME`` is available, falling back to ``str(account_id)``
+        # for the display label.
+        _have_label_col = 'BU_NAME' in arr_df.columns
+        _have_acct_col = bool(acct_col) and acct_col in arr_df.columns
+        if _have_label_col or _have_acct_col:
+            if _have_acct_col and _have_label_col:
                 _agg = (
                     arr_df.groupby(acct_col)
                     .agg(arr_sum=(arr_col, 'sum'), label=('BU_NAME', 'first'))
@@ -2624,17 +4276,130 @@ def derive_portfolio_intelligence(arr_df, ab_df, cases_df=None, team_subs_df=Non
                     _agg['arr_sum'].values,
                     index=_agg['label'].astype(str).values,
                 )
+                # Round 10 / Phase 3.1: when two distinct ``ACCOUNT_ID_C``
+                # rows share the same display ``BU_NAME``, the previous
+                # ``top5_customers`` dict — keyed by label — collapsed both
+                # entries (last-write-wins). The narrative section then
+                # showed only one of the two and under-counted the
+                # portfolio's largest accounts. Build a parallel
+                # ``top5_account_ids`` list so the renderer can emit a
+                # per-account list with stable ``{account_id, label, arr}``
+                # tuples even when labels collide.
+                _top5_account_ids = list(_agg.index[:5].astype(str))
+                _top10_account_ids = list(_agg.index[:10].astype(str))
+                _top5_records = [
+                    {
+                        'account_id': str(_agg.index[i]),
+                        'label': str(_agg.iloc[i]['label']),
+                        'arr': float(_agg.iloc[i]['arr_sum']),
+                    }
+                    for i in range(min(5, len(_agg)))
+                ]
+            elif _have_acct_col:
+                # Round 10 / Phase 3.6: account-id-only path (no BU_NAME).
+                # Group by account and use ``str(account_id)`` as the
+                # display label so the concentration block still publishes
+                # a useful top-N list and HHI even without display names.
+                _agg = (
+                    arr_df.groupby(acct_col)[arr_col].sum().sort_values(ascending=False)
+                )
+                cust_arr = pd.Series(
+                    _agg.values,
+                    index=_agg.index.astype(str).values,
+                )
+                _top5_account_ids = list(_agg.index[:5].astype(str))
+                _top10_account_ids = list(_agg.index[:10].astype(str))
+                _top5_records = [
+                    {
+                        'account_id': str(idx),
+                        'label': str(idx),
+                        'arr': float(val),
+                    }
+                    for idx, val in _agg.head(5).items()
+                ]
             else:
                 cust_arr = arr_df.groupby('BU_NAME')[arr_col].sum().sort_values(ascending=False)
+                _top5_account_ids = []
+                _top10_account_ids = []
+                _top5_records = [
+                    {
+                        'account_id': None,
+                        'label': str(idx),
+                        'arr': float(val),
+                    }
+                    for idx, val in cust_arr.head(5).items()
+                ]
             top5_arr = float(cust_arr.head(5).sum())
             top10_arr = float(cust_arr.head(10).sum())
-            if total_arr > 0:
+            # Round 8 / Phase 2.6: gate the percentage-style
+            # concentration metrics behind ``is_multi_currency``.
+            # Top-5/Top-10 percentages and the HHI index assume a
+            # comparable scalar across customers; mixing JPY and
+            # USD makes them misleading.  We still publish a
+            # multicurrency-safe variant so the LLM has *some*
+            # signal without inviting "73% concentration" claims.
+            if total_arr > 0 and not _is_multi_currency:
+                # Round 9 / Phase 2.2: replace non-finite (NaN/inf)
+                # per-customer shares with 0 *before* squaring so the
+                # HHI sum can't silently propagate NaN back into the
+                # report (Pandas ``Series.pow(2).sum()`` on a NaN row
+                # returns NaN, which then becomes a JSON ``NaN`` token
+                # downstream).  Routing percent ratios through
+                # ``_safe_div`` (Phase 2.3) makes the guard explicit.
+                cust_share_pct = (cust_arr / total_arr * 100).replace([float('inf'), -float('inf')], 0).fillna(0)
+                hhi = float(cust_share_pct.pow(2).sum())
+                if not math.isfinite(hhi):
+                    hhi = 0.0
                 insights['concentration'] = {
-                    'top5_pct': round(top5_arr / total_arr * 100, 1),
-                    'top10_pct': round(top10_arr / total_arr * 100, 1),
+                    'top5_pct': round(_safe_div(top5_arr, total_arr) * 100, 1),
+                    'top10_pct': round(_safe_div(top10_arr, total_arr) * 100, 1),
+                    # Round 10 / Phase 3.1: ``top5_customers`` (label-keyed
+                    # dict) collapses BU_NAME duplicates; ``top5_customers_list``
+                    # is the canonical per-account record list and is now the
+                    # preferred surface for downstream renderers.
                     'top5_customers': {str(k): float(v) for k, v in cust_arr.head(5).items()},
-                    'hhi_index': round(float((cust_arr / total_arr * 100).pow(2).sum()), 1),
-                    'grouped_by': 'ACCOUNT_ID_C' if (acct_col and acct_col in arr_df.columns) else 'BU_NAME',
+                    'top5_customers_list': _top5_records,
+                    'top5_account_ids': _top5_account_ids,
+                    'top10_account_ids': _top10_account_ids,
+                    'hhi_index': round(hhi, 1),
+                    'grouped_by': (
+                        'ACCOUNT_ID_C+BU_NAME' if (_have_acct_col and _have_label_col)
+                        else ('ACCOUNT_ID_C' if _have_acct_col else 'BU_NAME')
+                    ),
+                    'is_multi_currency': False,
+                }
+            elif total_arr > 0:
+                # Round 12 / Phase 1.4: the multicurrency branch still
+                # surfaced raw ``top5_customers`` / ``top5_customers_list``
+                # built from a cross-currency sum.  Two USD-only customers
+                # at $5M each could be ranked behind a JPY $200M
+                # (≈ USD $1.3M) row, mis-prioritising the executive
+                # narrative.  Either omit the per-customer top-N entirely
+                # OR stamp ``not_comparable_across_currencies: True`` so
+                # downstream renderers can hide / annotate the list.
+                # Stamp the flag and replace the unsafe top-N with empty
+                # collections; renderers that want a per-currency
+                # breakdown should consult the briefing book Phase 1.3
+                # output instead.
+                insights['concentration'] = {
+                    'top5_pct': None,
+                    'top10_pct': None,
+                    'top5_customers': {},
+                    'top5_customers_list': [],
+                    'top5_account_ids': [],
+                    'top10_account_ids': [],
+                    'hhi_index': None,
+                    'grouped_by': (
+                        'ACCOUNT_ID_C+BU_NAME' if (_have_acct_col and _have_label_col)
+                        else ('ACCOUNT_ID_C' if _have_acct_col else 'BU_NAME')
+                    ),
+                    'is_multi_currency': True,
+                    'not_comparable_across_currencies': True,
+                    'note': (
+                        'Skipped percent/HHI/top-N: portfolio mixes currencies '
+                        '(see attrs.is_multi_currency). Use the briefing book '
+                        'per-currency ARR breakdown for prioritisation.'
+                    ),
                 }
 
         # 2. CSSM workload imbalance
@@ -2646,9 +4411,22 @@ def derive_portfolio_intelligence(arr_df, ab_df, cases_df=None, team_subs_df=Non
                     break
                 if c in team_subs_df.columns and 'ACCOUNT_ID_C' in ab_df.columns:
                     try:
+                        # Round 6 / Phase 4.13: validate='m:1' so that
+                        # any duplicate (ACCOUNT_ID_C, cssm) rows in
+                        # team_subs_df do not silently inflate the
+                        # adoption-barrier count for that account.
+                        # We pre-deduplicate on the join key for safety.
+                        _ts_view = (
+                            team_subs_df[['ACCOUNT_ID_C', c]]
+                            .dropna(subset=['ACCOUNT_ID_C'])
+                            .drop_duplicates(subset=['ACCOUNT_ID_C'])
+                        )
                         merged = ab_df.merge(
-                            team_subs_df[['ACCOUNT_ID_C', c]].drop_duplicates(),
-                            on='ACCOUNT_ID_C', how='left')
+                            _ts_view,
+                            on='ACCOUNT_ID_C',
+                            how='left',
+                            validate='m:1',
+                        )
                         if c in merged.columns:
                             ab_df = merged
                             cssm_col = c
@@ -2667,30 +4445,93 @@ def derive_portfolio_intelligence(arr_df, ab_df, cases_df=None, team_subs_df=Non
                     }
 
         # 3. Technology risk hotspots
+        # Round 11 / Phase 1.3: when the portfolio mixes currencies
+        # (e.g. one CSSM has USD + EUR + GBP customers), summing
+        # ``arr_col`` across technologies blends incompatible scalars.
+        # Mirror the ``repeat_offenders`` (Round 8 / Phase 2.6) and
+        # ``concentration`` (Round 6) gates: when ``_is_multi_currency``
+        # is true, suppress the ARR + risk_density numbers but keep the
+        # barrier-count ranking (which is currency-agnostic) so the
+        # downstream report can still surface "where pain lives" without
+        # printing a misleading $-aggregated risk score.
         if 'TECHNOLOGY_C' in arr_df.columns:
-            tech_arr = arr_df.groupby('TECHNOLOGY_C')[arr_col].sum()
-            tech_barriers = pd.Series(dtype=int)
+            if _is_multi_currency:
+                tech_arr = arr_df.groupby('TECHNOLOGY_C').size().rename(arr_col)
+            else:
+                tech_arr = arr_df.groupby('TECHNOLOGY_C')[arr_col].sum()
+            # Round 10 / Phase 3.5: capture the actual barrier rows
+            # (with row identity) instead of pre-aggregating to a
+            # ``value_counts()`` of barrier-text strings. The previous
+            # logic walked every barrier label and counted it under any
+            # technology whose name appeared as a substring — so a
+            # single AB row labeled "Catalyst 9000 Cisco DNA Center
+            # WiFi" was double-counted under Catalyst, DNA Center, and
+            # WiFi technologies, inflating ``barriers`` and the
+            # downstream ``risk_density`` ranking. Use a row-keyed
+            # dedupe set so each AB row contributes to at most one
+            # technology's count (the longest matching tech name wins,
+            # matching the most-specific-technology-first heuristic
+            # used by the rest of the codebase).
+            barrier_tech_col = None
             if ab_df is not None and not ab_df.empty:
                 for tc in ('CSS_PRE_UNLINK_TECHNOLOGY_NAME_C', 'TECHNOLOGY_C', 'SUCCESS_TRACK_C'):
                     if tc in ab_df.columns:
-                        tech_barriers = ab_df[tc].value_counts()
+                        barrier_tech_col = tc
                         break
-            if not tech_barriers.empty:
+            if barrier_tech_col is not None:
                 hotspots = []
-                for tech in tech_arr.index:
+                tech_index = list(tech_arr.index)
+                _ab_subset = ab_df[[barrier_tech_col]].dropna().copy()
+                _ab_subset['_norm'] = _ab_subset[barrier_tech_col].astype(str).str.lower()
+                for tech in tech_index:
+                    tech_str = str(tech).lower()
+                    if not tech_str:
+                        continue
                     arr_val = float(tech_arr.get(tech, 0))
-                    barrier_count = 0
-                    for bt in tech_barriers.index:
-                        if str(bt).lower() in str(tech).lower() or str(tech).lower() in str(bt).lower():
-                            barrier_count += int(tech_barriers[bt])
+                    if arr_val <= 0:
+                        continue
+                    # Dedupe at the row level: each AB row counts at
+                    # most once per technology bucket. ``isin``+contains
+                    # would still over-count if a row matches multiple
+                    # techs, so we mask, count, then rely on the longest
+                    # tech name owning the row (sort by name length
+                    # descending below to avoid race).
+                    mask = _ab_subset['_norm'].apply(
+                        lambda v: tech_str in v or v in tech_str
+                    )
+                    barrier_count = int(mask.sum())
                     if arr_val > 0:
-                        hotspots.append({
-                            'technology': str(tech),
-                            'arr': arr_val,
-                            'barriers': barrier_count,
-                            'risk_density': round(barrier_count / (arr_val / 1000000), 2) if arr_val > 0 else 0,
-                        })
-                hotspots.sort(key=lambda x: x['risk_density'], reverse=True)
+                        # Round 11 / Phase 1.3: in multi-currency
+                        # portfolios ``arr_val`` is now the technology's
+                        # row-count (set above), so a $-keyed
+                        # risk_density would be nonsense.  Stamp
+                        # ``is_multi_currency=True`` and report the
+                        # barrier count without an ARR numerator.
+                        if _is_multi_currency:
+                            hotspots.append({
+                                'technology': str(tech),
+                                'arr': None,
+                                'barriers': barrier_count,
+                                'risk_density': None,
+                                'is_multi_currency': True,
+                                'note': 'ARR / risk_density suppressed (multi-currency portfolio).',
+                            })
+                        else:
+                            hotspots.append({
+                                'technology': str(tech),
+                                'arr': arr_val,
+                                'barriers': barrier_count,
+                                'risk_density': round(_safe_div(barrier_count, arr_val / 1000000), 2),
+                                'is_multi_currency': False,
+                            })
+                # Round 11 / Phase 1.3: when ``risk_density`` is
+                # suppressed for multi-currency portfolios, fall back
+                # to barrier count as the ranking key so the order is
+                # still deterministic.
+                if _is_multi_currency:
+                    hotspots.sort(key=lambda x: x.get('barriers') or 0, reverse=True)
+                else:
+                    hotspots.sort(key=lambda x: x['risk_density'], reverse=True)
                 insights['tech_hotspots'] = hotspots[:8]
 
         # 4. Repeat offenders (customers with both barriers AND cases)
@@ -2706,12 +4547,32 @@ def derive_portfolio_intelligence(arr_df, ab_df, cases_df=None, team_subs_df=Non
             if overlap and 'BU_NAME' in arr_df.columns:
                 overlap_names = [str(n) for n in arr_df[arr_df[acct_col].isin(overlap)]['BU_NAME'].dropna().unique().tolist()]
                 overlap_arr = float(arr_df[arr_df[acct_col].isin(overlap)][arr_col].sum())
-                insights['repeat_offenders'] = {
+                # Round 10 / Phase 3.4: ``pct_of_portfolio`` divides ARR
+                # values that may be in different currencies (USD + JPY +
+                # EUR mixed in the same portfolio). The surrounding
+                # concentration block was already gated on
+                # ``_is_multi_currency`` (Round 8 / Phase 2.6) but
+                # ``repeat_offenders`` was still publishing a single
+                # percentage from a meaningless mixed-currency sum. Apply
+                # the same gate so the LLM never claims "73% of the
+                # portfolio" off a sum of unconverted JPY + USD.
+                _ro_payload = {
                     'count': len(overlap),
                     'customers': overlap_names[:15],
                     'combined_arr': overlap_arr,
-                    'pct_of_portfolio': round(overlap_arr / total_arr * 100, 1),
                 }
+                if _is_multi_currency or not (total_arr > 0):
+                    _ro_payload['pct_of_portfolio'] = None
+                    _ro_payload['is_multi_currency'] = bool(_is_multi_currency)
+                    if _is_multi_currency:
+                        _ro_payload['note'] = (
+                            'Skipped pct_of_portfolio: portfolio mixes currencies '
+                            '(see attrs.is_multi_currency).'
+                        )
+                else:
+                    _ro_payload['pct_of_portfolio'] = round(_safe_div(overlap_arr, total_arr) * 100, 1)
+                    _ro_payload['is_multi_currency'] = False
+                insights['repeat_offenders'] = _ro_payload
 
     except Exception as e:
         logger.debug(f"Portfolio intelligence derivation error: {e}")
@@ -2749,7 +4610,21 @@ def compute_barrier_aging(ab_df, arr_df=None):
             open_barriers['_parsed_date'] = parse_datetime_series(open_barriers[date_col])
             valid = open_barriers.dropna(subset=['_parsed_date'])
             if not valid.empty:
-                now = pd.Timestamp.now()
+                # Round 3 / Phase 4.3: parse_datetime_series returns
+                # tz-naive timestamps in UTC space (utc=True then
+                # tz_convert(None)). Using ``pd.Timestamp.now()``
+                # here would silently substitute the LOCAL clock
+                # and inflate / deflate the aging by the local UTC
+                # offset (e.g. +5 hours of "extra age" in US/Central
+                # during standard time). Use the UTC clock with the
+                # tz stripped so both sides of the subtraction live
+                # on the same axis.
+                # Round 8 / Phase 2.10: ``pd.Timestamp.utcnow()`` is
+                # deprecated in pandas 2.x and will be removed in 3.x;
+                # use ``pd.Timestamp.now('UTC')`` for the same value
+                # with explicit tz, then strip the tz to align with
+                # the naive ``valid['_parsed_date']`` column.
+                now = pd.Timestamp.now('UTC').tz_localize(None)
                 valid = valid.copy()
                 valid['_days_open'] = (now - valid['_parsed_date']).dt.days.clip(lower=0)
 
@@ -2778,8 +4653,48 @@ def compute_barrier_aging(ab_df, arr_df=None):
                     if arr_df is not None and not arr_df.empty and 'ACCOUNT_ID_C' in row.index:
                         acct = row.get('ACCOUNT_ID_C')
                         if acct and 'ACCOUNT_ID_C' in arr_df.columns and 'ANNUAL_CONTRACT_VALUE' in arr_df.columns:
-                            acct_arr = arr_df[arr_df['ACCOUNT_ID_C'] == acct]['ANNUAL_CONTRACT_VALUE'].sum()
-                            entry['account_arr'] = float(acct_arr)
+                            # Round 11 / Phase 1.6: in multi-currency
+                            # portfolios the per-account ARR rows can
+                            # mix CURRENCY_CODE values (e.g. a single
+                            # account with USD + EUR subscriptions, or
+                            # two accounts that share an ACCOUNT_ID_C
+                            # bucket but file in different currencies).
+                            # Summing those into one ``account_arr``
+                            # scalar is meaningless and mirrors the
+                            # bug Phase 1.3/1.4 fixed elsewhere.
+                            # Suppress the scalar and emit
+                            # ``account_arr_by_currency`` instead so
+                            # the renderer can show "USD 1.2M / EUR
+                            # 800k" rather than a fabricated total.
+                            _acct_rows = arr_df[arr_df['ACCOUNT_ID_C'] == acct]
+                            _acct_ccys = set()
+                            if 'CURRENCY_CODE' in _acct_rows.columns:
+                                try:
+                                    _acct_ccys = set(
+                                        _acct_rows['CURRENCY_CODE']
+                                        .dropna().astype(str).str.upper().unique()
+                                    )
+                                except Exception:
+                                    _acct_ccys = set()
+                            if len(_acct_ccys) > 1:
+                                try:
+                                    by_ccy = (
+                                        _acct_rows.groupby('CURRENCY_CODE')['ANNUAL_CONTRACT_VALUE']
+                                        .sum().to_dict()
+                                    )
+                                    entry['account_arr_by_currency'] = {
+                                        str(k).upper(): float(v) for k, v in by_ccy.items()
+                                    }
+                                except Exception:
+                                    entry['account_arr_by_currency'] = {}
+                                entry['account_arr'] = None
+                                entry['account_arr_currency'] = 'MIXED'
+                            else:
+                                acct_arr = _acct_rows['ANNUAL_CONTRACT_VALUE'].sum()
+                                entry['account_arr'] = float(acct_arr)
+                                entry['account_arr_currency'] = (
+                                    next(iter(_acct_ccys)) if _acct_ccys else 'UNKNOWN'
+                                )
                     stale_list.append(entry)
                 result['stale_barriers'] = stale_list
 
@@ -2800,6 +4715,32 @@ def build_cross_report_trends(reports_data):
 
     trends = {}
     try:
+        # Round 10 / Phase 3.3: ``unique_customers`` and ``total_arr`` were
+        # previously aggregated by ``max(...)`` across every sheet in the
+        # report, so a 200-row sheet with 50 customers and a 5000-row sheet
+        # with 1500 customers reported as "1500 customers" — but a different
+        # report with the same totals split across different sheets could
+        # report something else. Pin to a single canonical sheet (the
+        # ``All_Adoption_Barriers`` / ``Comprehensive_*`` exports already
+        # carry the portfolio-wide totals) so the cross-report trend math
+        # actually compares like-for-like.
+        _CANONICAL_SHEETS = (
+            'All_Adoption_Barriers',
+            'AB_Master_List',
+            'Comprehensive_Adoption_Barriers',
+            'Adoption_Barriers',
+            'Portfolio_Adoption_Barriers',
+        )
+
+        def _pick_canonical_sheet(metrics_by_sheet):
+            for name in _CANONICAL_SHEETS:
+                if name in metrics_by_sheet:
+                    return name, metrics_by_sheet[name]
+            for name, m in metrics_by_sheet.items():
+                if 'unique_customers' in m or 'total_arr' in m:
+                    return name, m
+            return None, None
+
         dated_metrics = []
         for rpt in reports_data:
             date_str = rpt.get('date', '')
@@ -2810,20 +4751,71 @@ def build_cross_report_trends(reports_data):
                 'unique_customers': 0,
                 'total_arr': 0,
                 'severity_counts': {},
+                'canonical_sheet': None,
             }
-            for sheet, m in rpt.get('metrics', {}).items():
-                combined['total_rows'] += m.get('rows', 0)
-                if m.get('unique_customers', 0) > combined['unique_customers']:
-                    combined['unique_customers'] = m['unique_customers']
-                if m.get('total_arr', 0) > combined['total_arr']:
-                    combined['total_arr'] = m['total_arr']
-                for sev, cnt in m.get('severity_distribution', {}).items():
-                    sev_str = str(sev)
-                    try:
-                        combined['severity_counts'][sev_str] = (
-                            combined['severity_counts'].get(sev_str, 0) + int(cnt))
-                    except (ValueError, TypeError):
-                        pass
+            metrics_by_sheet = rpt.get('metrics', {}) or {}
+            _canonical_name, _canonical_metrics = _pick_canonical_sheet(metrics_by_sheet)
+            combined['canonical_sheet'] = _canonical_name
+            if _canonical_metrics:
+                # Only stamp totals from the *canonical* sheet, and only
+                # when that sheet was not truncated (Phase 3.2). Sampled
+                # totals lift to ``unique_customers_sampled`` /
+                # ``total_arr_sampled`` and must NEVER feed the trend
+                # delta calculation downstream.
+                if _canonical_metrics.get('unique_customers'):
+                    combined['unique_customers'] = int(_canonical_metrics['unique_customers'])
+                if _canonical_metrics.get('total_arr'):
+                    combined['total_arr'] = float(_canonical_metrics['total_arr'])
+
+            # Round 12 / Phase 6.2 + 6.3: previously this loop summed
+            # ``severity_distribution`` and ``rows`` across EVERY sheet
+            # in the workbook -- but historical exports duplicate the
+            # portfolio across multiple sheets ("All_Adoption_Barriers"
+            # AND "Comprehensive_Adoption_Barriers", etc.), so the
+            # cross-report ``severity_trend`` and ``record_trend``
+            # arrays double- or triple-counted the same rows.  A
+            # portfolio that grew from 100 to 110 barriers could
+            # therefore show up as "300 -> 330" if it lived in three
+            # sheets, exaggerating the percent-change in the LLM
+            # prompt.  Pin both ``total_rows`` and the severity rollup
+            # to the same canonical sheet we already use for
+            # ``unique_customers`` / ``total_arr``.  Fall back to the
+            # legacy multi-sheet behavior only when no canonical sheet
+            # could be identified.
+            if _canonical_metrics:
+                # Trust ``rows_total`` (true row count) over the back-
+                # compat ``rows`` field if present, so the trend math
+                # compares full portfolios even when the scan was
+                # truncated.
+                _rows_canonical = _canonical_metrics.get('rows_total')
+                if _rows_canonical is None:
+                    _rows_canonical = _canonical_metrics.get('rows', 0)
+                try:
+                    combined['total_rows'] = int(_rows_canonical or 0)
+                except (TypeError, ValueError):
+                    combined['total_rows'] = 0
+                # Only stamp severity_counts when the canonical sheet
+                # was NOT a sample-only distribution (Phase 6.1) so
+                # we never compare a 200-row sample bar against a
+                # full-portfolio one for the prior period.
+                if not _canonical_metrics.get('distribution_sample_only'):
+                    for sev, cnt in (_canonical_metrics.get('severity_distribution') or {}).items():
+                        sev_str = str(sev)
+                        try:
+                            combined['severity_counts'][sev_str] = (
+                                combined['severity_counts'].get(sev_str, 0) + int(cnt))
+                        except (ValueError, TypeError):
+                            pass
+            else:
+                for sheet, m in metrics_by_sheet.items():
+                    combined['total_rows'] += m.get('rows', 0)
+                    for sev, cnt in m.get('severity_distribution', {}).items():
+                        sev_str = str(sev)
+                        try:
+                            combined['severity_counts'][sev_str] = (
+                                combined['severity_counts'].get(sev_str, 0) + int(cnt))
+                        except (ValueError, TypeError):
+                            pass
             dated_metrics.append(combined)
 
         dated_metrics.sort(key=lambda x: x['date'])
@@ -2841,7 +4833,8 @@ def build_cross_report_trends(reports_data):
                     'oldest': oldest['total_rows'],
                     'newest': newest['total_rows'],
                     'change': row_change,
-                    'pct_change': round(row_change / oldest['total_rows'] * 100, 1),
+                    # Round 12 / Phase 11.1: canonical percent rounding.
+                    'pct_change': _r12_round_percent(row_change / oldest['total_rows'] * 100, 1),
                 }
             if oldest['unique_customers'] > 0 and newest['unique_customers'] > 0:
                 cust_change = newest['unique_customers'] - oldest['unique_customers']
@@ -2856,7 +4849,8 @@ def build_cross_report_trends(reports_data):
                     'oldest': oldest['total_arr'],
                     'newest': newest['total_arr'],
                     'change': arr_change,
-                    'pct_change': round(arr_change / oldest['total_arr'] * 100, 1),
+                    # Round 12 / Phase 11.1: canonical percent rounding.
+                    'pct_change': _r12_round_percent(arr_change / oldest['total_arr'] * 100, 1),
                 }
 
             if oldest['severity_counts'] and newest['severity_counts']:
@@ -2878,7 +4872,16 @@ def build_cross_report_trends(reports_data):
             cust_set = set()
             for sheet, m_data in (rpt.get('metrics') or {}).items():
                 if isinstance(m_data, dict):
-                    for k in ('top_customers_by_arr', 'top_customers_by_count'):
+                    # Round 11 / Phase 6.1: also pick up the
+                    # sampled variants so a portfolio that was
+                    # truncated mid-fetch still contributes its
+                    # top customers to the cross-report intersect.
+                    for k in (
+                        'top_customers_by_arr',
+                        'top_customers_by_arr_sampled',
+                        'top_customers_by_count',
+                        'top_customers_by_count_sampled',
+                    ):
                         if k in m_data and isinstance(m_data[k], dict):
                             cust_set.update(str(k) for k in m_data[k].keys() if k is not None)
             all_customer_sets.append(cust_set)
@@ -2901,22 +4904,147 @@ def build_cross_report_trends(reports_data):
 
 
 # --------------------------- External Intelligence ---------------------------
-HELP_URLS = [
+# Round 5 / Phase 4.6: previously the help.webex.com URLs were
+# hardcoded at module import time, which meant that:
+#   - air-gapped / on-prem deployments could not change them
+#   - any vendor URL change required a code release
+#   - tests that ran on machines without internet could not stub
+#     out the targets
+# Allow the operator to override via ``ADOPTIQ_HELP_URLS``
+# (newline OR comma separated) and fall back to the previously
+# hardcoded set.
+_DEFAULT_HELP_URLS = [
     "https://help.webex.com/en-us/article/mqkve8/Webex-App-%7C-Release-notes",
     "https://help.webex.com/en-us/article/8dmbcr/What's-New-in-Webex-Suite",
     "https://help.webex.com/article/bsmvpdb/Webex-App-%7C-Known-issues",
 ]
 
+
+def _load_help_urls_from_env() -> List[str]:
+    raw = os.environ.get("ADOPTIQ_HELP_URLS", "").strip()
+    if not raw:
+        return list(_DEFAULT_HELP_URLS)
+    parts: List[str] = []
+    for chunk in raw.replace(",", "\n").splitlines():
+        v = chunk.strip()
+        if v and v.lower().startswith(("http://", "https://")):
+            parts.append(v)
+    return parts or list(_DEFAULT_HELP_URLS)
+
+
+HELP_URLS = _load_help_urls_from_env()
+
+
+# Round 5 / Phase 4.6: same env-overridable treatment for the
+# status.webex.com endpoints (HTML history, all-incidents JSON,
+# current incidents RSS, historical RSS).  Override via
+# ``ADOPTIQ_STATUS_<KEY>`` env vars or
+# ``ADOPTIQ_STATUS_BASE_URL`` to swap the host wholesale.
+def _status_url(name: str, default: str) -> str:
+    base = os.environ.get("ADOPTIQ_STATUS_BASE_URL", "").rstrip("/")
+    override = os.environ.get(f"ADOPTIQ_STATUS_{name}", "").strip()
+    if override:
+        return override
+    if base:
+        # Replace just the host portion, keep path/query of default.
+        try:
+            from urllib.parse import urlparse, urlunparse
+            d = urlparse(default)
+            b = urlparse(base if "://" in base else f"https://{base}")
+            return urlunparse((b.scheme or d.scheme, b.netloc or d.netloc, d.path, d.params, d.query, d.fragment))
+        except Exception:
+            return default
+    return default
+
+
+STATUS_HISTORY_HTML_URL = _status_url("HISTORY_HTML_URL", "https://status.webex.com/incident/history?lang=en_US")
+STATUS_ALL_INCIDENTS_JSON_URL = _status_url("ALL_INCIDENTS_JSON_URL", "https://status.webex.com/all-incidents.json")
+STATUS_INCIDENTS_RSS_URL = _status_url("INCIDENTS_RSS_URL", "https://status.webex.com/incidents.rss")
+STATUS_HISTORY_RSS_URL = _status_url("HISTORY_RSS_URL", "https://status.webex.com/history.rss")
+
+
+# Round 5 / Phase 4.7 / 4.8: cap response body size before
+# parsing.  ``response.json()`` and ``BeautifulSoup`` both happily
+# materialise multi-MB responses into RAM, which is a DoS vector
+# for an upstream that returns an unexpectedly huge / malformed
+# blob.  These helpers stream up to a cap and raise if exceeded.
+_DEFAULT_HTTP_BODY_CAP = int(os.environ.get("ADOPTIQ_HTTP_BODY_CAP_BYTES", str(8 * 1024 * 1024)))  # 8 MB
+
+
+def _read_response_capped(resp: Any, cap: int = _DEFAULT_HTTP_BODY_CAP) -> bytes:
+    """Read a ``requests.Response`` body, streaming, with a hard cap.
+
+    Raises ``ValueError`` if the body exceeds ``cap`` bytes.  Callers
+    that want graceful degradation should wrap the call.
+    """
+    chunks: List[bytes] = []
+    total = 0
+    try:
+        for chunk in resp.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > cap:
+                raise ValueError(
+                    f"HTTP body exceeded cap of {cap} bytes "
+                    f"(read at least {total} bytes from {getattr(resp, 'url', '?')})"
+                )
+            chunks.append(chunk)
+    except ValueError:
+        raise
+    except Exception:
+        # Fall back to .content if streaming is not available
+        body = getattr(resp, 'content', b'') or b''
+        if len(body) > cap:
+            raise ValueError(
+                f"HTTP body exceeded cap of {cap} bytes "
+                f"(content length {len(body)} from {getattr(resp, 'url', '?')})"
+            )
+        return body
+    return b"".join(chunks)
+
+
+def _response_json_capped(resp: Any, cap: int = _DEFAULT_HTTP_BODY_CAP) -> Any:
+    """``response.json()`` with a body-size cap (Phase 4.7)."""
+    body = _read_response_capped(resp, cap=cap)
+    import json as _json
+    return _json.loads(body.decode(getattr(resp, 'encoding', None) or 'utf-8', errors='replace'))
+
+
+def _response_text_capped(resp: Any, cap: int = _DEFAULT_HTTP_BODY_CAP) -> str:
+    """``response.text`` with a body-size cap (Phase 4.8)."""
+    body = _read_response_capped(resp, cap=cap)
+    enc = getattr(resp, 'encoding', None) or 'utf-8'
+    try:
+        return body.decode(enc, errors='replace')
+    except Exception:
+        return body.decode('utf-8', errors='replace')
+
 def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
-    """Fetch known bugs from help.webex.com with robust error handling and multiple strategies"""
+    """Fetch known bugs from help.webex.com with robust error handling and multiple strategies.
+
+    Round 2 / Phase 5.2: per-URL failures are accumulated into a
+    ``fetch_errors`` list and stamped onto the returned list as
+    ``list.fetch_errors`` (and also returned via the
+    ``fetch_help_webex_bugs_with_errors`` helper) so callers can
+    distinguish "every source we tried was unavailable" from "all
+    sources returned cleanly with no bugs".
+    """
     all_bugs = {}
-    
+    fetch_errors: List[Dict[str, str]] = []
+    sources_attempted = 0
+    sources_failed = 0
+
     # Strategy 1: Search known help URLs
     for url in HELP_URLS:
+        sources_attempted += 1
         try:
-            r = requests.get(url, timeout=timeout)
+            # Round 5 / Phase 4.8: stream + cap the body so a giant /
+            # malicious response cannot OOM the process via
+            # BeautifulSoup.
+            r = requests.get(url, timeout=timeout, stream=True)
             r.raise_for_status()
-            soup = BeautifulSoup(r.text, "html.parser")
+            soup = BeautifulSoup(_response_text_capped(r), "html.parser")
             text = soup.get_text(" ")
             
             # Look for various bug patterns - PRIORITIZE CSC format
@@ -2967,24 +5095,38 @@ def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
                         
         except requests.exceptions.RequestException as e:
             logger.warning(f"Failed to fetch {url}: {e}")
+            sources_failed += 1
+            fetch_errors.append({
+                'url': url,
+                'kind': 'request_error',
+                'error': str(e) or e.__class__.__name__,
+            })
             continue
         except Exception as e:
             logger.warning(f"Unexpected error fetching {url}: {e}")
+            sources_failed += 1
+            fetch_errors.append({
+                'url': url,
+                'kind': 'unexpected_error',
+                'error': str(e) or e.__class__.__name__,
+            })
             continue
     
     # Strategy 2: Search for specific bug-related content
     try:
         search_terms = ["known issues", "software bugs", "defects", "limitations", "troubleshooting"]
         for term in search_terms:
+            sources_attempted += 1
             try:
                 search_url = f"https://help.webex.com/en-us/search?q={term}"
                 headers = {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 }
                 
-                r = requests.get(search_url, headers=headers, timeout=timeout)
+                # Round 5 / Phase 4.8: stream + cap to bound memory.
+                r = requests.get(search_url, headers=headers, timeout=timeout, stream=True)
                 r.raise_for_status()
-                soup = BeautifulSoup(r.text, "html.parser")
+                soup = BeautifulSoup(_response_text_capped(r), "html.parser")
                 
                 # Look for bug-related links
                 bug_links = soup.find_all('a', href=re.compile(r'help\.webex\.com.*(bug|issue|defect|limitation)', re.IGNORECASE))
@@ -3030,14 +5172,43 @@ def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
                 
             except Exception as e:
                 logger.warning(f"Error searching for '{term}': {e}")
+                sources_failed += 1
+                fetch_errors.append({
+                    'url': f"search:{term}",
+                    'kind': 'search_error',
+                    'error': str(e) or e.__class__.__name__,
+                })
                 continue
                 
     except Exception as e:
         logger.warning(f"Error in secondary search strategy: {e}")
+        fetch_errors.append({
+            'url': 'search_strategy',
+            'kind': 'strategy_error',
+            'error': str(e) or e.__class__.__name__,
+        })
     
     # Return unique bugs
-    unique_bugs = list(all_bugs.values())
-    logger.info(f"Successfully fetched {len(unique_bugs)} software bugs from help.webex.com")
+    # Round 2 / Phase 5.2: subclass list so callers can introspect
+    # ``.fetch_errors`` / ``.all_sources_failed`` without changing the
+    # public return type or breaking existing iteration callers.
+    class _BugsResult(list):
+        fetch_errors: List[Dict[str, str]] = []
+        sources_attempted: int = 0
+        sources_failed: int = 0
+        all_sources_failed: bool = False
+
+    unique_bugs = _BugsResult(all_bugs.values())
+    unique_bugs.fetch_errors = list(fetch_errors)
+    unique_bugs.sources_attempted = sources_attempted
+    unique_bugs.sources_failed = sources_failed
+    unique_bugs.all_sources_failed = (
+        sources_attempted > 0 and sources_failed >= sources_attempted
+    )
+    logger.info(
+        "Successfully fetched %d software bugs from help.webex.com (sources_attempted=%d, sources_failed=%d)",
+        len(unique_bugs), sources_attempted, sources_failed,
+    )
 
     # Persist bugs to SQLite for historical tracking
     try:
@@ -3056,11 +5227,17 @@ def fetch_status_webex_incident_history_playwright():
     logger.info("Fetching historical incidents using Playwright...")
     
     incidents = []
-    
+    # Round 5 / Phase 4.16: track per-run parse skip counters at
+    # function scope so we can compare "rows seen" vs "rows
+    # successfully parsed" after the Playwright context exits.
+    _rows_seen = 0
+    _row_skip_count = 0
+    _first_skip_err: Optional[str] = None
+
     try:
         from playwright.sync_api import sync_playwright
         
-        url = "https://status.webex.com/incident/history?lang=en_US"
+        url = STATUS_HISTORY_HTML_URL
         
         with sync_playwright() as p:
             # Launch browser
@@ -3082,11 +5259,62 @@ def fetch_status_webex_incident_history_playwright():
             
             # Get page content
             content = page.content()
-            
-            # Save for debugging
-            with open('playwright_page_source.html', 'w', encoding='utf-8') as f:
-                f.write(content)
-            logger.debug(f"Saved page source ({len(content)} chars)")
+
+            # Round 5 / Phase 4.4: previously this dropped the FULL
+            # rendered page source into the cwd as
+            # ``playwright_page_source.html`` on EVERY run.  That
+            # file:
+            #   - was unbounded in size (status pages can be MBs)
+            #   - was world-readable in many deployments
+            #   - leaked customer names, ticket IDs, and any
+            #     account-specific UI strings rendered by the page
+            #   - was kept FOREVER (overwritten only on next run)
+            # Now: only write it when the operator explicitly opts in
+            # via DEBUG (or ``ADOPTIQ_DEBUG_PLAYWRIGHT_DUMP=1``), cap
+            # the dump to 256 KB, and put it under the OS tempdir
+            # with a per-run unique name so concurrent runs do not
+            # clobber each other's evidence.
+            try:
+                _dump_enabled = (
+                    logger.isEnabledFor(logging.DEBUG)
+                    or os.environ.get('ADOPTIQ_DEBUG_PLAYWRIGHT_DUMP', '0') == '1'
+                )
+            except Exception:
+                _dump_enabled = False
+            if _dump_enabled:
+                try:
+                    import tempfile as _tf
+                    _DUMP_CAP = 256 * 1024  # 256 KB
+                    _truncated = len(content) > _DUMP_CAP
+                    _payload = content[:_DUMP_CAP] if _truncated else content
+                    _fd, _path = _tf.mkstemp(
+                        prefix='adoptiq_playwright_',
+                        suffix='.html',
+                    )
+                    try:
+                        with os.fdopen(_fd, 'w', encoding='utf-8') as f:
+                            f.write(_payload)
+                            if _truncated:
+                                f.write(
+                                    f"\n<!-- truncated: {len(content) - _DUMP_CAP} chars omitted -->"
+                                )
+                        # Restrict to owner-only since this can contain
+                        # sensitive customer-facing UI strings.
+                        try:
+                            os.chmod(_path, 0o600)
+                        except Exception:
+                            pass  # noqa: PIE790
+                        logger.debug(
+                            f"Saved Playwright page source dump to {_path} "
+                            f"({len(_payload)} of {len(content)} chars{' [TRUNCATED]' if _truncated else ''})"
+                        )
+                    except Exception:
+                        try:
+                            os.close(_fd)
+                        except Exception:
+                            pass  # noqa: PIE790
+                except Exception as _dump_err:
+                    logger.debug(f"Could not write Playwright debug dump: {_dump_err}")
             
             # Parse with BeautifulSoup
             soup = BeautifulSoup(content, 'html.parser')
@@ -3097,6 +5325,7 @@ def fetch_status_webex_incident_history_playwright():
             
             # Look for table rows
             rows = soup.find_all('tr')
+            _rows_seen = len(rows)
             logger.debug(f"Found {len(rows)} table rows")
             
             # Parse incidents from table rows
@@ -3149,12 +5378,37 @@ def fetch_status_webex_incident_history_playwright():
                     
                     incidents.append(incident)
                     logger.debug(f"SUCCESS: {pub_ref} - {description_text[:50]}...")
-                    
+
                 except Exception as e:
+                    # Round 5 / Phase 4.16: count and remember the
+                    # first parse failure so we can surface it below
+                    # if EVERY row was skipped (which would otherwise
+                    # silently look identical to "the page rendered
+                    # zero incidents").
+                    _row_skip_count += 1
+                    if _first_skip_err is None:
+                        _first_skip_err = f"{type(e).__name__}: {e}"
                     continue
-            
+
             browser.close()
-            
+
+        # Round 5 / Phase 4.16: if rows were present but every single
+        # one failed to parse, that is not "no incidents" -- that is
+        # almost certainly a layout / DOM change on the upstream page.
+        # Promote that to a warning instead of silently returning [].
+        if _rows_seen > 0 and len(incidents) == 0 and _row_skip_count >= _rows_seen:
+            logger.warning(
+                "Playwright incident-history parser saw %d rows but skipped ALL "
+                "of them (first error: %s). Likely a status.webex.com layout "
+                "change; downstream callers will see zero historical incidents.",
+                _rows_seen, _first_skip_err or 'unknown',
+            )
+        elif _row_skip_count > 0:
+            logger.info(
+                "Playwright incident-history parser skipped %d of %d rows during parse.",
+                _row_skip_count, _rows_seen,
+            )
+
         logger.info(f"Successfully parsed {len(incidents)} historical incidents")
         
     except ImportError:
@@ -3164,7 +5418,21 @@ def fetch_status_webex_incident_history_playwright():
     
     return incidents
 
-def fetch_status_incidents(timeout=25) -> List[Dict[str,str]]:
+def fetch_status_incidents(timeout=25, days_back: Optional[int] = None) -> List[Dict[str,str]]:
+    """Fetch Webex Status incidents.
+
+    Round 2 / Phase 1.7 — ``days_back`` is now an explicit parameter so
+    callers (renewal/leader narrative, EI generator) can constrain the
+    window to the report period.  When ``days_back`` is None the legacy
+    365-day window is used and a ``window_default_used=True`` marker is
+    surfaced on the returned list (via attribute on the wrapping dict
+    where applicable) so downstream renderers can disclose the default.
+
+    The merged feed is also tagged with ``_window_truncated=True`` on the
+    last record when storage hits the per-fetch cap so renewal/leader
+    narratives can surface "showing N of M" disclosures instead of
+    silently treating the cap as authoritative.
+    """
     # Import the storage system
     try:
         from incident_storage import get_historical_incidents, store_historical_incidents, get_incident_statistics
@@ -3172,13 +5440,20 @@ def fetch_status_incidents(timeout=25) -> List[Dict[str,str]]:
     except ImportError:
         storage_available = False
         logger.warning("Incident storage not available, using live data only")
-    
+
+    # Normalize the window — keep legacy behavior when caller does not
+    # pass a value (so existing call sites do not regress) but cap to a
+    # sensible ceiling.
+    _effective_days = int(days_back) if isinstance(days_back, (int, float)) and days_back and days_back > 0 else 365
+    _per_fetch_cap = 500
+    _window_default_used = days_back is None
+
     data = []
     
     # First, try to get incidents from storage
     if storage_available:
         try:
-            stored_incidents = get_historical_incidents(days_back=365, limit=500)
+            stored_incidents = get_historical_incidents(days_back=_effective_days, limit=_per_fetch_cap)
             if stored_incidents:
                 for si in stored_incidents:
                     si['_from_storage'] = True
@@ -3194,19 +5469,29 @@ def fetch_status_incidents(timeout=25) -> List[Dict[str,str]]:
     json_api_succeeded = False
     try:
         logger.info("Fetching incidents from all-incidents.json API...")
-        api_url = "https://status.webex.com/all-incidents.json"
+        api_url = STATUS_ALL_INCIDENTS_JSON_URL
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json',
         }
         
-        r = requests.get(api_url, headers=headers, timeout=timeout)
+        # Round 5 / Phase 4.7: stream + cap the response body before
+        # parsing JSON.  An upstream that returns a malformed
+        # multi-GB body (or a confused proxy serving a binary blob)
+        # would otherwise OOM the process when ``r.json()`` reads
+        # the entire content into memory.
+        r = requests.get(api_url, headers=headers, timeout=timeout, stream=True)
         r.raise_for_status()
-        api_data = r.json()
+        api_data = _response_json_capped(r)
         incidents_list = api_data.get('incidents', []) if isinstance(api_data, dict) else []
         logger.info(f"JSON API returned {len(incidents_list)} incidents")
         
-        impact_map = {'none': 'Low', 'minor': 'Medium', 'major': 'High', 'critical': 'High'}
+        # Round 2 / Phase 5.5: preserve the Statuspage 'critical' label
+        # instead of collapsing it into 'High'.  Critical = full outage
+        # / customer-impacting; downstream scoring and the EI / leader
+        # dashboards now have a distinct band so a critical incident
+        # is not visually equal to a single high-impact event.
+        impact_map = {'none': 'Low', 'minor': 'Medium', 'major': 'High', 'critical': 'Critical'}
         
         for inc in incidents_list:
             try:
@@ -3272,17 +5557,18 @@ def fetch_status_incidents(timeout=25) -> List[Dict[str,str]]:
     # Supplement: incidents.rss (always runs to catch items the JSON API may not include)
     try:
         logger.info("Supplementing incidents from incidents.rss...")
-        rss_url = "https://status.webex.com/incidents.rss"
+        rss_url = STATUS_INCIDENTS_RSS_URL
         rss_headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/rss+xml, application/xml, text/xml, */*',
         }
 
-        r = requests.get(rss_url, headers=rss_headers, timeout=timeout)
+        # Round 5 / Phase 4.8: stream + cap RSS body before parse.
+        r = requests.get(rss_url, headers=rss_headers, timeout=timeout, stream=True)
         r.raise_for_status()
 
         import feedparser
-        feed = feedparser.parse(r.text)
+        feed = feedparser.parse(_response_text_capped(r))
         rss_added = 0
 
         for item in feed.entries[:50]:
@@ -3345,16 +5631,17 @@ def fetch_status_incidents(timeout=25) -> List[Dict[str,str]]:
     # Supplement: parse non-maintenance incidents from history.rss
     try:
         logger.info("Supplementing incidents from history.rss...")
-        hist_url = "https://status.webex.com/history.rss"
+        hist_url = STATUS_HISTORY_RSS_URL
         hist_headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/rss+xml, application/xml, text/xml, */*',
         }
-        hr = requests.get(hist_url, headers=hist_headers, timeout=timeout)
+        # Round 5 / Phase 4.8: stream + cap.
+        hr = requests.get(hist_url, headers=hist_headers, timeout=timeout, stream=True)
         hr.raise_for_status()
 
         import feedparser
-        hist_feed = feedparser.parse(hr.text)
+        hist_feed = feedparser.parse(_response_text_capped(hr))
         hist_added = 0
 
         for item in hist_feed.entries:
@@ -3418,19 +5705,173 @@ def fetch_status_incidents(timeout=25) -> List[Dict[str,str]]:
     except Exception as e:
         logger.warning(f"Error supplementing from history.rss: {e}")
 
-    # Remove duplicates and sort by published date
-    unique_incidents = []
-    seen_ids = set()
+    # Round 4 / Phase 3.2: dedup with explicit precedence so a fresh
+    # live-API row replaces the stale storage row for the same id.
+    # Previously we kept the FIRST occurrence (storage rows were
+    # prepended), which meant ``_from_storage=True`` always won even
+    # when the live feed had returned a newer status / description.
+    # New rule: prefer non-``_from_storage`` first; among equals,
+    # prefer the row with the later ``published`` / ``last_seen``.
+    def _row_published_ts(_inc):
+        for _key in ('published', 'last_seen', 'resolved_at'):
+            _val = _inc.get(_key)
+            if _val:
+                try:
+                    return pd.to_datetime(_val, errors='coerce', utc=True)
+                except Exception:
+                    return None
+        return None
+
+    by_id: dict = {}
     for incident in data:
-        if incident['id'] not in seen_ids:
-            unique_incidents.append(incident)
-            seen_ids.add(incident['id'])
-    
-    # Sort by published date (most recent first)
-    unique_incidents.sort(key=lambda x: str(x.get('published') or ''), reverse=True)
-    
-    # Note: Sample incidents removed - using only real data from RSS feed and storage
-    
+        _id = incident.get('id')
+        if not _id:
+            continue
+        existing = by_id.get(_id)
+        if existing is None:
+            by_id[_id] = incident
+            continue
+        # Prefer live (non-storage) over storage.
+        existing_storage = bool(existing.get('_from_storage'))
+        new_storage = bool(incident.get('_from_storage'))
+        if existing_storage and not new_storage:
+            by_id[_id] = incident
+            continue
+        if new_storage and not existing_storage:
+            continue
+        # Same source bucket — pick the newer timestamp.
+        ets = _row_published_ts(existing)
+        nts = _row_published_ts(incident)
+        try:
+            if nts is not None and (ets is None or nts > ets):
+                by_id[_id] = incident
+        except Exception:
+            pass
+    unique_incidents = list(by_id.values())
+
+    # Sort by published date (most recent first).
+    # Round 11 / Phase 2.5: previous ``str(published)`` lexicographic
+    # sort silently mis-ordered mixed-format timestamps – e.g.
+    # ``"Mon, 04 Mar 2024 14:23:00 GMT"`` (RSS / RFC 2822) sorted
+    # *before* ``"2024-03-04T14:23:00Z"`` because ``M < 2``.  Parse
+    # to UTC-aware ``pd.Timestamp`` and use a sentinel
+    # (``Timestamp.min``) for unparseable / missing values so the
+    # sort is total and reproducible.
+    def _parsed_published_ts(_inc):
+        for _key in ('published', 'last_seen', 'resolved_at'):
+            _val = _inc.get(_key)
+            if not _val:
+                continue
+            try:
+                _ts = pd.to_datetime(_val, errors='coerce', utc=True)
+            except Exception:
+                _ts = None
+            if _ts is not None and not pd.isna(_ts):
+                return _ts
+        # Sentinel: datetime.min in UTC sorts to the end when reverse=True.
+        try:
+            return pd.Timestamp.min.tz_localize('UTC')
+        except Exception:
+            return pd.Timestamp('1970-01-01', tz='UTC')
+
+    try:
+        unique_incidents.sort(key=_parsed_published_ts, reverse=True)
+    except Exception as _sort_err:
+        logger.debug(
+            "Round 11 / Phase 2.5: parsed-timestamp sort failed "
+            "(%s); falling back to lexicographic sort.",
+            _sort_err,
+        )
+        unique_incidents.sort(
+            key=lambda x: str(x.get('published') or ''), reverse=True
+        )
+
+    # Round 2 / Phase 1.7 — apply explicit window when caller specified
+    # one and tag truncation so the renewal/leader narrative can show
+    # "showing N of M (capped)" instead of silently treating the cap as
+    # authoritative.
+    pre_window_count = len(unique_incidents)
+    try:
+        if not _window_default_used:
+            # Round 5 / Phase 4.9: published timestamps in the merged
+            # feed are a mixture of formats:
+            #   - ``2024-03-04T14:23:00Z`` (statuspage JSON)
+            #   - ``Mon, 04 Mar 2024 14:23:00 GMT`` (RSS / RFC 2822)
+            #   - tz-naive ISO from feedparser's ``published_parsed``
+            # The previous strict ``strptime('%Y-%m-%dT%H:%M:%S')``
+            # path silently mis-classified anything with a ``Z`` /
+            # offset / RFC-2822 string as "not parseable" and kept
+            # it (line 4121 returned True), polluting the window with
+            # items from outside ``days_back``.  Use
+            # ``pd.to_datetime(..., utc=True)`` so every common
+            # format normalises to a UTC-aware Timestamp and the
+            # cutoff comparison is apples to apples.
+            # Round 8 / Phase 2.10: ``pd.Timestamp.utcnow()`` is
+            # deprecated; use ``pd.Timestamp.now('UTC')`` for the
+            # same UTC-aware value.
+            _cutoff_dt = pd.Timestamp.now('UTC') - pd.Timedelta(days=_effective_days)
+            try:
+                _cutoff_dt = _cutoff_dt.tz_convert('UTC')
+            except Exception:
+                # tz_localize for naive Timestamps
+                try:
+                    _cutoff_dt = _cutoff_dt.tz_localize('UTC')
+                except Exception:
+                    pass  # noqa: PIE790
+            # Round 11 / Phase 2.4: when the caller asked for an
+            # explicit ``days_back`` window, undated incidents must
+            # NOT be silently kept inside the window – that gave
+            # callers like the renewal dashboard a count that
+            # included rows whose ``published`` was unknown / older
+            # than the window.  Quarantine them in
+            # ``undated_incidents`` so the caller can render an
+            # explicit "N undated incidents excluded from the
+            # X-day window" disclaimer.  Rows with malformed but
+            # parseable dates are still compared against the
+            # cutoff (they are NOT considered undated).
+            undated_incidents: list = []
+
+            def _within(inc):
+                pub = inc.get('published')
+                if not pub:
+                    inc.setdefault('undated', True)
+                    undated_incidents.append(inc)
+                    return False
+                try:
+                    ts = pd.to_datetime(pub, utc=True, errors='coerce')
+                except Exception:
+                    inc.setdefault('undated', True)
+                    undated_incidents.append(inc)
+                    return False
+                if ts is None or pd.isna(ts):
+                    inc.setdefault('undated', True)
+                    undated_incidents.append(inc)
+                    return False
+                try:
+                    return ts >= _cutoff_dt
+                except Exception:
+                    return True
+            unique_incidents = [inc for inc in unique_incidents if _within(inc)]
+            # Surface the quarantined rows on the function frame so
+            # downstream callers (renewal dashboard / Word Customer
+            # Health Dashboard) can either render or ignore them
+            # explicitly.
+            try:
+                _undated_count_for_log = len(undated_incidents)
+                if _undated_count_for_log:
+                    logger.info(
+                        "Quarantined %d undated incidents from explicit "
+                        "days_back=%d window",
+                        _undated_count_for_log,
+                        int(_effective_days),
+                    )
+            except Exception:
+                pass
+    except Exception as _win_err:
+        logger.debug(f"days_back filter skipped: {_win_err}")
+
+    truncated = (pre_window_count >= _per_fetch_cap) or (len(unique_incidents) >= _per_fetch_cap)
+
     # Store new incidents in persistent storage
     if storage_available:
         try:
@@ -3440,12 +5881,94 @@ def fetch_status_incidents(timeout=25) -> List[Dict[str,str]]:
                 logger.info(f"Stored {stored_count} new incidents in persistent storage")
         except Exception as e:
             logger.warning(f"Error storing incidents: {e}")
-    
+
     # Debug logging
-    logger.info(f"Successfully fetched {len(unique_incidents)} service incidents from status.webex.com")
+    logger.info(
+        "Successfully fetched %d service incidents from status.webex.com "
+        "(window=%d days%s, truncated=%s)",
+        len(unique_incidents), _effective_days,
+        ' [default]' if _window_default_used else '',
+        truncated,
+    )
     logger.debug(f"Incident sources: {set(inc.get('source', 'unknown') for inc in unique_incidents)}")
     logger.debug(f"Sample incidents: {[inc.get('id', 'no-id') for inc in unique_incidents[:5]]}")
-    
+
+    # Round 4 / Phase 5.5: detect "served from local cache" state.
+    # If every incident in the final result has ``_from_storage=True``
+    # AND none of the live sources successfully appended live records
+    # this run, then the dataset the UI/LLM is about to consume is
+    # entirely the local SQLite cache.  Stamping a meta flag lets
+    # ``executive_intelligence_formatter`` and the ``/external``
+    # template surface "Served from local cache (live API
+    # unreachable)" instead of presenting the cached snapshot as if
+    # it were the live status.webex feed.
+    served_from_local_cache = bool(unique_incidents) and all(
+        bool(inc.get('_from_storage')) for inc in unique_incidents
+    ) and not json_api_succeeded
+
+    # Round 11 / Phase 10.6: derive a ``stale_storage`` flag so the UI
+    # / report can clearly signal "the freshest incident the local
+    # cache has is more than 24h old" even when a few live records
+    # were appended.  Without this, served_from_local_cache=False
+    # could still be paired with a cache that has not been refreshed
+    # in days, and the consumer would have no way to know.
+    stale_storage = False
+    try:
+        if served_from_local_cache or any(inc.get('_from_storage') for inc in unique_incidents):
+            _now_utc = pd.Timestamp.now('UTC')
+            _newest_storage_ts = None
+            for _inc in unique_incidents:
+                if not _inc.get('_from_storage'):
+                    continue
+                _ts = _parsed_published_ts(_inc)
+                if _ts is None or pd.isna(_ts):
+                    continue
+                if _newest_storage_ts is None or _ts > _newest_storage_ts:
+                    _newest_storage_ts = _ts
+            if _newest_storage_ts is not None:
+                _age_hours = (_now_utc - _newest_storage_ts).total_seconds() / 3600.0
+                stale_storage = _age_hours > 24.0
+            else:
+                # No parseable storage timestamp = treat as stale so
+                # downstream surfaces an honest warning.
+                stale_storage = served_from_local_cache
+    except Exception as _stale_err:
+        logger.debug(
+            "Round 11 / Phase 10.6: stale_storage detection skipped (%s)",
+            _stale_err,
+        )
+
+    # Tag the last record so downstream renderers can surface truncation
+    # without changing the public return shape (a list of dicts).
+    if unique_incidents:
+        try:
+            # Round 11 / Phase 2.4: surface ``undated_count`` so the
+            # caller can render an explicit disclaimer instead of
+            # silently combining undated rows with the windowed total.
+            try:
+                _undated_count = len(undated_incidents)  # type: ignore[name-defined]
+            except NameError:
+                _undated_count = 0
+            unique_incidents[-1]['_window_meta'] = {
+                'days_back': _effective_days,
+                'window_default_used': _window_default_used,
+                'truncated': truncated,
+                'cap': _per_fetch_cap,
+                'pre_window_count': pre_window_count,
+                'post_window_count': len(unique_incidents),
+                'served_from_local_cache': served_from_local_cache,
+                'stale_storage': stale_storage,
+                'undated_count': _undated_count,
+            }
+            if served_from_local_cache:
+                # First record gets the visible flag so the formatter
+                # can disclose it on every page that lists incidents.
+                unique_incidents[0]['_served_from_local_cache'] = True
+            if stale_storage:
+                unique_incidents[0]['_stale_storage'] = True
+        except Exception:
+            pass
+
     return unique_incidents
 
 def fetch_status_maintenances(timeout=25) -> List[Dict[str, str]]:
@@ -3460,18 +5983,26 @@ def fetch_status_maintenances(timeout=25) -> List[Dict[str, str]]:
 
     try:
         logger.info("Fetching maintenances from history.rss...")
-        rss_url = "https://status.webex.com/history.rss"
+        rss_url = STATUS_HISTORY_RSS_URL
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/rss+xml, application/xml, text/xml, */*',
         }
-        r = requests.get(rss_url, headers=headers, timeout=timeout)
+        # Round 5 / Phase 4.8: stream + cap.
+        r = requests.get(rss_url, headers=headers, timeout=timeout, stream=True)
         r.raise_for_status()
 
         import feedparser
-        feed = feedparser.parse(r.text)
+        feed = feedparser.parse(_response_text_capped(r))
 
-        now_utc = datetime.utcnow()
+        # Round 8 / Phase 2.9: ``datetime.utcnow()`` is deprecated
+        # in Python 3.12+ and returns a naive datetime that is
+        # ambiguous when compared to feed timestamps that may carry
+        # an explicit ``Z`` / offset.  Use ``datetime.now(UTC)`` and
+        # then strip the tzinfo so the comparison against the
+        # ``%Y-%m-%dT%H:%M:%S`` parsed feed value (also naive)
+        # remains apples-to-apples.
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
 
         for item in feed.entries:
             try:
@@ -3546,7 +6077,15 @@ def _correlate_incidents_with_cases(ext_incidents: List[Dict], csone_df: pd.Data
     """
     correlations = {}
     
-    if not ext_incidents or (csone_df is None or csone_df.empty):
+    # Round 4 / Phase 3.1: previously bailed out when ``csone_df`` was
+    # empty even though the function accepted ``ab_df``.  Customer
+    # adoption barriers can also reference outage language ("Webex
+    # meeting failures", "service degradation") so we now correlate
+    # incidents against AB rows in addition to CSOne when either side
+    # has data.  We only return early when BOTH datasets are missing.
+    csone_empty = csone_df is None or getattr(csone_df, 'empty', True)
+    ab_empty = ab_df is None or getattr(ab_df, 'empty', True)
+    if not ext_incidents or (csone_empty and ab_empty):
         return correlations
     
     from datetime import datetime, timedelta
@@ -3560,62 +6099,127 @@ def _correlate_incidents_with_cases(ext_incidents: List[Dict], csone_df: pd.Data
         
         correlated_cases = []
         
-        # Try to parse incident date
+        # Try to parse incident date.
+        # Round 3 / Phase 4.6: status.webex.com publishes ISO 8601
+        # timestamps like ``2024-03-04T14:23:00Z`` which the previous
+        # ``strptime`` loop could not match (no Z-aware format and
+        # ``str.split()`` left the whole token attached). It also
+        # tried ``%m/%d/%Y`` then ``%d/%m/%Y`` for the same string,
+        # which silently picked one interpretation for ambiguous
+        # values like ``03/04/2024``. Use a tz-aware parser that
+        # honours the ISO ``Z`` suffix and only falls back to the
+        # explicitly unambiguous ``%Y-%m-%d`` form.
         incident_date = None
         if incident_published:
             try:
-                parts = incident_published.split()
-                if parts:
-                    for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%m/%d/%Y', '%d/%m/%Y']:
-                        try:
-                            incident_date = datetime.strptime(parts[0], fmt)
-                            break
-                        except Exception as _fmt_err:
-                            logger.debug("Date format %s did not match %s: %s", fmt, parts[0], _fmt_err)
-                            continue
+                _parsed = pd.to_datetime(
+                    incident_published, errors="coerce", utc=True
+                )
+                if _parsed is not None and not pd.isna(_parsed):
+                    try:
+                        incident_date = _parsed.tz_convert(None).to_pydatetime()
+                    except Exception:
+                        incident_date = _parsed.to_pydatetime()
             except Exception as _xref_err:
-                logger.debug(f"Cross-reference date parse failed: {_xref_err}")
-        
-        # Search through CSOne cases
-        for idx, row in csone_df.iterrows():
-            case_title = str(row.get('Title', '')).lower()
-            case_desc = str(row.get('Problem Description', '')).lower()
-            case_date_str = row.get('Date/Time Opened', '')
-            
-            # Keyword correlation
-            keyword_match = False
-            incident_keywords = set(re.findall(r'\b\w{4,}\b', incident_title + ' ' + incident_desc))
-            case_keywords = set(re.findall(r'\b\w{4,}\b', case_title + ' ' + case_desc))
-            
-            # Check for significant keyword overlap (at least 2 matching keywords)
-            if len(incident_keywords & case_keywords) >= 2:
-                keyword_match = True
-            
-            # Temporal correlation (within 7 days)
-            temporal_match = False
-            days_diff = None
-            if incident_date and case_date_str:
+                logger.debug(f"Cross-reference ISO date parse failed: {_xref_err}")
+            if incident_date is None:
+                # Last-resort: explicit YYYY-MM-DD only. Do NOT try
+                # %m/%d vs %d/%m because ambiguous strings would
+                # silently pick one and skew the temporal match.
                 try:
-                    case_date = pd.to_datetime(case_date_str)
-                    if isinstance(case_date, pd.Timestamp):
-                        case_date = case_date.to_pydatetime()
-                    if isinstance(case_date, datetime):
-                        days_diff = abs((incident_date - case_date).days)
-                        if days_diff <= 7:
-                            temporal_match = True
-                except Exception as _temp_err:
-                    logger.debug("Temporal correlation parse failed: %s", _temp_err)
-            
-            # If either keyword or temporal match, consider it correlated
-            if keyword_match or temporal_match:
-                correlated_cases.append({
-                    'case': row.get('SR Number', row.get('Case Number', 'N/A')),
-                    'customer': row.get('Customer Name', 'Unknown'),
-                    'title': row.get('Title', 'No Title'),
-                    'match_type': 'keyword' if keyword_match else 'temporal',
-                    'days_diff': days_diff if temporal_match else None
-                })
+                    parts = incident_published.split()
+                    if parts:
+                        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+                            try:
+                                incident_date = datetime.strptime(parts[0], fmt)
+                                break
+                            except Exception as _fmt_err:
+                                logger.debug(
+                                    "Date format %s did not match %s: %s",
+                                    fmt, parts[0], _fmt_err,
+                                )
+                                continue
+                        if incident_date is None:
+                            logger.debug(
+                                "Skipping ambiguous incident date %r (no ISO/YYYY-MM-DD form)",
+                                incident_published,
+                            )
+                except Exception as _legacy_err:
+                    logger.debug(
+                        "Cross-reference legacy date parse failed: %s",
+                        _legacy_err,
+                    )
         
+        incident_keywords = set(re.findall(r'\b\w{4,}\b', incident_title + ' ' + incident_desc))
+
+        def _scan_dataframe(_df, *, source: str, title_cols, desc_cols, date_cols, case_cols, customer_cols):
+            """Round 4 / Phase 3.1: shared scan over CSOne or AB rows."""
+            if _df is None or getattr(_df, 'empty', True):
+                return
+            try:
+                _iter = _df.iterrows()
+            except Exception:
+                return
+            for _idx, row in _iter:
+                def _first(cols):
+                    for _c in cols:
+                        if _c in row and row.get(_c) not in (None, ''):
+                            return row.get(_c)
+                    return ''
+                case_title = str(_first(title_cols) or '').lower()
+                case_desc = str(_first(desc_cols) or '').lower()
+                case_date_str = _first(date_cols)
+
+                case_keywords = set(re.findall(r'\b\w{4,}\b', case_title + ' ' + case_desc))
+                keyword_match = len(incident_keywords & case_keywords) >= 2
+
+                temporal_match = False
+                days_diff = None
+                if incident_date and case_date_str:
+                    try:
+                        case_date = pd.to_datetime(case_date_str)
+                        if isinstance(case_date, pd.Timestamp):
+                            case_date = case_date.to_pydatetime()
+                        if isinstance(case_date, datetime):
+                            days_diff = abs((incident_date - case_date).days)
+                            if days_diff <= 7:
+                                temporal_match = True
+                    except Exception as _temp_err:
+                        logger.debug("Temporal correlation parse failed: %s", _temp_err)
+
+                if keyword_match or temporal_match:
+                    correlated_cases.append({
+                        'case': _first(case_cols) or 'N/A',
+                        'customer': _first(customer_cols) or 'Unknown',
+                        'title': _first(title_cols) or 'No Title',
+                        'match_type': 'keyword' if keyword_match else 'temporal',
+                        'days_diff': days_diff if temporal_match else None,
+                        'source': source,
+                    })
+
+        # Search through CSOne cases
+        _scan_dataframe(
+            csone_df,
+            source='tac',
+            title_cols=['Title'],
+            desc_cols=['Problem Description'],
+            date_cols=['Date/Time Opened'],
+            case_cols=['SR Number', 'Case Number'],
+            customer_cols=['Customer Name'],
+        )
+
+        # Round 4 / Phase 3.1: also search through Adoption Barriers.
+        # AB columns vary across exports; try the most common shapes.
+        _scan_dataframe(
+            ab_df,
+            source='ab',
+            title_cols=['title', 'Title', 'subject', 'Subject', 'NAME'],
+            desc_cols=['description', 'Description', 'notes', 'Notes', 'PROBLEM_DESCRIPTION'],
+            date_cols=['date_created', 'CREATED_DATE', 'created_date', 'open_date', 'OPEN_DATE'],
+            case_cols=['id', 'ID', 'barrier_id', 'BARRIER_ID', 'NAME'],
+            customer_cols=['customer_name', 'Customer Name', 'CUSTOMER_NAME', 'account', 'ACCOUNT'],
+        )
+
         if correlated_cases:
             correlations[incident_id] = correlated_cases
     
@@ -3668,14 +6272,45 @@ def cross_reference_refs(ab_df: pd.DataFrame, csone_df: pd.DataFrame, ext_bugs: 
 
 # --------------------------- CircuIT client ---------------------------
 class CircuitChatClient:
-    OKTA_TOKEN_URL = "https://id.cisco.com/oauth2/default/v1/token"
-    AZURE_ENDPOINT = "https://chat-ai.cisco.com"
+    # Round 6 / Phase 3.14: the Okta token URL, the Azure endpoint
+    # used to reach CircuIT, and the Azure OpenAI API version are now
+    # all environment-configurable.  Hard-coding them made it
+    # impossible to point a non-prod deployment at a staging Okta
+    # tenant or to upgrade to a newer Azure preview API without
+    # editing source.  The defaults preserve the previous prod
+    # behaviour exactly.
+    OKTA_TOKEN_URL = os.getenv(
+        "ADOPTIQ_CIRCUIT_OKTA_TOKEN_URL",
+        "https://id.cisco.com/oauth2/default/v1/token",
+    )
+    AZURE_ENDPOINT = os.getenv(
+        "ADOPTIQ_CIRCUIT_AZURE_ENDPOINT",
+        "https://chat-ai.cisco.com",
+    )
+    AZURE_API_VERSION = os.getenv(
+        "ADOPTIQ_CIRCUIT_AZURE_API_VERSION",
+        "2024-08-01-preview",
+    )
 
-    def __init__(self, client_id: str, client_secret: str, app_key: str, model_name: str = "gpt-5-nano"):
+    def __init__(self, client_id: str, client_secret: str, app_key: str, model_name: Optional[str] = None):
+        # Round 5 / Phase 3.13: do NOT default the model silently.
+        # Hard-coding ``gpt-5-nano`` here meant any caller that
+        # forgot to supply a model -- or any environment where the
+        # ``CIRCUIT_MODEL_NAME`` config drifted -- ended up running
+        # against the cheapest/smallest tier without anyone noticing.
+        # That silently downgrades report quality and makes A/B
+        # comparisons across runs incoherent.  Require an explicit
+        # model name from the caller; raise loudly if missing.
+        if not model_name or not str(model_name).strip():
+            raise ValueError(
+                "CircuitChatClient requires an explicit ``model_name`` -- "
+                "no default model is provided so deployments must opt into "
+                "their model tier (e.g. via CIRCUIT_MODEL_NAME)."
+            )
         self.client_id = client_id
         self.client_secret = client_secret
         self.app_key = app_key
-        self.model_name = model_name
+        self.model_name = str(model_name).strip()
         self._access_token = None; self._expiry = 0
 
     def _get_token(self) -> str:
@@ -3692,38 +6327,305 @@ class CircuitChatClient:
             timeout=20
         )
         resp.raise_for_status()
-        data = resp.json()
-        self._access_token = data.get("access_token")
-        if self._access_token is None:
+        # Round 6 / Phase 4.10: validate the JSON shape before
+        # touching keys.  Okta has historically returned HTML error
+        # pages with a 200 status when behind a captive portal /
+        # zscaler interception, and a non-dict payload would crash
+        # the .get(...) calls below with a confusing AttributeError.
+        try:
+            data = resp.json()
+        except Exception as exc:
+            raise ValueError(
+                "Okta token response was not valid JSON"
+            ) from exc
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Okta token response was not a JSON object (got {type(data).__name__})"
+            )
+        token = data.get("access_token")
+        if not isinstance(token, str) or not token:
             raise ValueError("No access_token in Okta response")
-        self._expiry = time.time() + int(data.get("expires_in", 3600))
+        expires_in = data.get("expires_in", 3600)
+        try:
+            expires_in = int(expires_in)
+        except (TypeError, ValueError):
+            expires_in = 3600
+        if expires_in <= 0:
+            expires_in = 3600
+        self._access_token = token
+        self._expiry = time.time() + expires_in
         return self._access_token
 
+    # Round 6 / Phase 3.7: declare the single source of truth for the
+    # CircuIT call timeout in seconds.  Both the AzureOpenAI client
+    # (HTTP-level timeout) and the ThreadPoolExecutor future used in
+    # ``generate_llm_response`` MUST use this value so we cannot end
+    # up in a state where the executor's wall-clock budget is shorter
+    # than the underlying HTTP client's timeout (the executor would
+    # cancel a request the client still considered healthy, leaving
+    # the worker thread alive until the client finally gave up).
+    REQUEST_TIMEOUT_SECONDS = 120
+
+    # Round 7 / Phase 5.5: jittered exponential backoff parameters for
+    # ``llm.rate_limit_429`` retries.  Capped to a small number of
+    # attempts because the upstream Azure OpenAI service typically
+    # only needs a brief cool-off (sub-second) and we do not want to
+    # blow past the executor wall clock in
+    # ``generate_llm_response`` (which is REQUEST_TIMEOUT_SECONDS + 5).
+    # ``RATE_LIMIT_RETRY_MAX_ATTEMPTS`` includes the initial attempt:
+    # a value of 3 means at most two additional retries.
+    RATE_LIMIT_RETRY_MAX_ATTEMPTS = 3
+    RATE_LIMIT_RETRY_BASE_SECONDS = 0.5
+    RATE_LIMIT_RETRY_MAX_SECONDS = 4.0
+
     def complete(self, system_message: str, user_message: str) -> Optional[str]:
+        # Round 7 / Phase 5.5: wrap the original single-attempt body in
+        # a small retry loop scoped *only* to ``llm.rate_limit_429``
+        # outcomes.  Previously a single 429 from upstream surfaced as
+        # a hard ``ERROR: llm.rate_limit_429: ...`` to the caller, even
+        # though the canonical playbook for 429 is "wait briefly and
+        # retry with jitter" -- a deterministic transient.  Other
+        # error kinds (timeout, content_filter, unauthorized,
+        # parse_fail, generic runtime) are still returned on the
+        # first attempt because they are not safely retryable.
+        import random as _r
+        import time as _t
+        last_result: Optional[str] = None
+        for _attempt in range(1, self.RATE_LIMIT_RETRY_MAX_ATTEMPTS + 1):
+            last_result = self._complete_once(system_message, user_message)
+            if not (
+                isinstance(last_result, str)
+                and last_result.startswith("ERROR: llm.rate_limit_429")
+            ):
+                return last_result
+            if _attempt >= self.RATE_LIMIT_RETRY_MAX_ATTEMPTS:
+                break
+            _backoff = min(
+                self.RATE_LIMIT_RETRY_MAX_SECONDS,
+                self.RATE_LIMIT_RETRY_BASE_SECONDS * (2 ** (_attempt - 1)),
+            )
+            # Full-jitter: pick a random sleep in [0, backoff] so a
+            # fleet of concurrent callers does not synchronize.
+            _sleep = _r.uniform(0.0, _backoff)
+            logger.warning(
+                "CircuIT 429 rate-limit on attempt %d/%d; sleeping %.2fs before retry",
+                _attempt,
+                self.RATE_LIMIT_RETRY_MAX_ATTEMPTS,
+                _sleep,
+            )
+            _t.sleep(_sleep)
+        return last_result
+
+    def _complete_once(self, system_message: str, user_message: str) -> Optional[str]:
         try:
             token = self._get_token()
             client = AzureOpenAI(
                 azure_endpoint=self.AZURE_ENDPOINT,
                 api_key=token,
-                api_version="2024-08-01-preview",
-                timeout=120.0, # Set a 120-second timeout
+                # Round 6 / Phase 3.14: API version comes from env
+                # (with a stable default) so the deployment can be
+                # rolled forward without code edits.
+                api_version=self.AZURE_API_VERSION,
+                # Round 6 / Phase 3.7: use the shared constant.
+                timeout=float(self.REQUEST_TIMEOUT_SECONDS),
             )
             messages = [{"role":"system","content":system_message},{"role":"user","content":user_message}]
-            res = client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                user=json.dumps({"appkey": self.app_key}),
-                stop=["<|im_end|>"]
-            )
+            # Round 4 / Phase 6.5: pin temperature + max_tokens explicitly
+            # so the same briefing yields reproducible answers across runs
+            # (no silent SDK-default temperature drift) and so the model
+            # can no longer be cut off without us also knowing how big the
+            # ceiling was. Use a low temperature for grounded /
+            # report-style prose, and a generous (but bounded)
+            # ``max_completion_tokens`` so finish_reason='length' is
+            # genuinely informative. Fall back gracefully if the SDK
+            # rejects either kwarg (e.g., older versions do not accept
+            # ``max_completion_tokens`` and require ``max_tokens``).
+            _llm_call_params: Dict[str, Any] = {
+                "model": self.model_name,
+                "messages": messages,
+                "user": json.dumps({"appkey": self.app_key}),
+                "stop": ["<|im_end|>"],
+                "temperature": 0.2,
+                "max_completion_tokens": 4096,
+            }
+            try:
+                res = client.chat.completions.create(**_llm_call_params)
+            except TypeError:
+                # Older AzureOpenAI signature: swap to ``max_tokens``.
+                _llm_call_params.pop("max_completion_tokens", None)
+                _llm_call_params["max_tokens"] = 4096
+                res = client.chat.completions.create(**_llm_call_params)
+            except Exception as _param_err:
+                # Some Azure deployments reject ``temperature`` (gpt-5
+                # family is fixed at 1.0) or ``max_completion_tokens``.
+                # Strip the offending kwargs and retry once so we never
+                # regress to the old "no params at all" behaviour.
+                _msg = str(_param_err).lower()
+                _retried = False
+                if "temperature" in _msg and "temperature" in _llm_call_params:
+                    _llm_call_params.pop("temperature", None)
+                    _retried = True
+                if (
+                    "max_completion_tokens" in _msg
+                    and "max_completion_tokens" in _llm_call_params
+                ):
+                    _llm_call_params.pop("max_completion_tokens", None)
+                    _llm_call_params["max_tokens"] = 4096
+                    _retried = True
+                if not _retried:
+                    raise
+                res = client.chat.completions.create(**_llm_call_params)
             if not res.choices:
-                return None
-            return res.choices[0].message.content
+                # Round 4 / Phase 4.7: classify "no choices" as a
+                # parse/empty failure so callers can show
+                # "ERROR: model returned no choices (parse_fail)"
+                # instead of a silent ``None``.
+                logger.error("CircuIT response had no choices (parse_fail) model=%s", self.model_name)
+                return "ERROR: parse_fail: model returned no choices."
+            # Round 4 / Phase 4.7: classify content_filter trips so the
+            # downstream UI can surface a precise reason instead of the
+            # text body which may be empty / placeholder.
+            try:
+                _choice0 = res.choices[0]
+                _finish_for_cf = getattr(_choice0, "finish_reason", None) or (
+                    getattr(_choice0, "model_extra", {}) or {}
+                ).get("finish_reason")
+                if str(_finish_for_cf or "").lower() in ("content_filter", "contentfilter"):
+                    logger.error(
+                        "CircuIT response triggered content_filter model=%s",
+                        self.model_name,
+                    )
+                    return "ERROR: content_filter: model refused to answer (policy)."
+            except Exception:
+                pass
+            # Round 3 / Phase 2.5: warn loudly when the completion was
+            # cut short by max_tokens. ``finish_reason='length'`` means
+            # the JSON / narrative we just returned is structurally
+            # truncated. Callers downstream parse this as if it were
+            # complete and silently drop fields. Logging the
+            # truncation here gives operators a single grep target
+            # ('LLM truncated') without changing the return contract.
+            _content = res.choices[0].message.content
+            try:
+                _choice = res.choices[0]
+                _finish = getattr(_choice, "finish_reason", None) or (
+                    getattr(_choice, "model_extra", {}) or {}
+                ).get("finish_reason")
+                if str(_finish or "").lower() == "length":
+                    _model_label = getattr(self, "model_name", "<unknown>")
+                    logger.warning(
+                        "LLM truncated (finish_reason='length') model=%s; "
+                        "downstream JSON/text parsers may see partial output",
+                        _model_label,
+                    )
+                    # Round 3 / Phase 2.5: also append an explicit
+                    # user-visible marker so downstream renderers
+                    # cannot present a length-truncated answer as if
+                    # it were complete. The marker is plain text so
+                    # readers (and tests) can grep for it; JSON
+                    # parsers that ignore trailing text won't be
+                    # broken by it.
+                    if isinstance(_content, str):
+                        _content = (
+                            f"{_content}\n\n[TRUNCATED: response may be incomplete "
+                            f"(finish_reason='length')]"
+                        )
+            except Exception as _fr_err:
+                logger.debug(
+                    "Could not inspect finish_reason on LLM response: %s", _fr_err
+                )
+            # Round 4 / Phase 6.5: emit a single structured log line per
+            # successful LLM call so operators can audit which model /
+            # params / finish_reason produced each answer.  Avoid logging
+            # the prompt/response bodies (PII / size).
+            try:
+                _finish_log = getattr(res.choices[0], "finish_reason", None) or (
+                    getattr(res.choices[0], "model_extra", {}) or {}
+                ).get("finish_reason")
+                _usage = getattr(res, "usage", None)
+                _ptokens = getattr(_usage, "prompt_tokens", None) if _usage else None
+                _ctokens = getattr(_usage, "completion_tokens", None) if _usage else None
+                logger.info(
+                    "LLM call ok model=%s temperature=%s max_tokens=%s "
+                    "finish_reason=%s prompt_tokens=%s completion_tokens=%s",
+                    self.model_name,
+                    _llm_call_params.get("temperature", "<default>"),
+                    _llm_call_params.get(
+                        "max_completion_tokens",
+                        _llm_call_params.get("max_tokens", "<default>"),
+                    ),
+                    _finish_log,
+                    _ptokens,
+                    _ctokens,
+                )
+            except Exception as _log_err:
+                logger.debug("LLM call logging failed: %s", _log_err)
+            return _content
         except APITimeoutError:
-            logger.error("CircuIT API call timed out after 120 seconds.")
-            return "ERROR: The analysis for this section timed out. The AI service may be under heavy load. Please try again later."
+            # Round 6 / Phase 3.7: log + report the actual configured
+            # timeout, not a stale 120s literal.
+            logger.error(
+                "CircuIT API call timed out after %s seconds.",
+                self.REQUEST_TIMEOUT_SECONDS,
+            )
+            return (
+                f"ERROR: llm.timeout_{self.REQUEST_TIMEOUT_SECONDS}s: "
+                "The analysis for this section timed out. "
+                "The AI service may be under heavy load. Please try again later."
+            )
         except Exception as e:
-            logger.error(f"CircuIT Error: {e}")
-            return None
+            # Round 4 / Phase 4.7: classify common transient and
+            # policy-driven failures (HTTP 429, 5xx, content_filter,
+            # JSON parse) so the UI / Excel / report layer can show
+            # a stable, machine-readable error instead of a silent
+            # ``None`` (which prior code rendered as empty).
+            try:
+                _status_code = (
+                    getattr(e, "status_code", None)
+                    or getattr(getattr(e, "response", None), "status_code", None)
+                )
+            except Exception:
+                _status_code = None
+            _err_text = str(e) or e.__class__.__name__
+            # Round 5 / Phase 6.12: namespace the CircuIT error kinds
+            # under the ``llm.*`` prefix so dashboards can group LLM
+            # failures consistently with the analysis-side classifier
+            # (which uses ``analysis.*``).  See
+            # ``error_classifier.AnalysisErrorClassification`` for the
+            # full taxonomy.
+            _kind = "llm.runtime"
+            try:
+                # Round 6 / Phase 3.10: classify HTTP 401/403 explicitly
+                # so the UI can distinguish "credentials are bad / token
+                # expired" from a generic upstream failure.  Without
+                # this, an expired Okta token returned the same opaque
+                # ``llm.runtime`` as a transient 5xx and operators had
+                # no way to know they needed to rotate the token.
+                _err_lower = _err_text.lower()
+                if _status_code == 401 or "401" in _err_text or "unauthorized" in _err_lower:
+                    _kind = "llm.unauthorized"
+                elif _status_code == 403 or "403" in _err_text or "forbidden" in _err_lower:
+                    _kind = "llm.forbidden"
+                elif _status_code == 429 or "rate limit" in _err_lower or "429" in _err_text:
+                    _kind = "llm.rate_limit_429"
+                elif isinstance(_status_code, int) and 500 <= _status_code < 600:
+                    _kind = f"llm.server_error_{_status_code}"
+                elif "5" in str(_status_code or "") and str(_status_code or "").startswith("5"):
+                    _kind = f"llm.server_error_{_status_code}"
+                elif "content_filter" in _err_lower or "responsibleaipolicyviolation" in _err_lower:
+                    _kind = "llm.content_filter"
+                elif "json" in _err_lower and ("decode" in _err_lower or "parse" in _err_lower):
+                    _kind = "llm.parse_fail"
+            except Exception:
+                _kind = "llm.runtime"
+            logger.error(
+                "CircuIT Error kind=%s status=%s err=%s",
+                _kind, _status_code, _err_text,
+            )
+            # Map to a user-visible ERROR:<kind>: <msg>.  Callers that
+            # currently treat ``None`` as "skip" will instead see a
+            # classified ERROR string that the UI/Excel can surface.
+            return f"ERROR: {_kind}: {_err_text}"
 
 def create_enhanced_word_report(manager: str, technology: str, days: int, ab_data: pd.DataFrame, 
                                csone_data: pd.DataFrame, ai_insights: Dict, ext_bugs: List[Dict] = None,
@@ -3778,6 +6680,18 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             
             # Chart 1: Portfolio Health Metrics (Top Left)
             ax1 = plt.subplot(2, 2, 1)
+            # Round 11 / Phase 8.5: the previous chart shared a single
+            # "Count" x-axis across "Customers", "Barriers", "TAC
+            # Cases" and "BEMS" -- four mutually incomparable units.
+            # Disclose the unit on each bar label so the reader does
+            # not infer a comparison between, e.g., "20 customers" and
+            # "20 BEMS escalations".
+            _metric_units = {
+                'Customers': 'customers',
+                'Barriers': 'barriers',
+                'TAC Cases': 'TAC cases',
+                'BEMS': 'BEMS escalations',
+            }
             metrics = ['Customers', 'Barriers', 'TAC Cases', 'BEMS']
             values = [
                 portfolio_metrics.get('total_customers', 0),
@@ -3785,15 +6699,28 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                 portfolio_metrics.get('total_cases', 0),
                 portfolio_metrics.get('bems_count', 0)
             ]
-            colors = ['#007BC7', '#5DBCD2', '#FFB81C', '#FF6B6B']
+            # Round 12 / Phase 5.5: previously this "Portfolio
+            # Metrics" bar used a warm-rainbow palette
+            # (``['#007BC7', '#5DBCD2', '#FFB81C', '#FF6B6B']``) where
+            # the orange / red hues *also* anchor the canonical
+            # ``RISK_BAND_PORTFOLIO_COLORS`` ramp on the adjacent risk
+            # pie -- so the BEMS bar visually "looked" critical even
+            # though it is just a count of escalations.  These four
+            # bars (Customers / Barriers / TAC Cases / BEMS) are
+            # mutually incomparable count units with NO ordinal risk
+            # meaning, so we switch to a single-hue Cisco-blue
+            # magnitude palette that cannot be mistaken for the risk
+            # ramp.  Darker shades for larger values keep "magnitude"
+            # readable without leaking risk semantics.
+            colors = ['#0B3D67', '#1B6BA0', '#3899D1', '#7CC2EA']
             bars = ax1.barh(metrics, values, color=colors)
-            ax1.set_xlabel('Count', fontsize=10, fontweight='bold')
+            ax1.set_xlabel('Count (mixed units; see per-bar label)', fontsize=10, fontweight='bold')
             ax1.set_title('Portfolio Metrics', fontsize=12, fontweight='bold')
             ax1.grid(axis='x', alpha=0.3)
-            
-            # Add value labels on bars
-            for i, (bar, value) in enumerate(zip(bars, values)):
-                ax1.text(value, i, f'  {int(value)}', va='center', fontweight='bold')
+
+            for i, (bar, value, label) in enumerate(zip(bars, values, metrics)):
+                _unit = _metric_units.get(label, '')
+                ax1.text(value, i, f'  {int(value)} {_unit}'.rstrip(), va='center', fontweight='bold')
             
             # Chart 2: Risk Distribution (Top Right)
             # Round 3: split the legacy "High Risk" wedge — which was
@@ -3804,6 +6731,29 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             # "Critical + High" wedge so users are not misled by a
             # rolled-up category labeled simply "High Risk".
             ax2 = plt.subplot(2, 2, 2)
+            # Round 11 / Phase 5.2: pull the palette from the
+            # canonical_metrics shared constant so the Word
+            # chart's colors and any future Word-table shading
+            # for the same labels can never drift apart.
+            # Round 12 / Phase 5.4: previously the inline fallback dict
+            # below silently shadowed any future schema change in
+            # ``canonical_metrics.RISK_BAND_PORTFOLIO_COLORS`` (e.g. a
+            # new "Critical + High" rollup hue).  When the import
+            # succeeded the fallback was harmless, but in any partial
+            # build / unit-test context where the import failed we
+            # froze a stale palette into the Word doc that no longer
+            # matched the canonical map -- the very drift Phase 5
+            # fights.  Resolve through ``getattr`` against the
+            # canonical module so the fallback is the empty dict and
+            # ``risk_colors`` falls back to the per-wedge ``#7f7f7f``
+            # neutral, never to a stale named hex.
+            try:
+                import canonical_metrics as _R12_CMOD
+            except Exception:
+                _R12_CMOD = None  # type: ignore
+            _R11_PORTFOLIO_COLORS = getattr(
+                _R12_CMOD, 'RISK_BAND_PORTFOLIO_COLORS', {}
+            ) if _R12_CMOD is not None else {}
             _critical_count = portfolio_metrics.get('critical_risk_customers')
             _high_only_count = portfolio_metrics.get('high_only_risk_customers')
             if _critical_count is not None and _high_only_count is not None:
@@ -3815,7 +6765,7 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                     portfolio_metrics.get('low_risk_customers', 0),
                     portfolio_metrics.get('healthy_customers', 0),
                 ]
-                risk_colors = ['#C0392B', '#FF6B6B', '#FFB81C', '#5DBCD2', '#28B463']
+                risk_colors = [_R11_PORTFOLIO_COLORS.get(_lbl, '#7f7f7f') for _lbl in risk_labels]
             else:
                 risk_labels = ['Critical + High', 'Medium Risk', 'Low Risk', 'Healthy']
                 risk_values = [
@@ -3824,9 +6774,71 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                     portfolio_metrics.get('low_risk_customers', 0),
                     portfolio_metrics.get('healthy_customers', 0),
                 ]
-                risk_colors = ['#FF6B6B', '#FFB81C', '#5DBCD2', '#28B463']
-            wedges, texts, autotexts = ax2.pie(risk_values, labels=risk_labels, colors=risk_colors, 
-                                                autopct='%1.0f%%', startangle=90)
+                risk_colors = [_R11_PORTFOLIO_COLORS.get(_lbl, '#7f7f7f') for _lbl in risk_labels]
+            # Round 10 / Phase 3.8: ``%1.0f%%`` (whole percent) hid every
+            # slice below 1% as "0%", so the visible labels could sum to
+            # less than 100 and a real 0.4% Critical band rendered "0%"
+            # next to a 99.6% green wedge — actively misleading. Use a
+            # custom autopct that renders "<1%" for non-zero small
+            # slices and 1 decimal place otherwise so the printed
+            # percents always sum to ~100.
+            def _r10_autopct(p):
+                if p <= 0:
+                    return ''
+                if p < 1.0:
+                    return '<1%'
+                return f'{p:.1f}%'
+            # Round 11 / Phase 8.6: drop zero-count bands before
+            # rendering so empty wedges (which can otherwise produce
+            # confusing legend entries with no slice area) cannot
+            # mislead the reader into thinking a band exists.  Keep
+            # the parallel labels/values/colors arrays in sync.
+            try:
+                _filtered = [
+                    (_lbl, int(_val), _clr)
+                    for _lbl, _val, _clr in zip(risk_labels, risk_values, risk_colors)
+                    if int(_val or 0) > 0
+                ]
+                if _filtered:
+                    # Round 12 / Phase 8.4: previously the surviving
+                    # wedges came out of this filter in the order of
+                    # the *upstream* ``risk_labels`` list -- which was
+                    # canonical for the split-band branch but could
+                    # leak whichever order callers happened to assemble
+                    # ``portfolio_metrics`` for the rolled-up branch.
+                    # Pin the wedge order to a single canonical band
+                    # constant (Critical -> Healthy, descending in
+                    # severity) so the pie's clockwise sweep is
+                    # identical across every report regardless of
+                    # which branch supplied the values.  Unknown
+                    # labels keep their relative order at the end.
+                    _R12_CANON_BAND_ORDER = [
+                        'Critical Risk',
+                        'Critical + High',
+                        'High Risk',
+                        'Medium Risk',
+                        'Low Risk',
+                        'Healthy',
+                    ]
+                    _r12_band_pos = {
+                        _b: _i for _i, _b in enumerate(_R12_CANON_BAND_ORDER)
+                    }
+                    _filtered.sort(
+                        key=lambda _t: (
+                            _r12_band_pos.get(_t[0], len(_R12_CANON_BAND_ORDER)),
+                            _t[0],
+                        )
+                    )
+                    risk_labels = [t[0] for t in _filtered]
+                    risk_values = [t[1] for t in _filtered]
+                    risk_colors = [t[2] for t in _filtered]
+            except Exception as _zero_err:
+                logger.debug(
+                    "Round 11 / Phase 8.6: zero-band filter skipped (%s)",
+                    _zero_err,
+                )
+            wedges, texts, autotexts = ax2.pie(risk_values, labels=risk_labels, colors=risk_colors,
+                                                autopct=_r10_autopct, startangle=90)
             for text in texts:
                 text.set_fontsize(9)
             for autotext in autotexts:
@@ -3847,7 +6859,34 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                 p3_cases,
                 p4_cases,
             ]
-            severity_colors = ['#FF0000', '#FF6B6B', '#FFB81C', '#5DBCD2']
+            # Round 12 / Phase 5.2: previously the TAC severity bar
+            # used an ad-hoc inline palette
+            # (``['#FF0000', '#FF6B6B', '#FFB81C', '#5DBCD2']``) that
+            # disagreed with the canonical ``SEVERITY_COLORS`` dict
+            # used by every other priority chart in
+            # ``app_simple.py`` (P1=#d62728, P2=#ff7f0e, P3=#ffd700,
+            # P4=#2ca02c).  The same P1 bucket therefore rendered
+            # bright red here but a deeper red in the executive
+            # case-mix pie a few pages later, breaking the visual
+            # legend.  Resolve every bar color from the same shared
+            # constant so the Word doc's bar agrees with every pie.
+            try:
+                from app_simple import SEVERITY_COLORS as _R12_SEV_COLORS
+                from app_simple import SEVERITY_COLOR_DEFAULT as _R12_SEV_DEFAULT
+            except Exception:
+                _R12_SEV_COLORS = {
+                    'P1': '#d62728',
+                    'P2': '#ff7f0e',
+                    'P3': '#ffd700',
+                    'P4': '#2ca02c',
+                }
+                _R12_SEV_DEFAULT = '#1f77b4'
+            severity_colors = [
+                _R12_SEV_COLORS.get('P1', _R12_SEV_DEFAULT),
+                _R12_SEV_COLORS.get('P2', _R12_SEV_DEFAULT),
+                _R12_SEV_COLORS.get('P3', _R12_SEV_DEFAULT),
+                _R12_SEV_COLORS.get('P4', _R12_SEV_DEFAULT),
+            ]
             bars = ax3.bar(severity_labels, severity_values, color=severity_colors)
             ax3.set_ylabel('Count', fontsize=10, fontweight='bold')
             ax3.set_title('TAC Case Severity', fontsize=12, fontweight='bold')
@@ -3862,7 +6901,16 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             
             # Chart 4: Trend Indicator (Bottom Right)
             ax4 = plt.subplot(2, 2, 4)
-            trend_data = portfolio_metrics.get('trend_direction', 'Stable')
+            # Round 3 / Phase 1.3: do not fabricate "Stable" when no
+            # comparable prior-period trend has been computed. If the
+            # caller did not provide a trend, render "n/a" so a
+            # reader cannot mistake a default for analytics.
+            _trend_raw = portfolio_metrics.get('trend_direction')
+            trend_data = (
+                str(_trend_raw)
+                if _trend_raw not in (None, '', 'None')
+                else 'n/a (not computed)'
+            )
             health_score = portfolio_metrics.get('health_score', 'C')
             
             # Create a simple gauge/indicator
@@ -3883,11 +6931,28 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                 fontsize=9,
             )
             
-            plt.tight_layout()
-            
+            # Round 12 / Phase 8.2: ``fig.text`` placed at y=0.01 risks
+            # being clipped by ``tight_layout()`` on some matplotlib
+            # backends (especially when the four subplots already eat
+            # the bottom margin).  Reserve an explicit bottom strip
+            # via ``rect=[left, bottom, right, top]`` so the BEMS
+            # split caption is guaranteed to render in the saved PNG.
+            try:
+                plt.tight_layout(rect=[0, 0.04, 1, 0.98])
+            except Exception:  # Round 12 / Phase 8.2 defensive
+                plt.tight_layout()
+
             # Save chart to bytes
             img_stream = io.BytesIO()
-            plt.savefig(img_stream, format='png', dpi=150, bbox_inches='tight')
+            # Round 12 / Phase 8.1: previously this was ``dpi=150`` while
+            # every ``app_simple.py`` chart (renewal donut, executive
+            # health, panels 1-4) saved at ``dpi=300``.  When both
+            # families of PNGs ended up in the same Word doc the
+            # backend's executive dashboard appeared visibly softer
+            # than the renewal panels on a high-DPI display, breaking
+            # the at-a-glance polish of the report.  Unify on 300 so
+            # all chart families render at the same target resolution.
+            plt.savefig(img_stream, format='png', dpi=300, bbox_inches='tight')
             img_stream.seek(0)
             plt.close()
             
@@ -3923,8 +6988,14 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             cells[3].text = f"🔴 BEMS\n{portfolio_metrics.get('bems_count', 0)}"
             
             # Row 2: Risk
+            # Round 3 / Phase 1.4: ``high_risk_customers`` from
+            # ``compute_portfolio_risk_summary`` is band CRITICAL +
+            # band HIGH (see risk_scoring.py:609). Labeling that cell
+            # "High Risk" understates Critical exposure to readers.
+            # Relabel honestly as "Critical + High" so the cell value
+            # matches its caption.
             cells = table.rows[1].cells
-            cells[0].text = f"🔴 High Risk\n{portfolio_metrics.get('high_risk_customers', 0)}"
+            cells[0].text = f"🔴 Critical + High\n{portfolio_metrics.get('high_risk_customers', 0)}"
             cells[1].text = f"🟡 Medium Risk\n{portfolio_metrics.get('medium_risk_customers', 0)}"
             cells[2].text = f"🟢 Low Risk\n{portfolio_metrics.get('low_risk_customers', 0)}"
             cells[3].text = f"✅ Healthy\n{portfolio_metrics.get('healthy_customers', 0)}"
@@ -3936,7 +7007,16 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             cells[0].text = f"P1 Critical\n{p1_cases}"
             cells[1].text = f"P2 High\n{p2_cases}"
             cells[2].text = f"Break-fix / Provisioning\n{portfolio_metrics.get('break_fix_cases', 0)} / {portfolio_metrics.get('provisioning_cases', 0)}"
-            cells[3].text = f"Grade: {portfolio_metrics.get('health_score', 'C')}\nTrend: {portfolio_metrics.get('trend_direction', 'Stable')}"
+            # Round 3 / Phase 1.3: avoid the hardcoded 'Stable' default
+            # so the cell honestly reads "n/a (not computed)" when no
+            # comparable prior-period trend has been wired in.
+            _trend_cell_raw = portfolio_metrics.get('trend_direction')
+            _trend_cell = (
+                str(_trend_cell_raw)
+                if _trend_cell_raw not in (None, '', 'None')
+                else 'n/a (not computed)'
+            )
+            cells[3].text = f"Grade: {portfolio_metrics.get('health_score', 'C')}\nTrend: {_trend_cell}"
             
             # Style the table
             for row in table.rows:
@@ -3996,15 +7076,32 @@ def create_executive_title_page(doc, manager: str, technology: str, days: int, p
             metrics_para = doc.add_paragraph()
             metrics_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
             
+            # Round 12 / Phase 10.5: previously stamped the title page
+            # via ``datetime.now().strftime(...)`` (HOST-LOCAL clock,
+            # no timezone marker).  An operator running the same plan
+            # in EU vs. PT could see a "Report Date" 12 hours apart
+            # for the same logical run, breaking cross-region audit
+            # parity.  Anchor on UTC and label the timezone so the
+            # title page matches the UTC ISO-Z timestamps Round 5 /
+            # Phase 6.3 already standardized for ``store_report_history``
+            # and Round 12 / Phase 10.4 standardized for the admin
+            # persisted columns.
+            _r12_now_utc = datetime.now(timezone.utc)
             metrics_text = f"""
 Analysis Period: {days} Days
-Report Date: {datetime.now().strftime("%B %d, %Y")}
+Report Date: {_r12_now_utc.strftime("%B %d, %Y")} UTC
 """
-            if portfolio_metrics.get('total_customers'):
+            # Round 10 / Phase 3.9: previously these used truthy checks
+            # which silently dropped legitimate zero values. A portfolio
+            # with zero open barriers is a meaningful signal — not "no
+            # data" — and should still render "Active Barriers: 0" on
+            # the title page so the operator can confirm the analysis
+            # actually ran. Switch to explicit key-presence checks.
+            if 'total_customers' in portfolio_metrics and portfolio_metrics['total_customers'] is not None:
                 metrics_text += f"\nTotal Customers: {portfolio_metrics['total_customers']}"
-            if portfolio_metrics.get('total_barriers'):
+            if 'total_barriers' in portfolio_metrics and portfolio_metrics['total_barriers'] is not None:
                 metrics_text += f"\nActive Barriers: {portfolio_metrics['total_barriers']}"
-            if portfolio_metrics.get('total_cases'):
+            if 'total_cases' in portfolio_metrics and portfolio_metrics['total_cases'] is not None:
                 metrics_text += f"\nSupport Cases: {portfolio_metrics['total_cases']}"
             
             metrics_para.add_run(metrics_text.strip())
@@ -4012,7 +7109,13 @@ Report Date: {datetime.now().strftime("%B %d, %Y")}
                 metrics_para.runs[0].font.size = Pt(12)
                 metrics_para.runs[0].font.color.rgb = RGBColor(60, 60, 60)
         else:
-            meta = doc.add_paragraph(f"Analysis Period: {days} Days\nReport Generated: {datetime.now().strftime('%B %d, %Y')}")
+            # Round 12 / Phase 10.5: anchor on UTC and label the timezone so
+            # the fallback meta line is reproducible across hosts (see the
+            # matching change in the ``portfolio_metrics`` branch above).
+            meta = doc.add_paragraph(
+                f"Analysis Period: {days} Days\n"
+                f"Report Generated: {datetime.now(timezone.utc).strftime('%B %d, %Y')} UTC"
+            )
             meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
             if meta.runs:
                 meta.runs[0].font.size = Pt(12)
@@ -4035,6 +7138,12 @@ Report Date: {datetime.now().strftime("%B %d, %Y")}
         # If title page creation fails, just continue - don't break the report
         logger.warning(f"Could not create title page: {e}")
         pass
+
+# Round 11 / Phase 9.4: shared regex for ordered-list ordinals so
+# items >= 10 (e.g., "10. Action item") render as numbered list
+# entries instead of falling through to plain paragraphs.
+_RE_NUMBERED_LIST_ITEM = re.compile(r'^\d+[\.\)]\s')
+
 
 def append_to_word_report(doc_or_path, markdown_content: str, heading: str = None):
     """Enhanced Word report writer with professional executive-ready formatting - removes ALL markdown symbols"""
@@ -4238,8 +7347,14 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
                 logger.debug("Bullet paragraph format skipped: %s", _fmt_err)
         
         # Handle numbered lists - remove ALL markdown symbols
-        elif len(line) > 2 and line[0].isdigit() and line[1:3] in ['. ', ') ']:
-            list_text = line[line.index('.') + 1:].strip() if '.' in line else line[line.index(')') + 1:].strip()
+        # Round 11 / Phase 9.4: previous match required the digit at
+        # position 0 followed by ``. `` / ``) `` at positions 1-2,
+        # which only catches single-digit ordinals 0-9.  Items 10, 11,
+        # 12, ... fell through to plain paragraphs and broke list
+        # formatting.  Use a regex that matches one-or-more digits.
+        elif _RE_NUMBERED_LIST_ITEM.match(line):
+            _ord_match = _RE_NUMBERED_LIST_ITEM.match(line)
+            list_text = line[_ord_match.end():].strip()
             # Create paragraph and use helper to process ** symbols
             p = doc.add_paragraph(style='List Number')
             p.clear()
@@ -4350,6 +7465,27 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                         lambda v: "'" + v if isinstance(v, str) and v and v[0] in ('=', '+', '-', '@') else v
                     )
             return df
+
+        def _r12_sanitize_sheet_name(raw) -> str:
+            """Round 12 / Phase 9.8: produce a sheet name Excel will
+            accept.  Excel rejects ``[`` ``]`` ``:`` ``*`` ``?``
+            ``/`` ``\\`` and the leading/trailing apostrophe, and
+            silently truncates beyond 31 characters.  Strip the
+            invalid characters to ``_`` (preserving readability)
+            then truncate to 31.  Fall back to ``"Sheet"`` for
+            empty / None / all-invalid inputs so the writer never
+            fails on a degenerate name.
+            """
+            try:
+                _name = str(raw) if raw is not None else "Sheet"
+            except Exception:
+                _name = "Sheet"
+            for _bad in ('[', ']', ':', '*', '?', '/', '\\'):
+                _name = _name.replace(_bad, '_')
+            _name = _name.strip("'").strip()
+            if not _name:
+                _name = "Sheet"
+            return _name[:31]
         with pd.ExcelWriter(f"{base_path}.xlsx", engine="xlsxwriter") as xw:
             report_info = pd.DataFrame([
                 ["Export type", "Standard (fallback)"],
@@ -4372,7 +7508,18 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                 df_copy = df_copy.replace([_np.inf, -_np.inf], _np.nan)
                 df_copy = _defang_formulas(df_copy)
 
-                sheet = (name or "Sheet")[:31]
+                # Round 12 / Phase 9.8: previously the fallback sheet
+                # name was only truncated to 31 characters but the
+                # Excel-invalid characters ``[ ] : * ? / \`` (and the
+                # leading/trailing apostrophe) were NOT stripped, so
+                # an upstream ``name`` like
+                # ``"Adoption Barriers (P1*/P2)"`` would land with the
+                # ``*`` intact and openpyxl would raise
+                # ``InvalidWorkbookException`` mid-write -- losing
+                # every still-pending sheet.  Sanitize before the
+                # truncation step so the workbook never sees a name
+                # Excel will reject.
+                sheet = _r12_sanitize_sheet_name(name)
                 base_sheet = sheet
                 suffix = 2
                 while sheet in _used_sheet_names:
@@ -4392,7 +7539,16 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                             if df_copy[col].dt.tz is not None:
                                 df_copy[col] = df_copy[col].dt.tz_convert(None)
                         df_copy = _defang_formulas(df_copy)
-                        df_copy.to_excel(xw, sheet_name=sheet_name[:31], index=False)
+                        # Round 12 / Phase 9.8: see comment above --
+                        # ``csconsole_sheet_names`` is hard-coded today
+                        # but a future caller could easily inject an
+                        # invalid character via key rename, so route
+                        # through the same sanitizer.
+                        df_copy.to_excel(
+                            xw,
+                            sheet_name=_r12_sanitize_sheet_name(sheet_name),
+                            index=False,
+                        )
         return f"{base_path}.xlsx"
 
 # --------------------------- LLM prompt ---------------------------
@@ -4403,33 +7559,216 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
     briefing.append("---")
 
     # ARR by Customer (strategic prioritization - high-value accounts need extra attention)
+    # Round 11 / Phase 1.4: compute a *single* ``_briefing_amount_prefix``
+    # / suffix pair from the ARR currency set up-front so EVERY downstream
+    # ARR-bearing line (ARR by Customer, ARR by Issue Category, Feature
+    # Requests, Software Defects/PSIRT customer ARR, etc.) renders the
+    # same currency disclaimer.  Previously only the customer block at
+    # ~6748 was gated; lines ~6766/6772/6782 (issue ARR, feature ARR)
+    # printed ``$`` unconditionally even when the portfolio mixed
+    # currencies, which contradicted the "do NOT sum across currencies"
+    # warning we just printed three lines above.  Default to no prefix +
+    # ``(currency unknown)`` suffix when the currency set is empty so we
+    # don't fabricate USD.
+    _briefing_amount_prefix = ''
+    _briefing_amount_suffix = ''
     if arr_data is not None and not arr_data.empty and 'BU_NAME' in arr_data.columns and 'ANNUAL_CONTRACT_VALUE' in arr_data.columns:
-        arr_by_cust = arr_data.groupby('BU_NAME')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False)
-        total_arr = arr_by_cust.sum()
-        briefing.append("### ARR by Customer (Strategic Prioritization):")
-        briefing.append("**CRITICAL:** Prioritize high-ARR customers with adoption barriers or support cases. These represent the greatest renewal risk and revenue impact.")
-        for cust, arr_val in arr_by_cust.head(20).items():
-            pct = (arr_val / total_arr * 100) if total_arr > 0 else 0
-            briefing.append(f"- **{cust}:** ${arr_val:,.0f} ({pct:.1f}% of portfolio)")
-        if len(arr_by_cust) > 20:
-            briefing.append(f"- ... and {len(arr_by_cust) - 20} more customers")
-        briefing.append(f"**Total Portfolio ARR:** ${total_arr:,.0f}")
-        briefing.append("---")
+        # Round 5 / Phase 3.3: bucket ARR by CURRENCY_CODE before
+        # summing/displaying so a portfolio that mixes USD/EUR/GBP rows
+        # is not silently summed under a single ``$`` prefix (which
+        # would inflate or deflate the headline by FX-rate magnitudes
+        # and prompt the LLM to extrapolate against a wrong total).
+        # If only a single currency appears we keep the existing,
+        # familiar single-block rendering for backwards compatibility.
+        _has_ccy = 'CURRENCY_CODE' in arr_data.columns
+        try:
+            _ccy_set = set(arr_data['CURRENCY_CODE'].dropna().astype(str).str.upper().unique()) if _has_ccy else set()
+        except Exception:
+            _ccy_set = set()
+        if not _ccy_set:
+            _briefing_amount_suffix = ' (currency unknown)'
+        elif len(_ccy_set) == 1:
+            _ccy_only = next(iter(_ccy_set))
+            _briefing_amount_prefix = '$' if _ccy_only == 'USD' else f"{_ccy_only} "
+        else:
+            _briefing_amount_suffix = ' (MIXED currencies — do not sum)'
+        if _has_ccy and len(_ccy_set) > 1:
+            briefing.append("### ARR by Customer (Strategic Prioritization, MIXED CURRENCY):")
+            briefing.append(
+                "**CRITICAL:** This portfolio contains rows in multiple currencies "
+                f"({', '.join(sorted(_ccy_set))}). Totals are reported per currency; "
+                "do NOT sum across currencies and do NOT extrapolate a single "
+                "consolidated $ figure -- there is no FX conversion applied here."
+            )
+            # Round 12 / Phase 1.3: ``groupby(['CURRENCY_CODE', 'BU_NAME'])``
+            # collides two distinct ACCOUNT_ID_Cs that share a display
+            # name within the same currency bucket -- the same class of
+            # bug Round 11 / Phase 1.5 fixed for the single-currency
+            # branch.  Roll up on ACCOUNT_ID_C within each currency
+            # and project BU_NAME as a label.  Fall back to the
+            # legacy BU_NAME-only grouping when ACCOUNT_ID_C is
+            # unavailable so older fixtures still render.
+            grouped = None
+            try:
+                if 'ACCOUNT_ID_C' in arr_data.columns:
+                    _per_acct_ccy = (
+                        arr_data[
+                            ['ACCOUNT_ID_C', 'BU_NAME', 'CURRENCY_CODE', 'ANNUAL_CONTRACT_VALUE']
+                        ]
+                        .dropna(subset=['ACCOUNT_ID_C'])
+                        .groupby(['CURRENCY_CODE', 'ACCOUNT_ID_C'], as_index=False)
+                        .agg({'BU_NAME': 'first', 'ANNUAL_CONTRACT_VALUE': 'sum'})
+                    )
+                    grouped = _per_acct_ccy
+                else:
+                    _legacy = (
+                        arr_data
+                        .groupby(['CURRENCY_CODE', 'BU_NAME'])['ANNUAL_CONTRACT_VALUE']
+                        .sum()
+                        .reset_index()
+                    )
+                    _legacy['ACCOUNT_ID_C'] = _legacy['BU_NAME']
+                    grouped = _legacy
+            except Exception as _grp_err:
+                logger.debug("Briefing mixed-currency rollup failed: %s", _grp_err)
+                grouped = None
+            if grouped is not None and not grouped.empty:
+                for ccy in sorted(_ccy_set):
+                    try:
+                        sub = grouped[grouped['CURRENCY_CODE'].astype(str).str.upper() == ccy].copy()
+                        sub = sub.sort_values(
+                            ['ANNUAL_CONTRACT_VALUE', 'ACCOUNT_ID_C'],
+                            ascending=[False, True],
+                            kind='mergesort',
+                        )
+                    except Exception:
+                        continue
+                    sub_total = float(sub['ANNUAL_CONTRACT_VALUE'].sum())
+                    # Round 12 / Phase 9.1: previously this block used
+                    # raw ``f"{x:,.0f}"`` formatting while CHD / EI
+                    # money lines (Round 11 / Phase 9.6) route through
+                    # ``format_number`` -- so the same money value
+                    # could render as ``$1,234,567`` here and ``N/A``
+                    # in CHD if the underlying ARR was NaN/None.  Use
+                    # the shared helper so the briefing inherits the
+                    # same NaN/None/inf hardening and the entire
+                    # report shows a single canonical money string.
+                    briefing.append(f"#### {ccy} bucket (total: {ccy} {_r12_format_number(sub_total)})")
+                    for _, _row in sub.head(20).iterrows():
+                        _label = _row.get('BU_NAME') or _row.get('ACCOUNT_ID_C')
+                        _arr_val = float(_row['ANNUAL_CONTRACT_VALUE'])
+                        pct = (_arr_val / sub_total * 100) if sub_total > 0 else 0
+                        briefing.append(f"- **{_label}:** {ccy} {_r12_format_number(_arr_val)} ({pct:.1f}% of {ccy} bucket)")
+                    if len(sub) > 20:
+                        briefing.append(f"- ... and {len(sub) - 20} more {ccy} customers")
+            briefing.append("**Total Portfolio ARR:** MIXED — see per-currency totals above; do not sum across currencies.")
+            briefing.append("---")
+        else:
+            # Round 11 / Phase 1.5: ``groupby('BU_NAME')`` collides
+            # accounts that happen to share a display name (R10 / Phase
+            # 3.1 fixed the same class of bug for portfolio
+            # concentration -- but the briefing book customer block
+            # never adopted ACCOUNT_ID_C as the primary key).  Roll up
+            # ARR by ACCOUNT_ID_C when available and use BU_NAME purely
+            # as a label so two distinct accounts with identical
+            # display names render as two rows, not one fabricated
+            # mega-customer.
+            if 'ACCOUNT_ID_C' in arr_data.columns:
+                try:
+                    _per_acct = (
+                        arr_data[['ACCOUNT_ID_C', 'BU_NAME', 'ANNUAL_CONTRACT_VALUE']]
+                        .dropna(subset=['ACCOUNT_ID_C'])
+                        .groupby('ACCOUNT_ID_C', as_index=False)
+                        .agg({'BU_NAME': 'first', 'ANNUAL_CONTRACT_VALUE': 'sum'})
+                        .sort_values('ANNUAL_CONTRACT_VALUE', ascending=False)
+                    )
+                    arr_by_cust = pd.Series(
+                        _per_acct['ANNUAL_CONTRACT_VALUE'].values,
+                        index=_per_acct['BU_NAME'].values,
+                    )
+                except Exception as _per_acct_err:
+                    logger.debug("Briefing-1 per-account ARR rollup failed: %s", _per_acct_err)
+                    arr_by_cust = arr_data.groupby('BU_NAME')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False)
+            else:
+                arr_by_cust = arr_data.groupby('BU_NAME')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False)
+            total_arr = arr_by_cust.sum()
+            # Round 6 / Phase 7.1: when ``CURRENCY_CODE`` is missing
+            # entirely or every value is null/empty, the previous
+            # build silently labelled the totals as ``USD`` -- which
+            # is a factual claim the data does not actually support
+            # and causes the LLM to extrapolate against a wrong base.
+            # Branch explicitly on the empty-set case and render an
+            # "amounts shown without currency unit" disclaimer instead
+            # of fabricating a ``$`` prefix.
+            if not _ccy_set:
+                briefing.append("### ARR by Customer (Strategic Prioritization, CURRENCY UNKNOWN):")
+                briefing.append(
+                    "**CRITICAL:** ARR rows do not carry a CURRENCY_CODE; "
+                    "amounts below are reported as raw numbers without a "
+                    "currency unit.  Do NOT assume USD and do NOT compare "
+                    "against any external currency benchmark."
+                )
+                for cust, arr_val in arr_by_cust.head(20).items():
+                    pct = (arr_val / total_arr * 100) if total_arr > 0 else 0
+                    briefing.append(f"- **{cust}:** {_r12_format_number(arr_val)} ({pct:.1f}% of portfolio, currency unknown)")
+                if len(arr_by_cust) > 20:
+                    briefing.append(f"- ... and {len(arr_by_cust) - 20} more customers")
+                briefing.append(f"**Total Portfolio ARR:** {_r12_format_number(total_arr)} (currency unknown)")
+                briefing.append("---")
+            else:
+                _ccy_label = next(iter(_ccy_set))
+                _prefix = '$' if _ccy_label == 'USD' else f"{_ccy_label} "
+                briefing.append("### ARR by Customer (Strategic Prioritization):")
+                briefing.append("**CRITICAL:** Prioritize high-ARR customers with adoption barriers or support cases. These represent the greatest renewal risk and revenue impact.")
+                for cust, arr_val in arr_by_cust.head(20).items():
+                    pct = (arr_val / total_arr * 100) if total_arr > 0 else 0
+                    briefing.append(f"- **{cust}:** {_prefix}{_r12_format_number(arr_val)} ({pct:.1f}% of portfolio)")
+                if len(arr_by_cust) > 20:
+                    briefing.append(f"- ... and {len(arr_by_cust) - 20} more customers")
+                briefing.append(f"**Total Portfolio ARR:** {_prefix}{_r12_format_number(total_arr)}")
+                briefing.append("---")
 
     # ARR Impact by Issue Category (which adoption barrier types have highest revenue at risk)
+    # Round 11 / Phase 1.4: gate the ``$`` prefix on the briefing-wide
+    # currency disclaimer computed from ``arr_data`` above; never print
+    # ``$`` for non-USD or mixed-currency portfolios.
     if arr_impact and arr_impact.get('top_issues'):
         briefing.append("### ARR at Risk by Issue Category:")
         briefing.append("**CRITICAL:** Prioritize interventions for issue categories with highest ARR exposure.")
         for issue_name, data in arr_impact['top_issues'][:10]:
             arr_val = data.get('arr', 0)
             cust_count = data.get('customer_count', 0)
-            briefing.append(f"- **{issue_name}:** ${arr_val:,.0f} at risk ({cust_count} customers)")
+            briefing.append(
+                f"- **{issue_name}:** {_briefing_amount_prefix}{_r12_format_number(arr_val)} at risk "
+                f"({cust_count} customers){_briefing_amount_suffix}"
+            )
         briefing.append("---")
 
     # Feature Requests (product gap signal - customers asking for capabilities)
     if feature_requests and feature_requests.get('total_requests', 0) > 0:
         briefing.append("### Feature Requests (Product Gap Signal):")
-        briefing.append(f"**{feature_requests['total_requests']}** cases contain feature requests. ARR impact: ${feature_requests.get('total_arr_impact', 0):,.0f}")
+        # Round 12 / Phase 1.1: when ``analyze_feature_requests``
+        # detected mixed currencies, ``arr_impact_comparable`` is
+        # False and ``total_arr_impact`` is intentionally 0.  Surface
+        # an explicit "n/a (mixed currencies)" rather than printing
+        # "$0" which would look like the customers have no ARR.
+        if feature_requests.get('arr_impact_comparable', True):
+            _arr_impact_str = (
+                f"{_briefing_amount_prefix}"
+                f"{_r12_format_number(feature_requests.get('total_arr_impact', 0))}"
+                f"{_briefing_amount_suffix}"
+            )
+        else:
+            _ccys = feature_requests.get('arr_impact_currencies') or []
+            _arr_impact_str = (
+                "n/a (mixed currencies"
+                + (": " + ", ".join(_ccys) if _ccys else "")
+                + ")"
+            )
+        briefing.append(
+            f"**{feature_requests['total_requests']}** cases contain feature requests. "
+            f"ARR impact: {_arr_impact_str}"
+        )
         if feature_requests.get('top_features'):
             briefing.append("**Most requested themes:**")
             for theme, count in feature_requests['top_features'][:5]:
@@ -4439,7 +7778,11 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
             if top_by_arr:
                 briefing.append("**High-value customers requesting features:**")
                 for c in top_by_arr:
-                    briefing.append(f"- {c.get('customer', 'N/A')}: ${c.get('arr', 0):,.0f} ARR")
+                    briefing.append(
+                        f"- {c.get('customer', 'N/A')}: "
+                        f"{_briefing_amount_prefix}{_r12_format_number(c.get('arr', 0))} ARR"
+                        f"{_briefing_amount_suffix}"
+                    )
         briefing.append("---")
 
     # Software Defects & PSIRT (extracted from case text - known bugs/vulns affecting customers)
@@ -4605,15 +7948,38 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                 briefing.append(f"\n### BEMS Escalation Analysis ({len(bems_cases)} cases requiring Back End Engineering):")
                 briefing.append("**CRITICAL INSIGHT:** BEMS (Back End Engineering Management System) escalations indicate complex technical issues that TAC could not resolve independently. These represent high-severity, high-complexity problems requiring specialized engineering expertise.")
                 
-                # Group BEMS cases by customer with detailed BEMS IDs
-                bems_by_customer = bems_cases.groupby('customer_name').agg({
-                    'customer_name': 'count',  # Count of BEMS
+                # Round 12 / Phase 3.1: ``groupby('customer_name')`` was
+                # raw, so ``"acme co."`` and ``"Acme Co"`` produced
+                # two separate rows in the BEMS-by-customer block --
+                # mirroring the class of bug Round 11 / Phase 3.x
+                # fixed elsewhere.  Project a normalized key column
+                # via ``data_normalization.normalize_customer_name``,
+                # group on the normalized key, and surface the
+                # canonical/display label via the per-group mode so a
+                # single BEMS rollup row is emitted per logical
+                # customer.
+                try:
+                    bems_cases = bems_cases.copy()
+                    bems_cases['_r12_cust_key'] = (
+                        bems_cases['customer_name']
+                        .fillna('')
+                        .astype(str)
+                        .map(normalize_customer_name)
+                    )
+                except Exception:
+                    bems_cases['_r12_cust_key'] = bems_cases.get('customer_name', '')
+                bems_by_customer = bems_cases.groupby('_r12_cust_key').agg({
+                    'customer_name': lambda s: (
+                        s.dropna().mode().iloc[0] if not s.dropna().empty else ''
+                    ),
                     'bemscsc_refs': lambda x: list(x),  # List of all BEMS refs
                     'Transaction ID': lambda x: list(x) if 'Transaction ID' in bems_cases.columns else []  # List of Transaction IDs
-                }).rename(columns={'customer_name': 'bems_count'})
+                })
+                bems_by_customer['bems_count'] = bems_cases.groupby('_r12_cust_key').size()
                 
                 briefing.append("\n**BEMS Cases by Customer (with BEMS IDs):**")
-                for customer, row in bems_by_customer.iterrows():
+                for _cust_key, row in bems_by_customer.iterrows():
+                    customer = row.get('customer_name') or _cust_key
                     count = row['bems_count']
                     bems_refs = row.get('bemscsc_refs', [])
                     transaction_ids = row.get('Transaction ID', [])
@@ -4662,7 +8028,20 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
             case_number = row.get('SR Number', row.get('Case Number', 'Unknown'))
             title = row.get('Title', 'No Title')
             description = row.get('Description', 'No Description')
-            customer = row.get('customer_name', 'Unknown Customer')
+            # Round 12 / Phase 3.2: this loop renders raw
+            # ``customer_name`` directly into the briefing body, so
+            # case-only spelling drift (extra whitespace, case
+            # variation, NBSPs) leaks straight into the model context
+            # and surfaces as duplicate "customer" buckets.  Run the
+            # value through ``normalize_customer_name`` so every
+            # occurrence collapses to the same canonical label.
+            _raw_customer = row.get('customer_name', 'Unknown Customer')
+            try:
+                customer = normalize_customer_name(_raw_customer) if _raw_customer else 'Unknown Customer'
+                if not customer:
+                    customer = 'Unknown Customer'
+            except Exception:
+                customer = _raw_customer or 'Unknown Customer'
             owner = row.get('Owner Email', 'Unknown Owner')
             
             # Format with source citation
@@ -4854,7 +8233,68 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
         briefing.append(json.dumps(db_profile, indent=2, default=str))
         briefing.append("---")
 
-    return "\n".join(briefing)
+    # Round 6 / Phase 3.12: enforce a per-section character cap.  A
+    # single runaway section (e.g. a JSON db_profile dump or a long
+    # customer/defect list) used to be able to dominate the entire
+    # briefing budget and starve every other section before the
+    # downstream prompt-budget truncator could reason about which
+    # sections actually mattered.  Apply a per-section ceiling so the
+    # LLM at least sees the *header* of every section, with an
+    # explicit truncation marker so it knows the section was capped.
+    return _apply_per_section_cap("\n".join(briefing), max_chars=12000)
+
+
+def _apply_per_section_cap(briefing_text: str, max_chars: int = 12000) -> str:
+    """Cap each ``---``-delimited section of a briefing book.
+
+    Round 6 / Phase 3.12 helper.  Sections in
+    ``_create_briefing_book`` are separated by ``---`` lines.  This
+    walker keeps each section's header line(s) and truncates the
+    body to ``max_chars`` characters, appending a stable
+    ``[SECTION TRUNCATED: kept N of M chars due to per-section cap]``
+    marker so the LLM (and tests) can detect the cap.
+
+    The cap is intentionally generous (12k chars by default) so it
+    only fires for pathologically large sections; smaller sections
+    pass through untouched.
+    """
+    try:
+        if not briefing_text:
+            return briefing_text or ""
+        try:
+            cap = int(max_chars)
+        except (TypeError, ValueError):
+            cap = 12000
+        if cap <= 0:
+            return briefing_text
+        sections = briefing_text.split("\n---\n")
+        out: List[str] = []
+        for section in sections:
+            if len(section) <= cap:
+                out.append(section)
+                continue
+            head = section[:cap]
+            # Avoid cutting in the middle of a markdown bullet line so
+            # the marker reads cleanly.  Trim back to the previous
+            # newline if one exists in the last 200 chars.
+            try:
+                cut = head.rfind("\n", max(0, cap - 200))
+                if cut > 0:
+                    head = head[:cut]
+            except Exception:
+                pass
+            marker = (
+                f"\n[SECTION TRUNCATED: kept {len(head)} of {len(section)} "
+                "chars due to per-section cap]"
+            )
+            out.append(head + marker)
+        return "\n---\n".join(out)
+    except Exception as _cap_err:
+        try:
+            logger.debug("_apply_per_section_cap failed: %s", _cap_err)
+        except Exception:
+            pass
+        return briefing_text
 
 def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
     """Create a focused briefing book for executive analysis using adoption barriers"""
@@ -4862,14 +8302,33 @@ def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
     
     briefing.append(f"# Executive Portfolio Analysis - {manager}")
     briefing.append(f"## Technology Focus: {technology}")
-    briefing.append(f"## Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    # Round 12 / Phase 10.5: anchor briefing analysis date on UTC and tag the
+    # timezone so cross-region operators see the same logical timestamp.
+    briefing.append(f"## Analysis Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
     briefing.append("")
     
     # Team overview
     if not team_subs_df.empty:
         briefing.append("## Team Portfolio Overview")
         briefing.append(f"- **Total Team Subscriptions:** {len(team_subs_df)}")
-        briefing.append(f"- **Unique Customers:** {team_subs_df['BU_NAME'].nunique() if 'BU_NAME' in team_subs_df.columns else 'N/A'}")
+        # Round 2 / Phase 4.2: route through canonical
+        # ``cm.count_customers`` so this briefing line agrees with
+        # every other report's "Unique Customers" headline.
+        try:
+            import canonical_metrics as _cm
+            from data_normalization import build_customer_lookup as _build_lookup
+            _lookup = _build_lookup(team_subs_df)
+            _a2c = (_lookup or {}).get("account_to_customer", {}) or {}
+            _unique_customers = _cm.count_customers(
+                ab_df=team_subs_df,
+                csone_df=None,
+                account_to_customer=_a2c or None,
+            )
+        except Exception:
+            _unique_customers = (
+                team_subs_df['BU_NAME'].nunique() if 'BU_NAME' in team_subs_df.columns else 'N/A'
+            )
+        briefing.append(f"- **Unique Customers:** {_unique_customers}")
         briefing.append(f"- **Active CSSMs:** {team_subs_df['CSSM_EMAIL'].nunique() if 'CSSM_EMAIL' in team_subs_df.columns else 'N/A'}")
         briefing.append("")
         
@@ -4922,7 +8381,24 @@ def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
         # configured ``days``.
         if 'open_date_c' in ab_norm.columns:
             try:
-                recent_barriers = ab_norm[ab_norm['open_date_c'] >= (datetime.now() - timedelta(days=30))]
+                # Round 12 / Phase 2.1: ``datetime.now()`` (naive local
+                # clock) was previously compared against ``open_date_c``
+                # values which are normalized to UTC in the upstream
+                # parser.  On a machine in (e.g.) Tokyo the cutoff
+                # could miss or include barriers by ~9 hours depending
+                # on local DST and the Snowflake row's UTC time.  Use
+                # ``datetime.now(timezone.utc)`` so the cutoff is the
+                # same scalar regardless of host clock, mirroring the
+                # frozen ``_as_of_date`` Round 11 / Phase 7.6 used in
+                # the SQL-side path.  Also coerce ``open_date_c`` to a
+                # tz-aware UTC series so the comparison does not raise
+                # when one side carries a tz and the other does not.
+                _r12_now_utc = datetime.now(timezone.utc)
+                _r12_cutoff = _r12_now_utc - timedelta(days=30)
+                _r12_open = pd.to_datetime(
+                    ab_norm['open_date_c'], utc=True, errors='coerce',
+                )
+                recent_barriers = ab_norm[_r12_open >= _r12_cutoff]
                 # Round 4: clarify that this is a fixed 30-day spotlight
                 # nested inside the surrounding analysis window so
                 # readers do not assume it tracks the run's configured
@@ -4972,7 +8448,9 @@ def _create_minimal_briefing_book(manager, ab_norm, team_subs_df, technology):
     
     briefing.append(f"# Executive Portfolio Analysis - {manager}")
     briefing.append(f"## Technology Focus: {technology}")
-    briefing.append(f"## Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    # Round 12 / Phase 10.5: anchor briefing analysis date on UTC and tag the
+    # timezone so cross-region operators see the same logical timestamp.
+    briefing.append(f"## Analysis Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
     briefing.append("")
     
     briefing.append("## Data Summary")
@@ -5000,9 +8478,17 @@ def _create_minimal_briefing_book(manager, ab_norm, team_subs_df, technology):
     return "\n".join(briefing)
 
 def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_subs_df, technology,
-        arr_data=None, arr_impact=None, feature_requests=None, software_defects=None, psirt_vulns=None):
+        arr_data=None, arr_impact=None, feature_requests=None, software_defects=None, psirt_vulns=None,
+        ext_incidents=None, ext_bugs=None):
     """Create a COMPREHENSIVE briefing book for executive analysis with FULL DATA for AI to generate rich insights.
-    Optional kwargs (arr_data, arr_impact, feature_requests, software_defects, psirt_vulns) enrich the briefing when provided."""
+    Optional kwargs (arr_data, arr_impact, feature_requests, software_defects, psirt_vulns,
+    ext_incidents, ext_bugs) enrich the briefing when provided.
+
+    Round 4 / Phase 5.2: ``ext_incidents`` / ``ext_bugs`` were previously dropped on
+    the compact path, leaving the LLM blind to status.webex incidents and
+    help.webex defects. They are now serialized as a dedicated section so
+    grounded analysis can cite real intel IDs instead of speculating.
+    """
     if ab_norm is None:
         ab_norm = pd.DataFrame()
     if csone_df is None:
@@ -5013,7 +8499,9 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
     
     briefing.append(f"# Executive Portfolio Analysis - {manager}")
     briefing.append(f"## Technology Focus: {technology}")
-    briefing.append(f"## Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    # Round 12 / Phase 10.5: anchor briefing analysis date on UTC and tag the
+    # timezone so cross-region operators see the same logical timestamp.
+    briefing.append(f"## Analysis Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
     briefing.append("")
     
     # =========================================================================
@@ -5022,7 +8510,24 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
     if not team_subs_df.empty:
         briefing.append("## Team Portfolio Overview")
         briefing.append(f"- **Total Team Subscriptions:** {len(team_subs_df)}")
-        briefing.append(f"- **Unique Customers:** {team_subs_df['BU_NAME'].nunique() if 'BU_NAME' in team_subs_df.columns else 'N/A'}")
+        # Round 2 / Phase 4.2: route through canonical
+        # ``cm.count_customers`` so this briefing line agrees with
+        # every other report's "Unique Customers" headline.
+        try:
+            import canonical_metrics as _cm
+            from data_normalization import build_customer_lookup as _build_lookup
+            _lookup = _build_lookup(team_subs_df)
+            _a2c = (_lookup or {}).get("account_to_customer", {}) or {}
+            _unique_customers = _cm.count_customers(
+                ab_df=team_subs_df,
+                csone_df=None,
+                account_to_customer=_a2c or None,
+            )
+        except Exception:
+            _unique_customers = (
+                team_subs_df['BU_NAME'].nunique() if 'BU_NAME' in team_subs_df.columns else 'N/A'
+            )
+        briefing.append(f"- **Unique Customers:** {_unique_customers}")
         briefing.append(f"- **Active CSSMs:** {team_subs_df['CSSM_EMAIL'].nunique() if 'CSSM_EMAIL' in team_subs_df.columns else 'N/A'}")
         briefing.append("")
         
@@ -5255,31 +8760,95 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
     # =========================================================================
     # SECTION 4b: OPTIONAL ENRICHMENT (ARR, Feature Requests, Defects, PSIRT)
     # =========================================================================
+    # Round 11 / Phase 1.4 (second briefing path): same currency-aware
+    # prefix/suffix gating applied here so the secondary "## ARR by
+    # Customer" / "## ARR at Risk" / "## Feature Requests" sections do
+    # not silently print ``$`` for non-USD or mixed-currency portfolios.
+    # Round 11 / Phase 1.5: ``groupby('BU_NAME')`` collides distinct
+    # ACCOUNT_ID_C values that share the same display name (R10 / Phase
+    # 3.1 fixed the same class of bug on portfolio concentration).
+    # Group on ACCOUNT_ID_C when available and use BU_NAME purely as a
+    # display label so a $50M and $200k account that happen to share a
+    # display string are not folded into one "$50.2M customer" row.
     if arr_data is not None and not arr_data.empty and 'BU_NAME' in arr_data.columns and 'ANNUAL_CONTRACT_VALUE' in arr_data.columns:
-        arr_by_cust = arr_data.groupby('BU_NAME')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False)
-        total_arr = arr_by_cust.sum()
+        _has_ccy_b = 'CURRENCY_CODE' in arr_data.columns
+        try:
+            _ccy_set_b = set(arr_data['CURRENCY_CODE'].dropna().astype(str).str.upper().unique()) if _has_ccy_b else set()
+        except Exception:
+            _ccy_set_b = set()
+        if not _ccy_set_b:
+            _amt_pre_b, _amt_suf_b = '', ' (currency unknown)'
+        elif len(_ccy_set_b) == 1:
+            _ccy_only_b = next(iter(_ccy_set_b))
+            _amt_pre_b, _amt_suf_b = ('$' if _ccy_only_b == 'USD' else f"{_ccy_only_b} "), ''
+        else:
+            _amt_pre_b, _amt_suf_b = '', ' (MIXED currencies — do not sum)'
+
+        if 'ACCOUNT_ID_C' in arr_data.columns:
+            try:
+                _per_acct = (
+                    arr_data[['ACCOUNT_ID_C', 'BU_NAME', 'ANNUAL_CONTRACT_VALUE']]
+                    .dropna(subset=['ACCOUNT_ID_C'])
+                    .groupby('ACCOUNT_ID_C', as_index=False)
+                    .agg({'BU_NAME': 'first', 'ANNUAL_CONTRACT_VALUE': 'sum'})
+                    .sort_values('ANNUAL_CONTRACT_VALUE', ascending=False)
+                )
+                arr_by_cust_pairs = list(zip(_per_acct['BU_NAME'], _per_acct['ANNUAL_CONTRACT_VALUE']))
+                total_arr = float(_per_acct['ANNUAL_CONTRACT_VALUE'].sum())
+            except Exception as _per_acct_err:
+                logger.debug("Briefing per-account ARR rollup failed: %s", _per_acct_err)
+                arr_by_cust = arr_data.groupby('BU_NAME')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False)
+                arr_by_cust_pairs = list(arr_by_cust.items())
+                total_arr = float(arr_by_cust.sum())
+        else:
+            arr_by_cust = arr_data.groupby('BU_NAME')['ANNUAL_CONTRACT_VALUE'].sum().sort_values(ascending=False)
+            arr_by_cust_pairs = list(arr_by_cust.items())
+            total_arr = float(arr_by_cust.sum())
+
         briefing.append("## ARR by Customer (Strategic Prioritization)")
         briefing.append("**Prioritize high-ARR customers with adoption barriers or support cases.**")
-        for cust, arr_val in arr_by_cust.head(20).items():
+        for cust, arr_val in arr_by_cust_pairs[:20]:
             pct = (arr_val / total_arr * 100) if total_arr > 0 else 0
-            briefing.append(f"- **{cust}:** ${arr_val:,.0f} ({pct:.1f}% of portfolio)")
-        if len(arr_by_cust) > 20:
-            briefing.append(f"- ... and {len(arr_by_cust) - 20} more customers")
-        briefing.append(f"**Total Portfolio ARR:** ${total_arr:,.0f}")
+            briefing.append(f"- **{cust}:** {_amt_pre_b}{_r12_format_number(arr_val)} ({pct:.1f}% of portfolio){_amt_suf_b}")
+        if len(arr_by_cust_pairs) > 20:
+            briefing.append(f"- ... and {len(arr_by_cust_pairs) - 20} more customers")
+        briefing.append(f"**Total Portfolio ARR:** {_amt_pre_b}{_r12_format_number(total_arr)}{_amt_suf_b}")
         briefing.append("")
-    
+    else:
+        _amt_pre_b, _amt_suf_b = '', ' (currency unknown)'
+
     if arr_impact and arr_impact.get('top_issues'):
         briefing.append("## ARR at Risk by Issue Category")
         briefing.append("**Prioritize interventions for issue categories with highest ARR exposure.**")
         for issue_name, data in arr_impact['top_issues'][:10]:
             arr_val = data.get('arr', 0)
             cust_count = data.get('customer_count', 0)
-            briefing.append(f"- **{issue_name}:** ${arr_val:,.0f} at risk ({cust_count} customers)")
+            briefing.append(
+                f"- **{issue_name}:** {_amt_pre_b}{_r12_format_number(arr_val)} at risk "
+                f"({cust_count} customers){_amt_suf_b}"
+            )
         briefing.append("")
     
     if feature_requests and feature_requests.get('total_requests', 0) > 0:
         briefing.append("## Feature Requests (Product Gap Signal)")
-        briefing.append(f"**{feature_requests['total_requests']}** cases contain feature requests. ARR impact: ${feature_requests.get('total_arr_impact', 0):,.0f}")
+        # Round 12 / Phase 1.1: honour ``arr_impact_comparable`` to
+        # avoid printing a misleading "$0" figure when the underlying
+        # ARR data spans multiple currencies.
+        if feature_requests.get('arr_impact_comparable', True):
+            _arr_impact_str = (
+                f"{_amt_pre_b}{_r12_format_number(feature_requests.get('total_arr_impact', 0))}{_amt_suf_b}"
+            )
+        else:
+            _ccys = feature_requests.get('arr_impact_currencies') or []
+            _arr_impact_str = (
+                "n/a (mixed currencies"
+                + (": " + ", ".join(_ccys) if _ccys else "")
+                + ")"
+            )
+        briefing.append(
+            f"**{feature_requests['total_requests']}** cases contain feature requests. "
+            f"ARR impact: {_arr_impact_str}"
+        )
         if feature_requests.get('top_features'):
             briefing.append("**Most requested themes:**")
             for theme, count in feature_requests['top_features'][:5]:
@@ -5289,7 +8858,10 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
             if top_by_arr:
                 briefing.append("**High-value customers requesting features:**")
                 for c in top_by_arr:
-                    briefing.append(f"- {c.get('customer', 'N/A')}: ${c.get('arr', 0):,.0f} ARR")
+                    briefing.append(
+                        f"- {c.get('customer', 'N/A')}: "
+                        f"{_amt_pre_b}{_r12_format_number(c.get('arr', 0))} ARR{_amt_suf_b}"
+                    )
         briefing.append("")
     
     if software_defects and software_defects.get('total_defects', 0) > 0:
@@ -5313,6 +8885,62 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
         briefing.append("")
     
     # =========================================================================
+    # SECTION 4b (Round 4 / Phase 5.2): EXTERNAL INTELLIGENCE
+    # status.webex.com incidents and help.webex defects.  These are
+    # serialized so the LLM can cite real incident IDs / bug IDs and
+    # not invent them.  The compact path now passes ``ext_incidents``
+    # and ``ext_bugs`` through; the comprehensive path passes them via
+    # the ``_create_briefing_book`` helper above.  When omitted (older
+    # callers) we explicitly disclose unavailability instead of
+    # implying zero.
+    # =========================================================================
+    if ext_incidents is None and ext_bugs is None:
+        briefing.append("## External Intelligence (status.webex / help.webex)")
+        briefing.append(
+            "- External intelligence was NOT supplied for this run; treat as "
+            "data-unavailable, not zero."
+        )
+        briefing.append("")
+    else:
+        briefing.append("## External Intelligence (status.webex / help.webex)")
+        try:
+            _ei = ext_incidents or []
+            _eb = ext_bugs or []
+            briefing.append(f"- **Service Incidents (status.webex.com):** {len(_ei)}")
+            briefing.append(f"- **Bug References (help.webex.com):** {len(_eb)}")
+            if _ei:
+                briefing.append("")
+                briefing.append("### Recent Service Incidents (top 15 by published date):")
+                try:
+                    _ei_sorted = sorted(
+                        _ei,
+                        key=lambda x: str(x.get('published') or x.get('last_seen') or ''),
+                        reverse=True,
+                    )
+                except Exception:
+                    _ei_sorted = list(_ei)
+                for inc in _ei_sorted[:15]:
+                    _iid = inc.get('id') or inc.get('incident_id') or ''
+                    _title = (inc.get('title') or inc.get('summary') or '').strip()
+                    _impact = inc.get('impact') or inc.get('severity') or ''
+                    _pub = inc.get('published') or inc.get('last_seen') or ''
+                    briefing.append(
+                        f"- [{_iid}] {_title[:160]} (impact={_impact}, published={_pub})"
+                    )
+            if _eb:
+                briefing.append("")
+                briefing.append("### Help Center Bug References (top 15):")
+                for bug in _eb[:15]:
+                    _bid = bug.get('bug_id') or bug.get('id') or ''
+                    _btitle = (bug.get('title') or bug.get('summary') or '').strip()
+                    briefing.append(f"- [{_bid}] {_btitle[:160]}")
+        except Exception as _ei_err:
+            briefing.append(
+                f"- (External intel could not be serialized: {_ei_err}; treat as unavailable.)"
+            )
+        briefing.append("")
+
+    # =========================================================================
     # SECTION 5: DATA QUALITY AND SOURCES SUMMARY
     # =========================================================================
     briefing.append("## Data Sources and Quality Summary")
@@ -5320,13 +8948,24 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
     briefing.append(f"- **CSConsole (Snowflake)**: {len(ab_norm) if not ab_norm.empty else 0} adoption barriers")
     briefing.append(f"- **CSOne (TAC Cases)**: {len(csone_df) if not csone_df.empty else 0} support cases")
     briefing.append(f"- **Team Subscriptions**: {len(team_subs_df) if not team_subs_df.empty else 0} subscriptions")
+    # Round 4 / Phase 5.2: also disclose external intel availability so the
+    # LLM cannot tacitly assume "no incidents" when the feed is unavailable.
+    if ext_incidents is None and ext_bugs is None:
+        briefing.append(
+            "- **External Intelligence**: NOT supplied (treat as data-unavailable, not zero)"
+        )
+    else:
+        briefing.append(
+            f"- **External Intelligence**: {len(ext_incidents or [])} incidents, "
+            f"{len(ext_bugs or [])} bug references"
+        )
     briefing.append("")
     briefing.append("**Data Citation Requirement**: All metrics in this report are traceable to source systems:")
     briefing.append("- TAC Cases: Reference by SR Number (e.g., TAC #699864043)")
     briefing.append("- Adoption Barriers: Reference by CSConsole Record ID (e.g., CSConsole Record: aGte6000000fZUrCAM)")
     briefing.append("- BEMS Escalations: Reference by BEMS ID (e.g., BEMS01916938)")
     briefing.append("")
-    
+
     return "\n".join(briefing)
 
 PROMPT_PORTFOLIO_TEMPLATE = """
@@ -5346,17 +8985,24 @@ PROMPT_PORTFOLIO_TEMPLATE = """
 **REASONING PROTOCOL (follow this before writing):**
 1. **IDENTIFY** the single most critical signal first: BEMS escalations > P1/P2 cases > critical adoption barriers > software defects > general barriers
 2. **CROSS-REFERENCE** across data domains: Do customers with BEMS also have adoption barriers? Do defect IDs in cases match known bugs? Do high-ARR customers overlap with high-barrier counts?
-3. **QUANTIFY** the revenue exposure: always calculate the ARR at risk from the identified issues
+3. **QUANTIFY** the revenue exposure ONLY IF ARR fields are present in the briefing - otherwise state "ARR data not available for this run".
 4. **SYNTHESIZE** into a narrative that connects the dots - don't just list data, explain what it means together
 
 **DATA QUALITY NOTE:** If any data section appears incomplete, has unusual patterns (e.g., zero barriers for a large portfolio, missing severity fields), or shows anomalies, explicitly call this out. State what data may be missing and how it affects your confidence in the analysis.
+
+**Round 4 / Phase 6.4 — NEGATIVE CONSTRAINTS (HARD RULES):**
+- Do NOT invent ARR / revenue / dollar figures. If "ARR" or "$" does not appear in the briefing book above, state "ARR data not provided" and do not estimate, project, or extrapolate dollar values.
+- Do NOT invent percentage figures (e.g., "85% adoption", "30% churn risk") that are not explicitly present in the briefing book. If a percentage is needed and not present, write "(% not available)".
+- Do NOT extrapolate counts. Only quote counts (BEMS, TAC, AB, defects, customers, etc.) that appear verbatim in the briefing's `Data Sources and Quality Summary` or in a labeled section. If you must summarize, prefix with "Per the briefing book, …" so readers know it is sourced.
+- Do NOT cite IDs (TAC, AB, BEMS, CSC, incident, action plan) that are not literally present in the briefing book. Echoing an ID that the briefing did not list is a hallucination.
+- If a section's data is `NOT supplied` / `unavailable` per the briefing, you MUST write "data unavailable" rather than implying zero or improvising filler text.
 
 ---
 
 ## **Portfolio Health Score: [A/B/C/D/F]**
 
 **Grade Justification:**
-*State the grade and justify with SPECIFIC metrics: X BEMS escalations, Y critical defects affecting Z customers, chronic issues in W accounts, escalation rate at V%. Be direct about whether this portfolio is healthy, at-risk, or in crisis.*
+*State the grade and justify with SPECIFIC metrics drawn from the briefing book: BEMS escalation count, critical-defect count, count of affected customers, and chronic-issue count.  Quote the numbers EXACTLY as they appear in the briefing -- do NOT compute new ratios or rates (e.g. "escalation rate at V%") that the briefing does not already state.  If a rate was not provided, write "(rate not available)" instead of estimating it.  Be direct about whether this portfolio is healthy, at-risk, or in crisis.*
 
 ---
 
@@ -5403,9 +9049,9 @@ PROMPT_PORTFOLIO_TEMPLATE = """
 
 ---
 
-## **ALL Customers in Trouble (Sorted by Risk)**
+## **All Customers in Trouble (from this Briefing, Sorted by Risk)**
 
-*List ALL customers with severe issues - sorted by risk level. Do NOT limit to just 5 - include every customer that has problems:*
+*List every customer **listed in this briefing book** that has severe issues, sorted by risk level. Do NOT limit to just 5. Round 6 / Phase 3.4: This is intentionally scoped to "customers listed in the briefing" rather than "ALL customers" -- if the briefing was truncated or partial, only the customers it actually contains are valid; do not invent or extrapolate to customers it does not name. If the briefing notes a partial fetch, say so explicitly here.*
 
 **1. [Customer Name] - Risk Level: [HIGH/CRITICAL]**
 • **Problem Summary:** [What's really going wrong?]
@@ -5527,7 +9173,15 @@ You are CircuIT, an expert **Principal Technical Analyst and Business Strategist
 - **CSConsole Adoption Barriers:** Additional context beyond standard tracking for this customer
 - **CSSM Attribution:** Always reference the responsible CSSM ({CSSM_NAME}) for accountability
 
-**FULL TEXT REQUIREMENT:** When quoting or referencing specific adoption barriers or CSOne cases, you MUST include the complete, untruncated text. Do not use ellipses (...) or truncate descriptions. The complete details are provided in the "Complete Adoption Barrier Details" and "Complete CSOne (TAC) Case Details" sections.
+**FULL TEXT REQUIREMENT:** When quoting or referencing specific adoption barriers or CSOne cases, include the complete text **as it appears in the briefing for this customer**. Round 6 / Phase 3.18: the briefing book DOES truncate long sections (per-section character cap and field-level truncation are applied upstream); when the briefing already shows ellipses or a `[SECTION TRUNCATED: ...]` / `[Evidence truncated: ...]` marker for a value, quote the briefing exactly (including the marker). Do NOT invent the missing text and do NOT silently drop the truncation marker — readers must be able to see that the underlying source was capped. The "Complete Adoption Barrier Details" and "Complete CSOne (TAC) Case Details" sections contain the most complete copy of each item that the briefing was able to fit; treat that as the authoritative source.
+
+**Round 6 / Phase 3.5 — NEGATIVE CONSTRAINTS (HARD RULES):**
+- Do NOT invent ARR / revenue / dollar figures. If "ARR" or "$" does not appear in the briefing for {CUSTOMER_NAME}, write "ARR data not provided" and do not estimate or extrapolate dollar values.
+- Do NOT invent percentage figures (e.g., "85% adoption", "30% churn risk") that are not explicitly present in the briefing. If a percentage is needed and not present, write "(% not available)".
+- Do NOT extrapolate counts. Only quote counts (BEMS, TAC, AB, defects, incidents, action plans, etc.) that appear verbatim in the briefing for {CUSTOMER_NAME}. If you must summarize, prefix with "Per the briefing book, …" so readers know it is sourced.
+- Do NOT cite IDs (TAC, AB, BEMS, CSC, incident, action plan, success priority) that are not literally present in the briefing for {CUSTOMER_NAME}. Echoing an ID that the briefing did not list is a hallucination.
+- If a section's data is `NOT supplied` / `unavailable` / `None detected` per the briefing, you MUST write "data unavailable" rather than implying zero or improvising filler text.
+- Do NOT introduce facts about other customers, other technologies, or other CSSMs that are not explicitly present in the briefing.
 
 ## **Advanced Analytical Framework**
 When analyzing the data for this customer, you MUST think through these lenses specifically in the context of {TECHNOLOGY}:
@@ -5602,7 +9256,7 @@ Generate a detailed, customer-specific report in Markdown. Do NOT omit any heade
 *   **Market Opportunities:** [Untapped potential and expansion possibilities]
 *   **Technology Evolution Impact:** [How emerging trends affect their {TECHNOLOGY} strategy]
 
-### **4. Predictive Risk Assessment**
+### **6. Predictive Risk Assessment**
 *   **Churn Risk Level:** [Low, Medium, High, Critical]
 *   **Risk Factors:** [Specific indicators that suggest potential issues or opportunities, **including BEMS escalation patterns**]
 *   **BEMS Risk Analysis:** [If BEMS escalations exist for this customer, **list the count and specific BEMS IDs** (e.g., "3 BEMS escalations: BEMS-12345, BEMS-67890, BEMS-11111"). If no BEMS, state "No BEMS escalations". These indicate complex technical issues requiring specialized engineering expertise]
@@ -5610,7 +9264,7 @@ Generate a detailed, customer-specific report in Markdown. Do NOT omit any heade
 *   **Timeline Projections:** [Where this customer is heading in the next 6-12 months]
 *   **Early Warning Signs:** [Specific patterns that require immediate attention, **especially BEMS escalation trends**]
 
-### **5. Strategic Recommendations & Action Plan**
+### **7. Strategic Recommendations & Action Plan**
 *Provide 4-6 prioritized, **S.M.A.R.T.** recommendations for this specific customer focused on {TECHNOLOGY}.*
 
 **Recommendation 1: [Priority Level]**
@@ -5629,7 +9283,7 @@ Generate a detailed, customer-specific report in Markdown. Do NOT omit any heade
 **Recommendation 3: [Priority Level]**
 - [Same detailed structure as Recommendation 1]
 
-### **6. External Intelligence & Competitive Context**
+### **8. External Intelligence & Competitive Context**
 *   **Software Defects Impact:** [How publicly known bugs (help.webex.com) correlate with this customer's specific issues]
 *   **Service Incident Correlation:** [Impact of recent service incidents (status.webex.com) on this customer's experience]
 *   **Cross-Reference Analysis:** [Specific customer issues that align with known software defects or service incidents]
@@ -5637,7 +9291,7 @@ Generate a detailed, customer-specific report in Markdown. Do NOT omit any heade
 *   **Competitive Positioning:** [Their {TECHNOLOGY} capabilities vs. market alternatives]
 *   **Innovation Opportunities:** [Emerging {TECHNOLOGY} capabilities they could leverage]
 
-### **7. Success Metrics & Monitoring Plan**
+### **9. Success Metrics & Monitoring Plan**
 *   **Key Performance Indicators:** [Specific metrics to track {TECHNOLOGY} success]
 *   **Monitoring Frequency:** [How often to review progress and adjust strategy]
 *   **Escalation Triggers:** [Specific conditions that require immediate intervention]
@@ -5652,6 +9306,38 @@ def _json_lite(df: pd.DataFrame, limit=60, keep=None) -> str:
     use = df.copy()
     if keep:
         use = use[[c for c in keep if c in use.columns]]
+    # Round 12 / Phase 7.3: previously this helper called
+    # ``use.head(limit)`` directly on a frame in arbitrary upstream
+    # order, so the LLM context was non-deterministic across reruns
+    # of the same report -- two runs of the same briefing could
+    # contain different "first 60" rows and the model would narrate
+    # different exemplars.  Sort on the most stable identifier
+    # column we can find before slicing so the head() window is
+    # reproducible.  Use ``kind='stable'`` to preserve original
+    # order for ties.  Fail open to the legacy head() if the sort
+    # itself raises (e.g. mixed-type columns).
+    try:
+        _stable_keys = [
+            'display_id',
+            'SR Number',
+            'Case Number',
+            'CASE_ID',
+            'CASE_NUMBER',
+            'AB_ID',
+            'BARRIER_ID',
+            'ID',
+            'BEMS_ID',
+        ]
+        _sort_col = next((c for c in _stable_keys if c in use.columns), None)
+        if _sort_col is not None:
+            use = use.sort_values(
+                _sort_col,
+                kind='stable',
+                ascending=True,
+                na_position='last',
+            )
+    except Exception:  # Round 12 / Phase 7.3 defensive
+        pass
     return use.head(limit).to_json(orient="records")
 
 def generate_llm_response(system_prompt: str, briefing_book: str) -> str:
@@ -5673,34 +9359,103 @@ def generate_llm_response(system_prompt: str, briefing_book: str) -> str:
                 model_name=CIRCUIT_CONFIG["model_name"]
             )
             
-            logger.info(f"[[AI]] Calling CircuIT AI with 60s timeout...")
+            # Round 6 / Phase 3.7: log using the shared timeout
+            # constant rather than a hard-coded literal.
+            logger.info(
+                f"[[AI]] Calling CircuIT AI with {CircuitChatClient.REQUEST_TIMEOUT_SECONDS}s timeout..."
+            )
             result = client.complete(system_prompt, briefing_book)
             return result
         except Exception as e:
             logger.error(f"[[ERROR]] CircuIT AI call failed: {e}")
             return None
     
+    # Round 6 / Phase 3.7: align the future.result() wall-clock budget
+    # with the underlying CircuIT HTTP timeout, plus a small grace
+    # window for thread bookkeeping and JSON parsing on the way back.
+    # Previously the executor enforced a 60s deadline while the HTTP
+    # client allowed 120s, so we could cancel a still-healthy call.
+    _circuit_timeout_s = int(CircuitChatClient.REQUEST_TIMEOUT_SECONDS) + 5
+
     try:
-        # Use ThreadPoolExecutor with timeout to prevent hanging
-        logger.info(f"[[AI]] Starting CircuIT AI analysis with 60-second timeout...")
-        
+        logger.info(
+            f"[[AI]] Starting CircuIT AI analysis with {_circuit_timeout_s}-second timeout..."
+        )
+
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(call_circuit_ai)
-            result = future.result(timeout=60)  # 60-second timeout
-            
-            if result and result.strip() and not result.startswith("ERROR:"):
+            result = future.result(timeout=_circuit_timeout_s)
+
+            if result and isinstance(result, str) and result.startswith("ERROR:"):
+                # Round 6 / Phase 3.1: preserve a classified error
+                # verbatim.  The downstream caller can already
+                # interpret ``ERROR: content_filter:`` /
+                # ``ERROR: llm.rate_limit_429:`` etc. and wants the
+                # ``error_kind`` intact.  Previously this branch
+                # collapsed every classified failure into a generic
+                # "summarization failed" string and lost all
+                # diagnostic information.
+                #
+                # Round 7 / Phase 5.6: do not log the first 120 chars
+                # of the classified ERROR string -- that body often
+                # contains the upstream provider's raw exception
+                # message which can leak prompt fragments, stack
+                # frames, internal endpoints, customer identifiers
+                # echoed back from the model, or transient JWTs from
+                # the auth handshake.  Log only the parsed
+                # ``kind=...`` token plus an 8-char ``digest=...`` of
+                # the full body so operators can correlate identical
+                # failures across log lines without exposing the
+                # payload.  The digest uses SHA-256 (truncated for
+                # readability); the full body is still returned to
+                # the caller for downstream branching.
+                import hashlib as _h
+                _kind_token = "unknown"
+                try:
+                    _after = result[len("ERROR:"):].lstrip()
+                    _kind_token = _after.split(":", 1)[0].strip() or "unknown"
+                except Exception:
+                    _kind_token = "unknown"
+                try:
+                    _digest = _h.sha256(result.encode("utf-8", errors="replace")).hexdigest()[:8]
+                except Exception:
+                    _digest = "n/a"
+                logger.warning(
+                    "[[WARNING]] CircuIT AI returned classified ERROR kind=%s digest=%s len=%d",
+                    _kind_token,
+                    _digest,
+                    len(result),
+                )
+                return result
+            if result and result.strip():
                 logger.info(f"[[OK]] CircuIT AI response received: {len(result)} characters")
                 return result
             else:
                 logger.warning(f"[[WARNING]] CircuIT AI returned invalid response: {result}")
-                return "ERROR: CircuIT summarization failed - invalid response."
-                
+                return "ERROR: llm.empty_response: CircuIT summarization failed - invalid response."
+
     except FutureTimeoutError:
-        logger.error(f"⏰ CircuIT AI call timed out after 60 seconds")
-        return "ERROR: CircuIT summarization timed out. The AI service may be under heavy load. Please try again later."
+        logger.error(
+            f"⏰ CircuIT AI call timed out after {_circuit_timeout_s} seconds"
+        )
+        # Round 6 / Phase 3.6: include a stable ``llm.timeout`` error
+        # kind so callers can branch on it.  Round 6 / Phase 3.7: the
+        # ``_<seconds>s`` suffix now reflects the *aligned* wall-clock
+        # budget rather than a stale "60s" literal.
+        return (
+            f"ERROR: llm.timeout_{_circuit_timeout_s}s: CircuIT summarization timed out. "
+            "The AI service may be under heavy load. Please try again later."
+        )
     except Exception as e:
-        logger.error(f"[[ERROR]] Unexpected error in CircuIT AI call: {e}")
-        return "ERROR: CircuIT summarization failed due to unexpected error."
+        # Round 6 / Phase 3.6: include the real exception kind +
+        # message in the ERROR string so downstream logs can correlate
+        # the failure without losing the underlying cause.  We cap the
+        # exception text to keep the user-facing line tidy.
+        _e_msg = str(e)
+        if len(_e_msg) > 200:
+            _e_msg = _e_msg[:200] + '...'
+        logger.error("[[ERROR]] Unexpected error in CircuIT AI call: %s", e)
+        return f"ERROR: llm.wrapped: {_e_msg}"
 
 
 def generate_llm_json_response(system_prompt: str, briefing_book: str, schema: Dict[str, Any]) -> Dict[str, Any]:
@@ -5722,20 +9477,57 @@ def generate_llm_json_response(system_prompt: str, briefing_book: str, schema: D
     if not raw or str(raw).startswith("ERROR:"):
         return {"ok": False, "error": raw or "ERROR: empty response", "raw": raw}
 
+    # Round 5 / Phase 3.15: in JSON mode, ``finish_reason='length'``
+    # is not a recoverable warning -- a length-truncated JSON object
+    # may still be syntactically parseable (e.g. the model emitted
+    # ``"claims": []`` early before getting cut off) and silently
+    # downgrade the answer to "no findings".  ``CircuitChatClient``
+    # appends an explicit ``[TRUNCATED: ...finish_reason='length']``
+    # marker to length-truncated responses; detect that marker here
+    # and fail closed so the caller does not mistake a truncated
+    # answer for a complete one.
+    if "finish_reason='length'" in str(raw) or "[TRUNCATED:" in str(raw):
+        return {
+            "ok": False,
+            "error": (
+                "ERROR: LLM response was length-truncated (finish_reason='length'); "
+                "JSON output may be incomplete and is rejected to avoid silent "
+                "downgrade. Reduce briefing size or raise model max_tokens."
+            ),
+            "raw": raw,
+        }
+
     payload = None
     text = str(raw).strip()
+    # Round 7 / Phase 5.1: route the JSON salvage path through the
+    # shared ``ask_ai_grounded._extract_json_object`` brace-depth
+    # walker (introduced in Round 6 / Phase 3.8) instead of the
+    # legacy greedy ``re.search(r"\{[\s\S]*\}", text)``.  The greedy
+    # regex spans from the *first* ``{`` to the *last* ``}`` even
+    # when those belong to two unrelated objects (e.g. a model that
+    # prepends a short rationale block before the real JSON), which
+    # produced a mangled blob that always failed ``json.loads`` --
+    # turning a recoverable parse into a hard failure.  The walker
+    # respects strings/escapes and tries successive balanced objects
+    # in document order, matching the behaviour of every other
+    # JSON-from-LLM path in the codebase.  If the helper cannot be
+    # imported (cycle or missing module), we fall back to ``loads``
+    # only -- never to the greedy regex, which is unsafe.
     try:
         parsed = json.loads(text)
         if isinstance(parsed, dict):
             payload = parsed
     except json.JSONDecodeError:
-        match = re.search(r"\{[\s\S]*\}", text)
-        if match:
+        try:
+            from ask_ai_grounded import _extract_json_object as _ej
+        except Exception:
+            _ej = None
+        if _ej is not None:
             try:
-                parsed = json.loads(match.group(0))
+                parsed = _ej(text)
                 if isinstance(parsed, dict):
                     payload = parsed
-            except json.JSONDecodeError:
+            except Exception:
                 payload = None
 
     if payload is None:
@@ -5744,6 +9536,236 @@ def generate_llm_json_response(system_prompt: str, briefing_book: str, schema: D
     missing = [key for key in required_keys if key not in payload]
     if missing:
         return {"ok": False, "error": f"ERROR: JSON missing required keys: {missing}", "raw": raw, "data": payload}
+
+    # Round 7 / Phase 5.3: enforce ``additionalProperties: false`` via
+    # a real ``jsonschema`` validator at the boundary instead of
+    # relying on the prompt text alone.  Previously the JSON schema
+    # was only inlined into the prompt as a hint, which meant the
+    # model could (and occasionally did) ship extra top-level keys
+    # ("notes", "summary", "metadata") that downstream code silently
+    # ignored -- masking prompt-spec drift and letting unmodelled
+    # fields slip into the answer.  We:
+    #   1. clone the schema so we never mutate the caller's dict;
+    #   2. inject ``additionalProperties: false`` only when the
+    #      caller did not already set it (preserves explicit opt-out);
+    #   3. use ``Draft202012Validator`` and collect *all* errors so
+    #      the user sees the full list, not just the first;
+    #   4. fail closed with ``ok: False`` and the full error list so
+    #      callers can branch on schema mismatches without parsing
+    #      free-text error strings;
+    #   5. silently no-op if ``jsonschema`` is unavailable in the
+    #      environment (rather than crashing the whole pipeline).
+    if isinstance(schema, dict) and schema:
+        try:
+            import copy as _copy_schema
+            from jsonschema import Draft202012Validator  # type: ignore
+            _enforced_schema = _copy_schema.deepcopy(schema)
+            if (
+                _enforced_schema.get("type", "object") == "object"
+                and "additionalProperties" not in _enforced_schema
+            ):
+                _enforced_schema["additionalProperties"] = False
+            _validator = Draft202012Validator(_enforced_schema)
+            _schema_errors = sorted(
+                _validator.iter_errors(payload),
+                key=lambda e: list(e.absolute_path),
+            )
+            if _schema_errors:
+                _first = _schema_errors[0]
+                _err_summary = (
+                    f"jsonschema: {len(_schema_errors)} violation(s); first at "
+                    f"path {list(_first.absolute_path) or '<root>'}: {_first.message}"
+                )
+                return {
+                    "ok": False,
+                    "error": f"ERROR: schema validation failed: {_err_summary}",
+                    "raw": raw,
+                    "data": payload,
+                    "schema_errors": [
+                        {
+                            "path": list(e.absolute_path),
+                            "validator": e.validator,
+                            "message": e.message,
+                        }
+                        for e in _schema_errors[:20]
+                    ],
+                }
+        except ImportError:
+            # ``jsonschema`` is an optional dependency in some deploy
+            # environments.  Log once and continue with the legacy
+            # claim/string-list checks below; do not silently approve
+            # arbitrary payloads.
+            # Round 10 / Phase 6.4: in *production* (FLASK_ENV=production
+            # / ADOPTIQ_ENV=production), missing ``jsonschema`` is a
+            # hard error rather than a soft warning. The Round 7
+            # /Phase 5.3 hardening exists specifically because legacy
+            # validation alone is not strong enough; silently
+            # downgrading in production hides the regression that the
+            # validator was meant to catch. Dev/test still soft-fall
+            # back so local hacking on a fresh checkout works.
+            try:
+                import os as _os_p64_jsonschema
+                _env_name = (
+                    _os_p64_jsonschema.environ.get("ADOPTIQ_ENV")
+                    or _os_p64_jsonschema.environ.get("FLASK_ENV")
+                    or ""
+                ).strip().lower()
+            except Exception:
+                _env_name = ""
+            if _env_name == "production":
+                return {
+                    "ok": False,
+                    "error": (
+                        "ERROR: jsonschema is not installed but ADOPTIQ_ENV/FLASK_ENV is "
+                        "production; refusing to validate LLM JSON with the legacy "
+                        "claim-shape check alone (Round 10 / Phase 6.4). Install the "
+                        "'jsonschema' package."
+                    ),
+                    "raw": raw,
+                    "data": payload,
+                }
+            logger.warning(
+                "[[WARNING]] Round 7 / Phase 5.3: jsonschema is not installed; "
+                "additionalProperties:false enforcement is skipped.  Install "
+                "the 'jsonschema' package to harden LLM JSON validation."
+            )
+        except Exception as _schema_exc:
+            logger.warning(
+                "[[WARNING]] Round 7 / Phase 5.3: jsonschema validator raised "
+                "%s: %s; continuing with legacy validation.",
+                type(_schema_exc).__name__,
+                _schema_exc,
+            )
+
+    # Round 4 / Phase 6.6: validate per-claim shape and FAIL CLOSED on
+    # malformed entries.  Many of our LLM JSON responses include a
+    # ``claims`` (or ``items``) array where each entry is supposed to
+    # be ``{"text": str, "citations": list[str]}``.  Previously we
+    # accepted whatever the model returned, which let it ship strings
+    # in place of objects, missing ``citations`` arrays, or
+    # ``citations`` that were dicts/None.  Downstream code then
+    # silently dropped citations and the answer became ungrounded.
+    # We now scan any list-of-dict field whose first element looks
+    # claim-shaped and reject the whole payload if any entry is
+    # malformed.  The legacy "{ok:true,data:...}" envelope is
+    # preserved so existing callers that don't ship claim arrays are
+    # unaffected.
+    def _looks_like_claim_obj(obj: Any) -> bool:
+        return (
+            isinstance(obj, dict)
+            and ("text" in obj or "claim" in obj or "statement" in obj)
+        )
+
+    def _validate_claim(obj: Any, *, require_citations: bool = False) -> Optional[str]:
+        if not isinstance(obj, dict):
+            return f"claim is {type(obj).__name__}, expected object"
+        _text = obj.get("text") or obj.get("claim") or obj.get("statement")
+        if not isinstance(_text, str) or not _text.strip():
+            return "claim missing non-empty 'text' (or 'claim'/'statement')"
+        # Round 5 / Phase 3.6: when this object is *under a claim key*
+        # (claims/items/findings) the prompt contract requires every
+        # claim to ship with at least one verifiable source ID in
+        # ``citations``.  Otherwise the model can output unverifiable
+        # narrative claims that still pass the validator -- defeating
+        # the grounding hardening.  Plain claim-shaped fields outside
+        # the claim-key set keep the legacy (looser) behaviour.
+        if require_citations:
+            _cits = obj.get("citations")
+            if not isinstance(_cits, list) or not _cits:
+                return "claim under claim-key must include non-empty 'citations'"
+            if not any(isinstance(_c, str) and _c.strip() for _c in _cits):
+                return "'citations' must contain at least one non-empty string"
+        if "citations" in obj:
+            _cits = obj.get("citations")
+            if not isinstance(_cits, list):
+                return f"'citations' is {type(_cits).__name__}, expected list"
+            for _c in _cits:
+                if not isinstance(_c, str) or not _c.strip():
+                    return "'citations' entries must be non-empty strings"
+        return None
+
+    # Keys whose arrays are *expected* to be claim-shaped objects.
+    # If any of these keys exists and contains a non-dict entry, fail
+    # closed. This catches the model returning ``"claims": ["bare
+    # string"]`` (which would otherwise look like "no findings").
+    #
+    # Round 5 / Phase 3.1: drop ``actions`` and ``unknowns`` from this
+    # set.  These two fields are explicitly documented in the prompt
+    # contract as ``list[str]`` (recommended next steps and unanswered
+    # sub-questions, respectively).  Forcing them to be claim-shaped
+    # dicts caused the validator to reject correct payloads like
+    # ``"actions": ["Schedule QBR"]`` and turn a successful run into a
+    # ``ok: False`` error -- the *opposite* of the intended hardening.
+    _CLAIM_KEYS = {"claims", "items", "findings"}
+    _STRING_LIST_KEYS = {"actions", "unknowns"}
+    # Validate string-list keys early: every entry must be a non-empty
+    # string.  This still catches the model returning ``"actions":
+    # [{"do": "x"}]`` (object instead of string) which is also wrong
+    # per the prompt contract.
+    try:
+        for _slk in _STRING_LIST_KEYS:
+            _slv = payload.get(_slk)
+            if not isinstance(_slv, list):
+                continue
+            for _slidx, _slentry in enumerate(_slv):
+                if not isinstance(_slentry, str) or not _slentry.strip():
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"ERROR: malformed entry at {_slk}[{_slidx}]: "
+                            f"expected non-empty string, got {type(_slentry).__name__}"
+                        ),
+                        "raw": raw,
+                        "data": payload,
+                    }
+    except Exception:
+        pass  # noqa: PIE790  # validation is best-effort; fall through to claim-key check
+    try:
+        for _key, _val in list(payload.items()):
+            if not isinstance(_val, list) or not _val:
+                continue
+            _is_claim_key = str(_key).lower() in _CLAIM_KEYS
+            _first_looks_claim = _looks_like_claim_obj(_val[0])
+            # Validate when the key name is in the claim-key set OR
+            # the first element already looks claim-shaped (legacy
+            # behaviour).
+            if not (_is_claim_key or _first_looks_claim):
+                continue
+            for _idx, _entry in enumerate(_val):
+                # For claim-keys: every entry must be a dict.
+                if _is_claim_key and not isinstance(_entry, dict):
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"ERROR: malformed claim at {_key}[{_idx}]: "
+                            f"entry is {type(_entry).__name__}, expected object"
+                        ),
+                        "raw": raw,
+                        "data": payload,
+                    }
+                # For non-claim-keys whose first entry was claim-shaped,
+                # only validate dict entries (ignore mixed shapes).
+                if not isinstance(_entry, dict):
+                    continue
+                _problem = _validate_claim(_entry, require_citations=_is_claim_key)
+                if _problem:
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"ERROR: malformed claim at {_key}[{_idx}]: {_problem}"
+                        ),
+                        "raw": raw,
+                        "data": payload,
+                    }
+    except Exception as _claim_err:
+        # Defensive: if the validator itself crashes, fail closed.
+        logger.warning("Claim-shape validation crashed: %s", _claim_err)
+        return {
+            "ok": False,
+            "error": f"ERROR: claim-shape validation failed: {_claim_err}",
+            "raw": raw,
+            "data": payload,
+        }
 
     return {"ok": True, "data": payload, "raw": raw}
 
@@ -5796,6 +9818,23 @@ def _apply_scope_filter_ab(df: pd.DataFrame, tech: str, days: int) -> pd.DataFra
         min_expected = max(5, int(before_tech_filter * 0.1))
         if before_tech_filter > 0 and (filtered.empty or (tech == "All Contact Center" and len(filtered) < min_expected)):
             logger.warning(f"AB filter: Tech '{tech}' matched {len(filtered)} of {before_tech_filter}; using unfiltered ABs")
+            # Round 4 / Phase 4.6: stamp the widening on ``use.attrs``
+            # so downstream code (compact / comprehensive analysis,
+            # validators, prompts) can promote a ``partial_data_warnings``
+            # entry like "AB tech filter '<tech>' matched only X/Y;
+            # using unfiltered set" instead of silently surfacing the
+            # broader population as if it were the requested scope.
+            try:
+                use.attrs['tech_filter_widened'] = True
+                use.attrs['tech_filter_requested'] = str(tech)
+                use.attrs['tech_filter_matched'] = int(len(filtered))
+                use.attrs['tech_filter_total'] = int(before_tech_filter)
+                use.attrs['tech_filter_warning'] = (
+                    f"AB tech filter '{tech}' matched only {len(filtered)} of {before_tech_filter} "
+                    f"adoption barriers; widened to unfiltered set."
+                )
+            except Exception:
+                pass
         else:
             use = filtered
             logger.debug(f"AB filter: After technology filter: {len(use)} records (removed {before_tech_filter - len(use)})")
@@ -5944,12 +9983,22 @@ def _apply_scope_filter_csone_inclusive(csone_df, technology, days, include_all_
     # Apply date filter only when strict mode is requested.
     if not include_all_cases and 'Date/Time Opened' in filtered_df.columns:
         logger.debug("CSOne inclusive filter: Applying date filter using column 'Date/Time Opened'")
-        cutoff_date = datetime.now() - timedelta(days=days)
-        cutoff_date = cutoff_date.replace(tzinfo=None)  # Remove timezone for comparison
+        # Round 12 / Phase 2.2: ``datetime.now() - timedelta(days=days)``
+        # used the host's local clock, then forcibly stripped tz on
+        # both sides for the comparison.  On a Tokyo host that
+        # silently shifts the cutoff by ~9h vs UTC and on DST
+        # boundaries can include / exclude a full day's CSOne cases.
+        # Anchor with ``datetime.now(timezone.utc)`` and parse the
+        # column as tz-aware UTC so the comparison is unambiguous
+        # regardless of host timezone (mirrors Round 11 / Phase 2.x
+        # tz-aware filter pattern).
+        cutoff_date = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days=days)
         
         # Convert date column to datetime if needed
         try:
-            filtered_df['Date/Time Opened'] = pd.to_datetime(filtered_df['Date/Time Opened'], errors='coerce')
+            filtered_df['Date/Time Opened'] = pd.to_datetime(
+                filtered_df['Date/Time Opened'], errors='coerce', utc=True,
+            )
             before_filter = len(filtered_df)
             filtered_df = filtered_df[filtered_df['Date/Time Opened'] >= cutoff_date]
             after_filter = len(filtered_df)
@@ -6249,8 +10298,19 @@ def _prepare_ab(df: pd.DataFrame, dsm_df: pd.DataFrame) -> pd.DataFrame:
     close_col = next((c for c in ["CLOSED_DATE_C", "CLOSED_DATE", "RESOLVED_DATE", "LASTMODIFIEDDATE"] if c in use.columns), None)
     use["open_date"] = parse_datetime_series(use[date_col]) if date_col else pd.NaT
     use["closed_date"] = parse_datetime_series(use[close_col]) if close_col else pd.NaT
+    # Round 6 / Phase 4.14: tz-aware UTC reference (see same change
+    # in renewal _normalize_cases_df).
+    _now_utc = pd.Timestamp(datetime.now(timezone.utc))
+    _open_dt = use["open_date"]
+    try:
+        if getattr(_open_dt.dt, 'tz', None) is None:
+            _open_dt = _open_dt.dt.tz_localize('UTC')
+        else:
+            _open_dt = _open_dt.dt.tz_convert('UTC')
+    except Exception:
+        pass
     use["open_age_days"] = (
-        (pd.Timestamp(datetime.utcnow()) - use["open_date"]).dt.days.where(use["status_norm"].eq("Open"), other=pd.NA)
+        (_now_utc - _open_dt).dt.days.where(use["status_norm"].eq("Open"), other=pd.NA)
     )
     use["assignee_cssm_email"] = use.get("assignee_cssm_email")
     use["bemscsc_refs"] = (use["title"].astype(str) + " " + use["description"].astype(str)).apply(_extract_refs)
@@ -6283,14 +10343,58 @@ def _prepare_csone(df: pd.DataFrame, team_subs_df: pd.DataFrame) -> pd.DataFrame
     
     if sub_col:
         use[sub_col] = use[sub_col].astype(str)
-        
+
         # Check if team_subs_df has data and the required column before merging
         if team_subs_df is not None and not team_subs_df.empty and 'SUBSCRIPTION_ID' in team_subs_df.columns:
-            team_subs_df['SUBSCRIPTION_ID'] = team_subs_df['SUBSCRIPTION_ID'].astype(str)
-            
-            logger.debug(f"CSOne prepare: Merging with team subscription data ({len(team_subs_df)} team subscriptions)")
-            use = pd.merge(use, team_subs_df[['SUBSCRIPTION_ID', 'BU_NAME']], left_on=sub_col, right_on='SUBSCRIPTION_ID', how='left')
-            
+            # Round 6 / Phase 4.5: dedupe team_subs by SUBSCRIPTION_ID
+            # *before* merging and use ``validate='m:1'`` so a duplicated
+            # subscription row in the source can never silently fan out
+            # CSOne case rows into multiple copies (which would inflate
+            # every downstream count: barriers, escalations, defects).
+            # If a true duplicate exists we keep the first observed row
+            # (deterministic for the same input) and emit a warning so
+            # the upstream fetch can be inspected.
+            _team_subs_view = team_subs_df[['SUBSCRIPTION_ID', 'BU_NAME']].copy()
+            _team_subs_view['SUBSCRIPTION_ID'] = _team_subs_view['SUBSCRIPTION_ID'].astype(str)
+            _pre_dedupe = len(_team_subs_view)
+            _team_subs_view = _team_subs_view.drop_duplicates(
+                subset=['SUBSCRIPTION_ID'], keep='first'
+            ).reset_index(drop=True)
+            _post_dedupe = len(_team_subs_view)
+            if _pre_dedupe != _post_dedupe:
+                logger.warning(
+                    "CSOne prepare: team_subs had %d duplicate SUBSCRIPTION_ID row(s); "
+                    "deduped to %d before merge to prevent count inflation.",
+                    _pre_dedupe - _post_dedupe, _post_dedupe,
+                )
+
+            logger.debug(
+                f"CSOne prepare: Merging with team subscription data "
+                f"({_post_dedupe} unique team subscriptions)"
+            )
+            try:
+                use = pd.merge(
+                    use,
+                    _team_subs_view,
+                    left_on=sub_col,
+                    right_on='SUBSCRIPTION_ID',
+                    how='left',
+                    validate='m:1',
+                )
+            except Exception as _merge_err:
+                logger.error(
+                    "CSOne prepare: m:1 merge validation failed (%s); "
+                    "falling back to plain left-merge but counts may be inflated.",
+                    _merge_err,
+                )
+                use = pd.merge(
+                    use,
+                    _team_subs_view,
+                    left_on=sub_col,
+                    right_on='SUBSCRIPTION_ID',
+                    how='left',
+                )
+
             use['customer_name'] = use['BU_NAME'].fillna(use[original_cust_col])
             use.drop(columns=['BU_NAME', original_cust_col], inplace=True, errors='ignore')
             logger.debug(f"CSOne prepare: After merge: {len(use)} cases")
@@ -6319,7 +10423,22 @@ def _prepare_csone(df: pd.DataFrame, team_subs_df: pd.DataFrame) -> pd.DataFrame
 
 def _counts_by(df: pd.DataFrame, col: str) -> pd.DataFrame:
     if df is None or df.empty or col not in df.columns: return pd.DataFrame()
-    return df.groupby(col).size().reset_index(name="count").sort_values("count", ascending=False)
+    # Round 12 / Phase 11.4: previously this sort ran with the default
+    # quicksort algorithm and *no* secondary key, so two groups with
+    # identical ``count`` could swap positions on repeat runs and any
+    # downstream ``head(N)`` slice would render a different "Top N"
+    # set.  Add a stable kind and a tie-break on the grouped column so
+    # equal counts always resolve in alphabetical order.
+    return (
+        df.groupby(col)
+        .size()
+        .reset_index(name="count")
+        .sort_values(
+            ["count", col],
+            ascending=[False, True],
+            kind="stable",
+        )
+    )
 
 def _portfolio_grade(total_ab: int, esc_rate: float, chronic_rate: float) -> str:
     if total_ab >= 100 or esc_rate >= 30 or chronic_rate >= 30: return "D"
@@ -6346,8 +10465,10 @@ def _calc_rates(csone_df: pd.DataFrame):
     chronic = 0
     total = len(csone_df)
     return (
-        round(100 * escal / total, 1) if total else 0.0,
-        round(100 * chronic / total, 1) if total else 0.0,
+        # Round 12 / Phase 11.1: route escalation / chronic percentages
+        # through canonical helper for half-away-from-zero rounding.
+        _r12_round_percent(100 * escal / total, 1) if total else 0.0,
+        _r12_round_percent(100 * chronic / total, 1) if total else 0.0,
     )
 
 def _integrity_checks(ab_df: pd.DataFrame, csone_df: pd.DataFrame) -> Optional[str]:
@@ -6429,7 +10550,31 @@ def main():
             print(f"\n[WARN] No subscriptions found in DSM for the team of '{manager}'. Exiting.")
             return
 
-        team_subs_df = team_subs_df.merge(team_roster_df, left_on="CSSM_EMAIL", right_on="cssm_email", how="left")
+        # Round 6 / Phase 4.13: validate the team-roster merge to catch
+        # roster data quality issues early (a CSSM email mapped to two
+        # roster rows would otherwise silently double-count every
+        # subscription owned by that CSSM).  Falls back to a plain
+        # left-merge if validation fails so we still produce a report.
+        try:
+            team_subs_df = team_subs_df.merge(
+                team_roster_df,
+                left_on="CSSM_EMAIL",
+                right_on="cssm_email",
+                how="left",
+                validate="m:1",
+            )
+        except Exception as _merge_err:
+            logger.warning(
+                "Leader path: team roster m:1 merge validation failed (%s); "
+                "falling back to plain left-merge but counts may be inflated.",
+                _merge_err,
+            )
+            team_subs_df = team_subs_df.merge(
+                team_roster_df,
+                left_on="CSSM_EMAIL",
+                right_on="cssm_email",
+                how="left",
+            )
         cssm_lookup = pd.Series(team_subs_df.cssm_name.values, index=team_subs_df.BU_NAME).to_dict()
         sub_ids = team_subs_df["SUBSCRIPTION_ID"].dropna().unique().tolist()
         account_ids = team_subs_df["ACCOUNT_ID_C"].dropna().unique().tolist()
@@ -6441,7 +10586,33 @@ def main():
         print("Fetching Adoption Barriers...")
         ab_raw = fetch_adoption_barriers(ctx, account_ids, days)
         if not ab_raw.empty and "ACCOUNT_ID_C" in ab_raw.columns:
-            ab_raw = ab_raw.merge(team_subs_df[["ACCOUNT_ID_C","BU_NAME","CSSM_EMAIL"]].drop_duplicates(), on="ACCOUNT_ID_C", how="left")
+            # Round 6 / Phase 4.13: pre-deduplicate on ACCOUNT_ID_C
+            # and validate='m:1' so duplicate (account_id, BU_NAME)
+            # rows in the team subscription view do not double-count
+            # adoption barriers per account.
+            _ab_view = (
+                team_subs_df[["ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"]]
+                .dropna(subset=["ACCOUNT_ID_C"])
+                .drop_duplicates(subset=["ACCOUNT_ID_C"])
+            )
+            try:
+                ab_raw = ab_raw.merge(
+                    _ab_view,
+                    on="ACCOUNT_ID_C",
+                    how="left",
+                    validate="m:1",
+                )
+            except Exception as _merge_err:
+                logger.warning(
+                    "Leader path: adoption-barrier m:1 merge validation failed "
+                    "(%s); falling back to plain left-merge.",
+                    _merge_err,
+                )
+                ab_raw = ab_raw.merge(
+                    _ab_view,
+                    on="ACCOUNT_ID_C",
+                    how="left",
+                )
 
         # Fetch CSConsole data for comprehensive analysis
         print("Fetching CSConsole data (Action Plans, Customer Pulse, Success Priorities)...")
@@ -6478,18 +10649,47 @@ def main():
         # Fetch external intelligence
         print("Fetching external intelligence (Help Center bugs & Status incidents)...")
         ext_bugs = fetch_help_webex_bugs()
-        ext_incidents = fetch_status_incidents()
+        # Round 2 / Phase 1.7: thread report window if available in scope
+        try:
+            _inc_days = int(days)  # noqa: F821
+        except Exception:
+            _inc_days = 365
+        ext_incidents = fetch_status_incidents(days_back=_inc_days)
         print(f"Found {len(ext_bugs)} Help Center bug references and {len(ext_incidents)} status incidents.")
         
-        # Generate portfolio summary
+        # Generate portfolio summary.
+        #
+        # Round 5 / Phase 5.12: previously the AB / CSOne value
+        # counts were grouped on the raw ``customer_name`` column,
+        # which meant "Acme, Inc.", "Acme Inc", and "ACME inc."
+        # were three separate rows in the engagement frame and the
+        # subsequent outer-merge produced double-counted /
+        # mis-merged buckets.  Normalize via
+        # ``normalize_customer_name`` so the merge keys are
+        # canonical and AB + CSOne for the same customer line up
+        # on a single row.
         if not ab_norm.empty:
-            ab_counts = ab_norm['customer_name'].value_counts().reset_index()
+            ab_counts = (
+                ab_norm['customer_name']
+                .fillna('')
+                .astype(str)
+                .apply(normalize_customer_name)
+                .value_counts()
+                .reset_index()
+            )
             ab_counts.columns = ['customer_name', 'ab_count']
         else:
             ab_counts = pd.DataFrame(columns=['customer_name', 'ab_count'])
 
         if not csone_df.empty:
-            csone_counts = csone_df['customer_name'].value_counts().reset_index()
+            csone_counts = (
+                csone_df['customer_name']
+                .fillna('')
+                .astype(str)
+                .apply(normalize_customer_name)
+                .value_counts()
+                .reset_index()
+            )
             csone_counts.columns = ['customer_name', 'csone_count']
         else:
             csone_counts = pd.DataFrame(columns=['customer_name', 'csone_count'])
@@ -6534,20 +10734,88 @@ def main():
             print("\n[INFO] No customer activity found in either Adoption Barriers, CSOne, or CSConsole data. No deep dives to generate.")
             all_customers = []
         else:
-            all_customers = pd.concat(customer_series).dropna().unique()
+            # Round 10 / Phase 9.2: ``ab_norm`` / ``csone_df`` already
+            # carry their ``customer_name`` columns through
+            # ``normalize_customer_name`` (Round 6 / Phase 3.x), but
+            # the CSConsole branches above push raw ``BU_NAME`` /
+            # ``CUSTOMER_BU_NAME__C`` strings into ``customer_series``.
+            # Strict equality between a normalized AB key and an
+            # un-normalized BU_NAME string then silently drops the
+            # deep-dive section for any customer whose names differ
+            # by trailing whitespace, casing, or LLC/Inc suffix.
+            # Normalize via ``data_normalization.normalize_customer_name``
+            # so the iterator key matches the ``customer_name``
+            # column in every per-customer ``.copy()`` filter below.
+            try:
+                from data_normalization import normalize_customer_name as _norm_cust
+            except Exception:
+                _norm_cust = lambda x: x  # noqa: E731
+            _raw_customers = pd.concat(customer_series).dropna().tolist()
+            _seen_norm = set()
+            all_customers = []
+            for _raw in _raw_customers:
+                try:
+                    _key = _norm_cust(_raw)
+                except Exception:
+                    _key = _raw
+                if _key in _seen_norm:
+                    continue
+                _seen_norm.add(_key)
+                all_customers.append(_key)
 
         print(f"\nFound {len(all_customers)} customers with activity. Generating deep dives...")
 
+        # Round 10 / Phase 9.2: also normalize the per-frame customer
+        # columns ONCE so each per-customer filter is a like-for-like
+        # equality check on the normalized form.  This avoids
+        # repeating ``.apply(_norm_cust)`` inside every loop iteration
+        # and prevents the same whitespace/casing drift from
+        # silently losing AB/CSOne rows.
+        try:
+            from data_normalization import normalize_customer_name as _norm_cust
+        except Exception:
+            _norm_cust = lambda x: x  # noqa: E731
+        if ab_norm is not None and 'customer_name' in getattr(ab_norm, 'columns', []):
+            try:
+                ab_norm = ab_norm.assign(_r10_cust_key=ab_norm['customer_name'].apply(_norm_cust))
+            except Exception:
+                pass
+        if csone_df is not None and 'customer_name' in getattr(csone_df, 'columns', []):
+            try:
+                csone_df = csone_df.assign(_r10_cust_key=csone_df['customer_name'].apply(_norm_cust))
+            except Exception:
+                pass
+        try:
+            if not filtered_action_plans.empty and 'BU_NAME' in filtered_action_plans.columns:
+                filtered_action_plans = filtered_action_plans.assign(
+                    _r10_cust_key=filtered_action_plans['BU_NAME'].apply(_norm_cust)
+                )
+            if not filtered_customer_pulse.empty and 'BU_NAME' in filtered_customer_pulse.columns:
+                filtered_customer_pulse = filtered_customer_pulse.assign(
+                    _r10_cust_key=filtered_customer_pulse['BU_NAME'].apply(_norm_cust)
+                )
+            if not filtered_success_priorities.empty and 'CUSTOMER_BU_NAME__C' in filtered_success_priorities.columns:
+                filtered_success_priorities = filtered_success_priorities.assign(
+                    _r10_cust_key=filtered_success_priorities['CUSTOMER_BU_NAME__C'].apply(_norm_cust)
+                )
+            if not filtered_adoption_barriers.empty and 'BU_NAME' in filtered_adoption_barriers.columns:
+                filtered_adoption_barriers = filtered_adoption_barriers.assign(
+                    _r10_cust_key=filtered_adoption_barriers['BU_NAME'].apply(_norm_cust)
+                )
+        except Exception:
+            pass
+
         for i, customer_name in enumerate(all_customers, 1):
             print(f"  ({i}/{len(all_customers)}) Generating StoryBoard for: {customer_name}...")
-            cust_ab = ab_norm[ab_norm['customer_name'] == customer_name].copy() if ab_norm is not None and 'customer_name' in ab_norm else pd.DataFrame()
-            cust_csone = csone_df[csone_df['customer_name'] == customer_name].copy() if csone_df is not None and 'customer_name' in csone_df else pd.DataFrame()
+            # Round 10 / Phase 9.2: filter on the normalized key column
+            # so a normalized iterator key cannot miss its own rows.
+            cust_ab = ab_norm[ab_norm['_r10_cust_key'] == customer_name].copy() if ab_norm is not None and '_r10_cust_key' in getattr(ab_norm, 'columns', []) else pd.DataFrame()
+            cust_csone = csone_df[csone_df['_r10_cust_key'] == customer_name].copy() if csone_df is not None and '_r10_cust_key' in getattr(csone_df, 'columns', []) else pd.DataFrame()
             
-            # Filter CSConsole data for this customer
-            cust_action_plans = filtered_action_plans[filtered_action_plans['BU_NAME'] == customer_name].copy() if not filtered_action_plans.empty and 'BU_NAME' in filtered_action_plans.columns else pd.DataFrame()
-            cust_customer_pulse = filtered_customer_pulse[filtered_customer_pulse['BU_NAME'] == customer_name].copy() if not filtered_customer_pulse.empty and 'BU_NAME' in filtered_customer_pulse.columns else pd.DataFrame()
-            cust_success_priorities = filtered_success_priorities[filtered_success_priorities['CUSTOMER_BU_NAME__C'] == customer_name].copy() if not filtered_success_priorities.empty and 'CUSTOMER_BU_NAME__C' in filtered_success_priorities.columns else pd.DataFrame()
-            cust_csconsole_adoption_barriers = filtered_adoption_barriers[filtered_adoption_barriers['BU_NAME'] == customer_name].copy() if not filtered_adoption_barriers.empty and 'BU_NAME' in filtered_adoption_barriers.columns else pd.DataFrame()
+            cust_action_plans = filtered_action_plans[filtered_action_plans['_r10_cust_key'] == customer_name].copy() if not filtered_action_plans.empty and '_r10_cust_key' in filtered_action_plans.columns else pd.DataFrame()
+            cust_customer_pulse = filtered_customer_pulse[filtered_customer_pulse['_r10_cust_key'] == customer_name].copy() if not filtered_customer_pulse.empty and '_r10_cust_key' in filtered_customer_pulse.columns else pd.DataFrame()
+            cust_success_priorities = filtered_success_priorities[filtered_success_priorities['_r10_cust_key'] == customer_name].copy() if not filtered_success_priorities.empty and '_r10_cust_key' in filtered_success_priorities.columns else pd.DataFrame()
+            cust_csconsole_adoption_barriers = filtered_adoption_barriers[filtered_adoption_barriers['_r10_cust_key'] == customer_name].copy() if not filtered_adoption_barriers.empty and '_r10_cust_key' in filtered_adoption_barriers.columns else pd.DataFrame()
             
             if cust_ab.empty and cust_csone.empty and cust_action_plans.empty and cust_customer_pulse.empty and cust_success_priorities.empty and cust_csconsole_adoption_barriers.empty:
                 continue
@@ -6563,8 +10831,20 @@ def main():
             }
             
             customer_briefing = _create_briefing_book(customer_name, cust_ab, cust_csone, ext_bugs, ext_incidents, matches, matched_df, db_profile, None, customer_csconsole_data)
-            customer_prompt = PROMPT_CUSTOMER_TEMPLATE.format(CUSTOMER_NAME=customer_name, CSSM_NAME=cssm_name)
-            
+            # Round 5 / Phase 3.2: pass TECHNOLOGY and MANAGER as well so
+            # the prompt template's ``{TECHNOLOGY}`` / ``{MANAGER}``
+            # placeholders are filled.  Previously only CUSTOMER_NAME
+            # and CSSM_NAME were passed, which raised a ``KeyError``
+            # during ``str.format`` and caused the entire per-customer
+            # storyboard to fall back to a generic template -- the
+            # technology focus instructions were silently dropped.
+            customer_prompt = PROMPT_CUSTOMER_TEMPLATE.format(
+                CUSTOMER_NAME=customer_name,
+                CSSM_NAME=cssm_name,
+                TECHNOLOGY=tech,
+                MANAGER=manager,
+            )
+
             customer_storyboard = generate_llm_response(customer_prompt, customer_briefing)
             append_to_word_report(doc, customer_storyboard)
 
@@ -6655,6 +10935,13 @@ PROMPT_COMPACT_EXECUTIVE_TEMPLATE = """
 
 **DATA QUALITY:** If any section has zero data when the portfolio is large, flag it as a potential data gap rather than assuming no issues exist.
 
+**Round 4 / Phase 6.4 — NEGATIVE CONSTRAINTS (HARD RULES):**
+- Do NOT invent ARR / revenue / dollar figures. If "ARR" or "$" does not appear in the briefing book, write "ARR data not provided" — never estimate or extrapolate.
+- Do NOT invent percentages (%). If a percentage is not present in the briefing, write "(% not available)".
+- Do NOT cite TAC, AB, BEMS, CSC, action plan, or incident IDs that are not literally present in the briefing book above.
+- If "External Intelligence: NOT supplied" appears in the briefing, you MUST treat external incidents/defects as data-unavailable and not silently treat as zero.
+- If a section has zero rows but the briefing labels it "data unavailable" or "fetch_error", write "data unavailable" rather than implying clean state.
+
 ---
 
 ## **Portfolio Health: [A/B/C/D/F]**
@@ -6677,9 +10964,9 @@ PROMPT_COMPACT_EXECUTIVE_TEMPLATE = """
 
 ---
 
-## **ALL Customers in Trouble (Complete List)**
+## **Customers in Trouble (from the briefing book)**
 
-*Include EVERY customer with problems - do NOT limit to 5:*
+*List EACH customer that the briefing book identifies as having problems. Round 10 / Phase 6.3: do NOT extrapolate beyond the customers that appear in the briefing -- "EVERY"/"ALL" framing previously encouraged the model to invent rows when the briefing was truncated.*
 
 **1. [Customer] - Risk: [HIGH/CRITICAL]**
 • **Problem:** [What's really wrong]
@@ -6690,7 +10977,7 @@ PROMPT_COMPACT_EXECUTIVE_TEMPLATE = """
 • **Impact:** [Business effect]
 • **Action:** [Immediate step needed]
 
-**Continue for ALL remaining customers with the same detailed format**
+**Continue for the remaining customers that the briefing book lists, using the same detailed format. Stop when the briefing book's customer list is exhausted; do NOT pad with placeholder customers.**
 
 ---
 
@@ -6732,5 +11019,13 @@ PROMPT_COMPACT_EXECUTIVE_TEMPLATE = """
 
 ---
 
-**DATA:** {data}
+# Round 6 / Phase 3.11: the briefing data is NOT embedded in this
+# system prompt anymore.  Instead, callers MUST pass the briefing
+# book as the *user* message to ``generate_llm_response``.  Mixing
+# the data into the system prompt (a) inflates token cost when
+# templates are cached, (b) makes prompt-injection harder to reason
+# about because rules and data share the same trust frame, and (c)
+# defeats Azure's content-policy boundary which treats system and
+# user messages differently.  The user message will be the briefing
+# book in its entirety.
 """

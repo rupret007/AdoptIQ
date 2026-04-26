@@ -94,9 +94,46 @@
                 <div class="card ai-card fade-in shadow-cisco mb-4">
                     <div class="card-body">
                         <div id="loadingState" style="display:none;" class="text-center py-4">
-                            <div class="spinner-border text-primary mb-3" role="status"></div>
+                            {# Round 8 / Phase 5.6: a Bootstrap .spinner-border
+                               with role="status" needs visually-hidden text
+                               for screen readers; otherwise assistive
+                               technology announces an empty status region
+                               and the user has no idea anything is happening. #}
+                            <div class="spinner-border text-primary mb-3" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
                             <p class="text-muted mb-1 fw-semibold">Fetching live data from Snowflake...</p>
                             <p class="text-muted small mb-0" id="loadingDetail">Connecting and gathering portfolio data. This may take 15-30 seconds.</p>
+                        </div>
+                        <!-- Phase 2.4: legacy ungrounded mode banner -->
+                        <div id="ungroundedBanner" class="alert alert-warning small mb-3" style="display:none;">
+                            <i class="fas fa-triangle-exclamation me-1"></i>
+                            <strong>Ungrounded answer.</strong>
+                            <span id="ungroundedDetail">This answer used the legacy LLM path. Source IDs are not enforced.</span>
+                        </div>
+                        <!-- Phase 2.4: grounded failed + opt-in available -->
+                        <div id="groundedFailedBanner" class="alert alert-danger small mb-3" style="display:none;">
+                            <i class="fas fa-circle-exclamation me-1"></i>
+                            <strong>Grounded Ask-AI unavailable.</strong>
+                            <span id="groundedFailedDetail"></span>
+                            <div class="mt-2">
+                                <button class="btn btn-outline-warning btn-sm" type="button" id="legacyOptInBtn">
+                                    <i class="fas fa-bolt me-1"></i>Use ungrounded answer (no source citations)
+                                </button>
+                            </div>
+                        </div>
+                        <!-- Phase 2.5: evidence/account truncation banner -->
+                        <div id="truncationBanner" class="alert alert-info small mb-3" style="display:none;">
+                            <i class="fas fa-scissors me-1"></i>
+                            <strong>Sample-based answer.</strong>
+                            <span id="truncationDetail"></span>
+                        </div>
+                        <!-- Phase 1.3b: partial data warning banner -->
+                        <div id="partialDataBanner" class="alert alert-warning small mb-3" style="display:none;">
+                            <i class="fas fa-database me-1"></i>
+                            <strong>Partial data.</strong>
+                            <span>One or more sources failed to load. Affected metrics are unavailable, not zero.</span>
+                            <ul id="partialDataList" class="mb-0 mt-1"></ul>
                         </div>
                         <div id="answerContent" class="ai-answer"></div>
                         <div id="contextInfo" style="display:none;" class="mt-3 pt-3 border-top">
@@ -131,111 +168,33 @@
 
 {% block head %}
 <meta name="csrf-token" content="{{ csrf_token() }}">
+{# Round 8 / Phase 5.2: page-level CSP override that drops
+   ``script-src 'unsafe-inline'``.  The Ask-AI page used to ship
+   a ~300-line inline ``<script>`` block, which forced the
+   site-wide CSP in base.html to keep ``'unsafe-inline'`` on
+   ``script-src`` -- effectively disabling the whole point of
+   CSP for XSS containment.  The script body now lives in
+   ``/static/js/ask_ai.js`` (loaded via ``<script src>``), so this
+   page does not need inline-script permission at all.  We still
+   inherit the relaxed ``style-src 'unsafe-inline'`` from base.html
+   because Bootstrap utility classes and our extra_css block rely
+   on inline styles for now (Phase 5.2 will tighten that
+   separately). #}
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self';
+               script-src 'self' https://cdn.jsdelivr.net;
+               style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+               img-src 'self' data: https:;
+               font-src 'self' https://cdn.jsdelivr.net;
+               object-src 'none';
+               base-uri 'self';
+               form-action 'self';
+               frame-ancestors 'self';">
 {% endblock %}
 
 {% block extra_js %}
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-    function formatAnswer(text) {
-        if (!text || typeof text !== 'string') return '';
-        var escaped = text
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#x27;');
-        return escaped
-            .replace(/^#### (.+)$/gm, '<h6 class="mb-1 mt-3 text-muted">$1</h6>')
-            .replace(/^### (.+)$/gm, '<h6 class="mb-2 mt-3">$1</h6>')
-            .replace(/^## (.+)$/gm, '<h5 class="mb-2 mt-3 text-primary">$1</h5>')
-            .replace(/^# (.+)$/gm, '<h4 class="mb-2 mt-4 text-primary">$1</h4>')
-            .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-            .replace(/^\d+\.\s+/gm, function(m) { return '<span class="text-primary fw-bold">' + m.trim() + '</span> '; })
-            .replace(/^[\-\*]\s+/gm, '<span class="text-primary me-1">&#9679;</span> ')
-            .replace(/^---$/gm, '<hr class="my-3">')
-            .replace(/`([^`]+)`/g, '<code class="bg-light px-1 rounded">$1</code>')
-            .replace(/\n/g, '<br>');
-    }
-
-    var questionInput = document.getElementById('aiQuestion');
-    var askBtn = document.getElementById('askBtn');
-    var answerArea = document.getElementById('answerArea');
-    var loadingState = document.getElementById('loadingState');
-    var loadingDetail = document.getElementById('loadingDetail');
-    var answerContent = document.getElementById('answerContent');
-    var contextInfo = document.getElementById('contextInfo');
-    var contextDetail = document.getElementById('contextDetail');
-
-    function askAI(question) {
-        if (!question.trim()) return;
-        answerArea.style.display = '';
-        loadingState.style.display = '';
-        answerContent.textContent = '';
-        contextInfo.style.display = 'none';
-        askBtn.disabled = true;
-
-        var payload = {
-            question: question.trim(),
-            manager: document.getElementById('aiManager').value,
-            technology: document.getElementById('aiTech').value,
-            days: parseInt(document.getElementById('aiDays').value) || 90
-        };
-
-        var steps = [
-            'Connecting to Snowflake...',
-            'Fetching team subscriptions...',
-            'Loading adoption barriers and cases...',
-            'Building briefing for AI...',
-            'Waiting for Circuit AI response...'
-        ];
-        var stepIdx = 0;
-        var stepTimer = setInterval(function() {
-            stepIdx++;
-            if (stepIdx < steps.length) {
-                loadingDetail.textContent = steps[stepIdx];
-            }
-        }, 4000);
-
-        var csrfToken = (document.querySelector('meta[name="csrf-token"]') || {}).getAttribute('content') || '';
-        fetch('/api/ask-ai-portfolio', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
-            body: JSON.stringify(payload)
-        })
-        .then(function(r) { return r.json().catch(function() { return {ok: false, error: 'Invalid response from server'}; }); })
-        .then(function(data) {
-            clearInterval(stepTimer);
-            loadingState.style.display = 'none';
-            askBtn.disabled = false;
-            if (data.ok) {
-                answerContent.innerHTML = formatAnswer((data.answer && data.answer.trim()) ? data.answer : 'No answer was returned. Please try rephrasing your question.');
-                if (data.context_summary) {
-                    contextInfo.style.display = '';
-                    contextDetail.textContent = data.context_summary;
-                }
-            } else {
-                answerContent.innerHTML = formatAnswer('Error: ' + (data.error || 'Unknown error. Check that Snowflake and Circuit credentials are configured.'));
-            }
-        })
-        .catch(function(err) {
-            clearInterval(stepTimer);
-            loadingState.style.display = 'none';
-            askBtn.disabled = false;
-            answerContent.innerHTML = formatAnswer('Network error: ' + err);
-        });
-    }
-
-    askBtn.addEventListener('click', function() { askAI(questionInput.value); });
-    questionInput.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter') { e.preventDefault(); askAI(this.value); }
-    });
-
-    document.querySelectorAll('.suggestion-btn').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            questionInput.value = this.textContent;
-            askAI(this.textContent);
-        });
-    });
-});
-</script>
+{# Round 8 / Phase 5.2: load the Ask-AI page client from a static
+   asset so it executes under ``script-src 'self'`` without needing
+   the unsafe-inline relaxation. #}
+<script src="{{ url_for('static', filename='js/ask_ai.js') }}"></script>
 {% endblock %}

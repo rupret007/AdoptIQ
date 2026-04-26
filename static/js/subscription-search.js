@@ -51,9 +51,26 @@ function setupSubscriptionSearch() {
                     limit: 10
                 })
             });
-            
+
+            // Round 5 / Phase 2.12: validate the HTTP status and the
+            // response Content-Type before trying to parse JSON.  Calling
+            // ``response.json()`` on a 4xx/5xx that returned an HTML
+            // error page or an empty body throws a SyntaxError which is
+            // then caught below and turned into a generic "Search
+            // failed" toast -- that hides the real failure (e.g. CSRF
+            // token expired, login required, server 500).
+            if (!response.ok) {
+                showNotification('Search failed: HTTP ' + response.status + ' ' + (response.statusText || ''), 'error');
+                return;
+            }
+            const _ct = (response.headers.get('Content-Type') || '').toLowerCase();
+            if (_ct.indexOf('application/json') === -1) {
+                showNotification('Search failed: server returned non-JSON response (' + (_ct || 'unknown') + ')', 'error');
+                return;
+            }
+
             const data = await response.json();
-            
+
             if (data.success) {
                 displaySearchResults(data.subscriptions);
             } else {
@@ -124,14 +141,33 @@ function setupSubscriptionSearch() {
         }
     });
     
+    // Round 9 / Phase 5.3: keep subscription objects in a JS-side Map
+    // keyed by row id rather than round-tripping arbitrary JSON
+    // through HTML ``data-`` attributes with hand-rolled escapers.
+    // The previous form (``JSON.stringify(sub).replace(/&/g,...)``)
+    // missed edge-Unicode characters that browsers normalise during
+    // HTML parsing -- for example, U+0085 NEXT LINE and a handful of
+    // bidirectional control codepoints would survive the regex chain
+    // but break ``JSON.parse`` on read.  By keeping the object on a
+    // Map we never serialise it into the DOM, so an attacker cannot
+    // smuggle markup or bidi controls through the customer-name /
+    // CSSM fields and the round-trip is byte-exact.
+    const _subRegistry = new Map();
+    let _subSeq = 0;
+
     // Display search results
     const displaySearchResults = (subscriptions) => {
+        _subRegistry.clear();
         if (subscriptions.length === 0) {
             subscriptionList.innerHTML = '<div class="text-muted text-center py-3">No subscriptions found</div>';
         } else {
-            subscriptionList.innerHTML = subscriptions.map(sub => `
-                <div class="list-group-item list-group-item-action subscription-item" 
-                     data-subscription="${JSON.stringify(sub).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}">
+            subscriptionList.innerHTML = subscriptions.map(sub => {
+                _subSeq += 1;
+                const _rowId = 'sub-row-' + _subSeq;
+                _subRegistry.set(_rowId, sub);
+                return `
+                <div class="list-group-item list-group-item-action subscription-item"
+                     data-sub-row-id="${_rowId}">
                     <div class="d-flex w-100 justify-content-between">
                         <h6 class="mb-1">${escapeHtml(sub.BU_NAME)}</h6>
                         <small>${escapeHtml(sub.SUBSCRIPTION_ID)}</small>
@@ -143,8 +179,9 @@ function setupSubscriptionSearch() {
                     </p>
                     <small>CSSM: ${escapeHtml(sub.CSSM_NAME || 'Unknown')}</small>
                 </div>
-            `).join('');
-            
+            `;
+            }).join('');
+
             // Add click handlers to subscription items
             subscriptionList.querySelectorAll('.subscription-item').forEach(item => {
                 item.addEventListener('click', () => {
@@ -152,13 +189,28 @@ function setupSubscriptionSearch() {
                     subscriptionList.querySelectorAll('.subscription-item').forEach(i => {
                         i.classList.remove('active');
                     });
-                    
+
                     // Add selection to clicked item
                     item.classList.add('active');
-                    
-                    // Store selected subscription
-                    selectedSubscription = JSON.parse(item.dataset.subscription);
-                    
+
+                    // Round 9 / Phase 5.3: look up the original
+                    // subscription object on the in-memory registry
+                    // by row id instead of decoding a JSON-in-HTML
+                    // payload.  This eliminates the entire edge-Unicode
+                    // class of failures the Round 6 / Phase 2.9
+                    // try/catch was working around, while still
+                    // failing closed if the dataset attribute is
+                    // missing or the row id was evicted.
+                    const _rowId = item.dataset.subRowId || '';
+                    selectedSubscription = _rowId ? (_subRegistry.get(_rowId) || null) : null;
+                    if (!selectedSubscription || typeof selectedSubscription !== 'object') {
+                        selectedSubscription = null;
+                        useBtn.disabled = true;
+                        selectedDiv.style.display = 'none';
+                        console.error('subscription-search: missing/invalid registry entry for row', _rowId);
+                        return;
+                    }
+
                     // Show selected subscription details
                     selectedDetails.innerHTML = `
                         <div class="row">

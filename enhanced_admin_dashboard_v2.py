@@ -22,9 +22,9 @@ import threading
 import time
 import logging
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from flask import Flask, render_template_string, request, jsonify, redirect, url_for, Response
+from flask import Flask, render_template_string, request, jsonify, redirect, url_for, Response, session, abort
 from collections import defaultdict, deque
 from contextlib import contextmanager
 import requests
@@ -58,6 +58,20 @@ def _safe_json_load(s, default=None):
         return default
 
 
+def _r12_admin_utc_iso_z() -> str:
+    """Round 12 / Phase 10.4: produce a single canonical UTC ISO-Z
+    timestamp for every persisted admin field (insights, performance
+    metrics, audit rows, server status).  Previously these fields
+    used ``datetime.now().isoformat()`` (LOCAL TIME, no zone marker)
+    while ``store_report_history`` already routes through a local
+    ``_utc_iso_z`` helper -- mixing the two created the same kind
+    of "completed_at < start_time" artifact Round 5 / Phase 6.3
+    fixed for ``store_report_history`` itself.  Use a UTC, ``Z``-
+    suffixed string so the entire admin schema shares one clock.
+    """
+    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
 # Main app URL (for container: set ADOPTIQ_MAIN_URL=http://adoptiq-main:5000)
 MAIN_APP_URL = os.environ.get('ADOPTIQ_MAIN_URL', 'http://localhost:5001')
 
@@ -81,6 +95,50 @@ elif getattr(sys, 'frozen', False):
     raise RuntimeError("ADOPTIQ_ADMIN_SECRET_KEY must be set for packaged builds.")
 else:
     admin_app.secret_key = secrets.token_urlsafe(48)
+
+# Round 5 / Phase 2.3: per-session CSRF token issued from the Flask session
+# and required by destructive admin endpoints (start_server / stop_server /
+# clear_logs / export_logs).  Previously these were GET routes with no CSRF
+# protection, so any cross-origin link or img/iframe loaded by an
+# authenticated admin could trigger them.  We now require POST with a
+# matching ``X-AdoptIQ-Admin-CSRF`` header *or* form field.
+def _admin_csrf_token() -> str:
+    """Return (and lazily mint) the per-session admin CSRF token."""
+    tok = session.get('_admin_csrf')
+    if not tok:
+        tok = secrets.token_urlsafe(32)
+        session['_admin_csrf'] = tok
+    return tok
+
+
+def _require_admin_csrf() -> None:
+    """Abort with HTTP 403 if the current request lacks a valid CSRF token.
+
+    Called explicitly from POST-only destructive routes; we deliberately do
+    not register an ``@before_request`` hook so read-only routes (and the
+    AJAX endpoints already guarded elsewhere) keep their existing
+    behaviour.
+    """
+    expected = session.get('_admin_csrf')
+    # Round 6 / Phase 6.13: do NOT accept the CSRF token from
+    # ``request.args`` (URL query string).  Query-string tokens leak
+    # through ``Referer`` headers, browser history, OS process lists,
+    # and webserver access logs, which makes them functionally
+    # equivalent to no protection at all for destructive POSTs.
+    # Restrict to the header (preferred) and the hidden form field
+    # (POST-body) sources.
+    provided = (
+        request.headers.get('X-AdoptIQ-Admin-CSRF')
+        or request.form.get('_admin_csrf')
+    )
+    if not expected or not provided or not secrets.compare_digest(str(expected), str(provided)):
+        log_error('SECURITY', 'Admin CSRF check failed', '_require_admin_csrf')
+        abort(403)
+
+
+@admin_app.context_processor
+def _inject_admin_csrf():
+    return {'admin_csrf_token': _admin_csrf_token()}
 
 # Global variables for comprehensive monitoring
 server_process = None
@@ -165,10 +223,79 @@ def init_database():
                     ip_address TEXT,
                     user_agent TEXT,
                     error_message TEXT,
+                    days INTEGER,
+                    word_path TEXT,
+                    excel_path TEXT,
+                    word_hash TEXT,
+                    excel_hash TEXT,
+                    partial_data_warnings_json TEXT,
                     created_at TEXT
                 )
             ''')
-            
+            # Round 3 / Phase 5.4: ALTER existing rows so older
+            # databases pick up the new audit columns without
+            # losing prior history. SQLite has no ``IF NOT EXISTS``
+            # for ADD COLUMN, so introspect first.
+            try:
+                cursor.execute("PRAGMA table_info(report_history)")
+                _existing_cols = {row[1] for row in cursor.fetchall()}
+                _new_cols = [
+                    ("days", "INTEGER"),
+                    ("word_path", "TEXT"),
+                    ("excel_path", "TEXT"),
+                    ("word_hash", "TEXT"),
+                    ("excel_hash", "TEXT"),
+                    ("partial_data_warnings_json", "TEXT"),
+                ]
+                for _col, _type in _new_cols:
+                    if _col not in _existing_cols:
+                        try:
+                            cursor.execute(
+                                f"ALTER TABLE report_history ADD COLUMN {_col} {_type}"
+                            )
+                        except Exception as _alter_err:
+                            logger.debug(
+                                "ALTER report_history ADD %s skipped: %s",
+                                _col, _alter_err,
+                            )
+            except Exception as _migrate_err:
+                logger.debug(
+                    "report_history schema migration skipped: %s", _migrate_err
+                )
+
+            # Round 5 / Phase 4.12: every status / progress request
+            # (including the rehydration path in
+            # ``_build_status_from_report_history``) issues
+            # ``WHERE request_id = ? ORDER BY created_at DESC LIMIT 1``
+            # against this table.  Without an index that becomes a
+            # full table scan that grows linearly with audit
+            # retention, which is exactly the wrong shape for a
+            # frequently-polled status endpoint.  Add an index on
+            # ``request_id`` (and a covering one on
+            # ``(request_id, created_at)`` for the LIMIT 1 newest
+            # tiebreak); both are no-ops on existing DBs that already
+            # have them.
+            try:
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_report_history_request_id "
+                    "ON report_history(request_id)"
+                )
+            except Exception as _idx_err:
+                logger.debug(
+                    "CREATE INDEX idx_report_history_request_id skipped: %s",
+                    _idx_err,
+                )
+            try:
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_report_history_request_created "
+                    "ON report_history(request_id, created_at DESC)"
+                )
+            except Exception as _idx_err:
+                logger.debug(
+                    "CREATE INDEX idx_report_history_request_created skipped: %s",
+                    _idx_err,
+                )
+
             # Audit results table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS audit_results (
@@ -260,20 +387,257 @@ def init_database():
 
 def record_report_completion(request_id: str, report_type: str, manager: str, technology: str,
                              customer_name: str, status: str, start_time: str, end_time: str,
-                             ip_address: str = '', user_agent: str = '', error_message: str = ''):
-    """Record a completed report for audit/history. Call from app_simple when report finishes."""
+                             ip_address: str = '', user_agent: str = '', error_message: str = '',
+                             days: int = None, word_path: str = '', excel_path: str = '',
+                             partial_data_warnings: list = None):
+    """Record a completed report for audit/history. Call from app_simple when report finishes.
+
+    Round 3 / Phase 5.4: persist the audit columns the History page
+    actually needs to render an honest "what did this run produce?"
+    row — analysis horizon (``days``), generated artifact paths,
+    SHA-256 hashes for tamper detection, and the partial-data
+    warnings list so caveats survive past the in-memory status dict.
+    """
     try:
+        import hashlib as _hashlib
+        import os as _os
+        import json as _json
+        from datetime import timezone as _tz
+
+        # Round 5 / Phase 6.3: previously stored ``datetime.now().isoformat()``
+        # (LOCAL TIME, no zone marker) which was indistinguishable from
+        # the server's local clock.  When the report_history rows were
+        # later compared against UI timestamps (which are UTC w/ a 'Z'
+        # suffix), the two streams disagreed by the local-UTC offset
+        # and "completed_at" appeared to occur before "start_time".
+        # Force a UTC, ``Z``-suffixed ISO-8601 string so every audit
+        # row uses a single, unambiguous clock.
+        def _utc_iso_z(value: Any) -> str:
+            if not value:
+                return ''
+            if isinstance(value, str):
+                # If the caller already supplied a Z / offset string,
+                # keep it. Otherwise, treat naive strings as UTC.
+                _v = value.strip()
+                if not _v:
+                    return ''
+                if _v.endswith('Z') or '+' in _v[10:] or '-' in _v[10:]:
+                    return _v
+                return _v + 'Z'
+            try:
+                if hasattr(value, 'astimezone'):
+                    if value.tzinfo is None:
+                        value = value.replace(tzinfo=_tz.utc)
+                    return value.astimezone(_tz.utc).isoformat().replace('+00:00', 'Z')
+            except Exception:
+                pass
+            return str(value)
+
+        def _hash_artifact(path: str) -> str:
+            if not path:
+                return ''
+            try:
+                if not _os.path.exists(path):
+                    return ''
+                _h = _hashlib.sha256()
+                with open(path, 'rb') as _fh:
+                    for _chunk in iter(lambda: _fh.read(65536), b''):
+                        _h.update(_chunk)
+                return _h.hexdigest()
+            except Exception as _hash_err:
+                logger.debug(
+                    "Could not hash artifact %s: %s", path, _hash_err
+                )
+                return ''
+
+        word_hash = _hash_artifact(word_path)
+        excel_hash = _hash_artifact(excel_path)
+        try:
+            partial_warnings_json = (
+                _json.dumps(partial_data_warnings)
+                if partial_data_warnings else ''
+            )
+        except Exception:
+            partial_warnings_json = ''
+
         init_database()
         with db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO report_history
                 (request_id, report_type, manager, technology, customer_name, status,
-                 start_time, end_time, ip_address, user_agent, error_message, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 start_time, end_time, ip_address, user_agent, error_message,
+                 days, word_path, excel_path, word_hash, excel_hash,
+                 partial_data_warnings_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (request_id, report_type, manager, technology, customer_name, status,
-                  start_time, end_time, ip_address or '', user_agent or '', error_message or '',
-                  datetime.now().isoformat()))
+                  _utc_iso_z(start_time), _utc_iso_z(end_time),
+                  ip_address or '', user_agent or '', error_message or '',
+                  int(days) if days is not None else None,
+                  word_path or '', excel_path or '', word_hash, excel_hash,
+                  partial_warnings_json,
+                  _utc_iso_z(datetime.now(_tz.utc))))
+
+        # Round 5 / Phase 6.16: append-only JSONL audit mirror.
+        #
+        # The SQLite ``report_history`` table can be wiped by the
+        # ``/clear_logs`` admin endpoint (and is otherwise mutable via
+        # any sqlite client), so it is *not* a forensic-quality audit
+        # trail.  Mirror every successful insert into a JSONL file in
+        # the per-user Application Support directory with mode 0640
+        # and ``O_APPEND`` semantics, so the audit history survives
+        # a UI-driven wipe and any tampering is at least detectable.
+        # The mirror failing must not roll back the SQLite insert,
+        # hence the broad ``try/except``.
+        try:
+            _audit_path = _os.environ.get('ADOPTIQ_AUDIT_MIRROR_PATH', '').strip()
+            if not _audit_path:
+                try:
+                    _audit_dir = _os.path.join(_os.path.expanduser('~'), '.adoptiq')
+                    _os.makedirs(_audit_dir, exist_ok=True)
+                    _audit_path = _os.path.join(_audit_dir, 'report_history.audit.jsonl')
+                except Exception:
+                    _audit_path = ''
+            if _audit_path:
+                # Round 6 / Phase 6.6: cap ``partial_data_warnings``
+                # before mirroring.  Without this, a report with
+                # hundreds of "warning: missing source X" entries can
+                # produce a single JSONL line that exceeds the POSIX
+                # ``PIPE_BUF`` atomicity guarantee for ``O_APPEND``
+                # writes (~4096 bytes on macOS / Linux), at which
+                # point concurrent writers can interleave bytes and
+                # corrupt the audit stream.  Cap both the count and
+                # per-warning length so a single record stays under
+                # ~16 KiB.
+                _MAX_WARN_COUNT = 25
+                _MAX_WARN_LEN = 240
+                _warns_in = partial_data_warnings or []
+                _warns_capped = []
+                if isinstance(_warns_in, list):
+                    for _w in _warns_in[:_MAX_WARN_COUNT]:
+                        try:
+                            _w_str = str(_w)
+                        except Exception:
+                            _w_str = "<unserializable warning>"
+                        if len(_w_str) > _MAX_WARN_LEN:
+                            _w_str = _w_str[:_MAX_WARN_LEN] + "...[truncated]"
+                        _warns_capped.append(_w_str)
+                    if len(_warns_in) > _MAX_WARN_COUNT:
+                        _warns_capped.append(
+                            f"...[+{len(_warns_in) - _MAX_WARN_COUNT} additional warnings truncated]"
+                        )
+                _record = {
+                    'request_id': request_id,
+                    'report_type': report_type,
+                    'manager': manager,
+                    'technology': technology,
+                    'customer_name': customer_name,
+                    'status': status,
+                    'start_time': _utc_iso_z(start_time),
+                    'end_time': _utc_iso_z(end_time),
+                    'days': (int(days) if days is not None else None),
+                    'word_path': word_path or '',
+                    'excel_path': excel_path or '',
+                    'word_hash': word_hash,
+                    'excel_hash': excel_hash,
+                    'partial_data_warnings': _warns_capped,
+                    'created_at': _utc_iso_z(datetime.now(_tz.utc)),
+                    'error_message': (error_message or '')[:512],
+                }
+                # Round 6 / Phase 6.6: enforce a per-record byte cap
+                # so one giant record cannot dominate the mirror or
+                # break atomic-append semantics.  The byte cap is the
+                # absolute upper bound; the warnings cap above keeps
+                # the *typical* record well under 4 KiB.
+                _MAX_RECORD_BYTES = 16 * 1024
+
+                # Round 6 / Phase 7.3: ``json.dumps(..., default=str)``
+                # silently coerces non-serializable values (custom
+                # objects, exceptions, pandas Timestamps) into their
+                # ``__str__`` form.  That can leak module paths,
+                # ``repr``-style memory addresses, or whole exception
+                # tracebacks into the audit mirror -- all of which are
+                # both noisy and a privacy risk.  Wrap in a strict
+                # default that records a redacted placeholder and
+                # logs the offending type so we get an early-warning
+                # signal without crashing the mirror writer.
+                def _strict_default(_obj):
+                    _type_name = getattr(type(_obj), '__name__', 'unknown')
+                    log_error(
+                        'AUDIT_MIRROR',
+                        f'Non-serializable audit field: type={_type_name}',
+                        '_record_to_audit_jsonl',
+                    )
+                    return f"<unserializable:{_type_name}>"
+
+                _line_bytes = (_json.dumps(_record, default=_strict_default) + '\n').encode('utf-8')
+                if len(_line_bytes) > _MAX_RECORD_BYTES:
+                    _record_min = {
+                        'request_id': request_id,
+                        'report_type': report_type,
+                        'status': status,
+                        'created_at': _utc_iso_z(datetime.now(_tz.utc)),
+                        '_truncated': True,
+                        '_original_bytes': len(_line_bytes),
+                    }
+                    _line_bytes = (_json.dumps(_record_min, default=_strict_default) + '\n').encode('utf-8')
+
+                # Round 6 / Phase 6.6: rotate the audit JSONL if it
+                # has grown past ``ADOPTIQ_AUDIT_MIRROR_MAX_BYTES``
+                # (default 50 MiB).  We keep up to ``MAX_BACKUPS``
+                # rotated copies named ``...audit.jsonl.1`` etc.
+                # Rotation is best-effort; if it fails we still
+                # append to the live file rather than dropping the
+                # record.
+                try:
+                    _MAX_BYTES = int(_os.environ.get('ADOPTIQ_AUDIT_MIRROR_MAX_BYTES', '52428800'))
+                    _MAX_BACKUPS = int(_os.environ.get('ADOPTIQ_AUDIT_MIRROR_MAX_BACKUPS', '5'))
+                except (TypeError, ValueError):
+                    _MAX_BYTES = 50 * 1024 * 1024
+                    _MAX_BACKUPS = 5
+                try:
+                    _cur_size = _os.path.getsize(_audit_path) if _os.path.exists(_audit_path) else 0
+                    if _cur_size + len(_line_bytes) > _MAX_BYTES:
+                        for _i in range(_MAX_BACKUPS - 1, 0, -1):
+                            _src = f"{_audit_path}.{_i}"
+                            _dst = f"{_audit_path}.{_i + 1}"
+                            if _os.path.exists(_src):
+                                try:
+                                    _os.replace(_src, _dst)
+                                except Exception:
+                                    pass
+                        try:
+                            _os.replace(_audit_path, f"{_audit_path}.1")
+                        except Exception:
+                            pass
+                except Exception as _rot_err:
+                    logger.debug("audit JSONL rotation skipped: %s", _rot_err)
+
+                # Open with O_APPEND so concurrent writers cannot
+                # truncate each other; force owner-only perms on
+                # creation.
+                # Round 6 / Phase 6.11: tighten the create mode from
+                # 0o640 (group-readable) to 0o600 to match the
+                # documented intent above.  The audit mirror can
+                # carry analysis IDs, customer names, and report
+                # paths; group-read is too permissive on shared
+                # macOS / Linux hosts where multiple Cisco accounts
+                # may be in the staff group.  Also re-chmod after
+                # open in case the file already existed with a more
+                # permissive mode from a prior build.
+                _flags = _os.O_WRONLY | _os.O_APPEND | _os.O_CREAT
+                _fd = _os.open(_audit_path, _flags, 0o600)
+                try:
+                    _os.write(_fd, _line_bytes)
+                finally:
+                    _os.close(_fd)
+                try:
+                    _os.chmod(_audit_path, 0o600)
+                except Exception:
+                    pass
+        except Exception as _audit_err:
+            # Mirror failure must never poison the primary insert.
+            logger.debug("audit JSONL mirror skipped: %s", _audit_err)
     except Exception as e:
         logger.warning(f"Could not record report to history: {e}")
 
@@ -291,7 +655,7 @@ def store_report_insights(request_id: str, report_type: str, manager: str, techn
                 (request_id, report_type, manager, technology, customer_name, insights_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (request_id, report_type, manager or '', technology or '', customer_name or '',
-                  insights_json, datetime.now().isoformat()))
+                  insights_json, _r12_admin_utc_iso_z()))
             cursor.execute('''
                 DELETE FROM report_insights WHERE id NOT IN (
                     SELECT id FROM report_insights ORDER BY created_at DESC LIMIT 500
@@ -386,7 +750,7 @@ def assess_ip_risk(ip_address, request_count, user_agent):
 
 def log_access(ip_address, user_agent, endpoint):
     """Log access to the application with enhanced tracking"""
-    timestamp = datetime.now().isoformat()
+    timestamp = _r12_admin_utc_iso_z()
     
     # Get IP information
     ip_info = get_ip_info(ip_address)
@@ -445,7 +809,7 @@ def log_access(ip_address, user_agent, endpoint):
     
 def log_security_event(event_type, ip_address, user_agent, endpoint, description):
     """Log security events"""
-    timestamp = datetime.now().isoformat()
+    timestamp = _r12_admin_utc_iso_z()
     
     # Add to in-memory log (thread-safe)
     with monitoring_data_lock:
@@ -470,7 +834,7 @@ def log_security_event(event_type, ip_address, user_agent, endpoint, description
 
 def log_error(level, message, source, ip_address=None):
     """Log error with comprehensive details"""
-    timestamp = datetime.now().isoformat()
+    timestamp = _r12_admin_utc_iso_z()
     
     # Add to in-memory log (thread-safe)
     with monitoring_data_lock:
@@ -494,31 +858,85 @@ def log_error(level, message, source, ip_address=None):
     logger.error(f"[{source}] {message} (IP: {ip_address})")
 
 def get_pid_for_port(port):
-    """Get PID for a process using a specific port"""
+    """Get PID for a process using a specific port.
+
+    Round 9 / Phase 4.2: hardened-image / minimal-container deployments
+    routinely ship without ``netstat`` or ``lsof`` available on PATH.
+    Previously a missing binary surfaced as a noisy ``FileNotFoundError``
+    stack trace in the diagnostic tile (and a 500 in the wrapping
+    handler).  Now each branch wraps the subprocess in its own
+    try/except and returns ``None`` on missing binary / non-zero exit
+    so the diagnostic stays a structured "no pid" rather than a
+    five-line traceback the operator can't act on.
+    """
+    import subprocess, sys
     try:
-        import subprocess, sys
         if sys.platform == 'darwin' or sys.platform.startswith('linux'):
-            result = subprocess.run(
-                ['lsof', '-t', '-nP', f'-iTCP:{port}', '-sTCP:LISTEN'],
-                capture_output=True, text=True, timeout=5
-            )
-            pid_str = result.stdout.strip().split('\n')[0]
+            try:
+                result = subprocess.run(
+                    ['lsof', '-t', '-nP', f'-iTCP:{port}', '-sTCP:LISTEN'],
+                    capture_output=True, text=True, timeout=5,
+                )
+            except FileNotFoundError:
+                logger.debug("get_pid_for_port: lsof not available on PATH")
+                return None
+            except subprocess.TimeoutExpired:
+                logger.debug("get_pid_for_port: lsof timed out for port %s", port)
+                return None
+            pid_str = (result.stdout or '').strip().split('\n')[0]
             return int(pid_str) if pid_str else None
         else:
-            result = subprocess.run(['netstat', '-ano'], capture_output=True, text=True, timeout=5)
-            for line in result.stdout.split('\n'):
+            try:
+                result = subprocess.run(
+                    ['netstat', '-ano'], capture_output=True, text=True, timeout=5,
+                )
+            except FileNotFoundError:
+                logger.debug("get_pid_for_port: netstat not available on PATH")
+                return None
+            except subprocess.TimeoutExpired:
+                logger.debug("get_pid_for_port: netstat timed out")
+                return None
+            for line in (result.stdout or '').split('\n'):
                 if f':{port}' in line and 'LISTENING' in line:
                     parts = line.split()
                     if len(parts) >= 5:
-                        return int(parts[-1])
+                        try:
+                            return int(parts[-1])
+                        except (TypeError, ValueError):
+                            continue
             return None
-    except Exception:
+    except Exception as _diag_err:  # pragma: no cover - defensive
+        logger.debug("get_pid_for_port unexpected failure: %s", _diag_err)
         return None
 
 def get_server_status():
-    """Get current server status with enhanced monitoring"""
+    """Get current server status with enhanced monitoring.
+
+    Round 2 / Phase 2.3: combine the legacy TCP socket reachability
+    probe with a ``/api/diag/connectivity`` health probe so the tile
+    can distinguish three real states:
+
+    * ``port_open=True, data_path_ok=True``  → fully running
+    * ``port_open=True, data_path_ok=False`` → partial (HTTP up, but
+      Snowflake / Keeper data path is down).
+    * ``port_open=False``                    → not reachable
+
+    Round 3 / Phase 5.5: the previous docstring also listed "LLM" in
+    the dependency set, but ``/api/diag/connectivity`` only probes
+    DNS → TCP/TLS → AppRole → secret-read → Snowflake. CircuIT/LLM
+    health is **not** part of the data-path tile and is reported on
+    its own. Mis-labelling LLM here meant a green tile gave readers
+    false confidence that the AI summary path was healthy when in
+    fact only Snowflake had been verified.
+
+    Also resolves a long-standing bug where the displayed
+    ``server_status['port']`` was always the hard-coded ``5000`` from
+    module init (line ~91) even when the probe targeted a different
+    port (e.g. 5001 from ``ADOPTIQ_MAIN_URL``).  We now bind both the
+    displayed host and port to the values actually probed.
+    """
     global server_process, server_status
-    
+
     try:
         # Check if main app is reachable (host/port from ADOPTIQ_MAIN_URL in container)
         import socket
@@ -527,23 +945,80 @@ def get_server_status():
         sock.settimeout(2)
         result = sock.connect_ex((host, port))
         sock.close()
-        
-        if result == 0:
-            server_status['running'] = True
-            server_status['pid'] = get_pid_for_port(port) if host in ('127.0.0.1', 'localhost') else None
-        else:
-            server_status['running'] = False
-            server_status['pid'] = None
-        
-        server_status['last_check'] = datetime.now().isoformat()
-        
+        port_open = (result == 0)
+
+        # Round 2 / Phase 2.3: probe data-path health.  TCP-port-open
+        # alone is not a reliable readiness signal — Flask answers
+        # ``/`` while Snowflake / Keeper are unreachable.
+        data_path_ok = None
+        data_path_detail = None
+        if port_open:
+            try:
+                import requests as _requests  # local import to avoid hard dep at module load
+                _diag = _requests.get(
+                    f"http://{host}:{port}/api/diag/connectivity",
+                    timeout=2,
+                )
+                if _diag.status_code == 200:
+                    try:
+                        _payload = _diag.json() or {}
+                    except Exception:
+                        _payload = {}
+                    # Round 3 / Phase 5.2: an empty 200 body USED to
+                    # be treated as healthy, which made the admin
+                    # tile claim "Server Running" any time the
+                    # diagnostic endpoint silently returned ``{}``
+                    # without actually exercising downstream
+                    # connectivity. Require the endpoint to assert
+                    # ok=True (or healthy=True) explicitly; an empty
+                    # payload is now treated as "unknown" so the UI
+                    # surfaces it instead of green-washing it.
+                    if isinstance(_payload, dict) and (
+                        'ok' in _payload or 'healthy' in _payload
+                    ):
+                        data_path_ok = bool(
+                            _payload.get('ok', _payload.get('healthy'))
+                        )
+                        data_path_detail = (
+                            _payload.get('detail') or _payload
+                        )
+                    else:
+                        data_path_ok = False
+                        data_path_detail = (
+                            "diag endpoint returned 200 with no ok/healthy field "
+                            "(refusing to call this 'healthy')"
+                        )
+                else:
+                    data_path_ok = False
+                    data_path_detail = f"HTTP {_diag.status_code}"
+            except Exception as _diag_err:
+                data_path_ok = False
+                data_path_detail = str(_diag_err)
+
+        # Update displayed host/port to match the probed target.  The
+        # legacy global was hard-coded to 5000 at module init, so an
+        # admin running on 5001 would see "Port: 5000" forever.
+        server_status['host'] = host
+        server_status['port'] = port
+        server_status['port_open'] = port_open
+        server_status['data_path_ok'] = data_path_ok
+        server_status['data_path_detail'] = data_path_detail
+        server_status['running'] = bool(port_open and (data_path_ok in (True, None)))
+        server_status['pid'] = (
+            get_pid_for_port(port) if (port_open and host in ('127.0.0.1', 'localhost')) else None
+        )
+        server_status['last_check'] = _r12_admin_utc_iso_z()
+
         return server_status
-        
+
     except Exception as e:
         log_error('ERROR', f'Server status check failed: {e}', 'get_server_status')
         server_status['running'] = False
         server_status['pid'] = None
-        server_status['last_check'] = datetime.now().isoformat()
+        server_status['port_open'] = False
+        server_status['data_path_ok'] = False
+        server_status['data_path_detail'] = str(e)
+        server_status['last_check'] = _r12_admin_utc_iso_z()
         return server_status
 
 def get_system_info():
@@ -583,7 +1058,7 @@ def get_system_info():
             'network_bytes_sent': network.bytes_sent,
             'network_bytes_recv': network.bytes_recv,
             'processes': processes,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': _r12_admin_utc_iso_z()
         }
         
         # Log performance metrics
@@ -592,19 +1067,26 @@ def get_system_info():
         return system_info
         
     except Exception as e:
+        # Round 2 / Phase 2.2: surface failed-vs-zero state so the admin
+        # tile template can render "n/a" / a failure chip instead of
+        # claiming the host has 0% CPU / 0 GB of disk when ``psutil``
+        # raises.  ``state='failed'`` and ``fetch_error`` distinguish a
+        # genuine zero (idle host) from "could not measure".
         log_error('ERROR', f'System info retrieval failed: {e}', 'get_system_info')
         return {
-            'cpu_percent': 0, 'cpu_count': 0,
-            'memory_percent': 0, 'memory_total': 0, 'memory_available': 0,
-            'disk_percent': 0, 'disk_total': 0, 'disk_free': 0,
-            'network_bytes_sent': 0, 'network_bytes_recv': 0,
-            'processes': 0, 'timestamp': datetime.now().isoformat()
+            'cpu_percent': None, 'cpu_count': None,
+            'memory_percent': None, 'memory_total': None, 'memory_available': None,
+            'disk_percent': None, 'disk_total': None, 'disk_free': None,
+            'network_bytes_sent': None, 'network_bytes_recv': None,
+            'processes': None, 'timestamp': _r12_admin_utc_iso_z(),
+            'state': 'failed',
+            'fetch_error': str(e),
         }
 
 def log_performance_metrics(cpu_usage, memory_usage, disk_usage):
     """Log performance metrics to database"""
     try:
-        timestamp = datetime.now().isoformat()
+        timestamp = _r12_admin_utc_iso_z()
         active_connections = len(monitoring_data['ip_connections'])
 
         with db_connection() as conn:
@@ -617,18 +1099,37 @@ def log_performance_metrics(cpu_usage, memory_usage, disk_usage):
     except Exception as e:
         log_error('ERROR', f'Performance metrics logging failed: {e}', 'log_performance_metrics')
 
-def get_total_count(table: str) -> int:
+def get_total_count(table: str):
     """Return the true `SELECT COUNT(*)` for a monitoring table.
 
     KPI tiles must always reflect the full database, never the
     ``LIMIT 50`` slice rendered into the page.
+
+    Round 2 / Phase 2.2: returns ``None`` on failure so the tile
+    template can render "n/a" / a failure chip rather than the
+    indistinguishable ``0`` (which would be a valid count for an empty
+    table).  Callers using arithmetic should ``or 0`` if they want the
+    legacy behavior, but UI code MUST treat ``None`` as "fetch failed".
     """
 
     # Hard allow-list to defeat any caller injection (table name comes from
     # source code, but we still refuse to interpolate arbitrary identifiers).
     allowed = {"report_history", "ip_connections", "error_logs", "security_events"}
     if table not in allowed:
-        return 0
+        # Round 12 / Phase 10.7: previously this returned ``0`` for both
+        # "table is empty" and "policy rejected the table name", so the
+        # admin tile rendered a confident "0" even when ``get_total_count``
+        # had refused to even run the query.  Return ``None`` (the same
+        # sentinel the ``except`` branch uses) so the UI renders "n/a"
+        # / failure chip and operators can distinguish a real empty
+        # table from a misconfigured caller.  Also log so a misuse is
+        # discoverable in ``error_logs`` without crashing the request.
+        log_error(
+            'WARNING',
+            f'get_total_count refused disallowed table: {table!r}',
+            'get_total_count',
+        )
+        return None
     try:
         with db_connection() as conn:
             cursor = conn.cursor()
@@ -638,11 +1139,19 @@ def get_total_count(table: str) -> int:
             return int(row[0]) if row and row[0] is not None else 0
     except Exception as e:
         log_error('ERROR', f'Total count query failed for {table}: {e}', 'get_total_count')
-        return 0
+        return None
 
 
-def get_total_request_count() -> int:
-    """Return the SUM of request_count across every IP, not just the LIMIT 50 page."""
+def get_total_request_count():
+    """Return the SUM of request_count across every IP, not just the LIMIT 50 page.
+
+    Round 11 / Phase 10.2: returns ``None`` on DB failure (was ``0``)
+    so the template can distinguish "we know there were zero requests"
+    from "the audit database is unreachable / corrupt".  Returning a
+    bare ``0`` on failure silently understated the metric and let
+    monitoring tiles render a green "0 requests" badge during an
+    outage.  Callers must treat ``None`` as "unknown / failure".
+    """
     try:
         with db_connection() as conn:
             cursor = conn.cursor()
@@ -651,26 +1160,142 @@ def get_total_request_count() -> int:
             return int(row[0]) if row and row[0] is not None else 0
     except Exception as e:
         log_error('ERROR', f'Total request count query failed: {e}', 'get_total_request_count')
-        return 0
+        return None
 
 
 def get_report_history():
-    """Get comprehensive report history"""
+    """Get comprehensive report history.
+
+    Round 2 / Phase 1.13 — the returned list is intentionally limited to
+    the 50 most recent rows for the table view, but ``history.html``
+    needs the FULL count for its "Total Analyses" tile so the tile does
+    not silently understate the audit DB.  Each row exposes
+    ``_total_analyses`` (the unbounded ``COUNT(*)`` from
+    ``report_history``) so the template can render
+    ``{{ analyses[0]._total_analyses }}`` with a "showing 50 of N"
+    disclosure when the list is capped.
+    """
     try:
         with db_connection() as conn:
             cursor = conn.cursor()
-            
-            # Get recent reports
-            cursor.execute('''
-                SELECT request_id, report_type, manager, technology, customer_name, status, start_time, end_time, ip_address, user_agent, error_message, created_at
-                FROM report_history 
-                ORDER BY created_at DESC 
-                LIMIT 50
-            ''')
-            
+            cursor.execute('SELECT COUNT(*) FROM report_history')
+            try:
+                total_analyses = int(cursor.fetchone()[0] or 0)
+            except (TypeError, ValueError):
+                total_analyses = 0
+
+            # Round 4 / Phase 2.4: compute the "Last 7 Reports" tile
+            # and "Active Managers" tile from the FULL audit table,
+            # not from the LIMIT 50 page slice.  The previous
+            # template did ``analyses[:7]|length`` (always 7 once we
+            # had ≥7 rows, regardless of date) and
+            # ``analyses|map(...)|unique|length`` over the page
+            # slice, which understated the manager count whenever
+            # ``report_history`` had >50 rows spread across
+            # additional managers.
+            try:
+                # Round 6 / Phase 6.14: ``start_time`` and
+                # ``created_at`` are stored as UTC ISO-Z strings (see
+                # ``_utc_iso_z`` in this module).  SQLite's
+                # ``datetime('now', '-7 days')`` returns a naive
+                # ``YYYY-MM-DD HH:MM:SS`` form (no ``T``, no ``Z``)
+                # which lexically sorts BELOW the ISO-Z strings even
+                # for the same wall-clock instant -- the old
+                # comparison therefore matched MORE rows than 7 days
+                # back (every row that started with the date digits
+                # less than the literal "7 days ago" prefix), and
+                # silently broke for any month / year boundary.
+                # Compute the 7-day window in Python with
+                # ``datetime.now(_tz.utc) - timedelta(days=7)`` and
+                # bind it as a parameterized UTC ISO-Z string so the
+                # comparison is apples-to-apples.
+                from datetime import timedelta as _td_p614
+                _seven_ago_iso = _utc_iso_z(datetime.now(_tz.utc) - _td_p614(days=7))
+                cursor.execute(
+                    "SELECT COUNT(*) FROM report_history "
+                    "WHERE COALESCE(start_time, created_at) >= ?",
+                    (_seven_ago_iso,),
+                )
+                last_7_days = int(cursor.fetchone()[0] or 0)
+                last_7_days_failed = False
+            except Exception as _l7d_err:
+                # Round 11 / Phase 10.3: previously a DB error here
+                # silently coerced the metric to 0 and history.html
+                # rendered a green "0 reports / last 7 days" tile while
+                # the audit DB was actually unreachable. Surface a
+                # failure flag so the template can render
+                # "Unavailable" instead of misleading zero.
+                log_error(
+                    'WARNING',
+                    f'last_7_days query failed: {_l7d_err}',
+                    'get_report_history',
+                )
+                last_7_days = 0
+                last_7_days_failed = True
+            # Round 12 / Phase 10.3: previously a failure here set
+            # ``total_managers = 0`` with no failure flag, so the
+            # admin dashboard rendered "0 managers" indistinguishably
+            # from a real empty database.  Round 11 / Phase 10.3
+            # already established the ``last_7_days_failed`` pattern
+            # (set above on the prior except branch) -- mirror that
+            # pattern for ``total_managers`` so the template can
+            # render "Unavailable" rather than misleading zero.
+            total_managers_failed = False
+            try:
+                cursor.execute(
+                    "SELECT COUNT(DISTINCT manager) FROM report_history "
+                    "WHERE manager IS NOT NULL AND manager <> ''"
+                )
+                total_managers = int(cursor.fetchone()[0] or 0)
+            except Exception as _tm_err:
+                log_error(
+                    'WARNING',
+                    f'total_managers query failed: {_tm_err}',
+                    'get_report_history',
+                )
+                total_managers = 0
+                total_managers_failed = True
+
+            # Round 4 / Phase 5.3: include the Round 3 audit columns
+            # (``days``, ``word_path`` / ``excel_path`` for direct
+            # download links, ``word_hash`` / ``excel_hash`` for
+            # integrity / dedup, and ``partial_data_warnings_json`` so
+            # ``history.html`` and ``/progress/<id>`` fallback can show
+            # the warning ribbon for past runs).  Older databases that
+            # were migrated via ``ALTER TABLE`` will still have these
+            # columns thanks to the migration above; if any column is
+            # missing the SELECT will fail and we fall back to the
+            # legacy projection so we never crash the dashboard.
+            # Round 5 / Phase 6.17: ``ORDER BY created_at DESC`` alone is
+            # not deterministic when two rows share the same ``created_at``
+            # (very common: completion + post-completion update insert in
+            # the same second).  Add ``id DESC`` as a tiebreaker so the
+            # admin dashboard renders a stable, reproducible order and
+            # ``LIMIT 50`` cannot drop the wrong row.
+            try:
+                cursor.execute('''
+                    SELECT request_id, report_type, manager, technology, customer_name,
+                           status, start_time, end_time, ip_address, user_agent,
+                           error_message, created_at,
+                           days, word_path, excel_path, word_hash, excel_hash,
+                           partial_data_warnings_json
+                    FROM report_history
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 50
+                ''')
+                _have_audit_cols = True
+            except Exception:
+                cursor.execute('''
+                    SELECT request_id, report_type, manager, technology, customer_name, status, start_time, end_time, ip_address, user_agent, error_message, created_at
+                    FROM report_history
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 50
+                ''')
+                _have_audit_cols = False
+
             reports = []
             for row in cursor.fetchall():
-                reports.append({
+                _rec = {
                     'request_id': row[0],
                     'report_type': row[1],
                     'manager': row[2],
@@ -682,7 +1307,37 @@ def get_report_history():
                     'ip_address': row[8],
                     'user_agent': row[9],
                     'error_message': row[10],
-                    'created_at': row[11]
+                    'created_at': row[11],
+                    '_total_analyses': total_analyses,
+                    '_total_last_7_days': last_7_days,
+                    '_total_last_7_days_failed': last_7_days_failed,
+                    '_total_managers': total_managers,
+                    # Round 12 / Phase 10.3: parity with
+                    # ``_total_last_7_days_failed`` so the template
+                    # can render "Unavailable" instead of "0".
+                    '_total_managers_failed': total_managers_failed,
+                }
+                if _have_audit_cols and len(row) >= 18:
+                    _rec.update({
+                        'days': row[12],
+                        'word_path': row[13],
+                        'excel_path': row[14],
+                        'word_hash': row[15],
+                        'excel_hash': row[16],
+                        'partial_data_warnings_json': row[17],
+                    })
+                reports.append(_rec)
+            if not reports:
+                reports.append({
+                    '_placeholder': True,
+                    '_total_analyses': total_analyses,
+                    '_total_last_7_days': last_7_days,
+                    '_total_last_7_days_failed': last_7_days_failed,
+                    '_total_managers': total_managers,
+                    # Round 12 / Phase 10.3: parity with
+                    # ``_total_last_7_days_failed`` so the placeholder
+                    # row carries the failure flag too.
+                    '_total_managers_failed': total_managers_failed,
                 })
         return reports
         
@@ -817,11 +1472,11 @@ def get_analytics():
             # Daily report count (last 7 days)
             cursor.execute('''
                 SELECT DATE(created_at) as date, COUNT(*) as count
-                FROM report_history 
-                WHERE created_at >= datetime('now', '-7 days')
+                FROM report_history
+                WHERE created_at >= ?
                 GROUP BY DATE(created_at)
                 ORDER BY date DESC
-            ''')
+            ''', (_utc_iso_z(datetime.now(_tz.utc) - timedelta(days=7)),))
             daily_reports = dict(cursor.fetchall())
         
         return {
@@ -943,18 +1598,31 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
             color: #e74c3c;
         }
         
+        /* Round 12 / Phase 5.3: previously the admin traffic-light
+           classes were hard-coded with the flat-UI palette
+           (#e74c3c / #f39c12 / #27ae60), which drifted from the
+           ``canonical_metrics.RISK_BAND_COLORS`` map used by the
+           Word/Excel exports (#d62728 / #ff7f0e / #ffd700 /
+           #2ca02c).  Operators reviewing the admin console would
+           then see "high risk" rendered in a different red than
+           the same row in the downloadable report, breaking the
+           visual legend.  We project the canonical hexes through
+           Jinja at render time so the admin UI shares the single
+           source of truth.  Default values mirror the canonical
+           palette in case ``canonical_metrics`` cannot be imported
+           (degraded test contexts). */
         .risk-high {
-            color: #e74c3c;
+            color: {{ admin_risk_color_high|default('#d62728') }};
             font-weight: bold;
         }
         
         .risk-medium {
-            color: #f39c12;
+            color: {{ admin_risk_color_medium|default('#ffd700') }};
             font-weight: bold;
         }
         
         .risk-low {
-            color: #27ae60;
+            color: {{ admin_risk_color_low|default('#2ca02c') }};
             font-weight: bold;
         }
         
@@ -1126,22 +1794,25 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
         <!-- Analytics Overview (counts come from SELECT COUNT(*); the lists
              below show the most recent 50 rows only, so headline numbers
              must NEVER be derived from list lengths.) -->
+        <!-- Round 2 / Phase 2.2: failed-vs-zero state — get_total_count
+             returns ``None`` on DB failure so an unreachable monitoring
+             DB renders "n/a", not the indistinguishable "0". -->
         <div class="analytics-grid">
             <div class="analytics-card">
-                <div class="analytics-number">{{ totals.report_history }}</div>
-                <div class="analytics-label">Total Reports</div>
+                <div class="analytics-number">{% if totals.report_history is none %}n/a{% else %}{{ totals.report_history }}{% endif %}</div>
+                <div class="analytics-label">Total Reports{% if totals.report_history is none %} <small style="color:#dc3545;">source unavailable</small>{% endif %}</div>
             </div>
             <div class="analytics-card">
-                <div class="analytics-number">{{ totals.ip_connections }}</div>
-                <div class="analytics-label">Unique IPs</div>
+                <div class="analytics-number">{% if totals.ip_connections is none %}n/a{% else %}{{ totals.ip_connections }}{% endif %}</div>
+                <div class="analytics-label">Unique IPs{% if totals.ip_connections is none %} <small style="color:#dc3545;">source unavailable</small>{% endif %}</div>
             </div>
             <div class="analytics-card">
-                <div class="analytics-number">{{ totals.total_requests }}</div>
+                <div class="analytics-number">{% if totals.total_requests is none %}n/a{% else %}{{ totals.total_requests }}{% endif %}</div>
                 <div class="analytics-label">Total Requests</div>
             </div>
             <div class="analytics-card">
-                <div class="analytics-number">{{ totals.error_logs }}</div>
-                <div class="analytics-label">Recent Errors</div>
+                <div class="analytics-number">{% if totals.error_logs is none %}n/a{% else %}{{ totals.error_logs }}{% endif %}</div>
+                <div class="analytics-label">Recent Errors{% if totals.error_logs is none %} <small style="color:#dc3545;">source unavailable</small>{% endif %}</div>
             </div>
         </div>
         
@@ -1149,15 +1820,36 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
         <div class="dashboard-grid">
             <div class="dashboard-card">
                 <h3>🖥️ Server Status</h3>
+                <!-- Round 2 / Phase 2.3: surface combined health
+                     (port + data path) so a degraded backend is not
+                     reported as fully Running. -->
                 <div class="status-item">
                     <span class="status-label">Status:</span>
                     <span class="status-value {{ 'status-running' if server_status.running else 'status-stopped' }}">
-                        {{ 'Running' if server_status.running else 'Stopped' }}
+                        {% if server_status.port_open and server_status.data_path_ok %}
+                            Running (data path OK)
+                        {% elif server_status.port_open and server_status.data_path_ok == False %}
+                            Degraded (HTTP up, data path failing)
+                        {% elif server_status.port_open %}
+                            Running (data path unknown)
+                        {% else %}
+                            Stopped
+                        {% endif %}
                     </span>
                 </div>
+                {% if server_status.port_open and server_status.data_path_ok == False %}
+                <div class="status-item">
+                    <span class="status-label">Data Path Detail:</span>
+                    <span class="status-value risk-high">{{ server_status.data_path_detail }}</span>
+                </div>
+                {% endif %}
                 <div class="status-item">
                     <span class="status-label">PID:</span>
                     <span class="status-value">{{ server_status.pid or 'N/A' }}</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Host:</span>
+                    <span class="status-value">{{ server_status.host or 'N/A' }}</span>
                 </div>
                 <div class="status-item">
                     <span class="status-label">Port:</span>
@@ -1169,32 +1861,48 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 </div>
                 
                 <div style="margin-top: 15px;">
+                    {# Round 5 / Phase 2.3: destructive server controls
+                       are POST + CSRF protected, rendered as inline
+                       forms instead of GET-anchor links. #}
                     {% if server_status.running %}
-                    <a href="/stop_server" class="btn btn-danger">Stop Server</a>
+                    <form method="POST" action="/stop_server" style="display:inline;">
+                        <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
+                        <button type="submit" class="btn btn-danger">Stop Server</button>
+                    </form>
                     {% else %}
-                    <a href="/start_server" class="btn btn-success">Start Server</a>
+                    <form method="POST" action="/start_server" style="display:inline;">
+                        <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
+                        <button type="submit" class="btn btn-success">Start Server</button>
+                    </form>
                     {% endif %}
                 </div>
             </div>
             
             <div class="dashboard-card">
                 <h3>📊 System Metrics</h3>
+                {% if system_info.state == 'failed' %}
+                <div class="status-item">
+                    <span class="status-label">Status:</span>
+                    <span class="status-value status-stopped">n/a (psutil unavailable)</span>
+                </div>
+                {% else %}
                 <div class="status-item">
                     <span class="status-label">CPU Usage:</span>
-                    <span class="status-value">{{ "%.1f"|format(system_info.cpu_percent) }}%</span>
+                    <span class="status-value">{% if system_info.cpu_percent is none %}n/a{% else %}{{ "%.1f"|format(system_info.cpu_percent) }}%{% endif %}</span>
                 </div>
                 <div class="status-item">
                     <span class="status-label">Memory Usage:</span>
-                    <span class="status-value">{{ "%.1f"|format(system_info.memory_percent) }}%</span>
+                    <span class="status-value">{% if system_info.memory_percent is none %}n/a{% else %}{{ "%.1f"|format(system_info.memory_percent) }}%{% endif %}</span>
                 </div>
                 <div class="status-item">
                     <span class="status-label">Disk Usage:</span>
-                    <span class="status-value">{{ "%.1f"|format(system_info.disk_percent) }}%</span>
+                    <span class="status-value">{% if system_info.disk_percent is none %}n/a{% else %}{{ "%.1f"|format(system_info.disk_percent) }}%{% endif %}</span>
                 </div>
                 <div class="status-item">
                     <span class="status-label">Active Processes:</span>
-                    <span class="status-value">{{ system_info.processes }}</span>
+                    <span class="status-value">{% if system_info.processes is none %}n/a{% else %}{{ system_info.processes }}{% endif %}</span>
                 </div>
+                {% endif %}
             </div>
             
             <div class="dashboard-card">
@@ -1221,7 +1929,12 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
         </div>
         
         <!-- Currently Running Reports -->
-        {% if running_reports %}
+        {% if running_reports_failed %}
+        <div class="table-container">
+            <h3>🚀 Currently Running Reports</h3>
+            <p style="color:#dc3545;"><strong>n/a</strong> — main app unreachable; cannot determine running reports.</p>
+        </div>
+        {% elif running_reports %}
         <div class="table-container">
             <h3>🚀 Currently Running Reports</h3>
             <table>
@@ -1379,7 +2092,15 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                         <td>{{ '✓' if audit.checks.get('ip_security') else '✗' }}</td>
                         <td>{{ audit.timestamp }}</td>
                         <td>
-                            <a href="/audit_report/{{ audit.analysis_id }}" class="btn btn-primary" style="font-size: 0.8em; padding: 5px 10px;">Re-audit</a>
+                            {# Round 8 / Phase 4.8: re-audit is destructive
+                               (writes audit history, calls main app), so it
+                               is now a POST with the admin CSRF token instead
+                               of a plain anchor that any cross-origin page
+                               could trigger via <img src> or auto-redirect. #}
+                            <form method="POST" action="/audit_report/{{ audit.analysis_id }}" style="display:inline;">
+                                <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
+                                <button type="submit" class="btn btn-primary" style="font-size: 0.8em; padding: 5px 10px;">Re-audit</button>
+                            </form>
                         </td>
                     </tr>
                     {% endfor %}
@@ -1389,15 +2110,26 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
         
         <!-- Action Buttons -->
         <div style="text-align: center; margin: 20px 0;">
-            <a href="/export_logs" class="btn btn-primary">Export Logs</a>
-            <a href="/clear_logs" class="btn btn-warning">Clear Logs</a>
+            {# Round 5 / Phase 2.3: destructive log controls are POST + CSRF
+               protected, rendered as inline forms instead of GET-anchor
+               links so a cross-origin <img>/<a>/<iframe> can't trigger
+               them on an authenticated admin. #}
+            <form method="POST" action="/export_logs" style="display:inline;">
+                <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
+                <button type="submit" class="btn btn-primary">Export Logs</button>
+            </form>
+            <form method="POST" action="/clear_logs" style="display:inline;"
+                  onsubmit="return confirm('Clear all admin logs? This is irreversible.');">
+                <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
+                <button type="submit" class="btn btn-warning">Clear Logs</button>
+            </form>
             <a href="/api/analytics" class="btn btn-success">View Analytics</a>
         </div>
 
         <div class="table-container">
             <h3>Debug Controls</h3>
             <p><strong>Verbose Debug:</strong> {{ 'ON' if verbose_debug else 'OFF' }}</p>
-            <p><strong>Snowflake Queries (since reset):</strong> {{ snowflake_query_count }}</p>
+            <p><strong>Snowflake Queries (since reset):</strong> {% if snowflake_query_count_failed %}<span style="color:#dc3545;">n/a (debug endpoint unreachable)</span>{% else %}{{ snowflake_query_count }}{% endif %}</p>
             <button class="btn btn-warning" onclick="toggleVerboseDebug()">
                 {{ 'Disable' if verbose_debug else 'Enable' }} Verbose Debug
             </button>
@@ -1430,9 +2162,15 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
 
         async function toggleVerboseDebug() {
             try {
+                /* Round 8 / Phase 4.7: include the admin CSRF token so the
+                   POST is accepted by the now-CSRF-guarded
+                   /api/debug/verbose proxy. */
                 const response = await fetch('/api/debug/verbose', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-AdoptIQ-Admin-CSRF': '{{ admin_csrf_token }}',
+                    },
                     body: JSON.stringify({ enabled: !verboseDebugEnabled }),
                 });
                 const result = await response.json();
@@ -1448,9 +2186,13 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
 
         async function resetSnowflakeQueryMetrics() {
             try {
+                /* Round 8 / Phase 4.7: include admin CSRF header. */
                 const response = await fetch('/api/debug/verbose', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-AdoptIQ-Admin-CSRF': '{{ admin_csrf_token }}',
+                    },
                     body: JSON.stringify({ enabled: verboseDebugEnabled, reset_query_metrics: true }),
                 });
                 const result = await response.json();
@@ -1471,12 +2213,41 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
 @admin_app.before_request
 def log_request():
     """Log all requests with IP and user agent, and restrict admin to local access."""
+    # Round 8 / Phase 4.6: trusting ``X-Forwarded-For`` blindly when
+    # ``ADOPTIQ_TRUST_PROXY_HEADERS`` is set lets *any* upstream
+    # client spoof their source IP simply by sending an XFF header,
+    # because the admin app does not verify that the immediate peer
+    # (``REMOTE_ADDR``) is actually a proxy we trust.  Require an
+    # explicit comma-separated allowlist of trusted hop IPs in
+    # ``ADOPTIQ_TRUSTED_PROXY_IPS``; only honour XFF when the
+    # immediate peer is on that list.
     trust_proxy_headers = os.environ.get('ADOPTIQ_TRUST_PROXY_HEADERS', '').strip().lower() in {'1', 'true', 'yes'}
+    _peer_ip = request.environ.get('REMOTE_ADDR', 'unknown')
     if trust_proxy_headers:
-        xff = request.environ.get('HTTP_X_FORWARDED_FOR', '')
-        ip_address = xff.split(',')[0].strip() if xff else request.environ.get('REMOTE_ADDR', 'unknown')
+        _trusted = {
+            p.strip() for p in (os.environ.get('ADOPTIQ_TRUSTED_PROXY_IPS', '') or '').split(',')
+            if p.strip()
+        }
+        if _peer_ip in _trusted:
+            xff = request.environ.get('HTTP_X_FORWARDED_FOR', '')
+            # Walk the XFF chain right-to-left and pick the
+            # right-most untrusted hop -- that is the canonical
+            # client IP under the standard reverse-proxy contract.
+            _hops = [h.strip() for h in xff.split(',') if h.strip()] if xff else []
+            ip_address = _peer_ip
+            for _hop in reversed(_hops):
+                if _hop not in _trusted:
+                    ip_address = _hop
+                    break
+        else:
+            logger.warning(
+                "[[SECURITY]] Ignoring XFF header from non-allowlisted peer=%s; "
+                "set ADOPTIQ_TRUSTED_PROXY_IPS to enable.",
+                _peer_ip,
+            )
+            ip_address = _peer_ip
     else:
-        ip_address = request.environ.get('REMOTE_ADDR', 'unknown')
+        ip_address = _peer_ip
     user_agent = request.headers.get('User-Agent', 'unknown')
     endpoint = request.endpoint or 'unknown'
     
@@ -1484,6 +2255,33 @@ def log_request():
         return Response('Forbidden: admin is local access only', status=403)
 
     log_access(ip_address, user_agent, endpoint)
+
+
+@admin_app.after_request
+def _admin_no_store_for_api(response):
+    """Round 8 / Phase 4.10: forbid intermediary / browser caching for
+    every admin ``/api/*`` JSON response.
+
+    These endpoints expose live operational data (running reports,
+    error logs, security events, audit summaries, proxied debug
+    state).  Without ``Cache-Control: no-store`` a stale copy could
+    leak between admin sessions on a shared workstation, or be
+    captured by an inadvertent caching proxy.  Belt-and-braces: we
+    also send ``Pragma: no-cache`` for very old HTTP/1.0 caches and
+    ``Expires: 0`` for legacy proxy software.
+    """
+    try:
+        path = request.path or ''
+        if path.startswith('/api/') or path.startswith('/audit_report/'):
+            response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+            response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    except Exception:
+        # Never let a header-shaping failure block the response.
+        pass
+    return response
+
 
 @admin_app.route('/')
 def enhanced_admin_dashboard():
@@ -1509,27 +2307,61 @@ def enhanced_admin_dashboard():
     audit_history = audit_data.get('audits', [])
     
     # Get currently running reports from main app (MAIN_APP_URL for container)
+    # Round 2 / Phase 2.2: track failed-vs-zero state.  An unreachable
+    # main app must render "n/a" in the tile, not "0 running" which is
+    # also a valid steady-state.
     running_reports = []
+    running_reports_failed = False
     try:
         import requests
         response = requests.get(f'{MAIN_APP_URL.rstrip("/")}/api/status/all', timeout=2)
         if response.status_code == 200:
             all_reports = response.json()
             running_reports = [r for r in all_reports if r.get('status') in ['running', 'starting']]
+        else:
+            running_reports_failed = True
     except Exception as _fetch_err:
         logger.debug(f"Could not fetch running reports from main app: {_fetch_err}")
+        running_reports_failed = True
 
     verbose_debug = False
     snowflake_query_count = 0
+    snowflake_query_count_failed = False
     try:
         debug_resp = requests.get(f'{MAIN_APP_URL.rstrip("/")}/api/debug/verbose', timeout=2)
         if debug_resp.status_code == 200:
             debug_data = debug_resp.json()
             verbose_debug = bool(debug_data.get('verbose_debug'))
             snowflake_query_count = int(debug_data.get('snowflake_query_count', 0) or 0)
+        else:
+            snowflake_query_count_failed = True
     except Exception as _debug_err:
         logger.debug("Could not fetch verbose debug state from main app: %s", _debug_err)
     
+    # Round 12 / Phase 5.3: project the canonical risk-band palette
+    # into the admin template so the inline ``.risk-high``,
+    # ``.risk-medium`` and ``.risk-low`` traffic-light classes share
+    # the same hexes as the Word/Excel exports' canonical
+    # ``RISK_BAND_COLORS`` map.  Falls back to the canonical defaults
+    # if ``canonical_metrics`` cannot be imported (degraded test env).
+    try:
+        from canonical_metrics import (
+            RISK_BAND_COLORS as _R12_ADMIN_RBC,
+            RISK_BAND_COLOR_DEFAULT as _R12_ADMIN_RBC_DEFAULT,
+        )
+    except Exception:  # pragma: no cover - defensive
+        _R12_ADMIN_RBC = {
+            'CRITICAL': '#d62728',
+            'HIGH': '#ff7f0e',
+            'MEDIUM': '#ffd700',
+            'LOW': '#2ca02c',
+            'HEALTHY': '#28B463',
+        }
+        _R12_ADMIN_RBC_DEFAULT = '#1f77b4'
+    admin_risk_color_high = _R12_ADMIN_RBC.get('HIGH', _R12_ADMIN_RBC_DEFAULT)
+    admin_risk_color_medium = _R12_ADMIN_RBC.get('MEDIUM', _R12_ADMIN_RBC_DEFAULT)
+    admin_risk_color_low = _R12_ADMIN_RBC.get('LOW', _R12_ADMIN_RBC_DEFAULT)
+
     return render_template_string(ENHANCED_ADMIN_TEMPLATE_V2, 
                                 server_status=server_status,
                                 system_info=system_info,
@@ -1540,13 +2372,20 @@ def enhanced_admin_dashboard():
                                 audit_history=audit_history,
                                 audit_summary=audit_summary,
                                 running_reports=running_reports,
+                                running_reports_failed=running_reports_failed,
                                 main_app_url=MAIN_APP_URL,
                                 verbose_debug=verbose_debug,
-                                snowflake_query_count=snowflake_query_count)
+                                snowflake_query_count=snowflake_query_count,
+                                snowflake_query_count_failed=snowflake_query_count_failed,
+                                admin_risk_color_high=admin_risk_color_high,
+                                admin_risk_color_medium=admin_risk_color_medium,
+                                admin_risk_color_low=admin_risk_color_low)
 
-@admin_app.route('/start_server')
+@admin_app.route('/start_server', methods=['POST'])
 def start_server_route():
     """Start the AdoptIQ server"""
+    # Round 5 / Phase 2.3: require POST + admin CSRF token.
+    _require_admin_csrf()
     result = start_server()
     
     if result['success']:
@@ -1555,9 +2394,11 @@ def start_server_route():
         log_error('WARNING', f'Server start failed: {result.get("error", "unknown")}', 'start_server_route')
         return redirect(url_for('enhanced_admin_dashboard', message='Failed to start server. Check logs for details.', message_type='danger'))
 
-@admin_app.route('/stop_server')
+@admin_app.route('/stop_server', methods=['POST'])
 def stop_server_route():
     """Stop the AdoptIQ server"""
+    # Round 5 / Phase 2.3: require POST + admin CSRF token.
+    _require_admin_csrf()
     result = stop_server()
     
     if result['success']:
@@ -1566,22 +2407,37 @@ def stop_server_route():
         log_error('WARNING', f'Server stop failed: {result.get("error", "unknown")}', 'stop_server_route')
         return redirect(url_for('enhanced_admin_dashboard', message='Failed to stop server. Check logs for details.', message_type='danger'))
 
-@admin_app.route('/export_logs')
+@admin_app.route('/export_logs', methods=['POST'])
 def export_logs():
     """Export all logs to JSON"""
+    # Round 5 / Phase 2.3: require POST + admin CSRF token.  Exporting
+    # the full audit trail off-host is destructive in the sense that it
+    # exfiltrates sensitive data; same protection as the other routes.
+    _require_admin_csrf()
     try:
+        # Round 11 / Phase 10.1: previous code wrote a naive local
+        # ``datetime.now().isoformat()`` so two operators in
+        # different time zones would see different "export_timestamp"
+        # values for the same audit pull, and the embedded filename
+        # date could disagree with the JSON payload's date across UTC
+        # midnight.  Stamp UTC explicitly for both.
+        _export_now_utc = datetime.now(timezone.utc)
         logs_data = {
             'report_history': get_report_history(),
             'ip_connections': get_ip_connections(),
             'error_logs': get_error_logs(),
             'security_events': get_security_events(),
             'system_metrics': list(monitoring_data['system_metrics']),
-            'export_timestamp': datetime.now().isoformat()
+            'export_timestamp': _export_now_utc.isoformat(),
+            'export_timestamp_tz': 'UTC',
         }
-        
+
         export_dir = os.path.join(tempfile.gettempdir(), 'adoptiq_exports')
         os.makedirs(export_dir, exist_ok=True)
-        export_file = os.path.join(export_dir, f"admin_logs_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+        export_file = os.path.join(
+            export_dir,
+            f"admin_logs_export_{_export_now_utc.strftime('%Y%m%dT%H%M%SZ')}.json",
+        )
         with open(export_file, 'w', encoding='utf-8') as f:
             json.dump(logs_data, f, indent=2)
         
@@ -1591,9 +2447,11 @@ def export_logs():
         log_error('ERROR', f'Log export failed: {e}', 'export_logs')
         return redirect(url_for('enhanced_admin_dashboard', message='Export failed. Check logs for details.', message_type='danger'))
 
-@admin_app.route('/clear_logs')
+@admin_app.route('/clear_logs', methods=['POST'])
 def clear_logs():
     """Clear all logs"""
+    # Round 5 / Phase 2.3: require POST + admin CSRF token.
+    _require_admin_csrf()
     try:
         with db_connection() as conn:
             cursor = conn.cursor()
@@ -1653,9 +2511,22 @@ def api_audits():
     """Get audit history"""
     return jsonify(get_audit_history())
 
-@admin_app.route('/audit_report/<analysis_id>')
+@admin_app.route('/audit_report/<analysis_id>', methods=['POST'])
 def audit_report_route(analysis_id):
-    """Trigger audit for a specific report"""
+    """Trigger audit for a specific report.
+
+    Round 8 / Phase 4.8: this endpoint kicks off the per-report audit
+    pipeline (which scans files on disk, calls back into the main
+    app, and writes audit history records).  Triggering an audit
+    silently from a GET means CSRF (an attacker-crafted ``<a href>``
+    or ``<img src>`` on a third-party page that an authenticated
+    admin happens to load) can DoS the audit history store.
+    Restrict to POST + admin CSRF token so a destructive trigger is
+    only possible from inside the admin dashboard's own forms.
+    """
+    _require_admin_csrf()
+    if not _is_valid_analysis_id(analysis_id):
+        abort(400)
     result = audit_report(analysis_id)
     return jsonify(result)
 
@@ -1668,13 +2539,44 @@ def api_audit_summary():
 @admin_app.route('/api/debug/verbose', methods=['GET', 'POST'])
 def api_debug_verbose():
     """Proxy verbose debug state/toggle to the main app."""
+    # Round 8 / Phase 4.7: require the admin CSRF token for the
+    # POST (state-changing) path.  Verbose debug toggles control
+    # how much sensitive diagnostic data the main app emits, so
+    # an attacker who could trick a logged-in admin's browser
+    # into POSTing here could silently turn on full request
+    # logging.  GET (read-only) remains unauthenticated for the
+    # dashboard tile.
+    if request.method == 'POST':
+        _require_admin_csrf()
     main_url = f'{MAIN_APP_URL.rstrip("/")}/api/debug/verbose'
     try:
         if request.method == 'GET':
             resp = requests.get(main_url, timeout=3)
             return jsonify(resp.json()), resp.status_code
-        payload = request.get_json(silent=True) or {}
-        resp = requests.post(main_url, json=payload, timeout=3)
+        # Round 8 / Phase 4.9: instead of forwarding whatever the
+        # browser submits, project the inbound JSON body to a
+        # fixed allowlist of keys with explicit type coercions.
+        # This prevents the proxy from being abused to smuggle
+        # additional fields into the main app's debug API (e.g.
+        # if a future main-app version recognises new dangerous
+        # toggles like ``log_secrets`` or ``dump_env``, those
+        # cannot be silently forwarded through this proxy).
+        raw_payload = request.get_json(silent=True) or {}
+        if not isinstance(raw_payload, dict):
+            raw_payload = {}
+        _ALLOWED_DEBUG_KEYS = {'enabled', 'reset_query_metrics'}
+        projected_payload: dict = {}
+        if 'enabled' in raw_payload:
+            projected_payload['enabled'] = bool(raw_payload.get('enabled'))
+        if 'reset_query_metrics' in raw_payload:
+            projected_payload['reset_query_metrics'] = bool(raw_payload.get('reset_query_metrics'))
+        # Defensive: log (at DEBUG only) any unexpected keys we dropped
+        # so operators can spot misconfigured callers without leaking
+        # the values.
+        _dropped = sorted(set(raw_payload.keys()) - _ALLOWED_DEBUG_KEYS)
+        if _dropped:
+            logger.debug("Debug verbose proxy dropped unexpected keys: %s", _dropped)
+        resp = requests.post(main_url, json=projected_payload, timeout=3)
         return jsonify(resp.json()), resp.status_code
     except Exception as e:
         logger.error("Verbose debug proxy failed: %s", e)
@@ -1724,7 +2626,7 @@ def audit_report(analysis_id):
     
     audit_result = {
         'analysis_id': analysis_id,
-        'audit_timestamp': datetime.now().isoformat(),
+        'audit_timestamp': _r12_admin_utc_iso_z(),
         'status': 'pending',
         'checks': [],
         'score': 0,
@@ -1946,7 +2848,7 @@ def audit_report(analysis_id):
                 audit_result['score'],
                 audit_result['max_score'],
                 json.dumps(audit_result['checks']),
-                datetime.now().isoformat()
+                _r12_admin_utc_iso_z()
             ))
         
         logger.info(f"Audit completed for {analysis_id}: {audit_result['status']} ({audit_result['score']}/100)")
@@ -2067,10 +2969,30 @@ def start_server():
         if server_process and server_process.poll() is None:
             return {'success': False, 'error': 'Server is already running'}
         
-        # Start the server
-        server_process = subprocess.Popen([
-            sys.executable, 'app_simple.py'
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Round 9 / Phase 4.1: previously ``Popen([sys.executable,
+        # 'app_simple.py'])`` resolved ``app_simple.py`` against the
+        # *caller's* CWD.  An admin dashboard launched via systemd /
+        # macOS launchd normally inherits CWD=``/`` -- which made the
+        # spawn fail with FileNotFoundError if a stray script of the
+        # same name happened to live in the CWD it could redirect to a
+        # *different* interpreter target.  Anchor the spawn on the
+        # admin module's own directory so the path is always
+        # deterministic and not influenced by inherited CWD.
+        from pathlib import Path as _Path
+        _app_simple_path = (_Path(__file__).resolve().parent / 'app_simple.py')
+        if not _app_simple_path.is_file():
+            log_error(
+                'ERROR',
+                f'app_simple.py not found next to admin module (looked at {_app_simple_path.name})',
+                'start_server',
+            )
+            return {'success': False, 'error': 'Server entry point not found'}
+        server_process = subprocess.Popen(
+            [sys.executable, str(_app_simple_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(_app_simple_path.parent),
+        )
         
         # Wait a moment to check if it started successfully
         time.sleep(2)
@@ -2113,9 +3035,30 @@ if __name__ == '__main__':
             except Exception:
                 pass  # Keep default encoding if this fails
         init_database()
+        # Round 8 / Phase 4.11: bind to the loopback by default so the
+        # admin dashboard is not unintentionally exposed on every
+        # network interface of the host.  The before_request hook
+        # already rejects non-loopback peers with 403, but binding
+        # to 0.0.0.0 still makes the port observable to network
+        # scanners and any unauthenticated client on the same LAN
+        # / VPN.  Operators who genuinely need remote admin access
+        # must opt in explicitly via ``ADOPTIQ_ADMIN_BIND_PUBLIC=1``
+        # (which keeps the existing 0.0.0.0 binding for backward
+        # compatibility) or override ``ADOPTIQ_ADMIN_HOST`` to a
+        # specific interface.
+        _admin_host = (os.environ.get('ADOPTIQ_ADMIN_HOST') or '').strip()
+        if not _admin_host:
+            _bind_public = os.environ.get('ADOPTIQ_ADMIN_BIND_PUBLIC', '').strip().lower() in {'1', 'true', 'yes'}
+            _admin_host = '0.0.0.0' if _bind_public else '127.0.0.1'
+        if _admin_host not in ('127.0.0.1', '::1', 'localhost'):
+            print(
+                "[SECURITY] Admin dashboard binding to non-loopback host "
+                f"'{_admin_host}'. Ensure firewall + auth controls are in place; "
+                "the before_request hook still restricts to loopback peers."
+            )
         print("Starting AdoptIQ Admin Dashboard v2.0...")
-        print("Access the dashboard at: http://localhost:5002")
-        admin_app.run(host='0.0.0.0', port=5002, debug=False)
+        print(f"Access the dashboard at: http://{_admin_host if _admin_host != '0.0.0.0' else 'localhost'}:5002")
+        admin_app.run(host=_admin_host, port=5002, debug=False)
     except Exception as e:
         print("Admin Console failed to start:", e)
         import traceback

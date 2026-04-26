@@ -9,9 +9,48 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    
+
+    <!-- Round 6 / Phase 2.10: site-wide Content Security Policy.
+         Previously the strict CSP only lived in analyze.html, leaving
+         the rest of the app (history, help, ask_ai, leader_report_form,
+         subscription pages, admin pages) with the browser default of
+         "anything goes".  Moving it into base.html means every page
+         that extends base.html inherits the policy automatically.
+         Pages that need page-specific relaxations can override via the
+         per-page head slot.  Round 7 follow-up: inline references to
+         the literal Jinja block-head tag were removed because Jinja
+         parses HTML comments as live template text, and an unclosed
+         block-head literal in an HTML comment crashed every child
+         template with a TemplateSyntaxError on base.html line 865. -->
+    <!-- Round 9 / Phase 5.4: TODO MIGRATE inline ``<script>`` blocks
+         to nonce-/hash-pinned external files page-by-page so we can
+         drop ``'unsafe-inline'`` from ``script-src``.  ``ask_ai.html``
+         already opted into the strict policy via Round 8 / Phase 5.2
+         (its inline JS was extracted to ``static/js/ask_ai.js``).  In
+         the meantime, ``add_security_headers_for_sensitive_routes`` in
+         ``app_simple.py`` now emits a
+         ``Content-Security-Policy-Report-Only`` header on HTML responses
+         with a nonce-only ``script-src`` so we can measure the inline
+         surface in production logs without breaking the live UI. -->
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self';
+                   script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+                   style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+                   img-src 'self' data: https:;
+                   font-src 'self' https://cdn.jsdelivr.net;
+                   object-src 'none';
+                   base-uri 'self';
+                   form-action 'self';
+                   frame-ancestors 'self';">
+
     <!-- Bootstrap CSS -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Round 6 / Phase 2.1: pin Bootstrap 5.3.0 with SHA-384 SRI hash + crossorigin
+         so a CDN compromise / MITM swap of bootstrap.min.css cannot inject styles
+         that reposition or hide UI controls.  Hash sourced from getbootstrap.com
+         official 5.3.0 release page. -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"
+          integrity="sha384-9ndCyUaIbzAi2FUVXJi0CjmCapSmO7SnpJef0486qhLnuZ2cdeRhO02iuK6FUUVM"
+          crossorigin="anonymous">
     <!-- Custom CSS -->
     <style>
         :root {
@@ -622,7 +661,15 @@
             background-clip: text;
         }
 
-        /* Global minimal UI: remove decorative icon glyphs app-wide. */
+        /* Global minimal UI: hide decorative Font Awesome glyphs.
+           Round 6 / Phase 2.12: confirmed intentional.  We never load
+           the Font Awesome stylesheet, so without this rule the bare
+           ``<i class="fas fa-...">`` elements would render as empty
+           inline boxes that disrupt baseline alignment.  Hiding the
+           markers (rather than stripping every ``<i>`` tag from a
+           dozen templates) is the lowest-risk minimal-UI choice.
+           ``aria-hidden="true"`` on the <i> tags ensures screen
+           readers do not announce a "missing image" either way. */
         i.fa,
         i.fas,
         i.far,
@@ -729,7 +776,21 @@
                 <i class="fas fa-chart-line me-2"></i>AdoptIQ
             </a>
             
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+            {# Round 8 / Phase 5.4: Bootstrap navbar-toggler needs the
+               full ARIA pairing (``aria-controls``, ``aria-expanded``,
+               ``aria-label``) so screen readers can announce both the
+               control's purpose and the current expanded/collapsed
+               state of the menu it operates.  Without these the
+               toggler is announced as an unlabeled button and the
+               linked navbar collapse has no programmatic relationship
+               to it. #}
+            <button class="navbar-toggler"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#navbarNav"
+                    aria-controls="navbarNav"
+                    aria-expanded="false"
+                    aria-label="Toggle navigation">
                 <span class="navbar-toggler-icon"></span>
             </button>
             
@@ -806,7 +867,20 @@
                     </div>
                 </div>
                 <div class="col-md-6 text-md-end">
-                    <p class="mb-2">&copy; 2025 Cisco Systems, Inc. All rights reserved.</p>
+                    {# Round 6 / Phase 2.16: render the copyright year from
+                       a server-supplied context variable so the footer does
+                       not lie when the calendar rolls over.  The
+                       ``adoptiq_footer_year`` value is injected by a Flask
+                       ``context_processor`` (see app_simple.py).
+                       Round 8 / Phase 5.5: previous fallback hard-coded
+                       ``"2025"`` -- which would silently print a wrong year
+                       on every page if the context processor ever failed to
+                       register.  Drop the literal default and let JS
+                       (data-year-target) populate the current client-side
+                       year if the server variable is missing.  This
+                       degrades gracefully without committing the template
+                       to a future-dated lie. #}
+                    <p class="mb-2">&copy; <span data-year-target>{{ adoptiq_footer_year|default('') }}</span> Cisco Systems, Inc. All rights reserved.</p>
                     <p class="mb-0 text-muted">Built with ❤️ by the Cisco AdoptIQ Team · {{ adoptiq_version_string }}</p>
                 </div>
             </div>
@@ -814,7 +888,30 @@
     </footer>
 
     <!-- Bootstrap JS -->
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Round 6 / Phase 2.1: SRI-pin Bootstrap bundle JS too.  Without
+         integrity= a hijacked CDN could ship arbitrary JS that runs in
+         every authenticated session. -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"
+            integrity="sha384-geWF76RCwLtnZ8qwWowPQNguL3RmwHVBC9FhGdlKrxdiJJigb/j/68SIy3Te4Bkz"
+            crossorigin="anonymous"></script>
+    {# Round 8 / Phase 5.5: client-side fallback to populate the
+       footer copyright year if the server context processor failed
+       to set ``adoptiq_footer_year``.  This avoids the previous
+       hard-coded ``"2025"`` literal silently lying on every page
+       in 2026+. #}
+    <script>
+        (function () {
+            try {
+                var nodes = document.querySelectorAll('[data-year-target]');
+                var y = String(new Date().getUTCFullYear());
+                for (var i = 0; i < nodes.length; i++) {
+                    if (!nodes[i].textContent || !nodes[i].textContent.trim()) {
+                        nodes[i].textContent = y;
+                    }
+                }
+            } catch (_) { /* noop */ }
+        })();
+    </script>
     <!-- Custom JS -->
     {% block extra_js %}{% endblock %}
 </body>

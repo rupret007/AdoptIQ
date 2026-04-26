@@ -7,15 +7,157 @@ Leverages all discovered Snowflake tables to provide comprehensive, verifiable i
 import logging
 import pandas as pd
 import datetime
-from typing import Dict, List, Optional, Tuple
+from datetime import timezone
+from typing import Any, Dict, List, Optional, Tuple
 from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
-from snowflake_table_policy import is_table_blocked
+from snowflake_table_policy import (
+    TablePolicyViolation,
+    extract_table_references,
+    guard_sql,
+    is_table_allowed,
+    is_table_blocked,
+)
+
+
+def _enforce_policy_or_skip(sql: str, context: str) -> bool:
+    """Round 7 / Phase 2.5: enforce ``is_table_allowed`` before running.
+
+    ``snowflake_table_policy.guard_sql`` already raises
+    ``TablePolicyViolation`` for either a blocked table OR a table that
+    is not in the allowlist.  Previously this module only consulted
+    ``is_table_blocked`` ad-hoc -- which let new exploratory tables
+    (for example ``RENEWAL_DATA``, ``RISK_ASSESSMENT``,
+    ``BOOKINGS_TABLE_FOR_ACCOUNT_CHECK``) fall through to Snowflake
+    silently, even though they are not on the audited allowlist.
+
+    Now every section calls this helper before executing.  We log a
+    WARNING (not ERROR) when the policy refuses a table so the leader
+    report still renders -- the section is just left empty -- and the
+    operator can decide whether to add the table to the policy
+    allowlist or remove the query.
+
+    Returns ``True`` when the SQL passes policy and may be executed,
+    ``False`` when it must be skipped.
+    """
+    try:
+        guard_sql(sql)
+        return True
+    except TablePolicyViolation as _pol_err:
+        refs = extract_table_references(sql)
+        logger.warning(
+            "Round 7 / Phase 2.5: %s skipped by table policy "
+            "(refs=%s): %s",
+            context, refs, _pol_err,
+        )
+        return False
+
+
+class _PolicyEnforcingCursor:
+    """Round 7 / Phase 2.5: cursor proxy that calls ``guard_sql`` before
+    delegating to the real Snowflake cursor's ``execute``.
+
+    Every method on the underlying cursor still works (we delegate via
+    ``__getattr__``), but ``execute`` and ``executemany`` route through
+    the table-policy allowlist.  When policy refuses the SQL we raise
+    ``TablePolicyViolation`` so the section's existing ``try / except``
+    surrounds the policy violation just like any other Snowflake
+    failure -- no silent execution.
+    """
+
+    def __init__(self, real_cursor, context: str = "snowflake_query"):
+        self._real = real_cursor
+        self._context = context
+        self._policy_skipped = False
+        self._description = None
+
+    def execute(self, sql, params=None):
+        if not _enforce_policy_or_skip(sql, self._context):
+            self._policy_skipped = True
+            self._description = None
+            raise TablePolicyViolation(
+                f"Round 7 / Phase 2.5: {self._context} refused by table policy"
+            )
+        return self._real.execute(sql, params) if params is not None else self._real.execute(sql)
+
+    def executemany(self, sql, seq_of_params):
+        if not _enforce_policy_or_skip(sql, self._context):
+            self._policy_skipped = True
+            raise TablePolicyViolation(
+                f"Round 7 / Phase 2.5: {self._context} refused by table policy"
+            )
+        return self._real.executemany(sql, seq_of_params)
+
+    def fetchall(self):
+        if self._policy_skipped:
+            return []
+        return self._real.fetchall()
+
+    def fetchone(self):
+        if self._policy_skipped:
+            return None
+        return self._real.fetchone()
+
+    @property
+    def description(self):
+        return getattr(self._real, "description", None)
+
+    def close(self):
+        try:
+            return self._real.close()
+        except Exception:
+            return None
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _utc_window_start_iso(days: int) -> str:
+    """Round 7 / Phase 2.1: compute an explicit UTC window-start date.
+
+    Snowflake's ``CURRENT_DATE()`` is evaluated in the *session* time
+    zone, which means a leader report run at 02:00 UTC by a Pacific-time
+    Snowflake account silently slid the lookback window 8 hours into
+    yesterday (or tomorrow, depending on direction).  We now compute
+    ``today_utc - days`` in Python and bind the resulting ISO date as a
+    parameter, so the returned data set is identical regardless of where
+    Snowflake's session TZ happens to be configured.
+    """
+    try:
+        _days = int(days)
+    except (TypeError, ValueError):
+        _days = 0
+    if _days < 0:
+        _days = 0
+    cutoff = datetime.datetime.now(timezone.utc).date() - datetime.timedelta(days=_days)
+    return cutoff.isoformat()
 
 logger = logging.getLogger(__name__)
+
+
+def _redact_customer(customer_name: str) -> str:
+    """Round 7 / Phase 2.9: produce a short, stable digest of a
+    customer name for INFO-level log lines.
+
+    The previous code emitted the raw customer name into INFO logs
+    every time a section completed or failed.  When those INFO lines
+    are aggregated to Splunk / a cloud collector this is effectively
+    customer-PII fan-out -- the names are joined to logs that operators
+    outside the customer's account can read.  The DEBUG path keeps the
+    raw name for local troubleshooting.
+    """
+    try:
+        import hashlib as _hl
+        name = (customer_name or "").strip()
+        if not name:
+            return "<empty>"
+        digest = _hl.sha256(name.encode("utf-8")).hexdigest()[:8]
+        return f"customer#{digest}"
+    except Exception:
+        return "<redact-failed>"
 
 
 def _is_snowflake_access_issue(exc: Exception) -> bool:
@@ -36,7 +178,14 @@ def _is_snowflake_access_issue(exc: Exception) -> bool:
 
 
 def _log_query_fallback(context: str, exc: Exception) -> None:
-    if _is_snowflake_access_issue(exc):
+    # Round 7 / Phase 2.5: classify TablePolicyViolation as a known
+    # "skipped by policy" event rather than an ERROR -- the policy
+    # proxy already logged the offending tables; this avoids a second
+    # ERROR-level entry that would page on-call for an intentional
+    # allowlist refusal.
+    if isinstance(exc, TablePolicyViolation):
+        logger.info("%s skipped by table policy: %s", context, str(exc).strip())
+    elif _is_snowflake_access_issue(exc):
         logger.warning("%s skipped due to Snowflake access/schema limitations: %s", context, str(exc).strip())
     else:
         logger.error("%s failed: %s", context, exc)
@@ -51,15 +200,61 @@ class EnhancedSnowflakeInsights:
         self.source_attribution = {}
         self._skip_warned = set()  # log once when optional tables/columns are unavailable
         
-    def get_comprehensive_customer_insights(self, customer_name: str, days: int = 90) -> Dict:
+    def get_comprehensive_customer_insights(self, customer_name: str, days: int) -> Dict:
         """Get comprehensive insights from all available Snowflake tables.
-        When CX_DB/EDW tables or columns are missing, insight fetches fail quietly (logged at DEBUG).
+
+        Round 2 / Phase 3.5: ``days`` is now mandatory.  Previously the
+        default of 90 silently overrode the report's selected window
+        (e.g. a 30-day leader report would silently fetch 90 days of
+        bookings/usage/support/risk evidence).  Removing the default
+        forces every call site to pass the report window so the
+        evidence period matches the headline.
+
+        When CX_DB/EDW tables or columns are missing, insight fetches
+        fail quietly (logged at DEBUG).
         """
+        if days is None:
+            raise TypeError(
+                "EnhancedSnowflakeInsights.get_comprehensive_customer_insights() "
+                "requires an explicit 'days' window; pass the report's selected "
+                "analysis period (e.g. days=30/60/90)."
+            )
+        try:
+            days = int(days)
+        except (TypeError, ValueError) as _coerce_err:
+            raise TypeError(
+                f"EnhancedSnowflakeInsights.get_comprehensive_customer_insights() "
+                f"requires an integer 'days'; got {days!r}: {_coerce_err}"
+            )
+        if days <= 0:
+            raise ValueError(
+                f"EnhancedSnowflakeInsights.get_comprehensive_customer_insights() "
+                f"requires a positive 'days'; got {days}"
+            )
+        # Round 7 / Phase 2.3: pre-normalize ``customer_name`` before
+        # binding into ``LIKE %s`` queries so trailing whitespace,
+        # smart quotes, and casing variants resolve to the same
+        # Snowflake row set every other report uses.  Without this,
+        # the same customer could match here but miss in the leader
+        # report (and vice versa) because the leader path normalizes
+        # via ``normalize_customer_name`` before joining.
+        try:
+            from data_normalization import normalize_customer_name as _norm_cn
+            customer_name = _norm_cn(customer_name) or customer_name
+        except Exception as _norm_err:
+            logger.warning(
+                "Round 7 / Phase 2.3: normalize_customer_name failed for "
+                "%r (%s); proceeding with raw value.",
+                customer_name, _norm_err,
+            )
         logger.debug(f"Getting comprehensive insights for: {customer_name}")
         
         insights = {
             'customer_name': customer_name,
-            'analysis_date': datetime.datetime.now().isoformat(),
+            # Round 7 / Phase 2.2: tz-aware UTC so the analysis_date
+            # in the persisted insights matches the UTC window used to
+            # bind every Snowflake query above.
+            'analysis_date': datetime.datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
             'analysis_period_days': days,
             'data_sources': [],
             'insights': {},
@@ -105,9 +300,38 @@ class EnhancedSnowflakeInsights:
             insights['insights']['product'] = product_insights
             
             # Compile source attribution
-            insights['source_attribution'] = self._compile_source_attribution()
-            
-            logger.info(f"SUCCESS: Comprehensive insights generated for {customer_name}")
+            # Round 7 / Phase 2.13: pass the actual collected sub-section
+            # insights so the attribution dict reflects the real Snowflake
+            # tables/records used, not a template.
+            insights['source_attribution'] = self._compile_source_attribution(
+                insights.get('insights', {})
+            )
+
+            # Phase 4.3: aggregate any sub-section failures at the top
+            # level so the leader report can render an explicit
+            # "section unavailable" line for the customer instead of
+            # silently dropping a section that hit a Snowflake error.
+            section_errors: Dict[str, str] = {}
+            for section_name, section_payload in insights['insights'].items():
+                if isinstance(section_payload, dict):
+                    err = section_payload.get('error')
+                    if err:
+                        section_errors[section_name] = str(err)
+            if section_errors:
+                insights['section_errors'] = section_errors
+                # Surface to the warnings channel so the leader-report
+                # assembler can pick it up via standard logging too.
+                logger.warning(
+                    "Enhanced insights for %s completed with %d sub-section error(s): %s",
+                    customer_name,
+                    len(section_errors),
+                    ", ".join(sorted(section_errors.keys())),
+                )
+
+            # Round 7 / Phase 2.9: redact customer name in INFO log.
+            logger.info("SUCCESS: Comprehensive insights generated for %s", _redact_customer(customer_name))
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Comprehensive insights (raw customer): %s", customer_name)
             return insights
             
         except Exception as e:
@@ -156,10 +380,15 @@ class EnhancedSnowflakeInsights:
                 ABC_CATEGORY__C
             FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
             WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
+            -- Round 12 / Phase 7.2: stable ORDER BY before LIMIT so
+            -- Snowflake cannot return non-deterministic windows on
+            -- reruns of the same report.
+            ORDER BY ACCOUNT_ID_C NULLS LAST, BU_ACCOUNT_NAME NULLS LAST
             LIMIT 10
             """
             
-            cur = self.ctx.cursor()
+            # Round 7 / Phase 2.5: enforce table-policy allowlist on every execute.
+            cur = _PolicyEnforcingCursor(self.ctx.cursor(), context="enhanced_snowflake_insights")
             try:
                 cur.execute(account_query, (f'%{customer_name}%',))
                 account_results = cur.fetchall()
@@ -191,6 +420,8 @@ class EnhancedSnowflakeInsights:
                     RENEWAL_ACCOUNT
                 FROM CX_DB.CX_SWSSBST_BR.ACCOUNTS_EXPIRED_LAST_MONTH 
                 WHERE UPPER(NAME) LIKE UPPER(%s)
+                -- Round 12 / Phase 7.2: deterministic LIMIT window.
+                ORDER BY EXPIRED_DATE DESC NULLS LAST, ID NULLS LAST
                 LIMIT 5
                 """
                 
@@ -214,8 +445,8 @@ class EnhancedSnowflakeInsights:
                 cur.close()
             
         except Exception as e:
-            logger.debug(f"Error getting account insights: {e}")
-            insights['error'] = 'Account insights unavailable.'
+            logger.warning("Account insights unavailable for %s: %s", _redact_customer(customer_name), e)  # Round 7 / Phase 2.9
+            insights['error'] = f'Account insights unavailable: {str(e).strip() or e.__class__.__name__}'
         
         return insights
     
@@ -230,34 +461,81 @@ class EnhancedSnowflakeInsights:
         
         try:
             # Contract Information
+            # Round 7 / Phase 2.4: pull CURRENCY_CODE so total_arr can
+            # be reported with an explicit currency or marked UNKNOWN
+            # when the contract set mixes currencies (the previous code
+            # silently summed JPY + USD + EUR into a "$" total).
             contract_query = """
             SELECT 
                 CONTRACT_NUMBER,
                 SERVICE_END_DATE,
                 C_360_SERVICE_TIER_C,
                 ARR_AMOUNT,
-                ACCOUNT_ID_C
+                ACCOUNT_ID_C,
+                CURRENCY_CODE
             FROM CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU 
             WHERE UPPER(ACCOUNT_ID_C) IN (
                 SELECT UPPER(ACCOUNT_ID_C) 
                 FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
                 WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
             )
-            AND SERVICE_END_DATE >= DATEADD(day, -%s, CURRENT_DATE())
+            AND SERVICE_END_DATE >= %s
+            -- Round 12 / Phase 7.2: deterministic LIMIT window.
+            ORDER BY SERVICE_END_DATE DESC NULLS LAST, CONTRACT_NUMBER NULLS LAST,
+                     ACCOUNT_ID_C NULLS LAST
             LIMIT 20
             """
             
-            cur = self.ctx.cursor()
+            # Round 7 / Phase 2.5: enforce table-policy allowlist on every execute.
+            cur = _PolicyEnforcingCursor(self.ctx.cursor(), context="enhanced_snowflake_insights")
             try:
-                cur.execute(contract_query, (f'%{customer_name}%', days))
+                # Round 7 / Phase 2.1: bind explicit UTC window start
+                # so the data set is independent of Snowflake session TZ.
+                cur.execute(contract_query, (f'%{customer_name}%', _utc_window_start_iso(days)))
                 contract_results = cur.fetchall()
                 
                 if contract_results:
                     _CONTRACT_LIMIT = 20
+                    # Round 7 / Phase 2.4: compute currency-aware total
+                    # ARR.  If the rows we summed all share the same
+                    # CURRENCY_CODE we report that code; otherwise we
+                    # mark the currency UNKNOWN so the renderer cannot
+                    # accidentally label a multi-currency total with a
+                    # "$" prefix.
+                    _seen_ccy: set = set()
+                    _total = 0.0
+                    for _row in contract_results:
+                        _amt = _row[3] if len(_row) > 3 else None
+                        if _amt is None:
+                            continue
+                        if isinstance(_amt, float) and _amt != _amt:
+                            continue
+                        try:
+                            _ccy = (_row[5] if len(_row) > 5 else None) or "UNKNOWN"
+                        except Exception:
+                            _ccy = "UNKNOWN"
+                        _seen_ccy.add(str(_ccy).strip().upper() or "UNKNOWN")
+                        try:
+                            _total += float(_amt)
+                        except (TypeError, ValueError):
+                            continue
+                    if len(_seen_ccy) == 1:
+                        _total_currency = next(iter(_seen_ccy))
+                    elif len(_seen_ccy) == 0:
+                        _total_currency = "UNKNOWN"
+                    else:
+                        _total_currency = "UNKNOWN"
+                        logger.warning(
+                            "Round 7 / Phase 2.4: total_arr for %s mixes "
+                            "%d currencies (%s); marking currency UNKNOWN.",
+                            customer_name, len(_seen_ccy),
+                            ",".join(sorted(_seen_ccy)),
+                        )
                     insights['contract_data'] = {
                         'contracts_found': len(contract_results),
                         'contracts': [dict(zip([col[0] for col in cur.description], row)) for row in contract_results],
-                        'total_arr': sum(row[3] for row in contract_results if row[3] and not (isinstance(row[3], float) and (row[3] != row[3]))),
+                        'total_arr': _total,
+                        'total_arr_currency': _total_currency,
                         'fetch_limit': _CONTRACT_LIMIT,
                         'was_truncated': len(contract_results) >= _CONTRACT_LIMIT,
                     }
@@ -284,6 +562,8 @@ class EnhancedSnowflakeInsights:
                         WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
                     )
                 )
+                -- Round 12 / Phase 7.2: deterministic LIMIT window.
+                ORDER BY RENEWAL_DATE DESC NULLS LAST, CONTRACT_NUMBER NULLS LAST
                 LIMIT 10
                 """
                 
@@ -307,8 +587,8 @@ class EnhancedSnowflakeInsights:
                 cur.close()
             
         except Exception as e:
-            logger.debug(f"Error getting contract insights: {e}")
-            insights['error'] = 'Contract insights unavailable.'
+            logger.warning("Contract insights unavailable for %s: %s", _redact_customer(customer_name), e)  # Round 7 / Phase 2.9
+            insights['error'] = f'Contract insights unavailable: {str(e).strip() or e.__class__.__name__}'
         
         return insights
     
@@ -331,13 +611,17 @@ class EnhancedSnowflakeInsights:
                 AMOUNT
             FROM CX_DB.CX_SWSSBST_BR.BOOKINGS_TABLE_FOR_ACCOUNT_CHECK 
             WHERE UPPER(END_CUSTOMER_NAME) LIKE UPPER(%s)
-            AND DATE_BOOKED >= DATEADD(day, -%s, CURRENT_DATE())
+            AND DATE_BOOKED >= %s
+            -- Round 12 / Phase 7.2: deterministic LIMIT window.
+            ORDER BY DATE_BOOKED DESC NULLS LAST, SUBSCRIPTION_REFERENCE_ID NULLS LAST
             LIMIT 20
             """
             
-            cur = self.ctx.cursor()
+            # Round 7 / Phase 2.5: enforce table-policy allowlist on every execute.
+            cur = _PolicyEnforcingCursor(self.ctx.cursor(), context="enhanced_snowflake_insights")
             try:
-                cur.execute(booking_query, (f'%{customer_name}%', days))
+                # Round 7 / Phase 2.1: bind explicit UTC window start.
+                cur.execute(booking_query, (f'%{customer_name}%', _utc_window_start_iso(days)))
                 booking_results = cur.fetchall()
                 
                 if booking_results:
@@ -368,6 +652,8 @@ class EnhancedSnowflakeInsights:
                     FROM CX_DB.CX_SWSSBST_BR.BOOKINGS_TABLE_FOR_ACCOUNT_CHECK 
                     WHERE UPPER(END_CUSTOMER_NAME) LIKE UPPER(%s)
                 )
+                -- Round 12 / Phase 7.2: deterministic LIMIT window.
+                ORDER BY DATE_CREATED DESC NULLS LAST, SUBSCRIPTION_REFERENCE_ID NULLS LAST
                 LIMIT 10
                 """
                 
@@ -399,9 +685,11 @@ class EnhancedSnowflakeInsights:
                 if "booking" not in self._skip_warned:
                     self._skip_warned.add("booking")
                     logger.info("Optional: Booking insights table/column not available; skipping for all customers.")
+                insights['error'] = 'Booking insights not configured (table/column unavailable).'
             else:
+                logger.warning("Booking insights unavailable for %s: %s", _redact_customer(customer_name), e)  # Round 7 / Phase 2.9
                 _log_query_fallback("Booking insights query", e)
-            insights['error'] = 'Booking insights unavailable.'
+                insights['error'] = f'Booking insights unavailable: {err_str.strip() or e.__class__.__name__}'
         
         return insights
     
@@ -426,7 +714,8 @@ class EnhancedSnowflakeInsights:
             logger.info("Policy: Skipping ESA_C360_SUCCESS_PRIORITY__C queries in enhanced engagement insights.")
 
         try:
-            cur = self.ctx.cursor()
+            # Round 7 / Phase 2.5: enforce table-policy allowlist on every execute.
+            cur = _PolicyEnforcingCursor(self.ctx.cursor(), context="enhanced_snowflake_insights")
             try:
                 if not block_cs_task:
                     ap_query = """
@@ -443,10 +732,13 @@ class EnhancedSnowflakeInsights:
                         FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
                         WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
                     )
-                    AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
+                    AND CREATED_DATE >= %s
+                    -- Round 12 / Phase 7.2: deterministic LIMIT window.
+                    ORDER BY CREATED_DATE DESC NULLS LAST, ID NULLS LAST
                     LIMIT 20
                     """
-                    cur.execute(ap_query, (f'%{customer_name}%', days))
+                    # Round 7 / Phase 2.1: bind explicit UTC window start.
+                    cur.execute(ap_query, (f'%{customer_name}%', _utc_window_start_iso(days)))
                     ap_results = cur.fetchall()
                     if ap_results:
                         _AP_LIMIT = 20
@@ -477,10 +769,13 @@ class EnhancedSnowflakeInsights:
                         FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
                         WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
                     )
-                    AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
+                    AND CREATED_DATE >= %s
+                    -- Round 12 / Phase 7.2: deterministic LIMIT window.
+                    ORDER BY CREATED_DATE DESC NULLS LAST, ID NULLS LAST
                     LIMIT 20
                     """
-                    cur.execute(ab_query, (f'%{customer_name}%', days))
+                    # Round 7 / Phase 2.1: bind explicit UTC window start.
+                    cur.execute(ab_query, (f'%{customer_name}%', _utc_window_start_iso(days)))
                     ab_results = cur.fetchall()
                     if ab_results:
                         _AB_LIMIT = 20
@@ -509,10 +804,13 @@ class EnhancedSnowflakeInsights:
                     FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
                     WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
                 )
-                AND CREATEDDATE >= DATEADD(day, -%s, CURRENT_DATE())
+                AND CREATEDDATE >= %s
+                -- Round 12 / Phase 7.2: deterministic LIMIT window.
+                ORDER BY CREATEDDATE DESC NULLS LAST, ID NULLS LAST
                 LIMIT 20
                 """
-                cur.execute(cp_query, (f'%{customer_name}%', days))
+                # Round 7 / Phase 2.1: bind explicit UTC window start.
+                cur.execute(cp_query, (f'%{customer_name}%', _utc_window_start_iso(days)))
                 cp_results = cur.fetchall()
                 if cp_results:
                     _CP_LIMIT = 20
@@ -552,10 +850,13 @@ class EnhancedSnowflakeInsights:
                         )
                         OR UPPER(RELATED_CUSTOMER__C) LIKE UPPER(%s)
                     )
-                    AND CREATEDDATE >= DATEADD(day, -%s, CURRENT_DATE())
+                    AND CREATEDDATE >= %s
+                    -- Round 12 / Phase 7.2: deterministic LIMIT window.
+                    ORDER BY CREATEDDATE DESC NULLS LAST, ID NULLS LAST
                     LIMIT 20
                     """
-                    cur.execute(sp_query, (f'%{customer_name}%', f'%{customer_name}%', days))
+                    # Round 7 / Phase 2.1: bind explicit UTC window start.
+                    cur.execute(sp_query, (f'%{customer_name}%', f'%{customer_name}%', _utc_window_start_iso(days)))
                     sp_results = cur.fetchall()
                     if sp_results:
                         _SP_LIMIT = 20
@@ -574,8 +875,8 @@ class EnhancedSnowflakeInsights:
                 cur.close()
 
         except Exception as e:
-            logger.debug(f"Error getting engagement insights: {e}")
-            insights['error'] = 'Engagement insights unavailable.'
+            logger.warning("Engagement insights unavailable for %s: %s", _redact_customer(customer_name), e)  # Round 7 / Phase 2.9
+            insights['error'] = f'Engagement insights unavailable: {str(e).strip() or e.__class__.__name__}'
 
         return insights
     
@@ -608,13 +909,18 @@ class EnhancedSnowflakeInsights:
                 FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
                 WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
             )
-            AND LAST_LOGIN_DATE >= DATEADD(day, -%s, CURRENT_DATE())
+            AND LAST_LOGIN_DATE >= %s
+            -- Round 12 / Phase 7.2: deterministic LIMIT window so reruns
+            -- of the same usage report return the same 50 rows.
+            ORDER BY LAST_LOGIN_DATE DESC NULLS LAST, USER_ID NULLS LAST
             LIMIT 50
             """
             
-            cur = self.ctx.cursor()
+            # Round 7 / Phase 2.5: enforce table-policy allowlist on every execute.
+            cur = _PolicyEnforcingCursor(self.ctx.cursor(), context="enhanced_snowflake_insights")
             try:
-                cur.execute(user_query, (f'%{customer_name}%', days))
+                # Round 7 / Phase 2.1: bind explicit UTC window start.
+                cur.execute(user_query, (f'%{customer_name}%', _utc_window_start_iso(days)))
                 user_results = cur.fetchall()
                 
                 if user_results:
@@ -634,8 +940,8 @@ class EnhancedSnowflakeInsights:
                 cur.close()
             
         except Exception as e:
-            logger.debug(f"Error getting usage insights: {e}")
-            insights['error'] = 'Usage insights unavailable.'
+            logger.warning("Usage insights unavailable for %s: %s", _redact_customer(customer_name), e)  # Round 7 / Phase 2.9
+            insights['error'] = f'Usage insights unavailable: {str(e).strip() or e.__class__.__name__}'
         
         return insights
     
@@ -669,13 +975,17 @@ class EnhancedSnowflakeInsights:
                 FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
                 WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
             )
-            AND CREATED_DATE >= DATEADD(day, -%s, CURRENT_DATE())
+            AND CREATED_DATE >= %s
+            -- Round 12 / Phase 7.2: deterministic LIMIT window.
+            ORDER BY CREATED_DATE DESC NULLS LAST, CASE_ID NULLS LAST
             LIMIT 20
             """
             
-            cur = self.ctx.cursor()
+            # Round 7 / Phase 2.5: enforce table-policy allowlist on every execute.
+            cur = _PolicyEnforcingCursor(self.ctx.cursor(), context="enhanced_snowflake_insights")
             try:
-                cur.execute(support_query, (f'%{customer_name}%', days))
+                # Round 7 / Phase 2.1: bind explicit UTC window start.
+                cur.execute(support_query, (f'%{customer_name}%', _utc_window_start_iso(days)))
                 support_results = cur.fetchall()
                 
                 if support_results:
@@ -695,8 +1005,8 @@ class EnhancedSnowflakeInsights:
                 cur.close()
             
         except Exception as e:
-            logger.debug(f"Error getting support insights: {e}")
-            insights['error'] = 'Support insights unavailable.'
+            logger.warning("Support insights unavailable for %s: %s", _redact_customer(customer_name), e)  # Round 7 / Phase 2.9
+            insights['error'] = f'Support insights unavailable: {str(e).strip() or e.__class__.__name__}'
         
         return insights
     
@@ -723,10 +1033,16 @@ class EnhancedSnowflakeInsights:
                 FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
                 WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
             )
+            -- Round 12 / Phase 7.2: deterministic LIMIT window so the
+            -- top-10 risk-assessment rows are stable across reruns.
+            ORDER BY LAST_ASSESSED_DATE DESC NULLS LAST,
+                     RISK_SCORE DESC NULLS LAST,
+                     ACCOUNT_ID NULLS LAST
             LIMIT 10
             """
             
-            cur = self.ctx.cursor()
+            # Round 7 / Phase 2.5: enforce table-policy allowlist on every execute.
+            cur = _PolicyEnforcingCursor(self.ctx.cursor(), context="enhanced_snowflake_insights")
             try:
                 cur.execute(risk_query, (f'%{customer_name}%',))
                 risk_results = cur.fetchall()
@@ -754,9 +1070,11 @@ class EnhancedSnowflakeInsights:
                 if "risk" not in self._skip_warned:
                     self._skip_warned.add("risk")
                     logger.info("Optional: RISK_ASSESSMENT table not available or not authorized; skipping for all customers.")
+                insights['error'] = 'Risk insights not configured (table unavailable).'
             else:
+                logger.warning("Risk insights unavailable for %s: %s", _redact_customer(customer_name), e)  # Round 7 / Phase 2.9
                 _log_query_fallback("Risk insights query", e)
-            insights['error'] = 'Risk insights unavailable.'
+                insights['error'] = f'Risk insights unavailable: {err_str.strip() or e.__class__.__name__}'
         
         return insights
     
@@ -789,10 +1107,16 @@ class EnhancedSnowflakeInsights:
                 FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
                 WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
             )
+            -- Round 12 / Phase 7.2: deterministic LIMIT window so the
+            -- top-20 product-usage rows are reproducible run-to-run.
+            ORDER BY ADOPTION_SCORE DESC NULLS LAST,
+                     USAGE_LEVEL DESC NULLS LAST,
+                     PRODUCT_ID NULLS LAST
             LIMIT 20
             """
             
-            cur = self.ctx.cursor()
+            # Round 7 / Phase 2.5: enforce table-policy allowlist on every execute.
+            cur = _PolicyEnforcingCursor(self.ctx.cursor(), context="enhanced_snowflake_insights")
             try:
                 cur.execute(product_query, (f'%{customer_name}%',))
                 product_results = cur.fetchall()
@@ -814,28 +1138,71 @@ class EnhancedSnowflakeInsights:
                 cur.close()
             
         except Exception as e:
-            logger.debug(f"Error getting product insights: {e}")
-            insights['error'] = 'Product insights unavailable.'
+            logger.warning("Product insights unavailable for %s: %s", _redact_customer(customer_name), e)  # Round 7 / Phase 2.9
+            insights['error'] = f'Product insights unavailable: {str(e).strip() or e.__class__.__name__}'
         
         return insights
     
-    def _compile_source_attribution(self) -> Dict:
-        """Compile comprehensive source attribution"""
-        attribution = {
+    def _compile_source_attribution(self, sub_insights: Optional[Dict] = None) -> Dict:
+        """Compile comprehensive source attribution.
+
+        Round 7 / Phase 2.13: previously returned a hard-coded empty
+        template while still claiming "complete source attribution" in
+        the report copy.  Now walks every sub-section's ``sources``
+        list and aggregates the table names, verification methods, and
+        record counts so the attribution dict is grounded in what was
+        actually fetched.
+        """
+        attribution: Dict[str, Any] = {
             'data_sources_used': [],
             'verification_methods': {},
-            'total_records_analyzed': 0
+            'total_records_analyzed': 0,
         }
-        
-        # This would be populated by the actual data collection methods
-        # For now, return a template
+
+        if not isinstance(sub_insights, dict) or not sub_insights:
+            attribution['note'] = (
+                'No sub-section insights provided to compile attribution'
+            )
+            return attribution
+
+        seen_tables: List[str] = []
+        for section_name, section in sub_insights.items():
+            if not isinstance(section, dict):
+                continue
+            sources = section.get('sources') or []
+            if not isinstance(sources, list):
+                continue
+            for src in sources:
+                if not isinstance(src, dict):
+                    continue
+                table = str(src.get('table') or '').strip()
+                if not table:
+                    continue
+                if table not in seen_tables:
+                    seen_tables.append(table)
+                method = str(src.get('verification_method') or '').strip()
+                if method and table not in attribution['verification_methods']:
+                    attribution['verification_methods'][table] = method
+                try:
+                    rec_count = int(src.get('records_found') or 0)
+                except (TypeError, ValueError):
+                    rec_count = 0
+                attribution['total_records_analyzed'] += max(0, rec_count)
+
+        attribution['data_sources_used'] = sorted(seen_tables)
+        attribution['sections_with_sources'] = sorted(
+            name for name, sec in sub_insights.items()
+            if isinstance(sec, dict) and sec.get('sources')
+        )
         return attribution
     
     def _get_mock_insights(self, customer_name: str, days: int) -> Dict:
         """Get mock insights for testing"""
         return {
             'customer_name': customer_name,
-            'analysis_date': datetime.datetime.now().isoformat(),
+            # Round 7 / Phase 2.2: keep mock and live paths on the
+            # same tz-aware UTC clock.
+            'analysis_date': datetime.datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
             'analysis_period_days': days,
             'data_sources': ['Mock Data Source'],
             'insights': {
@@ -855,9 +1222,21 @@ class EnhancedSnowflakeInsights:
             }
         }
     
-    def generate_enhanced_insights_report(self, customer_name: str, days: int = 90) -> str:
-        """Generate enhanced insights report with complete source attribution"""
-        logger.info(f"DATA: Generating enhanced insights report for: {customer_name}")
+    def generate_enhanced_insights_report(self, customer_name: str, days: int) -> str:
+        """Generate enhanced insights report with complete source attribution.
+
+        Round 2 / Phase 3.5: ``days`` is mandatory (matches the
+        underlying ``get_comprehensive_customer_insights`` contract).
+        """
+        if days is None:
+            raise TypeError(
+                "EnhancedSnowflakeInsights.generate_enhanced_insights_report() "
+                "requires an explicit 'days' window."
+            )
+        # Round 7 / Phase 2.9: redact customer name in INFO log.
+        logger.info("DATA: Generating enhanced insights report for: %s", _redact_customer(customer_name))
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Generating enhanced insights report (raw customer): %s", customer_name)
         
         # Get comprehensive insights
         insights = self.get_comprehensive_customer_insights(customer_name, days)
@@ -886,7 +1265,9 @@ class EnhancedSnowflakeInsights:
         
         # Save document
         import re
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Round 7 / Phase 2.2: build the saved-file timestamp in UTC
+        # so the filename matches the UTC stamps inside the document.
+        timestamp = datetime.datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         safe_name = re.sub(r'[^\w\-.]', '_', customer_name)[:80]
         filename = f"Enhanced_Insights_{safe_name}_{timestamp}.docx"
         doc.save(filename)
@@ -903,7 +1284,10 @@ class EnhancedSnowflakeInsights:
         doc.add_heading('Customer Information', level=1)
         doc.add_paragraph(f"Customer Name: {customer_name}")
         doc.add_paragraph(f"Analysis Period: Last {days} days")
-        doc.add_paragraph(f"Report Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # Round 7 / Phase 2.2: render Report Generated stamp in UTC.
+        doc.add_paragraph(
+            f"Report Generated: {datetime.datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        )
         
         # Data sources overview (canonical + report-specific)
         doc.add_heading('Report Data Sources', level=1)
@@ -971,7 +1355,17 @@ class EnhancedSnowflakeInsights:
         if contract_insights.get('contract_data'):
             doc.add_heading('Contract Data', level=2)
             doc.add_paragraph(f"Contracts found: {contract_insights['contract_data'].get('contracts_found', 0)}")
-            doc.add_paragraph(f"Total ARR: ${contract_insights['contract_data'].get('total_arr', 0):,.2f}")
+            # Round 7 / Phase 2.4: render the total with the resolved
+            # currency code (or CURRENCY UNKNOWN when the contract set
+            # is mixed) instead of always prefixing "$".
+            _arr_total = contract_insights['contract_data'].get('total_arr', 0) or 0
+            _arr_ccy = contract_insights['contract_data'].get('total_arr_currency', 'UNKNOWN')
+            if _arr_ccy and _arr_ccy != 'UNKNOWN':
+                doc.add_paragraph(f"Total ARR: {_arr_ccy} {_arr_total:,.2f}")
+            else:
+                doc.add_paragraph(
+                    f"Total ARR: {_arr_total:,.2f} (CURRENCY UNKNOWN -- mixed or unset)"
+                )
             
             # Add source attribution
             if contract_insights.get('sources'):
@@ -1154,7 +1548,10 @@ class EnhancedSnowflakeInsights:
         doc.add_paragraph("• Error handling ensures graceful degradation")
         
         doc.add_heading('Report Generation Details', level=2)
-        doc.add_paragraph(f"Report generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # Round 7 / Phase 2.2: render trailing Report generated stamp in UTC.
+        doc.add_paragraph(
+            f"Report generated: {datetime.datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        )
         doc.add_paragraph("System: AdoptIQ Enhanced Snowflake Insights")
         doc.add_paragraph("Version: 1.0")
         doc.add_paragraph("Data Source: Snowflake Data Warehouse")

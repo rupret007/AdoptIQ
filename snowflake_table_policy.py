@@ -38,6 +38,30 @@ _TABLE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Round 9 / Phase 6.1: capture the trailing "FROM/JOIN <t1>, <t2>, <t3>"
+# tail so comma-separated joins are walked too.  The original pattern
+# only grabbed the first identifier after ``FROM`` / ``JOIN``, so a
+# query of the form ``FROM allowed.t1, blocked.t2`` got past
+# ``guard_sql`` because ``blocked.t2`` was never inspected.  This
+# secondary pattern grabs the rest of the comma list (everything up to
+# the next SQL keyword that terminates the FROM clause) and we split it
+# into individual identifiers below.
+_FROM_TAIL_PATTERN = re.compile(
+    r"\b(?:FROM|JOIN)\s+[A-Za-z0-9_.$\"]+\s*((?:,\s*[A-Za-z0-9_.$\"]+\s*)+)",
+    re.IGNORECASE,
+)
+
+# Round 9 / Phase 6.1: SQL keywords that legitimately follow a FROM /
+# JOIN list.  Any identifier captured by ``_FROM_TAIL_PATTERN`` whose
+# normalised form matches one of these is dropped -- defensive against
+# the regex over-greedily reaching into the next clause.
+_SQL_CLAUSE_KEYWORDS = {
+    "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "JOIN", "ON",
+    "UNION", "INTERSECT", "EXCEPT", "QUALIFY", "WINDOW",
+    "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS", "LATERAL",
+    "AS", "USING", "WITH", "SELECT",
+}
+
 
 def normalize_table_name(table_name: str) -> str:
     cleaned = (table_name or "").strip().strip(",;")
@@ -88,6 +112,18 @@ def guard_table(table_name: str) -> None:
 
 
 def extract_table_references(sql: str) -> List[str]:
+    """Round 9 / Phase 6.1: extract every table referenced by the SQL,
+    including comma-joined siblings of a ``FROM`` / ``JOIN`` clause.
+
+    The original implementation only captured the first identifier
+    after ``FROM`` / ``JOIN``, which let a query of the form
+    ``FROM allowed.t1, blocked.t2`` slip past ``guard_sql`` because
+    ``blocked.t2`` was never offered to ``guard_table``.  We now walk
+    the comma list with ``_FROM_TAIL_PATTERN``, drop SQL keywords that
+    the over-greedy regex might pick up, and dedupe on the way out.
+    Subqueries (``FROM (SELECT ...)``) are still skipped via the
+    original ``startswith("(")`` guard.
+    """
     if not isinstance(sql, str):
         return []
     refs: List[str] = []
@@ -99,6 +135,16 @@ def extract_table_references(sql: str) -> List[str]:
         if candidate.startswith("(") or candidate in {"SELECT"}:
             continue
         refs.append(candidate)
+    # Round 9 / Phase 6.1: sweep comma-separated tail identifiers too.
+    for tail_match in _FROM_TAIL_PATTERN.finditer(sql):
+        tail_text = tail_match.group(1) or ""
+        for piece in tail_text.split(","):
+            candidate = normalize_table_name(piece)
+            if not candidate:
+                continue
+            if candidate.startswith("(") or candidate in _SQL_CLAUSE_KEYWORDS:
+                continue
+            refs.append(candidate)
     # Preserve order, remove duplicates.
     return list(dict.fromkeys(refs))
 

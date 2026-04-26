@@ -7,6 +7,7 @@ import os
 import sys
 import shutil
 import subprocess
+import tempfile
 import time
 import webbrowser
 from pathlib import Path
@@ -50,7 +51,21 @@ def _register_programs_features(dest: Path, uninstall_exe: Path, version: str, b
 
 
 def _create_shortcuts(exe_path: Path, working_dir: Path) -> None:
-    """Create Start Menu and Desktop shortcuts so users can easily find AdoptIQ."""
+    """Create Start Menu and Desktop shortcuts so users can easily find AdoptIQ.
+
+    Round 8 / Phase 6.3:
+      * Use ``tempfile.NamedTemporaryFile`` so the helper script lives in
+        a private, owner-only temp file rather than a predictable
+        ``%TEMP%\\adoptiq_shortcut.ps1`` path that any local user could
+        race or pre-create as a symlink.
+      * Narrow ``ExecutionPolicy Bypass`` so it never persists outside
+        this single PowerShell invocation: pass ``-NonInteractive`` and
+        ``-InputFormat None`` so the helper cannot be hijacked via
+        stdin, and rely on ``-ExecutionPolicy Bypass`` being
+        process-scoped per Microsoft docs (it is stored in
+        ``$env:PSExecutionPolicyPreference`` for the spawned process
+        only and is *not* written to user/machine policy).
+    """
     try:
         appdata = Path(os.environ.get('APPDATA', ''))
         if not appdata:
@@ -73,17 +88,46 @@ $s.WorkingDirectory = '{workdir}'
 $s.Description = 'AdoptIQ - AI-Powered Renewal Reports'
 $s.Save()
 """
-            # Simpler: avoid escaping issues by using -File with a temp script
-            script = (Path(os.environ.get('TEMP', '.')) / 'adoptiq_shortcut.ps1')
-            script.write_text(ps, encoding='utf-8')
-            subprocess.run(
-                ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(script)],
-                capture_output=True, timeout=5, cwd=str(working_dir)
-            )
+            # Write the PowerShell helper into a unique, owner-only temp file
+            # via NamedTemporaryFile.  delete=False is required on Windows so
+            # that PowerShell can re-open the file after we close it; we unlink
+            # it ourselves in the ``finally`` block below.
+            script_path: Path | None = None
             try:
-                script.unlink(missing_ok=True)
-            except Exception:
-                pass
+                with tempfile.NamedTemporaryFile(
+                    mode='w',
+                    suffix='.ps1',
+                    prefix='adoptiq_shortcut_',
+                    encoding='utf-8',
+                    delete=False,
+                ) as tmp:
+                    tmp.write(ps)
+                    script_path = Path(tmp.name)
+                # ``-ExecutionPolicy Bypass`` is process-scoped (stored in
+                # $env:PSExecutionPolicyPreference for *this* invocation
+                # only).  ``-NoProfile``, ``-NonInteractive`` and
+                # ``-InputFormat None`` further narrow the bypass so the
+                # spawned PowerShell cannot pick up profile scripts or
+                # be driven by stdin.
+                subprocess.run(
+                    [
+                        'powershell',
+                        '-NoProfile',
+                        '-NonInteractive',
+                        '-InputFormat', 'None',
+                        '-ExecutionPolicy', 'Bypass',
+                        '-File', str(script_path),
+                    ],
+                    capture_output=True,
+                    timeout=5,
+                    cwd=str(working_dir),
+                )
+            finally:
+                if script_path is not None:
+                    try:
+                        script_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
     except Exception:
         pass  # Shortcuts are nice-to-have; don't block install
 

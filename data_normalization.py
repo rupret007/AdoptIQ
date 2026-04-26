@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
 # Canonical status buckets
+# Round 4 / Phase 3.4: extend with the in-progress / waiting phrases
+# that appear in real CSOne exports.  Without these patterns the
+# corresponding rows fall through to ``Unknown`` and
+# ``cm.count_open_tac`` undercounts the open backlog (open TAC and
+# aging look healthier than reality).
 OPEN_STATUS_PATTERNS = (
     r"\bopen\b",
     r"\bnew\b",
@@ -16,6 +21,18 @@ OPEN_STATUS_PATTERNS = (
     r"\bworking\b",
     r"\breopened?\b",
     r"\bpending\b",
+    r"\bwaiting\s+on\s+customer\b",
+    r"\bawaiting\s+customer\b",
+    r"\bwaiting\s+on\s+(engineering|support|3rd|third)[^\b]*\b",
+    r"\bawaiting\s+(engineering|support|3rd|third|response|info|information)\b",
+    r"\bcustomer\s+(action|response|update|input)\b",
+    r"\binvestigat(?:e|ing|ion)\b",
+    r"\bmonitor(?:ing)?\b",
+    r"\bidentified\b",
+    r"\bassigned\b",
+    r"\bactive\b",
+    r"\bon\s*hold\b",
+    r"\bdeferred\b",
 )
 CLOSED_STATUS_PATTERNS = (
     r"\bclosed?\b",
@@ -169,30 +186,108 @@ def normalize_customer_name(value: Any) -> str:
     return text
 
 
-def build_customer_lookup(team_subs_df: Optional[pd.DataFrame]) -> Dict[str, Dict[str, str]]:
-    """Build account-id and fuzzy customer-name lookups from subscription data."""
+def build_customer_lookup(team_subs_df: Optional[pd.DataFrame]) -> Dict[str, Any]:
+    """Build account-id and fuzzy customer-name lookups from subscription data.
+
+    Round 2 / Phase 4.1: detect collisions deterministically.
+
+    - ``account_to_customer`` was previously last-write-wins.  Two
+      different ``BU_NAME`` values for the same ``ACCOUNT_ID_C`` would
+      silently overwrite the prior mapping, so the same account would
+      route to different customers depending on row order.
+    - ``key_to_customer`` was first-write-wins (opposite policy), so
+      the same dataset could yield inconsistent canonical names.
+
+    The rebuilt logic:
+
+    1. Tally every ``account_id -> customer`` observed (with row order
+       preserved as a stable tiebreaker).
+    2. For accounts with multiple distinct customer names, deterministic
+       rule: pick the alphabetically first ``BU_NAME`` (stable across
+       runs, independent of row order).
+    3. Log every collision with the chosen winner and losers and surface
+       them via the returned ``warnings`` / ``collisions`` lists so
+       callers can route them to ``partial_data_warnings``.
+    """
+    import logging as _logging
+    _logger = _logging.getLogger(__name__)
+
     account_to_customer: Dict[str, str] = {}
     key_to_customer: Dict[str, str] = {}
+    collisions: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    empty_result = {
+        "account_to_customer": account_to_customer,
+        "key_to_customer": key_to_customer,
+        "collisions": collisions,
+        "warnings": warnings,
+    }
     if team_subs_df is None or team_subs_df.empty:
-        return {"account_to_customer": account_to_customer, "key_to_customer": key_to_customer}
+        return empty_result
 
     safe = team_subs_df.copy()
     if "BU_NAME" not in safe.columns:
         safe["BU_NAME"] = ""
     safe["BU_NAME"] = safe["BU_NAME"].apply(normalize_customer_name)
+
+    account_observations: Dict[str, List[str]] = {}
+    key_observations: Dict[str, List[str]] = {}
+
     for _, row in safe.iterrows():
         customer = normalize_customer_name(row.get("BU_NAME"))
         if customer == "Unknown":
             continue
         key = _clean_name_for_key(customer)
-        if key and key not in key_to_customer:
-            key_to_customer[key] = customer
+        if key:
+            key_observations.setdefault(key, []).append(customer)
         for account_col in LIKELY_ACCOUNT_ID_COLS:
             if account_col in safe.columns:
                 account_id = _clean_text(row.get(account_col))
                 if account_id:
-                    account_to_customer[account_id] = customer
-    return {"account_to_customer": account_to_customer, "key_to_customer": key_to_customer}
+                    account_observations.setdefault(account_id, []).append(customer)
+
+    for account_id, names in account_observations.items():
+        distinct = sorted(set(names))
+        winner = distinct[0]
+        account_to_customer[account_id] = winner
+        if len(distinct) > 1:
+            collisions.append({
+                "kind": "account_to_customer",
+                "key": account_id,
+                "chosen": winner,
+                "alternatives": distinct[1:],
+            })
+            warning_msg = (
+                f"account_to_customer collision for ACCOUNT_ID={account_id!r}: "
+                f"chose {winner!r} (alphabetical) over {distinct[1:]!r}"
+            )
+            warnings.append(warning_msg)
+            _logger.warning(warning_msg)
+
+    for key, names in key_observations.items():
+        distinct = sorted(set(names))
+        winner = distinct[0]
+        key_to_customer[key] = winner
+        if len(distinct) > 1:
+            collisions.append({
+                "kind": "key_to_customer",
+                "key": key,
+                "chosen": winner,
+                "alternatives": distinct[1:],
+            })
+            warning_msg = (
+                f"key_to_customer collision for normalized_key={key!r}: "
+                f"chose {winner!r} (alphabetical) over {distinct[1:]!r}"
+            )
+            warnings.append(warning_msg)
+            _logger.warning(warning_msg)
+
+    return {
+        "account_to_customer": account_to_customer,
+        "key_to_customer": key_to_customer,
+        "collisions": collisions,
+        "warnings": warnings,
+    }
 
 
 def resolve_customer_name(
@@ -265,17 +360,64 @@ def normalize_severity_label(value: Any) -> str:
 
 
 def parse_datetime_series(series: pd.Series) -> pd.Series:
+    """Round 9 / Phase 6.2: predictable, all-NaT fallback on hard parse failure.
+
+    The previous form's nested ``except Exception: pass`` swallowed the
+    failure silently and returned ``parsed`` in whatever ambiguous,
+    half-converted state pandas had landed it in (sometimes
+    tz-aware, sometimes tz-naive, sometimes with a mix of dtypes
+    after a partial coercion).  Downstream barrier-aging and ARR
+    window code then compared tz-aware to tz-naive Timestamps and
+    raised an opaque ``TypeError`` *inside the report writer* --
+    losing the rest of the report section.
+
+    The new contract is:
+
+    * On the happy path the return value is always tz-naive (UTC
+      anchored) so downstream comparisons against ``pd.Timestamp.now('UTC')
+      .tz_localize(None)`` (Round 8 / Phase 2.10) are well-defined.
+    * On total parse failure we return an all-``NaT`` Series of the
+      same length / index and stamp ``parsed.attrs['partial_data_warning']``
+      so the caller (``arr_df`` / ``incidents_df`` builders, already
+      wired to surface ``attrs`` via Round 7) can flag the section as
+      partial in the report rather than silently degrade.
+    """
+    def _all_nat(reason: str) -> pd.Series:
+        try:
+            empty = pd.Series([pd.NaT] * len(series), index=getattr(series, 'index', None), dtype="datetime64[ns]")
+        except Exception:
+            empty = pd.Series([pd.NaT], dtype="datetime64[ns]")
+        try:
+            empty.attrs['partial_data_warning'] = reason
+        except Exception:
+            pass
+        return empty
+
     try:
         parsed = pd.to_datetime(series, errors="coerce", utc=True, format="mixed")
     except TypeError:
-        parsed = pd.to_datetime(series, errors="coerce", utc=True)
+        try:
+            parsed = pd.to_datetime(series, errors="coerce", utc=True)
+        except Exception as fallback_err:
+            return _all_nat(f"parse_datetime_series: pd.to_datetime failed ({fallback_err.__class__.__name__})")
+    except Exception as parse_err:
+        return _all_nat(f"parse_datetime_series: pd.to_datetime failed ({parse_err.__class__.__name__})")
+    # Round 9 / Phase 6.2: convert to tz-naive UTC for downstream
+    # arithmetic.  ``tz_convert`` fails on already-naive series;
+    # ``tz_localize(None)`` fails on already-tz-aware series.  Try
+    # both and only fall back to ``_all_nat`` when neither path
+    # leaves us with a usable datetime64 dtype.
     try:
         parsed = parsed.dt.tz_convert(None)
     except Exception:
         try:
             parsed = parsed.dt.tz_localize(None)
         except Exception:
-            pass
+            try:
+                if not pd.api.types.is_datetime64_any_dtype(parsed):
+                    return _all_nat("parse_datetime_series: tz normalisation failed and result is non-datetime")
+            except Exception:
+                return _all_nat("parse_datetime_series: tz normalisation failed unexpectedly")
     return parsed
 
 
@@ -382,7 +524,11 @@ def add_case_lifecycle_fields(
     if df is None or df.empty:
         return pd.DataFrame() if df is None else df
 
-    now = datetime.utcnow()
+    # Round 6 / Phase 4.15: capture a single tz-aware UTC clock so
+    # the open/closed age computations below cannot drift by the
+    # host's local UTC offset and so both ages share the exact same
+    # reference instant (no clock skew between the two subtractions).
+    now = pd.Timestamp(datetime.now(timezone.utc))
     use = df.copy()
     lookup = customer_lookup or {"account_to_customer": {}, "key_to_customer": {}}
 
@@ -405,14 +551,54 @@ def add_case_lifecycle_fields(
         use["case_priority_norm"] = "Unknown"
         use["severity_norm"] = "Unknown"
 
+    # Round 10 / Phase 9.1: ``parse_datetime_series`` stamps a
+    # ``partial_data_warning`` on the returned ``Series.attrs`` when
+    # parsing falls back to all-NaT.  However ``Series.attrs`` does
+    # NOT propagate through ``df[col] = series`` assignment, so any
+    # downstream caller that reads ``df['open_date'].attrs`` will get
+    # an empty dict and silently miss the warning.  Capture the warn
+    # texts off the source ``Series.attrs`` *before* assignment and
+    # surface them on the returned DataFrame's ``attrs['partial_data_warnings']``
+    # list so report assembly can append them to the operator-facing
+    # ``partial_data_warnings`` shown on the progress page.
+    _lifecycle_warnings = []
     if open_col:
-        use["open_date"] = parse_datetime_series(use[open_col])
+        _open_series = parse_datetime_series(use[open_col])
+        try:
+            _w = _open_series.attrs.get('partial_data_warning')
+            if _w:
+                _lifecycle_warnings.append({
+                    'source': 'add_case_lifecycle_fields.open_date',
+                    'column': str(open_col),
+                    'reason': str(_w),
+                })
+        except Exception:
+            pass
+        use["open_date"] = _open_series
     else:
         use["open_date"] = pd.NaT
     if close_col:
-        use["closed_date"] = parse_datetime_series(use[close_col])
+        _close_series = parse_datetime_series(use[close_col])
+        try:
+            _w = _close_series.attrs.get('partial_data_warning')
+            if _w:
+                _lifecycle_warnings.append({
+                    'source': 'add_case_lifecycle_fields.closed_date',
+                    'column': str(close_col),
+                    'reason': str(_w),
+                })
+        except Exception:
+            pass
+        use["closed_date"] = _close_series
     else:
         use["closed_date"] = pd.NaT
+    if _lifecycle_warnings:
+        try:
+            existing = list(use.attrs.get('partial_data_warnings') or [])
+            existing.extend(_lifecycle_warnings)
+            use.attrs['partial_data_warnings'] = existing
+        except Exception:
+            pass
 
     use["is_open"] = use["case_status_norm"].eq("Open")
     use["is_closed"] = use["case_status_norm"].eq("Closed")
@@ -420,11 +606,25 @@ def add_case_lifecycle_fields(
     use.loc[use["closed_date"].notna() & use["case_status_norm"].eq("Unknown"), "is_closed"] = True
     use.loc[use["closed_date"].notna() & use["case_status_norm"].eq("Unknown"), "is_open"] = False
 
+    # Round 6 / Phase 4.15: align both date columns onto the same
+    # tz-aware UTC basis as ``now`` before subtraction so pandas
+    # does not raise / coerce when one side is tz-naive and the
+    # other tz-aware.
+    def _to_utc(s: pd.Series) -> pd.Series:
+        try:
+            if getattr(s.dt, 'tz', None) is None:
+                return s.dt.tz_localize('UTC')
+            return s.dt.tz_convert('UTC')
+        except Exception:
+            return s
+
+    _open_utc = _to_utc(use["open_date"])
+    _closed_utc = _to_utc(use["closed_date"])
     use["open_age_days"] = (
-        (pd.Timestamp(now) - use["open_date"]).dt.days.where(use["open_date"].notna() & use["is_open"], other=pd.NA)
+        (now - _open_utc).dt.days.where(_open_utc.notna() & use["is_open"], other=pd.NA)
     )
     use["closed_age_days"] = (
-        (pd.Timestamp(now) - use["closed_date"]).dt.days.where(use["closed_date"].notna() & use["is_closed"], other=pd.NA)
+        (now - _closed_utc).dt.days.where(_closed_utc.notna() & use["is_closed"], other=pd.NA)
     )
 
     use["case_type_class"] = use.apply(classify_case_type, axis=1)

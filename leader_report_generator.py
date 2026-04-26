@@ -6,9 +6,9 @@ including Action Plans, Adoption Barriers, Customer Pulse, and TAC cases
 
 import logging
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Any, Tuple, Optional, Iterable
+from typing import Dict, List, Any, Tuple, Optional, Iterable, Sequence
 import pandas as pd
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
@@ -16,7 +16,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_PARAGRAPH_ALIGNMENT
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
-from adoptiq_backend import _ensure_outputs
+from adoptiq_backend import _ensure_outputs, _utc_window_start_iso
 from enhanced_snowflake_insights import EnhancedSnowflakeInsights
 from data_normalization import detect_bems_mask, extract_bems_ids_from_row, normalize_customer_name, normalize_severity_label
 from snowflake_table_policy import is_table_blocked
@@ -38,10 +38,55 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Phase 3.4: shared display caps for leader-report sections.
+# When a render path needs to truncate, it MUST use these constants and
+# the form copy in templates/leader_report_form.html MUST be derived
+# from the same values so the form's "up to N" claims and the report's
+# actual output never drift.  ``0`` means "show all".
+LEADER_DISPLAY_CAPS: Dict[str, int] = {
+    "action_plans_per_member": 0,   # 0 = show all
+    "tac_cases_per_member": 0,      # 0 = show all
+}
+
 # Professional color palette
 CISCO_BLUE = RGBColor(0x00, 0x7B, 0xC7)
 CISCO_GRAY = RGBColor(0x58, 0x59, 0x5B)
 CISCO_LIGHT_GRAY = RGBColor(0xF5, 0xF5, 0xF5)
+
+# Round 12 / Phase 9.7: previously the BEMS escalation heading was
+# hardcoded to ``RGBColor(255, 0, 0)`` (pure web-safe red) and the
+# "Risk Assessment" inline label used ``RGBColor(220, 20, 60)``
+# (crimson) -- both of which differ from the canonical risk-band
+# palette (``#d62728`` for CRITICAL) used by every other Word /
+# Excel chart.  The same "high-risk" semantic therefore rendered
+# in three different reds across one document, breaking the
+# visual legend.  Resolve all warning/risk colors through a single
+# canonical map so any future palette tweak in ``canonical_metrics``
+# automatically lands in the leader report.
+try:
+    from canonical_metrics import (
+        RISK_BAND_COLORS as _R12_LRG_RBC,
+    )
+    _R12_LRG_HIGH_HEX = (_R12_LRG_RBC.get('CRITICAL', '#d62728') or '#d62728').lstrip('#')
+    _R12_LRG_MED_HEX = (_R12_LRG_RBC.get('MEDIUM', '#ff7f0e') or '#ff7f0e').lstrip('#')
+    _R12_LRG_LOW_HEX = (_R12_LRG_RBC.get('LOW', '#2ca02c') or '#2ca02c').lstrip('#')
+except Exception:  # pragma: no cover - defensive
+    _R12_LRG_HIGH_HEX = 'd62728'
+    _R12_LRG_MED_HEX = 'ff7f0e'
+    _R12_LRG_LOW_HEX = '2ca02c'
+
+def _r12_hex_to_rgb(_hex_str: str) -> RGBColor:
+    try:
+        _h = (_hex_str or '').lstrip('#')
+        if len(_h) != 6:
+            return RGBColor(0xd6, 0x27, 0x28)
+        return RGBColor(int(_h[0:2], 16), int(_h[2:4], 16), int(_h[4:6], 16))
+    except Exception:
+        return RGBColor(0xd6, 0x27, 0x28)
+
+CANONICAL_RISK_HIGH_RGB = _r12_hex_to_rgb(_R12_LRG_HIGH_HEX)
+CANONICAL_RISK_MED_RGB = _r12_hex_to_rgb(_R12_LRG_MED_HEX)
+CANONICAL_RISK_LOW_RGB = _r12_hex_to_rgb(_R12_LRG_LOW_HEX)
 
 class LeaderReportGenerator:
     """Generates comprehensive leader reports showing team member activities"""
@@ -87,6 +132,31 @@ class LeaderReportGenerator:
             return set(obj)
         except (TypeError, AttributeError, ValueError):
             return set()
+
+    @staticmethod
+    def _empty_df_failed(exc: Exception) -> pd.DataFrame:
+        """Round 7 / Phase 6.10: build an empty DataFrame whose
+        ``attrs['fetch_error']`` is populated so downstream callers
+        (and ``report_utils.classify_data_state``) can distinguish
+        "fetch failed" from "zero rows in window".
+
+        Previously ``except Exception: return pd.DataFrame()`` looked
+        identical to a successful zero-row fetch; the leader Word
+        report rendered the same generic "no data" copy in both
+        cases and validators that key on ``fetch_error`` could not
+        flag a partial-data warning.  Using this helper keeps the
+        fix narrow (only the except branches are changed) while
+        preserving the prior return shape.
+        """
+        empty = pd.DataFrame()
+        try:
+            empty.attrs['fetch_error'] = (
+                str(exc).strip() or exc.__class__.__name__ or 'fetch_failed'
+            )
+        except Exception:
+            # Pandas guarantees .attrs is a dict, but be defensive.
+            pass
+        return empty
 
     @staticmethod
     def _derive_sentiment_summary(
@@ -185,13 +255,28 @@ class LeaderReportGenerator:
             note_parts.append("external account")
         return f"[{'; '.join(note_parts)}]" if note_parts else ""
     
-    def __init__(self, ctx, team_roster: List[Tuple[str, str, str]]):
+    def __init__(self, ctx, team_roster: List[Tuple[str, str, str]],
+                 data_retrieved_at: Optional[datetime] = None,
+                 strict_mode: bool = False):
         """
         Initialize the leader report generator
         
         Args:
             ctx: Snowflake connection context
             team_roster: List of (manager_name, cssm_name, cssm_email) tuples
+            data_retrieved_at: Phase 3.1 — UTC timestamp marking when the
+                underlying data was fetched. Rendered alongside
+                ``Generated`` so freshness can be verified independent of
+                render time.
+            strict_mode: Round 7 / Phase 6.11 — when True, partial-data
+                conditions (canonical helper missing, fetch_error on
+                a critical source, BU_NAME merge cardinality
+                violations) raise instead of being silently swallowed.
+                Defaults to False so existing callers retain the
+                soft-fail behaviour.  ``app_simple`` / orchestration
+                code should forward the user's strict-mode preference
+                here so downstream validation matches the executive
+                intelligence path (Round 7 / Phase 1.8).
         """
         if ctx is None:
             raise ValueError("Snowflake connection context (ctx) cannot be None. Please ensure database connection is established.")
@@ -204,6 +289,38 @@ class LeaderReportGenerator:
         self.bems_analyzer = BEMSEscalationAnalyzer() if BEMSEscalationAnalyzer else None
         # ARR is intentionally excluded from reporting outputs.
         self.arr_sentiment_analyzer = None
+        # Round 5 / Phase 6.10: ``datetime.utcnow()`` is deprecated in
+        # Python 3.12+ (returns naive UTC, ambiguous when serialized).
+        # Use ``datetime.now(timezone.utc)`` so the data-retrieval stamp
+        # is explicitly tz-aware UTC and serializes with a 'Z' suffix.
+        # Round 10 / Phase 9.4: when the caller did NOT pass an
+        # explicit ``data_retrieved_at`` we used to silently default
+        # to ``datetime.now(timezone.utc)``.  That made the footer's
+        # "Data as of" cell read as a believable prefetch instant
+        # when in fact it was the *render* instant, masking stale
+        # caches in long-running orchestrations.  Mark the field as
+        # render-time so the footer can render an honest "Data as
+        # of (render-time)" label and downstream consumers can see
+        # the prefetch instant was never set.
+        if data_retrieved_at is None:
+            self.data_retrieved_at = datetime.now(timezone.utc)
+            self._data_retrieved_at_is_render_time = True
+            try:
+                logger.warning(
+                    "LeaderReportGenerator: data_retrieved_at not provided; "
+                    "defaulting to render-time clock. Footer will be marked "
+                    "'(render-time)' so the freshness stamp is not mistaken "
+                    "for a real prefetch instant."
+                )
+            except Exception:
+                pass
+        else:
+            self.data_retrieved_at = data_retrieved_at
+            self._data_retrieved_at_is_render_time = False
+        # Round 7 / Phase 6.11: keep on instance so any helper /
+        # validator that runs during report generation can read
+        # ``self.strict_mode`` without changing every signature.
+        self.strict_mode = bool(strict_mode)
         self._setup_document_settings()
     
     def _setup_document_settings(self):
@@ -328,7 +445,13 @@ class LeaderReportGenerator:
         
         _cb(80, 'Saving Word document...', 'Document Generation')
         output_dir = _ensure_outputs()
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Round 7 / Phase 6.7: stamp the filename in UTC so two leader
+        # reports kicked off within the same minute by users in
+        # different timezones do not collide on the same
+        # ``YYYYMMDD_HHMMSS`` suffix.  ``datetime.now()`` is local-tz
+        # which made the stamp non-deterministic in container
+        # deployments.
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         safe_manager = "".join(c for c in (manager_name or "Manager") if c.isalnum() or c in (' ', '-', '_')).rstrip()
         safe_manager = safe_manager.replace(' ', '_')
         filename = f"AdoptIQ_Report_Leader_{safe_manager}_{days}d_{timestamp}.docx"
@@ -633,12 +756,43 @@ class LeaderReportGenerator:
                     return df
                 merged = df
                 if not subscriptions_df.empty and 'ACCOUNT_ID_C' in subscriptions_df.columns and 'BU_NAME' in subscriptions_df.columns:
-                    merged = merged.merge(
+                    # Round 7 / Phase 6.4: the subscriptions frame can
+                    # carry multiple rows per ACCOUNT_ID_C (one per
+                    # SUBSCRIPTION_ID), and a single ACCOUNT_ID_C can
+                    # legitimately span multiple BU_NAME values.  A
+                    # naive ``drop_duplicates`` over the
+                    # ``[ACCOUNT_ID_C, BU_NAME]`` projection still
+                    # leaves >1 row per account when the BU split is
+                    # real, which then produces a many-to-many merge
+                    # that silently fans out the task table.  We
+                    # explicitly collapse to one BU_NAME per account
+                    # using a deterministic policy (lex-min of the
+                    # non-null BU labels) and assert ``validate='m:1'``
+                    # so any future schema change that re-introduces
+                    # the cardinality issue blows up loudly instead of
+                    # silently inflating row counts.
+                    sub_bu = (
                         subscriptions_df[['ACCOUNT_ID_C', 'BU_NAME']]
-                            .drop_duplicates()
-                            .rename(columns={'BU_NAME': '_SUB_BU_NAME'}),
+                        .dropna(subset=['ACCOUNT_ID_C'])
+                        .copy()
+                    )
+                    sub_bu['BU_NAME'] = sub_bu['BU_NAME'].fillna('').astype(str).str.strip()
+                    # Drop empty BU labels first so they don't become the
+                    # lex-min winner, then take the lex-min per account.
+                    sub_bu_nonempty = sub_bu[sub_bu['BU_NAME'].str.len() > 0]
+                    if sub_bu_nonempty.empty:
+                        sub_bu_one = sub_bu.drop_duplicates(subset=['ACCOUNT_ID_C'], keep='first')
+                    else:
+                        sub_bu_one = (
+                            sub_bu_nonempty
+                            .sort_values(['ACCOUNT_ID_C', 'BU_NAME'])
+                            .drop_duplicates(subset=['ACCOUNT_ID_C'], keep='first')
+                        )
+                    merged = merged.merge(
+                        sub_bu_one.rename(columns={'BU_NAME': '_SUB_BU_NAME'}),
                         on='ACCOUNT_ID_C',
                         how='left',
+                        validate='m:1',
                     )
                 bu_values = pd.Series([''] * len(merged), index=merged.index, dtype=object)
                 for col in ('_SUB_BU_NAME', 'BU_NAME', 'DSM_BU_NAME'):
@@ -694,36 +848,93 @@ class LeaderReportGenerator:
         
         cur = None
         try:
-            from adoptiq_backend import DSM_TABLE
+            from adoptiq_backend import (
+                DSM_TABLE,
+                _get_table_columns,
+                _column_or_default_expr,
+            )
             logger.debug(f"Creating cursor from ctx. ctx type: {type(self.ctx)}, ctx is None: {self.ctx is None}")
             
             cur = self.ctx.cursor()
             logger.debug(f"Cursor created successfully")
-            
-            placeholders = ','.join(['%s'] * len(cssm_emails))
-            sql = f"""
-            SELECT DISTINCT SUBSCRIPTION_ID, ACCOUNT_ID_C, BU_NAME, PRIMARY_DSM_EMAIL AS CSSM_EMAIL
-            FROM {DSM_TABLE}
-            WHERE PRIMARY_DSM_EMAIL IN ({placeholders})
-            """
-            
-            logger.debug(f"Executing SQL query...")
-            cur.execute(sql, cssm_emails)
-            logger.debug(f"SQL executed, fetching rows...")
-            rows = cur.fetchall()
-            logger.debug(f"Fetched {len(rows) if rows else 0} rows")
-            
-            if not rows:
+
+            # Round 3 / Phase 3.5: pick the actual email column from the
+            # DSM schema. Some DSM views expose CSSM_EMAIL, others
+            # PRIMARY_DSM_EMAIL. Hardcoding PRIMARY_DSM_EMAIL silently
+            # produced an empty result set on environments where the
+            # column is named CSSM_EMAIL, which then looked like
+            # "this CSSM owns no subscriptions" rather than a schema
+            # mismatch.
+            try:
+                _dsm_cols = _get_table_columns(self.ctx, DSM_TABLE) or set()
+            except Exception as _intro_err:
+                logger.warning(
+                    "Could not introspect %s columns for leader subscription lookup: %s",
+                    DSM_TABLE, _intro_err,
+                )
+                _dsm_cols = set()
+            if "PRIMARY_DSM_EMAIL" in _dsm_cols:
+                _email_col = "PRIMARY_DSM_EMAIL"
+            elif "CSSM_EMAIL" in _dsm_cols:
+                _email_col = "CSSM_EMAIL"
+            else:
+                # Default to PRIMARY_DSM_EMAIL for backward compatibility
+                # but log loudly so this isn't silent.
+                logger.warning(
+                    "Neither PRIMARY_DSM_EMAIL nor CSSM_EMAIL found in %s; "
+                    "defaulting to PRIMARY_DSM_EMAIL. Result set may be empty.",
+                    DSM_TABLE,
+                )
+                _email_col = "PRIMARY_DSM_EMAIL"
+
+            # Round 7 / Phase 6.1: chunk the email list so very large
+            # CSSM rosters do not blow the Snowflake statement size /
+            # IN-list limits.  ``_chunk_in_clause`` returns one chunk
+            # for typical roster sizes; multi-chunk dispatch only kicks
+            # in for unusually large teams.  We concatenate the rows
+            # across chunks and rely on the SELECT DISTINCT + final
+            # drop_duplicates below to keep the merged frame clean.
+            email_chunks = self._chunk_in_clause(cssm_emails)
+            all_rows: List[Tuple[Any, ...]] = []
+            cols: Optional[List[str]] = None
+            for _chunk_idx, _chunk in enumerate(email_chunks, start=1):
+                placeholders = ','.join(['%s'] * len(_chunk))
+                sql = f"""
+                SELECT DISTINCT SUBSCRIPTION_ID, ACCOUNT_ID_C, BU_NAME, {_email_col} AS CSSM_EMAIL
+                FROM {DSM_TABLE}
+                WHERE {_email_col} IN ({placeholders})
+                """
+                logger.debug(
+                    "Executing SQL chunk %d/%d (%d emails)",
+                    _chunk_idx, len(email_chunks), len(_chunk),
+                )
+                cur.execute(sql, _chunk)
+                _rows = cur.fetchall() or []
+                if _rows and cols is None:
+                    cols = [c[0] for c in cur.description]
+                all_rows.extend(_rows)
+
+            logger.debug(f"Fetched {len(all_rows)} rows across {len(email_chunks)} chunk(s)")
+
+            if not all_rows or cols is None:
                 logger.debug(f"No rows returned, returning empty DataFrame")
                 return pd.DataFrame()
-            
-            df = pd.DataFrame(rows, columns=[c[0] for c in cur.description])
+
+            df = pd.DataFrame(all_rows, columns=cols)
+            # Multi-chunk runs can re-emit the same SUBSCRIPTION_ID if
+            # a CSSM appears in more than one chunk's result via the
+            # DISTINCT inside a single query (it cannot, but defensively
+            # de-dupe across chunks too).
+            if "SUBSCRIPTION_ID" in df.columns:
+                df = df.drop_duplicates(subset=["SUBSCRIPTION_ID"], keep="first").reset_index(drop=True)
             logger.debug(f"Created DataFrame with {len(df)} rows")
-            
+
             return df
         except Exception as e:
             logger.error(f"Error fetching subscriptions: {e}", exc_info=True)
-            return pd.DataFrame()
+            # Round 7 / Phase 6.10: distinguish fetch-failed from
+            # zero-rows so classify_data_state -> "failed" downstream.
+            return self._empty_df_failed(e)
         finally:
             if cur:
                 cur.close()
@@ -749,6 +960,36 @@ class LeaderReportGenerator:
             return "", []
         cols = _get_table_columns(self.ctx, "EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW")
         return _build_owner_match_clause(cols, cleaned, TASK_OWNER_EMAIL_COLUMNS, table_alias=alias)
+
+    # Round 7 / Phase 6.1: chunk large ``IN (...)`` lists when binding
+    # account IDs / customer names / DSM emails into Snowflake queries.
+    # Snowflake's documented hard cap on a single ``IN`` list is 16,384
+    # expressions but the practical ceiling is much lower because of
+    # the 1 MiB statement size limit and because many JDBC/ODBC stacks
+    # in the path will refuse very long parameter arrays.  In practice
+    # Round 6 / Phase 4.2 chose 900 as a safe ceiling and we mirror
+    # that here so the leader fetchers behave the same way as the rest
+    # of the codebase.  ``_LEADER_IN_CHUNK_SIZE`` is exposed as a
+    # constant so tests can patch it without touching SQL strings.
+    _LEADER_IN_CHUNK_SIZE = 900
+
+    @staticmethod
+    def _chunk_in_clause(items: Sequence[Any], chunk_size: Optional[int] = None) -> List[List[Any]]:
+        """Round 7 / Phase 6.1: split ``items`` into chunks suitable
+        for binding into a single ``IN (...)`` clause.  Returns an
+        empty list (NOT a list containing an empty list) when
+        ``items`` is empty so callers can short-circuit cleanly.
+        """
+        size = int(chunk_size or LeaderReportGenerator._LEADER_IN_CHUNK_SIZE)
+        if size < 1:
+            size = 1
+        if not items:
+            return []
+        out: List[List[Any]] = []
+        seq = list(items)
+        for i in range(0, len(seq), size):
+            out.append(seq[i:i + size])
+        return out
 
     def _build_pulse_owner_clause(self, owner_emails: List[str], alias: Optional[str] = None):
         """Build a parameterized owner-match clause for ESA_C360_CUSTOMER_PULSE__C."""
@@ -788,41 +1029,68 @@ class LeaderReportGenerator:
         cur = None
         try:
             cur = self.ctx.cursor()
-            predicates: List[str] = []
-            params: List[Any] = []
-            if account_ids:
-                placeholders = ','.join(['%s'] * len(account_ids))
-                predicates.append(f"t.ACCOUNT_ID_C IN ({placeholders})")
-                params.extend(account_ids)
             owner_sql, owner_params = self._build_task_owner_clause(owner_emails, alias="t")
+            # Round 7 / Phase 6.1: dispatch one query per ID chunk and
+            # also (separately) one query for the owner-email predicate
+            # so the IN-list cap is per-chunk.  We always execute the
+            # owner-email branch exactly once because the email list is
+            # already small (a single CSSM team).  Results are merged
+            # and de-duplicated by ID at the end.
+            id_chunks = self._chunk_in_clause(account_ids) if account_ids else []
+            if not id_chunks and not owner_sql:
+                return pd.DataFrame()
+            all_rows: List[Tuple[Any, ...]] = []
+            cols: Optional[List[str]] = None
+
+            def _run(predicates: List[str], params: List[Any]) -> None:
+                nonlocal cols
+                if not predicates:
+                    return
+                where_clause = " OR ".join(predicates)
+                sql = f"""
+                SELECT t.*, dsm.BU_NAME AS DSM_BU_NAME
+                FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW t
+                LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm
+                       ON t.ACCOUNT_ID_C = dsm.ACCOUNT_ID_C
+                WHERE t.record_type_id = '0122T000000QHBGQA4'
+                  AND ({where_clause})
+                  -- Round 10 / Phase 5.1: align with the portfolio /
+                  -- subscription-side adoption-barrier predicate which
+                  -- uses ``DATE(COALESCE(OPEN_DATE_C, CREATED_DATE,
+                  -- CREATED_DATE_C))``. CREATED_DATE alone misses rows
+                  -- whose CREATED_DATE is null but OPEN_DATE_C is set
+                  -- (common for backfilled action plans), causing the
+                  -- leader side to undercount vs portfolio reports for
+                  -- the same window.
+                  -- Round 10 / Phase 5.2: bind a Python-computed UTC
+                  -- window-start so the lookback is independent of the
+                  -- Snowflake session TZ (mirrors the portfolio side).
+                  AND DATE(COALESCE(t.OPEN_DATE_C, t.CREATED_DATE, t.CREATED_DATE_C))
+                      >= %s
+                """
+                params_with_days = list(params) + [_utc_window_start_iso(days)]
+                cur.execute(sql, params_with_days)
+                _rows = cur.fetchall() or []
+                if _rows and cols is None:
+                    cols = [c[0] for c in cur.description]
+                all_rows.extend(_rows)
+
+            for _chunk in id_chunks:
+                placeholders = ','.join(['%s'] * len(_chunk))
+                _run([f"t.ACCOUNT_ID_C IN ({placeholders})"], list(_chunk))
             if owner_sql:
-                predicates.append(owner_sql)
-                params.extend(owner_params)
-            if not predicates:
+                _run([owner_sql], list(owner_params))
+
+            if not all_rows or cols is None:
                 return pd.DataFrame()
-            where_clause = " OR ".join(predicates)
-            sql = f"""
-            SELECT t.*, dsm.BU_NAME AS DSM_BU_NAME
-            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW t
-            LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm
-                   ON t.ACCOUNT_ID_C = dsm.ACCOUNT_ID_C
-            WHERE t.record_type_id = '0122T000000QHBGQA4'
-              AND ({where_clause})
-              AND DATE(t.CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())
-            """
-            params.append(days)
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-            if not rows:
-                return pd.DataFrame()
-            cols = [c[0] for c in cur.description]
-            df = pd.DataFrame(rows, columns=cols)
+            df = pd.DataFrame(all_rows, columns=cols)
             if 'ID' in df.columns:
                 df = df.drop_duplicates(subset=['ID'], keep='first').reset_index(drop=True)
             return df
         except Exception as e:
             logger.error(f"Error fetching action plans: {e}")
-            return pd.DataFrame()
+            # Round 7 / Phase 6.10: classify_data_state -> "failed".
+            return self._empty_df_failed(e)
         finally:
             if cur:
                 cur.close()
@@ -845,41 +1113,57 @@ class LeaderReportGenerator:
         cur = None
         try:
             cur = self.ctx.cursor()
-            predicates: List[str] = []
-            params: List[Any] = []
-            if account_ids:
-                placeholders = ','.join(['%s'] * len(account_ids))
-                predicates.append(f"t.ACCOUNT_ID_C IN ({placeholders})")
-                params.extend(account_ids)
             owner_sql, owner_params = self._build_task_owner_clause(owner_emails, alias="t")
+            # Round 7 / Phase 6.1: chunked dispatch (see _fetch_action_plans).
+            id_chunks = self._chunk_in_clause(account_ids) if account_ids else []
+            if not id_chunks and not owner_sql:
+                return pd.DataFrame()
+            all_rows: List[Tuple[Any, ...]] = []
+            cols: Optional[List[str]] = None
+
+            def _run(predicates: List[str], params: List[Any]) -> None:
+                nonlocal cols
+                if not predicates:
+                    return
+                where_clause = " OR ".join(predicates)
+                sql = f"""
+                SELECT t.*, dsm.BU_NAME AS DSM_BU_NAME
+                FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW t
+                LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm
+                       ON t.ACCOUNT_ID_C = dsm.ACCOUNT_ID_C
+                WHERE t.record_type_id = '0122T000000GJfTQAW'
+                  AND ({where_clause})
+                  -- Round 10 / Phase 5.1: see _fetch_action_plans for
+                  -- the rationale; same predicate so leader-side and
+                  -- portfolio-side adoption-barrier counts agree on the
+                  -- same window.
+                  -- Round 10 / Phase 5.2: bind UTC window-start.
+                  AND DATE(COALESCE(t.OPEN_DATE_C, t.CREATED_DATE, t.CREATED_DATE_C))
+                      >= %s
+                """
+                params_with_days = list(params) + [_utc_window_start_iso(days)]
+                cur.execute(sql, params_with_days)
+                _rows = cur.fetchall() or []
+                if _rows and cols is None:
+                    cols = [c[0] for c in cur.description]
+                all_rows.extend(_rows)
+
+            for _chunk in id_chunks:
+                placeholders = ','.join(['%s'] * len(_chunk))
+                _run([f"t.ACCOUNT_ID_C IN ({placeholders})"], list(_chunk))
             if owner_sql:
-                predicates.append(owner_sql)
-                params.extend(owner_params)
-            if not predicates:
+                _run([owner_sql], list(owner_params))
+
+            if not all_rows or cols is None:
                 return pd.DataFrame()
-            where_clause = " OR ".join(predicates)
-            sql = f"""
-            SELECT t.*, dsm.BU_NAME AS DSM_BU_NAME
-            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW t
-            LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm
-                   ON t.ACCOUNT_ID_C = dsm.ACCOUNT_ID_C
-            WHERE t.record_type_id = '0122T000000GJfTQAW'
-              AND ({where_clause})
-              AND DATE(t.CREATED_DATE) >= DATEADD(day, -%s, CURRENT_DATE())
-            """
-            params.append(days)
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-            if not rows:
-                return pd.DataFrame()
-            cols = [c[0] for c in cur.description]
-            df = pd.DataFrame(rows, columns=cols)
+            df = pd.DataFrame(all_rows, columns=cols)
             if 'ID' in df.columns:
                 df = df.drop_duplicates(subset=['ID'], keep='first').reset_index(drop=True)
             return df
         except Exception as e:
             logger.error(f"Error fetching adoption barriers: {e}")
-            return pd.DataFrame()
+            # Round 7 / Phase 6.10: classify_data_state -> "failed".
+            return self._empty_df_failed(e)
         finally:
             if cur:
                 cur.close()
@@ -902,40 +1186,52 @@ class LeaderReportGenerator:
         cur = None
         try:
             cur = self.ctx.cursor()
-            predicates: List[str] = []
-            params: List[Any] = []
-            if account_ids:
-                placeholders = ','.join(['%s'] * len(account_ids))
-                predicates.append(f"cp.ACCOUNT__C IN ({placeholders})")
-                params.extend(account_ids)
             owner_sql, owner_params = self._build_pulse_owner_clause(owner_emails, alias="cp")
+            # Round 7 / Phase 6.1: chunked dispatch (see _fetch_action_plans).
+            id_chunks = self._chunk_in_clause(account_ids) if account_ids else []
+            if not id_chunks and not owner_sql:
+                return pd.DataFrame()
+            all_rows: List[Tuple[Any, ...]] = []
+            cols: Optional[List[str]] = None
+
+            def _run(predicates: List[str], params: List[Any]) -> None:
+                nonlocal cols
+                if not predicates:
+                    return
+                where_clause = " OR ".join(predicates)
+                sql = f"""
+                SELECT cp.*, dsm.BU_NAME AS DSM_BU_NAME
+                FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C cp
+                LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm
+                       ON cp.ACCOUNT__C = dsm.ACCOUNT_ID_C
+                WHERE ({where_clause})
+                  -- Round 10 / Phase 5.2: bind UTC window-start so the
+                  -- lookback is independent of Snowflake session TZ.
+                  AND DATE(cp.CREATEDDATE) >= %s
+                """
+                params_with_days = list(params) + [_utc_window_start_iso(days)]
+                cur.execute(sql, params_with_days)
+                _rows = cur.fetchall() or []
+                if _rows and cols is None:
+                    cols = [c[0] for c in cur.description]
+                all_rows.extend(_rows)
+
+            for _chunk in id_chunks:
+                placeholders = ','.join(['%s'] * len(_chunk))
+                _run([f"cp.ACCOUNT__C IN ({placeholders})"], list(_chunk))
             if owner_sql:
-                predicates.append(owner_sql)
-                params.extend(owner_params)
-            if not predicates:
+                _run([owner_sql], list(owner_params))
+
+            if not all_rows or cols is None:
                 return pd.DataFrame()
-            where_clause = " OR ".join(predicates)
-            sql = f"""
-            SELECT cp.*, dsm.BU_NAME AS DSM_BU_NAME
-            FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C cp
-            LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm
-                   ON cp.ACCOUNT__C = dsm.ACCOUNT_ID_C
-            WHERE ({where_clause})
-              AND DATE(cp.CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())
-            """
-            params.append(days)
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-            if not rows:
-                return pd.DataFrame()
-            cols = [c[0] for c in cur.description]
-            df = pd.DataFrame(rows, columns=cols)
+            df = pd.DataFrame(all_rows, columns=cols)
             if 'ID' in df.columns:
                 df = df.drop_duplicates(subset=['ID'], keep='first').reset_index(drop=True)
             return df
         except Exception as e:
             logger.error(f"Error fetching customer pulse: {e}")
-            return pd.DataFrame()
+            # Round 7 / Phase 6.10: classify_data_state -> "failed".
+            return self._empty_df_failed(e)
         finally:
             if cur:
                 cur.close()
@@ -951,27 +1247,36 @@ class LeaderReportGenerator:
         cur = None
         try:
             cur = self.ctx.cursor()
-            placeholders = ','.join(['%s'] * len(customer_names))
-            sql = f"""
-            SELECT *
-            FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C 
-            WHERE RELATED_CUSTOMER__C IN ({placeholders})
-              AND DATE(CREATEDDATE) >= DATEADD(day, -%s, CURRENT_DATE())
-            """
-            
-            cur.execute(sql, [*customer_names, days])
-            rows = cur.fetchall()
-            
-            if not rows:
+            # Round 7 / Phase 6.1: chunked dispatch.
+            name_chunks = self._chunk_in_clause(customer_names)
+            all_rows: List[Tuple[Any, ...]] = []
+            cols: Optional[List[str]] = None
+            for _chunk_idx, _chunk in enumerate(name_chunks, start=1):
+                placeholders = ','.join(['%s'] * len(_chunk))
+                sql = f"""
+                SELECT *
+                FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C
+                WHERE RELATED_CUSTOMER__C IN ({placeholders})
+                  -- Round 10 / Phase 5.2: bind UTC window-start.
+                  AND DATE(CREATEDDATE) >= %s
+                """
+                cur.execute(sql, [*_chunk, _utc_window_start_iso(days)])
+                _rows = cur.fetchall() or []
+                if _rows and cols is None:
+                    cols = [c[0] for c in cur.description]
+                all_rows.extend(_rows)
+
+            if not all_rows or cols is None:
                 return pd.DataFrame()
-            
-            cols = [c[0] for c in cur.description]
-            df = pd.DataFrame(rows, columns=cols)
-            
+
+            df = pd.DataFrame(all_rows, columns=cols)
+            if "ID" in df.columns:
+                df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
             return df
         except Exception as e:
             logger.error(f"Error fetching success priorities: {e}")
-            return pd.DataFrame()
+            # Round 7 / Phase 6.10: classify_data_state -> "failed".
+            return self._empty_df_failed(e)
         finally:
             if cur:
                 cur.close()
@@ -995,7 +1300,12 @@ class LeaderReportGenerator:
         logger.info(f"TAC CASE MATCHING VALIDATION")
         logger.info(f"{'='*60}")
         
-        cutoff_date = datetime.now() - timedelta(days=days)
+        # Round 7 / Phase 6.7: cutoff_date drives ``CREATE_DATE >=`` /
+        # ``CLOSE_DATE >=`` filtering downstream; using local-tz
+        # ``datetime.now()`` shifted the window by up to 24h depending
+        # on the worker's TZ.  Snowflake stores timestamps in UTC, so
+        # compute the cutoff in UTC for parity with the SQL side.
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         logger.info(f"Cutoff date for filtering: {cutoff_date.strftime('%Y-%m-%d')}")
         logger.info(f"Total TAC cases in CSOne file: {len(csone_df)}")
         
@@ -1053,16 +1363,20 @@ class LeaderReportGenerator:
         
         # Get unique CSOne customers for debugging
         csone_customers_unique = csone_filtered[customer_col].dropna().unique()
+        # Round 7 / Phase 6.3: customer-name samples are PII-adjacent
+        # (account-level identifiers can correlate with named contacts)
+        # so they must not appear at INFO level.  Counts stay at INFO,
+        # actual names are downgraded to DEBUG.
         logger.info(f"\nCSOne customer validation:")
         logger.info(f"  - Total unique customers in filtered data: {len(csone_customers_unique)}")
-        logger.info(f"  - Sample CSOne customers: {list(csone_customers_unique[:5])}")
-        
+        logger.debug(f"  - Sample CSOne customers: {list(csone_customers_unique[:5])}")
+
         # Get all team customers for comparison
         all_team_customers = set()
         for data in team_data.values():
             all_team_customers.update(data['customers'])
         logger.info(f"  - Total unique team customers from Snowflake: {len(all_team_customers)}")
-        logger.info(f"  - Sample team customers: {list(all_team_customers)[:5]}")
+        logger.debug(f"  - Sample team customers: {list(all_team_customers)[:5]}")
         
         # Try to match TAC cases to team members based on customer names
         # Use aggressive fuzzy matching for better customer name matching
@@ -1075,18 +1389,45 @@ class LeaderReportGenerator:
                 continue
             
             # Log this team member's customers for debugging
+            # Round 7 / Phase 6.3: counts at INFO, names at DEBUG only.
             logger.info(f"  {cssm_name} has {len(customers)} customers")
-            logger.info(f"    Sample: {list(customers[:3])}")
+            logger.debug(f"    Sample: {list(customers[:3])}")
             
-            # Normalize customer names for better matching
-            # Convert both lists to uppercase and strip whitespace
-            normalized_customers = [str(c).upper().strip() for c in customers if c]
-            
+            # Normalize customer names for better matching.
+            # Round 7 / Phase 6.8: route both sides through the
+            # canonical ``normalize_customer_name`` from
+            # ``data_normalization`` so TAC matching uses the same
+            # whitespace-collapsed, stripped form as the Snowflake
+            # joins (``build_customer_lookup``, ``ROW_CONTRACTS``).
+            # The previous ``str(c).upper().strip()`` could disagree
+            # with the canonical normalizer on multi-space / tab /
+            # NBSP names and silently miss a TAC case that the
+            # subscriptions side counted.  We then upper-case for the
+            # in-this-function fuzzy comparison; canonical form
+            # remains the source of truth at the join boundary.
+            try:
+                from data_normalization import normalize_customer_name as _norm_cust_p68
+            except Exception:
+                def _norm_cust_p68(v):
+                    return str(v or "").strip()
+            normalized_customers = [
+                _norm_cust_p68(c).upper().strip()
+                for c in customers
+                if c and _norm_cust_p68(c) != "Unknown"
+            ]
+
             # Create a mask for aggressive fuzzy matching
             def matches_customer(csone_customer):
                 if pd.isna(csone_customer):
                     return False
-                csone_norm = str(csone_customer).upper().strip()
+                # Round 7 / Phase 6.8: normalize the CSOne side via
+                # the canonical helper too, so a NBSP-padded CSOne row
+                # (common when copy-pasted from the web UI) matches a
+                # plain-space Snowflake row.
+                csone_norm_canonical = _norm_cust_p68(csone_customer)
+                if csone_norm_canonical == "Unknown":
+                    return False
+                csone_norm = csone_norm_canonical.upper().strip()
                 
                 # Remove common suffixes/prefixes that might differ
                 csone_clean = csone_norm.replace(' INC', '').replace(' LLC', '').replace(' LTD', '').replace(' CORP', '').replace(',', '').strip()
@@ -1124,12 +1465,15 @@ class LeaderReportGenerator:
             # Validation and detailed logging
             if len(cssm_cases) > 0:
                 matched_customers = cssm_cases[customer_col].unique()
+                # Round 7 / Phase 6.3: keep counts at INFO; demote
+                # per-customer names to DEBUG so production INFO logs
+                # don't carry portfolio-customer identifiers.
                 logger.info(f"  OK: {cssm_name}: {len(cssm_cases)} TAC cases matched (last {days} days)")
-                logger.info(f"    Matched {len(matched_customers)} unique customers:")
+                logger.info(f"    Matched {len(matched_customers)} unique customers")
                 for cust in list(matched_customers)[:5]:
-                    logger.info(f"      - {cust}")
+                    logger.debug(f"      - {cust}")
                 if len(matched_customers) > 5:
-                    logger.info(f"      ... and {len(matched_customers) - 5} more")
+                    logger.debug(f"      ... and {len(matched_customers) - 5} more")
                 
                 # Validate date range of matched cases
                 if date_col in cssm_cases.columns:
@@ -1189,23 +1533,58 @@ class LeaderReportGenerator:
         manager_run.font.bold = True
         
         # Date range
-        end_date = datetime.now()
+        # Round 3 / Phase 4.4: the underlying Snowflake queries use
+        # ``CURRENT_DATE()`` which is the UTC calendar date. Using
+        # the local clock here meant that for any user west of UTC
+        # the printed "Analysis Period" could be off by a day from
+        # what was actually summed (e.g. a US/Central run between
+        # 19:00 and 23:59 local would show a header window that
+        # ended one day before the data window). Use UTC and label
+        # it explicitly so the header matches the SQL.
+        # Round 7 / Phase 6.7: ``datetime.utcnow()`` is deprecated as
+        # of Python 3.12 (returns naive datetime).  Use the tz-aware
+        # ``datetime.now(timezone.utc)`` so future Python versions
+        # don't ship a DeprecationWarning into the report header.
+        end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=days)
-        
+
         date_para = self.doc.add_paragraph()
         date_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
         date_run = date_para.add_run(
-            f'\n\nAnalysis Period: {start_date.strftime("%B %d, %Y")} - {end_date.strftime("%B %d, %Y")}'
+            f'\n\nAnalysis Period: {start_date.strftime("%B %d, %Y")} - '
+            f'{end_date.strftime("%B %d, %Y")} (UTC)'
         )
         date_run.font.size = Pt(12)
         date_run.font.color.rgb = CISCO_GRAY
-        
+
         # Report date
         report_date_para = self.doc.add_paragraph()
         report_date_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        report_date_run = report_date_para.add_run(f'Generated: {datetime.now().strftime("%B %d, %Y %I:%M %p")}')
+        report_date_run = report_date_para.add_run(
+            f'Generated: {datetime.now(timezone.utc).strftime("%B %d, %Y %I:%M %p UTC")}'
+        )
         report_date_run.font.size = Pt(10)
         report_date_run.font.color.rgb = CISCO_GRAY
+
+        # Phase 3.1: render data fetch timestamp distinct from render
+        # time so a stale-looking footer can be diagnosed at the source.
+        if getattr(self, 'data_retrieved_at', None) is not None:
+            data_para = self.doc.add_paragraph()
+            data_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            try:
+                _data_str = self.data_retrieved_at.strftime('%B %d, %Y %I:%M %p UTC')
+            except Exception:
+                _data_str = str(self.data_retrieved_at)
+            # Round 10 / Phase 9.4: when the constructor wasn't given
+            # an explicit ``data_retrieved_at``, mark the footer
+            # ``(render-time)`` so the operator can tell the
+            # freshness stamp came from the build clock instead of a
+            # real prefetch instant.
+            if getattr(self, '_data_retrieved_at_is_render_time', False):
+                _data_str = f"{_data_str} (render-time)"
+            data_run = data_para.add_run(f'Data as of: {_data_str}')
+            data_run.font.size = Pt(9)
+            data_run.font.color.rgb = CISCO_GRAY
         
         # Team overview
         team_para = self.doc.add_paragraph()
@@ -1380,9 +1759,27 @@ class LeaderReportGenerator:
             tech_breakdown[cssm_name] = {}
             
             # Get subscriptions and count by product/technology
+            # Round 3 / Phase 3.4: dedupe by SUBSCRIPTION_ID first.
+            # The DSM table emits multiple rows per subscription (line
+            # items, status history, etc.); iterating raw rows here
+            # double-counted any subscription that had >1 DSM row,
+            # silently inflating the per-CSSM technology totals
+            # against the rest of the report's per-subscription
+            # rollups.
             subscriptions = data.get('subscriptions', pd.DataFrame())
             if not subscriptions.empty and 'PRODUCT_NAME' in subscriptions.columns:
-                for _, sub in subscriptions.iterrows():
+                _subs_for_count = subscriptions
+                if 'SUBSCRIPTION_ID' in subscriptions.columns:
+                    _before = len(_subs_for_count)
+                    _subs_for_count = subscriptions.drop_duplicates(subset=['SUBSCRIPTION_ID'])
+                    _after = len(_subs_for_count)
+                    if _before != _after:
+                        logger.debug(
+                            "Tech rollup for %s: collapsed %d duplicate DSM rows "
+                            "(%d -> %d unique subscriptions)",
+                            cssm_name, _before - _after, _before, _after,
+                        )
+                for _, sub in _subs_for_count.iterrows():
                     product = sub.get('PRODUCT_NAME', 'Unknown')
                     if pd.notna(product):
                         # Simplify product names to technology categories
@@ -1576,7 +1973,11 @@ class LeaderReportGenerator:
         # Add section heading
         section_heading = self.doc.add_heading('Warning: BEMS Escalation Analysis', level=1)
         if section_heading.runs:
-            section_heading.runs[0].font.color.rgb = RGBColor(255, 0, 0)
+            # Round 12 / Phase 9.7: use the canonical CRITICAL risk
+            # color (#d62728) so the BEMS heading matches every other
+            # critical-risk indicator in the document instead of the
+            # ad-hoc pure red (255,0,0).
+            section_heading.runs[0].font.color.rgb = CANONICAL_RISK_HIGH_RGB
         
         # Add context paragraph
         context_para = self.doc.add_paragraph()
@@ -1605,12 +2006,19 @@ class LeaderReportGenerator:
                     risk_level = risk.get('overall_risk_level', 'Unknown')
                     risk_run = risk_para.add_run(f'{risk_level}')
                     risk_run.bold = True
+                    # Round 12 / Phase 9.7: previously these inline
+                    # risk colors were ad-hoc crimson / dark-orange /
+                    # forest-green RGB triples (220,20,60 / 255,140,0
+                    # / 34,139,34) which differed from the canonical
+                    # palette used by every chart.  Resolve through
+                    # ``CANONICAL_RISK_*_RGB`` so the inline label
+                    # cannot drift away from the legend.
                     if risk_level in ['High', 'Critical']:
-                        risk_run.font.color.rgb = RGBColor(220, 20, 60)
+                        risk_run.font.color.rgb = CANONICAL_RISK_HIGH_RGB
                     elif risk_level == 'Medium':
-                        risk_run.font.color.rgb = RGBColor(255, 140, 0)
+                        risk_run.font.color.rgb = CANONICAL_RISK_MED_RGB
                     else:
-                        risk_run.font.color.rgb = RGBColor(34, 139, 34)
+                        risk_run.font.color.rgb = CANONICAL_RISK_LOW_RGB
                     self.doc.add_paragraph()
                 
                 # Add strategic recommendations from analyzer - FIXED: Show ALL recommendations
@@ -1809,6 +2217,18 @@ class LeaderReportGenerator:
         
         logger.debug(f"Data sizes - ABs: {len(adoption_barriers)}, APs: {len(action_plans)}, CPs: {len(customer_pulse)}, TACs: {len(tac_cases)}")
 
+        # Round 2 / Phase 3.1: scan ``customer_pulse.attrs['fetch_error']``
+        # (parallel to compact_report_formatter ~1102).  If pulse fetch
+        # failed, the dataframe will be empty *with* a fetch_error attr
+        # and rendering "0 pulse responses" / "Neutral sentiment" is a
+        # silent lie.  We emit a "pulse unavailable" sentence instead.
+        pulse_unavailable_reason: Optional[str] = None
+        try:
+            if hasattr(customer_pulse, 'attrs') and customer_pulse.attrs.get('fetch_error'):
+                pulse_unavailable_reason = str(customer_pulse.attrs.get('fetch_error'))[:256]
+        except Exception:
+            pulse_unavailable_reason = None
+
         sentiment_summary = self._derive_sentiment_summary(
             customer_pulse=customer_pulse,
             adoption_barriers=adoption_barriers,
@@ -1894,41 +2314,79 @@ class LeaderReportGenerator:
             categories_str = ', '.join(top_barrier_categories)
             summary_text += f"The barrier categories are: {categories_str}, suggesting systemic issues that may benefit from standardized solutions or training programs. "
         
-        # Pulse narrative uses cm.pulse_sentiment so the Positive / Neutral /
-        # Concern label here matches every other report (Compact, EI, etc.).
-        # The 0-5 input scale is converted to the canonical 0-10 scale inside
-        # ``pulse_sentiment`` (0-5 doubled), then bucketed by
-        # ``PULSE_POSITIVE_THRESHOLD_0_TO_10`` (7.5) and
-        # ``PULSE_NEGATIVE_THRESHOLD_0_TO_10`` (5.0). The previous inline 4.0/3.0
-        # cutoffs against the raw mean disagreed with that contract.
-        if avg_pulse_score is not None and not customer_pulse.empty:
-            try:
-                pulse_summary = cm.pulse_sentiment(customer_pulse, scale=cm.PULSE_SCALE_0_TO_5)
-            except Exception:
-                pulse_summary = {"sentiment": "Neutral", "mean_0_to_10": None}
-            sent_label = pulse_summary.get("sentiment", "Neutral")
-            mean_norm = pulse_summary.get("mean_0_to_10")
-            mean_label = (
-                f"average score of {avg_pulse_score:.1f}/5.0 "
-                f"(normalized {mean_norm:.1f}/10.0)"
-                if mean_norm is not None
-                else f"average score of {avg_pulse_score:.1f}/5.0"
+        # Round 2 / Phase 1.9: standardize on the canonical 0-10 pulse
+        # scale (Salesforce Customer Pulse SCORE__C is 0-10 in
+        # production).  Earlier this call site used PULSE_SCALE_0_TO_5
+        # while the assess_customer_health call site (line ~118) used
+        # PULSE_SCALE_0_TO_10, so the same SCORE__C row could be
+        # labelled "Negative" by one paragraph and "Positive" by
+        # another.  Both call sites now use PULSE_SCALE_0_TO_10.
+        pulse_summary = None
+        # Round 2 / Phase 3.1: if pulse fetch failed, never compute or
+        # render a pulse sentiment paragraph — emit explicit
+        # "pulse unavailable" instead of pretending the pulse was
+        # neutral / score=0.
+        if pulse_unavailable_reason:
+            summary_text += (
+                f"Customer pulse feedback unavailable for this period "
+                f"(source error: {pulse_unavailable_reason}). "
             )
-            if sent_label == "Positive":
-                summary_text += (
-                    f"Customer pulse feedback is positive with an {mean_label}, "
-                    "indicating strong customer satisfaction. "
-                )
-            elif sent_label == "Negative":
-                summary_text += (
-                    f"Customer pulse feedback indicates concerns with an {mean_label}, "
-                    "requiring immediate customer engagement. "
-                )
+            sent_label = None
+            mean_norm = None
+        else:
+            if avg_pulse_score is not None and not customer_pulse.empty:
+                try:
+                    pulse_summary = cm.pulse_sentiment(customer_pulse, scale=cm.PULSE_SCALE_0_TO_10)
+                except Exception as _pulse_exc:
+                    logger.warning(
+                        "Pulse sentiment computation failed; omitting pulse sentence: %s",
+                        _pulse_exc,
+                    )
+                    pulse_summary = None
+            if pulse_summary is None:
+                # Skip the pulse-derived narrative; do not invent "Neutral".
+                sent_label = None
+                mean_norm = None
             else:
-                summary_text += (
-                    f"Customer pulse feedback shows moderate satisfaction with an "
-                    f"{mean_label}, with room for improvement. "
+                sent_label = pulse_summary.get("sentiment", "Neutral")
+                mean_norm = pulse_summary.get("mean_0_to_10")
+                # Render the score using the canonical 0-10 scale so the
+                # narrative cannot disagree with the canonical sentiment
+                # label.  ``avg_pulse_score`` is already on the same scale
+                # as the SCORE__C column.
+                # Round 7 / Phase 6.9: route through shared
+                # ``format_number`` so the rounding policy matches the
+                # rest of the platform (executive summary, compact,
+                # dashboard).  Soft-fail to inline f-string so the
+                # narrative still renders if report_utils is missing.
+                try:
+                    from report_utils import format_number as _fmt_num_p69_lr
+                except Exception:
+                    def _fmt_num_p69_lr(v, decimals=1, as_percent=False):
+                        try:
+                            return f"{float(v):.{decimals}f}"
+                        except Exception:
+                            return "N/A"
+                mean_label = (
+                    f"average score of {_fmt_num_p69_lr(mean_norm, decimals=1)}/10.0"
+                    if mean_norm is not None
+                    else f"average score of {_fmt_num_p69_lr(avg_pulse_score, decimals=1)}/10.0"
                 )
+                if sent_label == "Positive":
+                    summary_text += (
+                        f"Customer pulse feedback is positive with an {mean_label}, "
+                        "indicating strong customer satisfaction. "
+                    )
+                elif sent_label == "Negative":
+                    summary_text += (
+                        f"Customer pulse feedback indicates concerns with an {mean_label}, "
+                        "requiring immediate customer engagement. "
+                    )
+                else:
+                    summary_text += (
+                        f"Customer pulse feedback shows moderate satisfaction with an "
+                        f"{mean_label}, with room for improvement. "
+                    )
         
         # Add actionable recommendations
         summary_text += "\n\nActionable Recommendations: "
@@ -1998,8 +2456,16 @@ class LeaderReportGenerator:
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         
         # Header row
+        # Round 4 / Phase 3.7: when the optional ARR sentiment
+        # analyzer is wired in, the "Sentiment" column is no longer
+        # the canonical pulse label — it is ARR-enriched.  Label the
+        # column accordingly so a reader does not assume the value
+        # came from ``cm.pulse_sentiment``.
+        _sentiment_label = (
+            'Sentiment (ARR-enriched)' if getattr(self, 'arr_sentiment_analyzer', None) else 'Sentiment'
+        )
         header_cells = table.rows[0].cells
-        headers = ['Team Member', 'Action Plans', 'Adoption Barriers', 'Customer Pulse', 'BEMS', 'Sentiment', 'Total Activities']
+        headers = ['Team Member', 'Action Plans', 'Adoption Barriers', 'Customer Pulse', 'BEMS', _sentiment_label, 'Total Activities']
         
         for i, header_text in enumerate(headers):
             cell = header_cells[i]
@@ -2292,15 +2758,33 @@ class LeaderReportGenerator:
 
     @staticmethod
     def _is_status_open(status_value: Any) -> bool:
+        # Phase 3.3: previously this returned ``True`` for None / blank /
+        # parse-error inputs, which mis-classified rows of *unknown*
+        # status as OPEN and inflated open counts. Default unknown to
+        # ``False`` so unknown rows are excluded from the OPEN bucket
+        # (callers that need a separate "unknown" bucket can detect it
+        # via _is_status_unknown).
         if status_value is None:
-            return True
+            return False
         try:
             text = str(status_value).strip().lower()
         except Exception:
-            return True
+            return False
         if not text:
-            return True
+            return False
         return not any(token in text for token in LeaderReportGenerator._CLOSED_STATUS_TOKENS)
+
+    @staticmethod
+    def _is_status_unknown(status_value: Any) -> bool:
+        """Return True when status is missing/blank/unparseable. Used to
+        keep an "unknown" bucket distinct from open and closed counts.
+        """
+        if status_value is None:
+            return True
+        try:
+            return str(status_value).strip() == ""
+        except Exception:
+            return True
 
     def _compute_aging_buckets(self, df: Optional[pd.DataFrame]) -> Dict[str, int]:
         """Bucket ``df`` rows by age of their primary date column, filtering to
@@ -2473,7 +2957,27 @@ class LeaderReportGenerator:
             names = gaps[cssm_name]
             if not names:
                 continue
-            subheading = self.doc.add_heading(f'{cssm_name} ({len(names)})', level=3)
+            # Round 11 / Phase 11.5: previous heading used
+            # ``len(names)``, which counts raw list entries.  When
+            # the same customer appeared under two slightly
+            # different spellings (case / punctuation drift in
+            # BU_NAME), the heading would over-state the coverage
+            # gap (e.g. "ACME (5)" when only 3 distinct customers
+            # actually had no engagement).  Use the normalized
+            # customer key so the count matches what an operator
+            # would reach if they de-duplicated the bullet list
+            # themselves.
+            try:
+                _distinct_count = len({
+                    str(normalize_customer_name(_n) or _n).strip().lower()
+                    for _n in names
+                    if _n is not None and str(_n).strip()
+                })
+            except Exception:
+                _distinct_count = len(names)
+            subheading = self.doc.add_heading(
+                f'{cssm_name} ({_distinct_count})', level=3
+            )
             if subheading.runs:
                 subheading.runs[0].font.size = Pt(12)
             bullet = self.doc.add_paragraph()
@@ -2566,7 +3070,22 @@ class LeaderReportGenerator:
             shading.set(qn('w:fill'), '007BC7')
             header_cells[i]._element.get_or_add_tcPr().append(shading)
 
-        for row_idx, cssm_name in enumerate(sorted(per_member.keys()), start=1):
+        # Round 6 / Phase 1.12: sort by total current activity (descending)
+        # then by name for tie-break, matching how other tables in this
+        # report rank members by load rather than alphabetically.  A
+        # purely lexicographic sort makes "high-activity" members hide
+        # at the bottom of the list, which fights how the rest of the
+        # leader report orders things.
+        def _sort_key_per_member(name: str):
+            counts = per_member.get(name, {}) or {}
+            total_curr = (
+                int(counts.get('AP_curr', 0) or 0)
+                + int(counts.get('AB_curr', 0) or 0)
+                + int(counts.get('CP_curr', 0) or 0)
+            )
+            return (-total_curr, str(name).lower())
+
+        for row_idx, cssm_name in enumerate(sorted(per_member.keys(), key=_sort_key_per_member), start=1):
             counts = per_member[cssm_name]
             row_cells = table.rows[row_idx].cells
             row_cells[0].text = cssm_name
@@ -2631,10 +3150,44 @@ class LeaderReportGenerator:
                 if not open_ab.empty:
                     open_ab = open_ab.copy()
                     open_ab['_age_days'] = (now - _date(open_ab[date_col])).dt.days
+                    # Round 6 / Phase 1.13: add a secondary sort key so
+                    # the "oldest open AB" pick is deterministic when
+                    # two rows tie on ``_age_days`` (which is common
+                    # because many AB rows share the same created date
+                    # rounded to days).  Without a tiebreaker the row
+                    # picked here depends on input order and the report
+                    # silently flips between runs.
+                    _id_col = next(
+                        (c for c in ('ID', 'Id', 'AB_ID_C', 'AB_NUMBER_C') if c in open_ab.columns),
+                        None,
+                    )
+                    _opened_col = next(
+                        (c for c in ('OPEN_DATE_C', 'CREATED_DATE', 'CREATEDDATE') if c in open_ab.columns),
+                        None,
+                    )
+                    _sort_cols = ['_age_days']
+                    _sort_asc = [False]
+                    if _opened_col:
+                        _sort_cols.append(_opened_col)
+                        _sort_asc.append(True)
+                    if _id_col:
+                        _sort_cols.append(_id_col)
+                        _sort_asc.append(True)
+                    # Round 6 / Phase 5.12: pass ``observed=False`` so
+                    # if BU_NAME is ever provided as a Categorical (it is,
+                    # in some upstream paths) all categories are reported,
+                    # not just observed combinations.  The pandas default
+                    # is changing toward ``observed=True``, so making the
+                    # intent explicit prevents the leader account-health
+                    # output from silently dropping customers with zero
+                    # currently-open ABs after the upgrade.
                     oldest = (
                         open_ab.dropna(subset=['_age_days'])
-                        .sort_values('_age_days', ascending=False)
-                        .groupby(open_ab['BU_NAME'].fillna('Unknown').astype(str))
+                        .sort_values(_sort_cols, ascending=_sort_asc, kind='stable')
+                        .groupby(
+                            open_ab['BU_NAME'].fillna('Unknown').astype(str),
+                            observed=False,
+                        )
                         .head(1)
                     )
                     for _, ab_row in oldest.iterrows():
@@ -2650,7 +3203,12 @@ class LeaderReportGenerator:
                 cp_work[score_col] = pd.to_numeric(cp_work[score_col], errors='coerce')
                 cp_work = cp_work.dropna(subset=[score_col])
                 if not cp_work.empty:
-                    grouped = cp_work.groupby(cp_work['BU_NAME'].fillna('Unknown').astype(str))[score_col]
+                    # Round 6 / Phase 5.12: explicit ``observed=False`` for
+                    # the same reason as the AB groupby above.
+                    grouped = cp_work.groupby(
+                        cp_work['BU_NAME'].fillna('Unknown').astype(str),
+                        observed=False,
+                    )[score_col]
                     for name, stats in grouped.agg(['min', 'max', 'last']).iterrows():
                         entry = rows.setdefault(name, {"customer": name})
                         entry["cp_min"] = float(stats['min'])
@@ -2858,8 +3416,20 @@ class LeaderReportGenerator:
                         # FIXED: Show ALL high-severity barriers
                         for _, barrier in high_severity.iterrows():
                             barrier_para = self.doc.add_paragraph(style='List Bullet')
-                            
-                            customer = barrier.get('BU_NAME', 'Unknown')
+
+                            # Round 12 / Phase 3.4: this list rendered
+                            # raw ``BU_NAME`` per row, so spelling
+                            # variants of a single account fragmented
+                            # across multiple bullets in the per-CSSM
+                            # severity callout.  Normalize the
+                            # displayed label so the bullets agree
+                            # with the All Action Plans / dashboard
+                            # views (Round 11 / Phase 3.5 fix).
+                            _raw_customer = barrier.get('BU_NAME', 'Unknown')
+                            try:
+                                customer = normalize_customer_name(str(_raw_customer)) or str(_raw_customer)
+                            except Exception:
+                                customer = str(_raw_customer)
                             subject = barrier.get('SUBJECT_C', 'No subject')
                             severity = barrier.get('SEVERITY_C', 'Unknown')
                             
@@ -2877,11 +3447,19 @@ class LeaderReportGenerator:
                 
                 for _, ap in data['action_plans'].iterrows():
                     ap_para = self.doc.add_paragraph(style='List Bullet')
-                    
-                    customer = ap.get('BU_NAME', 'Unknown')
+
+                    # Round 11 / Phase 3.5: normalize the displayed
+                    # customer label so the leader report agrees
+                    # with the dashboard / Word body normalization
+                    # (CSSM pipeline already normalizes elsewhere).
+                    raw_customer = ap.get('BU_NAME', 'Unknown')
+                    try:
+                        customer = normalize_customer_name(str(raw_customer)) or str(raw_customer)
+                    except Exception:
+                        customer = str(raw_customer)
                     subject = ap.get('SUBJECT_C', 'No subject')
                     status = ap.get('STATUS_C', 'Unknown')
-                    
+
                     ap_para.add_run(f'{customer} - {subject} ').font.italic = True
                     ap_para.add_run(f'(Status: {status})')
                     note = self._format_external_note(ap, cssm_name)
@@ -2897,7 +3475,12 @@ class LeaderReportGenerator:
                 for _, cp in data['customer_pulse'].iterrows():
                     cp_para = self.doc.add_paragraph(style='List Bullet')
 
-                    customer = cp.get('BU_NAME', 'Unknown')
+                    # Round 11 / Phase 3.5: normalize displayed BU_NAME.
+                    raw_customer = cp.get('BU_NAME', 'Unknown')
+                    try:
+                        customer = normalize_customer_name(str(raw_customer)) or str(raw_customer)
+                    except Exception:
+                        customer = str(raw_customer)
                     subject = (
                         cp.get('SUBJECT_C')
                         or cp.get('SUBJECT')
@@ -2983,8 +3566,16 @@ class LeaderReportGenerator:
                         row_cells[0].text = f"TAC #{case_num}"
                         
                         # Customer - FIXED: No truncation
-                        customer = case.get(customer_col, 'Unknown') if customer_col else 'Unknown'
-                        row_cells[1].text = str(customer)
+                        # Round 11 / Phase 3.5: normalize TAC table
+                        # customer cell so spelling variants render
+                        # consistently with the rest of the leader
+                        # report.
+                        raw_customer_cell = case.get(customer_col, 'Unknown') if customer_col else 'Unknown'
+                        try:
+                            customer = normalize_customer_name(str(raw_customer_cell)) or str(raw_customer_cell)
+                        except Exception:
+                            customer = str(raw_customer_cell)
+                        row_cells[1].text = customer
                         
                         # Title - FIXED: No truncation
                         title = case.get('Title', 'No title')
@@ -3130,6 +3721,53 @@ class LeaderReportGenerator:
             shading_elm.set(qn('w:fill'), '007BC7')
             cell._element.get_or_add_tcPr().append(shading_elm)
         
+        # Round 12 / Phase 9.3: previously this iteration called
+        # ``combined_abs.head(100)`` on a frame assembled from
+        # multiple sources (CSSM-owned + collaborator) with NO
+        # canonical sort, so the displayed 100 rows were an
+        # arbitrary slice of however ``concat`` happened to order
+        # the inputs.  Two reruns of the same report could surface
+        # entirely different barriers in the visible table while
+        # the truncation footer still claimed to be a "sample" of
+        # the same population.  Sort by ``LAST_MODIFIED_DATE``
+        # descending (most recently active barriers first, the
+        # natural prioritization for a manager review) with a
+        # stable id tie-break before the head() so the rendered
+        # subset is deterministic and the footer's "showing 100 of
+        # N" claim refers to a canonical 100.
+        try:
+            _date_col = next(
+                (c for c in ('LAST_MODIFIED_DATE', 'CREATED_DATE') if c in combined_abs.columns),
+                None,
+            )
+            _id_col = next(
+                (c for c in ('AB_ID', 'BARRIER_ID', 'ID') if c in combined_abs.columns),
+                None,
+            )
+            if _date_col is not None and _id_col is not None:
+                combined_abs = combined_abs.sort_values(
+                    [_date_col, _id_col],
+                    ascending=[False, True],
+                    na_position='last',
+                    kind='mergesort',
+                )
+            elif _date_col is not None:
+                combined_abs = combined_abs.sort_values(
+                    _date_col,
+                    ascending=False,
+                    na_position='last',
+                    kind='mergesort',
+                )
+            elif _id_col is not None:
+                combined_abs = combined_abs.sort_values(
+                    _id_col,
+                    ascending=True,
+                    na_position='last',
+                    kind='mergesort',
+                )
+        except Exception:  # Round 12 / Phase 9.3 defensive
+            pass
+
         # Use .head(n).iterrows() so we don't materialize every row into a list.
         for row_idx, (_, ab) in enumerate(combined_abs.head(AB_LIST_DISPLAY_CAP).iterrows(), start=1):
             row_cells = table.rows[row_idx].cells
@@ -3145,6 +3783,21 @@ class LeaderReportGenerator:
                         value = value.strftime('%Y-%m-%d')
                     else:
                         value = str(value)
+
+                # Round 12 / Phase 3.5: ``Complete Barrier Details``
+                # rendered ``BU_NAME`` cells via raw ``str(value)``,
+                # leaking case / whitespace variants into the body
+                # table even though Round 11 / Phase 3.x normalized
+                # the same value elsewhere in the document.  Apply
+                # ``normalize_customer_name`` so the table cell agrees
+                # with the dashboard / All Action Plans view.
+                if col_name == 'BU_NAME' and value:
+                    try:
+                        _norm = normalize_customer_name(value)
+                        if _norm:
+                            value = _norm
+                    except Exception:
+                        pass
 
                 row_cells[col_idx].text = value
                 if row_cells[col_idx].paragraphs and row_cells[col_idx].paragraphs[0].runs:
@@ -3801,7 +4454,17 @@ class LeaderReportGenerator:
         total_cps = 0
         total_tac_cases = 0
         total_bems = 0
-        
+        total_bems_tac_only = 0
+
+        # Round 11 / Phase 6.8: track distinct customers across the
+        # entire team (normalized) so the executive summary can
+        # state the true headcount of unique accounts rather than
+        # the sum of per-CSSM ``num_customers`` -- which double-
+        # counts shared / collaborative customers.  We keep the
+        # raw sum under ``total_customer_assignments`` for parity
+        # with the legacy "assignments" reading.
+        _r11_distinct_customers: set = set()
+
         # Collect all team data
         team_summary_data = []
         customer_health_summary = {}
@@ -3809,6 +4472,24 @@ class LeaderReportGenerator:
         for cssm_name, data in team_data.items():
             # Count activities
             num_customers = self.safe_len(data.get('customers', []))
+            try:
+                _raw_cust_iter = data.get('customers', []) or []
+                if hasattr(_raw_cust_iter, 'tolist'):
+                    _raw_cust_iter = _raw_cust_iter.tolist()
+                for _c in _raw_cust_iter:
+                    if _c is None:
+                        continue
+                    try:
+                        _norm_c = normalize_customer_name(str(_c)) or str(_c)
+                    except Exception:
+                        _norm_c = str(_c)
+                    if _norm_c.strip():
+                        _r11_distinct_customers.add(_norm_c.strip().lower())
+            except Exception as _ddc_err:
+                logger.debug(
+                    "Round 11 / Phase 6.8: could not collect distinct customers for %s: %s",
+                    cssm_name, _ddc_err,
+                )
             num_aps = self.safe_len(data.get('action_plans', []))
             num_abs = self.safe_len(data.get('adoption_barriers', []))
             num_cps = self.safe_len(data.get('customer_pulse', []))
@@ -3820,9 +4501,19 @@ class LeaderReportGenerator:
             total_cps += num_cps
             total_tac_cases += num_tac
             
-            # Count BEMS escalations
+            # Count BEMS escalations.
+            # Round 2 / Phase 3.3: also track the canonical TAC-only
+            # count so the dashboard footnote can show both numbers.
+            # Without this, the leader headline (combined AB+TAC) and
+            # the EI/Compact dashboards (TAC-only) silently disagree
+            # on the same run.
             bems_count = self._count_bems_escalations(data)
             total_bems += bems_count
+            try:
+                bems_tac_only = self._count_bems_canonical_tac(data)
+            except Exception:
+                bems_tac_only = 0
+            total_bems_tac_only += bems_tac_only
             
             high_severity_count = 0
             open_ab_count = 0
@@ -3832,22 +4523,36 @@ class LeaderReportGenerator:
             if not data.get('adoption_barriers', pd.DataFrame()).empty:
                 abs_df = data['adoption_barriers']
                 if 'SEVERITY_C' in abs_df.columns:
+                    # Round 6 / Phase 5.6: route through the canonical
+                    # high/critical mask which already normalizes
+                    # SEVERITY_C via ``normalize_severity_label``, so
+                    # raw values like "1 - Critical" / "p1" / "Sev 1"
+                    # collapse onto the same band before counting.
                     high_severity_count = int(self._high_or_critical_barrier_mask(abs_df).sum())
                 if 'STATUS_C' in abs_df.columns:
-                    status_values = abs_df['STATUS_C'].astype(str)
-                    open_ab_count = len(abs_df[status_values.isin(['Open', 'New'])])
+                    # Round 6 / Phase 5.6: normalize STATUS_C via
+                    # ``_is_status_open`` (the same helper the
+                    # account-health table and other leader sub-
+                    # sections already use) so case / whitespace /
+                    # legacy spelling differences ("open" vs "Open"
+                    # vs "OPEN" vs "In Progress") cannot silently
+                    # drop rows from the team summary count.
+                    status_series = abs_df['STATUS_C']
+                    open_ab_count = int(status_series.apply(self._is_status_open).sum())
+                    status_norm = status_series.astype(str).str.strip().str.lower()
                     resolved_ab_count = int(
-                        status_values.str.contains('closed|resolved|complete', case=False, na=False).sum()
+                        status_norm.str.contains(r'closed|resolved|complete', case=False, na=False).sum()
                     )
 
             if not data.get('action_plans', pd.DataFrame()).empty:
                 ap_df = data['action_plans']
                 if 'STATUS_C' in ap_df.columns:
+                    # Round 6 / Phase 5.6: normalize STATUS_C the same
+                    # way before pattern matching so "Done"/"DONE"/
+                    # "  done  " all collapse onto the same bucket.
+                    _ap_status_norm = ap_df['STATUS_C'].astype(str).str.strip().str.lower()
                     completed_ap_count = int(
-                        ap_df['STATUS_C']
-                        .astype(str)
-                        .str.contains('complete|closed|done', case=False, na=False)
-                        .sum()
+                        _ap_status_norm.str.contains(r'complete|closed|done', case=False, na=False).sum()
                     )
 
             # Blended impact: resolved work + completed plans, lightly
@@ -3901,14 +4606,31 @@ class LeaderReportGenerator:
         
         # Statistics rows
         avg_divisor = max(total_team_members, 1)
+        # Round 11 / Phase 6.8: headline number is now the count
+        # of unique normalized customers across the team rather
+        # than the sum of per-CSSM "customers" (which over-states
+        # whenever the same account is shared across CSSMs).
+        _r11_distinct_customer_count = len(_r11_distinct_customers)
+        _r11_total_assignments = total_customers
         stats_data = [
             ('Team Members', str(total_team_members), f"{total_team_members}"),
-            ('Total Customers', str(total_customers), f"{total_customers/avg_divisor:.1f}"),
+            (
+                'Customer Assignments (sum of CSSM lists; distinct customers='
+                + str(_r11_distinct_customer_count)
+                + ')',
+                str(_r11_total_assignments),
+                f"{_r11_total_assignments/avg_divisor:.1f}",
+            ),
             ('Action Plans', str(total_aps), f"{total_aps/avg_divisor:.1f}"),
             ('Adoption Barriers', str(total_abs), f"{total_abs/avg_divisor:.1f}"),
             ('Customer Pulse Records', str(total_cps), f"{total_cps/avg_divisor:.1f}"),
             ('TAC Cases', str(total_tac_cases), f"{total_tac_cases/avg_divisor:.1f}"),
-            ('BEMS Escalations', str(total_bems), f"{total_bems/avg_divisor:.1f}"),
+            # Round 2 / Phase 3.3: headline = combined AB+TAC mode
+            # (leader convention).  Footnote the canonical TAC-only
+            # number so reconcilers can reproduce the EI/Compact
+            # dashboard figure from the same run.
+            ('BEMS Escalations (combined AB+TAC; TAC-only=' + str(total_bems_tac_only) + ')',
+             str(total_bems), f"{total_bems/avg_divisor:.1f}"),
             # Aggregate "overall_summary" total = AP + AB + CP + TAC across all members.
             ('Total Activities', str(total_aps + total_abs + total_cps + total_tac_cases), f"{(total_aps + total_abs + total_cps + total_tac_cases)/avg_divisor:.1f}")
         ]
@@ -4037,7 +4759,7 @@ class LeaderReportGenerator:
         self.doc.add_paragraph()
         meta_para = self.doc.add_paragraph()
         meta_para.add_run('REPORT: Report Metadata:\n').font.bold = True
-        meta_para.add_run(f'• Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n')
+        meta_para.add_run(f'• Generated: {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")} UTC\n')
         meta_para.add_run(f'• Manager: {(manager_name or "Manager")}\n')
         meta_para.add_run(f'• Time Period: Last {days} days\n')
         meta_para.add_run(f'• Data Sources: CSConsole (APs, ABs, CPs), CSOne (TAC Cases), Snowflake (Customer Data)\n')
@@ -4083,7 +4805,21 @@ class LeaderReportGenerator:
             try:
                 if self.enhanced_insights:
                     customer_insights = self.enhanced_insights.get_comprehensive_customer_insights(customer, days=days)
-                    
+
+                    # Phase 4.3: render an explicit "section
+                    # unavailable" note for any sub-section that
+                    # failed instead of silently dropping it.
+                    section_errors = (customer_insights or {}).get('section_errors') or {}
+                    if section_errors:
+                        warn_para = self.doc.add_paragraph()
+                        warn_run = warn_para.add_run('⚠️ Some Snowflake sub-sections were unavailable for this customer:')
+                        warn_run.font.bold = True
+                        warn_run.font.color.rgb = RGBColor(204, 102, 0)
+                        for _section, _err in sorted(section_errors.items()):
+                            err_para = self.doc.add_paragraph(style='List Bullet')
+                            err_para.add_run(f"{_section}: {_err}")
+                        insights_added = True
+
                     if customer_insights and customer_insights.get('insights'):
                         insights_added = True
                         
@@ -4377,7 +5113,8 @@ class LeaderReportGenerator:
         Returns validation results and audit trail
         """
         validation_results = {
-            'timestamp': datetime.now().isoformat(),
+            # Round 7 / Phase 6.7: validation timestamp in UTC for audit consistency.
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             'validation_checks': {},
             'data_integrity': {},
             'cross_checks': {},
@@ -4551,10 +5288,14 @@ class LeaderReportGenerator:
         """Validate that data falls within expected date ranges"""
         logger.info(f"Validating date ranges (last {days} days)...")
         
+        # Round 7 / Phase 6.7: validation date range computed in UTC
+        # so it lines up with Snowflake's UTC ``CURRENT_DATE()`` and
+        # the leader header's UTC analysis period.
+        _now_utc_v = datetime.now(timezone.utc)
         date_validation = {
             'expected_date_range': {
-                'start': (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d'),
-                'end': datetime.now().strftime('%Y-%m-%d')
+                'start': (_now_utc_v - timedelta(days=days)).strftime('%Y-%m-%d'),
+                'end': _now_utc_v.strftime('%Y-%m-%d')
             },
             'actual_date_ranges': {},
             'date_violations': []
@@ -4630,7 +5371,24 @@ class LeaderReportGenerator:
                             )
                         )
                     else:
-                        subscription_customers = len(subscriptions_df)
+                        # Round 11 / Phase 6.7: when ``BU_NAME`` is
+                        # absent, prefer ``nunique`` on a stable
+                        # account/subscription identifier so this
+                        # value still represents distinct customers
+                        # rather than the raw row count (which
+                        # over-counts when one customer has many
+                        # subscription rows).
+                        _id_col = None
+                        for _c in ('SUBSCRIPTION_ID', 'ACCOUNT_ID_C', 'CONTRACT_NUMBER'):
+                            if _c in subscriptions_df.columns:
+                                _id_col = _c
+                                break
+                        if _id_col:
+                            subscription_customers = int(
+                                subscriptions_df[_id_col].dropna().astype(str).nunique()
+                            )
+                        else:
+                            subscription_customers = len(subscriptions_df)
             except Exception:
                 subscription_customers = 0
             
@@ -4934,7 +5692,18 @@ class LeaderReportGenerator:
             # Get enhanced insights for this customer
             try:
                 enhanced_data = self.enhanced_insights.get_comprehensive_customer_insights(customer, _resolved_days)
-                
+
+                # Phase 4.3: surface sub-section failures so the
+                # reader sees "section unavailable" instead of the
+                # section silently disappearing from the doc.
+                _section_errs = (enhanced_data or {}).get('section_errors') or {}
+                if _section_errs:
+                    self.doc.add_paragraph(
+                        "  ⚠️ Some Snowflake sub-sections were unavailable for this customer:"
+                    )
+                    for _section, _err in sorted(_section_errs.items()):
+                        self.doc.add_paragraph(f"    • {_section}: {_err}")
+
                 if enhanced_data and enhanced_data.get('insights'):
                     insights = enhanced_data['insights']
                     
@@ -5052,7 +5821,9 @@ class LeaderReportGenerator:
         
         self.doc.add_paragraph()
         self.doc.add_paragraph("Enhanced insights generated using AdoptIQ Enhanced Snowflake Insights System v1.0")
-        self.doc.add_paragraph(f"Analysis timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # Round 7 / Phase 6.7: render in UTC so the timestamp matches
+        # the rest of the doc (analysis period + meta block).
+        self.doc.add_paragraph(f"Analysis timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
         self.doc.add_paragraph("Total Snowflake tables analyzed: 89+")
         self.doc.add_paragraph("Data categories covered: 8")
         self.doc.add_paragraph("Source attribution: Complete for all data points")
@@ -5213,7 +5984,8 @@ class LeaderReportGenerator:
         
         self.doc.add_paragraph()
         self.doc.add_paragraph("Enhanced defect analysis generated using AdoptIQ Enhanced Defect Analyzer v1.0")
-        self.doc.add_paragraph(f"Analysis timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # Round 7 / Phase 6.7: UTC timestamp for parity with doc header.
+        self.doc.add_paragraph(f"Analysis timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
         self.doc.add_paragraph("Data sources: BST (Bug Search Tool) and Circuit")
         self.doc.add_paragraph("Classification: Cisco Internal Data with proper safeguards")
 
@@ -5222,7 +5994,9 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                           csone_df: Optional[pd.DataFrame] = None,
                           ext_bugs: List[Dict] = None, ext_incidents: List[Dict] = None,
                           software_defects: Dict = None, psirt_vulns: Dict = None,
-                          progress_callback=None) -> Tuple[str, str, Dict]:
+                          progress_callback=None,
+                          data_retrieved_at: Optional[datetime] = None,
+                          strict_mode: bool = False) -> Tuple[str, str, Dict]:
     """
     Main function to generate leader report
     
@@ -5251,7 +6025,14 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
     try:
         logger.info(f"Starting leader report generation for {manager_name}")
         
-        generator = LeaderReportGenerator(ctx, team_roster)
+        # Round 7 / Phase 6.11: forward strict_mode through to the
+        # generator so partial-data conditions raise instead of being
+        # silently swallowed when callers opt in.
+        generator = LeaderReportGenerator(
+            ctx, team_roster,
+            data_retrieved_at=data_retrieved_at,
+            strict_mode=strict_mode,
+        )
         
         doc, filepath, team_data, direct_reports = generator.generate_leader_report(
             manager_name, days,

@@ -20,6 +20,29 @@ Design principles
    pipeline.
 4. Every function returns a plain ``int``/``float``/``dict`` with
    explicit semantics. No mutable shared state.
+
+Round 5 / Phase 6.18 -- on data freshness
+-----------------------------------------
+Functions in this module DO NOT inject a "data was retrieved at ..."
+or "as-of" timestamp into their return values.  Freshness is a
+property of the *call site* (the worker that fetched the underlying
+DataFrames), not of the canonical math layer.  Callers must therefore:
+
+- Capture ``data_retrieved_at`` (UTC, tz-aware) immediately *after*
+  the upstream Snowflake / CSOne fetches complete (see
+  ``snowflake_prefetch.AnalysisRunContext`` and
+  ``leader_report_generator``).
+- Pass that timestamp into the report formatter / Word writer / Ask
+  AI grounded prompt so the headline ("Generated: ... UTC") and the
+  "Source data retrieved at ..." disclaimer agree.
+- NEVER call ``datetime.now()`` inside a canonical metric function to
+  derive freshness -- by the time the metric runs the data could
+  already be many minutes old.
+
+Headline metrics (e.g. ``build_portfolio_metrics``,
+``compute_high_risk_count``) therefore return *only* the math; the
+report writer is responsible for stamping the "as-of" line above
+the table.
 """
 
 from __future__ import annotations
@@ -37,6 +60,76 @@ from data_normalization import (
     normalize_severity_label,
     normalize_status_label,
 )
+
+
+# ---------------------------------------------------------------------------
+# Round 11 / Phase 5.1 -- shared risk-band color constant
+# ---------------------------------------------------------------------------
+# Single source of truth for the matplotlib/Word/HTML risk-band
+# palette so every report path renders the same color for the same
+# canonical band.  Keys are the canonical band labels emitted by
+# the risk classifier.  Use ``RISK_BAND_COLORS.get(band, RISK_BAND_COLOR_DEFAULT)``
+# to pick a color so an unexpected label never crashes the chart.
+RISK_BAND_COLORS: Dict[str, str] = {
+    "CRITICAL": "#d62728",
+    "HIGH": "#ff7f0e",
+    "MEDIUM": "#ffd700",
+    "LOW": "#2ca02c",
+    "HEALTHY": "#28B463",
+    "UNKNOWN": "#7f7f7f",
+}
+RISK_BAND_COLOR_DEFAULT: str = "#1f77b4"
+
+# Round 11 / Phase 5.2 -- Word/matplotlib portfolio palette.
+# Charts in ``adoptiq_backend.append_to_word_report`` and Word
+# cell shading were both hard-coded with these hexes.  Keep both
+# call sites pointing at this dict so future tweaks land in
+# exactly one place.
+RISK_BAND_PORTFOLIO_COLORS: Dict[str, str] = {
+    "Critical Risk": "#C0392B",
+    "High Risk": "#FF6B6B",
+    "Medium Risk": "#FFB81C",
+    "Low Risk": "#5DBCD2",
+    "Healthy": "#28B463",
+    "Critical + High": "#FF6B6B",
+}
+
+
+# ---------------------------------------------------------------------------
+# Round 12 / Phase 11.7 -- fold_fuzzy degradation counter
+# ---------------------------------------------------------------------------
+# When ``_collect_customer_names(..., fold_fuzzy=True)`` cannot import
+# ``data_normalization._clean_name_for_key`` we *silently* fall back to
+# the un-folded set, which can re-introduce ``Cisco Systems`` /
+# ``Cisco Systems, Inc.`` double-counts.  Round 7 / Phase 3.6 added a
+# logger.warning, but logger output is easy to swallow in subprocess
+# / packaged builds.  This module-level counter is bumped on every
+# degradation so callers (and the verbose debug API) can detect the
+# regression deterministically.
+_R12_FOLD_FUZZY_DEGRADATIONS: int = 0
+
+
+def get_fold_fuzzy_degradation_count() -> int:
+    """Return how many times ``fold_fuzzy`` silently degraded.
+
+    Round 12 / Phase 11.7: callers should treat any non-zero return as
+    a partial-data signal and either re-emit the underlying warning or
+    surface it via ``partial_data_warnings`` so analysts can see that
+    customer-name folding was disabled for at least one metric in
+    the current process.
+    """
+
+    return int(_R12_FOLD_FUZZY_DEGRADATIONS)
+
+
+def reset_fold_fuzzy_degradation_count() -> None:
+    """Reset the Round 12 / Phase 11.7 fold_fuzzy degradation counter.
+
+    Intended for tests so each scenario starts from zero.
+    """
+
+    global _R12_FOLD_FUZZY_DEGRADATIONS
+    _R12_FOLD_FUZZY_DEGRADATIONS = 0
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +248,7 @@ def _collect_customer_names(
     extra_names: Optional[Sequence[str]],
     account_to_customer: Optional[Dict[str, str]],
     drop_unknown: bool,
+    fold_fuzzy: bool = False,
 ) -> set:
     """Internal: union of normalized customer names across all sources.
 
@@ -162,6 +256,14 @@ def _collect_customer_names(
     that lacks a customer-name column but does carry an ``ACCOUNT_ID``-
     style column (TAC support cases, success priorities, etc.) still
     contributes its accounts when a subscription mapping is provided.
+
+    Round 2 / Phase 4.6: ``fold_fuzzy`` controls whether names are
+    folded by ``data_normalization._clean_name_for_key`` (e.g. drop
+    ``Inc``/``LLC``/punctuation) so ``"Cisco Systems"`` and
+    ``"Cisco Systems, Inc."`` count as one customer.  The default is
+    **False** because every Round-1 phase 1 / phase 5 metric used the
+    literal-string-unique policy; ``fold_fuzzy=True`` is opt-in for
+    callers that want the looser legal-suffix-tolerant count.
     """
     seen: set = set()
     all_frames: List[Optional[pd.DataFrame]] = list(frames)
@@ -180,6 +282,61 @@ def _collect_customer_names(
     if drop_unknown:
         seen.discard("Unknown")
         seen.discard("")
+    if fold_fuzzy:
+        # Fold names through the same key cleaner used by
+        # ``data_normalization.resolve_customer_name`` so callers that
+        # opt in get the same looser equality the lookup table uses.
+        try:
+            from data_normalization import _clean_name_for_key as _ckey
+        except Exception as _ckey_err:
+            # Round 7 / Phase 3.6: previously this returned the
+            # un-folded ``seen`` set silently, which could double-count
+            # ``"Cisco Systems"`` and ``"Cisco Systems, Inc."`` whenever
+            # ``data_normalization`` failed to import.  Log a warning
+            # and stash the error on the returned set so the caller's
+            # ``partial_data_warnings`` block can surface the loss of
+            # fuzzy folding.
+            try:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "Round 7 / Phase 3.6: data_normalization._clean_name_for_key "
+                    "unavailable (%s); fold_fuzzy disabled for this call.",
+                    _ckey_err,
+                )
+            except Exception:
+                pass  # noqa: PIE790
+            # Round 12 / Phase 11.7: previously the only signal that
+            # fold_fuzzy had silently degraded was a Round 7 / Phase
+            # 3.6 logger.warning emission.  When the logger itself was
+            # misconfigured (or the warning was swallowed by a noisy
+            # parent), callers had *no* programmatic signal that fuzzy
+            # folding had been requested but skipped, and downstream
+            # ``Cisco Systems`` / ``Cisco Systems, Inc.`` double-counts
+            # silently re-appeared.  Bump a process-wide counter so
+            # callers (and ``partial_data_warnings``) can introspect.
+            try:
+                global _R12_FOLD_FUZZY_DEGRADATIONS
+                _R12_FOLD_FUZZY_DEGRADATIONS += 1
+            except Exception:
+                # Round 12 / Phase 11.7: never let the side-channel
+                # crash a real call -- the counter is purely
+                # diagnostic.
+                pass
+            return seen
+        folded: Dict[str, str] = {}
+        for raw in seen:
+            key = _ckey(raw)
+            if not key:
+                # No clean key (empty / Unknown): keep the original
+                # so we don't accidentally drop entries.
+                folded.setdefault(raw, raw)
+                continue
+            # Prefer the longer original spelling for the chosen
+            # canonical name (more specific) when collisions occur.
+            existing = folded.get(key)
+            if existing is None or len(raw) > len(existing):
+                folded[key] = raw
+        return set(folded.values())
     return seen
 
 
@@ -194,6 +351,7 @@ def count_customers(
     extra_names: Optional[Sequence[str]] = None,
     account_to_customer: Optional[Dict[str, str]] = None,
     drop_unknown: bool = True,
+    fold_fuzzy: bool = False,
 ) -> int:
     """Count unique customers across every supplied source.
 
@@ -206,6 +364,12 @@ def count_customers(
     identifier (renewal/contract/Snowflake exports) still contribute to
     the headline count, matching what the dashboard's
     ``_get_all_customers_from_all_sources`` does.
+
+    Round 2 / Phase 4.6: ``fold_fuzzy`` (default ``False``) lets
+    callers opt in to legal-suffix-/punctuation-tolerant equality
+    via :func:`data_normalization._clean_name_for_key`.  All Round-1
+    fixes assumed literal-string-unique counts, so the default keeps
+    that behaviour while documenting the policy.
     """
 
     return len(
@@ -215,6 +379,7 @@ def count_customers(
             extra_names,
             account_to_customer,
             drop_unknown,
+            fold_fuzzy=fold_fuzzy,
         )
     )
 
@@ -230,6 +395,7 @@ def list_customers(
     extra_names: Optional[Sequence[str]] = None,
     account_to_customer: Optional[Dict[str, str]] = None,
     drop_unknown: bool = True,
+    fold_fuzzy: bool = False,
 ) -> List[str]:
     """Return the sorted canonical customer universe as a list."""
 
@@ -240,6 +406,7 @@ def list_customers(
             extra_names,
             account_to_customer,
             drop_unknown,
+            fold_fuzzy=fold_fuzzy,
         )
     )
 
@@ -637,11 +804,46 @@ RISK_SCALE_0_TO_10 = "0_to_10"
 _RISK_SCALES = {RISK_SCALE_0_TO_100, RISK_SCALE_0_TO_10}
 
 
+# Round 5 / Phase 5.16: pull the canonical band thresholds from the
+# scorer so we don't keep a literal ``55.0`` HIGH cutoff (or
+# equivalent) drifting in this module.  ``risk_scoring`` is the
+# authoritative source of truth; if (for any reason) it cannot be
+# imported at module-load time, fall back to the documented
+# defaults so no caller is left with an undefined symbol.
+try:
+    from risk_scoring import RISK_BAND_THRESHOLDS as _RISK_BAND_THRESHOLDS_FROM_SCORER
+    RISK_BAND_THRESHOLDS = dict(_RISK_BAND_THRESHOLDS_FROM_SCORER)
+except Exception as _rs_import_err:  # pragma: no cover - defensive only
+    # Round 7 / Phase 3.5: previously this branch silently created a
+    # second source of truth (a hard-coded dict that could drift from
+    # ``risk_scoring.RISK_BAND_THRESHOLDS``).  Raise instead so any
+    # import failure is loud and unambiguous; callers MUST be able to
+    # import the canonical thresholds.
+    raise ImportError(
+        "Round 7 / Phase 3.5: canonical_metrics requires "
+        "risk_scoring.RISK_BAND_THRESHOLDS as the single source of "
+        f"truth; refusing to fall back to literal defaults. Cause: "
+        f"{type(_rs_import_err).__name__}: {_rs_import_err}"
+    ) from _rs_import_err
+# Round 7 / Phase 3.5: the literal-fallback dict that previously lived
+# here has been removed.  Keeping the unreachable block below would
+# compile but would re-introduce the silent-drift surface that the
+# audit found.  An explicit raise above replaces it.
+if False:  # noqa: SIM108  -- retained for diff-readability across audit rounds
+    RISK_BAND_THRESHOLDS = {
+        "CRITICAL": 75.0,
+        "HIGH": 55.0,
+        "MEDIUM": 35.0,
+        "LOW": 15.0,
+        "HEALTHY": 0.0,
+    }
+
+
 def compute_high_risk_count(
     risk_profiles: Optional[Dict[str, Dict[str, Any]]],
     *,
     scale: str = RISK_SCALE_0_TO_100,
-    high_threshold_0_to_10: float = 6.0,
+    high_threshold_0_to_10: float = 5.5,
 ) -> int:
     """Count high-risk customers in a portfolio.
 
@@ -656,7 +858,11 @@ def compute_high_risk_count(
         - ``"0_to_100"`` (default): canonical. High-risk = bands
           ``CRITICAL`` + ``HIGH`` (i.e. score >= 55).
         - ``"0_to_10"``: legacy. High-risk = ``risk_score_0_10`` >=
-          ``high_threshold_0_to_10`` (default 6.0).
+          ``high_threshold_0_to_10`` (default 5.5, which equals the
+          0-100 band cutoff at ``RISK_BAND_THRESHOLDS["HIGH"]/10``).
+          The 0-10 branch ALSO honors ``risk_band == "CRITICAL"|"HIGH"``
+          and ``color == "red"`` so the headline count and any narrative
+          table filtered by ``is_high_risk_profile`` agree byte-for-byte.
     """
 
     if scale not in _RISK_SCALES:
@@ -687,7 +893,13 @@ def compute_high_risk_count(
                 except (TypeError, ValueError):
                     continue
             try:
-                if float(score) >= 55.0:
+                # Round 6 / Phase 5.5: derive the cutoff from the
+                # canonical RISK_BAND_THRESHOLDS so this branch
+                # cannot drift if HIGH is ever retuned (e.g. raised
+                # to 60 or lowered to 50).  The previous literal
+                # 55.0 silently disagreed with downstream callers
+                # that already used RISK_BAND_THRESHOLDS["HIGH"].
+                if float(score) >= float(RISK_BAND_THRESHOLDS["HIGH"]):
                     count += 1
             except (TypeError, ValueError):
                 continue
@@ -697,6 +909,13 @@ def compute_high_risk_count(
     count = 0
     threshold = float(high_threshold_0_to_10)
     for profile in risk_profiles.values():
+        # Phase 1.5: also honor the 0-100 band override on the 0-10 branch
+        # so a profile flagged ``risk_band="HIGH"`` with score=5.4 (just
+        # below the 0-10 default) is still counted, matching is_high_risk_profile.
+        band = str(profile.get("risk_band", "")).upper().strip()
+        if band in {"CRITICAL", "HIGH"}:
+            count += 1
+            continue
         # Prefer explicit color flag if present (legacy compact path).
         color = str(profile.get("color", "")).strip().lower()
         if color in {"red"}:
@@ -720,7 +939,7 @@ def is_high_risk_profile(
     profile: Optional[Dict[str, Any]],
     *,
     scale: str = RISK_SCALE_0_TO_100,
-    high_threshold_0_to_10: float = 6.0,
+    high_threshold_0_to_10: float = 5.5,
 ) -> bool:
     """Return True when ``profile`` matches the canonical high-risk
     definition used by :func:`compute_high_risk_count`.
@@ -749,11 +968,24 @@ def is_high_risk_profile(
             except (TypeError, ValueError):
                 return False
         try:
-            return float(score) >= 55.0
+            # Round 5 / Phase 5.16: derive the HIGH cutoff from the
+            # canonical ``RISK_BAND_THRESHOLDS`` so it can never drift
+            # from the scorer / band-split helpers.
+            return float(score) >= float(RISK_BAND_THRESHOLDS["HIGH"])
         except (TypeError, ValueError):
             return False
 
     # 0-10 legacy scale
+    # Round 4 / Phase 1.5: honor the canonical risk_band first so the
+    # 0-10 branch agrees with the 0-100 branch above.  Without this,
+    # a profile carrying ``risk_band='HIGH'`` (or CRITICAL) but a
+    # 0-10 score of 5.4 was excluded by the legacy ``score >= 6.0``
+    # threshold even though the rest of the report classifies it as
+    # HIGH.  The Excel ``High_Risk_Customers`` sheet (which calls
+    # this helper on the 0-10 scale) silently dropped those rows.
+    band = str(profile.get("risk_band", "")).upper().strip()
+    if band in {"CRITICAL", "HIGH"}:
+        return True
     color = str(profile.get("color", "")).strip().lower()
     if color == "red":
         return True
@@ -866,6 +1098,19 @@ def count_score_range(
 # legacy ``_derive_sentiment_summary`` used 7.5/5.0; the narrative
 # elsewhere referred to a ``/5.0`` scale. We canonicalize to 0-10 and
 # document conversion explicitly.
+#
+# Round 6 / Phase 5.13: these pulse thresholds are deliberately
+# INDEPENDENT of ``RISK_BAND_THRESHOLDS`` even though they share
+# similar magnitudes (7.5 / 5.0).  Pulse measures customer sentiment
+# from the CSConsole CUSTOMER_PULSE__C feed, and risk bands measure
+# adoption / support / billing risk from a blended scoring model.
+# Tying them together (e.g. setting POSITIVE = RISK_BAND_THRESHOLDS
+# ["CRITICAL"]/10) would mean any future risk-band tuning silently
+# re-bucketed sentiment data, which would be a hard-to-trace
+# correctness regression.  When the product team needs to retune
+# pulse, it should be done here in isolation; the risk model is
+# tuned in ``risk_scoring.RISK_BAND_THRESHOLDS``.  Keep the two
+# decoupled.
 PULSE_POSITIVE_THRESHOLD_0_TO_10 = 7.5
 PULSE_NEGATIVE_THRESHOLD_0_TO_10 = 5.0
 
@@ -893,6 +1138,34 @@ def _coerce_pulse_score_series(
     return series.dropna()
 
 
+_BACKFILL_FLAG_COLS = (
+    "is_backfilled",
+    "is_backfill",
+    "backfilled",
+    "is_synthetic",
+    "synthetic",
+)
+
+
+def _split_backfill_mask(pulse_df: Optional[pd.DataFrame]) -> Optional[pd.Series]:
+    """Return a boolean mask of rows that look like backfilled / synthetic
+    pulses, or ``None`` if no backfill flag column is present.
+    """
+
+    if _is_empty(pulse_df):
+        return None
+    flag_col = next(
+        (c for c in _BACKFILL_FLAG_COLS if c in pulse_df.columns),
+        None,
+    )
+    if not flag_col:
+        return None
+    try:
+        return pulse_df[flag_col].fillna(False).astype(bool)
+    except Exception:
+        return None
+
+
 def pulse_sentiment(
     pulse_df: Optional[pd.DataFrame],
     *,
@@ -904,6 +1177,14 @@ def pulse_sentiment(
     ``neutral``, ``negative``, and ``sentiment`` (string) fields.
     The ``sentiment`` label is determined from the mean using the
     canonical thresholds (Positive >= 7.5, Negative <= 5.0).
+
+    Round 5 / Phase 5.6: when ``pulse_df`` carries a backfill flag
+    column (``is_backfilled``, ``is_synthetic``, etc.) a parallel
+    ``customer_observed`` summary is included on the returned dict
+    that excludes those rows.  Without this, callers that wanted
+    "what did the customer actually say" had no way to get it from
+    the canonical helper -- forcing them to re-implement filtering
+    inline and disagree with the headline number.
     """
 
     if scale not in _PULSE_SCALES:
@@ -912,36 +1193,54 @@ def pulse_sentiment(
             f"Allowed scales: {sorted(_PULSE_SCALES)}"
         )
 
-    series = _coerce_pulse_score_series(pulse_df, scale)
-    if series.empty:
+    def _summarize(series: pd.Series) -> Dict[str, Any]:
+        if series.empty:
+            return {
+                "count": 0,
+                "mean_0_to_10": None,
+                "positive": 0,
+                "neutral": 0,
+                "negative": 0,
+                "sentiment": "Unknown",
+            }
+        mean_val = float(series.mean())
+        positive = int((series >= PULSE_POSITIVE_THRESHOLD_0_TO_10).sum())
+        negative = int((series <= PULSE_NEGATIVE_THRESHOLD_0_TO_10).sum())
+        neutral = int(len(series) - positive - negative)
+        if mean_val >= PULSE_POSITIVE_THRESHOLD_0_TO_10:
+            label = "Positive"
+        elif mean_val <= PULSE_NEGATIVE_THRESHOLD_0_TO_10:
+            label = "Negative"
+        else:
+            label = "Neutral"
         return {
-            "count": 0,
-            "mean_0_to_10": None,
-            "positive": 0,
-            "neutral": 0,
-            "negative": 0,
-            "sentiment": "Unknown",
+            "count": int(len(series)),
+            "mean_0_to_10": round(mean_val, 2),
+            "positive": positive,
+            "neutral": neutral,
+            "negative": negative,
+            "sentiment": label,
         }
-    mean_val = float(series.mean())
-    positive = int((series >= PULSE_POSITIVE_THRESHOLD_0_TO_10).sum())
-    negative = int((series <= PULSE_NEGATIVE_THRESHOLD_0_TO_10).sum())
-    neutral = int(len(series) - positive - negative)
 
-    if mean_val >= PULSE_POSITIVE_THRESHOLD_0_TO_10:
-        label = "Positive"
-    elif mean_val <= PULSE_NEGATIVE_THRESHOLD_0_TO_10:
-        label = "Negative"
+    series = _coerce_pulse_score_series(pulse_df, scale)
+    summary = _summarize(series)
+
+    backfill_mask = _split_backfill_mask(pulse_df)
+    if backfill_mask is not None and not _is_empty(pulse_df):
+        try:
+            observed_df = pulse_df.loc[~backfill_mask]
+            observed_series = _coerce_pulse_score_series(observed_df, scale)
+            observed_summary = _summarize(observed_series)
+            backfill_count = int(backfill_mask.sum())
+            summary["customer_observed"] = observed_summary
+            summary["backfilled_excluded_count"] = backfill_count
+            summary["has_backfill_flag"] = True
+        except Exception:
+            summary["has_backfill_flag"] = False
     else:
-        label = "Neutral"
+        summary["has_backfill_flag"] = False
 
-    return {
-        "count": int(len(series)),
-        "mean_0_to_10": round(mean_val, 2),
-        "positive": positive,
-        "neutral": neutral,
-        "negative": negative,
-        "sentiment": label,
-    }
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -1003,23 +1302,60 @@ def build_portfolio_metrics(
         payload["high_risk_customers"] = compute_high_risk_count(
             risk_profiles, scale=risk_scale
         )
-        # Medium / Low / Healthy band counts when 0-100 model used.
-        if risk_scale == RISK_SCALE_0_TO_100:
-            band_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "HEALTHY": 0}
-            for profile in risk_profiles.values():
-                band = str(profile.get("risk_band", "")).upper().strip()
-                if band in band_counts:
-                    band_counts[band] += 1
-            # Expose both the rolled-up "high_risk" (CRITICAL + HIGH) used
-            # by the headline tile *and* the split bands so charts can
-            # render an accurate "Critical vs High" breakdown without
-            # silently relabeling. Round 3 fix for the executive risk
-            # pie's misleading "High Risk" wedge.
-            payload["critical_risk_customers"] = band_counts["CRITICAL"]
-            payload["high_only_risk_customers"] = band_counts["HIGH"]
-            payload["medium_risk_customers"] = band_counts["MEDIUM"]
-            payload["low_risk_customers"] = band_counts["LOW"]
-            payload["healthy_customers"] = band_counts["HEALTHY"]
+        # Medium / Low / Healthy band counts.
+        # Round 5 / Phase 5.7: previously the band split was only
+        # populated when ``risk_scale == RISK_SCALE_0_TO_100`` and the
+        # 0-10 callers ended up with no band breakdown at all (the
+        # "Critical vs High vs Medium vs Low vs Healthy" pie was
+        # silently zero on every 0-10 path).  Compute the band split
+        # for both scales so charts agree byte-for-byte regardless of
+        # how risk was scored.
+        band_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "HEALTHY": 0}
+        for profile in risk_profiles.values():
+            band = str(profile.get("risk_band", "")).upper().strip()
+            if band in band_counts:
+                band_counts[band] += 1
+                continue
+            # Fallback when ``risk_band`` is missing: derive from the
+            # numeric score using canonical thresholds.  This ensures
+            # the 0-10 branch (which historically only carried a raw
+            # ``score`` field) still produces a band split.
+            score_0_100 = profile.get("risk_score_0_100")
+            if score_0_100 is None:
+                score_0_10 = profile.get("risk_score_0_10")
+                if score_0_10 is None:
+                    score_0_10 = profile.get("score")
+                try:
+                    score_0_100 = float(score_0_10) * 10.0 if score_0_10 is not None else None
+                except (TypeError, ValueError):
+                    score_0_100 = None
+            try:
+                if score_0_100 is None:
+                    continue
+                s = float(score_0_100)
+            except (TypeError, ValueError):
+                continue
+            if s >= RISK_BAND_THRESHOLDS["CRITICAL"]:
+                band_counts["CRITICAL"] += 1
+            elif s >= RISK_BAND_THRESHOLDS["HIGH"]:
+                band_counts["HIGH"] += 1
+            elif s >= RISK_BAND_THRESHOLDS["MEDIUM"]:
+                band_counts["MEDIUM"] += 1
+            elif s >= RISK_BAND_THRESHOLDS["LOW"]:
+                band_counts["LOW"] += 1
+            else:
+                band_counts["HEALTHY"] += 1
+        # Expose both the rolled-up "high_risk" (CRITICAL + HIGH) used
+        # by the headline tile *and* the split bands so charts can
+        # render an accurate "Critical vs High" breakdown without
+        # silently relabeling. Round 3 fix for the executive risk
+        # pie's misleading "High Risk" wedge.
+        payload["critical_risk_customers"] = band_counts["CRITICAL"]
+        payload["high_only_risk_customers"] = band_counts["HIGH"]
+        payload["medium_risk_customers"] = band_counts["MEDIUM"]
+        payload["low_risk_customers"] = band_counts["LOW"]
+        payload["healthy_customers"] = band_counts["HEALTHY"]
+        payload["risk_scale"] = risk_scale
 
     return payload
 
@@ -1040,9 +1376,11 @@ __all__ = [
     "PULSE_SCALE_0_TO_5",
     "PULSE_POSITIVE_THRESHOLD_0_TO_10",
     "PULSE_NEGATIVE_THRESHOLD_0_TO_10",
+    "RISK_BAND_THRESHOLDS",
     "bems_rate",
     "build_portfolio_metrics",
     "compute_high_risk_count",
+    "is_high_risk_profile",
     "count_score_range",
     "count_bems",
     "count_break_fix",

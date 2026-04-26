@@ -2,6 +2,21 @@
 
 {% block title %}Leader Report - AdoptIQ{% endblock %}
 
+{% block head %}
+{# Round 7 / Phase 4.11: expose ``csrf_token`` as a meta tag so any
+   AJAX call originating from this page (e.g. the ``AbortController``
+   handler in the form's submit script, or the optional manager
+   refresh fetch) can pick up the token via
+   ``document.querySelector('meta[name="csrf-token"]')`` -- the same
+   pattern used by analyze.html, ask_ai.html, external_intelligence.html
+   and bst_psirt_search.html.  The hidden input on the form itself is
+   sufficient for a classic form POST, but every other page on the app
+   reads the token from the meta tag for fetch() requests; without
+   parity here a future fetch added to this page would silently fall
+   back to an empty string and be rejected by the CSRF middleware. #}
+<meta name="csrf-token" content="{{ csrf_token() }}">
+{% endblock %}
+
 {% block content %}
 <div class="container py-5">
     <div class="row justify-content-center">
@@ -103,8 +118,8 @@
                                         <li>Customer accounts and subscriptions</li>
                                         <li>Products and technologies</li>
                                         <li>Top challenges and adoption barriers</li>
-                                        <li>Recent action plans (up to 5)</li>
-                                        <li><strong>TAC Cases</strong> (up to 20 with priority, status, and dates)</li>
+                                        <li>Recent action plans</li>
+                                        <li><strong>TAC Cases</strong> (with priority, status, and dates)</li>
                                     </ul>
                                 </li>
                                 <li><strong>Final section:</strong> Detailed list of all adoption barriers with product, category, 
@@ -195,8 +210,19 @@
     transform: scale(1.1);
 }
 
+/* Round 7 / Phase 4.14: ``.shadow-cisco`` and the card hover shadow
+   used to be hardcoded to ``rgba(0, 123, 199, ...)`` -- a colour that
+   does not match any of the ``--cisco-*`` design tokens defined in
+   ``base.html``.  That meant a future re-skin of the brand palette
+   would silently leave this page out of sync.  We now express both
+   shadows in terms of ``var(--cisco-accent-blue)`` (which is
+   ``#0073e6`` in the current palette, the closest token to the
+   original ``#007bc7``) so the page tracks the global theme.  Note
+   that ``base.html`` already defines a ``.shadow-cisco`` rule on
+   ``var(--cisco-blue)``; this override is intentionally kept because
+   the leader form deliberately uses the more subtle accent shadow. */
 .shadow-cisco {
-    box-shadow: 0 4px 6px rgba(0, 123, 199, 0.1);
+    box-shadow: 0 4px 6px color-mix(in srgb, var(--cisco-accent-blue) 10%, transparent);
 }
 
 .card {
@@ -205,7 +231,7 @@
 
 .card:hover {
     transform: translateY(-5px);
-    box-shadow: 0 8px 12px rgba(0, 123, 199, 0.15);
+    box-shadow: 0 8px 12px color-mix(in srgb, var(--cisco-accent-blue) 15%, transparent);
 }
 </style>
 
@@ -213,14 +239,40 @@
 document.addEventListener('DOMContentLoaded', function() {
     const form = document.getElementById('leaderReportForm');
     const submitBtn = document.getElementById('submitBtn');
-    
+
+    // Round 6 / Phase 2.4: re-entrancy guard.  Disabling the submit
+    // button alone is not enough because the form ``submit`` event
+    // can also be triggered by Enter while focus is on a non-button
+    // input, and a slow network can let the user click again before
+    // the button visibly disables.  We additionally:
+    //   * track an ``isSubmitting`` flag the handler checks first,
+    //   * abort any prior in-flight request via ``AbortController``
+    //     so a stalled fetch can never race with a fresh submit.
+    var isSubmitting = false;
+    var inflightController = null;
+
     form.addEventListener('submit', async function(e) {
         e.preventDefault();
-        
+
+        if (isSubmitting) {
+            // Round 6 / Phase 2.4: silently ignore the duplicate
+            // submit; the visible "Generating Report..." spinner is
+            // already telling the user something is happening.
+            return;
+        }
+        isSubmitting = true;
+
         // Disable submit button
         submitBtn.disabled = true;
         submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Generating Report...';
-        
+
+        // Round 6 / Phase 2.4: abort any prior pending request before
+        // starting a new one so we do not stack overlapping fetches.
+        if (inflightController) {
+            try { inflightController.abort(); } catch (_) { /* noop */ }
+        }
+        inflightController = new AbortController();
+
         try {
             // Create FormData from the form
             const formData = new FormData(form);
@@ -230,9 +282,26 @@ document.addEventListener('DOMContentLoaded', function() {
             const response = await fetch('/start_leader_report', {
                 method: 'POST',
                 headers: { 'X-CSRFToken': csrfToken },
-                body: formData
+                body: formData,
+                signal: inflightController.signal
             });
-            
+
+            // Round 5 / Phase 2.13: branch on the response Content-Type
+            // (and HTTP status) before calling ``response.json()`` so a
+            // server that responded with an HTML 5xx / 401 page is
+            // surfaced clearly rather than failing with an opaque
+            // SyntaxError caught by the catch block.
+            if (!response.ok) {
+                let _bodyText = '';
+                try { _bodyText = await response.text(); } catch (_) { /* noop */ }
+                throw new Error('HTTP ' + response.status + ' ' + (response.statusText || '') +
+                                (_bodyText ? (' - ' + _bodyText.slice(0, 200)) : ''));
+            }
+            const _ct = (response.headers.get('Content-Type') || '').toLowerCase();
+            if (_ct.indexOf('application/json') === -1) {
+                throw new Error('Server returned non-JSON response (Content-Type: ' + (_ct || 'unknown') + ').');
+            }
+
             const result = await response.json();
             
             if (result.success) {
@@ -252,9 +321,19 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         } catch (error) {
             console.error('Error:', error);
-            alert('Error submitting form: ' + error.message);
+            // Round 6 / Phase 2.4: AbortError fires when we cancel a
+            // stale request from a duplicate submit; do not yell at
+            // the user about it.
+            if (error && error.name !== 'AbortError') {
+                alert('Error submitting form: ' + error.message);
+            }
             submitBtn.disabled = false;
             submitBtn.innerHTML = '<i class="fas fa-rocket me-2"></i>Generate Leader Report';
+        } finally {
+            // Round 6 / Phase 2.4: always release the re-entrancy
+            // guard so the user can retry after a transient failure.
+            isSubmitting = false;
+            inflightController = null;
         }
     });
     

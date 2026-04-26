@@ -35,6 +35,41 @@ try:
 except ImportError:
     pass
 
+import re
+
+# Round 7 / Phase 2.6: bound the table-name fragments we are allowed
+# to interpolate into raw SQL.  Snowflake table identifiers are
+# ``catalog.schema.name`` and each part is alphanumeric/underscore.
+# Rows from ``information_schema.tables`` are normally clean, but they
+# come from a remote system and the discovery script previously
+# embedded them verbatim into ``f"SELECT COUNT(*) FROM {full_name}"``,
+# which is a textbook SQL-injection sink if the catalog ever exposes a
+# row with a quoted identifier or a stray semicolon.  We now reject
+# anything that does not match the strict pattern.
+_TABLE_PART_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _is_safe_table_identifier(full_name: str) -> bool:
+    """Return True only when ``full_name`` is a 3-part dotted identifier
+    whose every component matches the conservative pattern above."""
+    if not isinstance(full_name, str) or not full_name:
+        return False
+    parts = full_name.split(".")
+    if len(parts) != 3:
+        return False
+    return all(_TABLE_PART_RE.match(p or "") for p in parts)
+
+
+def _safe_or_skip(full_name: str) -> bool:
+    if _is_safe_table_identifier(full_name):
+        return True
+    print(
+        f"  SKIP: refusing to interpolate non-conforming table name "
+        f"into SQL: {full_name!r}"
+    )
+    return False
+
+
 def main():
     try:
         import snowflake.connector
@@ -95,7 +130,28 @@ def main():
         for row in tables:
             catalog, schema, name, row_count = row[0], row[1], row[2], row[3] if len(row) > 3 else None
             full_name = f"{catalog}.{schema}.{name}"
-            rc = f" (rows: {row_count})" if row_count is not None else ""
+            # Round 2 / Phase 5.8: ``information_schema.tables.row_count``
+            # in Snowflake is maintained asynchronously and is often
+            # stale or NULL; previously this was printed without
+            # caveat which led ops to treat it as authoritative.  Label
+            # it as approximate and (best-effort) confirm with an
+            # exact ``COUNT(*)`` for the discovery report.
+            if row_count is None:
+                rc = " (rows: unknown — information_schema.row_count is NULL)"
+            else:
+                rc = f" (rows: ~{row_count} approximate per information_schema)"
+                # Round 7 / Phase 2.6: validate the discovered identifier
+                # against the strict pattern before interpolating it
+                # into SELECT COUNT(*).
+                if _safe_or_skip(full_name):
+                    try:
+                        cur.execute(f"SELECT COUNT(*) FROM {full_name}")
+                        exact = cur.fetchone()[0]
+                        rc = f" (rows: {exact:,} exact via COUNT(*); information_schema reported ~{row_count})"
+                    except Exception as _exact_err:
+                        rc += f"; exact COUNT(*) failed: {_exact_err}"
+                else:
+                    rc += "; exact COUNT(*) skipped (identifier failed allowlist regex)"
             print(f"  {full_name}{rc}")
     print()
 
@@ -106,6 +162,12 @@ def main():
     print("## 2. SUPPORT_CASES table (AdoptIQ fallback when no CSOne Excel)")
     print("-" * 70)
     for full_name in support_tables:
+        # Round 7 / Phase 2.6: even though ``support_tables`` is a
+        # hardcoded literal today, route every interpolation through
+        # the same allowlist regex so a future maintainer cannot
+        # accidentally extend the list with a non-conforming entry.
+        if not _safe_or_skip(full_name):
+            continue
         parts = full_name.split(".")
         if len(parts) != 3:
             continue

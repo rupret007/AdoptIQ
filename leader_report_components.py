@@ -31,6 +31,26 @@ The facades are intentionally minimal: they document and group the
 existing methods rather than reimplementing them. When the class is
 finally split into dedicated modules, these facades give us a stable
 import path to preserve.
+
+Round 7 / Phase 3.19: this module is intentionally a *thin wrapper* and
+intentionally has no behaviour of its own.  Each facade delegates 1:1 to
+the matching ``LeaderReportGenerator`` private method; therefore the
+expected invariants are:
+
+* Every public method on the facade calls **exactly one** generator
+  ``_method`` and forwards its arguments without translation.
+* The facade does not cache, mutate, or post-process any return value;
+  any change in semantics must happen on the underlying generator.
+* The facade must not introduce new public surface that is not also
+  reachable on ``LeaderReportGenerator``.  This keeps the eventual
+  physical split (one module per role) a pure rename, not a behaviour
+  change.
+
+The :func:`_assert_facade_invariants` helper at module load time
+performs a structural check to catch accidental drift -- if a facade
+method is added without a corresponding ``_method`` on the generator,
+import will raise :class:`AssertionError`.  This protects the wrapper
+contract documented above.
 """
 
 from __future__ import annotations
@@ -192,6 +212,61 @@ class LeaderReportWriter(_GeneratorFacadeBase):
 
     def write_validation_section(self, validation_results: Dict[str, Any]) -> None:
         self._generator._add_validation_section(validation_results)
+
+
+# Round 7 / Phase 3.19: facade-invariant check.  Every public method on
+# the three facades must map to a private ``_<name>`` (or a documented
+# alias) on :class:`LeaderReportGenerator`.  We compute this once at
+# import time using the explicit map below so we do not have to import
+# the generator (which would be a circular dependency); the map is
+# audited as part of code review and tested in
+# ``tests/test_round7_leader_components_invariants.py``.
+_FACADE_METHOD_TO_GENERATOR: Dict[str, str] = {
+    # TeamDataRepository
+    "fetch_action_plans": "_fetch_action_plans",
+    "fetch_adoption_barriers": "_fetch_adoption_barriers",
+    "fetch_customer_pulse": "_fetch_customer_pulse",
+    "fetch_success_priorities": "_fetch_success_priorities",
+    "get_subscriptions_for_cssm": "_get_subscriptions_for_cssm",
+    "collect_team_data": "_collect_team_data",
+    # TeamDataValidator
+    "validate": "_validate_and_verify_data",
+    "validate_date_ranges": "_validate_date_ranges",
+    "validate_customer_data_consistency": "_validate_customer_data_consistency",
+    "validate_tac_cases": "_validate_tac_cases",
+    # LeaderReportWriter
+    "write_title_page": "_create_title_page",
+    "write_summary_table": "_create_summary_table",
+    "write_team_insights": "_add_team_insights_section",
+    "write_adoptiq_summaries_per_person": "_create_adoptiq_summaries_per_person",
+    "write_detailed_ab_list": "_create_detailed_ab_list",
+    "write_bems_section": "_add_bems_escalation_section",
+    "write_validation_section": "_add_validation_section",
+}
+
+
+def _assert_facade_invariants() -> None:
+    """Verify each facade method has a matching map entry.
+
+    Round 7 / Phase 3.19: catches the case where someone adds a public
+    method to a facade without updating the wrapper contract, which
+    would break the "thin wrapper" invariant documented in the module
+    docstring.
+    """
+    facades = (TeamDataRepository, TeamDataValidator, LeaderReportWriter)
+    for facade in facades:
+        for name, attr in vars(facade).items():
+            if name.startswith("_") or not callable(attr):
+                continue
+            if name not in _FACADE_METHOD_TO_GENERATOR:
+                raise AssertionError(
+                    f"Round 7 / Phase 3.19: facade {facade.__name__}."
+                    f"{name} has no entry in _FACADE_METHOD_TO_GENERATOR; "
+                    "either remove the method or update the contract map."
+                )
+
+
+_assert_facade_invariants()
 
 
 __all__ = [

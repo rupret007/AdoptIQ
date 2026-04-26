@@ -212,8 +212,12 @@ CIRCUIT_CLIENT_SECRET=your_client_secret</code></pre>
                         <h6 class="fw-bold"><i class="fas fa-exclamation-triangle me-2"></i>Database Connection Issues</h6>
                         <p class="mb-2"><strong>Symptom:</strong> "Connection failed", "Keeper Connection Error", or timeout errors</p>
                         <p class="mb-2"><strong>Solution:</strong> Verify Keeper credentials and network connectivity</p>
-                        <button id="adoptiq-diag-btn" class="btn btn-sm btn-outline-primary" type="button"
-                                onclick="runConnectivityDiagnostics()">
+                        {# Round 6 / Phase 2.14: removed inline ``onclick=`` so the
+                           strict CSP from base.html (Phase 2.10) does not need
+                           ``script-src 'unsafe-inline'`` for handlers.  The click
+                           handler is now wired via ``addEventListener`` in the
+                           script block below. #}
+                        <button id="adoptiq-diag-btn" class="btn btn-sm btn-outline-primary" type="button">
                             <i class="fas fa-stethoscope me-1"></i>Run connectivity self-test
                         </button>
                         <div id="adoptiq-diag-result" class="mt-3" style="display: none;"></div>
@@ -230,38 +234,116 @@ CIRCUIT_CLIENT_SECRET=your_client_secret</code></pre>
                         out.innerHTML = '<div class="text-muted small">Running DNS -> TLS -> AppRole -> secret-read -> Snowflake. This can take up to 30 seconds.</div>';
 
                         try {
+                            // Round 5 / Phase 2.2: build the diagnostics
+                            // table with DOM APIs and ``textContent`` so a
+                            // diagnostic ``detail`` / ``error_kind`` /
+                            // ``hint`` field that contains HTML can never
+                            // execute as script in this page.  Previously
+                            // we string-concatenated those values into
+                            // ``innerHTML``.
+                            function _txt(s) { return (s == null) ? '' : String(s); }
                             const resp = await fetch('/api/diag/connectivity', { method: 'GET' });
+                            // Round 6 / Phase 2.3: never call .json() on
+                            // a non-OK or non-JSON response.  A 5xx
+                            // returning HTML would otherwise surface as
+                            // a confusing "Unexpected token <" rather
+                            // than the real status.
+                            if (!resp.ok) {
+                                throw new Error('HTTP ' + resp.status + ' ' + (resp.statusText || ''));
+                            }
+                            var _ct = resp.headers.get('content-type') || '';
+                            if (_ct.indexOf('application/json') === -1) {
+                                throw new Error('Expected JSON, got ' + (_ct || 'unknown content-type'));
+                            }
                             const data = await resp.json();
-                            let html = '<div class="p-2 rounded ' + (data.ok ? 'bg-success-subtle border border-success' : 'bg-danger-subtle border border-danger') + '">';
-                            html += '<div class="fw-bold mb-2">' + (data.ok ? 'All checks passed' : 'One or more checks failed') + '</div>';
-                            html += '<table class="table table-sm mb-2"><thead><tr><th>Step</th><th>Status</th><th>ms</th><th>Detail</th></tr></thead><tbody>';
+                            // Reset and rebuild the output container.
+                            out.innerHTML = '';
+                            const wrap = document.createElement('div');
+                            wrap.className = 'p-2 rounded ' + (data.ok ? 'bg-success-subtle border border-success' : 'bg-danger-subtle border border-danger');
+                            const head = document.createElement('div');
+                            head.className = 'fw-bold mb-2';
+                            head.textContent = data.ok ? 'All checks passed' : 'One or more checks failed';
+                            wrap.appendChild(head);
+                            const table = document.createElement('table');
+                            table.className = 'table table-sm mb-2';
+                            const thead = document.createElement('thead');
+                            const trh = document.createElement('tr');
+                            ['Step', 'Status', 'ms', 'Detail'].forEach(function (h) {
+                                const th = document.createElement('th');
+                                th.textContent = h;
+                                trh.appendChild(th);
+                            });
+                            thead.appendChild(trh);
+                            table.appendChild(thead);
+                            const tbody = document.createElement('tbody');
                             (data.checks || []).forEach(function (c) {
                                 const badgeCls = c.status === 'ok' ? 'bg-success' : (c.status === 'skipped' ? 'bg-secondary' : 'bg-danger');
-                                html += '<tr>';
-                                html += '<td><code>' + c.name + '</code></td>';
-                                html += '<td><span class="badge ' + badgeCls + '">' + c.status + '</span></td>';
-                                html += '<td class="small">' + (c.ms != null ? c.ms : '') + '</td>';
-                                html += '<td class="small"><code style="white-space: normal;">' + (c.detail || c.error_kind || '') + '</code></td>';
-                                html += '</tr>';
+                                const tr = document.createElement('tr');
+                                const tdName = document.createElement('td');
+                                const codeName = document.createElement('code');
+                                codeName.textContent = _txt(c.name);
+                                tdName.appendChild(codeName);
+                                tr.appendChild(tdName);
+                                const tdStatus = document.createElement('td');
+                                const badge = document.createElement('span');
+                                badge.className = 'badge ' + badgeCls;
+                                badge.textContent = _txt(c.status);
+                                tdStatus.appendChild(badge);
+                                tr.appendChild(tdStatus);
+                                const tdMs = document.createElement('td');
+                                tdMs.className = 'small';
+                                tdMs.textContent = (c.ms != null ? String(c.ms) : '');
+                                tr.appendChild(tdMs);
+                                const tdDetail = document.createElement('td');
+                                tdDetail.className = 'small';
+                                const codeDetail = document.createElement('code');
+                                codeDetail.style.whiteSpace = 'normal';
+                                codeDetail.textContent = _txt(c.detail || c.error_kind || '');
+                                tdDetail.appendChild(codeDetail);
+                                tr.appendChild(tdDetail);
+                                tbody.appendChild(tr);
                             });
-                            html += '</tbody></table>';
+                            table.appendChild(tbody);
+                            wrap.appendChild(table);
                             if (data.hint) {
-                                html += '<div class="small"><strong>Hint:</strong> ' + data.hint + '</div>';
+                                const hintDiv = document.createElement('div');
+                                hintDiv.className = 'small';
+                                const hintLabel = document.createElement('strong');
+                                hintLabel.textContent = 'Hint:';
+                                hintDiv.appendChild(hintLabel);
+                                hintDiv.appendChild(document.createTextNode(' ' + _txt(data.hint)));
+                                wrap.appendChild(hintDiv);
                             }
-                            if (data.truststore_active) {
-                                html += '<div class="small text-muted mt-1">truststore (system keychain) is active.</div>';
-                            } else {
-                                html += '<div class="small text-muted mt-1">truststore not active - using certifi bundle (may miss Cisco corporate CA).</div>';
-                            }
-                            html += '</div>';
-                            out.innerHTML = html;
+                            const tsDiv = document.createElement('div');
+                            tsDiv.className = 'small text-muted mt-1';
+                            tsDiv.textContent = data.truststore_active
+                                ? 'truststore (system keychain) is active.'
+                                : 'truststore not active - using certifi bundle (may miss Cisco corporate CA).';
+                            wrap.appendChild(tsDiv);
+                            out.appendChild(wrap);
                         } catch (err) {
-                            out.innerHTML = '<div class="alert alert-danger small">Self-test harness failed: ' + err + '</div>';
+                            out.innerHTML = '';
+                            const errDiv = document.createElement('div');
+                            errDiv.className = 'alert alert-danger small';
+                            errDiv.textContent = 'Self-test harness failed: ' + ((err && err.message) ? err.message : String(err));
+                            out.appendChild(errDiv);
                         } finally {
                             btn.disabled = false;
                             btn.innerHTML = originalHtml;
                         }
                     }
+                    // Round 6 / Phase 2.14: replace inline ``onclick=`` with
+                    // ``addEventListener`` so the strict CSP from base.html
+                    // (Phase 2.10) does not require ``script-src
+                    // 'unsafe-inline'`` to fire the handler.  Use a defensive
+                    // null check in case the button is removed in a future
+                    // refactor.
+                    document.addEventListener('DOMContentLoaded', function() {
+                        var _diagBtn = document.getElementById('adoptiq-diag-btn');
+                        if (_diagBtn) {
+                            _diagBtn.addEventListener('click', runConnectivityDiagnostics);
+                        }
+                    });
                     </script>
                     
                     <div class="alert alert-warning hover-lift">
@@ -448,15 +530,21 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
     
-    // Add click effects to numbered steps
-    document.querySelectorAll('.bg-primary, .bg-success, .bg-info, .bg-warning, .bg-danger').forEach(step => {
-        step.addEventListener('click', function() {
-            this.style.transform = 'scale(1.1)';
-            setTimeout(() => {
-                this.style.transform = 'scale(1)';
-            }, 200);
-        });
-    });
+    // Round 7 / Phase 4.13: previously this hooked a click handler on
+    // *every* ``.bg-primary / .bg-success / .bg-info / .bg-warning /
+    // .bg-danger`` element to play a small ``scale(1.1)`` animation.
+    // Those classes are used heavily on decorative numbered "step"
+    // chips that have no semantic role, no ``tabindex``, and no
+    // keyboard handler -- which means the cursor turned into a
+    // pointer / focus ring on hover but neither screen-reader users
+    // nor keyboard users could actually interact with the element,
+    // and the visual handler conveyed no information.  This is a
+    // textbook a11y anti-pattern (interactive-looking, non-interactive
+    // semantics).  The animation is removed; if a future change wants
+    // to make these chips truly interactive, they should become
+    // ``<button>`` elements (or get explicit ``role="button"`` +
+    // ``tabindex="0"`` + a keyboard handler) before the click handler
+    // is reinstated.
     
     // Add smooth scrolling for anchor links
     document.querySelectorAll('a[href^="#"]').forEach(anchor => {
@@ -486,14 +574,23 @@ document.addEventListener('DOMContentLoaded', function() {
     });
     
     // Add search functionality for help content
+    // Round 7 / Phase 4.12: the dynamically-injected search input had
+    // only a placeholder string for context.  Placeholders are
+    // announced inconsistently across screen readers and disappear as
+    // soon as the user begins typing.  Adding an explicit
+    // ``aria-label`` (parallel to the fix in history.html) gives
+    // assistive tech a stable name regardless of the input value.
     const searchInput = document.createElement('input');
     searchInput.type = 'text';
     searchInput.className = 'form-control mb-4';
     searchInput.placeholder = 'Search help content...';
+    searchInput.setAttribute('aria-label', 'Search help content');
+    searchInput.id = 'help-search-input';
     searchInput.style.maxWidth = '400px';
-    
+
     const searchContainer = document.createElement('div');
     searchContainer.className = 'text-center mb-4';
+    searchContainer.setAttribute('role', 'search');
     searchContainer.appendChild(searchInput);
     
     const firstCard = document.querySelector('.card');

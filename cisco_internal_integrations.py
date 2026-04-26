@@ -8,7 +8,7 @@ import requests
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple, Any
 import pandas as pd
 from dataclasses import dataclass
@@ -20,6 +20,228 @@ from bs4 import BeautifulSoup
 import urllib.parse
 
 logger = logging.getLogger(__name__)
+
+
+# Round 5 / Phase 4.7: cap _safe_response_json(response) body size before parse.
+# A misbehaving / compromised upstream returning a giant body would
+# otherwise be loaded entirely into memory.  8 MB default; override
+# with ``ADOPTIQ_HTTP_BODY_CAP_BYTES``.
+_HTTP_BODY_CAP_BYTES = int(os.environ.get("ADOPTIQ_HTTP_BODY_CAP_BYTES", str(8 * 1024 * 1024)))
+
+
+# Round 6 / Phase 4.12: shared retry helper used by the cisco
+# integrations (BST/PSIRT) for transient failures.  The previous
+# implementation either retried with a fixed sleep or did not retry
+# at all, so a brief 503 from BST or a per-key 429 from PSIRT would
+# fail the whole report.  We use exponential backoff with full
+# jitter, honouring a Retry-After header when the server provides
+# one, and only retry on the documented transient classes.
+_CISCO_RETRY_MAX_ATTEMPTS = max(1, int(os.environ.get("ADOPTIQ_CISCO_RETRY_MAX_ATTEMPTS", "4")))
+_CISCO_RETRY_BASE_S = max(0.05, float(os.environ.get("ADOPTIQ_CISCO_RETRY_BASE_S", "0.5")))
+_CISCO_RETRY_CAP_S = max(_CISCO_RETRY_BASE_S, float(os.environ.get("ADOPTIQ_CISCO_RETRY_CAP_S", "8.0")))
+_CISCO_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+def _retry_request(
+    method: str,
+    url: str,
+    *,
+    headers: Optional[Dict[str, str]] = None,
+    params: Optional[Dict[str, Any]] = None,
+    data: Optional[Any] = None,
+    json_body: Optional[Any] = None,
+    timeout: int = 30,
+    attempts: int = _CISCO_RETRY_MAX_ATTEMPTS,
+    description: str = "request",
+) -> Optional[requests.Response]:
+    """Issue ``requests.request`` with exponential backoff + jitter.
+
+    Retries on connection errors, timeouts, and HTTP 429/5xx.  Returns
+    the final ``Response`` (which may still be a non-2xx response), or
+    ``None`` if every attempt raised an exception.
+    """
+    last_response: Optional[requests.Response] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                headers=headers,
+                params=params,
+                data=data,
+                json=json_body,
+                timeout=timeout,
+            )
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            if attempt >= attempts:
+                logger.error(
+                    "%s failed after %d attempts: %s", description, attempt, exc
+                )
+                return None
+            sleep_s = min(_CISCO_RETRY_CAP_S, _CISCO_RETRY_BASE_S * (2 ** (attempt - 1)))
+            # Round 12 / Phase 11.5: deterministic jitter in test mode
+            # so golden traces of BST / PSIRT retries do not flake on
+            # the wall-clock-seeded ``random.uniform``.  Production
+            # behaviour is unchanged.
+            if os.environ.get("ADOPTIQ_TEST_MODE", "").strip().lower() in {"1", "true", "yes"}:
+                sleep_s = float(sleep_s) / 2.0
+            else:
+                sleep_s = random.uniform(0, sleep_s)  # full jitter
+            logger.warning(
+                "%s attempt %d/%d raised %s; sleeping %.2fs before retry",
+                description, attempt, attempts, type(exc).__name__, sleep_s,
+            )
+            time.sleep(sleep_s)
+            continue
+        last_response = response
+        if response.status_code in _CISCO_RETRY_STATUSES and attempt < attempts:
+            retry_after = response.headers.get('Retry-After') if response.headers else None
+            sleep_s: float
+            if retry_after:
+                try:
+                    sleep_s = max(0.0, float(retry_after))
+                except (TypeError, ValueError):
+                    sleep_s = min(_CISCO_RETRY_CAP_S, _CISCO_RETRY_BASE_S * (2 ** (attempt - 1)))
+            else:
+                sleep_s = min(_CISCO_RETRY_CAP_S, _CISCO_RETRY_BASE_S * (2 ** (attempt - 1)))
+            # Round 12 / Phase 11.5: deterministic jitter in test mode
+            # (parity with the connection-error branch above).
+            if os.environ.get("ADOPTIQ_TEST_MODE", "").strip().lower() in {"1", "true", "yes"}:
+                sleep_s = float(sleep_s) / 2.0
+            else:
+                sleep_s = random.uniform(0, sleep_s)  # full jitter
+            logger.warning(
+                "%s attempt %d/%d returned HTTP %s; sleeping %.2fs before retry",
+                description, attempt, attempts, response.status_code, sleep_s,
+            )
+            time.sleep(sleep_s)
+            continue
+        return response
+    return last_response
+
+
+def _query_digest(value: Any, length: int = 12) -> str:
+    """Round 8 / Phase 4.4: hash a search query / param so we can log
+    a stable correlator at INFO without leaking the raw text.
+
+    The raw value remains available to operators at DEBUG.
+    """
+    try:
+        import hashlib as _h
+        return _h.sha256(str(value or '').encode('utf-8', 'replace')).hexdigest()[:length]
+    except Exception:
+        return '?'
+
+
+def _response_body_digest(response: Any, cap: int = 200) -> Tuple[str, str]:
+    """Round 9 / Phase 3.1: shared body-digest+truncate helper for error logs.
+
+    Round 8 / Phase 4.2 hardened only the OAuth-token error path; every
+    other Cisco error branch (BST API, Circuit, PSIRT) was still calling
+    ``logger.error(...response.text)`` which can dump multi-megabyte
+    HTML SSO error pages -- and any reflected user-id / email / scope
+    fragments -- into the centralised log.  This returns a stable
+    ``(short_digest, truncated_first_cap_chars)`` tuple suitable for the
+    ``... body_digest=%s body_first_%d=%r`` logging form, so every call
+    site can be hardened uniformly without lifting body bytes by hand.
+    """
+    try:
+        text = getattr(response, 'text', '') or ''
+    except Exception:
+        text = ''
+    try:
+        import hashlib as _h
+        digest = _h.sha256(text.encode('utf-8', 'replace')).hexdigest()[:12]
+    except Exception:
+        digest = '?'
+    try:
+        truncated = text[: max(0, int(cap))]
+    except Exception:
+        truncated = ''
+    return digest, truncated
+
+
+_CISCO_ALLOWED_NETLOC_HOSTS = (
+    # Round 9 / Phase 3.3: defence-in-depth allowlist for outbound URLs
+    # that pass ``allow_redirects=True``.  We do not strip the leading
+    # subdomain so e.g. ``apix.cisco.com`` and ``api.cisco.com`` are
+    # both anchored on a trailing ``.cisco.com`` suffix; an exact-match
+    # fast-path covers ``cisco.com`` itself.  Anything else -- a typo
+    # in the configured base URL, a poisoned env var pointing at a
+    # lookalike domain -- is refused before the redirect chain runs.
+    'cisco.com',
+)
+
+
+def _is_cisco_netloc(url: str) -> bool:
+    """Round 9 / Phase 3.3: parse + assert a URL's netloc is on the
+    Cisco allowlist before issuing a redirect-following request.
+
+    Returns ``True`` only for ``https://`` URLs whose host equals one
+    of ``_CISCO_ALLOWED_NETLOC_HOSTS`` or ends in
+    ``.<allowed_host>``.  Bare hostnames, ``http://`` URLs, IP
+    literals, and anything we can't parse all return ``False`` so the
+    caller can fail closed rather than follow an attacker-controlled
+    redirect.
+    """
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(str(url or ''))
+    except Exception:
+        return False
+    if parsed.scheme.lower() != 'https':
+        return False
+    host = (parsed.hostname or '').lower()
+    if not host:
+        return False
+    for allowed in _CISCO_ALLOWED_NETLOC_HOSTS:
+        if host == allowed or host.endswith('.' + allowed):
+            return True
+    return False
+
+
+def _safe_response_json(response: Any, cap: int = _HTTP_BODY_CAP_BYTES) -> Any:
+    """Parse ``response.json()`` with a body-size cap.
+
+    Falls back to ``response.json()`` if the response object does not
+    support streaming (e.g. mocks).  Raises ``ValueError`` if the body
+    exceeds ``cap`` bytes.
+
+    Round 8 / Phase 4.3: also reject responses whose ``Content-Type``
+    is not a JSON family (``application/json`` /
+    ``application/*+json``).  Cisco identity/SSO endpoints have been
+    observed to return an HTML SSO redirect page on auth failure,
+    which previously triggered a confusing JSONDecodeError deep in
+    the call stack instead of a clean "auth failed" message.
+    """
+    try:
+        body = getattr(response, 'content', None)
+    except Exception:
+        body = None
+    if body is None:
+        return response.json()
+    if len(body) > cap:
+        raise ValueError(
+            f"HTTP body exceeded cap of {cap} bytes (got {len(body)} bytes from "
+            f"{getattr(response, 'url', '?')})"
+        )
+    try:
+        _headers = getattr(response, 'headers', {}) or {}
+        _ctype = str(_headers.get('Content-Type') or _headers.get('content-type') or '').lower()
+    except Exception:
+        _ctype = ''
+    if _ctype:
+        _primary = _ctype.split(';', 1)[0].strip()
+        if _primary and not (
+            _primary == 'application/json'
+            or _primary.endswith('+json')
+            or _primary == 'text/json'
+        ):
+            raise ValueError(
+                f"Refusing to JSON-decode non-JSON response (Content-Type={_primary!r}, "
+                f"url={getattr(response, 'url', '?')})"
+            )
+    return response.json()
 
 class DataClassification(Enum):
     """Data classification levels for Cisco information"""
@@ -45,6 +267,12 @@ class DefectInfo:
     classification: DataClassification
     source: str
     verification_method: str
+    # Round 2 / Phase 5.1: separate scrape-time from real defect dates
+    # so historical defects are not misrepresented as freshly created
+    # / modified on every scrape.  ``last_indexed_at`` records when
+    # this row was harvested; ``created_date`` / ``modified_date``
+    # remain authoritative when parseable from the source HTML.
+    last_indexed_at: Optional[str] = None
 
 @dataclass
 class CircuitData:
@@ -142,7 +370,9 @@ class CiscoInternalIntegrations:
         """
         # Check if we have a valid cached token
         if self.psirt_access_token and self.psirt_token_expiry:
-            if datetime.now() < self.psirt_token_expiry:
+            # Round 6 / Phase 4.17: tz-aware UTC compare matches the
+            # token_expiry value stored above.
+            if datetime.now(timezone.utc) < self.psirt_token_expiry:
                 return self.psirt_access_token
         
         # Need to get new token
@@ -168,14 +398,55 @@ class CiscoInternalIntegrations:
             response = requests.post(token_url, headers=headers, data=data, timeout=30)
             
             if response.status_code == 200:
-                token_data = response.json()
-                self.psirt_access_token = token_data.get('access_token')
-                expires_in = token_data.get('expires_in', 3600)  # Default 1 hour
-                self.psirt_token_expiry = datetime.now() + timedelta(seconds=expires_in - 60)  # Refresh 1 min early
+                token_data = _safe_response_json(response)
+                # Round 6 / Phase 4.11: validate the token JSON
+                # shape before caching.  A non-dict payload (e.g. a
+                # captive-portal HTML page returned with a 200) used
+                # to crash subsequent .get() calls and would also
+                # poison the cache with a None token, so keep the
+                # cache untouched and return None when the response
+                # does not match the documented OAuth shape.
+                if not isinstance(token_data, dict):
+                    logger.error(
+                        "PSIRT OAuth token response was not a JSON object (got %s)",
+                        type(token_data).__name__,
+                    )
+                    return None
+                token = token_data.get('access_token')
+                if not isinstance(token, str) or not token:
+                    logger.error("PSIRT OAuth token response missing access_token")
+                    return None
+                expires_in = token_data.get('expires_in', 3600)
+                try:
+                    expires_in = int(expires_in)
+                except (TypeError, ValueError):
+                    expires_in = 3600
+                if expires_in <= 60:
+                    expires_in = 3600
+                # Round 6 / Phase 4.17: tz-aware UTC for token expiry
+                # so the comparison in the cache lookup remains valid
+                # regardless of the host process timezone.
+                self.psirt_access_token = token
+                self.psirt_token_expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 60)
                 logger.info(f"PSIRT OAuth token obtained, expires in {expires_in} seconds")
                 return self.psirt_access_token
             else:
-                logger.error(f"PSIRT OAuth token request failed: {response.status_code} - {response.text}")
+                # Round 8 / Phase 4.2: ``response.text`` from a Cisco
+                # OAuth identity endpoint can be very large (full HTML
+                # error page) and may echo back our client_id/scope.
+                # Truncate the body and log a digest so support can
+                # still correlate without inflating logs or leaking
+                # bearer-adjacent data.
+                _body = (response.text or '')[:512]
+                try:
+                    import hashlib as _h
+                    _body_digest = _h.sha256((response.text or '').encode('utf-8', 'replace')).hexdigest()[:12]
+                except Exception:
+                    _body_digest = '?'
+                logger.error(
+                    "PSIRT OAuth token request failed: status=%s body_digest=%s body_first_512=%r",
+                    response.status_code, _body_digest, _body,
+                )
                 return None
                 
         except Exception as e:
@@ -201,6 +472,34 @@ class CiscoInternalIntegrations:
         
         return headers
     
+    # Round 2 / Phase 5.1: shared helper for scraped HTML.  Returns
+    # an ISO-8601 date (YYYY-MM-DD) when a recognizable date is found
+    # in ``text``, otherwise ``None`` so callers can substitute
+    # ``Unknown`` rather than stamping today's date.
+    _BST_DATE_PATTERNS = (
+        r"\b(\d{4}-\d{2}-\d{2})\b",
+        r"\b(\d{2}/\d{2}/\d{4})\b",
+        r"\b([A-Z][a-z]{2,8}\s+\d{1,2},\s+\d{4})\b",
+    )
+
+    def _extract_date_from_text(self, text: str) -> Optional[str]:
+        if not text:
+            return None
+        try:
+            for pat in self._BST_DATE_PATTERNS:
+                m = re.search(pat, text)
+                if not m:
+                    continue
+                raw = m.group(1)
+                for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%B %d, %Y", "%b %d, %Y"):
+                    try:
+                        return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
+                    except Exception:
+                        continue
+        except Exception as exc:  # pragma: no cover - parser failure is non-fatal
+            logger.debug("BST date parse failed: %s", exc)
+        return None
+
     def _classify_data(self, data_source: str, content: str) -> DataClassification:
         """
         Classify data based on source and content
@@ -267,7 +566,12 @@ class CiscoInternalIntegrations:
             # Use the actual BST URL from the interface
             bst_base_url = "https://bst.cloudapps.cisco.com/bugsearch"
             
-            logger.info(f"Web scraping BST for defects: {search_query}")
+            # Round 8 / Phase 4.4: don't leak raw search text in INFO
+            # logs (these may include customer names, defect IDs,
+            # internal product code names).  Log a stable digest at
+            # INFO and the verbatim query at DEBUG.
+            logger.info("Web scraping BST for defects (query_digest=%s)", _query_digest(search_query))
+            logger.debug("Web scraping BST for defects: %s", search_query)
             
             # Enhanced headers to mimic a real browser session
             headers = {
@@ -287,6 +591,13 @@ class CiscoInternalIntegrations:
             # First, get the BST search page to understand the form structure
             try:
                 logger.info(f"Accessing BST search page: {bst_base_url}")
+                # Round 9 / Phase 3.3: refuse to chase redirects when the
+                # base URL is not on the Cisco netloc allowlist.
+                if not _is_cisco_netloc(bst_base_url):
+                    logger.error(
+                        "BST search page request refused: base_url netloc not on cisco allowlist"
+                    )
+                    return defects
                 response = requests.get(bst_base_url, headers=headers, timeout=30, allow_redirects=True)
                 
                 if response.status_code == 200:
@@ -416,6 +727,16 @@ class CiscoInternalIntegrations:
         
         if defect_id and title:
             classification = self._classify_data('bst', title)
+            # Round 2 / Phase 5.1: don't stamp scrape-time as
+            # ``created_date`` / ``modified_date``.  The BST web
+            # interface does not consistently expose either, so prior
+            # behaviour caused historical defects to look brand-new
+            # every time the scraper ran.  Try to parse a date from
+            # the row first; fall back to ``Unknown`` and surface the
+            # scrape time only on a separate ``last_indexed_at``
+            # attribute.
+            row_text = row.get_text(" ", strip=True) if row is not None else ""
+            parsed_date = self._extract_date_from_text(row_text)
             return DefectInfo(
                 defect_id=defect_id,
                 title=title,
@@ -425,12 +746,13 @@ class CiscoInternalIntegrations:
                 component='',
                 description=title,
                 resolution=None,
-                created_date=datetime.now().strftime('%Y-%m-%d'),
-                modified_date=datetime.now().strftime('%Y-%m-%d'),
+                created_date=parsed_date or 'Unknown',
+                modified_date=parsed_date or 'Unknown',
                 assignee='',
                 classification=classification,
                 source='BST Web Scraping',
-                verification_method=f'BST Web Interface - Search: {search_query}'
+                verification_method=f'BST Web Interface - Search: {search_query}',
+                last_indexed_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC'),
             )
         
         return None
@@ -452,6 +774,11 @@ class CiscoInternalIntegrations:
         title = title_elem.get_text(strip=True) if title_elem else f"Defect {defect_id}"
         
         classification = self._classify_data('bst', title)
+        # Round 2 / Phase 5.1: parse a real date from the div text
+        # when present; otherwise leave the date as 'Unknown' rather
+        # than stamping today's date and making old defects look new.
+        div_text = div.get_text(" ", strip=True) if div is not None else ""
+        parsed_date = self._extract_date_from_text(div_text)
         return DefectInfo(
             defect_id=defect_id,
             title=title,
@@ -461,12 +788,13 @@ class CiscoInternalIntegrations:
             component='',
             description=title,
             resolution=None,
-            created_date=datetime.now().strftime('%Y-%m-%d'),
-            modified_date=datetime.now().strftime('%Y-%m-%d'),
+            created_date=parsed_date or 'Unknown',
+            modified_date=parsed_date or 'Unknown',
             assignee='',
             classification=classification,
             source='BST Web Scraping',
-            verification_method=f'BST Web Interface - Search: {search_query}'
+            verification_method=f'BST Web Interface - Search: {search_query}',
+            last_indexed_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC'),
         )
     
     def _extract_defect_from_list_item(self, li, search_query: str, product_filter: Optional[str]) -> Optional[DefectInfo]:
@@ -487,6 +815,42 @@ class CiscoInternalIntegrations:
             if not form_action:
                 # If no action, use the current page
                 form_action = "https://bst.cloudapps.cisco.com/bugsearch"
+
+            # Round 8 / Phase 4.1 (HIGH): the form action URL comes
+            # straight off the parsed HTML page, which means a
+            # tampered upstream response (man-in-the-middle on the
+            # corporate network, a compromised cache, or an
+            # attacker-controlled redirect) could swing this POST
+            # away from BST and to an attacker-controlled host
+            # carrying our session cookies and CSRF tokens.  Lock
+            # the destination to an explicit allowlist of trusted
+            # Cisco hosts and require ``https://`` before sending.
+            from urllib.parse import urlparse, urljoin
+            _BST_ALLOWED_HOSTS = {
+                'bst.cloudapps.cisco.com',
+                'bst.cisco.com',
+                'tools.cisco.com',
+            }
+            try:
+                _resolved = urljoin('https://bst.cloudapps.cisco.com/', form_action)
+                _parsed = urlparse(_resolved)
+            except Exception:
+                _resolved = ''
+                _parsed = None
+            if (
+                _parsed is None
+                or (_parsed.scheme or '').lower() != 'https'
+                or (_parsed.hostname or '').lower() not in _BST_ALLOWED_HOSTS
+            ):
+                logger.warning(
+                    "[[SECURITY]] Refusing to POST BST form to non-allowlisted target "
+                    "(scheme=%s host=%s).  Falling back to canonical bugsearch URL.",
+                    (_parsed.scheme if _parsed else ''),
+                    (_parsed.hostname if _parsed else ''),
+                )
+                form_action = 'https://bst.cloudapps.cisco.com/bugsearch'
+            else:
+                form_action = _resolved
             
             # Build form data based on the BST interface structure
             form_data = {}
@@ -516,9 +880,30 @@ class CiscoInternalIntegrations:
                 if name:
                     form_data[name] = value
             
-            # Submit the form
-            logger.info(f"Submitting BST form with data: {form_data}")
+            # Round 6 / Phase 4.21: hidden inputs in BST forms commonly
+            # carry CSRF tokens / session identifiers / signed
+            # cookies; never log their raw values.  We log only the
+            # *names* of hidden fields and the visible search/product
+            # parameters.
+            _safe_form_data: Dict[str, Any] = {}
+            _hidden_names = [h.get('name') for h in hidden_inputs if h.get('name')]
+            for k, v in form_data.items():
+                if k in _hidden_names:
+                    _safe_form_data[k] = '<redacted>'
+                else:
+                    _safe_form_data[k] = v
+            logger.info(
+                "Submitting BST form (hidden fields redacted): %s",
+                _safe_form_data,
+            )
             
+            # Round 9 / Phase 3.3: refuse to follow redirects when the
+            # form action is not on the Cisco netloc allowlist.
+            if not _is_cisco_netloc(form_action):
+                logger.error(
+                    "BST form submission refused: form_action netloc not on cisco allowlist"
+                )
+                return defects
             response = requests.post(
                 form_action,
                 data=form_data,
@@ -560,8 +945,32 @@ class CiscoInternalIntegrations:
             
             for params in search_params:
                 try:
-                    logger.info(f"Trying BST direct search with params: {params}")
-                    
+                    # Round 9 / Phase 3.2: ``params`` echoes the raw
+                    # search query into the operator log; mirror the
+                    # Round 8 / Phase 4.4 ``query_digest`` pattern so
+                    # INFO carries only a length + hash correlator.
+                    # Full params remain available at DEBUG.
+                    try:
+                        _query_for_digest = params.get('search') or params.get('q') or params.get('query') or params.get('term') or ''
+                    except Exception:
+                        _query_for_digest = ''
+                    logger.info(
+                        "Trying BST direct search keys=%s query_len=%d query_digest=%s",
+                        sorted(params.keys()), len(str(_query_for_digest)),
+                        _query_digest(_query_for_digest),
+                    )
+                    logger.debug("BST direct search verbatim params=%r", params)
+
+                    # Round 9 / Phase 3.3: defence-in-depth -- refuse to
+                    # follow redirects when the configured base URL
+                    # somehow points outside ``*.cisco.com``.  Prevents
+                    # a misconfigured / poisoned base URL env from
+                    # silently chasing an attacker-controlled redirect.
+                    if not _is_cisco_netloc(base_url):
+                        logger.error(
+                            "BST direct search refused: base_url netloc not on cisco allowlist"
+                        )
+                        continue
                     response = requests.get(
                         base_url,
                         params=params,
@@ -665,40 +1074,98 @@ class CiscoInternalIntegrations:
             if product_filter:
                 safe_product = urllib.parse.quote(product_filter, safe='')
                 url = f"https://apix.cisco.com/bug/v2.0/bugs/product_name/{safe_product}"
-                params = {
+                base_params = {
                     'keyword': search_query,
                     'modified_date': self._get_modified_date_param(days_back),
-                    'page_index': 1
                 }
             else:
                 # Use keyword search
                 url = "https://apix.cisco.com/bug/v2.0/bugs/keyword"
-                params = {
+                base_params = {
                     'keyword': search_query,
                     'modified_date': self._get_modified_date_param(days_back),
-                    'page_index': 1
                 }
-            
+
             headers = {
                 'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json',
                 'Content-Type': 'application/json'
             }
-            
-            logger.info(f"Searching BST API: {url} with query: {search_query}")
-            
-            response = requests.get(url, params=params, headers=headers, timeout=30)
-            
-            if response.status_code == 200:
-                data = response.json()
-                defects = self._parse_bst_api_response(data, search_terms, product_filter)
-                logger.info(f"BST API returned {len(defects)} defects")
-            elif response.status_code == 403:
-                logger.error("BST API access forbidden - check API credentials and permissions")
-            elif response.status_code == 401:
-                logger.error("BST API authentication failed - invalid or expired token")
-            else:
-                logger.error(f"BST API returned status {response.status_code}: {response.text}")
+
+            # Round 8 / Phase 4.4: digest the query at INFO; verbatim at DEBUG.
+            logger.info("Searching BST API: %s (query_digest=%s)", url, _query_digest(search_query))
+            logger.debug("Searching BST API: %s with query: %s", url, search_query)
+
+            # Round 6 / Phase 4.4: paginate the BST API.  The previous
+            # implementation always requested ``page_index=1`` only and
+            # ``_parse_bst_api_response`` consumed ``data['bugs']`` once,
+            # so any portfolio with more bugs than fit on a single page
+            # silently lost every later page.  We now walk pages
+            # sequentially, stop when:
+            #   (a) the response returns no bugs,
+            #   (b) we hit a hard ``_BST_MAX_PAGES`` guard, or
+            #   (c) we reach a configured ``_BST_MAX_RESULTS`` cap so a
+            #       runaway result set cannot exhaust memory.
+            _BST_MAX_PAGES = int(os.environ.get("ADOPTIQ_BST_MAX_PAGES", "10"))
+            _BST_MAX_RESULTS = int(os.environ.get("ADOPTIQ_BST_MAX_RESULTS", "500"))
+            _page = 1
+            while _page <= _BST_MAX_PAGES and len(defects) < _BST_MAX_RESULTS:
+                page_params = dict(base_params)
+                page_params['page_index'] = _page
+                # Round 6 / Phase 4.12: exponential backoff with full
+                # jitter for transient (429/5xx) failures.
+                response = _retry_request(
+                    'GET', url,
+                    params=page_params,
+                    headers=headers,
+                    timeout=30,
+                    description=f"BST search page {_page}",
+                )
+                if response is None:
+                    logger.error("BST API: giving up at page %d after retries", _page)
+                    break
+                if response.status_code == 200:
+                    data = _safe_response_json(response)
+                    page_defects = self._parse_bst_api_response(data, search_terms, product_filter)
+                    if not page_defects:
+                        logger.info(
+                            "BST API: page %d returned 0 bugs; stopping pagination "
+                            "(cumulative=%d).",
+                            _page, len(defects),
+                        )
+                        break
+                    defects.extend(page_defects)
+                    logger.info(
+                        "BST API: page %d returned %d bugs (cumulative=%d).",
+                        _page, len(page_defects), len(defects),
+                    )
+                    _page += 1
+                    continue
+                if response.status_code == 403:
+                    logger.error("BST API access forbidden - check API credentials and permissions")
+                elif response.status_code == 401:
+                    logger.error("BST API authentication failed - invalid or expired token")
+                else:
+                    # Round 9 / Phase 3.1: digest+truncate body instead
+                    # of dumping the full HTML/JSON page (may echo
+                    # request fragments + reflected user identity).
+                    _digest, _body = _response_body_digest(response, cap=200)
+                    logger.error(
+                        "BST API returned status %s body_digest=%s body_first_200=%r",
+                        response.status_code, _digest, _body,
+                    )
+                break
+            if len(defects) >= _BST_MAX_RESULTS:
+                logger.warning(
+                    "[[TRUNCATION]] BST API hit max_results=%d; later pages skipped.",
+                    _BST_MAX_RESULTS,
+                )
+            elif _page > _BST_MAX_PAGES:
+                logger.warning(
+                    "[[TRUNCATION]] BST API hit max_pages=%d; later pages skipped.",
+                    _BST_MAX_PAGES,
+                )
+            logger.info(f"BST API returned {len(defects)} defects total")
                 
         except Exception as e:
             logger.error(f"Error accessing BST official API: {e}")
@@ -733,10 +1200,20 @@ class CiscoInternalIntegrations:
             response = requests.post(token_url, data=data, headers=headers, timeout=30)
             
             if response.status_code == 200:
-                token_data = response.json()
+                token_data = _safe_response_json(response)
                 return token_data.get('access_token')
             else:
-                logger.error(f"OAuth2 token request failed: {response.status_code} - {response.text}")
+                # Round 8 / Phase 4.2: truncate body and add a digest.
+                _body = (response.text or '')[:512]
+                try:
+                    import hashlib as _h
+                    _body_digest = _h.sha256((response.text or '').encode('utf-8', 'replace')).hexdigest()[:12]
+                except Exception:
+                    _body_digest = '?'
+                logger.error(
+                    "OAuth2 token request failed: status=%s body_digest=%s body_first_512=%r",
+                    response.status_code, _body_digest, _body,
+                )
                 return None
                 
         except Exception as e:
@@ -836,11 +1313,14 @@ class CiscoInternalIntegrations:
         
         try:
             self._rate_limit('bst')
-            
-            # Calculate date range
-            end_date = datetime.now()
+
+            # Round 6 / Phase 4.7: use tz-aware UTC for query windows so
+            # the start/end dates do not silently shift around when the
+            # process is run in a non-UTC timezone (e.g. CI in UTC vs.
+            # local dev in PST would request different windows otherwise).
+            end_date = datetime.now(timezone.utc)
             start_date = end_date - timedelta(days=days_back)
-            
+
             # Build search query
             search_query = ' OR '.join(search_terms)
             if product_filter:
@@ -856,7 +1336,9 @@ class CiscoInternalIntegrations:
             
             headers = self._get_headers('bst')
             
-            logger.info(f"Searching BST API for defects: {search_query}")
+            # Round 8 / Phase 4.4: digest the query at INFO; verbatim at DEBUG.
+            logger.info("Searching BST API for defects (query_digest=%s)", _query_digest(search_query))
+            logger.debug("Searching BST API for defects: %s", search_query)
             
             response = requests.get(
                 f"{self.bst_base_url}/defects/search",
@@ -866,7 +1348,7 @@ class CiscoInternalIntegrations:
             )
             
             if response.status_code == 200:
-                data = response.json()
+                data = _safe_response_json(response)
                 
                 for defect_data in data.get('defects', []):
                     # Classify the data
@@ -894,7 +1376,12 @@ class CiscoInternalIntegrations:
                 logger.info(f"Found {len(defects)} defects in BST API")
                 
             else:
-                logger.error(f"BST API error: {response.status_code} - {response.text}")
+                # Round 9 / Phase 3.1: digest+truncate body.
+                _digest, _body = _response_body_digest(response, cap=200)
+                logger.error(
+                    "BST API error: status=%s body_digest=%s body_first_200=%r",
+                    response.status_code, _digest, _body,
+                )
                 
         except Exception as e:
             logger.error(f"Error searching BST API: {e}")
@@ -925,7 +1412,7 @@ class CiscoInternalIntegrations:
             )
             
             if response.status_code == 200:
-                defect_data = response.json()
+                defect_data = _safe_response_json(response)
                 
                 # Classify the data
                 classification = self._classify_data('bst', defect_data.get('description', ''))
@@ -951,7 +1438,12 @@ class CiscoInternalIntegrations:
                 return defect
                 
             else:
-                logger.error(f"BST API error for defect {defect_id}: {response.status_code} - {response.text}")
+                # Round 9 / Phase 3.1: digest+truncate body.
+                _digest, _body = _response_body_digest(response, cap=200)
+                logger.error(
+                    "BST API error for defect %s: status=%s body_digest=%s body_first_200=%r",
+                    defect_id, response.status_code, _digest, _body,
+                )
                 
         except Exception as e:
             logger.error(f"Error fetching defect details from BST: {e}")
@@ -975,11 +1467,12 @@ class CiscoInternalIntegrations:
         
         try:
             self._rate_limit('circuit')
-            
-            # Calculate date range
-            end_date = datetime.now()
+
+            # Round 6 / Phase 4.7: tz-aware UTC for the search window
+            # (see _search_defects_bst_api above for rationale).
+            end_date = datetime.now(timezone.utc)
             start_date = end_date - timedelta(days=days_back)
-            
+
             # Build search query
             search_query = ' OR '.join(search_terms)
             if space_filter:
@@ -995,7 +1488,9 @@ class CiscoInternalIntegrations:
             
             headers = self._get_headers('circuit')
             
-            logger.info(f"Searching Circuit for data: {search_query}")
+            # Round 8 / Phase 4.4: digest the query at INFO; verbatim at DEBUG.
+            logger.info("Searching Circuit for data (query_digest=%s)", _query_digest(search_query))
+            logger.debug("Searching Circuit for data: %s", search_query)
             
             response = requests.get(
                 f"{self.circuit_base_url}/search",
@@ -1005,7 +1500,7 @@ class CiscoInternalIntegrations:
             )
             
             if response.status_code == 200:
-                data = response.json()
+                data = _safe_response_json(response)
                 
                 for item_data in data.get('items', []):
                     # Classify the data
@@ -1028,7 +1523,12 @@ class CiscoInternalIntegrations:
                 logger.info(f"Found {len(circuit_data)} items in Circuit")
                 
             else:
-                logger.error(f"Circuit API error: {response.status_code} - {response.text}")
+                # Round 9 / Phase 3.1: digest+truncate body.
+                _digest, _body = _response_body_digest(response, cap=200)
+                logger.error(
+                    "Circuit API error: status=%s body_digest=%s body_first_200=%r",
+                    response.status_code, _digest, _body,
+                )
                 
         except Exception as e:
             logger.error(f"Error searching Circuit: {e}")
@@ -1088,30 +1588,139 @@ class CiscoInternalIntegrations:
             
             # PSIRT API endpoint format according to official openVuln API docs
             # Reference: https://developer.cisco.com/docs/psirt/
+            #
+            # Round 6 / Phase 4.6: split CVE / bug ID lists into batched
+            # requests.  The previous implementation joined the entire
+            # ``search_terms`` CVE list into a single path segment which
+            # (a) trivially exceeds typical URL length limits (~8 KiB)
+            # for any non-trivial CVE batch and (b) makes the server's
+            # 414 / 400 response indistinguishable from "no advisories
+            # found".  We now request CVE/bug IDs in fixed-size batches
+            # and merge the parsed advisories.
+            _PSIRT_BATCH_SIZE = int(os.environ.get("ADOPTIQ_PSIRT_BATCH_SIZE", "10"))
             if 'cve' in params:
-                endpoint = f"{self.psirt_base_url}/v2/cve/{params['cve']}"
-                response = requests.get(endpoint, headers=headers, timeout=30)
+                _all = [c for c in cve_ids if c]
+                for i in range(0, len(_all), _PSIRT_BATCH_SIZE):
+                    _batch = _all[i:i + _PSIRT_BATCH_SIZE]
+                    _joined = ",".join(_batch)
+                    endpoint = f"{self.psirt_base_url}/v2/cve/{_joined}"
+                    logger.info(
+                        "PSIRT API request (CVE batch %d-%d of %d): %s",
+                        i + 1, i + len(_batch), len(_all), endpoint,
+                    )
+                    # Round 6 / Phase 4.12: retry transient 429/5xx
+                    # responses with exponential backoff + jitter.
+                    response = _retry_request(
+                        'GET', endpoint,
+                        headers=headers,
+                        timeout=30,
+                        description=f"PSIRT CVE batch {i // _PSIRT_BATCH_SIZE + 1}",
+                    )
+                    if response is None:
+                        logger.error("PSIRT CVE batch failed after retries; skipping")
+                        continue
+                    if response.status_code == 200:
+                        data = _safe_response_json(response)
+                        vulnerabilities.extend(
+                            self._parse_psirt_response(data, _batch, product_filter)
+                        )
+                    elif response.status_code == 403:
+                        logger.error("PSIRT API access forbidden - check API credentials and permissions")
+                        break
+                    elif response.status_code == 401:
+                        # Round 8 / Phase 4.5: clear the cached
+                        # PSIRT bearer so the next call refreshes
+                        # against the OAuth endpoint instead of
+                        # replaying a token the server already
+                        # rejected.
+                        logger.error("PSIRT API authentication failed - invalid or expired token (clearing cached bearer)")
+                        self.psirt_access_token = None
+                        self.psirt_token_expiry = None
+                        break
+                    else:
+                        # Round 9 / Phase 3.1: digest+truncate body uniformly.
+                        _digest, _body = _response_body_digest(response, cap=200)
+                        logger.error(
+                            "PSIRT API CVE batch returned status %s body_digest=%s body_first_200=%r",
+                            response.status_code, _digest, _body,
+                        )
+                logger.info(f"PSIRT API returned {len(vulnerabilities)} vulnerabilities (CVE batched)")
             elif 'bug_id' in params:
-                endpoint = f"{self.psirt_base_url}/v2/bug_id/{params['bug_id']}"
-                response = requests.get(endpoint, headers=headers, timeout=30)
+                _all = [b for b in bug_ids if b]
+                for i in range(0, len(_all), _PSIRT_BATCH_SIZE):
+                    _batch = _all[i:i + _PSIRT_BATCH_SIZE]
+                    _joined = ",".join(_batch)
+                    endpoint = f"{self.psirt_base_url}/v2/bug_id/{_joined}"
+                    logger.info(
+                        "PSIRT API request (bug_id batch %d-%d of %d): %s",
+                        i + 1, i + len(_batch), len(_all), endpoint,
+                    )
+                    response = _retry_request(
+                        'GET', endpoint,
+                        headers=headers,
+                        timeout=30,
+                        description=f"PSIRT bug_id batch {i // _PSIRT_BATCH_SIZE + 1}",
+                    )
+                    if response is None:
+                        logger.error("PSIRT bug_id batch failed after retries; skipping")
+                        continue
+                    if response.status_code == 200:
+                        data = _safe_response_json(response)
+                        vulnerabilities.extend(
+                            self._parse_psirt_response(data, _batch, product_filter)
+                        )
+                    elif response.status_code == 403:
+                        logger.error("PSIRT API access forbidden - check API credentials and permissions")
+                        break
+                    elif response.status_code == 401:
+                        # Round 8 / Phase 4.5: clear the cached PSIRT bearer.
+                        logger.error("PSIRT API authentication failed - invalid or expired token (clearing cached bearer)")
+                        self.psirt_access_token = None
+                        self.psirt_token_expiry = None
+                        break
+                    else:
+                        # Round 9 / Phase 3.1: digest+truncate body uniformly.
+                        _digest, _body = _response_body_digest(response, cap=200)
+                        logger.error(
+                            "PSIRT API bug_id batch returned status %s body_digest=%s body_first_200=%r",
+                            response.status_code, _digest, _body,
+                        )
+                logger.info(f"PSIRT API returned {len(vulnerabilities)} vulnerabilities (bug_id batched)")
             else:
-                # Use /v2/all endpoint for general searches
                 endpoint = f"{self.psirt_base_url}/v2/all"
-                response = requests.get(endpoint, params=params, headers=headers, timeout=30)
-            
-            logger.info(f"PSIRT API request: {endpoint}")
-            
-            if response.status_code == 200:
-                data = response.json()
-                logger.info(f"PSIRT API response type: {type(data)}, keys: {list(data.keys()) if isinstance(data, dict) else 'not a dict'}")
-                vulnerabilities = self._parse_psirt_response(data, search_terms, product_filter)
-                logger.info(f"PSIRT API returned {len(vulnerabilities)} vulnerabilities")
-            elif response.status_code == 403:
-                logger.error("PSIRT API access forbidden - check API credentials and permissions")
-            elif response.status_code == 401:
-                logger.error("PSIRT API authentication failed - invalid or expired token")
-            else:
-                logger.error(f"PSIRT API returned status {response.status_code}: {response.text}")
+                response = _retry_request(
+                    'GET', endpoint,
+                    params=params,
+                    headers=headers,
+                    timeout=30,
+                    description="PSIRT all-advisories",
+                )
+                if response is None:
+                    logger.error("PSIRT all-advisories failed after retries")
+                    return vulnerabilities
+                logger.info(f"PSIRT API request: {endpoint}")
+                if response.status_code == 200:
+                    data = _safe_response_json(response)
+                    logger.info(
+                        "PSIRT API response type: %s, keys: %s",
+                        type(data), list(data.keys()) if isinstance(data, dict) else 'not a dict',
+                    )
+                    vulnerabilities = self._parse_psirt_response(data, search_terms, product_filter)
+                    logger.info(f"PSIRT API returned {len(vulnerabilities)} vulnerabilities")
+                elif response.status_code == 403:
+                    logger.error("PSIRT API access forbidden - check API credentials and permissions")
+                elif response.status_code == 401:
+                    # Round 8 / Phase 4.5: clear the cached PSIRT bearer.
+                    logger.error("PSIRT API authentication failed - invalid or expired token (clearing cached bearer)")
+                    self.psirt_access_token = None
+                    self.psirt_token_expiry = None
+                else:
+                    # Round 9 / Phase 3.1: digest+truncate body uniformly.
+                    _digest, _body = _response_body_digest(response, cap=200)
+                    logger.error(
+                        "PSIRT API returned status %s body_digest=%s body_first_200=%r",
+                        response.status_code, _digest, _body,
+                    )
                 
         except Exception as e:
             logger.error(f"Error accessing PSIRT API: {e}")
@@ -1147,12 +1756,17 @@ class CiscoInternalIntegrations:
             )
             
             if response.status_code == 200:
-                data = response.json()
+                data = _safe_response_json(response)
                 vulnerability = self._parse_single_psirt_response(data, advisory_id)
                 logger.info(f"Retrieved PSIRT advisory details for {advisory_id}")
                 return vulnerability
             else:
-                logger.error(f"PSIRT API error for advisory {advisory_id}: {response.status_code} - {response.text}")
+                # Round 9 / Phase 3.1: digest+truncate body.
+                _digest, _body = _response_body_digest(response, cap=200)
+                logger.error(
+                    "PSIRT API error for advisory %s: status=%s body_digest=%s body_first_200=%r",
+                    advisory_id, response.status_code, _digest, _body,
+                )
                 
         except Exception as e:
             logger.error(f"Error fetching PSIRT advisory details: {e}")
@@ -1239,10 +1853,19 @@ class CiscoInternalIntegrations:
         try:
             advisory = api_data.get('advisory', {})
             
-            # Extract CVE IDs
-            cve_ids = []
-            if 'cves' in advisory:
-                cve_ids = [cve.get('cve_id', '') for cve in advisory['cves']]
+            # Round 2 / Phase 5.4: reuse the same CVE id normalization
+            # the list parser uses; the PSIRT API returns ``cves`` as a
+            # mix of plain strings and ``{cveId|cve_id}`` dicts, so the
+            # previous ``cve.get('cve_id', '')`` silently dropped every
+            # string entry and crashed on non-dict values.
+            cve_ids: List[str] = []
+            if 'cves' in advisory and isinstance(advisory['cves'], list):
+                for cve in advisory['cves']:
+                    if isinstance(cve, str):
+                        cve_ids.append(cve)
+                    elif isinstance(cve, dict):
+                        cve_ids.append(cve.get('cveId', cve.get('cve_id', '')))
+                cve_ids = [c for c in cve_ids if c]
             
             # Extract bug IDs
             bug_ids = []

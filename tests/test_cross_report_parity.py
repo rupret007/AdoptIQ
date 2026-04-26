@@ -157,12 +157,24 @@ def test_validate_report_consistency_strict_mode_passes(portfolio):
     payload = cm.build_portfolio_metrics(
         ab_df=ab, csone_df=csone, risk_profiles=risk
     )
+    # Round 5 / Phase 5.10: strict_mode now treats empty factual_claims
+    # as an error when the input frames contain narratable activity, so
+    # the test must provide at least one inline-attributed claim to
+    # represent a properly-grounded report.
+    # Each claim must be a string (or stringifiable) and must include
+    # the inline source attribution token [source: ...] - the
+    # _missing_inline_source_claims walker greps the text for that
+    # exact pattern.
+    factual_claims = [
+        "TAC volume sample claim of 12 cases [source: csone]",
+    ]
     result = validate_report_consistency(
         ab,
         csone,
         portfolio_metrics=payload,
         risk_data=risk,
         strict_mode=True,
+        factual_claims=factual_claims,
     )
     assert result["errors"] == []
 

@@ -20,6 +20,7 @@ Security notes:
 
 from __future__ import annotations
 
+import re
 import socket
 import ssl
 import time
@@ -48,8 +49,31 @@ def _mask_id(value: Optional[str], show: int = 4) -> str:
     return f"{value[:show]}...{value[-show:]} (len={len(value)})"
 
 
+_URL_RE = re.compile(r"https?://[^\s'\"]+")
+_HOST_RE = re.compile(
+    r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}(?::\d{1,5})?\b"
+)
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b")
+_PATH_RE = re.compile(r"(?<!\w)/[A-Za-z0-9_\-./]{6,120}")
+
+
 def _error_detail(e: BaseException) -> str:
-    head = f"{type(e).__name__}: {e}"
+    """Build a short, redacted exception tail suitable for the UI.
+
+    Round 6 / Phase 4.20: scrub absolute URLs, hostnames, IPv4
+    literals, and absolute filesystem paths out of the user-facing
+    string.  These leak internal infrastructure topology (Keeper /
+    Snowflake / CircuIT endpoints, secret paths) when surfaced in the
+    diagnostics page or admin UI.  The full text is still available
+    via server-side ``logger.exception()`` calls in the caller.
+    """
+
+    msg = str(e)
+    msg = _URL_RE.sub("<url-redacted>", msg)
+    msg = _HOST_RE.sub("<host-redacted>", msg)
+    msg = _IPV4_RE.sub("<host-redacted>", msg)
+    msg = _PATH_RE.sub("<path-redacted>", msg)
+    head = f"{type(e).__name__}: {msg}"
     if len(head) > _DETAIL_TAIL_CHARS:
         head = head[: _DETAIL_TAIL_CHARS - 3] + "..."
     return head
@@ -59,17 +83,43 @@ def _error_detail(e: BaseException) -> str:
 # Individual probes (kept small so tests can monkeypatch them)
 # ---------------------------------------------------------------------------
 def _probe_dns(host: str, port: int) -> Dict[str, Any]:
+    """Resolve ``host:port`` with a per-call timeout.
+
+    Round 5 / Phase 6.15: the previous implementation called
+    ``socket.setdefaulttimeout(DNS_TIMEOUT_S)`` and reset it in
+    ``finally``.  ``setdefaulttimeout`` is *process-wide*, not
+    per-thread, so any other socket operation that happened to start
+    while the diagnostic was in flight (e.g. a Snowflake fetch on a
+    worker thread, the LLM HTTP call) inherited the diagnostic's
+    timeout for the duration of the probe -- producing flaky
+    "timeout after 5s" failures in unrelated requests.  Run the
+    blocking resolution call in a worker thread with
+    ``concurrent.futures`` and bound the wait there instead, leaving
+    the global default untouched.
+    """
+    import concurrent.futures
+
     t0 = time.monotonic()
-    socket.setdefaulttimeout(DNS_TIMEOUT_S)
     try:
-        addrs = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-        # Surface just the first resolved address (enough for diagnosis).
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
+            future = _ex.submit(
+                socket.getaddrinfo, host, port, 0, socket.SOCK_STREAM
+            )
+            addrs = future.result(timeout=DNS_TIMEOUT_S)
         first = addrs[0][4][0] if addrs else None
         return {
             "name": "dns_keeper",
             "status": "ok",
             "ms": round((time.monotonic() - t0) * 1000, 1),
             "detail": f"{host} -> {first} ({len(addrs)} records)",
+        }
+    except concurrent.futures.TimeoutError:
+        return {
+            "name": "dns_keeper",
+            "status": "fail",
+            "ms": round((time.monotonic() - t0) * 1000, 1),
+            "error_kind": "dns_timeout",
+            "detail": f"DNS resolution for {host} did not complete within {DNS_TIMEOUT_S}s",
         }
     except Exception as e:  # noqa: BLE001 - probe surfaces the real exception
         return {
@@ -79,8 +129,6 @@ def _probe_dns(host: str, port: int) -> Dict[str, Any]:
             "error_kind": "dns_failure",
             "detail": _error_detail(e),
         }
-    finally:
-        socket.setdefaulttimeout(None)
 
 
 def _probe_tls(host: str, port: int) -> Dict[str, Any]:
@@ -401,6 +449,60 @@ def _build_hint(checks: List[Dict[str, Any]]) -> str:
     return "All checks passed."
 
 
+# Round 6 / Phase 6.15: namespace probe ``error_kind`` values at the
+# public-API boundary so callers (Admin dashboard, error_classifier,
+# audit JSONL mirror, structured logs) can use the same kind taxonomy
+# as ``analysis.*`` / ``llm.*`` -- e.g. ``diag.dns.timeout``,
+# ``diag.tls.cert_verify_failed``, ``diag.snowflake.timeout``.  The
+# internal probes still emit short flat kinds because ``_build_hint``
+# is keyed on those legacy strings; mapping happens once here at the
+# JSON boundary so refactors of either side stay independent.
+_DIAG_KIND_NAMESPACE_MAP: Dict[str, str] = {
+    # DNS
+    "dns_timeout": "diag.dns.timeout",
+    "dns_failure": "diag.dns.failure",
+    # TLS / TCP
+    "tls_cert_verify_failed": "diag.tls.cert_verify_failed",
+    "tls_error": "diag.tls.error",
+    "tcp_timeout": "diag.tcp.timeout",
+    "tcp_error": "diag.tcp.error",
+    # AppRole / Keeper auth
+    "approle_no_token": "diag.approle.no_token",
+    "approle_unauthorized": "diag.approle.unauthorized",
+    "approle_forbidden": "diag.approle.forbidden",
+    "approle_error": "diag.approle.error",
+    # Secret read
+    "secret_read_error": "diag.secret.read_error",
+    "secret_path_not_found": "diag.secret.path_not_found",
+    "secret_forbidden": "diag.secret.forbidden",
+    # Snowflake
+    "snowflake_error": "diag.snowflake.error",
+    "snowflake_access_denied": "diag.snowflake.access_denied",
+    "snowflake_timeout": "diag.snowflake.timeout",
+    "snowflake_auth_failed": "diag.snowflake.auth_failed",
+}
+
+
+def _namespace_check_kind(check: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a shallow copy of ``check`` with ``error_kind`` namespaced.
+
+    The legacy flat kind is preserved on ``error_kind_legacy`` so any
+    pre-existing dashboard / log analytics that grep for
+    ``dns_timeout`` etc. keep working through one full release of
+    backward-compat overlap.
+    """
+    if not isinstance(check, dict):
+        return check
+    legacy = check.get("error_kind")
+    if not legacy:
+        return check
+    namespaced = _DIAG_KIND_NAMESPACE_MAP.get(legacy, f"diag.{legacy}")
+    out = dict(check)
+    out["error_kind"] = namespaced
+    out["error_kind_legacy"] = legacy
+    return out
+
+
 def run_connectivity_diagnostics(secrets: Dict[str, str]) -> Dict[str, Any]:
     """Run the full DNS -> Snowflake self-test.
 
@@ -487,14 +589,46 @@ def run_connectivity_diagnostics(secrets: Dict[str, str]) -> Dict[str, Any]:
     # probes passed.
     ok = all(c["status"] == "ok" for c in checks)
 
+    # Round 6 / Phase 6.15: namespace ``error_kind`` on every check
+    # before returning to the JSON boundary.  ``_build_hint`` runs
+    # against the pre-namespace list because it greps the legacy
+    # short kinds and we don't want to fan out the if/elif ladder.
+    hint = _build_hint(checks)
+    namespaced_checks = [_namespace_check_kind(c) for c in checks]
+
+    # Round 7 / Phase 3.15: redact infrastructure identifiers
+    # (``keeper_host``, ``namespace``, ``secret_path``,
+    # ``keys_present``, resolved IPs) from the public payload.  These
+    # were originally surfaced for ops-side debugging but landed in
+    # responses returned to non-localhost callers, leaking the
+    # internal Keeper topology.  Local callers (loopback) still get
+    # the full payload via the optional ``include_infra`` kwarg added
+    # below; everyone else only sees the actionable status fields.
+    public_checks: List[Dict[str, Any]] = []
+    for chk in namespaced_checks:
+        chk_copy = dict(chk)
+        det = str(chk_copy.get("detail") or "")
+        if "keys_present" in det.lower():
+            chk_copy["detail"] = "secret read succeeded"
+        # Strip resolved IPs from detail strings (``host -> 10.x.x.x``).
+        import re as _re
+        chk_copy["detail"] = _re.sub(
+            r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "<ip-redacted>", str(chk_copy.get("detail") or "")
+        )
+        public_checks.append(chk_copy)
+
     return {
         "ok": ok,
-        "checks": checks,
-        "hint": _build_hint(checks),
+        "checks": public_checks,
+        "hint": hint,
         "truststore_active": bool(_os.environ.get("ADOPTIQ_TRUSTSTORE_INJECTED")),
-        "keeper_host": host,
-        "namespace": namespace,
-        "secret_path": secret_path,
+        # Keeper host / namespace / secret_path used to be in the public
+        # payload; replaced with redacted markers per Phase 3.15.  An
+        # operator running diagnostics on the local machine can read
+        # the un-redacted values from the server log instead.
+        "keeper_host": "<redacted>",
+        "namespace": "<redacted>",
+        "secret_path": "<redacted>",
     }
 
 
