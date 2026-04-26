@@ -222,7 +222,7 @@
    ``var(--cisco-blue)``; this override is intentionally kept because
    the leader form deliberately uses the more subtle accent shadow. */
 .shadow-cisco {
-    box-shadow: 0 4px 6px color-mix(in srgb, var(--cisco-accent-blue) 10%, transparent);
+    box-shadow: 0 4px 6px color-mix(in srgb, var(--accent-primary, var(--cisco-accent-blue)) 10%, transparent);
 }
 
 .card {
@@ -231,7 +231,7 @@
 
 .card:hover {
     transform: translateY(-5px);
-    box-shadow: 0 8px 12px color-mix(in srgb, var(--cisco-accent-blue) 15%, transparent);
+    box-shadow: 0 8px 12px color-mix(in srgb, var(--accent-primary, var(--cisco-accent-blue)) 15%, transparent);
 }
 </style>
 

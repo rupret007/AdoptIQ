@@ -26,9 +26,12 @@
     /* Round 7 / Phase 4.10: brand-coloured surfaces now read from the
        theme tokens defined in ``base.html``.  The previous hardcoded
        ``#007bc7`` / ``#667eea`` / ``#764ba2`` palette could not follow
-       any future re-skin and drifted from every other page. */
+       any future re-skin and drifted from every other page.
+       Round 17.4 / Phase 6.5: routed through the new semantic
+       ``--accent-*`` / ``--bg-*`` / ``--text-*`` tokens so the panel
+       tracks the dark/light toggle without dual-writing rules. */
     .bst-page-shell {
-        background: linear-gradient(135deg, var(--cisco-accent-blue) 0%, var(--cisco-dark-blue) 100%);
+        background: linear-gradient(135deg, var(--accent-primary, var(--cisco-accent-blue)) 0%, var(--accent-secondary, var(--cisco-dark-blue)) 100%);
         margin: -1.5rem -1rem 0;
         padding: 24px 16px 40px;
         min-height: calc(100vh - var(--header-height, 0px));
@@ -64,18 +67,20 @@
     }
 
     .search-panel {
-        background: #fff;
+        background: var(--bg-surface, #fff);
+        color: var(--text-primary, inherit);
+        border: 1px solid var(--border-subtle, transparent);
         border-radius: 15px;
         padding: 30px;
         box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
     }
 
     .search-panel h2 {
-        color: var(--cisco-accent-blue);
+        color: var(--accent-primary, var(--cisco-accent-blue));
         margin-top: 0;
         font-size: 1.8em;
         margin-bottom: 20px;
-        border-bottom: 3px solid var(--cisco-accent-blue);
+        border-bottom: 3px solid var(--accent-primary, var(--cisco-accent-blue));
         padding-bottom: 10px;
     }
 
@@ -87,7 +92,7 @@
         display: block;
         margin-bottom: 8px;
         font-weight: 600;
-        color: var(--cisco-gray-700, #333);
+        color: var(--text-primary, var(--cisco-gray-700, #333));
     }
 
     .form-group input,
@@ -95,9 +100,11 @@
     .form-group textarea {
         width: 100%;
         padding: 12px;
-        border: 2px solid var(--cisco-gray-300);
+        border: 2px solid var(--border-subtle, var(--cisco-gray-300));
         border-radius: 8px;
         font-size: 1em;
+        background-color: var(--bg-surface, #fff);
+        color: var(--text-primary, inherit);
         transition: border-color 0.3s;
     }
 
@@ -105,11 +112,11 @@
     .form-group select:focus,
     .form-group textarea:focus {
         outline: none;
-        border-color: var(--cisco-accent-blue);
+        border-color: var(--accent-primary, var(--cisco-accent-blue));
     }
 
     .bst-btn {
-        background: linear-gradient(135deg, var(--cisco-accent-blue) 0%, var(--cisco-dark-blue) 100%);
+        background: linear-gradient(135deg, var(--accent-primary, var(--cisco-accent-blue)) 0%, var(--accent-primary-hover, var(--cisco-dark-blue)) 100%);
         color: #fff;
         padding: 15px 30px;
         border: none;
@@ -123,7 +130,7 @@
 
     .bst-btn:hover {
         transform: translateY(-2px);
-        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+        box-shadow: 0 5px 15px var(--accent-glow, rgba(0, 0, 0, 0.3));
     }
 
     .bst-btn:active {
@@ -137,7 +144,9 @@
     }
 
     .results {
-        background: #fff;
+        background: var(--bg-surface, #fff);
+        color: var(--text-primary, inherit);
+        border: 1px solid var(--border-subtle, transparent);
         border-radius: 15px;
         padding: 30px;
         box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
@@ -150,15 +159,16 @@
     }
 
     .results h3 {
-        color: var(--cisco-accent-blue);
+        color: var(--accent-primary, var(--cisco-accent-blue));
         margin-top: 0;
         font-size: 1.5em;
         margin-bottom: 15px;
     }
 
     .summary-box {
-        background: var(--cisco-gray-100);
-        border-left: 4px solid var(--cisco-accent-blue);
+        background: var(--bg-surface-raised, var(--cisco-gray-100));
+        color: var(--text-primary, inherit);
+        border-left: 4px solid var(--accent-primary, var(--cisco-accent-blue));
         padding: 20px;
         margin: 20px 0;
         border-radius: 8px;
@@ -169,8 +179,9 @@
     }
 
     .info-box {
-        background: var(--cisco-light-blue);
-        border-left: 4px solid var(--cisco-accent-blue);
+        background: var(--accent-glow-soft, var(--cisco-light-blue));
+        color: var(--text-primary, inherit);
+        border-left: 4px solid var(--accent-primary, var(--cisco-accent-blue));
         padding: 15px;
         margin: 15px 0;
         border-radius: 8px;
@@ -184,6 +195,11 @@
         border-radius: 8px;
     }
 
+    [data-bs-theme="dark"] .warning-box {
+        background: rgba(255, 140, 0, 0.18);
+        color: #ffc97a;
+    }
+
     .error-box {
         background: #f8d7da;
         border-left: 4px solid var(--cisco-danger);
@@ -193,11 +209,16 @@
         color: #721c24;
     }
 
+    [data-bs-theme="dark"] .error-box {
+        background: rgba(214, 39, 40, 0.18);
+        color: #ff7e7e;
+    }
+
     .direct-link {
         display: inline-block;
         margin-top: 10px;
         padding: 10px 20px;
-        background: var(--cisco-accent-blue);
+        background: var(--accent-primary, var(--cisco-accent-blue));
         color: #fff;
         text-decoration: none;
         border-radius: 5px;
@@ -205,18 +226,18 @@
     }
 
     .direct-link:hover {
-        background: var(--cisco-dark-blue);
+        background: var(--accent-primary-hover, var(--cisco-dark-blue));
     }
 
     .loading {
         text-align: center;
         padding: 20px;
-        color: var(--cisco-gray-600);
+        color: var(--text-muted, var(--cisco-gray-600));
     }
 
     .spinner {
-        border: 4px solid var(--cisco-gray-200);
-        border-top: 4px solid var(--cisco-accent-blue);
+        border: 4px solid var(--border-subtle, var(--cisco-gray-200));
+        border-top: 4px solid var(--accent-primary, var(--cisco-accent-blue));
         border-radius: 50%;
         width: 40px;
         height: 40px;

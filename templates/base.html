@@ -1,10 +1,35 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-bs-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}AdoptIQ Portfolio Analyzer{% endblock %}</title>
-    
+
+    {# Round 17.4 / Phase 6.1: early-paint theme bootstrap.  Reads
+       the persisted ``adoptiq-theme`` from ``localStorage`` BEFORE
+       the rest of the page paints, so the user never sees a flash
+       of the wrong theme on first render.  Falls back to ``dark``
+       (the design default) if the key is missing or unreadable.
+       Only ``dark`` and ``light`` are accepted; anything else is
+       treated as ``dark`` so a corrupt value cannot inject a
+       custom attribute.  This block is intentionally inline and
+       synchronous; the existing CSP allows ``script-src 'self'
+       'unsafe-inline'`` so no policy change is needed.  Token
+       overrides live in the ``[data-bs-theme="dark"]`` block in
+       the main inline ``<style>`` further down. #}
+    <script>
+        (function () {
+            try {
+                var stored = null;
+                try { stored = window.localStorage.getItem('adoptiq-theme'); } catch (_) { /* private mode / SecurityError */ }
+                var theme = (stored === 'light' || stored === 'dark') ? stored : 'dark';
+                document.documentElement.setAttribute('data-bs-theme', theme);
+            } catch (_) {
+                document.documentElement.setAttribute('data-bs-theme', 'dark');
+            }
+        })();
+    </script>
+
     <!-- Cache busting for development -->
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
@@ -99,18 +124,107 @@
             --cisco-gray-700: #495057;
             --cisco-gray-800: #343a40;
             --cisco-gray-900: #212529;
-            
+
             /* Enhanced Spacing */
             --section-spacing: 4rem;
             --card-spacing: 1.5rem;
             --element-spacing: 1rem;
+
+            /*
+             * Round 17.4 / Phase 6.2: AdoptIQ orange accent.  Defined
+             * once on :root so both light and dark themes can reach
+             * it; in dark mode it becomes the primary chrome accent
+             * (replacing Cisco blue), in light mode it is available
+             * for callouts but the chrome still favours blue to keep
+             * today's look intact when the user toggles to light.
+             */
+            --adoptiq-orange: #ff7a1a;
+            --adoptiq-orange-hover: #ff944d;
+            --adoptiq-orange-soft: #ffb380;
+            --adoptiq-orange-glow: rgba(255, 122, 26, 0.35);
+            --adoptiq-orange-glow-soft: rgba(255, 122, 26, 0.15);
+
+            /*
+             * Round 17.4 / Phase 6.2: semantic theme tokens.  These
+             * are the indirection layer between brand hexes and the
+             * chrome rules below; flipping them in
+             * ``[data-bs-theme="dark"]`` re-skins the whole app
+             * without touching the rules themselves.  Defaults below
+             * mirror today's light look so the toggle's "light"
+             * setting reproduces the pre-Round-17.4 chrome verbatim.
+             * IMPORTANT: ``--risk-*`` tokens above are deliberately
+             * NOT included here -- they drive matplotlib chart hexes
+             * and Excel band fills (canonical_metrics.RISK_BAND_COLORS)
+             * and must stay byte-identical across themes per Round 13.
+             */
+            --bg-base: var(--cisco-gray-100);
+            --bg-surface: #ffffff;
+            --bg-surface-raised: #ffffff;
+            --border-subtle: var(--cisco-gray-200);
+            --text-primary: var(--cisco-gray-900);
+            --text-secondary: var(--cisco-gray-700);
+            --text-muted: var(--cisco-gray-600);
+            --accent-primary: var(--cisco-blue);
+            --accent-primary-hover: var(--cisco-accent-blue);
+            --accent-secondary: var(--cisco-dark-blue);
+            --accent-glow: rgba(0, 188, 235, 0.35);
+            --accent-glow-soft: rgba(0, 188, 235, 0.15);
+            --navbar-bg: linear-gradient(135deg, var(--cisco-navy) 0%, var(--cisco-dark-blue) 100%);
+            --hero-bg: linear-gradient(135deg, var(--cisco-blue) 0%, var(--cisco-dark-blue) 50%, var(--cisco-navy) 100%);
+            --footer-bg: linear-gradient(135deg, var(--cisco-gray-800) 0%, var(--cisco-gray-900) 100%);
+            --card-header-bg: linear-gradient(135deg, var(--cisco-light-blue) 0%, #f0f9ff 100%);
+            --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.08);
+            --shadow-card-hover: 0 20px 40px rgba(0, 0, 0, 0.12);
+            --shadow-modal: 0 25px 70px rgba(0, 0, 0, 0.25);
+        }
+
+        /*
+         * Round 17.4 / Phase 6.2: dark-theme override block.  Bootstrap
+         * 5.3's native ``data-bs-theme="dark"`` attribute (set on the
+         * <html> element by the early-paint script in <head>) drives
+         * Bootstrap's component-level dark styling for tables,
+         * dropdowns, modals, and form controls; this block then
+         * pivots the AdoptIQ-specific chrome to a charcoal surface
+         * with a vibrant orange accent.  Overriding the semantic
+         * ``--bg-*``/``--text-*``/``--accent-*`` tokens (NOT the
+         * brand ``--cisco-*`` or chart-driving ``--risk-*`` tokens)
+         * means the chrome rules below pivot for free without
+         * dual-writing every selector.
+         */
+        [data-bs-theme="dark"] {
+            --bg-base: #0d1117;
+            --bg-surface: #161b22;
+            --bg-surface-raised: #21262d;
+            --border-subtle: #30363d;
+            --text-primary: #f0f6fc;
+            --text-secondary: #c9d1d9;
+            --text-muted: #8b949e;
+            --accent-primary: var(--adoptiq-orange);
+            --accent-primary-hover: var(--adoptiq-orange-hover);
+            --accent-secondary: var(--adoptiq-orange-soft);
+            --accent-glow: var(--adoptiq-orange-glow);
+            --accent-glow-soft: var(--adoptiq-orange-glow-soft);
+            --navbar-bg: linear-gradient(135deg, #0a0d12 0%, #161b22 100%);
+            --hero-bg: linear-gradient(135deg, #161b22 0%, #21262d 50%, #0d1117 100%);
+            --footer-bg: linear-gradient(135deg, #0a0d12 0%, #161b22 100%);
+            --card-header-bg: linear-gradient(135deg, #1f242c 0%, #21262d 100%);
+            --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.45);
+            --shadow-card-hover: 0 20px 40px rgba(255, 122, 26, 0.25);
+            --shadow-modal: 0 25px 70px rgba(0, 0, 0, 0.6);
+            color-scheme: dark;
+        }
+
+        [data-bs-theme="light"] {
+            color-scheme: light;
         }
         
         body {
-            background-color: var(--cisco-gray-100);
+            background-color: var(--bg-base);
+            color: var(--text-primary);
             font-family: 'CiscoSans', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             line-height: 1.6;
             scroll-behavior: smooth;
+            transition: background-color 0.25s ease, color 0.25s ease;
         }
         
         /* Enhanced Typography */
@@ -127,25 +241,26 @@
         
         /* Enhanced Navigation */
         .navbar {
-            background: linear-gradient(135deg, var(--cisco-navy) 0%, var(--cisco-dark-blue) 100%) !important;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+            background: var(--navbar-bg) !important;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
             padding: 1rem 0;
             backdrop-filter: blur(10px);
+            border-bottom: 1px solid var(--border-subtle);
         }
-        
+
         .navbar-brand {
             font-weight: 800;
             font-size: 1.6rem;
-            color: var(--cisco-blue) !important;
-            text-shadow: 0 0 15px rgba(0, 188, 235, 0.4);
+            color: var(--accent-primary) !important;
+            text-shadow: 0 0 15px var(--accent-glow);
             transition: all 0.3s ease;
         }
-        
+
         .navbar-brand:hover {
-            text-shadow: 0 0 20px rgba(0, 188, 235, 0.6);
+            text-shadow: 0 0 20px var(--accent-glow);
             transform: scale(1.05);
         }
-        
+
         .navbar-nav .nav-link {
             color: rgba(255, 255, 255, 0.9) !important;
             font-weight: 500;
@@ -155,7 +270,7 @@
             position: relative;
             overflow: hidden;
         }
-        
+
         .navbar-nav .nav-link::before {
             content: '';
             position: absolute;
@@ -166,23 +281,67 @@
             background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
             transition: left 0.5s ease;
         }
-        
+
         .navbar-nav .nav-link:hover::before {
             left: 100%;
         }
-        
+
         .navbar-nav .nav-link:hover {
-            color: var(--cisco-blue) !important;
+            color: var(--accent-primary) !important;
             background-color: rgba(255, 255, 255, 0.15);
             transform: translateY(-2px);
-            box-shadow: 0 4px 15px rgba(0, 188, 235, 0.2);
+            box-shadow: 0 4px 15px var(--accent-glow);
         }
-        
+
         .navbar-nav .nav-link.active {
-            color: var(--cisco-blue) !important;
-            background-color: rgba(0, 188, 235, 0.15);
-            box-shadow: 0 0 0 2px rgba(0, 188, 235, 0.3);
+            color: var(--accent-primary) !important;
+            background-color: var(--accent-glow-soft);
+            box-shadow: 0 0 0 2px var(--accent-glow);
         }
+
+        /*
+         * Round 17.4 / Phase 6.4: theme toggle button.  A small
+         * sun/moon icon in the navbar that flips ``data-bs-theme``
+         * on the <html> element and persists the choice in
+         * localStorage.  Click handler lives in
+         * ``static/js/theme-toggle.js``; this rule only styles the
+         * button so it tracks the active accent and doesn't look
+         * out of place on either palette.
+         */
+        .theme-toggle {
+            background: transparent;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            color: rgba(255, 255, 255, 0.9);
+            border-radius: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            margin-left: 0.5rem;
+            font-size: 1rem;
+            line-height: 1;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 2.5rem;
+        }
+
+        .theme-toggle:hover {
+            color: var(--accent-primary);
+            border-color: var(--accent-primary);
+            background-color: rgba(255, 255, 255, 0.08);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px var(--accent-glow);
+        }
+
+        .theme-toggle:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+
+        .theme-toggle .theme-icon-dark { display: none; }
+        .theme-toggle .theme-icon-light { display: inline; }
+        [data-bs-theme="dark"] .theme-toggle .theme-icon-dark { display: inline; }
+        [data-bs-theme="dark"] .theme-toggle .theme-icon-light { display: none; }
         
         /* Enhanced Buttons */
         .btn {
@@ -209,30 +368,32 @@
         }
         
         .btn-primary {
-            background: linear-gradient(135deg, var(--cisco-blue) 0%, var(--cisco-accent-blue) 100%);
+            background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-primary-hover) 100%);
             border: none;
             padding: 0.875rem 2rem;
-            box-shadow: 0 6px 20px rgba(0, 188, 235, 0.3);
+            color: #fff;
+            box-shadow: 0 6px 20px var(--accent-glow);
         }
-        
+
         .btn-primary:hover {
-            background: linear-gradient(135deg, var(--cisco-accent-blue) 0%, var(--cisco-dark-blue) 100%);
+            background: linear-gradient(135deg, var(--accent-primary-hover) 0%, var(--accent-secondary) 100%);
+            color: #fff;
             transform: translateY(-3px);
-            box-shadow: 0 8px 25px rgba(0, 188, 235, 0.4);
+            box-shadow: 0 8px 25px var(--accent-glow);
         }
-        
+
         .btn-outline-primary {
-            color: var(--cisco-blue);
-            border: 2px solid var(--cisco-blue);
+            color: var(--accent-primary);
+            border: 2px solid var(--accent-primary);
             background: transparent;
             padding: 0.875rem 2rem;
         }
-        
+
         .btn-outline-primary:hover {
-            background: var(--cisco-blue);
-            color: white;
+            background: var(--accent-primary);
+            color: #fff;
             transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(0, 188, 235, 0.3);
+            box-shadow: 0 6px 20px var(--accent-glow);
         }
         
         .btn-lg {
@@ -242,47 +403,55 @@
         
         /* Enhanced Cards */
         .card {
-            border: none;
+            border: 1px solid var(--border-subtle);
             border-radius: 1.25rem;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+            box-shadow: var(--shadow-card);
             transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
             overflow: hidden;
-            background: white;
+            background: var(--bg-surface);
+            color: var(--text-primary);
         }
-        
+
         .card:hover {
             transform: translateY(-8px);
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.12);
+            box-shadow: var(--shadow-card-hover);
+            border-color: var(--accent-primary);
         }
-        
+
         .card-header {
-            background: linear-gradient(135deg, var(--cisco-light-blue) 0%, #f0f9ff 100%);
-            border-bottom: 1px solid var(--cisco-gray-200);
+            background: var(--card-header-bg);
+            border-bottom: 1px solid var(--border-subtle);
             font-weight: 700;
-            color: var(--cisco-navy);
+            color: var(--text-primary);
             padding: 1.5rem 2rem;
             font-size: 1.125rem;
         }
-        
+
+        [data-bs-theme="dark"] .card-header {
+            color: var(--accent-primary);
+        }
+
         .card-body {
             padding: 2rem;
+            background: var(--bg-surface);
+            color: var(--text-primary);
         }
         
         /* Enhanced Progress Bars */
         .progress {
             height: 0.875rem;
             border-radius: 0.625rem;
-            background-color: var(--cisco-gray-200);
+            background-color: var(--border-subtle);
             overflow: hidden;
             box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
         }
-        
+
         .progress-bar {
-            background: linear-gradient(90deg, var(--cisco-blue) 0%, var(--cisco-accent-blue) 100%);
+            background: linear-gradient(90deg, var(--accent-primary) 0%, var(--accent-primary-hover) 100%);
             border-radius: 0.625rem;
             transition: width 0.6s ease;
         }
-        
+
         /* Enhanced Alerts */
         .alert {
             border-radius: 1rem;
@@ -291,76 +460,88 @@
             font-weight: 500;
             box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
         }
-        
+
         .alert-success {
             background: linear-gradient(135deg, var(--cisco-success) 0%, #00c853 100%);
             color: white;
         }
-        
+
         .alert-danger {
             background: linear-gradient(135deg, var(--cisco-danger) 0%, #f44336 100%);
             color: white;
         }
-        
+
         .alert-warning {
             background: linear-gradient(135deg, var(--cisco-warning) 0%, #ff9800 100%);
             color: white;
         }
-        
+
         .alert-info {
-            background: linear-gradient(135deg, var(--cisco-blue) 0%, var(--cisco-accent-blue) 100%);
+            background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-primary-hover) 100%);
             color: white;
         }
         
         /* Enhanced Form Controls */
         .form-control, .form-select {
-            border: 2px solid var(--cisco-gray-300);
+            border: 2px solid var(--border-subtle);
             border-radius: 0.75rem;
             padding: 1rem 1.25rem;
             font-size: 1rem;
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            background-color: white;
+            background-color: var(--bg-surface);
+            color: var(--text-primary);
         }
-        
+
+        .form-control::placeholder {
+            color: var(--text-muted);
+            opacity: 0.7;
+        }
+
         .form-control:focus, .form-select:focus {
-            border-color: var(--cisco-blue);
-            box-shadow: 0 0 0 0.25rem rgba(0, 188, 235, 0.2);
+            border-color: var(--accent-primary);
+            box-shadow: 0 0 0 0.25rem var(--accent-glow-soft);
             transform: translateY(-2px);
-            background-color: white;
+            background-color: var(--bg-surface);
+            color: var(--text-primary);
         }
-        
+
         .form-control.is-valid {
             border-color: var(--cisco-success);
             box-shadow: 0 0 0 0.25rem rgba(0, 166, 81, 0.2);
         }
-        
+
         .form-control.is-invalid {
             border-color: var(--cisco-danger);
             box-shadow: 0 0 0 0.25rem rgba(227, 28, 61, 0.2);
         }
-        
+
         .form-label {
             font-weight: 600;
-            color: var(--cisco-navy);
+            color: var(--text-primary);
             margin-bottom: 0.75rem;
             font-size: 1rem;
         }
-        
+
+        [data-bs-theme="dark"] .form-label {
+            color: var(--accent-primary);
+        }
+
         .form-text {
-            color: var(--cisco-gray-600);
+            color: var(--text-muted);
             font-size: 0.875rem;
             margin-top: 0.5rem;
         }
         
         /* Enhanced Footer */
         .footer {
-            background: linear-gradient(135deg, var(--cisco-gray-800) 0%, var(--cisco-gray-900) 100%);
+            background: var(--footer-bg);
             color: white;
             padding: 4rem 0 2.5rem;
             margin-top: 5rem;
             position: relative;
+            border-top: 1px solid var(--border-subtle);
         }
-        
+
         .footer::before {
             content: '';
             position: absolute;
@@ -368,12 +549,12 @@
             left: 0;
             right: 0;
             height: 1px;
-            background: linear-gradient(90deg, transparent, var(--cisco-blue), transparent);
+            background: linear-gradient(90deg, transparent, var(--accent-primary), transparent);
         }
-        
+
         /* Enhanced Hero Section */
         .hero-section {
-            background: linear-gradient(135deg, var(--cisco-blue) 0%, var(--cisco-dark-blue) 50%, var(--cisco-navy) 100%);
+            background: var(--hero-bg);
             color: white;
             padding: 6rem 0;
             margin-bottom: 5rem;
@@ -413,59 +594,60 @@
             left: 0;
             right: 0;
             bottom: 0;
-            background: linear-gradient(135deg, rgba(0, 188, 235, 0.05) 0%, rgba(0, 115, 230, 0.05) 100%);
+            background: linear-gradient(135deg, var(--accent-glow-soft) 0%, transparent 100%);
             opacity: 0;
             transition: opacity 0.3s ease;
             border-radius: 1.25rem;
         }
-        
+
         .feature-card:hover::before {
             opacity: 1;
         }
-        
+
         .feature-card:hover {
             transform: translateY(-12px);
         }
-        
+
         .feature-icon {
             font-size: 4rem;
-            color: var(--cisco-blue);
+            color: var(--accent-primary);
             margin-bottom: 2rem;
             transition: all 0.4s ease;
             position: relative;
         }
-        
+
         .feature-card:hover .feature-icon {
             transform: scale(1.15) rotate(5deg);
-            color: var(--cisco-accent-blue);
+            color: var(--accent-primary-hover);
         }
         
         /* Enhanced Stats */
         .stats-section .border-end {
-            border-right: 2px solid var(--cisco-gray-200) !important;
+            border-right: 2px solid var(--border-subtle) !important;
         }
-        
+
         .stats-section h3 {
             font-size: 3rem;
             font-weight: 800;
             margin-bottom: 0.75rem;
-            background: linear-gradient(135deg, var(--cisco-blue), var(--cisco-accent-blue));
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-primary-hover));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
         }
-        
+
         /* Enhanced Technology Cards */
         .tech-card {
-            border: 2px solid var(--cisco-gray-200);
+            border: 2px solid var(--border-subtle);
             border-radius: 1rem;
             padding: 2rem;
             transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-            background: white;
+            background: var(--bg-surface);
+            color: var(--text-primary);
             position: relative;
             overflow: hidden;
         }
-        
+
         .tech-card::before {
             content: '';
             position: absolute;
@@ -473,67 +655,84 @@
             left: -100%;
             width: 100%;
             height: 100%;
-            background: linear-gradient(90deg, transparent, rgba(0, 188, 235, 0.05), transparent);
+            background: linear-gradient(90deg, transparent, var(--accent-glow-soft), transparent);
             transition: left 0.6s ease;
         }
-        
+
         .tech-card:hover::before {
             left: 100%;
         }
-        
+
         .tech-card:hover {
-            border-color: var(--cisco-blue);
+            border-color: var(--accent-primary);
             transform: translateY(-6px);
-            box-shadow: 0 12px 30px rgba(0, 188, 235, 0.15);
+            box-shadow: 0 12px 30px var(--accent-glow);
         }
-        
+
         /* Enhanced Modal */
         .modal-content {
             border-radius: 1.25rem;
-            border: none;
-            box-shadow: 0 25px 70px rgba(0, 0, 0, 0.25);
+            border: 1px solid var(--border-subtle);
+            background: var(--bg-surface);
+            color: var(--text-primary);
+            box-shadow: var(--shadow-modal);
         }
-        
+
         .modal-header {
-            background: linear-gradient(135deg, var(--cisco-light-blue) 0%, #f0f9ff 100%);
-            border-bottom: 1px solid var(--cisco-gray-200);
+            background: var(--card-header-bg);
+            border-bottom: 1px solid var(--border-subtle);
             border-radius: 1.25rem 1.25rem 0 0;
             padding: 1.5rem 2rem;
+            color: var(--text-primary);
         }
-        
+
+        [data-bs-theme="dark"] .modal-header {
+            color: var(--accent-primary);
+        }
+
         /* Enhanced Spinner */
         .spinner-border {
-            color: var(--cisco-blue);
+            color: var(--accent-primary);
         }
-        
+
         /* Enhanced Badges */
         .badge {
             font-weight: 600;
             padding: 0.5rem 1rem;
             border-radius: 0.5rem;
         }
-        
+
         /* Enhanced Tables */
         .table {
             border-radius: 1rem;
             overflow: hidden;
+            color: var(--text-primary);
         }
-        
+
         .table thead th {
-            background: linear-gradient(135deg, var(--cisco-light-blue) 0%, #f0f9ff 100%);
+            background: var(--card-header-bg);
             border: none;
             font-weight: 700;
-            color: var(--cisco-navy);
+            color: var(--text-primary);
             padding: 1.25rem 1rem;
         }
-        
+
+        [data-bs-theme="dark"] .table thead th {
+            color: var(--accent-primary);
+        }
+
         .table tbody tr {
             transition: all 0.3s ease;
+            background-color: var(--bg-surface);
         }
-        
+
         .table tbody tr:hover {
-            background-color: var(--cisco-light-blue);
+            background-color: var(--bg-surface-raised);
             transform: scale(1.01);
+        }
+
+        [data-bs-theme="dark"] .table tbody tr:hover {
+            background-color: var(--accent-glow-soft);
         }
         
         /* Responsive Design Enhancements */
@@ -564,20 +763,20 @@
         ::-webkit-scrollbar {
             width: 10px;
         }
-        
+
         ::-webkit-scrollbar-track {
-            background: var(--cisco-gray-200);
+            background: var(--bg-surface);
             border-radius: 5px;
         }
-        
+
         ::-webkit-scrollbar-thumb {
-            background: var(--cisco-blue);
+            background: var(--accent-primary);
             border-radius: 5px;
             transition: background 0.3s ease;
         }
-        
+
         ::-webkit-scrollbar-thumb:hover {
-            background: var(--cisco-accent-blue);
+            background: var(--accent-primary-hover);
         }
         
         /* Animation Classes */
@@ -651,16 +850,16 @@
         /* Enhanced Focus States */
         .btn:focus, .form-control:focus, .form-select:focus {
             outline: none;
-            box-shadow: 0 0 0 4px rgba(0, 188, 235, 0.25);
+            box-shadow: 0 0 0 4px var(--accent-glow);
         }
-        
+
         /* Loading States */
         .loading {
             opacity: 0.7;
             pointer-events: none;
             position: relative;
         }
-        
+
         .loading::after {
             content: '';
             position: absolute;
@@ -669,8 +868,8 @@
             width: 24px;
             height: 24px;
             margin: -12px 0 0 -12px;
-            border: 3px solid var(--cisco-gray-300);
-            border-top: 3px solid var(--cisco-blue);
+            border: 3px solid var(--border-subtle);
+            border-top: 3px solid var(--accent-primary);
             border-radius: 50%;
             animation: spin 1s linear infinite;
         }
@@ -682,7 +881,7 @@
         
         /* Utility Classes */
         .text-gradient {
-            background: linear-gradient(135deg, var(--cisco-blue), var(--cisco-accent-blue));
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-primary-hover));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
@@ -722,15 +921,15 @@
         }
         
         .bg-gradient-cisco {
-            background: linear-gradient(135deg, var(--cisco-blue) 0%, var(--cisco-dark-blue) 100%);
+            background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-secondary) 100%);
         }
-        
+
         .shadow-cisco {
-            box-shadow: 0 10px 30px rgba(0, 188, 235, 0.15);
+            box-shadow: 0 10px 30px var(--accent-glow-soft);
         }
-        
+
         .border-cisco {
-            border-color: var(--cisco-blue) !important;
+            border-color: var(--accent-primary) !important;
         }
         
         /* Enhanced Hover Effects */
@@ -752,32 +951,32 @@
         
         /* Enhanced Input Groups */
         .input-group-text {
-            background: var(--cisco-gray-100);
-            border: 2px solid var(--cisco-gray-300);
+            background: var(--bg-surface-raised);
+            border: 2px solid var(--border-subtle);
             border-left: none;
-            color: var(--cisco-gray-600);
+            color: var(--text-muted);
             font-weight: 500;
         }
-        
+
         .input-group .form-control {
             border-right: none;
         }
-        
+
         .input-group .form-control:focus + .input-group-text {
-            border-color: var(--cisco-blue);
-            background: var(--cisco-light-blue);
-            color: var(--cisco-blue);
+            border-color: var(--accent-primary);
+            background: var(--accent-glow-soft);
+            color: var(--accent-primary);
         }
-        
+
         /* Enhanced File Upload */
         .form-control[type="file"] {
             padding: 0.75rem;
             line-height: 1.5;
         }
-        
+
         .form-control[type="file"]::-webkit-file-upload-button {
-            background: var(--cisco-blue);
-            color: white;
+            background: var(--accent-primary);
+            color: #fff;
             border: none;
             padding: 0.5rem 1rem;
             border-radius: 0.5rem;
@@ -785,10 +984,56 @@
             font-weight: 500;
             transition: all 0.3s ease;
         }
-        
+
         .form-control[type="file"]::-webkit-file-upload-button:hover {
-            background: var(--cisco-accent-blue);
+            background: var(--accent-primary-hover);
             transform: translateY(-1px);
+        }
+
+        /*
+         * Round 17.4 / Phase 6.5: dark-theme polish for misc Bootstrap
+         * surfaces that aren't covered by the semantic-token rewrite
+         * above.  Bootstrap 5.3's native ``data-bs-theme="dark"`` flips
+         * most of these for free; these rules just make sure AdoptIQ-
+         * specific text colours and link accents track our orange
+         * instead of Bootstrap's default sky blue.
+         */
+        [data-bs-theme="dark"] a {
+            color: var(--accent-primary);
+        }
+
+        [data-bs-theme="dark"] a:hover {
+            color: var(--accent-primary-hover);
+        }
+
+        [data-bs-theme="dark"] .text-muted {
+            color: var(--text-muted) !important;
+        }
+
+        [data-bs-theme="dark"] .dropdown-menu {
+            background-color: var(--bg-surface-raised);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-primary);
+        }
+
+        [data-bs-theme="dark"] .dropdown-item {
+            color: var(--text-primary);
+        }
+
+        [data-bs-theme="dark"] .dropdown-item:hover,
+        [data-bs-theme="dark"] .dropdown-item:focus {
+            background-color: var(--accent-glow-soft);
+            color: var(--accent-primary);
+        }
+
+        [data-bs-theme="dark"] .list-group-item {
+            background-color: var(--bg-surface);
+            border-color: var(--border-subtle);
+            color: var(--text-primary);
+        }
+
+        [data-bs-theme="dark"] hr {
+            border-color: var(--border-subtle);
         }
     </style>
     
@@ -852,6 +1097,27 @@
                         <a class="nav-link{% if request.endpoint == 'ask_ai_page' %} active{% endif %}" href="{{ url_for('ask_ai_page') }}" title="Ask AI questions about your portfolio data">
                             <i class="fas fa-robot me-1"></i>Ask AI
                         </a>
+                    </li>
+                    {# Round 17.4 / Phase 6.4: theme toggle button.
+                       ``aria-pressed`` is updated by theme-toggle.js
+                       on every flip so screen readers announce the
+                       new theme state.  Two icons live inside the
+                       button; CSS in <style> above shows the one
+                       that matches the active theme so the icon
+                       always indicates the action that the click
+                       will perform (sun in dark mode -> click to go
+                       light, moon in light mode -> click to go
+                       dark). #}
+                    <li class="nav-item d-flex align-items-center">
+                        <button type="button"
+                                id="theme-toggle"
+                                class="theme-toggle"
+                                aria-label="Toggle light or dark theme"
+                                aria-pressed="false"
+                                title="Toggle light or dark theme">
+                            <span class="theme-icon-dark" aria-hidden="true">&#9728;</span>
+                            <span class="theme-icon-light" aria-hidden="true">&#9789;</span>
+                        </button>
                     </li>
                 </ul>
             </div>
@@ -921,6 +1187,13 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"
             integrity="sha384-geWF76RCwLtnZ8qwWowPQNguL3RmwHVBC9FhGdlKrxdiJJigb/j/68SIy3Te4Bkz"
             crossorigin="anonymous"></script>
+    {# Round 17.4 / Phase 6.4: theme toggle wiring.  The early-paint
+       <script> in <head> already applied the persisted theme before
+       first paint; this same-origin script binds the click handler
+       on #theme-toggle so the user can flip between dark and light.
+       Loaded after Bootstrap so DOM is ready and Bootstrap's own
+       data-bs-theme handlers don't fight ours. #}
+    <script src="{{ url_for('static', filename='js/theme-toggle.js') }}"></script>
     {# Round 8 / Phase 5.5: client-side fallback to populate the
        footer copyright year if the server context processor failed
        to set ``adoptiq_footer_year``.  This avoids the previous

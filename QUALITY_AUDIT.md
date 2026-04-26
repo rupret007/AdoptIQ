@@ -1452,3 +1452,77 @@ Working note. Round 17.3 is a small, surgical follow-on to the Round 17.2 ShareP
 - Bumping the version (no rebuild yet; defaults will be baked into the next build naturally).
 - Actually running on a non-default port end-to-end — the resolver helpers cover the parsing side; production override is exercised on every operator's machine that sets `ADOPTIQ_PORT`.
 
+# Round 17.4 — Dark Theme + Light/Dark Toggle
+
+## Goal
+
+Switch AdoptIQ to a dark-by-default UI with a user-flippable light/dark toggle, using Bootstrap 5.3's native `data-bs-theme` attribute. Cover both the main app (:5151) and the admin dashboard (:5152). Critically, keep the `--risk-*` data-viz tokens **byte-identical** so the Round 13 cross-surface parity (HTML badges ↔ matplotlib charts ↔ Excel conditional formatting all sharing the same hex via `canonical_metrics.RISK_BAND_COLORS`) is not silently broken.
+
+## Approach
+
+- Bootstrap 5.3 already SRI-pinned in `templates/base.html`. Driving the theme through `data-bs-theme="dark|light"` on `<html>` gives correctly-styled tables, dropdowns, modals, and form controls for free — no CSS rewrites of every component.
+- A new layer of **semantic** tokens (`--bg-base`, `--bg-surface`, `--bg-surface-raised`, `--border-subtle`, `--text-primary`, `--text-secondary`, `--text-muted`, `--accent-primary`, `--accent-primary-hover`, `--accent-secondary`, `--accent-glow`, `--accent-glow-soft`, `--shadow-card`) abstracts away brand hex values. Light theme defaults wire these to the existing Cisco-blue chrome; the `[data-bs-theme="dark"]` block re-skins the whole app to charcoal + orange by re-pointing the same semantic tokens at `--adoptiq-orange`-driven values. Per-component CSS rules reference `var(--accent-primary)` etc. and "just work" in both themes.
+- Theme choice persists in `localStorage` under `adoptiq-theme`. An early-paint inline `<script>` in `<head>` reads the stored value and applies the `data-bs-theme` attribute **before first paint**, eliminating FOUC for returning users.
+
+## Palette
+
+```css
+/* dark (default) */
+--bg-base: #0d1117;
+--bg-surface: #161b22;
+--bg-surface-raised: #21262d;
+--border-subtle: #30363d;
+--text-primary: #f0f6fc;
+--text-muted: #8b949e;
+--adoptiq-orange: #ff7a1a;
+--adoptiq-orange-hover: #ff944d;
+--accent-glow: rgba(255, 122, 26, 0.35);
+```
+
+`[data-bs-theme="light"]` reverts the semantic tokens to the existing Cisco-blue palette so toggling back gives today's look unchanged.
+
+## Files changed
+
+| File | Change |
+| --- | --- |
+| `templates/base.html` | `<html lang="en" data-bs-theme="dark">` (dark default); early-paint `<script>` in `<head>` that reads `localStorage['adoptiq-theme']` and applies it pre-paint; new semantic-token layer in `:root` (`--bg-*`, `--text-*`, `--accent-primary*`, `--shadow-card`, `--adoptiq-orange*`); `[data-bs-theme="dark"]` and `[data-bs-theme="light"]` override blocks; retuned navbar gradient, hero, footer, cards, form controls, modal chrome, scrollbars, file-upload button, `.bg-gradient-cisco`, `.text-gradient`, hover glows to consume `var(--accent-primary)` etc.; sun/moon `#theme-toggle` button injected into the navbar near "Ask AI"; `<script src="static/js/theme-toggle.js">` loaded after Bootstrap. **`--risk-*` tokens at lines 112–115 left byte-identical.** |
+| `static/css/style.css` | Added `[data-bs-theme="dark"]` selectors for `.card-header`, `.table thead th`, `.table tbody tr:hover`, `.progress-bar`, `.progress`, `.navbar`, `.footer`, `.alert-{success,info,warning,danger}` (with dark-tuned backgrounds / borders), `.status-{success,danger,warning}`, `.report-section h3`, `.data-table th/td`, `.btn-primary` (replacing the old hardcoded `#007BC7` gradient with `var(--accent-primary)` → `var(--accent-primary-hover)`). Existing rules continue to act as the light defaults. |
+| `static/js/theme-toggle.js` (new) | Plain ES5 module: `STORAGE_KEY='adoptiq-theme'`, `DEFAULT_THEME='dark'`, `VALID_THEMES={dark,light}`. Exposes `safeReadStored`, `safeWriteStored`, `getCurrentTheme`, `applyTheme`, `updateToggleAria`, `toggleTheme`. On `DOMContentLoaded` it reflects the live attribute, binds the click handler, and keeps `aria-pressed`/`aria-label` honest for screen readers. Same-origin so existing CSP `script-src 'self' 'unsafe-inline'` covers it without changes. |
+| `templates/ask_ai.html` | `.ai-card` `border-left` swapped from a hardcoded `--cisco-blue` to `var(--accent-primary, var(--cisco-blue))` so the highlight follows the active theme. |
+| `templates/external_intelligence.html` | Timeline rail (`.intel-timeline::before` / `.timeline-item::before`), bug/maint row hover (`.bug-row:hover`, `.maint-row:hover`), `.status-scheduled`, the JSON `<pre>` panel for `aiCanonicalHeadline`, and the `.input-group-text` `bg-white` repainted via `var(--border-subtle)` / `var(--accent-primary)` / `var(--bg-surface)` / `var(--accent-glow-soft)`. |
+| `templates/leader_report_form.html` | `.shadow-cisco` and `.card:hover` glows switched to `color-mix(in srgb, var(--accent-primary, var(--cisco-accent-blue)) ...)` so the rim follows the active accent without leaking blue tones into the dark UI. |
+| `templates/bst_psirt_search.html` | Page-shell gradient, search panel chrome, form controls, `.bst-btn`, results card, `.summary-box` / `.info-box` / `.warning-box` / `.error-box`, `.direct-link`, `.loading`, `.spinner` all repainted via the semantic tokens; added `[data-bs-theme="dark"]` overrides for the warn/error boxes. |
+| `enhanced_admin_dashboard_v2.py` | Same `:root` token layer + `[data-bs-theme="dark"]` overrides injected into the inline `<style>` of `ENHANCED_ADMIN_TEMPLATE_V2`; `<html lang="en" data-bs-theme="dark">`; same early-paint `<script>` in `<head>`; mirrored `#theme-toggle` button anchored top-right of the admin header; inline ES5 toggle wiring at the end of `<script>` (kept inline because the admin app renders a single self-contained HTML string, not a Jinja partial chain). Worst hardcoded literals (`#fff` cards, `#f0f0f0` borders, `#007BC7` gradients, `rgba(255,255,255,...)` surfaces) repointed to `var(--bg-surface)` / `var(--border-subtle)` / `var(--accent-primary)` / `var(--shadow-card)`. Semantic-error hexes (`#dc3545`, `#6c757d`) intentionally left in place — they read on both themes and are not chrome. |
+| `tests/test_round17_4_dark_theme.py` (new) | Five regression assertions: (1) `<html>` carries `data-bs-theme="dark"` (dark-by-default), (2) early-paint `<script>` in `<head>` references `localStorage` + `adoptiq-theme` + `setAttribute('data-bs-theme'`, (3) `:root` defines `--adoptiq-orange`, `--bg-base`, `--bg-surface`, `--text-primary`, `--accent-primary`, (4) `[data-bs-theme="light"]` override block exists (toggle reversibility), (5) **Round 13 invariant pin**: `--risk-critical: #d62728`, `--risk-high: #ff7f0e`, `--risk-medium: #ffd700`, `--risk-low: #2ca02c` are byte-identical (regression-proofs the chart / Excel parity). |
+
+## Toggle behavior
+
+- First load: early-paint `<script>` reads `localStorage['adoptiq-theme']`. If it's `"dark"` or `"light"`, that value is applied to `<html data-bs-theme="...">` before first paint. Anything else (missing, corrupt, private mode `SecurityError`) → fall back to `"dark"`.
+- Click `#theme-toggle` → flip between `"dark"` ↔ `"light"`, write back to `localStorage`, update `aria-pressed`/`aria-label`. Sun glyph shows in light mode, moon glyph shows in dark mode.
+- Same `STORAGE_KEY = 'adoptiq-theme'` is used by both the main app (:5151) and the admin dashboard (:5152), so a user who toggles in one tab sees the same theme in the other.
+- The toggle is a true two-way switch: the `[data-bs-theme="light"]` override block restores the existing Cisco-blue chrome byte-for-byte, so light mode is identical to the pre-Round-17.4 look.
+
+## Round 13 invariant — risk band parity
+
+The four `--risk-*` tokens (`--risk-critical: #d62728`, `--risk-high: #ff7f0e`, `--risk-medium: #ffd700`, `--risk-low: #2ca02c`) are **untouched** by Round 17.4 and now pinned by `tests/test_round17_4_dark_theme.py::test_risk_band_hexes_are_byte_identical_round_13_pin`. These hexes are shared with `canonical_metrics.RISK_BAND_COLORS`, which drives:
+
+- Matplotlib chart fills (the bar/donut/timeline visuals embedded in HTML, Word, and PDF reports).
+- Excel conditional formatting on risk-band columns.
+- HTML risk badges in the report itself.
+
+The whole point of Round 13 was to make those three surfaces agree byte-for-byte. Round 17.4 deliberately re-skins **chrome** (navbar, cards, alerts, buttons, links, scrollbars) but treats the data-viz palette as load-bearing and off-limits.
+
+## Verification
+
+- `make verify` clean. Test count moved **2190 → 2195 passed, 2 skipped** (the five new pins in `tests/test_round17_4_dark_theme.py`). All four gates green: `ruff check` clean, `bandit -ll` clean, `pip-audit --strict` clean, full `pytest -q` clean.
+- Manual smoke (per the plan's Verification section): open `http://localhost:5151` and `http://localhost:5152`, confirm dark default, click toggle → light, refresh → still light, toggle → dark, refresh → still dark, sweep analyze / ask_ai / history / external_intelligence / leader_report_form / customer_360 / help — no white-on-white or invisible text in either theme.
+
+## Out of scope
+
+- No change to `--risk-*` tokens or `canonical_metrics.RISK_BAND_COLORS`.
+- No change to matplotlib chart palettes or Excel conditional formatting.
+- No new dependencies (Bootstrap 5.3 already pinned; toggle JS is plain ES5).
+- No CSP changes (existing `style-src 'self' 'unsafe-inline'` and `script-src 'self' 'unsafe-inline'` already cover both the inline early-paint script and the new same-origin `theme-toggle.js`).
+- No port changes (Round 17.3 already shipped).
+- No rebuild — pure template / CSS / JS change picked up by the existing v1.0.4 build at next launch.
+

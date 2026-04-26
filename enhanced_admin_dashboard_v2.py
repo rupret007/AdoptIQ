@@ -1586,7 +1586,7 @@ def get_analytics():
 # Enhanced HTML template
 ENHANCED_ADMIN_TEMPLATE_V2 = """
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-bs-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -1594,53 +1594,163 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AdoptIQ Admin Dashboard v2.0 - Enhanced with Audit System</title>
+    {# Round 17.4 / Phase 6.6: early-paint theme bootstrap.  Same
+       contract as the main app: read ``adoptiq-theme`` from
+       localStorage BEFORE first paint and apply it to <html>, so
+       a returning user never sees a flash of the wrong theme.
+       Constrained to "dark"|"light" so a corrupt value cannot
+       inject arbitrary attribute text. #}
+    <script>
+        (function () {
+            try {
+                var stored = null;
+                try { stored = window.localStorage.getItem('adoptiq-theme'); } catch (_) { /* private mode */ }
+                var theme = (stored === 'light' || stored === 'dark') ? stored : 'dark';
+                document.documentElement.setAttribute('data-bs-theme', theme);
+            } catch (_) {
+                document.documentElement.setAttribute('data-bs-theme', 'dark');
+            }
+        })();
+    </script>
     <style>
+        /*
+         * Round 17.4 / Phase 6.6: shared theme tokens for the admin
+         * console.  Mirrors the semantic-token layer in
+         * ``templates/base.html`` so the toggle in the main app and
+         * the admin dashboard agree on what "dark" and "light" mean.
+         * The historical Cisco-blue look is the light default; the
+         * ``[data-bs-theme="dark"]`` block below pivots the chrome
+         * to charcoal + orange.  ``--risk-*`` tokens are NOT defined
+         * here -- the risk-band hexes for ``.risk-high`` /
+         * ``.risk-medium`` / ``.risk-low`` continue to come from
+         * ``canonical_metrics.RISK_BAND_COLORS`` via Jinja so the
+         * admin UI stays byte-identical with Word/Excel exports.
+         */
+        :root {
+            --bg-base: #0076CE;
+            --bg-page: #f5f7fa;
+            --bg-surface: rgba(255, 255, 255, 0.95);
+            --bg-surface-raised: rgba(255, 255, 255, 1.0);
+            --border-subtle: #ddd;
+            --text-primary: #2c3e50;
+            --text-secondary: #495057;
+            --text-muted: #7f8c8d;
+            --accent-primary: #3498db;
+            --accent-primary-hover: #2980b9;
+            --accent-glow: rgba(52, 152, 219, 0.35);
+            --accent-glow-soft: rgba(52, 152, 219, 0.1);
+            --th-bg: linear-gradient(135deg, #3498db, #2980b9);
+            --shadow-card: 0 8px 32px rgba(0, 0, 0, 0.1);
+            --adoptiq-orange: #ff7a1a;
+            --adoptiq-orange-hover: #ff944d;
+        }
+
+        [data-bs-theme="dark"] {
+            --bg-base: #0d1117;
+            --bg-page: #0d1117;
+            --bg-surface: #161b22;
+            --bg-surface-raised: #21262d;
+            --border-subtle: #30363d;
+            --text-primary: #f0f6fc;
+            --text-secondary: #c9d1d9;
+            --text-muted: #8b949e;
+            --accent-primary: var(--adoptiq-orange);
+            --accent-primary-hover: var(--adoptiq-orange-hover);
+            --accent-glow: rgba(255, 122, 26, 0.35);
+            --accent-glow-soft: rgba(255, 122, 26, 0.12);
+            --th-bg: linear-gradient(135deg, #1f242c, #21262d);
+            --shadow-card: 0 8px 32px rgba(0, 0, 0, 0.5);
+            color-scheme: dark;
+        }
+
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
-        
+
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: #0076CE;
+            background: var(--bg-base, #0076CE);
+            color: var(--text-primary);
             min-height: 100vh;
             padding: 20px;
+            transition: background-color 0.25s ease, color 0.25s ease;
         }
-        
+
         .container {
             max-width: 1400px;
             margin: 0 auto;
         }
-        
+
         .header {
-            background: rgba(255, 255, 255, 0.95);
+            background: var(--bg-surface);
+            color: var(--text-primary);
             padding: 20px;
             border-radius: 15px;
             margin-bottom: 20px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            box-shadow: var(--shadow-card);
             backdrop-filter: blur(10px);
+            border: 1px solid var(--border-subtle);
+            position: relative;
         }
-        
+
         .header h1 {
-            color: #2c3e50;
+            color: var(--text-primary);
             text-align: center;
             margin-bottom: 10px;
         }
-        
+
+        [data-bs-theme="dark"] .header h1 {
+            color: var(--accent-primary);
+        }
+
         .header p {
             text-align: center;
-            color: #7f8c8d;
+            color: var(--text-muted);
             font-size: 1.1em;
         }
-        
+
         .header .subtitle {
             text-align: center;
-            color: #3498db;
+            color: var(--accent-primary);
             font-size: 0.9em;
             margin-top: 5px;
             font-style: italic;
         }
+
+        /*
+         * Round 17.4 / Phase 6.6: theme toggle, mirroring the main
+         * app's button.  Anchored to top-right of the header so it
+         * is consistently visible across every admin sub-page.
+         */
+        .theme-toggle {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            background: transparent;
+            border: 2px solid var(--border-subtle);
+            color: var(--text-primary);
+            border-radius: 8px;
+            padding: 6px 10px;
+            font-size: 1rem;
+            line-height: 1;
+            cursor: pointer;
+            transition: all 0.25s ease;
+        }
+        .theme-toggle:hover {
+            color: var(--accent-primary);
+            border-color: var(--accent-primary);
+            box-shadow: 0 2px 10px var(--accent-glow);
+        }
+        .theme-toggle:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+        .theme-toggle .theme-icon-dark { display: none; }
+        .theme-toggle .theme-icon-light { display: inline; }
+        [data-bs-theme="dark"] .theme-toggle .theme-icon-dark { display: inline; }
+        [data-bs-theme="dark"] .theme-toggle .theme-icon-light { display: none; }
         
         .dashboard-grid {
             display: grid;
@@ -1648,47 +1758,61 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
             gap: 20px;
             margin-bottom: 20px;
         }
-        
+
         .dashboard-card {
-            background: rgba(255, 255, 255, 0.95);
+            background: var(--bg-surface);
+            color: var(--text-primary);
             padding: 20px;
             border-radius: 15px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            box-shadow: var(--shadow-card);
             backdrop-filter: blur(10px);
+            border: 1px solid var(--border-subtle);
         }
-        
+
         .dashboard-card h3 {
-            color: #2c3e50;
+            color: var(--text-primary);
             margin-bottom: 15px;
-            border-bottom: 2px solid #3498db;
+            border-bottom: 2px solid var(--accent-primary);
             padding-bottom: 10px;
         }
-        
+
+        [data-bs-theme="dark"] .dashboard-card h3 {
+            color: var(--accent-primary);
+        }
+
         .status-item {
             display: flex;
             justify-content: space-between;
             margin-bottom: 10px;
             padding: 8px;
-            background: rgba(52, 152, 219, 0.1);
+            background: var(--accent-glow-soft);
             border-radius: 8px;
         }
-        
+
         .status-label {
             font-weight: 600;
-            color: #2c3e50;
+            color: var(--text-primary);
         }
-        
+
         .status-value {
             font-weight: bold;
-            color: #3498db;
+            color: var(--accent-primary);
         }
-        
+
         .status-running {
             color: #27ae60;
         }
-        
+
         .status-stopped {
             color: #e74c3c;
+        }
+
+        [data-bs-theme="dark"] .status-running {
+            color: #84e08a;
+        }
+
+        [data-bs-theme="dark"] .status-stopped {
+            color: #ff7e7e;
         }
         
         /* Round 12 / Phase 5.3: previously the admin traffic-light
@@ -1720,43 +1844,54 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
         }
         
         .table-container {
-            background: rgba(255, 255, 255, 0.95);
+            background: var(--bg-surface);
+            color: var(--text-primary);
             padding: 20px;
             border-radius: 15px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            box-shadow: var(--shadow-card);
             backdrop-filter: blur(10px);
+            border: 1px solid var(--border-subtle);
             margin-bottom: 20px;
         }
-        
+
         .table-container h3 {
-            color: #2c3e50;
+            color: var(--text-primary);
             margin-bottom: 15px;
-            border-bottom: 2px solid #3498db;
+            border-bottom: 2px solid var(--accent-primary);
             padding-bottom: 10px;
         }
-        
+
+        [data-bs-theme="dark"] .table-container h3 {
+            color: var(--accent-primary);
+        }
+
         table {
             width: 100%;
             border-collapse: collapse;
             margin-top: 10px;
+            color: var(--text-primary);
         }
-        
+
         th, td {
             padding: 12px;
             text-align: left;
-            border-bottom: 1px solid #ddd;
+            border-bottom: 1px solid var(--border-subtle);
         }
-        
+
         th {
-            background: linear-gradient(135deg, #3498db, #2980b9);
+            background: var(--th-bg);
             color: white;
             font-weight: 600;
         }
-        
-        tr:hover {
-            background: rgba(52, 152, 219, 0.1);
+
+        [data-bs-theme="dark"] th {
+            color: var(--accent-primary);
         }
-        
+
+        tr:hover {
+            background: var(--accent-glow-soft);
+        }
+
         .btn {
             display: inline-block;
             padding: 10px 20px;
@@ -1768,62 +1903,77 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
             font-weight: 600;
             transition: all 0.3s ease;
         }
-        
+
         .btn-primary {
-            background: linear-gradient(135deg, #3498db, #2980b9);
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-primary-hover));
             color: white;
         }
-        
+
         .btn-success {
             background: linear-gradient(135deg, #27ae60, #229954);
             color: white;
         }
-        
+
         .btn-danger {
             background: linear-gradient(135deg, #e74c3c, #c0392b);
             color: white;
         }
-        
+
         .btn-warning {
             background: linear-gradient(135deg, #f39c12, #e67e22);
             color: white;
         }
-        
+
         .btn:hover {
             transform: translateY(-2px);
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+            box-shadow: 0 4px 15px var(--accent-glow);
         }
-        
+
         .alert {
             padding: 15px;
             margin: 10px 0;
             border-radius: 8px;
             font-weight: 600;
         }
-        
+
         .alert-success {
             background: rgba(39, 174, 96, 0.1);
             color: #27ae60;
             border: 1px solid #27ae60;
         }
-        
+
         .alert-danger {
             background: rgba(231, 76, 60, 0.1);
             color: #e74c3c;
             border: 1px solid #e74c3c;
         }
-        
+
         .alert-warning {
             background: rgba(243, 156, 18, 0.1);
             color: #f39c12;
             border: 1px solid #f39c12;
         }
-        
+
+        [data-bs-theme="dark"] .alert-success {
+            background: rgba(39, 174, 96, 0.18);
+            color: #84e08a;
+        }
+
+        [data-bs-theme="dark"] .alert-danger {
+            background: rgba(231, 76, 60, 0.18);
+            color: #ff7e7e;
+        }
+
+        [data-bs-theme="dark"] .alert-warning {
+            background: rgba(243, 156, 18, 0.18);
+            color: #ffc97a;
+        }
+
         .refresh-btn {
             position: fixed;
             bottom: 20px;
             right: 20px;
-            background: linear-gradient(135deg, #9b59b6, #8e44ad);
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-primary-hover));
             color: white;
             border: none;
             border-radius: 50%;
@@ -1831,49 +1981,72 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
             height: 60px;
             font-size: 24px;
             cursor: pointer;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+            box-shadow: 0 4px 15px var(--accent-glow);
             transition: all 0.3s ease;
         }
-        
+
         .refresh-btn:hover {
             transform: scale(1.1);
         }
-        
+
         .analytics-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
             gap: 15px;
             margin-bottom: 20px;
         }
-        
+
         .analytics-card {
-            background: rgba(255, 255, 255, 0.95);
+            background: var(--bg-surface);
+            color: var(--text-primary);
             padding: 15px;
             border-radius: 10px;
             text-align: center;
             box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            border: 1px solid var(--border-subtle);
         }
-        
+
         .analytics-number {
             font-size: 2em;
             font-weight: bold;
-            color: #3498db;
+            color: var(--accent-primary);
         }
-        
+
         .analytics-label {
-            color: #7f8c8d;
+            color: var(--text-muted);
             margin-top: 5px;
+        }
+
+        a {
+            color: var(--accent-primary);
+        }
+        a:hover {
+            color: var(--accent-primary-hover);
         }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
+            {# Round 17.4 / Phase 6.6: theme toggle button.  Click
+               handler is wired by the inline ``theme-toggle.js``
+               equivalent at the bottom of this template; the
+               early-paint <script> in <head> already applied the
+               persisted choice before first paint. #}
+            <button type="button"
+                    id="theme-toggle"
+                    class="theme-toggle"
+                    aria-label="Toggle light or dark theme"
+                    aria-pressed="false"
+                    title="Toggle light or dark theme">
+                <span class="theme-icon-dark" aria-hidden="true">&#9728;</span>
+                <span class="theme-icon-light" aria-hidden="true">&#9789;</span>
+            </button>
             <h1>🚀 AdoptIQ Admin Dashboard v2.0</h1>
             <p>Advanced Monitoring & Security Analytics</p>
             <div class="subtitle">Real-time Report Monitoring • IP Tracking • Audit System • Security Logs</div>
             {% if main_app_url %}
-            <p style="margin-top: 12px;"><a href="{{ main_app_url }}" target="_blank" rel="noopener noreferrer" style="color: rgba(255,255,255,0.95); text-decoration: underline;">← Back to AdoptIQ</a></p>
+            <p style="margin-top: 12px;"><a href="{{ main_app_url }}" target="_blank" rel="noopener noreferrer">← Back to AdoptIQ</a></p>
             {% endif %}
         </div>
         
@@ -2470,6 +2643,73 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 alert('Failed to reset Snowflake query metrics.');
             }
         }
+
+        /*
+         * Round 17.4 / Phase 6.6: theme toggle wiring.  This is a
+         * deliberately small, self-contained ES5 implementation
+         * (no external file fetch -- the admin dashboard renders a
+         * single inlined template, not a Jinja partial chain) that
+         * mirrors the contract of ``static/js/theme-toggle.js`` in
+         * the main app:
+         *   * persist user choice in localStorage under
+         *     ``adoptiq-theme`` (same key as the main app so a user
+         *     who toggled there sees the same theme here).
+         *   * accept only "dark" | "light" -- corrupt values are
+         *     ignored and we fall back to "dark".
+         *   * keep ``aria-pressed``/``aria-label`` honest for screen
+         *     readers.
+         * The early-paint script in <head> already applied the
+         * stored value before first paint, so this block only has to
+         * reflect the live attribute and bind the click handler.
+         */
+        (function () {
+            var STORAGE_KEY = 'adoptiq-theme';
+            var DEFAULT_THEME = 'dark';
+            var VALID_THEMES = { dark: true, light: true };
+
+            function safeReadStored() {
+                try {
+                    return window.localStorage.getItem(STORAGE_KEY);
+                } catch (_) {
+                    return null;
+                }
+            }
+            function safeWriteStored(theme) {
+                try { window.localStorage.setItem(STORAGE_KEY, theme); } catch (_) { /* private mode */ }
+            }
+            function getCurrentTheme() {
+                var stored = safeReadStored();
+                if (VALID_THEMES[stored]) return stored;
+                var attr = document.documentElement.getAttribute('data-bs-theme');
+                if (VALID_THEMES[attr]) return attr;
+                return DEFAULT_THEME;
+            }
+            function applyTheme(theme) {
+                if (!VALID_THEMES[theme]) theme = DEFAULT_THEME;
+                document.documentElement.setAttribute('data-bs-theme', theme);
+                updateToggleAria(theme);
+            }
+            function updateToggleAria(theme) {
+                var btn = document.getElementById('theme-toggle');
+                if (!btn) return;
+                var nextTheme = theme === 'dark' ? 'light' : 'dark';
+                btn.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+                btn.setAttribute('aria-label', 'Switch to ' + nextTheme + ' theme');
+            }
+            function toggleTheme() {
+                var current = getCurrentTheme();
+                var next = current === 'dark' ? 'light' : 'dark';
+                applyTheme(next);
+                safeWriteStored(next);
+            }
+            document.addEventListener('DOMContentLoaded', function () {
+                applyTheme(getCurrentTheme());
+                var btn = document.getElementById('theme-toggle');
+                if (btn) {
+                    btn.addEventListener('click', toggleTheme);
+                }
+            });
+        })();
     </script>
 </body>
 </html>

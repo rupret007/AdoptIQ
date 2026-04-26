@@ -16,7 +16,7 @@
         top: 0;
         bottom: 0;
         width: 2px;
-        background: var(--cisco-gray-300);
+        background: var(--border-subtle, var(--cisco-gray-300));
     }
     .timeline-item { position: relative; margin-bottom: 1.5rem; padding-left: 1.5rem; }
     .timeline-item::before {
@@ -27,8 +27,8 @@
         width: 12px;
         height: 12px;
         border-radius: 50%;
-        border: 2px solid var(--cisco-blue);
-        background: white;
+        border: 2px solid var(--accent-primary, var(--cisco-blue));
+        background: var(--bg-surface, white);
         z-index: 1;
     }
     /* Round 2 / Phase 5.5: 'critical' is its own impact band.
@@ -56,9 +56,9 @@
         background: var(--cisco-success-bg, #e6f9ef);
     }
     .bug-row { transition: background 0.2s; }
-    .bug-row:hover { background: var(--cisco-light-blue) !important; }
+    .bug-row:hover { background: var(--accent-glow-soft, var(--cisco-light-blue)) !important; }
     .maint-row { transition: background 0.2s; }
-    .maint-row:hover { background: var(--cisco-light-blue) !important; }
+    .maint-row:hover { background: var(--accent-glow-soft, var(--cisco-light-blue)) !important; }
     .tab-content > .tab-pane { padding-top: 1.5rem; }
     /* Round 2 / Phase 5.5: 'critical' is its own impact band */
     .impact-badge-critical {
@@ -70,14 +70,14 @@
     .impact-badge-low    { background: var(--cisco-success); color: var(--cisco-white, #fff); }
     .status-active    { color: var(--cisco-danger);  font-weight: 600; }
     .status-resolved  { color: var(--cisco-success); font-weight: 600; }
-    .status-scheduled { color: var(--cisco-blue);    font-weight: 600; }
+    .status-scheduled { color: var(--accent-primary, var(--cisco-blue));    font-weight: 600; }
     .status-completed { color: var(--cisco-success); font-weight: 600; }
     .refresh-spin { animation: spin 1s linear infinite; }
     .import-file-input { display: none; }
     .search-box { max-width: 400px; }
     .hidden-by-search { display: none !important; }
     .ai-answer { white-space: pre-wrap; font-size: 0.95rem; line-height: 1.6; }
-    .ai-card { border-left: 4px solid var(--cisco-blue); }
+    .ai-card { border-left: 4px solid var(--accent-primary, var(--cisco-blue)); }
 </style>
 {% endblock %}
 
@@ -204,7 +204,7 @@
             <!-- Search bar -->
             <div class="mb-3">
                 <div class="input-group search-box">
-                    <span class="input-group-text bg-white" aria-hidden="true"><i class="fas fa-search text-muted"></i></span>
+                    <span class="input-group-text" aria-hidden="true"><i class="fas fa-search text-muted"></i></span>
                     {# Round 7 / Phase 4.7: a11y -- the only label
                        associated with the search input was the placeholder
                        text, which is announced inconsistently and is
@@ -529,7 +529,7 @@
                                                 <i class="fas fa-info-circle me-1"></i>How was this answer grounded?
                                             </summary>
                                             <div id="aiContextSummary" class="small text-muted mt-2" style="display:none;"></div>
-                                            <pre id="aiCanonicalHeadline" class="small text-muted mt-2 mb-0" style="display:none; white-space:pre-wrap; background:#f8f9fa; padding:0.5rem; border-radius:4px;"></pre>
+                                            <pre id="aiCanonicalHeadline" class="small text-muted mt-2 mb-0" style="display:none; white-space:pre-wrap; background:var(--bg-surface-raised, #f8f9fa); color:var(--text-primary, inherit); padding:0.5rem; border-radius:4px;"></pre>
                                         </details>
                                     </div>
                                 </div>
