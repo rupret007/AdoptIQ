@@ -1711,3 +1711,75 @@ Net test delta: **2196 → 2199 passed** (+3, all from `tests/test_round18_doc_c
 
 **Trailer:** Made-with: Claude Opus 4.7 (1M context)
 
+## Round 19.1 — handoff 2026-04-26
+
+This is a Cursor closing handoff for a small, surgical session that closes
+**R18-NEXT-005** (the doc/code parity expansion follow-up Claude flagged at
+the end of Round 18). The bigger Round 19 mission ("Report Accuracy Golden
+Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
+— this is `.1` because it slots in beside that mission, not on top of it.
+
+**What changed (plain English):**
+- Added `tests/test_round19_1_doc_code_parity_expansion.py` (NEW, 6 cases) that
+  pins three more doc/code parity invariants in the same shape as the R18-001
+  pattern, so a future doc OR code edit that breaks any of them fails
+  `make verify` locally before it can land:
+  1. **Admin bind default** — `enhanced_admin_dashboard_v2.py:3826/3830` defaults to
+     `127.0.0.1` unless `ADOPTIQ_ADMIN_BIND_PUBLIC=1`; `CLAUDE.md` admin row
+     (line 49) and the `**Admin security:**` callout (line 111) say the same
+     thing. (Round 14 R14-007 / Phase 4.5.)
+  2. **Default ports 5151 / 5152** — `app_simple._DEFAULT_MAIN_PORT` (line 19539)
+     and `enhanced_admin_dashboard_v2._DEFAULT_ADMIN_PORT` (line 122) match the
+     `CLAUDE.md` Two Flask Apps table rows; `ADOPTIQ_PORT` /
+     `ADOPTIQ_ADMIN_PORT` env-var override names are pinned in code. (Round 17.3.)
+  3. **Risk-band hex SSoT parity** — `canonical_metrics.RISK_BAND_COLORS`
+     (lines 73-80) for `CRITICAL`/`HIGH`/`MEDIUM`/`LOW` equals the four
+     `--risk-*` CSS tokens in `templates/base.html` (lines 112-115)
+     byte-for-byte: `#d62728` / `#ff7f0e` / `#ffd700` / `#2ca02c`. This is the
+     load-bearing Round 13/15 cross-surface invariant Round 17.4 explicitly
+     left untouched when the dark theme shipped.
+- No source-code changes (`*.py` outside the new test file). No template / CSS
+  / config changes. No CLAUDE.md changes — the doc was already correct on all
+  three invariants; this round just pins it.
+
+**Files touched:**
+- `tests/test_round19_1_doc_code_parity_expansion.py` — NEW, 6 doc/code parity tests
+- `QUALITY_AUDIT.md` — this Round 19.1 handoff section
+
+**SSoT modules touched:** none
+  (The test reads `canonical_metrics.py` and `config.py` as ground truth, but
+  does not modify either. No SSoT module is mutated this round.)
+
+**Tests added/updated:**
+- `tests/test_round19_1_doc_code_parity_expansion.py::test_admin_app_bind_default_is_loopback` — pins the admin-app `'0.0.0.0' if _bind_public else '127.0.0.1'` ternary + `ADOPTIQ_ADMIN_BIND_PUBLIC` env-var name in `enhanced_admin_dashboard_v2.py`
+- `tests/test_round19_1_doc_code_parity_expansion.py::test_claude_md_admin_row_documents_loopback_default_and_escape_hatch` — pins `127.0.0.1` + `ADOPTIQ_ADMIN_BIND_PUBLIC` on the `| Admin | 5152 |` row of CLAUDE.md
+- `tests/test_round19_1_doc_code_parity_expansion.py::test_claude_md_admin_security_line_pins_loopback_default` — pins the `**Admin security:**` callout line in CLAUDE.md (loopback default + escape-hatch env var)
+- `tests/test_round19_1_doc_code_parity_expansion.py::test_default_ports_match_claude_md_two_flask_apps_table` — pins `_DEFAULT_MAIN_PORT = 5151` + `_DEFAULT_ADMIN_PORT = 5152` against the `CLAUDE.md` Two Flask Apps table rows
+- `tests/test_round19_1_doc_code_parity_expansion.py::test_default_ports_have_env_overrides_documented` — pins `ADOPTIQ_PORT` / `ADOPTIQ_ADMIN_PORT` env-var-name discipline in both apps
+- `tests/test_round19_1_doc_code_parity_expansion.py::test_canonical_metrics_risk_band_colors_match_css_tokens` — pins canonical_metrics ↔ templates/base.html risk-band hex parity (the Round 13/15/17.4 cross-surface invariant)
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 2205 passed / 2 skipped (was 2199 / 2; +6 net, all from the new file)
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py` — `if 'X' in locals()` antipattern count grew from **74 → 84** since Round 18's recon (24 hours). 10 new sites need the same per-function dead-code triage R18-NEXT-001 deferred. `grep -nE "in locals\(\)" app_simple.py` reproduces the count; pick a sample of 5-10 newly-added sites and classify each as (a) always-bound → simplify, or (b) conditionally-bound → keep with a comment naming the producing branch.
+2. `app_simple.py` ~247 broad-except sites — R18-NEXT-002 still open. The Round 18 spot-check confirmed all are Category (i) defensive boundaries, but the sub-audit of the ~50 sites WITHOUT an `as e:` clause (no exception context, no debug log) is still pending; mass-add `logger.debug(... exc_info=True)` instrumentation per site OR justify keeping each silent.
+3. The Round 19 KPI registry section above (line ~1299) is **Phase 1 only** — KPI registry inventory is filled in but Phases 2-7 (golden fixture build, formatter run, programmatic diff vs expected) are not started. R18-D1 (cross-format parity coverage gap) was supposed to absorb into this round and has not. Either close R18-D1 here in Round 19 by building the fixture, or split it back out to its own follow-up.
+4. `.github/workflows/build.yml::quality-checks` runs only `pytest -q` — ruff / bandit / pip-audit are local-only. R18-NEXT-004 still open. A Cursor-edit that's clean locally but adds a ruff or bandit regression won't be caught by CI today.
+5. `pip list --outdated` reports 76 outdated packages (Round 18 baseline; not re-checked this session). `pip-audit` is still clean (no CVEs), but staleness compounds; R18-NEXT-003 still open.
+
+**Known deferrals (intentional non-fixes):**
+- R18-NEXT-001 (broad triage of all ~84 `if X in locals()` sites in `app_simple.py`) — needs per-function dead-code analysis; one round of its own; left to Claude or a future Cursor session.
+- R18-NEXT-002 (no-context broad-except sub-audit, ~50 sites) — same reason.
+- R18-NEXT-003 (76 outdated packages) — pip-audit still clean; defer to a dedicated dependency-bump round so any regressions isolate.
+- R18-NEXT-004 (CI/`make verify` alignment) — out-of-scope per Round 0 contract; needs a separate CI-only commit.
+- The big Round 19 mission ("Report Accuracy Golden Fixture", line ~1299) — the KPI registry is in place but the synthetic fixture, formatter run, and per-KPI diff harness are not yet built. R18-D1 (cross-format parity coverage gap) is supposed to absorb into that round.
+- No CLAUDE.md edits this round — the doc was already correct on all three pinned invariants; this round only adds the regression net so future drift is caught locally before it can land.
+- `# Round 19.1` source markers — no source files were modified, so no `# Round 19.1` markers exist; the per-file footprint is just the one new test file.
+
+**Trailer:** Made-with: Cursor
+
