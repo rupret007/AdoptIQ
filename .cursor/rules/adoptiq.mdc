@@ -1,0 +1,359 @@
+---
+alwaysApply: true
+---
+
+# AdoptIQ -- Cisco Renewal Risk and Adoption Intelligence
+
+## Project Overview
+
+AdoptIQ is a Flask-based desktop web application that generates renewal-risk and adoption reports (Word and Excel) from Snowflake data, CSOne adoption barriers, support cases, and external service intelligence. It is packaged with PyInstaller for both macOS and Windows distribution.
+
+- **Python:** 3.x (no explicit `python_requires` declared)
+- **Web framework:** Flask + Flask-WTF (CSRF) + Jinja2 templates
+- **Frontend:** vanilla JavaScript, custom CSS in `static/css/style.css`
+- **Data sources:** Snowflake (primary), CSOne `.xlsx` exports, external sites (`status.webex.com`, `help.webex.com`)
+- **AI / LLM:** OpenAI-compatible client + Anthropic; "Ask AI" pipeline via `ask_ai_grounded.py`
+- **Secrets:** Keeper integration via `hvac`, plus build-time bundling via `embed_credentials.py`
+- **Packaging:** PyInstaller (`AdoptIQ.app` for Mac, `AdoptIQ.exe` and `AdoptIQ-Setup.exe` for Windows)
+- **Current version:** `ADOPTIQ_VERSION = "1.0.3"`, `ADOPTIQ_BUILD = "1"` in `config.py`
+
+## Architecture
+
+```
+app_simple.py                       Main Flask web app (port 5001)
+enhanced_admin_dashboard_v2.py      Admin/monitoring Flask app (port 5002, loopback by default)
+adoptiq_backend.py                  Core analysis/report backend (Word/Excel generation)
+config.py                           Version, SECRET_KEY, env loading
+embed_credentials.py                Build-time secret bundler -> _bundled_secrets.py
+templates/                          Jinja2 templates (11 files)
+static/                             CSS + JS
+tests/                              pytest suite
+```
+
+The codebase is **flat**: no `__init__.py` files anywhere. All ~33 modules live at the project root.
+
+### Entry Points
+
+| Entry | Purpose | Port | Host control |
+|---|---|---|---|
+| `app_simple.py` | Main web UI -- analysis, reports, history, Ask AI, External Intelligence | 5001 | `ADOPTIQ_BIND_HOST` (default `0.0.0.0`) |
+| `enhanced_admin_dashboard_v2.py` | Admin dashboard -- monitoring, audits, security, analytics | 5002 | Loopback default; `ADOPTIQ_ADMIN_HOST` direct, or `ADOPTIQ_ADMIN_BIND_PUBLIC` truthy -> `0.0.0.0` |
+| `adoptiq_backend.py` (`main()`) | Module-level entry; not a server | N/A | N/A |
+| `export_adrian_snowflake_records.py` | CLI export of Snowflake rows to Excel (argparse) | N/A | N/A |
+| `embed_credentials.py` | Build-time only; reads `secrets.env`, writes `_bundled_secrets.py` | N/A | N/A |
+| `installer_app.py` / `uninstaller_app.py` | Windows helper executables (PyInstaller targets) | N/A | N/A |
+
+`enhanced_admin_dashboard_v2.py` requires `ADOPTIQ_ADMIN_SECRET_KEY` to be set in frozen builds (raises if unset). In dev, it falls back to `secrets.token_urlsafe(48)`.
+
+### Data Flow
+
+1. User uploads CSOne `.xlsx` via the main web UI (`/start_analysis`, `/start_compact_analysis`, `/start_customer_renewal_analysis`, `/start_leader_report`, etc.)
+2. `app_simple.py` saves to `UPLOAD_FOLDER` (under `_APP_SUPPORT`) and starts a daemon analysis thread
+3. CSOne data is loaded and passed through the shared pipeline: `_prepare_csone` -> `_apply_scope_filter_csone`
+4. Snowflake prefetch (`snowflake_prefetch.py`) pulls customer/subscription/case data; `data_source_validator.py` enforces required-source checks
+5. Per-report logic runs in `adoptiq_backend.py`, `advanced_renewal_analyzer.py`, `leader_report_generator.py`, etc.
+6. Optional external intelligence (`incident_storage.py`) is layered in for context
+7. Reports written by `executive_intelligence_formatter.py`, `compact_report_formatter.py`, `executive_report_builder.py`, `leader_report_components.py`
+8. Insights stored via `enhanced_admin_dashboard_v2.store_report_insights` (best-effort, optional import)
+9. Results page exposes downloads via `/download/<analysis_id>/<file_type>` and `/download-file/<filename>`
+
+### Module Map (root-level `*.py`, 33 files)
+
+#### Web layer
+| Module | Purpose |
+|---|---|
+| `app_simple.py` | Main Flask app (port 5001); analysis orchestration, all main routes, `_APP_SUPPORT` resolution |
+| `enhanced_admin_dashboard_v2.py` | Admin Flask app (port 5002); monitoring, audits, error/security/analytics endpoints; report-insights persistence |
+
+#### Core analysis backbone
+| Module | Purpose |
+|---|---|
+| `adoptiq_backend.py` | Core analysis/report engine (Word + Excel); large all-in-one module |
+| `advanced_renewal_analyzer.py` | Renewal-risk analysis from Snowflake |
+| `canonical_metrics.py` | Single source of truth for cross-report counts |
+| `risk_scoring.py` | Deterministic weighted risk scoring |
+| `report_consistency.py` | Cross-report consistency checks and failsafes |
+| `data_normalization.py` | Shared normalization helpers for report consistency |
+| `data_contracts.py` | Shared data contract types for consistency payloads |
+
+#### Reporting / formatters
+| Module | Purpose |
+|---|---|
+| `compact_report_formatter.py` | Compact (executive) report formatter |
+| `executive_intelligence_formatter.py` | Word compact reports / executive intelligence formatting |
+| `executive_report_builder.py` | Thin Word report builder over `adoptiq_backend` primitives |
+| `leader_report_generator.py` | Leader (manager) reports: direct reports, action plans, barriers, pulse, TAC |
+| `leader_report_components.py` | Repository/validator/writer facades for `LeaderReportGenerator` |
+| `report_utils.py` | Shared report formatting, risk scoring helpers, canonical data sources |
+
+#### Data sources
+| Module | Purpose |
+|---|---|
+| `snowflake_prefetch.py` | Snowflake prefetch/cache, retries, active-context registry |
+| `snowflake_csone_discovery.py` | Detects whether CSOne-style data exists in Snowflake |
+| `snowflake_table_policy.py` | Allow/deny policy for Snowflake table references in SQL |
+| `enhanced_snowflake_insights.py` | Broader Snowflake table insights |
+| `cisco_internal_integrations.py` | Cisco BST / Circuit (and related) internal integrations |
+| `incident_storage.py` | SQLite persistence for external intelligence (incidents, bugs, maintenances) |
+| `data_source_validator.py` | Validates required data sources before report generation |
+
+#### AI
+| Module | Purpose |
+|---|---|
+| `ask_ai_grounded.py` | Grounded Ask AI (retrieval-first) pipeline |
+
+#### Diagnostics / observability
+| Module | Purpose |
+|---|---|
+| `connectivity_diagnostics.py` | Keeper/Snowflake connectivity self-test |
+| `error_classifier.py` | Classifies analysis failures (VPN, TLS, etc.) for user messaging |
+| `structured_logging.py` | Structured logging helpers for critical paths |
+
+#### Build / packaging
+| Module | Purpose |
+|---|---|
+| `embed_credentials.py` | Reads `secrets.env`, writes `_bundled_secrets.py`; CI secret lint |
+| `update_version_pc.py` | Rewrites `ADOPTIQ_VERSION` / `ADOPTIQ_BUILD` in `config.py` and `version_info.txt` |
+| `installer_app.py` | Windows installer wrapper (PyInstaller target for `adoptiq_installer.spec`) |
+| `uninstaller_app.py` | Windows uninstaller (PyInstaller target for `adoptiq_uninstaller.spec`) |
+| `_bundled_secrets.py` | **Generated.** Auto-loads obfuscated env into `os.environ`. Never edit by hand. Never commit. |
+| `export_adrian_snowflake_records.py` | CLI Snowflake export tool |
+
+#### Config
+| Module | Purpose |
+|---|---|
+| `config.py` | App config, version constants, `SECRET_KEY`, `load_dotenv()` |
+
+### Templates
+
+11 Jinja2 templates: `analyze.html`, `history.html`, `minimal_test.html`, `leader_report_form.html`, `base.html`, `external_intelligence.html`, `ask_ai.html`, `500.html`, `bst_psirt_search.html`, `help.html`, `404.html`
+
+### Static Assets
+
+3 files: `static/css/style.css`, `static/js/ask_ai.js`, `static/js/subscription-search.js`
+
+### Flask Routes
+
+#### Main app (`app_simple.py`, port 5001)
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/` | GET | App home / analysis UI |
+| `/start_analysis` | POST | Start full analysis |
+| `/progress/<analysis_id>` | GET | Progress page |
+| `/status/<analysis_id>` | GET | Status JSON polling |
+| `/api/status/all` | GET | All analyses status |
+| `/api/diag/connectivity` | GET | Connectivity diagnostics |
+| `/api/debug/verbose` | GET, POST | Verbose debug API |
+| `/previous-reports` | GET | Previous reports listing |
+| `/help` | GET | Help page |
+| `/history` | GET | Report history |
+| `/ask-ai` | GET | Ask AI UI |
+| `/api/ask-ai-portfolio` | POST | Portfolio-grounded Ask AI |
+| `/external-intelligence` | GET | External intel UI |
+| `/api/refresh-external-intel` | POST | Refresh external intel |
+| `/api/export-intel` | GET | Export intel |
+| `/api/import-intel` | POST | Import intel |
+| `/api/ask-intel` | POST | Query intel |
+| `/download-file/<filename>` | GET | File download |
+| `/download/<analysis_id>/<file_type>` | GET | Per-analysis artifact download |
+| `/cancel/<analysis_id>` | POST | Cancel analysis |
+| `/start_compact_analysis` | POST | Start compact report |
+| `/start_customer_renewal_analysis` | POST | Start renewal report |
+| `/search_subscriptions` | POST | Subscription search |
+| `/subscription_analysis/<subscription_id>` | GET | Per-subscription analysis |
+| `/subscription_renewal_risk/<subscription_id>` | GET | Per-subscription renewal risk |
+| `/start_subscription_analysis` | POST | Start subscription analysis |
+| `/clear_stuck_analyses` | POST | Clear stuck jobs |
+| `/start_leader_report` | POST | Start leader report |
+| `/leader_report_form` | GET | Leader report form |
+| `/simple_test`, `/test_generate_report` | POST | Internal test hooks |
+| `/bst_psirt_search` (and related) | POST | BST / PSIRT defect search |
+
+#### Admin app (`enhanced_admin_dashboard_v2.py`, port 5002)
+
+| Route | Purpose |
+|---|---|
+| `/` | Admin dashboard home |
+| `/start_server`, `/stop_server` | Lifecycle control |
+| `/export_logs`, `/clear_logs` | Log handling |
+| `/api/reports` | Reports inventory |
+| `/api/connections` | Connection telemetry |
+| `/api/errors` | Error log API |
+| `/api/analytics` | Analytics data |
+| `/api/security` | Security telemetry |
+| `/api/audits` | Audit log API |
+| `/audit_report/<analysis_id>` | Per-analysis audit report |
+| `/api/audit_summary` | Audit summary |
+| `/api/diag/connectivity`, `/api/debug/verbose` | Diagnostics shared with main app |
+
+## Build Infrastructure
+
+### Mac Build
+- `build_mac.sh` (primary) -> runs `embed_credentials.py`, `update_version_pc.py`, `pyinstaller --clean --noconfirm adoptiq_mac.spec`
+- Spec entry: `app_simple.py`, BUNDLE `AdoptIQ.app`, identifier `com.cisco.adoptiq`, datas include `team_config.json`, `templates/`, `static/`, `certifi` cacert
+- Post-build: `xattr` + `codesign` on `dist/AdoptIQ.app`, then DMG via `hdiutil create` -> `OUTBOX/AdoptIQ-v${VERSION}-build${BUILD}.dmg`
+- `build_mac_dmg.sh` (wrapper) -> calls `build_mac.sh`, then stages a second DMG with `Unblock` instructions and `READ_ME_FIRST.txt`. Optional OneDrive mirroring via `MAC_STAGING_DIR` / `MAC_OUTBOX_DIR`
+
+### PC Build
+- `build_pc.bat` -> runs `embed_credentials.py`, `update_version_pc.py`, `pyinstaller --clean --noconfirm adoptiq_pc.spec`
+- Output: `dist/AdoptIQ.exe` -> copied to `OUTBOX/` along with `Run_AdoptIQ.bat`, `Unblock_AdoptIQ.bat`, `READ_ME_FIRST.txt`, `README.md`, `build_info.txt`
+- Hardcoded staging path: `C:\Users\jestory\OneDrive - Cisco\AI Projects\Staging\AdoptIQ_PC`
+
+### Windows Installer
+- `adoptiq_installer.spec` -> `dist/AdoptIQ-Setup.exe` (bundles `dist/AdoptIQ.exe` + uninstaller + `README.md` + `version_info.txt`)
+- `adoptiq_uninstaller.spec` -> `AdoptIQ-Uninstall.exe`
+- `adoptiq_setup.iss` (Inno Setup) -> `OutputBaseFilename=AdoptIQ-Setup`, default install `{userappdata}\AdoptIQ`; post-install creates `uploads/`, `outputs/`
+
+### Shared Build Steps
+1. `embed_credentials.py` reads `secrets.env` and generates `_bundled_secrets.py` (XOR + base64). Build fails if this fails.
+2. `update_version_pc.py` rewrites `ADOPTIQ_VERSION` / `ADOPTIQ_BUILD` in `config.py` and `version_info.txt` from env vars (defaults `1.0.3` / `1`).
+3. PyInstaller runs with platform-specific `.spec` file.
+4. Output binaries copied to `OUTBOX/`.
+
+## Development Conventions
+
+### Code Safety (synthesized from 7 review documents: `CODE_REVIEW.md`, `CODE_REVIEW_1.0.1.md`, `CODE_REVIEW_AUDIT.md`, `CODE_REVIEW_DEEP_2026.md`, `CODE_REVIEW_DETAILED.md`, `CODE_REVIEW_LATEST.md`, `CODE_REVIEW_LEARNING_AND_HISTORY.md`. Documented fix batches: 7 in v1.0.1 review, 8 in audit, ~24 enumerated items naively summed across docs with overlap.)
+
+#### Tier 1 -- mentioned in 4-6 of 7 review docs (highest priority)
+- All report-generation paths MUST call `raise_validation_error_if_invalid(...)` (or equivalent `data_source_validator` check) before producing output
+- Treat any optional DataFrame as possibly `None` or empty: guard with `if ab_norm is None or arr_data is None: ...` BEFORE `.empty`, `.str`, or column access
+- For string matching on DataFrame columns that may be non-string / NaN / mixed: use `df['col'].astype(str).str.contains(..., na=False)` -- never naive `.str` on raw mixed columns
+- Do NOT use `DataFrame.get('col', default)` where a Series is required for vectorized ops. Use `'col' in df.columns` then `df['col']` (or empty `Series`) instead
+- All Snowflake (and similar) queries that touch user-influenced values MUST use parameterized execution: `cur.execute(sql, params)` with `%s` placeholders. Never string-concat user input into SQL
+- CSOne-backed reports MUST go through the shared pipeline: `_prepare_csone` -> `_apply_scope_filter_csone` (or the designed inclusive fallback). No raw unscoped CSOne for team-scoped metrics
+- For team-scoped reports (e.g. Leader): fetch team subscription data BEFORE loading/scoping CSOne -- the scope filter requires it
+- Resolve `csone_file` paths flexibly: try the path as given first, then `os.path.join(UPLOAD_FOLDER, filename)` (mirror `process_csone_data`)
+- Use `report_utils` canonical helpers (`DATA_SOURCES_CANONICAL`, `get_data_sources_paragraph_text`, `get_data_sources_list`) for source citations -- so reports stay consistent
+- After substantive report or formatter changes, run `python tests/test_reports_extensive.py` to confirm no regressions
+- PyInstaller specs MUST list non-obvious modules in `hiddenimports` (Flask, pandas, Snowflake, formatters, etc.) -- otherwise frozen builds will fail at runtime
+
+#### Tier 2 -- cross-cutting (2-3 of 7 docs)
+- Validate user-facing fields: length caps; reject SQL/script-like substrings; numeric range checks (e.g. days 1-365); uploads via `secure_filename` + 50MB cap + `.xlsx`/`.xls` allow-list only
+- In frozen / PyInstaller runs: use `_APP_SUPPORT` for writable data, `sys._MEIPASS` for bundled assets. NEVER assume project cwd or that `os.path.dirname(__file__)` is writable
+- Persist `analysis_status.json` to `_APP_SUPPORT`, NOT `os.path.join(os.path.dirname(__file__), ...)` -- the latter fails in frozen builds
+- CSOne path allow-listing: use `os.path.normpath` then `startswith(base_norm + os.sep)` -- NOT a naive `startswith(base_norm)` (the latter accepts sibling-prefix paths)
+- CSRF via Flask-WTF on forms. The `X-Requested-With` AJAX bypass is forgeable; acceptable on localhost only. If exposing to a network, add origin checks or token-based CSRF for AJAX
+- Document or surface the `SUPPORT_CASES` Snowflake fallback when the table is missing or empty (don't pretend zero is real data)
+- No hardcoded secrets in `config.py` or anywhere else -- load from env / Keeper / `_bundled_secrets`
+
+#### Tier 3 -- module-specific (1-2 docs each)
+- Risk dict comparisons: `v.get('score', 0) >= 6`, never compare the dict object to an int
+- ARR/severity row logic: `if 'Severity' in customer_cases.columns: customer_cases['Severity'].astype(str) == 'P1'`, else 0 -- not `.get(...)` with a scalar default treated as a per-row value
+- `TECH_FILTERS`, `OFFICIAL_CATEGORIES`, manager lists: keep a single source of truth. `config.py`, `team_config.json`, and `adoptiq_backend.py` must NOT drift
+- Threading: `save_analysis_status()` MUST be called only from within `with analysis_status_lock:` blocks. Background analysis threads are daemons. `cancellation_flags` and `analysis_status` access respects locks
+- Resolve CSOne column names flexibly via `LIKELY_TITLE_COLS` / `LIKELY_DESC_COLS` constants -- not hardcoded `"Title"` / `"Problem Description"`
+- Never let `from wtforms.validators import Optional` shadow `typing.Optional`. Alias as `OptionalValidator` so `Optional[str]` type hints still work
+- Functions that must return strings to callers (e.g. `extract_bems_refs`) MUST return a string on all paths. Never `None` when an inner field is empty -- return `""`
+- `enrich_csone_with_arr` and similar must resolve customer columns flexibly: `Customer Name`, `customer_name`, `BU_NAME`, `Customer` -- not a single hardcoded column
+- BEMS / compact paths: detect the customer column the same way severity is detected, before indexing `bems_cases[customer_col]`
+- If `load_analysis_status` parses ISO datetimes for `step_start_time`, include `end_time` in the same parse list -- otherwise downstream consumers receive a string
+- Avoid bare `except Exception: pass` in non-trivial helpers. At minimum: `except Exception: logger.debug(..., exc_info=False)` with context
+- Close Snowflake cursors in `try/finally`. Log critical broad-`except` failures with `exc_info=True`
+- All report flows (Comprehensive / Renewal / Leader) should skip CSOne files whose names look like AdoptIQ outputs (e.g. `AdoptIQ_Portfolio_*`) -- never feed a prior report back as data
+- History route: if `get_report_history()` returns non-list (e.g. `None`), coerce to `[]` BEFORE the template
+- JS history/progress links MUST use `/progress/${encodeURIComponent(analysisId)}` -- not a stale `/results/...` pattern
+- `enhanced_admin_dashboard_v2` MUST NOT import `adoptiq_backend` or `app_simple` -- direction is app -> admin only, to avoid circular imports
+- Optional admin/learning module imports (e.g. `get_learned_insights`) wrapped in `try/except`, with no-op / empty-string fallback so the core app runs if they are missing
+- LLM prompt `.format()` calls must supply ALL placeholders. e.g. `PROMPT_PORTFOLIO_TEMPLATE.format(MANAGER=manager, TECHNOLOGY=tech)` -- partial format raises `KeyError`
+- `webbrowser.open` on startup wrapped in `try/except` and a short delay -- a missing browser must not crash the app
+
+### Frontend
+- All external / cross-app `target="_blank"` links MUST include `rel="noopener noreferrer"`
+- CSRF meta tag access: null-check before `.getAttribute('content')`
+- `fetch()` calls: check `response.ok` before `.json()`
+- Admin templates: defensively coerce possibly-null fields. e.g. `request_count = row[3] if row[3] is not None else 0` (so `|sum` filter never sees `None`); truncate `user_agent` and `error.message`; default `risk_level`
+
+### Security
+- Admin app binds to `127.0.0.1` by default. To expose, set `ADOPTIQ_ADMIN_HOST` directly or `ADOPTIQ_ADMIN_BIND_PUBLIC` truthy
+- Frozen builds raise on missing `ADOPTIQ_ADMIN_SECRET_KEY`. Dev falls back to `secrets.token_urlsafe(48)`
+- CSRF via Flask-WTF on all forms
+- CSOne path traversal protection via normalized prefix check (see Tier 2)
+- No hardcoded secrets anywhere -- all via `_bundled_secrets` / Keeper / env
+
+### Files That Must NEVER Be Committed
+From `.gitignore`:
+- `secrets.env`, `_bundled_secrets.py`, `secrets.env.bak-*`, `version_info.txt`, `*.spec.bak`
+- `dist/`, `build/`, `*.exe`, `*.zip`, `*.dmg`, `OUTBOX/`, `v1.0.*/`
+- `__pycache__/`, `*.py[cod]`, `venv/`, `.venv/`, `.env`
+- `*.log`, `*.db`, `analysis_status.json`, `diff_full.txt`, `build_info.txt`, `build_output.txt`, `.DS_Store`
+
+### Tooling
+- **Tests:** `pytest` configured via `pytest.ini` -- `testpaths = tests`, markers `slow` and `flask`, `addopts = -v --tb=short`
+- **Test fixtures:** `tests/conftest.py` inserts project root on `sys.path`, provides `app` / `client` fixtures from `app_simple.app`, sets `TESTING` and `WTF_CSRF_ENABLED=False`
+- **Linter:** NOT currently configured. No `pyproject.toml`, no `ruff.toml`, no `setup.cfg`. If introducing one, prefer `ruff` and add a `pyproject.toml`. Do not invent a `ruff check .` step that does not yet exist.
+- **Canonical verification command:** `python -m pytest -v` from project root
+
+### Workflow: Test -> Build -> Smoke -> Commit
+Branch model from `BRANCH_WORKFLOW.md`:
+- Development on **machine-specific branches** (e.g. `pc-sync-YYYY-MM-DD`, `mac-sync-YYYY-MM-DD`), not directly on `master`
+- `master` = stable integration branch
+- Mac vs PC build instruction docs are owned on their respective machine branches; shared docs (`README.md`, `BRANCH_WORKFLOW.md`) either machine can change
+- Integrate to `master` only after `pytest -q`, the platform build, and an artifact + smoke check
+- Don't commit generated/runtime artifacts; keep commits small to enable cherry-picks
+
+Concrete sequence:
+1. Edit code
+2. Run `python -m pytest -v` and ensure tests pass
+3. Build with `bash build_mac.sh` (Mac) or `build_pc.bat` (PC)
+4. Verify the built app starts and serves HTTP 200 at `http://localhost:5001`
+5. Commit on the machine-specific branch
+6. Integrate to `master` after both platforms green
+
+## Credentials and Configuration
+
+Mechanism: `embed_credentials.py` reads `secrets.env` at build time and writes `_bundled_secrets.py` (XOR + base64 obfuscation). `_bundled_secrets.py` loads obfuscated values into `os.environ` at import. The full authoritative list of embedded keys is `ENV_KEYS` in `embed_credentials.py` (lines 17-47). Categories include:
+
+| Category | Examples |
+|---|---|
+| App identity | `ADOPTIQ_MAIN_URL`, `ADOPTIQ_SECRET_KEY`, `ADOPTIQ_ADMIN_SECRET_KEY` |
+| Snowflake | `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`, `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA`, `SNOWFLAKE_ROLE` |
+| Cisco internal | `BST_*`, `CIRCUIT_*`, `KEEPER_*`, `PSIRT_*` |
+| LLM | `ANTHROPIC_API_KEY` |
+| CSOne sources | `CSONE_ONEDRIVE_FOLDER`, `CSONE_SHARED_FOLDER_URL` |
+
+Build-time version override: `ADOPTIQ_VERSION` and `ADOPTIQ_BUILD` env vars (consumed by `update_version_pc.py` and the PyInstaller spec).
+
+## Port Configuration
+
+| Service | Port | Notes |
+|---|---|---|
+| Main AdoptIQ app | 5001 | Hardcoded in `app_simple.py`. Host via `ADOPTIQ_BIND_HOST` (default `0.0.0.0`) |
+| Admin Console | 5002 | Hardcoded in `enhanced_admin_dashboard_v2.py`. Loopback by default; `ADOPTIQ_ADMIN_HOST` direct override, or `ADOPTIQ_ADMIN_BIND_PUBLIC` truthy -> `0.0.0.0` |
+
+## Storage
+
+- **macOS:** `~/Library/Application Support/AdoptIQ/`
+- **Windows:** `%APPDATA%\AdoptIQ\`
+- **Other Unix:** `~/.adoptiq/`
+
+Subdirectories created automatically: `uploads/`, `outputs/`. `app_simple.py` does `os.chdir(_APP_SUPPORT)` when frozen so all relative paths resolve there.
+
+SQLite databases:
+- `admin_monitoring_v2.db` -- via `enhanced_admin_dashboard_v2._get_db_path()`. App Support when frozen, CWD otherwise.
+- `external_intelligence.db` -- via `incident_storage._db_path()`. Same App Support / `.adoptiq` resolution.
+
+Path resolution is **inline** in multiple modules (`_APP_SUPPORT` in `app_simple.py`, `incident_storage._db_path`, `enhanced_admin_dashboard_v2._get_db_path`). There is no single dedicated `path_helper.py` module.
+
+## Known Drift / Inconsistencies
+
+These were surfaced during code-review mining and remain visible in the repo. The bug-scrub assistant should be aware of them and is empowered to fix them when in scope:
+
+- `adoptiq_setup.iss` declares `MyAppVersion "1.0"` while `config.py`, `version_info.txt`, and the build scripts are on **1.0.3**. Inno Setup display will be wrong unless updated.
+- `build_mac_dmg.sh` checks for `OUTBOX/AdoptIQ.app`, but `build_mac.sh` only writes the DMG to `OUTBOX/` (the `.app` is in `dist/`). The two scripts have drifted; `build_mac_dmg.sh` may fail unless the wrapper copies the `.app` itself.
+- `CODE_REVIEW_AUDIT.md` §5.1 says the missing `comprehensive_executive_formatter` fallback is "Fix Applied", while §9 still lists it as "Outstanding". The §9 summary is stale; the approved fallback path is `_create_enhanced_compact_report`.
+- `CODE_REVIEW_AUDIT.md` is dated **2025-02-02** while the other 2026 review docs are dated **2026-02-04** and **2026-02-05**. Confirm whether 2025 is a typo or genuinely a year-old artifact.
+- No `__init__.py` files exist anywhere -- the project is intentionally flat. Don't add one without architectural intent; PyInstaller specs assume the flat layout.
+
+## Quick Reference
+
+| Need | Where |
+|---|---|
+| Start dev server | `python app_simple.py` -> http://localhost:5001 |
+| Start admin server | `python enhanced_admin_dashboard_v2.py` -> http://127.0.0.1:5002 |
+| Run tests | `python -m pytest -v` |
+| Build Mac | `bash build_mac.sh` -> `OUTBOX/AdoptIQ-v1.0.3-build1.dmg` |
+| Build PC | `build_pc.bat` -> `OUTBOX/AdoptIQ.exe` |
+| Bump version | Set `ADOPTIQ_VERSION` / `ADOPTIQ_BUILD` env vars before build, or edit `config.py` lines 4-5 directly |
+| Add a new env-bundled secret | Add to `ENV_KEYS` in `embed_credentials.py` AND to `secrets.env` |
+| Inspect report storage on Mac | `~/Library/Application Support/AdoptIQ/` |
