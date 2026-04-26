@@ -10,7 +10,7 @@ AdoptIQ for macOS - Install (about 1 minute)
    - If macOS asks "Allow Terminal to open this script?", click Open.
 
 3) From now on, launch AdoptIQ from Applications or Spotlight.
-   Your browser will open to http://localhost:5001 automatically.
+   Your browser will open to http://localhost:5151 automatically.
 
 
 Why is the unblock step needed?

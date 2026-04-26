@@ -28,7 +28,7 @@
 ## 2. Admin Link (Main App)
 
 ### Context (`app_simple.py`)
-- `inject_version()` provides `admin_console_url` from `os.environ.get('ADOPTIQ_ADMIN_URL', 'http://localhost:5001')`. `os` is imported at top level.
+- `inject_version()` provides `admin_console_url` from `os.environ.get('ADOPTIQ_ADMIN_URL', 'http://localhost:5151')`. `os` is imported at top level.
 
 ### Template (`templates/base.html`)
 - Admin nav item wrapped in `{% if admin_console_url %}` so it is hidden when URL is empty.

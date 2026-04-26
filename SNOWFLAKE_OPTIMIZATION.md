@@ -47,7 +47,7 @@ For leader reports with `N` direct reports:
 
 ## Baseline Procedure
 
-1. Open admin dashboard at `http://localhost:5002`.
+1. Open admin dashboard at `http://localhost:5152`.
 2. In **Debug Controls**, click **Reset Query Counter**.
 3. Run a target report flow.
 4. Refresh admin dashboard and record `Snowflake Queries (since reset)`.

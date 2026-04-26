@@ -1415,3 +1415,40 @@ Every formatter ultimately consumes [`canonical_metrics.build_portfolio_metrics`
 - No code changes in Phase 1; this is a read-only inventory.
 - Test count baseline at the start of Round 19: 2149 passed, 2 skipped (Round 18 closing baseline).
 
+
+# Round 17.3 — Default ports moved to 5151 / 5152 (env-overridable)
+
+Working note. Round 17.3 is a small, surgical follow-on to the Round 17.2 SharePoint pull build. The user reported that 5001 / 5002 collide with other tools on macOS and asked to move adjacent to their other 5150 ("Van Halen") app, while also making the choice cheap to revisit later.
+
+## Decision
+
+- New defaults: `5151` (main) / `5152` (admin).
+- Both ports are now read from the environment via tiny resolver helpers (`app_simple._resolve_main_port`, `enhanced_admin_dashboard_v2._resolve_admin_port`) which fall back to the new defaults on garbage / out-of-range input. No rebuild is required to move ports again — just set `ADOPTIQ_PORT` / `ADOPTIQ_ADMIN_PORT`.
+- `MAIN_APP_URL` default bumped from `http://localhost:5001` to `http://localhost:5151`; `_main_app_host_port()` hostname-only fallback bumped 5000 → 5151 to match.
+
+## Files changed
+
+| File | Change |
+| --- | --- |
+| `app_simple.py` | Added `_DEFAULT_MAIN_PORT = 5151` + `_resolve_main_port()`; replaced literal `PORT = 5001` with `PORT = _resolve_main_port()`. |
+| `enhanced_admin_dashboard_v2.py` | Added `_DEFAULT_ADMIN_PORT = 5152` + `_resolve_admin_port()`; replaced hardcoded `port=5002` with `port=_admin_port`; bumped `MAIN_APP_URL` default + URL-parse fallback to 5151. |
+| `installer_app.py` | Browser auto-open URL `:5001` → `:5151`. |
+| `scripts/test_build_smoke.sh` | `PORT=5001` → `PORT=5151`. |
+| `build_mac.sh`, `build_pc.bat`, `adoptiq_setup.iss` | User-facing URLs `:5001` → `:5151`. |
+| `secrets.env.template` | `ADOPTIQ_MAIN_URL` default `:5001` → `:5151`; documented new `ADOPTIQ_PORT` / `ADOPTIQ_ADMIN_PORT` overrides. |
+| `templates/help.html` | "Open your browser" URL `:5001` → `:5151`. |
+| `README.md`, `CLAUDE.md`, `CURSOR_MAC_BUILD_INSTRUCTIONS.md`, `CURSOR_PC_BUILD_INSTRUCTIONS.md`, `SNOWFLAKE_OPTIMIZATION.md`, `MIGRATION_TO_MAC.md`, `CODE_REVIEW_LEARNING_AND_HISTORY.md`, `scripts/mac/READ_ME_FIRST.txt`, `scripts/win/READ_ME_FIRST.txt`, `.cursor/rules/adoptiq.mdc` | Doc sweep replacing `5001`→`5151` and `5002`→`5152`. |
+| `tests/test_critical_fixes.py` | Repinned `test_admin_main_app_url_port` / `test_admin_standalone_port` to the new defaults; added `test_main_app_default_port` for the main side. All three now also assert the `ADOPTIQ_PORT` / `ADOPTIQ_ADMIN_PORT` env hooks remain wired. |
+| `tests/test_round17_3_port_overrides.py` (new) | Three behavioural tests for the resolver helpers: default main port, env-override main port, default + env admin port + `MAIN_APP_URL` coupling guard. |
+
+## Verification
+
+- `make verify` clean twice. Test count moved 2186 → **2190 passed, 2 skipped** (one new pin in `test_critical_fixes.py` + three new behavioural tests in `test_round17_3_port_overrides.py`).
+- Resolver helpers smoke-tested at the REPL: defaults match plan; env override accepts integers; non-integer / out-of-range / blank values fall back to the default with a warning rather than raising.
+- No `make build` was run for Round 17.3 — defaults are picked up by the existing v1.0.4 build at next launch since the changes are pure source. A rebuild can be triggered later by request.
+
+## Out of scope
+
+- Bumping the version (no rebuild yet; defaults will be baked into the next build naturally).
+- Actually running on a non-default port end-to-end — the resolver helpers cover the parsing side; production override is exercised on every operator's machine that sets `ADOPTIQ_PORT`.
+

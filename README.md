@@ -131,13 +131,13 @@ Use the packaged app for your platform. No Python or development tools are requi
 
 1. Double-click **AdoptIQ.app** (macOS) or **AdoptIQ.exe** (Windows) to launch.
 2. A terminal window should not appear in standard packaged builds.
-3. Your browser will open automatically to **http://localhost:5001** (or open it manually if needed).
+3. Your browser will open automatically to **http://localhost:5151** (or open it manually if needed).
 4. Use AdoptIQ as needed, keeping the server window open during use.
 
 ### Verbose Debug Mode (optional)
 
 - Enable detailed runtime diagnostics with environment variable `ADOPTIQ_VERBOSE_DEBUG=1`.
-- You can also toggle verbose mode at runtime from the admin dashboard (`http://localhost:5002`) using the **Debug Controls** section.
+- You can also toggle verbose mode at runtime from the admin dashboard (`http://localhost:5152`) using the **Debug Controls** section.
 - Runtime API is also available at `GET/POST /api/debug/verbose` (localhost app/admin surface) for scripted troubleshooting.
 - The same admin section shows a Snowflake query counter and includes a reset button to baseline each report flow.
 - Verbose mode is intended for troubleshooting and query optimization validation; disable it for normal use.
@@ -254,7 +254,7 @@ Thank you for your feedback and for helping us improve AdoptIQ!
 
 ## Troubleshooting
 
-- **Port 5001 in use:** If you launch AdoptIQ while another instance is running, the app will show a dialog asking whether to quit the other instance and start, or cancel. From Terminal you can also run `lsof -i :5001` to find and stop the process.
+- **Port 5151 in use:** If you launch AdoptIQ while another instance is running, the app will show a dialog asking whether to quit the other instance and start, or cancel. From Terminal you can also run `lsof -i :5151` to find and stop the process.
 - **App closes immediately / bounces in the Dock and exits (macOS):** This is almost always macOS Gatekeeper quarantine on an adhoc-signed build. Run the **Unblock AdoptIQ.command** from the DMG window, or in Terminal run `xattr -dr com.apple.quarantine /Applications/AdoptIQ.app` then `open /Applications/AdoptIQ.app`. See "If macOS blocks the app" above.
 - **App closes immediately (other):** Launch from Terminal to see startup errors. On macOS, also check `~/Library/Application Support/AdoptIQ/startup_error.txt` for any uncaught Python exception.
 - **Windows SmartScreen warning:** Click **More info** and then **Run anyway** if you trust the packaged build source.

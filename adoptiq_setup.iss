@@ -5,7 +5,7 @@
 #define MyAppName "AdoptIQ"
 #define MyAppVersion "1.0"
 #define MyAppPublisher "AdoptIQ"
-#define MyAppURL "http://localhost:5001"
+#define MyAppURL "http://localhost:5151"
 #define MyAppExeName "AdoptIQ.exe"
 
 [Setup]

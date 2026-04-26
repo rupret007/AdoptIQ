@@ -6,7 +6,7 @@ AdoptIQ for Windows - Install (about 1 minute)
      in this folder, then launches AdoptIQ.exe.
    - A console window stays open while AdoptIQ is running. Closing that
      window stops AdoptIQ.
-   - Your default browser opens automatically to http://localhost:5001.
+   - Your default browser opens automatically to http://localhost:5151.
 
 2) If Windows SmartScreen blocks the launch:
    - In the SmartScreen dialog click "More info" -> "Run anyway".
@@ -44,9 +44,9 @@ Troubleshooting
 - "Windows protected your PC" SmartScreen dialog with no "Run anyway"
   -> Run "Unblock_AdoptIQ.bat" first, then "Run_AdoptIQ.bat".
 
-- Port 5001 already in use
+- Port 5151 already in use
   -> Open Command Prompt and run:
-       netstat -ano | findstr :5001
+       netstat -ano | findstr :5151
      Then in Task Manager, end the PID shown in the last column.
 
 - "Missing module" or "ModuleNotFoundError" in the console

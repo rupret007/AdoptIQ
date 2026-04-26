@@ -102,10 +102,10 @@ Confirm `OUTBOX\` contains exactly these six files:
 
 Also verify:
 - Double-click `Run_AdoptIQ.bat` -- AdoptIQ should start and the default
-  browser should open `http://localhost:5001`. The console window stays
+  browser should open `http://localhost:5151`. The console window stays
   open while AdoptIQ is running; closing it stops the app.
 - No missing module errors at startup (check the console window).
-- Hit `http://localhost:5001/api/diag/connectivity` in the browser to
+- Hit `http://localhost:5151/api/diag/connectivity` in the browser to
   confirm DNS, TLS, AppRole login, secret read, and Snowflake all pass.
   If AppRole login fails here, the bundled Keeper credentials are stale
   (see section 3).
@@ -132,7 +132,7 @@ In Explorer, type `%APPDATA%\AdoptIQ` in the address bar to open the folder.
   - Manual equivalent: right-click `AdoptIQ.exe` -> Properties -> tick **Unblock** -> OK.
 - **"Could not reach the AdoptIQ server" appears in the browser:** The AdoptIQ console window was closed (or never started). Double-click `Run_AdoptIQ.bat` again. The friendlier message replaces the misleading "verify your input" text from earlier builds.
 - **"Keeper rejected the bundled KEEPER_ROLE_ID / KEEPER_SECRET_ID":** The `secrets.env` used at build time has a stale Keeper AppRole. Refresh from the same `secrets.env` used by the most recent Mac build, re-run `embed_credentials.py`, and rebuild. See section 3.
-- **Port 5001 in use:** Run `netstat -ano | findstr :5001` to find and stop the conflicting process.
+- **Port 5151 in use:** Run `netstat -ano | findstr :5151` to find and stop the conflicting process.
 - Keep platform path differences in mind:
   - Windows: `%APPDATA%\AdoptIQ`
   - macOS: `~/Library/Application Support/AdoptIQ`

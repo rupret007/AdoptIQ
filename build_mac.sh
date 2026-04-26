@@ -113,4 +113,4 @@ echo "Done."
 echo "$DMG_PATH"
 echo "OUTBOX/README.md"
 echo
-echo "Mount the DMG, drag AdoptIQ.app to Applications, then open and browse to http://localhost:5001"
+echo "Mount the DMG, drag AdoptIQ.app to Applications, then open and browse to http://localhost:5151"

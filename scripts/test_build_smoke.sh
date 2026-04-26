@@ -9,7 +9,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 APP_PATH="${1:-$ROOT_DIR/OUTBOX/AdoptIQ.app}"
-PORT=5001
+PORT=5151
 WAIT_TIMEOUT=20
 
 if [[ ! -d "$APP_PATH" ]]; then

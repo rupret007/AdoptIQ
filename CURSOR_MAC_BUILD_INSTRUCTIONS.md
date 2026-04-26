@@ -123,7 +123,7 @@ hdiutil detach /tmp/adoptiq_dmg
 ```
 
 Also verify:
-- App starts and opens `http://localhost:5001`
+- App starts and opens `http://localhost:5151`
 - No missing module errors at startup
 
 ### Staging sync (OneDrive)

@@ -1549,16 +1549,35 @@ class TestRound24Fixes:
             "Both Ask-AI endpoints need generic error message"
 
     def test_admin_main_app_url_port(self):
-        """Admin dashboard MAIN_APP_URL should default to port 5001."""
+        """Admin dashboard MAIN_APP_URL should default to port 5151 and honour ADOPTIQ_MAIN_URL."""
+        # Round 17.3: defaults moved 5001 -> 5151 / 5002 -> 5152 to dodge
+        # the macOS AirPlay Receiver / Flask-default conflict zone.  Pin
+        # both the new default *and* the env-override hook so a future
+        # silent revert breaks this test.
         with open(os.path.join(_PROJECT_ROOT, 'enhanced_admin_dashboard_v2.py'), encoding='utf-8') as f:
             src = f.read()
-        assert "http://localhost:5001" in src, "MAIN_APP_URL should default to port 5001"
+        assert "http://localhost:5151" in src, "MAIN_APP_URL should default to port 5151"
+        assert "ADOPTIQ_MAIN_URL" in src, "MAIN_APP_URL must remain env-overridable"
 
     def test_admin_standalone_port(self):
-        """Admin dashboard standalone should run on port 5002."""
+        """Admin dashboard standalone should run on port 5152 (env-overridable via ADOPTIQ_ADMIN_PORT)."""
+        # Round 17.3: hardcoded ``port=5002`` replaced with a resolver
+        # that reads ``ADOPTIQ_ADMIN_PORT`` and defaults to 5152.  Pin
+        # the resolver hook + the new default literal.
         with open(os.path.join(_PROJECT_ROOT, 'enhanced_admin_dashboard_v2.py'), encoding='utf-8') as f:
             src = f.read()
-        assert "port=5002" in src, "Standalone admin should run on port 5002"
+        assert "_DEFAULT_ADMIN_PORT = 5152" in src, "Default admin port should be 5152"
+        assert "ADOPTIQ_ADMIN_PORT" in src, "Standalone admin port must be env-overridable"
+        assert "port=_admin_port" in src, "admin_app.run must use the resolved port, not a literal"
+
+    def test_main_app_default_port(self):
+        """app_simple.py main port should default to 5151 (env-overridable via ADOPTIQ_PORT)."""
+        # Round 17.3 companion to the admin port checks above.
+        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+            src = f.read()
+        assert "_DEFAULT_MAIN_PORT = 5151" in src, "Default main port should be 5151"
+        assert "ADOPTIQ_PORT" in src, "Main app port must be env-overridable"
+        assert "PORT = _resolve_main_port()" in src, "Main app must use the resolver, not a literal"
 
     def test_backend_runs_guarded(self):
         """adoptiq_backend.py title page .runs[0] should use 'if obj.runs:' guard, not try/except."""

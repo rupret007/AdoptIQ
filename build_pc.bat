@@ -218,6 +218,6 @@ echo   OUTBOX\READ_ME_FIRST.txt    - First-run instructions (open in Notepad)
 echo   OUTBOX\README.md            - Full user documentation
 echo   OUTBOX\build_info.txt       - Version / build metadata
 echo.
-echo   User double-clicks Run_AdoptIQ.bat; browser opens automatically to http://localhost:5001
+echo   User double-clicks Run_AdoptIQ.bat; browser opens automatically to http://localhost:5151
 echo.
 pause

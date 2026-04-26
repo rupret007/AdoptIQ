@@ -112,8 +112,44 @@ def _r12_admin_utc_iso_z() -> str:
     return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
-# Main app URL (for container: set ADOPTIQ_MAIN_URL=http://adoptiq-main:5000)
-MAIN_APP_URL = os.environ.get('ADOPTIQ_MAIN_URL', 'http://localhost:5001')
+# Main app URL (for container: set ADOPTIQ_MAIN_URL=http://adoptiq-main:5151)
+# Round 17.3: default port moved from 5001 -> 5151 (Van Halen-adjacent,
+# out of macOS AirPlay Receiver / Flask-default conflict zone).
+MAIN_APP_URL = os.environ.get('ADOPTIQ_MAIN_URL', 'http://localhost:5151')
+
+# Round 17.3: env-overridable admin port (default 5152, was 5002).  See
+# ``_resolve_admin_port`` for parsing rules.
+_DEFAULT_ADMIN_PORT = 5152
+
+
+def _resolve_admin_port(env=None):
+    """Return the admin-app TCP port from ``ADOPTIQ_ADMIN_PORT`` or default.
+
+    Out-of-range or non-integer values fall back to the default; we use
+    a print fallback rather than a logger here because this module is
+    imported into the main app and we want the warning visible even if
+    logging hasn't been initialised yet.
+    """
+    env_map = os.environ if env is None else env
+    raw = (env_map.get('ADOPTIQ_ADMIN_PORT') or '').strip()
+    if not raw:
+        return _DEFAULT_ADMIN_PORT
+    try:
+        candidate = int(raw)
+    except (TypeError, ValueError):
+        print(
+            f"[admin] ADOPTIQ_ADMIN_PORT={raw!r} is not an integer; "
+            f"falling back to {_DEFAULT_ADMIN_PORT}"
+        )
+        return _DEFAULT_ADMIN_PORT
+    if not (1 <= candidate <= 65535):
+        print(
+            f"[admin] ADOPTIQ_ADMIN_PORT={candidate} is outside the "
+            f"1-65535 TCP range; falling back to {_DEFAULT_ADMIN_PORT}"
+        )
+        return _DEFAULT_ADMIN_PORT
+    return candidate
+
 
 def _main_app_host_port():
     """Parse MAIN_APP_URL into (host, port) for socket check."""
@@ -121,10 +157,13 @@ def _main_app_host_port():
         from urllib.parse import urlparse
         p = urlparse(MAIN_APP_URL)
         host = p.hostname or '127.0.0.1'
-        port = p.port if p.port is not None else 5000
+        # Round 17.3: fallback bumped from 5000 -> 5151 to match the new
+        # main-app default; only exercised when ``ADOPTIQ_MAIN_URL`` is
+        # set to a hostname-only URL (rare).
+        port = p.port if p.port is not None else 5151
         return host, port
     except Exception:
-        return '127.0.0.1', 5000
+        return '127.0.0.1', 5151
 
 # Create Flask app for enhanced admin dashboard
 admin_app = Flask(__name__)
@@ -972,7 +1011,7 @@ def get_server_status():
     Also resolves a long-standing bug where the displayed
     ``server_status['port']`` was always the hard-coded ``5000`` from
     module init (line ~91) even when the probe targeted a different
-    port (e.g. 5001 from ``ADOPTIQ_MAIN_URL``).  We now bind both the
+    port (e.g. 5151 from ``ADOPTIQ_MAIN_URL``).  We now bind both the
     displayed host and port to the values actually probed.
     """
     global server_process, server_status
@@ -1037,7 +1076,7 @@ def get_server_status():
 
         # Update displayed host/port to match the probed target.  The
         # legacy global was hard-coded to 5000 at module init, so an
-        # admin running on 5001 would see "Port: 5000" forever.
+        # admin running on 5151 would see "Port: 5000" forever.
         server_status['host'] = host
         server_status['port'] = port
         server_status['port_open'] = port_open
@@ -3555,9 +3594,11 @@ if __name__ == '__main__':
                 f"'{_admin_host}'. Ensure firewall + auth controls are in place; "
                 "the before_request hook still restricts to loopback peers."
             )
+        # Round 17.3: env-overridable port (default 5152, was 5002).
+        _admin_port = _resolve_admin_port()
         print("Starting AdoptIQ Admin Dashboard v2.0...")
-        print(f"Access the dashboard at: http://{_admin_host if _admin_host != '0.0.0.0' else 'localhost'}:5002")  # noqa: S104 # nosec B104 - string compare in display label
-        admin_app.run(host=_admin_host, port=5002, debug=False)
+        print(f"Access the dashboard at: http://{_admin_host if _admin_host != '0.0.0.0' else 'localhost'}:{_admin_port}")  # noqa: S104 # nosec B104 - string compare in display label
+        admin_app.run(host=_admin_host, port=_admin_port, debug=False)
     except Exception as e:
         print("Admin Console failed to start:", e)
         import traceback

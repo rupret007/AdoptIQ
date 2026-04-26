@@ -19532,6 +19532,42 @@ def _check_port_available(port):
     return (False, pid, name)
 
 
+# Round 17.3: resolve the main-app TCP port from the environment so
+# operators can move AdoptIQ off a contested port without a rebuild.
+# 5151 is adjacent to the user's other 5150 ("Van Halen") app and out
+# of the macOS AirPlay Receiver / Flask-default 5000-5001 conflict zone.
+_DEFAULT_MAIN_PORT = 5151
+
+
+def _resolve_main_port(env=None):
+    """Return the main-app TCP port from ``ADOPTIQ_PORT`` or the default.
+
+    Out-of-range or non-integer values fall back to the default with a
+    warning log.  Pulled out as a tiny helper so the test surface is
+    a single function rather than the ``if __name__ == "__main__"``
+    block.
+    """
+    env_map = os.environ if env is None else env
+    raw = (env_map.get('ADOPTIQ_PORT') or '').strip()
+    if not raw:
+        return _DEFAULT_MAIN_PORT
+    try:
+        candidate = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "ADOPTIQ_PORT=%r is not an integer; falling back to %d",
+            raw, _DEFAULT_MAIN_PORT,
+        )
+        return _DEFAULT_MAIN_PORT
+    if not (1 <= candidate <= 65535):
+        logger.warning(
+            "ADOPTIQ_PORT=%d is outside the 1-65535 TCP range; "
+            "falling back to %d", candidate, _DEFAULT_MAIN_PORT,
+        )
+        return _DEFAULT_MAIN_PORT
+    return candidate
+
+
 def _shutdown_handler():
     """Save analysis status on shutdown.
 
@@ -19606,7 +19642,9 @@ if __name__ == '__main__':
             "bootstrap raised: %s",
             _init_err,
         )
-    PORT = 5001
+    # Round 17.3: env-overridable port (default 5151, was 5001).  See
+    # ``_resolve_main_port`` above for parsing rules.
+    PORT = _resolve_main_port()
     print("AdoptIQ Simple - AI-Powered Executive Analytics")
     print(version_string())
     print("Using EXACT CircuIT AI logic from your working script")

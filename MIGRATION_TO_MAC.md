@@ -576,7 +576,7 @@ Create `tests/test_reports_extensive.py` with tests for:
 ## 13. Mac-specific notes
 
 - **Build script:** Windows uses `build_pc.bat`; Mac likely uses `build_mac.sh` or similar. Ensure the Mac build script includes `report_utils` in the spec and runs the same PyInstaller flow.
-- **Port:** Windows uses 5001; confirm Mac uses the same or update README.
+- **Port:** Windows uses 5151; confirm Mac uses the same or update README.
 - **Paths:** `%APPDATA%\AdoptIQ` becomes `~/Library/Application Support/AdoptIQ` or similar on Mac. Update README paths for Mac.
 - **SmartScreen:** Mac doesn't have SmartScreen; that section can be Mac-specific or omitted.
 - **Code signing (adhoc only):** Builds use adhoc signing — there is no Apple Developer ID. To keep the DMG drag-to-install flow working on Apple Silicon:

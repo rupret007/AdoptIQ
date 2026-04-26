@@ -186,8 +186,8 @@ def main():
     print('Waiting for server to start...')
     time.sleep(12)
 
-    print('Opening browser to http://localhost:5001')
-    webbrowser.open('http://localhost:5001')
+    print('Opening browser to http://localhost:5151')
+    webbrowser.open('http://localhost:5151')
 
     print('AdoptIQ is running. Use the Flask window to see server output.')
     print('This window will close in 5 seconds.')

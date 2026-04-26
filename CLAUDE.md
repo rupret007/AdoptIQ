@@ -4,14 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This App Does
 
-AdoptIQ is a renewal-risk and adoption intelligence desktop application (Flask + PyInstaller) that generates Word/Excel reports from Snowflake data, CSOne adoption barriers, support cases, and external service intelligence. It ships as a native macOS `.app` (DMG) and Windows `.exe` with a browser UI at `http://localhost:5001`.
+AdoptIQ is a renewal-risk and adoption intelligence desktop application (Flask + PyInstaller) that generates Word/Excel reports from Snowflake data, CSOne adoption barriers, support cases, and external service intelligence. It ships as a native macOS `.app` (DMG) and Windows `.exe` with a browser UI at `http://localhost:5151`.
 
 ## Commands
 
 ```bash
 # Run the app
-python app_simple.py                        # Main app — http://localhost:5001
-python enhanced_admin_dashboard_v2.py       # Admin dashboard — http://127.0.0.1:5002
+python app_simple.py                        # Main app — http://localhost:5151
+python enhanced_admin_dashboard_v2.py       # Admin dashboard — http://127.0.0.1:5152
 
 # Tests
 python -m pytest -v                         # Full test suite (baseline: 1949 passed / 2 skipped)
@@ -45,8 +45,8 @@ The project is flat — 33 top-level Python modules with no package hierarchy. T
 ### Two Flask Apps
 | App | Port | File | Access |
 |-----|------|------|--------|
-| Main UI | 5001 | `app_simple.py` | `ADOPTIQ_BIND_HOST` (default `0.0.0.0`) |
-| Admin | 5002 | `enhanced_admin_dashboard_v2.py` | Loopback only by default |
+| Main UI | 5151 | `app_simple.py` | `ADOPTIQ_BIND_HOST` (default `0.0.0.0`) |
+| Admin | 5152 | `enhanced_admin_dashboard_v2.py` | Loopback only by default |
 
 ### Data Flow
 ```

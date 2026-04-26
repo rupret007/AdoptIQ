@@ -20,8 +20,8 @@ AdoptIQ is a Flask-based desktop web application that generates renewal-risk and
 ## Architecture
 
 ```
-app_simple.py                       Main Flask web app (port 5001)
-enhanced_admin_dashboard_v2.py      Admin/monitoring Flask app (port 5002, loopback by default)
+app_simple.py                       Main Flask web app (port 5151)
+enhanced_admin_dashboard_v2.py      Admin/monitoring Flask app (port 5152, loopback by default)
 adoptiq_backend.py                  Core analysis/report backend (Word/Excel generation)
 config.py                           Version, SECRET_KEY, env loading
 embed_credentials.py                Build-time secret bundler -> _bundled_secrets.py
@@ -36,8 +36,8 @@ The codebase is **flat**: no `__init__.py` files anywhere. All ~33 modules live 
 
 | Entry | Purpose | Port | Host control |
 |---|---|---|---|
-| `app_simple.py` | Main web UI -- analysis, reports, history, Ask AI, External Intelligence | 5001 | `ADOPTIQ_BIND_HOST` (default `0.0.0.0`) |
-| `enhanced_admin_dashboard_v2.py` | Admin dashboard -- monitoring, audits, security, analytics | 5002 | Loopback default; `ADOPTIQ_ADMIN_HOST` direct, or `ADOPTIQ_ADMIN_BIND_PUBLIC` truthy -> `0.0.0.0` |
+| `app_simple.py` | Main web UI -- analysis, reports, history, Ask AI, External Intelligence | 5151 | `ADOPTIQ_BIND_HOST` (default `0.0.0.0`) |
+| `enhanced_admin_dashboard_v2.py` | Admin dashboard -- monitoring, audits, security, analytics | 5152 | Loopback default; `ADOPTIQ_ADMIN_HOST` direct, or `ADOPTIQ_ADMIN_BIND_PUBLIC` truthy -> `0.0.0.0` |
 | `adoptiq_backend.py` (`main()`) | Module-level entry; not a server | N/A | N/A |
 | `export_adrian_snowflake_records.py` | CLI export of Snowflake rows to Excel (argparse) | N/A | N/A |
 | `embed_credentials.py` | Build-time only; reads `secrets.env`, writes `_bundled_secrets.py` | N/A | N/A |
@@ -62,8 +62,8 @@ The codebase is **flat**: no `__init__.py` files anywhere. All ~33 modules live 
 #### Web layer
 | Module | Purpose |
 |---|---|
-| `app_simple.py` | Main Flask app (port 5001); analysis orchestration, all main routes, `_APP_SUPPORT` resolution |
-| `enhanced_admin_dashboard_v2.py` | Admin Flask app (port 5002); monitoring, audits, error/security/analytics endpoints; report-insights persistence |
+| `app_simple.py` | Main Flask app (port 5151); analysis orchestration, all main routes, `_APP_SUPPORT` resolution |
+| `enhanced_admin_dashboard_v2.py` | Admin Flask app (port 5152); monitoring, audits, error/security/analytics endpoints; report-insights persistence |
 
 #### Core analysis backbone
 | Module | Purpose |
@@ -134,7 +134,7 @@ The codebase is **flat**: no `__init__.py` files anywhere. All ~33 modules live 
 
 ### Flask Routes
 
-#### Main app (`app_simple.py`, port 5001)
+#### Main app (`app_simple.py`, port 5151)
 
 | Route | Method | Purpose |
 |---|---|---|
@@ -170,7 +170,7 @@ The codebase is **flat**: no `__init__.py` files anywhere. All ~33 modules live 
 | `/simple_test`, `/test_generate_report` | POST | Internal test hooks |
 | `/bst_psirt_search` (and related) | POST | BST / PSIRT defect search |
 
-#### Admin app (`enhanced_admin_dashboard_v2.py`, port 5002)
+#### Admin app (`enhanced_admin_dashboard_v2.py`, port 5152)
 
 | Route | Purpose |
 |---|---|
@@ -296,7 +296,7 @@ Concrete sequence:
 1. Edit code
 2. Run `python -m pytest -v` and ensure tests pass
 3. Build with `bash build_mac.sh` (Mac) or `build_pc.bat` (PC)
-4. Verify the built app starts and serves HTTP 200 at `http://localhost:5001`
+4. Verify the built app starts and serves HTTP 200 at `http://localhost:5151`
 5. Commit on the machine-specific branch
 6. Integrate to `master` after both platforms green
 
@@ -318,8 +318,8 @@ Build-time version override: `ADOPTIQ_VERSION` and `ADOPTIQ_BUILD` env vars (con
 
 | Service | Port | Notes |
 |---|---|---|
-| Main AdoptIQ app | 5001 | Hardcoded in `app_simple.py`. Host via `ADOPTIQ_BIND_HOST` (default `0.0.0.0`) |
-| Admin Console | 5002 | Hardcoded in `enhanced_admin_dashboard_v2.py`. Loopback by default; `ADOPTIQ_ADMIN_HOST` direct override, or `ADOPTIQ_ADMIN_BIND_PUBLIC` truthy -> `0.0.0.0` |
+| Main AdoptIQ app | 5151 | Hardcoded in `app_simple.py`. Host via `ADOPTIQ_BIND_HOST` (default `0.0.0.0`) |
+| Admin Console | 5152 | Hardcoded in `enhanced_admin_dashboard_v2.py`. Loopback by default; `ADOPTIQ_ADMIN_HOST` direct override, or `ADOPTIQ_ADMIN_BIND_PUBLIC` truthy -> `0.0.0.0` |
 
 ## Storage
 
@@ -349,8 +349,8 @@ These were surfaced during code-review mining and remain visible in the repo. Th
 
 | Need | Where |
 |---|---|
-| Start dev server | `python app_simple.py` -> http://localhost:5001 |
-| Start admin server | `python enhanced_admin_dashboard_v2.py` -> http://127.0.0.1:5002 |
+| Start dev server | `python app_simple.py` -> http://localhost:5151 |
+| Start admin server | `python enhanced_admin_dashboard_v2.py` -> http://127.0.0.1:5152 |
 | Run tests | `python -m pytest -v` |
 | Build Mac | `bash build_mac.sh` -> `OUTBOX/AdoptIQ-v1.0.3-build1.dmg` |
 | Build PC | `build_pc.bat` -> `OUTBOX/AdoptIQ.exe` |
