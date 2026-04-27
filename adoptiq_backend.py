@@ -2016,12 +2016,40 @@ def fetch_arr_data(ctx, account_ids: List[str]) -> pd.DataFrame:
         # Stamp a multi-currency warning on the frame attrs so any
         # renderer that sums across rows can detect the situation
         # without re-discovering it.
-        try:
-            ccys = sorted(c for c in normalized['CURRENCY_CODE'].dropna().unique() if c)
-            distinct_ccys = [c for c in ccys if c and c != 'UNKNOWN']
-            normalized.attrs['currencies_present'] = ccys
-            normalized.attrs['is_multi_currency'] = len(distinct_ccys) > 1
-        except Exception:
+        # Round 28: explicit column guard + structured WARNING on miss
+        # so the multi-currency disclosure is not silently dropped when
+        # an upstream schema drift removes CURRENCY_CODE from the
+        # frame.  Previously the bare ``try / except Exception`` block
+        # masked KeyError on missing columns and the report rendered
+        # as if the portfolio were single-currency USD.
+        if 'CURRENCY_CODE' in normalized.columns:
+            try:
+                ccys = sorted(c for c in normalized['CURRENCY_CODE'].dropna().unique() if c)
+                distinct_ccys = [c for c in ccys if c and c != 'UNKNOWN']
+                normalized.attrs['currencies_present'] = ccys
+                normalized.attrs['is_multi_currency'] = len(distinct_ccys) > 1
+            except Exception as _ccy_err:
+                logger.warning(
+                    "currency.code.scan_failed",
+                    extra={
+                        'event': 'currency.code.scan_failed',
+                        'error_class': type(_ccy_err).__name__,
+                        'columns_present': list(normalized.columns)[:25],
+                    },
+                )
+                normalized.attrs['currencies_present'] = []
+                normalized.attrs['is_multi_currency'] = False
+        else:
+            logger.warning(
+                "currency.code.missing",
+                extra={
+                    'event': 'currency.code.missing',
+                    'columns_present': list(normalized.columns)[:25],
+                    'note': 'is_multi_currency defaulted to False; '
+                            'multi-currency disclosure suppressed for '
+                            'this normalized frame',
+                },
+            )
             normalized.attrs['currencies_present'] = []
             normalized.attrs['is_multi_currency'] = False
         return normalized
@@ -3539,11 +3567,23 @@ def calculate_arr_at_risk(arr_df, ab_df, cases_df=None):
                 arr_active_df = arr_df
         result['active_subs_excluded_count'] = int(len(arr_df) - len(arr_active_df))
 
+        # Round 28: route ARR sums through ``pd.to_numeric(errors='coerce')``
+        # for parity with the safe pattern in ``compute_metrics_from_frame``
+        # (`adoptiq_backend.py` _arr_sum block).  Previously a single
+        # NaN-bearing or string-coerced ARR row would propagate NaN
+        # through the subsequent percent / band math and surface as
+        # ``"$nan"`` in the rendered report.
         at_risk_mask = arr_active_df[acct_col].isin(troubled_accounts)
-        arr_at_risk = arr_active_df.loc[at_risk_mask, arr_col].sum()
+        _arr_at_risk_series = pd.to_numeric(
+            arr_active_df.loc[at_risk_mask, arr_col], errors='coerce'
+        ).fillna(0)
+        arr_at_risk = float(_arr_at_risk_series.sum())
 
         critical_mask = arr_active_df[acct_col].isin(critical_accounts)
-        arr_critical = arr_active_df.loc[critical_mask, arr_col].sum()
+        _arr_critical_series = pd.to_numeric(
+            arr_active_df.loc[critical_mask, arr_col], errors='coerce'
+        ).fillna(0)
+        arr_critical = float(_arr_critical_series.sum())
 
         # Round 2 / Phase 1.1: when the portfolio is multi-currency,
         # all aggregate amounts are unsafe sums; expose them as
@@ -3679,12 +3719,28 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
                     if _was_truncated:
                         metrics['distribution_sample_only'] = True
                         metrics['distribution_sample_size'] = len(df)
+                    # Round 28: deterministic distribution payloads.
+                    # ``value_counts().head(8)`` breaks ties by upstream
+                    # row order; sort by (count DESC, key ASC) with a
+                    # stable kind so distribution charts render in the
+                    # same order across reports built from the same data.
+                    def _r28_top_n_dict(series, n):
+                        return {
+                            str(k): int(v)
+                            for k, v in (
+                                series.value_counts()
+                                .sort_index()
+                                .sort_values(ascending=False, kind='stable')
+                                .head(n)
+                                .items()
+                            )
+                        }
                     for col in df.columns:
                         col_lower = str(col).lower()
                         if any(k in col_lower for k in ['severity', 'sev', 'priority']):
-                            metrics['severity_distribution'] = {str(k): int(v) for k, v in df[col].value_counts().head(8).items()}
+                            metrics['severity_distribution'] = _r28_top_n_dict(df[col], 8)
                         elif any(k in col_lower for k in ['status', 'state']):
-                            metrics['status_distribution'] = {str(k): int(v) for k, v in df[col].value_counts().head(8).items()}
+                            metrics['status_distribution'] = _r28_top_n_dict(df[col], 8)
                         elif any(k in col_lower for k in ['customer', 'bu_name', 'account']):
                             # Round 10 / Phase 3.2: when the sheet was
                             # truncated to ``_SCAN_ROW_LIMIT`` rows we only
@@ -3725,7 +3781,7 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
                             if subj_col_name is None:
                                 subj_col_name = col
                         elif any(k in col_lower for k in ['category', 'ab_category', 'type']):
-                            metrics['category_distribution'] = {str(k): int(v) for k, v in df[col].value_counts().head(8).items()}
+                            metrics['category_distribution'] = _r28_top_n_dict(df[col], 8)
 
                     if cust_col_name and arr_col_name:
                         try:
@@ -3785,9 +3841,23 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
                                 df[cust_col_name].fillna('').astype(str).map(normalize_customer_name)
                             )
                             _normed = _normed[_normed != '']
-                            _vc = _normed.value_counts().head(10)
+                            # Round 28: stable tie-breaking on (count DESC,
+                            # name ASC) so identical counts produce
+                            # identical ordering across runs and reports
+                            # are byte-identical given the same inputs.
+                            _vc = (
+                                _normed.value_counts()
+                                .sort_index()
+                                .sort_values(ascending=False, kind='stable')
+                                .head(10)
+                            )
                         except Exception:
-                            _vc = df[cust_col_name].value_counts().head(10)
+                            _vc = (
+                                df[cust_col_name].value_counts()
+                                .sort_index()
+                                .sort_values(ascending=False, kind='stable')
+                                .head(10)
+                            )
                         _top_count_payload = {str(k): int(v) for k, v in _vc.items()}
                         if _was_truncated:
                             metrics['top_customers_by_count_sampled'] = _top_count_payload
@@ -4821,7 +4891,20 @@ def compute_barrier_aging(ab_df, arr_df=None):
                 result['max_days_open'] = int(valid['_days_open'].max())
                 result['median_days_open'] = round(float(valid['_days_open'].median()), 1)
 
-                stale = valid.nlargest(5, '_days_open')
+                # Round 28: deterministic stale-cases ranking.  ``nlargest``
+                # alone breaks ties by row order, which is sensitive to
+                # upstream Snowflake row-ordering and produces different
+                # report outputs for the same data across runs.  Sort
+                # by (_days_open DESC, ID ASC) with a stable sort so
+                # the top-5 list is byte-identical across runs.
+                _stale_keys = ['_days_open']
+                if 'ID' in valid.columns:
+                    _stale_keys.append('ID')
+                stale = valid.sort_values(
+                    by=_stale_keys,
+                    ascending=[False] + [True] * (len(_stale_keys) - 1),
+                    kind='stable',
+                ).head(5)
                 stale_list = []
                 for _, row in stale.iterrows():
                     entry = {
