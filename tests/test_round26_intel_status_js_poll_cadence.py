@@ -21,6 +21,32 @@ def test_intel_status_js_file_exists() -> None:
     assert JS_PATH.stat().st_size >= 200
 
 
+def test_intel_status_js_has_double_init_guard() -> None:
+    """Round 26 - review (R26-003): the poller must guard against
+    double-initialisation so a future bundle accident or hot-reload
+    cannot bind two click handlers on [data-intel-run-now] (which
+    would double every refresh POST) or two visibilitychange listeners
+    (doubling status polls on every tab focus).
+
+    Both halves of the idempotency contract are pinned: the read
+    AND the write of ``window.__adoptiqIntelStatusInit``.  An edit
+    that drops one half breaks the guard silently and this test
+    catches it.
+    """
+    assert "__adoptiqIntelStatusInit" in JS_SRC, (
+        "R26-003 regression: intel_status.js no longer carries a "
+        "double-init guard.  A future bundle accident or hot-reload "
+        "would silently double-bind every event handler."
+    )
+    read_count = JS_SRC.count("if (window.__adoptiqIntelStatusInit)")
+    write_count = JS_SRC.count("window.__adoptiqIntelStatusInit = true")
+    assert read_count >= 1 and write_count >= 1, (
+        f"R26-003 regression: double-init guard incomplete "
+        f"(reads={read_count}, writes={write_count}).  Both halves "
+        f"must be present for the guard to be idempotent."
+    )
+
+
 def test_intel_status_js_uses_correct_status_endpoint() -> None:
     assert "'/api/intel/status'" in JS_SRC
     assert "'/api/intel/refresh'" in JS_SRC

@@ -30,6 +30,16 @@
 (function () {
     'use strict';
 
+    // Round 26 - review (R26-003): defensive double-init guard.  The
+    // poller is included exactly once via base.html today, but a future
+    // bundle accident or hot-reload would otherwise bind two click
+    // handlers on [data-intel-run-now] and two visibilitychange
+    // listeners, doubling traffic to /api/intel/{status,refresh}.
+    // Idempotent across DOMContentLoaded -> immediate-init races and
+    // across multi-script-include accidents.
+    if (window.__adoptiqIntelStatusInit) { return; }
+    window.__adoptiqIntelStatusInit = true;
+
     var STATUS_URL = '/api/intel/status';
     var REFRESH_URL = '/api/intel/refresh';
     var UPLOAD_FORM_ID = 'adoptiq-intel-upload-form';
