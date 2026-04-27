@@ -184,3 +184,80 @@ def test_upload_oversize_returns_json_413_for_api_paths(
     assert "too large" in err.lower()
     # Message includes the megabyte cap so users see the actual limit.
     assert "MB" in err
+
+
+def test_upload_returns_refresh_started_on_success(
+    client, monkeypatch, tmp_path
+):
+    """Round 26 - review (NIT-007a): a successful upload must trigger
+    an incremental refresh and report ``refresh_started == True``.
+
+    We monkeypatch ``corpus_bootstrap.is_enabled`` and
+    ``corpus_bootstrap.request_refresh`` so the test doesn't depend
+    on the real corpus singleton (which might be uninitialized in a
+    bare pytest run).  The assertion shape mirrors the production
+    JSON contract documented in ``api_intel_upload``.
+    """
+    monkeypatch.setattr(Config, "ADOPTIQ_INTEL_UPLOAD_ENABLED", True)
+    monkeypatch.setattr(Config, "CSONE_INTEL_UPLOADS_FOLDER", str(tmp_path))
+
+    import corpus_bootstrap as cb
+
+    refresh_calls: list[dict] = []
+
+    def _fake_is_enabled() -> bool:
+        return True
+
+    def _fake_request_refresh(*, rebuild: bool = False) -> bool:
+        refresh_calls.append({"rebuild": rebuild})
+        return True
+
+    monkeypatch.setattr(cb, "is_enabled", _fake_is_enabled)
+    monkeypatch.setattr(cb, "request_refresh", _fake_request_refresh)
+
+    payload = b"col1,col2\n1,2\n"
+    data = {"file": (io.BytesIO(payload), "tiny.csv")}
+    resp = client.post(
+        "/api/intel/upload",
+        data=data,
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body.get("ok") is True
+    assert body.get("refresh_started") is True
+    # Upload route is the post-upload trigger -- never a rebuild.
+    assert refresh_calls == [{"rebuild": False}]
+
+
+def test_upload_does_not_set_refresh_started_when_corpus_disabled(
+    client, monkeypatch, tmp_path
+):
+    """Round 26 - review (NIT-007a): when ``corpus_bootstrap.is_enabled``
+    is False (CORPUS_KNOWLEDGE_ENABLED unset), the upload still
+    succeeds but ``refresh_started`` must be False so the JS doesn't
+    show a "indexing now" toast that will never resolve."""
+    monkeypatch.setattr(Config, "ADOPTIQ_INTEL_UPLOAD_ENABLED", True)
+    monkeypatch.setattr(Config, "CSONE_INTEL_UPLOADS_FOLDER", str(tmp_path))
+
+    import corpus_bootstrap as cb
+
+    monkeypatch.setattr(cb, "is_enabled", lambda: False)
+
+    def _request_refresh_should_not_be_called(*args, **kwargs):
+        raise AssertionError(
+            "request_refresh must not be called when is_enabled() is False"
+        )
+
+    monkeypatch.setattr(cb, "request_refresh", _request_refresh_should_not_be_called)
+
+    data = {"file": (io.BytesIO(b"row\n"), "tiny.csv")}
+    resp = client.post(
+        "/api/intel/upload",
+        data=data,
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body.get("ok") is True
+    assert body.get("refresh_started") is False
