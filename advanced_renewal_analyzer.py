@@ -1335,8 +1335,26 @@ class AdvancedRenewalAnalyzer:
             _basis_matches = (
                 not _customer_ccy or _customer_ccy == _basis_ccy
             )
+            # Round 28 sweep: verified that every currency-bearing
+            # _RAT[...] read in this method is downstream of the
+            # ``not is_multi_ccy and _basis_matches`` predicate so the
+            # contract documented in risk_scoring.RENEWAL_ARR_THRESHOLDS
+            # is satisfied -- multi-currency portfolios skip the gate
+            # AND non-USD single-currency portfolios skip the gate AND
+            # both emit a disclosure factor before bypassing the
+            # threshold compares.  Pinned by
+            # tests/test_round28_renewal_arr_thresholds_multicurrency_parametric.py.
             if is_multi_ccy or not _basis_matches:
-                if not is_multi_ccy and not _basis_matches:
+                if is_multi_ccy:
+                    # Round 28: surface multi-currency skip in the
+                    # narrative too (single-currency-non-USD branch
+                    # already discloses below; multi-currency was
+                    # silent prior to Round 28).
+                    risk_factors.append(
+                        f"ARR gates skipped: multi-currency portfolio "
+                        f"(threshold basis {_basis_ccy})"
+                    )
+                elif not _basis_matches:
                     risk_factors.append(
                         f"ARR gates skipped: customer currency {_customer_ccy} "
                         f"differs from threshold basis {_basis_ccy}"

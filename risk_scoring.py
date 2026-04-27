@@ -234,6 +234,30 @@ RENEWAL_RISK_INCREMENTS = {
     "many_high_severity_barriers_penalty": 25,
 }
 
+# Round 28: formal contract for RENEWAL_ARR_THRESHOLDS consumers.
+#
+# Currency-bearing keys (``high_value_arr``, ``low_value_arr``,
+# ``high_discount_pct``) are denominated in the basis currency stamped
+# at ``RENEWAL_ARR_THRESHOLDS["currency_basis"]`` (USD).  Consumers MUST:
+#
+#   1. Skip the threshold compare when
+#      ``financial_metrics["is_multi_currency"]`` is True OR
+#      ``financial_metrics["currency"].upper() != currency_basis``.
+#   2. When skipping, append a disclosure factor naming the customer's
+#      currency and the basis currency so the omission is visible in
+#      the rendered narrative (e.g. ``"ARR gates skipped: customer
+#      currency EUR differs from threshold basis USD"``).
+#
+# Keys that score dimensionless ratios or 0-100 scores
+# (``low_completion_rate``, ``high_completion_rate``,
+# ``low_engagement_score``, ``high_engagement_score``,
+# ``low_support_completion_rate``, ``poor_adoption_health_score``,
+# ``good_adoption_health_score``, ``many_high_severity_barriers``,
+# ``starting_renewal_score``) are NOT subject to the currency contract
+# above -- they apply uniformly regardless of currency.
+#
+# This contract is enforced by Round 28 parametric tests under
+# ``tests/test_round28_renewal_arr_thresholds_multicurrency_parametric.py``.
 RENEWAL_ARR_THRESHOLDS = {
     # ARR (annual recurring revenue) thresholds in *unspecified*
     # currency (advanced_renewal_analyzer is currency-aware as of
@@ -247,7 +271,12 @@ RENEWAL_ARR_THRESHOLDS = {
     #   (b) convert the customer's portfolio total to USD-equivalent
     #       before comparing.  Mirrors the multi-currency disclosure
     #       contract added in Phase 1.1/1.3.
-    "currency_basis": "USD",  # Round 13 / Phase 1.7
+    # Round 28: AdoptIQ ships strategy (a) -- skip-the-gate -- because
+    #   we do not have a sourced/dated FX feed; faking one would make
+    #   reports less honest.  Future rounds may add an opt-in
+    #   FX-normalize path behind a config flag without breaking this
+    #   contract.
+    "currency_basis": "USD",  # Round 13 / Phase 1.7; reaffirmed Round 28
     "high_value_arr": 100_000,
     "low_value_arr": 10_000,
     "high_discount_pct": 50,
