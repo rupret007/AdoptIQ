@@ -1625,21 +1625,33 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
          * ``.risk-medium`` / ``.risk-low`` continue to come from
          * ``canonical_metrics.RISK_BAND_COLORS`` via Jinja so the
          * admin UI stays byte-identical with Word/Excel exports.
+         *
+         * Round 24 / theme-parity: light-mode tokens were drifting
+         * from ``templates/base.html`` (the admin used ``#0076CE``
+         * page bg + ``#3498db`` Tableau-blue accent, the main app
+         * used ``#f8f9fa`` page bg + ``#00bceb`` Cisco-blue accent).
+         * The values below now resolve to the same hexes as
+         * ``base.html``'s ``:root`` defaults, so toggling between
+         * ports 5151 and 5152 in light mode no longer reveals two
+         * different palettes.  ``--bg-page`` was removed because it
+         * was declared in both blocks but never referenced anywhere
+         * in the inline stylesheet (consolidated with ``--bg-base``).
+         * ``tests/test_round24_admin_theme_parity.py`` pins the
+         * alignment so a future drift breaks CI.
          */
         :root {
-            --bg-base: #0076CE;
-            --bg-page: #f5f7fa;
-            --bg-surface: rgba(255, 255, 255, 0.95);
-            --bg-surface-raised: rgba(255, 255, 255, 1.0);
-            --border-subtle: #ddd;
-            --text-primary: #2c3e50;
+            --bg-base: #f8f9fa;                                   /* Round 24 / theme-parity */
+            --bg-surface: #ffffff;                                /* Round 24 / theme-parity */
+            --bg-surface-raised: #ffffff;                         /* Round 24 / theme-parity */
+            --border-subtle: #e9ecef;                             /* Round 24 / theme-parity */
+            --text-primary: #212529;                              /* Round 24 / theme-parity */
             --text-secondary: #495057;
-            --text-muted: #7f8c8d;
-            --accent-primary: #3498db;
-            --accent-primary-hover: #2980b9;
-            --accent-glow: rgba(52, 152, 219, 0.35);
-            --accent-glow-soft: rgba(52, 152, 219, 0.1);
-            --th-bg: linear-gradient(135deg, #3498db, #2980b9);
+            --text-muted: #6c757d;                                /* Round 24 / theme-parity */
+            --accent-primary: #00bceb;                            /* Round 24 / theme-parity */
+            --accent-primary-hover: #0073e6;                      /* Round 24 / theme-parity */
+            --accent-glow: rgba(0, 188, 235, 0.35);               /* Round 24 / theme-parity */
+            --accent-glow-soft: rgba(0, 188, 235, 0.15);          /* Round 24 / theme-parity */
+            --th-bg: linear-gradient(135deg, #00bceb, #0073e6);   /* Round 24 / theme-parity */
             --shadow-card: 0 8px 32px rgba(0, 0, 0, 0.1);
             --adoptiq-orange: #ff7a1a;
             --adoptiq-orange-hover: #ff944d;
@@ -1647,7 +1659,6 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
 
         [data-bs-theme="dark"] {
             --bg-base: #0d1117;
-            --bg-page: #0d1117;
             --bg-surface: #161b22;
             --bg-surface-raised: #21262d;
             --border-subtle: #30363d;
@@ -1671,7 +1682,7 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
 
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: var(--bg-base, #0076CE);
+            background: var(--bg-base, #f8f9fa);                  /* Round 24 / theme-parity */
             color: var(--text-primary);
             min-height: 100vh;
             padding: 20px;
