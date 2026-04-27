@@ -988,6 +988,43 @@ def add_security_headers_for_sensitive_routes(response):
 
     return response
 
+
+@app.errorhandler(413)
+def _r26_review_json_413_for_api(error):  # noqa: ARG001
+    """Round 26 - review (R26-OPEN-004): return JSON for oversize
+    uploads on ``/api/*`` so the AdoptIQ Intelligence poller (and
+    any other API client) renders the friendly "File too large"
+    message instead of treating Werkzeug's default HTML 413 as a
+    generic network error.
+
+    Werkzeug enforces ``MAX_CONTENT_LENGTH`` at request-parse time
+    and aborts before any view runs, so the per-endpoint
+    defense-in-depth check in ``_validate_intel_upload`` only fires
+    for uploads that fit the global cap but exceed a tighter
+    per-endpoint cap.  This errorhandler covers the global-cap
+    case and matches the same JSON shape (``{ok: False, error: ...}``)
+    the upload route emits on its own validation failures.
+
+    Non-API paths (browser-form uploads to legacy endpoints) keep
+    Werkzeug's default HTML 413 so they still see a recognizable
+    error page.
+    """
+    try:
+        path = request.path or ''
+    except Exception:  # noqa: BLE001
+        path = ''
+    if not path.startswith('/api/'):
+        # Fall through to Flask's default HTML 413 for non-API paths.
+        return error
+    max_bytes = int(app.config.get('MAX_CONTENT_LENGTH') or 0)
+    if max_bytes > 0:
+        max_mb = max_bytes // (1024 * 1024)
+        msg = f'File too large. Maximum size is {max_mb}MB.'
+    else:
+        msg = 'File too large.'
+    return jsonify({'ok': False, 'error': msg}), 413
+
+
 # Configure logging.
 #
 # Round 5 / Phase 6.5: ``app_simple`` is the canonical entry point for

@@ -143,3 +143,44 @@ def test_upload_rejects_path_traversal_filename(client, monkeypatch, tmp_path):
     assert resolved.is_file()
     assert str(resolved).startswith(str(tmp_path.resolve()))
     assert "etc_passwd" in saved_name or saved_name.endswith("passwd.csv")
+
+
+def test_upload_oversize_returns_json_413_for_api_paths(
+    app, client, monkeypatch, tmp_path
+):
+    """Round 26 - review (R26-OPEN-004): oversize uploads to /api/*
+    must return JSON 413 (matching the upload route's own
+    ``{ok: False, error: ...}`` shape) so the AdoptIQ Intelligence
+    poller renders the friendly "File too large" message instead
+    of treating Werkzeug's default HTML 413 as a network error.
+
+    Werkzeug aborts before any view runs once the request body
+    exceeds ``MAX_CONTENT_LENGTH``, so we shrink the cap to a tiny
+    value for this test and POST a body just over it.
+    """
+    monkeypatch.setattr(Config, "ADOPTIQ_INTEL_UPLOAD_ENABLED", True)
+    monkeypatch.setattr(Config, "CSONE_INTEL_UPLOADS_FOLDER", str(tmp_path))
+    # Clamp to 1 MiB for the duration of the test; the test client's
+    # multipart envelope easily fits this so we can exceed it
+    # deterministically without actually allocating dozens of MB.
+    original_cap = app.config.get("MAX_CONTENT_LENGTH")
+    app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024
+    try:
+        oversize = b"x" * (2 * 1024 * 1024)
+        data = {"file": (io.BytesIO(oversize), "huge.xlsx")}
+        resp = client.post(
+            "/api/intel/upload",
+            data=data,
+            content_type="multipart/form-data",
+        )
+    finally:
+        app.config["MAX_CONTENT_LENGTH"] = original_cap
+
+    assert resp.status_code == 413
+    body = resp.get_json()
+    assert body is not None, "errorhandler must return JSON, not HTML"
+    assert body.get("ok") is False
+    err = body.get("error") or ""
+    assert "too large" in err.lower()
+    # Message includes the megabyte cap so users see the actual limit.
+    assert "MB" in err
