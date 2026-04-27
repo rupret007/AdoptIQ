@@ -1186,11 +1186,21 @@ except Exception as e:
 # the first /api/intel/status read) doesn't have to do it.  Failures
 # here are non-fatal -- ``_ensure_intel_uploads_folder`` will retry
 # lazily on the upload path.
+#
+# Round 26 - review (R26-OPEN-002): gate the pre-create on
+# ``ADOPTIQ_INTEL_UPLOAD_ENABLED`` so disabled installs don't grow a
+# always-on ``intel_uploads`` source on every bootstrap pass.  Admins
+# who want to pre-seed files by hand without enabling the upload
+# endpoint can ``mkdir`` the folder themselves -- the bootstrap
+# walker still picks it up via ``_resolve_index_sources``.
 try:
+    _intel_upload_enabled_at_startup = bool(
+        getattr(Config, 'ADOPTIQ_INTEL_UPLOAD_ENABLED', False)
+    )
     _intel_uploads_dir_at_startup = getattr(
         Config, 'CSONE_INTEL_UPLOADS_FOLDER', None
     )
-    if _intel_uploads_dir_at_startup:
+    if _intel_upload_enabled_at_startup and _intel_uploads_dir_at_startup:
         _intel_path = Path(str(_intel_uploads_dir_at_startup))
         _intel_path.mkdir(parents=True, exist_ok=True)
         try:

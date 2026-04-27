@@ -188,9 +188,12 @@ def _resolve_index_sources() -> list[dict[str, object]]:
        report names, when ``CSONE_INCLUDE_USER_DOWNLOADS`` is
        truthy.
     4. ``intel_uploads`` (Round 26) -- per-user drop folder
-       populated by ``/api/intel/upload``.  Always walked when the
-       directory exists so admin-pre-seeded files are picked up
-       even when the user-facing upload route itself is disabled.
+       populated by ``/api/intel/upload``.  Walked when the
+       directory exists.  Pre-create is gated on
+       ``ADOPTIQ_INTEL_UPLOAD_ENABLED`` (Round 26 review /
+       R26-OPEN-002), so disabled installs leave the source
+       absent unless an admin pre-seeds the directory by hand --
+       at which point the walker still picks it up.
 
     Each entry is a self-describing dict so the admin tile can render
     labels without having to hard-code the order.
