@@ -1971,10 +1971,20 @@ def index():
     # Round 26 / Phase D: feature flag for the user-facing upload
     # control.  Default OFF so the endpoint and the drop-zone are
     # not exposed unless the operator opts in via env var.
-    _intel_upload_flag = (
-        os.environ.get('ADOPTIQ_INTEL_UPLOAD_ENABLED', '').strip().lower()
+    #
+    # Round 26 - review (R26-002): route through ``Config.*`` so the
+    # template flag and the ``api_intel_upload`` gate (which already
+    # reads ``Config.ADOPTIQ_INTEL_UPLOAD_ENABLED``) cannot drift.
+    # Previously this read ``os.environ`` directly, which:
+    #   - silently bypassed the same casefolding rules
+    #     ``Config`` uses on import (e.g. ``yes``/``on`` truthy);
+    #   - tests that ``monkeypatch.setattr(Config, ...)`` -- the
+    #     pattern used by every ``test_round26_intel_upload_*`` --
+    #     could not flip this side of the flag, leaving the
+    #     drop-zone hidden in tests that needed it visible.
+    intel_upload_enabled = bool(
+        getattr(Config, 'ADOPTIQ_INTEL_UPLOAD_ENABLED', False)
     )
-    intel_upload_enabled = _intel_upload_flag in ('1', 'true', 'yes', 'on')
 
     return render_template(
         'analyze.html',
