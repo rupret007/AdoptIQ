@@ -167,8 +167,8 @@ def _accumulate_index_stats(target: IndexStats, source: IndexStats) -> None:
 
 
 def _resolve_index_sources() -> list[dict[str, object]]:
-    """Round 17.1 + 17.2: enumerate the corpus index sources for the
-    current bootstrap pass.  Order matters because ``index_folder``
+    """Round 17.1 + 17.2 + 26: enumerate the corpus index sources for
+    the current bootstrap pass.  Order matters because ``index_folder``
     rebuilds only on the first source -- subsequent sources do
     incremental upserts on top of the rows the first source wrote.
 
@@ -187,6 +187,10 @@ def _resolve_index_sources() -> list[dict[str, object]]:
     3. ``user_downloads`` -- ``~/Downloads`` filtered to AdoptIQ
        report names, when ``CSONE_INCLUDE_USER_DOWNLOADS`` is
        truthy.
+    4. ``intel_uploads`` (Round 26) -- per-user drop folder
+       populated by ``/api/intel/upload``.  Always walked when the
+       directory exists so admin-pre-seeded files are picked up
+       even when the user-facing upload route itself is disabled.
 
     Each entry is a self-describing dict so the admin tile can render
     labels without having to hard-code the order.
@@ -251,6 +255,31 @@ def _resolve_index_sources() -> list[dict[str, object]]:
                     "label": "user_downloads",
                     "dir": str(downloads_path),
                     "filter": "adoptiq_named",
+                }
+            )
+
+    # 4) Round 26: per-user uploaded CSOne reports.  We walk this
+    # source unconditionally when the directory exists -- not gated
+    # on ``ADOPTIQ_INTEL_UPLOAD_ENABLED`` -- so admin-pre-seeded
+    # files are still ingested even when the live upload endpoint
+    # is turned off.  The walker uses ``all_supported`` so any
+    # CSOne export shape (xlsx / csv / docx / pdf) the operator
+    # drops in is picked up.  Filename hygiene is enforced at
+    # upload time (``secure_filename`` + uuid prefix); files
+    # placed by hand are trusted to come from the operator.
+    intel_uploads_dir = getattr(Config, "CSONE_INTEL_UPLOADS_FOLDER", None)
+    if intel_uploads_dir:
+        try:
+            intel_uploads_path = Path(str(intel_uploads_dir))
+            intel_exists = intel_uploads_path.is_dir()
+        except Exception:
+            intel_exists = False
+        if intel_exists:
+            sources.append(
+                {
+                    "label": "intel_uploads",
+                    "dir": str(intel_uploads_path),
+                    "filter": "all_supported",
                 }
             )
     return sources

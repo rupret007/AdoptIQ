@@ -184,6 +184,41 @@ class Config:
         Path.home() / 'Downloads'
     )
 
+    # Round 26 / Phase D: user-uploaded CSOne report drop folder.
+    #
+    # Reports submitted through the user-facing AdoptIQ Intelligence
+    # banner (analyze.html) land here under sanitized random
+    # filenames.  The corpus indexer then walks this folder on the
+    # next bootstrap pass so user-supplied reports are immediately
+    # searchable from Ask AI without forcing an admin re-index.
+    #
+    # Default location lives under the per-user ``~/.adoptiq``
+    # directory so:
+    #   * uploads survive Flask restarts (persistent index source);
+    #   * the directory is created with 0700 permissions by the
+    #     application (see ``_ensure_intel_uploads_folder`` in
+    #     ``app_simple.py``) -- never world-readable;
+    #   * tests / power users can override via env var without
+    #     touching code.
+    CSONE_INTEL_UPLOADS_FOLDER = os.environ.get(
+        'CSONE_INTEL_UPLOADS_FOLDER'
+    ) or str(Path.home() / '.adoptiq' / 'intel_uploads')
+
+    # Round 26 / Phase D: feature flag for the user-facing upload
+    # endpoint.  Default OFF so the route + drop-zone are not
+    # exposed unless the operator opts in.  When false:
+    #   * /api/intel/upload returns 404 (route not registered? no
+    #     -- registered but returns 403 with a clear payload so
+    #     existing tests can still assert the route exists);
+    #   * the analyze.html drop-zone is not rendered;
+    #   * the indexer still walks any pre-existing
+    #     ``CSONE_INTEL_UPLOADS_FOLDER`` content (so an admin can
+    #     pre-seed it from disk even when uploads are disabled).
+    ADOPTIQ_INTEL_UPLOAD_ENABLED = (
+        str(os.environ.get('ADOPTIQ_INTEL_UPLOAD_ENABLED', 'false')).strip().lower()
+        in {'1', 'true', 'yes', 'on'}
+    )
+
     # Round 17: CSOne Knowledge Corpus feature flag.
     #
     # When enabled (env ``CORPUS_KNOWLEDGE_ENABLED`` truthy), AdoptIQ

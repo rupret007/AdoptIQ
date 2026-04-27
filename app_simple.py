@@ -1181,6 +1181,28 @@ try:
 except Exception as e:
     logger.error(f"Failed to create directories: {e}")
 
+# Round 26 / Phase D: pre-create the AdoptIQ Intelligence uploads
+# folder at startup with 0700 permissions, so the first upload (or
+# the first /api/intel/status read) doesn't have to do it.  Failures
+# here are non-fatal -- ``_ensure_intel_uploads_folder`` will retry
+# lazily on the upload path.
+try:
+    _intel_uploads_dir_at_startup = getattr(
+        Config, 'CSONE_INTEL_UPLOADS_FOLDER', None
+    )
+    if _intel_uploads_dir_at_startup:
+        _intel_path = Path(str(_intel_uploads_dir_at_startup))
+        _intel_path.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(str(_intel_path), 0o700)
+        except Exception:
+            pass
+except Exception as _intel_setup_err:  # noqa: BLE001
+    logger.debug(
+        "Round 26 / intel uploads folder pre-create failed: %s",
+        type(_intel_setup_err).__name__,
+    )
+
 # Global storage for analysis status with persistence
 analysis_status = {}
 cancellation_flags = {}  # Track cancellation requests
@@ -1928,7 +1950,39 @@ def index():
     form = AnalysisForm()
     # Set manager choices dynamically from team_config.json
     form.manager.choices = [(m, m) for m in MANAGERS]
-    return render_template('analyze.html', form=form, error_message=error_message)
+
+    # Round 26 / Phase C: server-side seed for the AdoptIQ
+    # Intelligence banner.  We render a usable summary even when JS
+    # is disabled so users see real state (idle/running/last run)
+    # immediately on first paint -- the banner JS then takes over
+    # and keeps it live via /api/intel/status.  Failures here must
+    # never break the analysis page; fall back to ``None`` so the
+    # template's "{% if not intel_status %}" branch wins.
+    intel_status_ctx: Optional[Dict[str, Any]] = None
+    try:
+        intel_status_ctx = _r17_corpus_status_payload()
+    except Exception as _intel_err:  # noqa: BLE001 - never break / on render
+        logger.debug(
+            "Round 26 / Phase C: intel_status seed failed: %s",
+            type(_intel_err).__name__,
+        )
+        intel_status_ctx = None
+
+    # Round 26 / Phase D: feature flag for the user-facing upload
+    # control.  Default OFF so the endpoint and the drop-zone are
+    # not exposed unless the operator opts in via env var.
+    _intel_upload_flag = (
+        os.environ.get('ADOPTIQ_INTEL_UPLOAD_ENABLED', '').strip().lower()
+    )
+    intel_upload_enabled = _intel_upload_flag in ('1', 'true', 'yes', 'on')
+
+    return render_template(
+        'analyze.html',
+        form=form,
+        error_message=error_message,
+        intel_status=intel_status_ctx,
+        intel_upload_enabled=intel_upload_enabled,
+    )
 
 @app.route('/start_analysis', methods=['POST'])
 def start_analysis():
@@ -15291,6 +15345,258 @@ def api_corpus_sharepoint_refresh():
     payload['refresh_started'] = refresh_started
     if refresh_error:
         payload['refresh_error'] = refresh_error
+    return jsonify(payload), 200
+
+
+# ---------------------------------------------------------------------------
+# Round 26 / Phase B: user-facing AdoptIQ Intelligence aliases.
+#
+# The corpus indexer was historically an admin-only feature, surfaced
+# under ``/api/corpus/*`` and labeled "CSOne Knowledge Corpus" in the
+# admin dashboard.  Round 26 promotes it to a first-class, user-visible
+# capability ("AdoptIQ Intelligence") that powers troubleshooting,
+# case-history retrieval, and customer-sentiment grounding for Ask AI.
+# Rather than fork the route handlers, these aliases simply forward to
+# the existing implementations so:
+#
+#   * the JSON payload shape stays identical (no test churn for callers
+#     of ``/api/corpus/status``);
+#   * auth (CSRF + ``X-AdoptIQ-Internal``) is inherited verbatim;
+#   * future contract changes only need to be made in one place.
+#
+# The user-facing banner in ``analyze.html`` and the navbar badge in
+# ``base.html`` poll ``/api/intel/status`` (read-only) and POST to
+# ``/api/intel/refresh`` for the "Run now" action.
+# ---------------------------------------------------------------------------
+
+
+@app.route('/api/intel/status', methods=['GET'])
+def api_intel_status():
+    """Round 26 / Phase B: user-facing alias for ``/api/corpus/status``.
+
+    Returns the same payload as the underlying corpus status endpoint
+    so the user-facing banner can render without privileged access.
+    Read-only and inexpensive (the payload is a snapshot of in-memory
+    bootstrap state plus a single SQLite SELECT), safe to poll every
+    few seconds while indexing is in progress.
+    """
+    return jsonify(_r17_corpus_status_payload()), 200
+
+
+@app.route('/api/intel/refresh', methods=['POST'])
+def api_intel_refresh():
+    """Round 26 / Phase B: user-facing alias for ``/api/corpus/refresh``.
+
+    Delegates to :func:`api_corpus_refresh` to keep auth (CSRF +
+    ``X-AdoptIQ-Internal``) and payload shape in lockstep.  Exposed
+    separately so the user-facing UI can label the action accurately
+    ("Run AdoptIQ Intelligence now") without importing admin URLs.
+    """
+    return api_corpus_refresh()
+
+
+# ---------------------------------------------------------------------------
+# Round 26 / Phase D: user-uploaded CSOne report ingestion.
+# ---------------------------------------------------------------------------
+
+# Allowed file extensions for the intel upload endpoint.  Mirrors the
+# extensions ``corpus_indexer`` already knows how to parse so the
+# uploaded file is guaranteed to make it into the index on the next
+# pass (no silent "uploaded but never indexed" surprises).
+_INTEL_UPLOAD_ALLOWED_EXTENSIONS = (
+    '.xlsx', '.xls', '.csv', '.docx', '.pdf', '.txt', '.md',
+)
+
+
+def _ensure_intel_uploads_folder() -> Optional[str]:
+    """Round 26 / Phase D: lazily create the user-upload drop folder
+    with restrictive (0700) permissions.
+
+    Returns the absolute folder path on success, ``None`` if the
+    folder cannot be created (e.g. read-only home dir).  Errors are
+    logged but never raised so a misconfigured deployment does not
+    break unrelated routes that import this module.
+    """
+    folder = getattr(Config, 'CSONE_INTEL_UPLOADS_FOLDER', None)
+    if not folder:
+        return None
+    try:
+        path = Path(str(folder))
+        path.mkdir(parents=True, exist_ok=True)
+        # Tighten perms to 0700 -- this folder may transiently hold
+        # customer-named files before the indexer ingests + the user
+        # deletes; never world-readable.
+        try:
+            os.chmod(str(path), 0o700)
+        except Exception:  # noqa: BLE001 - best effort on Windows
+            pass
+        return str(path)
+    except Exception as err:  # noqa: BLE001
+        logger.warning(
+            "Round 26 / intel uploads folder unavailable: %s (%s)",
+            type(err).__name__, folder,
+        )
+        return None
+
+
+def _validate_intel_upload(file) -> Tuple[bool, str]:
+    """Round 26 / Phase D: defense-in-depth file checks for the
+    user-facing intel upload endpoint.
+
+    Performs:
+      * extension allow-list (hardcoded, narrow)
+      * size cap reusing the global ``MAX_CONTENT_LENGTH``
+      * empty-file rejection
+
+    Returns ``(True, '')`` on success or ``(False, message)`` on a
+    failure suitable to return verbatim in a JSON error body.  We do
+    NOT call ``magic`` / sniff bytes here -- the indexer's per-format
+    parser already rejects malformed inputs and surfaces the failure
+    via ``last_stats.errors`` on the next pass; surfacing a clear
+    "this is not the file type you said" 400 here is good enough.
+    """
+    if not file or not file.filename:
+        return False, 'No file selected.'
+    name_lower = str(file.filename).strip().lower()
+    if not any(name_lower.endswith(ext) for ext in _INTEL_UPLOAD_ALLOWED_EXTENSIONS):
+        allowed = ', '.join(_INTEL_UPLOAD_ALLOWED_EXTENSIONS)
+        return False, f'Unsupported file type. Allowed: {allowed}.'
+    try:
+        file.seek(0, 2)
+        size = file.tell()
+        file.seek(0)
+    except Exception:  # noqa: BLE001
+        return False, 'Could not determine file size.'
+    if size <= 0:
+        return False, 'Uploaded file is empty.'
+    max_size = int(app.config.get('MAX_CONTENT_LENGTH', 50 * 1024 * 1024))
+    if size > max_size:
+        max_mb = max_size // (1024 * 1024)
+        return False, f'File too large. Maximum size is {max_mb}MB.'
+    return True, ''
+
+
+@app.route('/api/intel/upload', methods=['POST'])
+def api_intel_upload():
+    """Round 26 / Phase D: accept a CSOne report from the user-facing
+    AdoptIQ Intelligence banner.
+
+    Auth: same dual-path as ``/api/corpus/refresh`` -- a Flask-WTF
+    CSRF token (browser path) **or** matching ``X-AdoptIQ-Internal``
+    header (server-to-server).  Exposed only when the operator has
+    set ``ADOPTIQ_INTEL_UPLOAD_ENABLED=true`` so a default install
+    never accepts uploads from the UI.
+
+    On success the file lands in
+    ``Config.CSONE_INTEL_UPLOADS_FOLDER`` under a sanitized random
+    name (``<8-hex>_<secure_filename>``) and the next bootstrap
+    pass picks it up automatically.  Returns the same status shape
+    as ``/api/intel/status`` plus ``{"upload": {filename, size}}``
+    so the JS can render a confirmation without a second roundtrip.
+    """
+    # Feature flag.  Returns 403 (not 404) so callers get a clear
+    # signal that the route exists but is currently disabled --
+    # mirrors how ``/api/corpus/refresh`` behaves when corpus
+    # knowledge is disabled.
+    if not bool(getattr(Config, 'ADOPTIQ_INTEL_UPLOAD_ENABLED', False)):
+        return jsonify({
+            'ok': False,
+            'error': 'AdoptIQ Intelligence uploads are disabled '
+                     '(set ADOPTIQ_INTEL_UPLOAD_ENABLED=true).',
+        }), 403
+
+    # Auth gate (CSRF or internal token).  Reuse the SharePoint
+    # helper -- it already implements both branches identically to
+    # ``api_corpus_refresh``.
+    auth_err = _r17_2_authorize_corpus_admin()
+    if auth_err is not None:
+        body, status = auth_err
+        return jsonify(body), status
+
+    # Locate / create the drop folder.
+    target_dir = _ensure_intel_uploads_folder()
+    if not target_dir:
+        return jsonify({
+            'ok': False,
+            'error': 'Server upload folder is unavailable.',
+        }), 500
+
+    if 'file' not in request.files:
+        return jsonify({'ok': False, 'error': 'No file uploaded.'}), 400
+    file = request.files['file']
+    is_valid, err_msg = _validate_intel_upload(file)
+    if not is_valid:
+        return jsonify({'ok': False, 'error': err_msg}), 400
+
+    import uuid as _uuid
+    raw_name = secure_filename(file.filename or '')
+    if not raw_name:
+        return jsonify({
+            'ok': False,
+            'error': 'Filename rejected by sanitizer.',
+        }), 400
+    safe_name = _r13_unique_upload_filename(_uuid, raw_name, file)
+    target_path = os.path.join(target_dir, safe_name)
+
+    # Defense-in-depth: ensure the resolved path stays inside the
+    # target directory (no traversal via cleverly crafted
+    # filenames; ``secure_filename`` already strips ``..``, but a
+    # second check costs nothing).
+    try:
+        resolved_target = os.path.realpath(target_path)
+        resolved_dir = os.path.realpath(target_dir)
+        if not resolved_target.startswith(resolved_dir + os.sep) and resolved_target != resolved_dir:
+            return jsonify({
+                'ok': False,
+                'error': 'Path traversal rejected.',
+            }), 400
+    except Exception:  # noqa: BLE001
+        return jsonify({
+            'ok': False,
+            'error': 'Could not resolve upload path.',
+        }), 500
+
+    try:
+        file.save(target_path)
+        try:
+            os.chmod(target_path, 0o600)
+        except Exception:  # noqa: BLE001 - best effort on Windows
+            pass
+        size_bytes = 0
+        try:
+            size_bytes = int(os.path.getsize(target_path))
+        except Exception:  # noqa: BLE001
+            size_bytes = 0
+    except Exception as err:  # noqa: BLE001
+        logger.warning(
+            "Round 26 / intel upload save failed: %s",
+            type(err).__name__,
+        )
+        return jsonify({
+            'ok': False,
+            'error': 'Could not save uploaded file.',
+        }), 500
+
+    # Best-effort: kick off an incremental refresh so the new file
+    # gets indexed without the user having to click "Run now".
+    refresh_started = False
+    try:
+        import corpus_bootstrap as _r26_cb
+        if _r26_cb.is_enabled():
+            refresh_started = bool(_r26_cb.request_refresh(rebuild=False))
+    except Exception as err:  # noqa: BLE001
+        logger.debug(
+            "Round 26 / post-upload refresh failed: %s",
+            type(err).__name__,
+        )
+
+    payload = _r17_corpus_status_payload()
+    payload['ok'] = True
+    payload['upload'] = {
+        'filename': safe_name,
+        'size': size_bytes,
+    }
+    payload['refresh_started'] = refresh_started
     return jsonify(payload), 200
 
 
