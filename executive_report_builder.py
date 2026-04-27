@@ -3,6 +3,7 @@ ExecutiveReportBuilder - Clean Word report builder for AdoptIQ comprehensive rep
 Wraps python-docx Document with executive-ready formatting and delegates to adoptiq_backend.
 """
 import logging
+from typing import Optional
 
 from docx import Document
 from docx.shared import Inches
@@ -106,8 +107,65 @@ class ExecutiveReportBuilder:
             )
             self.doc.add_paragraph(text)
 
-    def save(self, path: str):
-        """Save document to path."""
+    def save(
+        self,
+        path: str,
+        customer_name: Optional[str] = None,
+        report_subject: Optional[str] = None,
+    ):
+        """Save document to path.
+
+        Round 25 / Phase E: stamp ``doc.core_properties`` so the
+        generated ``.docx`` identifies as AdoptIQ output rather than a
+        python-docx-default file with a 2013 created date.  The stamp
+        runs *before* ``doc.save(...)`` because python-docx serializes
+        ``core.xml`` from the in-memory properties at save time.
+
+        ``customer_name`` and ``report_subject`` are optional; when
+        provided they enrich the ``Title`` and ``Subject`` properties
+        with portfolio context (e.g. ``"Brian Frazier All Contact
+        Center - Executive Analysis - 2026-04-25"``).  When omitted we
+        still emit a non-empty title that names the report family and
+        date so the Properties dialog never shows an empty title.
+        """
+        try:
+            from datetime import datetime as _r25e_datetime, timezone as _r25e_tz
+
+            _r25e_now = _r25e_datetime.now(_r25e_tz.utc)
+            _r25e_customer = (customer_name or "").strip()
+            _r25e_subject = (report_subject or "").strip()
+
+            if _r25e_customer:
+                _r25e_title = (
+                    f"{_r25e_customer} - Executive Analysis - "
+                    f"{_r25e_now.strftime('%Y-%m-%d')}"
+                )
+            else:
+                _r25e_title = (
+                    f"AdoptIQ Comprehensive Executive Report - "
+                    f"{_r25e_now.strftime('%Y-%m-%d')}"
+                )
+
+            cp = self.doc.core_properties
+            cp.author = "AdoptIQ Executive Report Generator"
+            cp.last_modified_by = "AdoptIQ Executive Report Generator"
+            cp.title = _r25e_title
+            cp.subject = _r25e_subject or "AdoptIQ Comprehensive Executive Report"
+            cp.comments = "AdoptIQ Comprehensive Executive Report"
+            cp.category = "Executive Analytics"
+            cp.created = _r25e_now
+            cp.modified = _r25e_now
+            try:
+                cp.company = "AdoptIQ"
+            except Exception:
+                pass
+        except Exception as _r25e_err:
+            logger.debug(
+                "Round 25 / Phase E: core-properties stamp skipped on "
+                "ExecutiveReportBuilder.save: %s",
+                _r25e_err,
+            )
+
         self.doc.save(path)
 
     def parse_ai_output_and_add(self, ai_output: str):
