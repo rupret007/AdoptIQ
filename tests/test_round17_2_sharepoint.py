@@ -424,6 +424,17 @@ def test_resolve_index_sources_orders_sharepoint_first(monkeypatch, tmp_path: Pa
     monkeypatch.setattr(Config, "CSONE_ONEDRIVE_FOLDER", str(od_dir), raising=False)
     monkeypatch.setattr(Config, "CSONE_INCLUDE_USER_DOWNLOADS", True, raising=False)
     monkeypatch.setattr(Config, "CSONE_USER_DOWNLOADS_DIR", str(dl_dir), raising=False)
+    # Round 26: explicitly point ``intel_uploads`` at a missing path
+    # so this Round 17.2 ordering invariant remains a 3-source test.
+    # The Round 26 ``intel_uploads`` source is exercised separately in
+    # ``test_round26_intel_alias_endpoints.py`` and the bootstrap
+    # source-list test below.
+    monkeypatch.setattr(
+        Config,
+        "CSONE_INTEL_UPLOADS_FOLDER",
+        str(tmp_path / "intel-uploads-missing"),
+        raising=False,
+    )
 
     sources = cb._resolve_index_sources()
     labels = [s["label"] for s in sources]
@@ -457,6 +468,14 @@ def test_resolve_index_sources_skips_missing_onedrive(monkeypatch, tmp_path: Pat
     )
     monkeypatch.setattr(Config, "CSONE_INCLUDE_USER_DOWNLOADS", True, raising=False)
     monkeypatch.setattr(Config, "CSONE_USER_DOWNLOADS_DIR", str(dl_dir), raising=False)
+    # Round 26: keep this assertion focused on the OneDrive-skipped
+    # invariant by pinning intel uploads at a missing path.
+    monkeypatch.setattr(
+        Config,
+        "CSONE_INTEL_UPLOADS_FOLDER",
+        str(tmp_path / "intel-uploads-missing"),
+        raising=False,
+    )
 
     labels = [s["label"] for s in cb._resolve_index_sources()]
     assert "onedrive" not in labels
