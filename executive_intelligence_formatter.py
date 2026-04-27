@@ -1743,6 +1743,14 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
         portfolio_metrics.setdefault("partial_data_warnings", []).append(
             f"Total customer count unavailable: {_cc_exc}"
         )
+    # Round 22 / R22-001: thread _ei_extra_frames + _account_to_customer
+    # through the validator so its customer universe matches portfolio_metrics
+    # exactly.  build_portfolio_metrics(extra_customer_frames=_ei_extra_frames)
+    # was already passing extras at L1715, but the validator was running
+    # AB+CSOne-only -- which meant ANY customer that appears only in a
+    # csconsole frame (action plan / pulse / etc.) caused the validator to
+    # compute a smaller total_customers than portfolio_metrics, raising
+    # "Portfolio metric mismatch" on every realistic dataset.
     consistency = validate_report_consistency(
         ab_for_check,
         csone_for_check,
@@ -1750,6 +1758,8 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
         risk_data=risk_scores if isinstance(risk_scores, dict) else {},
         defects=software_defects if isinstance(software_defects, dict) else {},
         factual_claims=factual_claims,
+        extra_frames=_ei_extra_frames or None,
+        account_to_customer=_account_to_customer,
     )
     if not consistency["is_valid"]:
         raise ValueError(f"Executive consistency checks failed: {'; '.join(consistency['errors'])}")

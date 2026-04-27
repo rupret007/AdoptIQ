@@ -2749,12 +2749,22 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
                 "build_portfolio_metrics value: %s",
                 _tc_err,
             )
+        # Round 22 / R22-001: thread the same extras + account_to_customer
+        # we used for build_portfolio_metrics through the validator so the
+        # validator's customer universe matches portfolio_metrics["total_customers"]
+        # exactly.  Without this the validator computes total_customers from
+        # ab_data ∪ csone_norm only and raises "Portfolio metric mismatch" the
+        # moment any extra-frame customer is present (e.g. action plan / pulse
+        # only customers).  The leader-report path at app_simple.py:18776 has
+        # done this since Round 5/6 -- this is the same fix for the compact path.
         consistency = validate_report_consistency(
             ab_data,
             csone_norm,
             portfolio_metrics=portfolio_metrics,
             risk_data=risk_data,
             factual_claims=factual_claims,
+            extra_frames=_extra_customer_frames or None,
+            account_to_customer=account_to_customer,
         )
         if consistency["errors"]:
             logger.error(f"[CONSISTENCY] Compact report errors: {consistency['errors']}")

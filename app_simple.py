@@ -5646,6 +5646,12 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             not in {"1", "true", "yes", "on"}
         )
         _enh_factual_claims = locals().get("factual_claims") or []
+        # Round 22 / R22-001: thread _enh_extra_frames through the validator
+        # so its total_customers matches _enh_portfolio_metrics["total_customers"]
+        # exactly.  The PM was built with extra_customer_frames=_enh_extra_frames
+        # at L5636, but the validator without extras would compute AB+CSOne only
+        # and raise "Portfolio metric mismatch".  No account_to_customer in
+        # scope on this path; pass None.
         _enh_consistency = validate_report_consistency(
             ab_norm if isinstance(ab_norm, pd.DataFrame) else pd.DataFrame(),
             csone_df if isinstance(csone_df, pd.DataFrame) else pd.DataFrame(),
@@ -5653,6 +5659,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             customer_pulse_df=csconsole_customer_pulse,
             strict_mode=_enh_strict,
             factual_claims=_enh_factual_claims if isinstance(_enh_factual_claims, list) else None,
+            extra_frames=_enh_extra_frames or None,
         )
         if not _enh_consistency.get('is_valid', True):
             logger.error(
@@ -10972,6 +10979,13 @@ def run_customer_renewal_analysis(analysis_id):
             str(os.getenv("ADOPTIQ_NONSTRICT_CONSISTENCY", "0")).strip().lower()
             not in {"1", "true", "yes", "on"}
         )
+        # Round 22 / R22-001: thread _ren_extra_frames + _ren_account_to_customer
+        # through the validator so its total_customers matches
+        # renewal_portfolio_metrics["total_customers"] exactly.  The PM was
+        # built with both at L10960-10961, but the validator without them
+        # would compute AB+CSOne only and raise "Portfolio metric mismatch"
+        # whenever an extras-only customer (action plan, pulse, success
+        # priority, adoption barrier) is present in the renewal scope.
         consistency_check = validate_report_consistency(
             customer_ab,
             _renewal_csone_norm,
@@ -10979,6 +10993,8 @@ def run_customer_renewal_analysis(analysis_id):
             defects=software_defects,
             factual_claims=factual_claims,
             strict_mode=_renewal_strict,
+            extra_frames=_ren_extra_frames or None,
+            account_to_customer=_ren_account_to_customer,
         )
         if not consistency_check["is_valid"]:
             raise ValueError(f"Renewal consistency checks failed: {'; '.join(consistency_check['errors'])}")

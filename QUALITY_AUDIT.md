@@ -2024,3 +2024,155 @@ Net test delta: **2205 → 2208 passed** (+3, all from `tests/test_round20_in_lo
 
 **Trailer:** Made-with: Cursor
 
+# Round 22 — Claude review (2026-04-26)
+
+Picked up R21-NEXT-CONSISTENCY (the `validate_report_consistency` ↔ `build_portfolio_metrics(extra_customer_frames=...)` disagreement Cursor surfaced during Round 21.1 implementation but didn't fix). Cursor flagged it correctly as "needs a stakeholder call on which side is canonical." This round closes the question: **the validator was already canonical** — its API has accepted `extra_frames` + `account_to_customer` since Round 5/6 — but 4 of the 7 callsites were silently building `portfolio_metrics` with extras and then calling the validator without them, guaranteeing a `Portfolio metric mismatch` on any realistic dataset.
+
+Round 21 + Round 21.1 input batch was also audited (read the golden fixture + spot-checked Cursor's two other hot spots).
+
+## Stack
+Unchanged from Round 21.1.
+
+## Verification commands
+- `make verify` — Round 14 harness, unchanged.
+
+## Phase 0 — Round 21 / 21.1 audit (no defects in fixture)
+
+Hand-walked `tests/fixtures/round19/golden.py::EXPECTED_KPIS` against the literal `_CSONE_ROWS` (20), `_AB_ROWS` (10), `_PULSE_ROWS` (8), `_RISK_PROFILES` (10), `make_extra_frames` (4 csconsole-style frames). Every value verified by inspection:
+
+| KPI | Expected | Verified |
+| --- | --- | --- |
+| `total_cases` | 20 | ✓ |
+| Priority breakdown (P1/P2/P3/P4/Unknown) | 4/4/4/4/4 = 20 | ✓ (invariant 1) |
+| `count_open_tac` / `count_closed_tac` | 12 / 6 (sum 18 ≤ 20) | ✓ (invariant 4) |
+| `break_fix_cases` / `provisioning_cases` | 3 / 2 | ✓ |
+| `bems_count` | 4 (CSOne `Transaction ID` only) | ✓ — see Phase 0.1 |
+| `bems_rate` | 20.0 (round(4/20*100, 2)) | ✓ |
+| `total_barriers` | 10 | ✓ |
+| `count_critical_barriers` | 4 (2 Critical + 2 High, default mode `critical_or_high`) | ✓ |
+| `count_open_barriers` | 6 | ✓ |
+| `total_customers` (with extras) | 5 (AcmeCorp, BetaInc, GammaLLC, DeltaCo, EpsilonInc) | ✓ |
+| Risk bands | 2 each across CRITICAL/HIGH/MEDIUM/LOW/HEALTHY | ✓ (invariant 2; boundary-safe) |
+| `high_risk_customers` | 4 (CRITICAL 2 + HIGH 2) | ✓ (invariant 3) |
+| `pulse.mean_0_to_10` | 6.5 (round(52/8, 2)) | ✓ |
+| `pulse` pos/neut/neg | 3/3/2 (sum 8) | ✓ |
+| `count_escalated` | 8 (P1 4 + P2 4) | ✓ |
+
+### Phase 0.1 — Cursor hot spot #2 (Round 21): BEMS AB-side question
+**RESOLVED: fixture is correct as-is.** `canonical_metrics.count_bems` (L603-667) defaults to `BEMS_MODE_CANONICAL` which only inspects `csone_df` (L642-645). AB-side BEMS is only counted in `BEMS_MODE_COMBINED_AB_TAC` (L647-654) which is the legacy Leader Report mode. Cursor's flag was a question, not a defect.
+
+### Phase 0.2 — Cursor hot spot #2 (Round 21.1): `add_case_lifecycle_fields` re-derivation
+**Documented as-is, no source change.** Confirmed Cursor's read: `add_case_lifecycle_fields` re-derives `case_type_class` from `Title` regardless of any pre-populated column. The fixture's pre-populated `case_type_class` is a test ergonomic for the canonical-helper layer; the formatter layer will re-derive from `Title` text. Both contracts are correctly pinned by Cursor's `tests/test_round21_1_formatter_render_diff.py::test_case_type_class_is_re_derived_by_formatters_documented`. No production change in this round.
+
+### Phase 0.3 — Cursor hot spot #3 (Round 21.1): Excel summary tests bypass `generate_excel`
+**Acknowledged, deferred to R22-NEXT-001.** The Round 21.1 Excel summary tests call `write_summary_sheet` directly to avoid driving `generate_excel` (which hosts R20-NEXT-001's closure-binding bug at L7335+). This means a future fix that changes `generate_excel`'s output won't be caught by Round 21.1's tests. End-to-end `generate_excel` render test deferred to R22-NEXT-001 alongside R20-NEXT-001's actual fix.
+
+## Phase 1 — Findings table
+
+| ID | Severity | Status | File:line | One-liner | Commit |
+| --- | --- | --- | --- | --- | --- |
+| R22-001 | **HIGH** | FIXED | 4 callsites in `compact_report_formatter.py:2752`, `executive_intelligence_formatter.py:1746`, `app_simple.py:5649`, `app_simple.py:10975` | Closes R21-NEXT-CONSISTENCY: each callsite built `portfolio_metrics` with `extra_customer_frames` but called `validate_report_consistency` without `extra_frames`/`account_to_customer`, guaranteeing `Portfolio metric mismatch` whenever any csconsole-only customer was present. The leader path (`app_simple.py:18776`) already did this correctly since Round 5/6; Round 22 brings the other 4 callsites in line. | (this round) |
+
+## Phase 2 — R22-001 root cause
+
+The 7 `validate_report_consistency` callsites split into 3 categories:
+
+| Caller | Builds PM with extras? | Validator extras kwargs? | Verdict |
+| --- | --- | --- | --- |
+| `app_simple.run_leader_report_generation:18776` | YES | **YES** (extras + account_to_customer) | Correct (Round 5/6) |
+| `app_simple.comprehensive:12123` | YES | uses `customer_universe=all_customers_comprehensive` shortcut | Correct (different path) |
+| `app_simple.run_subscription_analysis:17508` | NO (no PM passed) | N/A | OK (no mismatch possible) |
+| `compact_report_formatter:2752` | YES | NO | **BUG → FIXED R22-001** |
+| `executive_intelligence_formatter:1746` | YES | NO | **BUG → FIXED R22-001** |
+| `app_simple._create_enhanced_compact_report:5649` | YES (`_enh_extra_frames`) | NO | **BUG → FIXED R22-001** |
+| `app_simple.run_customer_renewal_analysis:10975` | YES (`_ren_extra_frames` + `_ren_account_to_customer`) | NO | **BUG → FIXED R22-001** |
+
+**Why the bug was dormant in tests:** the existing tests (Round 21.1 `tests/test_round21_1_formatter_render_diff.py`) DELIBERATELY did NOT pass extras to the formatters as a workaround for the consistency error. Cursor's hot spot #1 explicitly named this: "the test sidesteps this by NOT passing extras to the formatter." So the bug fired in production but not in CI.
+
+## Phase 3 — fix details
+
+Each of the 4 callsites now mirrors the leader path's pattern:
+```python
+# Before
+consistency = validate_report_consistency(
+    ab, csone, portfolio_metrics=pm, ...
+)
+# After (Round 22 / R22-001)
+consistency = validate_report_consistency(
+    ab, csone, portfolio_metrics=pm, ...,
+    extra_frames=<same extras passed to build_portfolio_metrics> or None,
+    account_to_customer=<same account_to_customer> (where in scope),
+)
+```
+
+`account_to_customer` is in scope at 3 of 4 sites; the enhanced-fallback path (`app_simple.py:5649`) does not have one in scope and passes only `extra_frames`. Each site has a `# Round 22 / R22-001` comment explaining the rationale and pointing at the leader path as the precedent.
+
+## Phase 4 — regression tests
+
+`tests/test_round22_consistency_validator_extras_parity.py` (NEW, 7 tests):
+
+**Source-text contract pins (4 tests, one per fixed site):**
+- `test_compact_formatter_threads_extras_to_validator`
+- `test_executive_intelligence_formatter_threads_extras_to_validator`
+- `test_app_simple_enhanced_compact_threads_extras_to_validator`
+- `test_app_simple_renewal_threads_extras_to_validator`
+
+A future "cleanup" edit that removes the kwarg from any of the 4 sites silently fails its specific test. The test asserts not just keyword presence but also the matching scope-local variable name (e.g. `_ei_extra_frames`, `_ren_account_to_customer`).
+
+**Behavioural pins (3 tests, using the Round 19 golden fixture):**
+- `test_validator_without_extras_undercounts_customer_universe` — pre-R22 baseline: validator without extras sees 3 customers (AB+CSOne).
+- `test_validator_with_extras_matches_portfolio_metrics_universe` — R22 contract: validator with extras sees 5 customers and matches PM exactly; `is_valid` True.
+- `test_validator_without_extras_disagrees_with_pm_with_extras` — pre-R22 failure mode: PM has 5 customers, validator (without extras) has 3, validator raises with `total_customers` in the error message. If a future regression silently drops the kwarg from any caller, this exact pattern returns and the test catches it.
+
+## Files changed
+
+| File | Why | `# Round 22` markers |
+| --- | --- | --- |
+| `compact_report_formatter.py` | R22-001 fix at `create_compact_executive_report` validator call | 1 |
+| `executive_intelligence_formatter.py` | R22-001 fix at `create_executive_intelligence_report` validator call | 1 |
+| `app_simple.py` | R22-001 fix at `_create_enhanced_compact_report` (L5649) and `run_customer_renewal_analysis` (L10975) validator calls | 2 |
+| `tests/test_round22_consistency_validator_extras_parity.py` | NEW — pins R22-001 (4 source-text tests + 3 behavioural tests) | (NEW file) |
+| `QUALITY_AUDIT.md` | This Round 22 section | n/a (doc) |
+
+## Verification commands & results
+
+```
+$ make verify
+ruff check .          → clean
+bandit -ll …          → 0 HIGH / 0 MED
+pip-audit --strict    → clean
+pytest -q             → 2276 passed / 3 skipped (was 2269 / 3)
+All Round 14 gates passed.
+```
+
+Net test delta: **2269 → 2276 passed** (+7, all from `tests/test_round22_consistency_validator_extras_parity.py`), **3 skipped unchanged** (R21-NEXT-LEADER still deferred), all gates green.
+
+## Residual risks
+
+- **R20-NEXT-001 (HIGH) remains unfixed.** The closure-binding bug in `generate_report` / `generate_excel` is now safer to attempt because the consistency validator will give a real signal once R22-001 lands (previously the EI test had to dodge the validator entirely). But R20-NEXT-001 still requires the snapshot-then-fix-then-snapshot dance Cursor outlined in Round 21.1 hot spot.
+- **Production formatter callers that DO pass extras may now hit consistency errors that were previously masked.** Pre-R22, the validator quietly accepted any PM that disagreed with its (AB+CSOne-only) view via the loud `Portfolio metric mismatch` error; now that the validator's count matches PM correctly, the existing raise no longer fires for the legitimate multi-source case. But if there's any OTHER drift (e.g. account_to_customer overrides that affect dedup), the validator will now correctly surface it. Anyone running a build right after this lands should expect at most a one-time loud failure that points to a real underlying drift.
+- **The Round 21.1 EI render test still does NOT pass extras.** Round 22 left it untouched on purpose — that test pins the no-extras shape (which is also a valid production scenario). A separate R22-NEXT-002 should add the WITH-extras shape to that test now that R22-001 makes it possible.
+
+## Recommended follow-ups (R22-NEXT)
+
+| ID | Sev | Surface | One-liner | Why deferred | Effort |
+| --- | --- | --- | --- | --- | --- |
+| R22-NEXT-001 | **HIGH** | `app_simple.py` correctness | R20-NEXT-001 inherited: closure-binding bugs in `generate_report` (L7062+) / `generate_excel` (L7335+). Now that R22-001 makes the consistency validator trustworthy, the snapshot-fix-snapshot dance Cursor outlined in Round 21.1 hot spot is unblocked. | Behavior-changing; needs the snapshot baseline before any code edit | M-L |
+| R22-NEXT-002 | LOW | tests | Add a WITH-extras variant of the Round 21.1 EI render test now that R22-001 makes it pass without `Portfolio metric mismatch`. Closes the test gap Cursor flagged in Round 21.1 hot spot #1. | One-test add; not in this round to keep it focused on R22-001 | S |
+| R22-NEXT-003 | LOW | tests | End-to-end `generate_excel` render test (Round 21.1 hot spot #3 from Cursor). Currently `write_summary_sheet` is exercised directly to avoid `generate_excel`'s closure-binding bug. Bundle with R22-NEXT-001's snapshot work. | Bundle with R22-NEXT-001 | S |
+| R22-NEXT-LEADER | MED | tests | R21-NEXT-LEADER inherited: build a Snowflake-context + team_roster mock so `leader_report_generator.generate_leader_report` can be driven from a unit test against the golden fixture. The Round 21.1 deferred skip is in place. | Standalone mission; needs the mock harness | M |
+| R22-NEXT-IN-LOCALS-LONG-TAIL | MED | `app_simple.py` correctness | R20-NEXT-002 inherited: long-tail `if 'X' in locals()` triage in `run_customer_renewal_analysis` (L10341+), `run_subscription_analysis` (L17927+), `run_leader_report_generation` (L19166+). ~28 sites, same per-function dead-code analysis as R20-001. | Multi-round effort; safe to chunk | M each chunk |
+| R22-NEXT-OBS | MED | `app_simple.py` reliability | R20-NEXT-003 inherited: ~50 broad-except sites without `as e:` clause. Mass-add `logger.debug("...: %s", e, exc_info=True)` per site OR justify silence. | Untouched; one-batch rule | M |
+| R22-NEXT-CI | LOW | CI parity | R20-NEXT-005 inherited: align `.github/workflows/build.yml::quality-checks` with `make verify`. | Out of scope this round | S |
+| R22-NEXT-DEPS | LOW | dependency hygiene | R20-NEXT-006 inherited: 76 outdated packages, `pip-audit` clean. | Mass version bump risk | M |
+| R22-NEXT-PHASE6 | LOW | tests | Round 19 KPI mission Phase 6 (sentinel input variants) and Phase 7 (rolling regression flag) — registry follow-on phases. | Out of scope this round | M |
+
+## Per-batch footprint
+
+| Batch | Status | Files touched |
+| --- | --- | --- |
+| Phase 0 — Round 21 / 21.1 fixture audit | NO DEFECTS (3 of Cursor's hot spots resolved as questions / acknowledged-as-deferred) | none |
+| R22-001 — validator extras parity (4 callers) | FIXED | `compact_report_formatter.py`, `executive_intelligence_formatter.py`, `app_simple.py`, `tests/test_round22_consistency_validator_extras_parity.py` (NEW) |
+| R22-NEXT-001 — closure-binding bug | DOCUMENTED + still pinned by R20 marker test | n/a (no change this round) |
+
+**Trailer:** Made-with: Claude Opus 4.7 (1M context)
