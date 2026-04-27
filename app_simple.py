@@ -10573,8 +10573,13 @@ def run_customer_renewal_analysis(analysis_id):
                 logger.info(f"[[RENEWAL]] Inclusive filter: {len(csone_df)} cases")
             if renewal_type == 'renewal_portfolio':
                 # Portfolio: use all CSOne data (no customer filter for portfolio)
-                # all_customers should already be defined above, but verify
-                if 'all_customers' not in locals() or not all_customers:
+                # Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL: ``all_customers`` is
+                # bound unconditionally above in the matching
+                # ``if renewal_type == 'renewal_portfolio':`` block (L10442 in
+                # try / L10445 in except), so the legacy presence guard was
+                # provably dead.  Keep only the truthy fallback so an empty
+                # list still falls back to the subs-derived universe.
+                if not all_customers:
                     all_customers = team_subs_df['BU_NAME'].dropna().unique().tolist() if not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns else []
                 # Portfolio: use all cases, not filtered by customer
                 customer_csone = csone_df.copy() if not csone_df.empty else pd.DataFrame()
@@ -10790,8 +10795,12 @@ def run_customer_renewal_analysis(analysis_id):
         # Calculate renewal risk based on type
         if renewal_type == 'renewal_portfolio':
             # Portfolio renewal: calculate risk for each customer
-            # CRITICAL FIX: Ensure all_customers is defined (it should be from above, but verify)
-            if 'all_customers' not in locals() or not all_customers:
+            # Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL: ``all_customers`` is
+            # bound unconditionally in the matching ``renewal_portfolio``
+            # block at L10442 / L10445 / L10583 above.  Drop the dead
+            # presence half of the guard; the truthy half stays so an empty
+            # list still triggers the subs-derived re-init.
+            if not all_customers:
                 all_customers = team_subs_df['BU_NAME'].dropna().unique().tolist() if not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns else []
                 logger.info(f"[[CUSTOMER_COUNT]] Portfolio renewal - re-initialized all_customers: {len(all_customers)} customers")
             
@@ -10971,24 +10980,31 @@ def run_customer_renewal_analysis(analysis_id):
         # and includes subscription-only / pulse-only customers.
         _renewal_csone_norm = add_case_lifecycle_fields(customer_csone)
         try:
-            _ren_lookup = build_customer_lookup(
-                team_subs_df if 'team_subs_df' in locals() else None
-            )
+            # Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL: ``team_subs_df`` is
+            # used unconditionally at L10330 above (``team_subs_df['ACCOUNT_ID_C']``)
+            # so by this point it MUST be bound -- a NameError would already
+            # have aborted the function.  Drop the dead presence guard.
+            _ren_lookup = build_customer_lookup(team_subs_df)
             _ren_account_to_customer = (_ren_lookup or {}).get("account_to_customer", {}) or {}
         except Exception:
             _ren_account_to_customer = {}
-        _ren_extra_frames = []
-        for _df_name in (
-            'team_subs_df',
-            'csconsole_customer_pulse',
-            'csconsole_success_priorities',
-            'csconsole_adoption_barriers',
-            'csconsole_action_plans',
-        ):
-            if _df_name in locals():
-                _val = locals()[_df_name]
-                if isinstance(_val, pd.DataFrame) and not _val.empty:
-                    _ren_extra_frames.append(_val)
+        # Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL: all five frames are
+        # bound unconditionally above -- ``team_subs_df`` at L10200/10231/10292
+        # (one per renewal entry path), and the four ``csconsole_*`` frames
+        # at L10350-10353 (try) / L10356-10359 (except).  Replace the
+        # name-based presence/lookup pattern with direct frame iteration so
+        # a future rename catches at import time, not silently.
+        _ren_extra_frames = [
+            _val
+            for _val in (
+                team_subs_df,
+                csconsole_customer_pulse,
+                csconsole_success_priorities,
+                csconsole_adoption_barriers,
+                csconsole_action_plans,
+            )
+            if isinstance(_val, pd.DataFrame) and not _val.empty
+        ]
         # Round 5 / Phase 5.14: previously this call passed
         # ``risk_profiles=None`` so the renewal portfolio metrics
         # never carried ``high_risk_customers`` /
@@ -11099,13 +11115,13 @@ def run_customer_renewal_analysis(analysis_id):
         base = str(out_dir / f"AdoptIQ_Report_Renewal_{tag}")
         
         # Generate renewal report (handles both single and portfolio)
-        # Ensure CSConsole data variables are defined (they should be from filtering above)
-        if 'customer_action_plans' not in locals():
-            customer_action_plans = pd.DataFrame()
-        if 'customer_customer_pulse' not in locals():
-            customer_customer_pulse = pd.DataFrame()
-        if 'customer_success_priorities' not in locals():
-            customer_success_priorities = pd.DataFrame()
+        # Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL: ``customer_action_plans``,
+        # ``customer_customer_pulse``, and ``customer_success_priorities``
+        # are bound unconditionally in BOTH branches of the customer-filter
+        # block above (L10509-10538 success / L10513/10519/10529 portfolio
+        # else / L10538/10544/10554 single-customer else).  All paths through
+        # the filter set every name with at least an empty DataFrame fallback,
+        # so the presence guards were dead.
         
         renewal_word_path = _create_simple_renewal_report(
             base_path=base,
@@ -11552,12 +11568,21 @@ def run_customer_renewal_analysis(analysis_id):
         # Run non-locking side effects after releasing status lock
         auto_audit_report(analysis_id)
         # Round 3 / Phase 5.4: pass days, paths, and warnings.
+        # Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL: ``renewal_word_path``
+        # (assigned at L11110 via ``_create_simple_renewal_report``) and
+        # ``excel_path`` (assigned at L11140 as ``f"{base}.xlsx"``) are
+        # both bound unconditionally before this success-path call.  If
+        # either assignment had raised, control would have jumped to the
+        # outer ``except`` at L11574 instead of reaching here.  Drop the
+        # dead presence guards; keep the truthy check on ``excel_path``
+        # so a future override that sets it to ``None`` still surfaces an
+        # empty audit string instead of ``"None"``.
         record_report_completion(
             analysis_id, report_type, manager, technology, customer_name_val,
             'completed', start_time, completion_time,
             days=status.get('days') if isinstance(status, dict) else None,
-            word_path=renewal_word_path if 'renewal_word_path' in locals() else '',
-            excel_path=excel_path if 'excel_path' in locals() and excel_path else '',
+            word_path=renewal_word_path or '',
+            excel_path=excel_path if excel_path else '',
         )
         try:
             insights_payload = _build_insights_payload(status, 'Renewal analysis completed')

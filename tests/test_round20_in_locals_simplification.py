@@ -72,12 +72,21 @@ APP_SIMPLE = REPO_ROOT / "app_simple.py"
 # customers from the renewal risk universe and hardcoding
 # recent_window_days=30 -- this was a behaviour-changing fix, not just
 # hygiene).
+# Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL lowered it from 40 to 31 by
+# simplifying 9 dead presence guards in ``run_customer_renewal_analysis``
+# (all_customers x2, team_subs_df, csconsole_* loop x1 collapsed into
+# direct iteration, customer_action_plans / customer_customer_pulse /
+# customer_success_priorities sentinel re-init, and the renewal_word_path
+# / excel_path completion-record kwargs).  The remaining 31 sites
+# include legitimate ``finally``-block ctx guards, partial-data warning
+# checks, and untouched chunks in subscription / leader / helper
+# functions queued for future rounds.
 #
 # Future rounds that simplify MORE sites should lower this floor in the
 # same change; rounds that intentionally introduce a new ``in locals()``
 # pattern (e.g. for legitimate ``'cur' in locals()`` cleanup-after-try
 # discipline) should raise the floor and document why in the audit row.
-_R20_IN_LOCALS_FLOOR = 40
+_R20_IN_LOCALS_FLOOR = 31
 
 
 def test_in_locals_count_is_at_or_below_post_r20_floor() -> None:
@@ -248,3 +257,72 @@ def test_closure_binding_pattern_inside_nested_functions_is_gone() -> None:
             f"definition time rather than via the broken "
             f"free-variable / ``locals()`` lookup."
         )
+
+
+def test_r22_next_in_locals_renewal_simplifications_do_not_regress() -> None:
+    """Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL pinned 9 dead-presence
+    guard simplifications in ``run_customer_renewal_analysis``.
+
+    Pin the post-fix shape so a future "for safety" revert can't
+    silently re-introduce the dead guards without a test failure.
+
+    The 9 simplifications:
+    1. L10577 ``all_customers`` CSOne-portfolio re-init -> ``if not all_customers:``
+    2. L10794 ``all_customers`` portfolio-risk re-init  -> ``if not all_customers:``
+    3. L10975 ``team_subs_df`` -> ``build_customer_lookup(team_subs_df)``
+    4. L10982-10996 csconsole_* loop  -> direct frame iteration
+    5-7. L11103/11105/11107 customer_*_plans/pulse/priorities sentinel
+       re-init -> dropped (all branches above bind every name)
+    8-9. L11559/11560 record_report_completion kwargs -> ``renewal_word_path or ''``
+       and ``excel_path if excel_path else ''``
+    """
+    src = APP_SIMPLE.read_text(encoding="utf-8")
+
+    # Marker comments must be present (one per simplification cluster).
+    renewal_markers = (
+        "# Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL:",
+    )
+    marker_count = src.count(renewal_markers[0])
+    assert marker_count >= 5, (
+        f"R22-NEXT-IN-LOCALS-RENEWAL regression: expected at least 5 "
+        f"``# Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL:`` marker "
+        f"comments in app_simple.py (one per simplification cluster); "
+        f"found {marker_count}.  A future edit may have reverted "
+        f"the simplifications."
+    )
+
+    # Direct-iteration shape for the csconsole_* extras frames must be
+    # present (replaces the legacy ``for _df_name in (...): if _df_name
+    # in locals()`` loop).
+    direct_iter_marker = (
+        "_ren_extra_frames = [\n"
+        "            _val\n"
+        "            for _val in (\n"
+        "                team_subs_df,\n"
+        "                csconsole_customer_pulse,\n"
+        "                csconsole_success_priorities,\n"
+        "                csconsole_adoption_barriers,\n"
+        "                csconsole_action_plans,\n"
+        "            )\n"
+        "            if isinstance(_val, pd.DataFrame) and not _val.empty\n"
+        "        ]"
+    )
+    assert direct_iter_marker in src, (
+        "R22-NEXT-IN-LOCALS-RENEWAL regression: the direct-frame "
+        "iteration replacing the legacy locals()[name] lookup loop "
+        "is missing.  A future edit may have re-introduced the "
+        "name-string-based lookup."
+    )
+
+    # The completion-record call must pass the simplified args.
+    completion_simplified = (
+        "word_path=renewal_word_path or '',\n"
+        "            excel_path=excel_path if excel_path else '',\n"
+        "        )"
+    )
+    assert completion_simplified in src, (
+        "R22-NEXT-IN-LOCALS-RENEWAL regression: the simplified "
+        "``record_report_completion`` kwargs (renewal_word_path / "
+        "excel_path) are missing their post-Round-23.2 shape.  A "
+        "future edit may have re-added the dead presence guards."
+    )

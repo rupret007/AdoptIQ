@@ -2420,3 +2420,87 @@ Net test delta: **2290 → 2293 passed** (+3: 2 new Leader render-diff tests + 1
 | Phase 3 — close R21-NEXT-LEADER skip | UPDATED | `tests/test_round21_1_formatter_render_diff.py` |
 
 **Trailer:** Made-with: Cursor
+
+## Round 23.2 — handoff
+
+**Mission:** simplify dead presence-guard antipatterns in `run_customer_renewal_analysis` per the R22-NEXT-IN-LOCALS-RENEWAL queue. Pure code-hygiene cut; no behaviour change. Floor-pin lowers from 40 → 31.
+
+## What landed
+
+### Sites simplified (all in `app_simple.py::run_customer_renewal_analysis`, L10106–L11591)
+
+| Site | Was | Now | Why dead |
+| --- | --- | --- | --- |
+| L10577 | `if 'all_customers' not in locals() or not all_customers:` | `if not all_customers:` | `all_customers` bound at L10442/10445 in matching `renewal_portfolio` block |
+| L10794 | same | same | Same block, same reason |
+| L10975 | `team_subs_df if 'team_subs_df' in locals() else None` | `team_subs_df` | Used unconditionally at L10330 (`team_subs_df['ACCOUNT_ID_C']`); NameError would already have aborted |
+| L10982–10996 | `for _df_name in (...): if _df_name in locals(): _val = locals()[_df_name]; ...` | List comprehension iterating direct frame references | All five frames bound at L10200/10231/10292 (`team_subs_df`) and L10350-10353/10356-10359 (`csconsole_*`) |
+| L11103, L11105, L11107 | `if 'customer_action_plans' not in locals(): customer_action_plans = pd.DataFrame()` (×3) | Removed entirely; replaced with explanatory comment | Both branches of L10506-10554 customer-filter block bind every name with at least an empty DataFrame fallback |
+| L11559, L11560 | `word_path=renewal_word_path if 'renewal_word_path' in locals() else ''`, `excel_path=excel_path if 'excel_path' in locals() and excel_path else ''` | `word_path=renewal_word_path or ''`, `excel_path=excel_path if excel_path else ''` | Both bound at L11110 / L11140 unconditionally before this success-path call; control would have jumped to outer `except` at L11574 if either had raised |
+
+### Sites left intentionally (in same function)
+
+| Site | Code | Why kept |
+| --- | --- | --- |
+| L10739 | `_scope_locals = locals()` (Round 14 / Phase 2.4) | Documented `.get()`-based pattern that intentionally captures bare-name references rule out by ruff F821; not the antipattern shape the floor pin tracks |
+| L10778 | `int(days) if isinstance(locals().get('days'), (int, float)) and locals().get('days') else 365` | Out of scope: uses `locals().get()` not `'X' in locals()`; doesn't trip the floor regex. Triage for a future round |
+| L11609 | `if 'ctx' in locals() and ctx is not None:` (in `finally:`) | **Legitimate**: ctx is bound at L10162 inside the outer `try` — if an exception happened before that assignment (e.g., inside the `with analysis_status_lock:` block at L10120), ctx is unbound when `finally:` runs. The presence guard is the correct pattern here |
+
+### Floor pin update
+
+`tests/test_round20_in_locals_simplification.py::_R20_IN_LOCALS_FLOOR` lowered from `40` → `31`. The 9 simplified sites removed 9 `'X' in locals()` substring matches; 5 new explanatory `# Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL:` comments were rephrased to use "presence guard" instead of "in locals()" so they don't artificially inflate the floor count back up. Net: −9 hard sites in code.
+
+### New behavioural test
+
+`tests/test_round20_in_locals_simplification.py::test_r22_next_in_locals_renewal_simplifications_do_not_regress` pins three properties:
+
+1. At least 5 `# Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL:` marker comments are present (one per simplification cluster).
+2. The list-comprehension shape that replaced the legacy `for _df_name in (...): if _df_name in locals()` loop is present verbatim.
+3. The simplified `record_report_completion` kwargs (`renewal_word_path or ''`, `excel_path if excel_path else ''`) are present verbatim — guards a "for safety" revert that re-adds the dead presence guards.
+
+## Files changed (Round 23.2)
+
+| File | Why | `# Round 23.2` markers |
+| --- | --- | --- |
+| `app_simple.py` | 9 dead presence-guard simplifications in `run_customer_renewal_analysis` | 5 `# Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL:` comment markers |
+| `tests/test_round20_in_locals_simplification.py` | Lowered `_R20_IN_LOCALS_FLOOR` from 40→31; added `test_r22_next_in_locals_renewal_simplifications_do_not_regress` | n/a (test pin) |
+| `QUALITY_AUDIT.md` | This Round 23.2 section | n/a (doc) |
+
+## Verification commands & results
+
+```
+$ make verify
+ruff check .          → clean
+bandit -ll …          → 0 HIGH / 0 MED
+pip-audit --strict    → clean
+pytest -q             → 2294 passed / 2 skipped (was 2293 / 2)
+All Round 14 gates passed.
+```
+
+Net test delta: **2293 → 2294 passed** (+1: new Round 23.2 marker test), skip count unchanged at 2.
+
+## Residual risks
+
+- **L10778 `locals().get('days')` left in place.** Different antipattern shape (uses `.get()` not `in locals()`), out of the floor-pin regex scope. Mechanically dead too — `days` is bound at L10124 inside the same outer try — but bundled into a future `R23.2-NEXT-LOCALS-GET` cleanup pass that audits all `locals().get(...)` sites uniformly across the file (count: 4 — L6749, L10778, L11989, L18656).
+- **Floor pin still admits 31 antipatterns.** Subscription analysis (~6), leader_report generation (~2), top-level helpers (~8), and a handful of misc sites in `run_comprehensive_analysis` (~7) remain. Per the one-function-per-round cadence (R20-001 precedent), each gets its own commit when triaged.
+
+## Recommended follow-ups (R23.2-NEXT)
+
+| ID | Sev | Surface | One-liner | Why deferred | Effort |
+| --- | --- | --- | --- | --- | --- |
+| R23.2-NEXT-LOCALS-GET | LOW | `app_simple.py` hygiene | Audit and simplify the 4 `locals().get('days')` round-trips at L6749/L10778/L11989/L18656; same dead-code pattern as the `'X' in locals()` family | Out of scope this commit | XS |
+| R23.2-NEXT-SUBSCRIPTION | LOW | `app_simple.py` hygiene | Triage ~6 `'X' in locals()` sites in `run_subscription_analysis` (L12805/12807/12809/12811/12943/12944/12945/12948/12970/12974/13051) per R20-001 matrix | One-function-per-round cadence | M |
+| R23.2-NEXT-LEADER | LOW | `app_simple.py` hygiene | Same for `run_leader_report_generation` (~2 sites) | One-function-per-round cadence | XS |
+| R23.2-NEXT-COMPREHENSIVE | LOW | `app_simple.py` hygiene | ~7 sites in `run_comprehensive_analysis` (L18067/18068/18712/18713/18714/18715/19306/19307) | One-function-per-round cadence | M |
+
+## Per-batch footprint
+
+| Batch | Status | Files touched |
+| --- | --- | --- |
+| Phase 1 — `all_customers` re-init x2 | UPDATED | `app_simple.py` |
+| Phase 2 — `team_subs_df` lookup + extras-frame loop collapse | UPDATED | `app_simple.py` |
+| Phase 3 — `customer_*_plans/pulse/priorities` sentinel re-init x3 | UPDATED | `app_simple.py` |
+| Phase 4 — `record_report_completion` kwargs simplification | UPDATED | `app_simple.py` |
+| Phase 5 — floor pin update + new marker test | UPDATED | `tests/test_round20_in_locals_simplification.py` |
+
+**Trailer:** Made-with: Cursor
