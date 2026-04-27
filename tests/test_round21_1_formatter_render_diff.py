@@ -623,26 +623,32 @@ def test_excel_summary_technology_scope_uses_passed_value(excel_summary_rows):
 # ---------------------------------------------------------------------------
 
 
-def test_leader_formatter_render_deferred_to_round_22():
-    """The Leader formatter render-diff is deferred to Round 22.
+def test_leader_formatter_render_harness_landed_in_round_23_1():
+    """Round 23.1 closes R21-NEXT-LEADER (deferred Leader render-diff).
 
-    ``leader_report_generator.generate_leader_report`` requires a live
-    Snowflake context (``ctx``) and a ``team_roster`` of
-    ``(email, full_name, manager_email)`` tuples. The
-    ``LeaderReportGenerator`` constructor calls into the Snowflake
-    fetch path during initialization for direct-report enumeration,
-    and ``generate_leader_report`` invokes additional fetch helpers
-    that hit Snowflake for subscription / barrier / pulse data.
+    The Round 21.1 cut deliberately punted the Leader formatter
+    render-diff because ``leader_report_generator.generate_leader_report``
+    requires a live Snowflake ``ctx`` and a ``team_roster`` of
+    ``(manager_name, cssm_name, cssm_email)`` tuples, and the
+    ``LeaderReportGenerator`` invokes five Snowflake fetch helpers
+    during init + render that cannot be exercised from a unit test
+    without invasive mocking.
 
-    Building a faithful mock for that surface is a self-contained
-    Round 22 mission (R21-NEXT-LEADER). This test marks the deferral
-    explicitly so the audit trail captures it as an intentional
-    non-fix rather than an oversight, and so a future round picks it
-    up cleanly.
+    Round 23.1 / R22-NEXT-LEADER lands that mocking surface as
+    ``tests/fixtures/round19/leader_mock_harness.py``: a fixture-aligned
+    ``team_roster`` plus a ``patch_leader_generator_with_round19_fixture``
+    helper that monkeypatches the five ``_fetch_*`` /
+    ``_get_subscriptions_for_cssm`` methods to return Round 19 fixture-
+    shaped DataFrames. The actual render-diff lives in
+    ``tests/test_round23_1_leader_render_diff.py``; this test only
+    asserts the harness module exists so a future round can't silently
+    delete it without the audit trail noticing.
     """
-    pytest.skip(
-        "R21-NEXT-LEADER: Leader formatter render-diff deferred to "
-        "Round 22; requires Snowflake ctx + team_roster fetch mocking."
+    harness_path = Path(__file__).resolve().parent / "fixtures" / "round19" / "leader_mock_harness.py"
+    assert harness_path.exists(), (
+        f"Round 23.1 / R22-NEXT-LEADER: Leader-report mock harness "
+        f"missing at {harness_path}; the deferred R21-NEXT-LEADER "
+        f"work cannot land without it."
     )
 
 

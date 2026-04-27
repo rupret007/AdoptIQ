@@ -2337,3 +2337,86 @@ Net `in locals()` count in `app_simple.py`: **65 → 40** (−25 from removing a
 | Phase 6 — post-fix snapshot diff | VERIFIED IDENTICAL | `tests/golden/round23_baseline/{compact,ei}_post_fix.*` |
 
 **Trailer:** Made-with: Cursor
+
+---
+
+## Round 23.1 — handoff (R22-NEXT-LEADER / R21-NEXT-LEADER closed)
+
+**Mission.** Land the Leader-formatter mock harness inherited from Round 21.1 (`R21-NEXT-LEADER`) and re-prioritised through Round 22 (`R22-NEXT-LEADER`). The `LeaderReportGenerator` requires a live Snowflake `ctx` plus a `team_roster` of `(manager_name, cssm_name, cssm_email)` tuples, and `generate_leader_report` exercises five Snowflake fetch helpers (`_get_subscriptions_for_cssm`, `_fetch_action_plans`, `_fetch_adoption_barriers`, `_fetch_customer_pulse`, `_fetch_success_priorities`) during init + render. Without a mock harness, the Leader formatter could not be driven from a unit test against the Round 19 golden fixture, leaving a single `pytest.skip` as the only `R*-NEXT-LEADER` deferral in the audit.
+
+### Phase 1 — leader mock harness module
+
+`tests/fixtures/round19/leader_mock_harness.py` (NEW): a fixture-aligned harness that gives tests three primitives — a fake Snowflake `ctx` (a `MagicMock` that satisfies the constructor's `if ctx is None` guard and proxies `.cursor()`), a 1-CSSM `team_roster` collapsed to a single direct report so the Round 19 customer universe (5 customers) lands in one bucket, and a `patch_leader_generator_with_round19_fixture(monkeypatch, generator)` helper that monkeypatches the five `_fetch_*` / `_get_subscriptions_for_cssm` methods on a generator instance to return Round 19-shaped `pd.DataFrame`s.
+
+The harness intentionally monkeypatches at the `_fetch_*` method level rather than at the cursor's SQL layer because (a) the cursor mock would have to encode the Leader path's SQL semantics (DSM_ASSIGNMENT_DATA join, owner-email expansion, `_utc_window_start_iso(days)` predicate) which makes the mock as brittle as the schema it's mocking, and (b) the existing `tests/test_leader_report.py` tests already use the `_fetch_*` `monkeypatch.setattr` pattern (see `test_collect_team_data_captures_external_account_action_plans`), so this is the project's established Snowflake-mocking idiom. A future `R23-NEXT-INTEGRATION-SNAPSHOT` follow-up can replace this with a true cursor-level mock once the Leader path stabilises.
+
+Round 19 frames are reshaped on the fly:
+- Subscriptions: synthesised `(SUBSCRIPTION_ID, ACCOUNT_ID_C, BU_NAME, CSSM_EMAIL)` rows, one per fixture customer, all owned by the same CSSM email.
+- Adoption Barriers: AB fixture rows reshaped to add `ACCOUNT_ID_C` (= `ACC_<customer.upper()>`) and the `severity_norm` / `case_status_norm` columns the Leader path expects.
+- Customer Pulse: pulse fixture rows wrapped with `ACCOUNT__C` (which `_collect_team_data` renames to `ACCOUNT_ID_C` via `customer_pulse_all = customer_pulse_all.rename(columns={'ACCOUNT__C': 'ACCOUNT_ID_C'})` — exercising the rename path).
+- Success Priorities: `make_extra_frames()[2]` reused (csconsole_success_priorities, keyed by `RELATED_CUSTOMER__C`).
+- Action Plans: empty frame returned for now; the Round 19 fixture's AP rows live in `make_extra_frames()[0]` and are keyed by `RELATED_CUSTOMER__C`, not the `ACCOUNT_ID_C` the Leader path expects. Bridging that requires the cursor-level mock and is captured as `R23-NEXT-LEADER-AP-FIXTURE`.
+
+`make_leader_csone_df_for_tac_integration()` reshapes the Round 19 csone_df for `add_tac_cases_from_csone`: renames `customer_name` → `BU_NAME` (the helper looks for `bu_name` / `customer name` / `account name` substrings) and stamps a `Date Opened` column with a current UTC timestamp so the `days`-window filter accepts every row.
+
+### Phase 2 — leader render-diff test
+
+`tests/test_round23_1_leader_render_diff.py` (NEW, 2 tests):
+
+**`test_leader_renders_against_golden_fixture`** — drives the Leader path end-to-end. Builds the harness ctx + team_roster, monkeypatches the five Snowflake fetch helpers, runs `LeaderReportGenerator.generate_leader_report` (with `_ensure_outputs` redirected to `tmp_path` so the test is hermetic), threads the Round 19 csone_df via `add_tac_cases_from_csone`, regenerates the document, and asserts the Team Activity Summary table's TOTAL row matches the Round 19 `EXPECTED_KPIS`:
+- Adoption Barriers TOTAL = `EXPECTED_KPIS["total_barriers"]` (10).
+- Customer Pulse TOTAL = `EXPECTED_KPIS["pulse"]["count"]` (8).
+- Action Plans TOTAL = 0 (current harness wiring; pinned to catch silent regressions).
+- Total Activities TOTAL ≥ AB + CP floor (18) — pins the contract without coupling to BEMS internals.
+- The output `.docx` file is asserted to exist on disk so a future regression that breaks the save path is caught.
+
+**`test_leader_bems_column_uses_combined_ab_tac_mode`** — pins the Leader's BEMS-counting mode. `_count_bems_escalations` uses `cm.BEMS_MODE_COMBINED_AB_TAC` so the Leader's BEMS column counts both AB-side and TAC-side BEMS markers. The Round 19 fixture has 4 BEMS markers in `csone_df` (TAC-001, TAC-004, TAC-006, TAC-009) and 0 in the AB fixture, so the combined count must equal `EXPECTED_KPIS["bems_count"]` (= 4).
+
+### Phase 3 — close R21-NEXT-LEADER skip
+
+`tests/test_round21_1_formatter_render_diff.py::test_leader_formatter_render_deferred_to_round_22` previously held a `pytest.skip` documenting the deferral. Renamed to `test_leader_formatter_render_harness_landed_in_round_23_1` and reshaped to a one-line existence assertion that the harness module is at the expected path. Removing the test outright would lose the audit trail; the existence pin keeps the deferral history visible while no longer counting as a `skipped` line in `pytest -q`.
+
+## Files changed (Round 23.1)
+
+| File | Why | `# Round 23.1` markers |
+| --- | --- | --- |
+| `tests/fixtures/round19/leader_mock_harness.py` | NEW — fixture-aligned `team_roster` + `make_leader_mock_ctx()` + `patch_leader_generator_with_round19_fixture()` + `make_leader_csone_df_for_tac_integration()` | (NEW file) |
+| `tests/test_round23_1_leader_render_diff.py` | NEW — 2 Leader render-diff tests against Round 19 golden fixture | (NEW file) |
+| `tests/test_round21_1_formatter_render_diff.py` | Renamed `pytest.skip` test to a harness-existence pin | n/a (rename) |
+| `QUALITY_AUDIT.md` | This Round 23.1 section | n/a (doc) |
+
+## Verification commands & results
+
+```
+$ make verify
+ruff check .          → clean
+bandit -ll …          → 0 HIGH / 0 MED
+pip-audit --strict    → clean
+pytest -q             → 2293 passed / 2 skipped (was 2290 / 3)
+All Round 14 gates passed.
+```
+
+Net test delta: **2290 → 2293 passed** (+3: 2 new Leader render-diff tests + 1 existence pin replacing the skip), **3 → 2 skipped** (R21-NEXT-LEADER closed), all gates green.
+
+## Residual risks
+
+- **Action Plans column reads 0 for the Leader's TOTAL row.** The Round 19 fixture's AP rows are in `make_extra_frames()[0]` (csconsole_action_plans, keyed by `RELATED_CUSTOMER__C`) and the Leader-path expects them keyed by `ACCOUNT_ID_C`. Bridging requires either reshaping the AP frame in the harness (couples the harness to a specific schema mapping that may drift) or replacing the `_fetch_*` mock with a cursor-level mock (the proper long-term fix). Captured as `R23-NEXT-LEADER-AP-FIXTURE`.
+- **`_fetch_*`-level mocking is more brittle than cursor-level mocking.** If the Leader path ever introduces a new fetch helper or refactors `_collect_team_data` to bypass one of the five mocked methods, the harness will silently miss data. Mitigation: the new render-diff test asserts `len(team_data) == 1` and `len(cssm_data["customers"]) == 5`, so any silent miss would crash there.
+
+## Recommended follow-ups (R23.1-NEXT)
+
+| ID | Sev | Surface | One-liner | Why deferred | Effort |
+| --- | --- | --- | --- | --- | --- |
+| R23-NEXT-LEADER-AP-FIXTURE | LOW | tests | Wire `make_extra_frames()[0]` into the harness's Action Plans frame so the Leader's AP TOTAL is non-zero against the golden fixture; closes the `assert int(total_row[1]) == 0` pin. | Requires either schema-mapping drift acceptance or cursor-level mock | S-M |
+| R23-NEXT-INTEGRATION-SNAPSHOT | LOW | tests | Add a true byte-level pre/post integration snapshot at `run_compact_analysis` boundary now that the Leader mock harness pattern is established. | Pending the cursor-level mock pivot | M |
+| R23-NEXT-RENEWAL | MED | `app_simple.py` correctness | Triage ~12 `'X' in locals()` sites in `run_customer_renewal_analysis` per the R20-001 classification matrix; bundled into Round 23.2 (commit 3 this batch). | One-function-per-round cadence | M |
+
+## Per-batch footprint
+
+| Batch | Status | Files touched |
+| --- | --- | --- |
+| Phase 1 — leader mock harness module | NEW | `tests/fixtures/round19/leader_mock_harness.py` |
+| Phase 2 — leader render-diff tests | NEW | `tests/test_round23_1_leader_render_diff.py` |
+| Phase 3 — close R21-NEXT-LEADER skip | UPDATED | `tests/test_round21_1_formatter_render_diff.py` |
+
+**Trailer:** Made-with: Cursor
