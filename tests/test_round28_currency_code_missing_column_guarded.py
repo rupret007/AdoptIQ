@@ -16,6 +16,8 @@ from __future__ import annotations
 import inspect
 import logging
 
+import pytest
+
 import adoptiq_backend
 
 
@@ -49,7 +51,7 @@ def test_round28_currency_code_column_explicit_guard_in_source() -> None:
 
 
 def test_round28_currency_code_missing_logs_warning_and_defaults_false(
-    caplog: 'pytest.LogCaptureFixture',  # type: ignore[name-defined]
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Behavioural pin: when CURRENCY_CODE is absent from the input
     frame, _normalize_arr_df must log a structured WARNING and set
