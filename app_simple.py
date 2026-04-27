@@ -12675,8 +12675,77 @@ def run_comprehensive_analysis(analysis_id):
                         "[R25B/R25C] Portfolio drift validator unavailable (%s); proceeding without strict check.",
                         _r25b_other_err,
                     )
+                # Round 27 / R27-AI-GATE-PORTFOLIO: layer
+                # ai_narrative_validator on top of the Round 25 R25B/R25C
+                # numeric+risk-band gates.  R25B/R25C cover headline-number
+                # drift but not invented entities, HTML/JS injection, or
+                # uncited claim-level assertions -- those slip through
+                # because the validator was wired only into the executive
+                # ai_insights_raw path (Round 16 / Phase 3.4 at L6975-7018).
+                # Asymmetry vs R25B/R25C is deliberate: R25B/R25C raise
+                # ValueError on numeric drift (block the build); R27
+                # substitutes the GROUNDING_FAILURE_PLACEHOLDER so the
+                # report still renders with a labeled placeholder rather
+                # than failing the entire job for an entity false positive.
+                # ADOPTIQ_R27_LEGACY_AI_GATE=1 opts out.
+                _r27_safe_portfolio = portfolio_summary  # Round 27 / R27-AI-GATE-PORTFOLIO
+                _r27_legacy_gate_port = str(  # Round 27 / R27-AI-GATE-PORTFOLIO
+                    os.getenv("ADOPTIQ_R27_LEGACY_AI_GATE", "0")
+                ).strip().lower() in {"1", "true", "yes", "on"}
+                if not _r27_legacy_gate_port:
+                    try:
+                        import ai_narrative_validator as _r27_anv_port  # Round 27 / R27-AI-GATE-PORTFOLIO
+                        # Allowed entities for the portfolio narrative: manager
+                        # + technology focus, plus the customer-name list the
+                        # canonical pipeline already discovered for this run
+                        # (when available).  Customer names are sourced from
+                        # ``portfolio_metrics`` so the entity allowlist stays
+                        # aligned with the same SSoT R25B/R25C use for numeric
+                        # claims.
+                        _r27_allowed_port = {
+                            e for e in (
+                                status.get('manager'),
+                                status.get('tech'),
+                            ) if e
+                        }
+                        try:
+                            _r27_pm_customers = portfolio_metrics.get('customer_names') or []
+                            if isinstance(_r27_pm_customers, (list, tuple, set)):
+                                _r27_allowed_port.update(
+                                    str(_n) for _n in _r27_pm_customers if _n
+                                )
+                        except Exception:  # noqa: BLE001
+                            # ``portfolio_metrics`` shape may not expose a
+                            # customer-name list; degrade gracefully -- the
+                            # narrative validator still runs entity heuristics
+                            # against the briefing book even with an empty
+                            # allowlist.
+                            pass
+                        _r27_result_port = _r27_anv_port.validate_narrative(
+                            portfolio_summary,
+                            portfolio_briefing,
+                            allowed_entities=_r27_allowed_port if _r27_allowed_port else None,
+                        )
+                        if not _r27_result_port.is_valid:
+                            logger.warning(
+                                "[[AI]] Round 27 / R27-AI-GATE-PORTFOLIO: portfolio "
+                                "summary failed grounding validation; substituting "
+                                "placeholder. failures=%s samples=%s",
+                                list(_r27_result_port.failures),
+                                {
+                                    k: (v[:80] if isinstance(v, str) else v)
+                                    for k, v in (_r27_result_port.sample_offending or {}).items()
+                                },
+                            )
+                            _r27_safe_portfolio = _r27_anv_port.GROUNDING_FAILURE_PLACEHOLDER
+                    except Exception as _r27_anv_port_err:  # noqa: BLE001
+                        logger.warning(
+                            "[[AI]] Round 27 / R27-AI-GATE-PORTFOLIO: validator "
+                            "raised unexpectedly (%s); accepting LLM output as-is",
+                            _r27_anv_port_err,
+                        )
                 # Use clean builder to parse AI output and remove ALL markdown symbols
-                report_builder.parse_ai_output_and_add(portfolio_summary)
+                report_builder.parse_ai_output_and_add(_r27_safe_portfolio)  # Round 27 / R27-AI-GATE-PORTFOLIO
                 logger.info(f"[[OK]] Portfolio AI analysis completed successfully - NO markdown symbols")
             else:
                 logger.warning(f"[[WARNING]] Portfolio AI analysis failed: {portfolio_summary}")
@@ -12929,14 +12998,70 @@ def run_comprehensive_analysis(analysis_id):
                 
                 customer_prompt = PROMPT_CUSTOMER_TEMPLATE.format(CUSTOMER_NAME=customer_name, CSSM_NAME=cssm_name, TECHNOLOGY=specific_technology, MANAGER=status['manager'])
                 customer_storyboard = generate_llm_response(customer_prompt, customer_briefing)
-                
+
                 # Check if AI response is valid
                 if customer_storyboard and not customer_storyboard.startswith("ERROR:"):
+                    # Round 27 / R27-AI-GATE-CUSTOMER: gate the per-customer
+                    # storyboard narrative through ai_narrative_validator
+                    # before it lands in the report.  Mirrors the Round 16 /
+                    # Phase 3.4 pattern at L6975-7018 that already protects
+                    # the executive ai_insights_raw path; the per-customer
+                    # call at this site was the high-volume hallucination
+                    # vector left open by Round 16 because validate_narrative
+                    # was never wired here.  ADOPTIQ_R27_LEGACY_AI_GATE=1
+                    # opts out for emergency hotfix.
+                    _r27_safe_storyboard = customer_storyboard  # Round 27 / R27-AI-GATE-CUSTOMER
+                    _r27_legacy_gate_cust = str(  # Round 27 / R27-AI-GATE-CUSTOMER
+                        os.getenv("ADOPTIQ_R27_LEGACY_AI_GATE", "0")
+                    ).strip().lower() in {"1", "true", "yes", "on"}
+                    if not _r27_legacy_gate_cust:
+                        try:
+                            import ai_narrative_validator as _r27_anv  # Round 27 / R27-AI-GATE-CUSTOMER
+                            # Allowed-entity set for this customer's narrative.
+                            # The four substitution slots in the prompt template
+                            # are the only entities the LLM should be naming;
+                            # anything else (e.g. an invented customer or a
+                            # hallucinated CSSM) trips validate_no_invented_entities.
+                            _r27_allowed_cust = {
+                                e for e in (
+                                    customer_name,
+                                    cssm_name,
+                                    specific_technology,
+                                    status.get('manager'),
+                                ) if e
+                            }
+                            _r27_result_cust = _r27_anv.validate_narrative(
+                                customer_storyboard,
+                                customer_briefing,
+                                allowed_entities=_r27_allowed_cust,
+                            )
+                            if not _r27_result_cust.is_valid:
+                                logger.warning(
+                                    "[[AI]] Round 27 / R27-AI-GATE-CUSTOMER: %s "
+                                    "storyboard failed grounding validation; "
+                                    "substituting placeholder. failures=%s "
+                                    "samples=%s",
+                                    customer_name,
+                                    list(_r27_result_cust.failures),
+                                    {
+                                        k: (v[:80] if isinstance(v, str) else v)
+                                        for k, v in (_r27_result_cust.sample_offending or {}).items()
+                                    },
+                                )
+                                _r27_safe_storyboard = _r27_anv.GROUNDING_FAILURE_PLACEHOLDER
+                        except Exception as _r27_anv_err:  # noqa: BLE001
+                            # Validator must never break the report pipeline.
+                            # Mirror the Round 16 defensive try at L7009-7018.
+                            logger.warning(
+                                "[[AI]] Round 27 / R27-AI-GATE-CUSTOMER: validator "
+                                "raised unexpectedly (%s); accepting LLM output as-is",
+                                _r27_anv_err,
+                            )
                     # Add customer separator before each customer section (except the first)
                     if customers_actually_analyzed > 0:
                         report_builder._add_customer_separator()
                     # Use clean builder to parse AI output - NO markdown symbols
-                    report_builder.parse_ai_output_and_add(customer_storyboard)
+                    report_builder.parse_ai_output_and_add(_r27_safe_storyboard)  # Round 27 / R27-AI-GATE-CUSTOMER
                     logger.info(f"  [[OK]] Completed AI analysis for {customer_name} - NO markdown symbols")
                     customers_actually_analyzed += 1
                 else:
