@@ -198,19 +198,18 @@ def test_admin_tile_buttons_renamed(monkeypatch):
 
 
 @pytest.mark.flask
-def test_admin_tile_renders_error_count_when_errors_is_int(monkeypatch):
-    """Round 26 - review (R26-001): the production payload from
-    ``corpus_bootstrap._index_stats_to_dict`` exposes
-    ``last_stats.errors`` as an INTEGER COUNT (filenames suppressed
-    on purpose to avoid PII leakage).  The original Round 26 Phase E
-    template assumed a list-of-dicts shape and silently broke (slicing
-    an int raises TypeError); the existing list-shape tests passed
-    only because they faked the dict shape.
+def test_admin_tile_legacy_int_error_count_still_renders(monkeypatch):
+    """Round 26 - review (R26-OPEN-001): the production payload now
+    emits a list of ``{file, reason}`` dicts plus ``errors_total``,
+    but a stale subprocess / downgraded build can still emit the
+    legacy integer count.  The dual-shape template branch keeps the
+    int-shape path working as a defensive fallback so a downgrade
+    doesn't silently swallow failures.
 
-    This test pins the int-shape branch of the dual-shape rendering
-    so a regression that re-removes the count branch (or a refactor
-    that changes the production shape without updating the template)
-    is caught immediately.
+    This test pins the legacy-int branch.  It also asserts the old
+    "Filenames suppressed to avoid PII leakage" copy is gone --
+    AdoptIQ is internal-only and the operator's question is now
+    "which files failed?", not "which customer".
     """
     boot = _base_boot(last_stats={"errors": 3})
     html = _get_dashboard_html(
@@ -219,14 +218,16 @@ def test_admin_tile_renders_error_count_when_errors_is_int(monkeypatch):
     )
     assert "Recent index errors" in html
     assert "3 files failed" in html
-    # PII-safety: no individual filenames / paths should appear in the
-    # rendered tile when the count-only shape is in play.
-    assert "Filenames suppressed" in html
+    # R26-OPEN-001: PII-suppression copy removed for internal deployment.
+    assert "Filenames suppressed to avoid PII" not in html
+    # Legacy fallback should hint at log-tailing instead of pretending
+    # the suppression is intentional.
+    assert "Legacy payload shape" in html
 
 
 @pytest.mark.flask
 def test_admin_tile_singular_error_count_uses_singular_label(monkeypatch):
-    """R26-001: 1 error => "1 file failed" (singular), not "1 files"."""
+    """R26-OPEN-001: 1 error => "1 file failed" (singular), not "1 files"."""
     boot = _base_boot(last_stats={"errors": 1})
     html = _get_dashboard_html(
         monkeypatch,
@@ -238,7 +239,7 @@ def test_admin_tile_singular_error_count_uses_singular_label(monkeypatch):
 
 @pytest.mark.flask
 def test_admin_tile_does_not_render_errors_section_when_zero(monkeypatch):
-    """R26-001: ``errors=0`` is the steady-state happy path.  The
+    """R26-OPEN-001: ``errors=0`` is the steady-state happy path.  The
     Recent index errors block must NOT appear (no false alarm in the
     operator's eye-line)."""
     boot = _base_boot(last_stats={"errors": 0})
@@ -247,3 +248,66 @@ def test_admin_tile_does_not_render_errors_section_when_zero(monkeypatch):
         _corpus_status_payload(boot=boot),
     )
     assert "Recent index errors" not in html
+
+
+@pytest.mark.flask
+def test_admin_tile_renders_n_of_m_when_errors_truncated(monkeypatch):
+    """R26-OPEN-001: when ``errors_total`` exceeds the rendered list
+    length, the tile must surface "N of M shown" so operators know
+    log-tailing is required for the rest.
+
+    The marshaller caps the list at 5 and exposes the full count via
+    ``errors_total``.  Here we feed 5 dicts + ``errors_total=12`` and
+    assert the truncation summary appears.
+    """
+    errors = [
+        {"file": f"err_{i}.xlsx", "reason": f"r{i}"} for i in range(5)
+    ]
+    boot = _base_boot(last_stats={"errors": errors, "errors_total": 12})
+    html = _get_dashboard_html(
+        monkeypatch,
+        _corpus_status_payload(boot=boot),
+    )
+    assert "Recent index errors" in html
+    assert "5 of 12 shown" in html
+
+
+@pytest.mark.flask
+def test_admin_tile_omits_n_of_m_when_no_truncation(monkeypatch):
+    """R26-OPEN-001: when the full list fits (``errors_total`` ==
+    ``len(errors)``) the truncation summary must NOT appear -- the
+    operator already sees every error inline."""
+    errors = [
+        {"file": "err_a.xlsx", "reason": "a"},
+        {"file": "err_b.xlsx", "reason": "b"},
+    ]
+    boot = _base_boot(last_stats={"errors": errors, "errors_total": 2})
+    html = _get_dashboard_html(
+        monkeypatch,
+        _corpus_status_payload(boot=boot),
+    )
+    assert "Recent index errors" in html
+    assert "of 2 shown" not in html
+    # The "(last bootstrap pass)" subhead should appear instead.
+    assert "last bootstrap pass" in html
+
+
+@pytest.mark.flask
+def test_admin_tile_no_pii_suppression_copy_anywhere(monkeypatch):
+    """R26-OPEN-001: AdoptIQ is internal-only.  The original Round 26
+    Phase E PII-suppression subtext must not appear in any error-shape
+    branch (int, list-of-dicts, or zero).  Pin the copy removal so a
+    later refactor doesn't accidentally restore it."""
+    cases = [
+        {"errors": 3},
+        {"errors": [{"file": "x.xlsx", "reason": "boom"}]},
+        {"errors": [], "errors_total": 0},
+    ]
+    for last_stats in cases:
+        boot = _base_boot(last_stats=last_stats)
+        html = _get_dashboard_html(
+            monkeypatch,
+            _corpus_status_payload(boot=boot),
+        )
+        assert "Filenames suppressed to avoid PII" not in html
+        assert "PII leakage" not in html

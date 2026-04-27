@@ -2591,40 +2591,46 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 </table>
                 {% endif %}
 
-                {# Round 26 / Phase E: surface per-file error info from
-                   the most recent index pass.  Two payload shapes are
-                   supported defensively:
+                {# Round 26 / Phase E + Round 26 - review (R26-OPEN-001):
+                   surface per-file error info from the most recent
+                   index pass.  AdoptIQ is internal-only so filenames
+                   are intentionally rendered (the original Round 17
+                   PII-suppression stance no longer applies).
 
-                   1. ``last_stats.errors`` is an int -- the production
-                      shape emitted by ``corpus_bootstrap._index_stats_to_dict``
-                      (only the count is exposed, on purpose: error
-                      strings can leak filenames / customer names).
-                      Render the count and point operators at the log.
-                   2. ``last_stats.errors`` is a list of strings or
-                      dicts -- the future / test shape if a follow-up
-                      round adds redacted samples.  Render up to 5.
+                   Production shape (post-R26-OPEN-001):
+                     last_stats.errors       -- list of {file, reason} dicts (<=5)
+                     last_stats.errors_total -- full count
 
-                   Round 26 - review (R26-001): the original Phase E
-                   template assumed shape (2) and silently broke under
-                   shape (1) because slicing an int raises TypeError.
-                   The dual-shape branch below keeps the test fixture
-                   working and adds correct production rendering. #}
+                   Legacy / defensive fallback shapes still handled so
+                   a stale payload can't crash the tile:
+                     * int (legacy R17 / pre-R26-OPEN-001 production)
+                     * list of plain strings (test fixture before the
+                       error-row split landed)
+                #}
                 {% set _last_errors = (corpus_status.boot.last_stats or {}).get('errors') if corpus_status.boot.last_stats else none %}
+                {% set _errors_total = (corpus_status.boot.last_stats or {}).get('errors_total') if corpus_status.boot.last_stats else none %}
                 {% if _last_errors is number and _last_errors > 0 %}
+                {# Legacy fallback: pre-R26-OPEN-001 payloads emitted
+                   only the count.  Render it so a stale subprocess /
+                   downgraded build still surfaces the failure. #}
                 <p style="margin-top: 0.6em; color:#dc3545;">
                     <strong>Recent index errors:</strong>
                     {{ _last_errors }} file{{ '' if _last_errors == 1 else 's' }} failed
                     in the last bootstrap pass.
                     <span style="color:#6c757d; font-size: 0.9em;">
-                        (Filenames suppressed to avoid PII leakage; check
-                        application logs for details.)
+                        (Legacy payload shape; check application logs
+                        for filenames.)
                     </span>
                 </p>
                 {% elif _last_errors and _last_errors is not number %}
                 <p style="margin-top: 0.6em;">
                     <strong>Recent index errors</strong>
                     <span style="color:#6c757d; font-size: 0.9em;">
-                        (last bootstrap pass &mdash; up to 5 shown)
+                        {% if _errors_total and _errors_total > _last_errors|length %}
+                            ({{ _last_errors|length }} of {{ _errors_total }} shown)
+                        {% else %}
+                            (last bootstrap pass)
+                        {% endif %}
                     </span>
                 </p>
                 <ul class="data-table" style="font-size: 0.9em; padding-left: 1.5em;">

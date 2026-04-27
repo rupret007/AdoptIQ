@@ -123,6 +123,83 @@ def test_intel_uploads_picked_up_when_flag_off_but_admin_pre_seeded(
     ]
 
 
+# ---------------------------------------------------------------------------
+# Round 26 - review (R26-OPEN-001): _index_stats_to_dict marshalling
+# ---------------------------------------------------------------------------
+#
+# Originally Round 17 stripped error filenames before they reached the
+# admin tile (PII).  Internal-only deployment lifts that constraint, so
+# the marshaller now exposes:
+#
+#   * ``errors``       -- list of {"file", "reason"} dicts (<=5 entries)
+#   * ``errors_total`` -- full count for "N of M shown" rendering
+#
+# These tests pin the new contract.  They live next to the gating tests
+# so the Round 26 review follow-up has one obvious test home.
+
+
+def test_index_stats_to_dict_marshals_first_five_errors_and_total():
+    import corpus_bootstrap as cb
+    from corpus_indexer import IndexStats
+
+    stats = IndexStats()
+    # Indexer appends "<filename>: <ExceptionClass>" strings; reproduce
+    # that exact shape here so the partition path fires.
+    for i in range(12):
+        stats.errors.append(f"file_{i}.xlsx: BadZipFile")
+
+    payload = cb._index_stats_to_dict(stats)
+
+    assert isinstance(payload["errors"], list)
+    assert payload["errors_total"] == 12
+    assert len(payload["errors"]) == 5
+    # Order preservation: first 5 errors should appear in input order.
+    expected_files = [f"file_{i}.xlsx" for i in range(5)]
+    assert [row["file"] for row in payload["errors"]] == expected_files
+    assert all(row["reason"] == "BadZipFile" for row in payload["errors"])
+
+
+def test_index_stats_to_dict_errors_total_matches_list_when_under_cap():
+    """When stats has <=5 errors, the rendered list equals the full count
+    and ``errors_total`` matches ``len(errors)``."""
+    import corpus_bootstrap as cb
+    from corpus_indexer import IndexStats
+
+    stats = IndexStats()
+    stats.errors.append("only_one.xlsx: KeyError")
+
+    payload = cb._index_stats_to_dict(stats)
+    assert payload["errors_total"] == 1
+    assert len(payload["errors"]) == 1
+    assert payload["errors"][0] == {"file": "only_one.xlsx", "reason": "KeyError"}
+
+
+def test_index_stats_to_dict_handles_no_colon_edge_case():
+    """Conn=None / fallback path: indexer appends a bare string with no
+    colon.  Marshaller must render it as ``{"file": "?", "reason": <s>}``
+    so the template doesn't crash on missing keys."""
+    import corpus_bootstrap as cb
+    from corpus_indexer import IndexStats
+
+    stats = IndexStats()
+    stats.errors.append("indexer aborted before file open")
+
+    payload = cb._index_stats_to_dict(stats)
+    assert payload["errors_total"] == 1
+    assert payload["errors"][0]["file"] == "?"
+    assert "indexer aborted" in payload["errors"][0]["reason"]
+
+
+def test_index_stats_to_dict_empty_errors_list():
+    """Steady-state happy path: no errors -> empty list + zero count."""
+    import corpus_bootstrap as cb
+    from corpus_indexer import IndexStats
+
+    payload = cb._index_stats_to_dict(IndexStats())
+    assert payload["errors"] == []
+    assert payload["errors_total"] == 0
+
+
 def test_intel_uploads_present_when_flag_on_and_dir_exists(
     monkeypatch, tmp_path: Path
 ):

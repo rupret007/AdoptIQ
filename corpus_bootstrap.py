@@ -130,7 +130,42 @@ def _utc_now_iso() -> str:
 
 def _index_stats_to_dict(stats: IndexStats) -> dict[str, object]:
     """Marshal :class:`IndexStats` into a dict the admin tile / JSON
-    endpoint can render.  Errors list is truncated for privacy."""
+    endpoint can render.
+
+    Round 26 - review (R26-OPEN-001): the original Round 17 design
+    emitted only ``len(stats.errors)`` because filenames could leak
+    customer names.  AdoptIQ is internal-only and the original
+    Phase E goal of "operators diagnose a degraded run from the
+    dashboard without tailing logs" requires actual filenames in the
+    payload.  We now expose:
+
+    * ``errors``      -- a list of ``{"file": str, "reason": str}``
+      dicts (first 5 entries), parsed from the
+      ``"<filename>: <ExceptionClass>"`` strings the indexer
+      appends to ``IndexStats.errors``.
+    * ``errors_total`` -- the full count, so the tile can render
+      "5 of 12 shown" when truncated.
+
+    The ``conn=None`` edge case (no filename to split) is rendered
+    as ``{"file": "?", "reason": "<original string>"}`` so the
+    template branch in
+    :file:`enhanced_admin_dashboard_v2.py` doesn't have to handle
+    it specially.
+    """
+    error_rows: list[dict[str, str]] = []
+    for raw in list(stats.errors)[:5]:
+        s = str(raw)
+        if ":" in s:
+            file_part, _, reason_part = s.partition(":")
+            error_rows.append(
+                {
+                    "file": file_part.strip() or "?",
+                    "reason": reason_part.strip() or "error",
+                }
+            )
+        else:
+            error_rows.append({"file": "?", "reason": s.strip() or "error"})
+
     return {
         "files_seen": int(stats.files_seen),
         "files_parsed": int(stats.files_parsed),
@@ -140,8 +175,11 @@ def _index_stats_to_dict(stats: IndexStats) -> dict[str, object]:
         "chunks_added": int(stats.chunks_added),
         "started_at": stats.started_at,
         "finished_at": stats.finished_at,
-        # Only the count of errors -- error strings can leak filenames.
-        "errors": int(len(stats.errors)),
+        # Round 26 - review (R26-OPEN-001): list of dicts, capped at 5.
+        "errors": error_rows,
+        # Round 26 - review (R26-OPEN-001): full count so the tile
+        # can render "N of M shown" when the list is truncated.
+        "errors_total": int(len(stats.errors)),
     }
 
 
