@@ -2403,9 +2403,33 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
             <a href="/api/analytics" class="btn btn-success">View Analytics</a>
         </div>
 
-        {# Round 17 / Phase D.5: Corpus tile + CSRF-protected refresh action. #}
+        {# Round 17 / Phase D.5: Corpus tile + CSRF-protected refresh action.
+
+           Round 26 / Phase A: rename the user-visible heading from
+           "CSOne Knowledge Corpus" to "AdoptIQ Intelligence" so the
+           tile matches the user-facing banner on / (analyze.html).
+           Internal symbols, URLs (/api/corpus/*, /corpus_refresh),
+           env vars (CORPUS_KNOWLEDGE_ENABLED), and DB filenames
+           are intentionally NOT renamed -- they are public contracts
+           pinned by tests, sysadmin runbooks, and the encrypted-DB
+           on-disk path.
+
+           Round 26 / Phase E: also surface
+           ``corpus_status.boot.in_progress`` and ``last_started_at``
+           (already present on the JSON payload but never rendered),
+           plus any errors recorded in
+           ``corpus_status.boot.last_stats.errors`` so the operator
+           can diagnose a degraded run from the dashboard without
+           tailing logs. #}
         <div class="table-container">
-            <h3>CSOne Knowledge Corpus</h3>
+            <h3>AdoptIQ Intelligence</h3>
+            <p style="color:#6c757d; font-size:0.85em; margin-top:-0.5em;">
+                Indexes CSOne reports synced from OneDrive
+                (and reports uploaded by the user) so Ask AI,
+                Customer 360, and Playbook can ground answers in
+                real case history, resolutions, and customer
+                sentiment.
+            </p>
             {% if corpus_status_failed %}
                 <p style="color:#dc3545;">
                     <strong>Status:</strong> n/a (main app unreachable from
@@ -2431,7 +2455,16 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 </p>
                 {% endif %}
             {% else %}
+                {% if corpus_status.boot.in_progress %}
+                <p style="color:#0d6efd;">
+                    <strong>Status:</strong> indexing in progress
+                    {% if corpus_status.boot.last_started_at %}
+                        &mdash; started {{ corpus_status.boot.last_started_at }}
+                    {% endif %}
+                </p>
+                {% else %}
                 <p><strong>Status:</strong> available</p>
+                {% endif %}
                 <p>
                     <strong>Files indexed:</strong>
                     {{ corpus_status.corpus.files_parsed }} /
@@ -2557,21 +2590,55 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                     </tbody>
                 </table>
                 {% endif %}
+
+                {# Round 26 / Phase E: surface up to the first 5
+                   per-file errors from the most recent index pass.
+                   ``last_stats.errors`` is already truncated to
+                   ``MAX_INDEX_ERRORS`` by ``_index_stats_to_dict``,
+                   so the slice here is a defensive cap. The list
+                   is rendered as a sub-table so operators can see
+                   filename + reason without leaving the dashboard. #}
+                {% set _last_errors = (corpus_status.boot.last_stats or {}).get('errors') if corpus_status.boot.last_stats else none %}
+                {% if _last_errors %}
+                <p style="margin-top: 0.6em;">
+                    <strong>Recent index errors</strong>
+                    <span style="color:#6c757d; font-size: 0.9em;">
+                        (last bootstrap pass &mdash; up to 5 shown)
+                    </span>
+                </p>
+                <ul class="data-table" style="font-size: 0.9em; padding-left: 1.5em;">
+                    {% for err in _last_errors[:5] %}
+                        <li style="color:#dc3545;">
+                            {% if err is mapping %}
+                                <code>{{ err.get('file') or err.get('path') or '?' }}</code>
+                                &mdash; {{ err.get('reason') or err.get('error') or 'error' }}
+                            {% else %}
+                                {{ err }}
+                            {% endif %}
+                        </li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
             {% endif %}
 
             {# Refresh button always rendered so the operator can recover from
                an "unavailable" or "disabled" state without leaving the admin
                console.  Refresh is CSRF-protected (admin token verified
-               server-side before the proxy call to the main app). #}
+               server-side before the proxy call to the main app).
+
+               Round 26 / Phase E: relabel the buttons to match the
+               user-visible "AdoptIQ Intelligence" framing.  The
+               POST target stays ``/corpus_refresh`` so admin runbooks
+               and existing tests keep working. #}
             <form method="POST" action="/corpus_refresh" style="display:inline;">
                 <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
-                <button type="submit" class="btn btn-primary">Refresh Corpus</button>
+                <button type="submit" class="btn btn-primary">Run incremental</button>
             </form>
             <form method="POST" action="/corpus_refresh" style="display:inline;"
                   onsubmit="return confirm('Rebuild the entire encrypted cache from scratch? This may take several minutes.');">
                 <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
                 <input type="hidden" name="rebuild" value="1">
-                <button type="submit" class="btn btn-warning">Force Rebuild</button>
+                <button type="submit" class="btn btn-warning">Rebuild</button>
             </form>
         </div>
 
