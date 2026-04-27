@@ -2591,15 +2591,36 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 </table>
                 {% endif %}
 
-                {# Round 26 / Phase E: surface up to the first 5
-                   per-file errors from the most recent index pass.
-                   ``last_stats.errors`` is already truncated to
-                   ``MAX_INDEX_ERRORS`` by ``_index_stats_to_dict``,
-                   so the slice here is a defensive cap. The list
-                   is rendered as a sub-table so operators can see
-                   filename + reason without leaving the dashboard. #}
+                {# Round 26 / Phase E: surface per-file error info from
+                   the most recent index pass.  Two payload shapes are
+                   supported defensively:
+
+                   1. ``last_stats.errors`` is an int -- the production
+                      shape emitted by ``corpus_bootstrap._index_stats_to_dict``
+                      (only the count is exposed, on purpose: error
+                      strings can leak filenames / customer names).
+                      Render the count and point operators at the log.
+                   2. ``last_stats.errors`` is a list of strings or
+                      dicts -- the future / test shape if a follow-up
+                      round adds redacted samples.  Render up to 5.
+
+                   Round 26 - review (R26-001): the original Phase E
+                   template assumed shape (2) and silently broke under
+                   shape (1) because slicing an int raises TypeError.
+                   The dual-shape branch below keeps the test fixture
+                   working and adds correct production rendering. #}
                 {% set _last_errors = (corpus_status.boot.last_stats or {}).get('errors') if corpus_status.boot.last_stats else none %}
-                {% if _last_errors %}
+                {% if _last_errors is number and _last_errors > 0 %}
+                <p style="margin-top: 0.6em; color:#dc3545;">
+                    <strong>Recent index errors:</strong>
+                    {{ _last_errors }} file{{ '' if _last_errors == 1 else 's' }} failed
+                    in the last bootstrap pass.
+                    <span style="color:#6c757d; font-size: 0.9em;">
+                        (Filenames suppressed to avoid PII leakage; check
+                        application logs for details.)
+                    </span>
+                </p>
+                {% elif _last_errors and _last_errors is not number %}
                 <p style="margin-top: 0.6em;">
                     <strong>Recent index errors</strong>
                     <span style="color:#6c757d; font-size: 0.9em;">

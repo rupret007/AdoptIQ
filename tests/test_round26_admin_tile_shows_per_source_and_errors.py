@@ -195,3 +195,55 @@ def test_admin_tile_buttons_renamed(monkeypatch):
     assert ">Rebuild<" in html
     assert ">Refresh Corpus<" not in html
     assert ">Force Rebuild<" not in html
+
+
+@pytest.mark.flask
+def test_admin_tile_renders_error_count_when_errors_is_int(monkeypatch):
+    """Round 26 - review (R26-001): the production payload from
+    ``corpus_bootstrap._index_stats_to_dict`` exposes
+    ``last_stats.errors`` as an INTEGER COUNT (filenames suppressed
+    on purpose to avoid PII leakage).  The original Round 26 Phase E
+    template assumed a list-of-dicts shape and silently broke (slicing
+    an int raises TypeError); the existing list-shape tests passed
+    only because they faked the dict shape.
+
+    This test pins the int-shape branch of the dual-shape rendering
+    so a regression that re-removes the count branch (or a refactor
+    that changes the production shape without updating the template)
+    is caught immediately.
+    """
+    boot = _base_boot(last_stats={"errors": 3})
+    html = _get_dashboard_html(
+        monkeypatch,
+        _corpus_status_payload(boot=boot),
+    )
+    assert "Recent index errors" in html
+    assert "3 files failed" in html
+    # PII-safety: no individual filenames / paths should appear in the
+    # rendered tile when the count-only shape is in play.
+    assert "Filenames suppressed" in html
+
+
+@pytest.mark.flask
+def test_admin_tile_singular_error_count_uses_singular_label(monkeypatch):
+    """R26-001: 1 error => "1 file failed" (singular), not "1 files"."""
+    boot = _base_boot(last_stats={"errors": 1})
+    html = _get_dashboard_html(
+        monkeypatch,
+        _corpus_status_payload(boot=boot),
+    )
+    assert "1 file failed" in html
+    assert "1 files failed" not in html
+
+
+@pytest.mark.flask
+def test_admin_tile_does_not_render_errors_section_when_zero(monkeypatch):
+    """R26-001: ``errors=0`` is the steady-state happy path.  The
+    Recent index errors block must NOT appear (no false alarm in the
+    operator's eye-line)."""
+    boot = _base_boot(last_stats={"errors": 0})
+    html = _get_dashboard_html(
+        monkeypatch,
+        _corpus_status_payload(boot=boot),
+    )
+    assert "Recent index errors" not in html
