@@ -689,8 +689,38 @@ _CRITICAL_AB_MODES = {CRITICAL_AB_MODE_CRITICAL_ONLY, CRITICAL_AB_MODE_CRITICAL_
 
 
 def count_total_barriers(ab_df: Optional[pd.DataFrame]) -> int:
-    """Total Adoption Barrier row count (post-normalization)."""
+    """Total Adoption Barrier count (post-normalization).
 
+    Round 25 / Phase F: count *distinct* barrier IDs rather than rows.
+
+    Pre-Round 25 this returned ``_safe_len(ab_df)`` -- one count per
+    row.  But the Snowflake AB extract fans out to one row *per
+    assignee* (or per status-history change), so a single barrier with
+    three assignees inflated the headline by 3x.  The reference Brian
+    Frazier / All Contact Center / 90d report had 71 rows but only 67
+    distinct ``ID`` values; the dashboard tile read ``Active Barriers:
+    71`` while a recipient who actually pivoted the Excel export found
+    67.  Fix by using ``nunique`` on the ``ID`` column when present.
+
+    Behaviour-preserving fallback: if the frame has no ``ID`` column
+    (older fixture data, an unnamed dataframe, etc.) we fall back to
+    the row count so callers do not regress to zero in those edge
+    cases.  ``None``/empty inputs still yield 0.
+    """
+
+    if ab_df is None or len(ab_df) == 0:
+        return 0
+    try:
+        cols = getattr(ab_df, "columns", [])
+    except Exception:
+        cols = []
+    if "ID" in cols:
+        try:
+            return int(ab_df["ID"].dropna().nunique())
+        except Exception:
+            # Defensive: an unhashable ID column should not degrade the
+            # report.  Fall through to the rowcount path.
+            pass
     return _safe_len(ab_df)
 
 

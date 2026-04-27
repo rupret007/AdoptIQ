@@ -661,3 +661,111 @@ def add_case_lifecycle_fields(
 
     return use
 
+
+# ---------------------------------------------------------------------------
+# Round 25 / Phase F: HTML strip helper for Excel object columns
+# ---------------------------------------------------------------------------
+#
+# Pre-Round 25 the Excel writer emitted whatever string lived in object
+# columns -- including raw HTML markup leaking out of Snowflake views
+# that store rich-text descriptions.  The reference Brian Frazier
+# report's ``AB_Detail_All`` and ``CSConsole_Customer_Pulse`` sheets had
+# cells like::
+#
+#     <a href="/" target="_blank"> </a>
+#     <img src="/lightning/r/Account/0014..." />
+#     <p>Customer asked about <strong>renewal</strong> options.</p>
+#
+# Excel renders ``<`` literally, so the recipient saw raw markup
+# instead of the intended text content.  This helper strips well-formed
+# HTML tags and unescapes named/numeric entities, while leaving plain
+# text untouched.  Cells that don't contain ``<`` skip the regex pass
+# entirely so this is cheap on clean exports.
+
+import html as _html_module
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def strip_html_from_string(value: Any) -> Any:
+    """Strip HTML tags and unescape entities from a single cell value.
+
+    Non-string values are returned unchanged.  Strings that don't
+    contain ``<`` are returned unchanged (so we don't rewrite their
+    storage in the underlying frame).  Strings with ``<`` are passed
+    through ``re.sub`` to drop tags and ``html.unescape`` to convert
+    ``&amp;`` -> ``&``, ``&nbsp;`` -> non-breaking space, etc.
+
+    Round 25 / Phase F.2: applied to Excel object columns immediately
+    before ``df.to_excel(...)`` so generated workbooks no longer leak
+    Snowflake rich-text markup into ``AB_Detail_All`` and
+    ``CSConsole_Customer_Pulse``.
+    """
+
+    if not isinstance(value, str):
+        return value
+    if "<" not in value:
+        return value
+    try:
+        stripped = _HTML_TAG_RE.sub("", value)
+        return _html_module.unescape(stripped)
+    except Exception:
+        # Defensive: a regex / unescape failure should not lose data.
+        return value
+
+
+def strip_html_from_dataframe(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Return a shallow copy of ``df`` with HTML stripped from object columns.
+
+    Only object-dtype columns whose values look like they might contain
+    HTML are rewritten -- numeric / datetime columns and pure-text
+    columns without any ``<`` characters are left alone.  We make a
+    shallow copy so callers can pass us the DataFrame they were about
+    to write to Excel without worrying about us mutating their working
+    state.
+
+    Returns ``df`` unchanged when:
+    - ``df`` is None,
+    - ``df`` is not a DataFrame, or
+    - ``df`` is empty.
+
+    Round 25 / Phase F.2.
+    """
+
+    if df is None:
+        return df
+    if not hasattr(df, "columns") or not hasattr(df, "copy"):
+        return df
+    try:
+        if len(df) == 0:
+            return df
+    except Exception:
+        return df
+
+    try:
+        out = df.copy()
+    except Exception:
+        return df
+
+    try:
+        obj_cols = list(out.select_dtypes(include=["object"]).columns)
+    except Exception:
+        obj_cols = []
+    for col in obj_cols:
+        try:
+            series = out[col]
+        except Exception:
+            continue
+        # Cheap fast-path: skip the column entirely if no cell has a
+        # ``<`` character -- avoids the regex apply on big text columns.
+        try:
+            has_tag = series.astype(str).str.contains("<", regex=False, na=False).any()
+        except Exception:
+            has_tag = True
+        if not has_tag:
+            continue
+        try:
+            out[col] = series.map(strip_html_from_string)
+        except Exception:
+            continue
+    return out
