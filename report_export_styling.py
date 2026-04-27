@@ -775,6 +775,22 @@ def build_summary_rows(
         # rendering "Customers in portfolio: --" since Round 15 / Phase 2
         # landed.  Pass the frames as keyword args so the canonical
         # count actually surfaces.
+        #
+        # Round 25 / Phase A: this ``(ab_df, csone_df, pulse_df)`` shape
+        # is now the SINGLE canonical "displayed customer universe" for
+        # both the Excel ``Summary`` sheet and the Compact Word headline
+        # ``Total Customers`` tile.  Pre-Round 25 the Word path widened
+        # the count via ``extra_frames`` (team subs, action plans,
+        # success priorities, csconsole adoption barriers) which produced
+        # ``49`` in the reference Brian Frazier / 90d report while this
+        # row showed ``37``.  The Word headline now mirrors this call
+        # exactly so any reader can manually reconcile the headline by
+        # counting unique customers across the three detail sheets the
+        # report actually displays (AB_Detail_All, CSOne_Detail_All,
+        # CSConsole_Customer_Pulse).  Do NOT widen this call without
+        # also widening the Compact Word headline -- the cross-format
+        # parity invariant in
+        # ``report_consistency.validate_report_consistency`` will fail.
         customers = _safe_canonical_call(
             cm.count_customers,
             ab_df=ab_df,

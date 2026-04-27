@@ -1,12 +1,17 @@
 """Round 2 / Phase 1.11 regression test.
 
 ``report_consistency.validate_report`` must accept ``extra_frames``
-and ``account_to_customer`` and forward them to ``cm.count_customers``
-when computing ``metrics['total_customers']``.
+and ``account_to_customer`` so the validator's customer universe
+matches the report's universe in every shape they participate in.
 
-Without this thread, the validator counts only the AB+CSOne universe
-while the report itself counts subscription-only / pulse-only customers
-too, so the validator silently disagrees with the headline tile.
+Round 25 / Phase A note: the validator's HEADLINE
+``metrics['total_customers']`` is now derived from the narrow
+``count_customers(ab_df, csone_df, pulse_df=...)`` shape (the same
+shape used by the Excel ``Summary`` row and the post-Round 25 Word
+headline tile).  ``extra_frames`` no longer widens the headline
+count; instead it feeds ``metrics['total_customers_with_extras']``,
+which preserves the pre-Round 25 wide-universe count for downstream
+defect-customer linkage and per-section coverage diagnostics.
 """
 from __future__ import annotations
 
@@ -39,16 +44,22 @@ def test_validate_report_forwards_extra_frames_to_count_customers() -> None:
         src,
         re.DOTALL,
     ), (
-        "Round 2 Phase 1.11: validate_report must forward "
-        "extra_frames to cm.count_customers so the validator's "
-        "total_customers matches the report's headline tile."
+        "Round 2 Phase 1.11 / Round 25: validate_report must forward "
+        "extra_frames to cm.count_customers (now in the "
+        "``total_customers_with_extras`` diagnostic call) so the "
+        "validator still surfaces the wide-universe count for "
+        "callers that need it for defect-customer linkage."
     )
 
 
 def test_validator_counts_subs_only_customer_via_extra_frames() -> None:
-    """Functional check: a subscription-only customer (no AB/CSOne
-    rows) must appear in metrics['total_customers'] when supplied via
-    ``extra_frames``.
+    """Round 25 / Phase A update: a subscription-only customer
+    (no AB/CSOne/Pulse rows) supplied via ``extra_frames`` no
+    longer enters the headline ``metrics['total_customers']``
+    because the headline was narrowed to the displayed-sheets
+    universe.  The wide-universe count remains available as
+    ``metrics['total_customers_with_extras']`` for diagnostic
+    purposes.
     """
     ab = pd.DataFrame([{"customer_name": "Acme"}])
     cs = pd.DataFrame([{"customer_name": "Acme"}])
@@ -62,13 +73,32 @@ def test_validator_counts_subs_only_customer_via_extra_frames() -> None:
         extra_frames=[subs],
     )
     metrics = result["metrics"]
-    assert metrics["total_customers"] == 2, (
-        "Round 2 Phase 1.11: with subscription-only Beta supplied via "
-        "extra_frames, total_customers must be 2 (Acme + Beta), not "
-        f"1.  Got {metrics['total_customers']}."
+
+    # Round 25 / Phase A: headline narrows to (AB ∪ CSOne ∪ Pulse).
+    # Beta lives only in extras, so it must NOT appear in the
+    # narrow headline.
+    assert metrics["total_customers"] == 1, (
+        "Round 25 / Phase A: subscription-only Beta supplied via "
+        "extra_frames must NOT inflate the headline "
+        "total_customers (which is now the displayed-sheets "
+        "universe AB ∪ CSOne ∪ Pulse).  Beta belongs in "
+        f"total_customers_with_extras instead.  Got headline "
+        f"{metrics['total_customers']}."
     )
-    canonical = cm.count_customers(ab_df=ab, csone_df=cs, extra_frames=[subs])
-    assert metrics["total_customers"] == canonical, (
-        "Round 2 Phase 1.11: validator total_customers must equal "
-        "cm.count_customers(...) on the same inputs."
+
+    # The wide universe MUST still surface Beta -- this is the
+    # diagnostic that preserves the pre-Round 25 count for
+    # downstream consumers (defect linkage, per-section coverage).
+    assert metrics["total_customers_with_extras"] == 2, (
+        "Round 25 / Phase A: the wide-universe diagnostic "
+        "``total_customers_with_extras`` must still include "
+        "subscription-only Beta when extras are supplied.  Got "
+        f"{metrics.get('total_customers_with_extras')}."
+    )
+    canonical_wide = cm.count_customers(
+        ab_df=ab, csone_df=cs, extra_frames=[subs],
+    )
+    assert metrics["total_customers_with_extras"] == canonical_wide, (
+        "Round 25 / Phase A: validator total_customers_with_extras "
+        "must equal cm.count_customers(...) on the same inputs."
     )

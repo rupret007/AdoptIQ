@@ -68,6 +68,7 @@ def validate_report_consistency(
     strict_mode: bool = False,
     extra_frames: Optional[list] = None,
     account_to_customer: Optional[Dict[str, str]] = None,
+    pulse_df: Optional[pd.DataFrame] = None,
 ) -> ConsistencyResultContract:
     """
     Validate cross-report consistency and produce actionable diagnostics.
@@ -97,12 +98,26 @@ def validate_report_consistency(
     # producing spurious mismatches against the canonical helpers.
     import canonical_metrics as _cm  # local import to avoid cycle
 
+    # Round 25 / Phase A: ``metrics["total_customers"]`` now derives
+    # from the SAME narrow displayed-sheets universe used by the
+    # Excel ``Summary`` row and the Compact Word headline tile --
+    # ``count_customers(ab_df=, csone_df=, pulse_df=)``.  Pre-Round 25
+    # this branch threaded ``extra_frames`` (team subs, action plans,
+    # success priorities, csconsole adoption barriers), which inflated
+    # the validator's universe above what readers can manually
+    # reconcile by counting unique customers across the three detail
+    # sheets the report actually displays.  ``extra_frames`` is still
+    # accepted (and used downstream for defect-customer linkage) but
+    # no longer enters this headline count.  The wider count is
+    # surfaced as ``metrics["total_customers_with_extras"]`` for
+    # diagnostic parity with pre-Round 25 dashboards.
+    _pulse_for_count = pulse_df if pulse_df is not None else customer_pulse_df
     if customer_universe is not None:
         if isinstance(customer_universe, pd.DataFrame):
             metrics["total_customers"] = _cm.count_customers(
-                ab_df=customer_universe, csone_df=None,
-                extra_frames=extra_frames,
-                account_to_customer=account_to_customer,
+                ab_df=customer_universe,
+                csone_df=None,
+                pulse_df=_pulse_for_count,
             )
         else:
             # Round 6 / Phase 5.14: previously this branch did its own
@@ -121,9 +136,9 @@ def validate_report_consistency(
             try:
                 _synthetic_universe = pd.DataFrame({"customer_name": _iter_values})
                 metrics["total_customers"] = _cm.count_customers(
-                    ab_df=_synthetic_universe, csone_df=None,
-                    extra_frames=extra_frames,
-                    account_to_customer=account_to_customer,
+                    ab_df=_synthetic_universe,
+                    csone_df=None,
+                    pulse_df=_pulse_for_count,
                 )
             except Exception as _univ_err:
                 # Defensive fallback: if the synthetic universe path
@@ -140,16 +155,28 @@ def validate_report_consistency(
                 customer_set = {c for c in customer_set if c and c != "Unknown"}
                 metrics["total_customers"] = len(customer_set)
     else:
-        # Round 2 / Phase 1.11: thread extra_frames + account_to_customer
-        # so the validator counts subscription-only / pulse-only / action
-        # plan-only customers in the same universe the report does.
-        # Without this the validator silently fails closed when the
-        # report includes customers that have no AB / no CSOne rows.
         metrics["total_customers"] = _cm.count_customers(
-            ab_df=ab_df, csone_df=csone_df,
+            ab_df=ab_df,
+            csone_df=csone_df,
+            pulse_df=_pulse_for_count,
+        )
+
+    # Round 25 / Phase A: surface the wider universe (with extras +
+    # account_to_customer backfill) as a diagnostic so existing
+    # callers that need it for defect-customer linkage / per-section
+    # coverage can still see it.  This is INFORMATIONAL only; the
+    # PM-vs-validator headline parity check below uses the narrow
+    # ``metrics["total_customers"]`` value.
+    try:
+        metrics["total_customers_with_extras"] = _cm.count_customers(
+            ab_df=ab_df,
+            csone_df=csone_df,
+            pulse_df=_pulse_for_count,
             extra_frames=extra_frames,
             account_to_customer=account_to_customer,
         )
+    except Exception:
+        metrics["total_customers_with_extras"] = metrics["total_customers"]
 
     if csone_df is not None and not csone_df.empty:
         # Single source of truth for P1/P2/P3/P4/Unknown counts so the
@@ -257,8 +284,28 @@ def validate_report_consistency(
             errors.append("Portfolio metric mismatch: total_cases does not match normalized TAC cases.")
         if int(portfolio_metrics.get("bems_count", 0)) != bems_count:
             errors.append("Portfolio metric mismatch: bems_count does not match canonical BEMS detection.")
-        if "total_customers" in portfolio_metrics and int(portfolio_metrics.get("total_customers", 0)) != metrics["total_customers"]:
-            errors.append("Portfolio metric mismatch: total_customers does not match normalized customer universe.")
+        # Round 25 / Phase A: cross-format parity gate.  After this
+        # round, ``portfolio_metrics["total_customers"]`` (Word
+        # headline) and ``metrics["total_customers"]`` (validator's
+        # narrow displayed-sheets count) are both derived from
+        # ``count_customers(ab_df=, csone_df=, pulse_df=)``.  Any drift
+        # here means the Word path is widening the universe in a way
+        # the Excel ``Summary`` sheet does NOT, so a reader manually
+        # counting customers across the three detail sheets will
+        # disagree with the headline tile.  Block the build.
+        if "total_customers" in portfolio_metrics:
+            pm_total = int(portfolio_metrics.get("total_customers", 0) or 0)
+            canon_total = int(metrics["total_customers"])
+            if pm_total != canon_total:
+                errors.append(
+                    "Portfolio metric mismatch: total_customers="
+                    f"{pm_total} (Word headline) != "
+                    f"{canon_total} (canonical AB ∪ CSOne ∪ Pulse universe). "
+                    "The Word headline must mirror the Excel Summary row -- both "
+                    "derive from count_customers(ab_df=, csone_df=, pulse_df=). "
+                    "If the Word path is using extra_frames / account_to_customer "
+                    "to widen the count, drop those args from the headline call site."
+                )
         reported_p1 = portfolio_metrics.get("critical_p1", portfolio_metrics.get("p1_cases", None))
         if reported_p1 is not None and int(reported_p1) != metrics["critical_p1"]:
             errors.append("Portfolio metric mismatch: critical_p1 does not match canonical severity counting.")
@@ -606,3 +653,359 @@ def validate_report_consistency(
         raise ValueError("; ".join(errors))
     return result
 
+
+# ---------------------------------------------------------------------------
+# Round 25 / Phase B: post-render Word numeric drift validator.
+#
+# The Compact Word "Executive Summary: What's Really Happening" block is
+# filled by the LLM from ``PROMPT_PORTFOLIO_TEMPLATE`` in
+# ``adoptiq_backend.py``.  Phase B injects the canonical totals into the
+# prompt body so the LLM has authoritative values; this validator runs
+# *after* the doc text is assembled and asserts every numeric rendering
+# of those totals matches the canonical pipeline.  Drift either means
+# the LLM ignored the constraint or a downstream formatter mutated the
+# value -- either way, block the build before the artifact reaches the
+# user's Downloads folder.
+# ---------------------------------------------------------------------------
+
+
+# Each entry maps a canonical-metric key (the key on the canonical
+# ``portfolio_metrics`` dict / kwargs to ``PROMPT_PORTFOLIO_TEMPLATE``)
+# to:
+#   - ``label``: human-readable name for error messages
+#   - ``patterns``: regex patterns matched against the rendered Word
+#     paragraphs.  The number is captured in group(1).  Patterns are
+#     case-insensitive and tolerate ``**bold**`` / leading bullets.
+#
+# Patterns are intentionally narrow -- they match ONLY the
+# Phase B "Portfolio Snapshot" lines.  They will not pick up
+# free-floating numeric mentions elsewhere in the narrative
+# (e.g. "we closed 14 cases this quarter") so the validator is
+# safe to enable on existing reports.
+_R25B_VALIDATED_TOTALS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "total_customers",
+        "Total Customers",
+        (
+            r"total\s+customers?\s*:?\s*\**\s*(\d+)\b",
+        ),
+    ),
+    (
+        "total_barriers",
+        "Active Adoption Barriers",
+        (
+            r"active\s+adoption\s+barriers?\s*:?\s*\**\s*(\d+)\b",
+        ),
+    ),
+    (
+        "total_cases",
+        "TAC Cases",
+        (
+            r"tac\s+cases?\s*:?\s*\**\s*(\d+)\b",
+        ),
+    ),
+    (
+        "bems_count",
+        "BEMS Escalations",
+        (
+            r"bems\s+escalations?\s*:?\s*\**\s*(\d+)\b",
+        ),
+    ),
+)
+
+
+def _r25b_extract_paragraphs(rendered: Any) -> list[str]:
+    """Return paragraph-level text from a rendered Word doc / iterable / string.
+
+    Accepts:
+    - a ``docx.Document``-like object exposing ``.paragraphs`` with ``.text``
+    - an iterable of strings (one per paragraph)
+    - a single string (split on newlines)
+    """
+
+    if rendered is None:
+        return []
+    if hasattr(rendered, "paragraphs"):
+        try:
+            return [str(getattr(p, "text", "") or "") for p in rendered.paragraphs]
+        except Exception:
+            return []
+    if isinstance(rendered, str):
+        return rendered.splitlines()
+    try:
+        return [str(item or "") for item in rendered]
+    except TypeError:
+        return [str(rendered)]
+
+
+def validate_word_numeric_drift(
+    rendered: Any,
+    canonical_totals: Dict[str, Any],
+    *,
+    raise_on_drift: bool = False,
+) -> ConsistencyResultContract:
+    """Round 25 / Phase B post-render validator.
+
+    Scans the rendered Compact Word document for the Portfolio Snapshot
+    numeric claims and verifies each matches the canonical pipeline
+    value supplied in ``canonical_totals``.
+
+    Parameters
+    ----------
+    rendered:
+        A ``docx.Document`` instance, an iterable of paragraph strings,
+        or a single multi-line string.  The validator extracts
+        paragraph-level text and runs the Round 25 narrow regex set
+        against each paragraph.
+    canonical_totals:
+        Mapping of canonical metric keys (``"total_customers"``,
+        ``"total_barriers"``, ``"total_cases"``, ``"bems_count"``) to
+        their authoritative integer values.  Keys absent from this dict
+        are skipped (the validator only checks what it has truth for).
+    raise_on_drift:
+        When ``True`` and any drift is detected, raise ``ValueError``
+        with the aggregated error list.  When ``False`` (default), the
+        caller can read the returned ``errors`` list and decide how to
+        surface it.  The Compact Word build path uses
+        ``raise_on_drift=True`` to block report delivery.
+
+    Returns
+    -------
+    A ``ConsistencyResultContract`` dict with ``is_valid``, ``errors``,
+    ``warnings``, and a ``metrics`` block carrying the parsed numbers
+    keyed by canonical metric name (e.g. ``metrics["total_customers"]``
+    is a list of every integer found in the rendered narrative for that
+    label, in order).
+    """
+
+    paragraphs = _r25b_extract_paragraphs(rendered)
+    parsed: Dict[str, list[int]] = {key: [] for key, _, _ in _R25B_VALIDATED_TOTALS}
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    for paragraph in paragraphs:
+        if not paragraph:
+            continue
+        for key, _label, patterns in _R25B_VALIDATED_TOTALS:
+            for pattern in patterns:
+                for match in re.finditer(pattern, paragraph, flags=re.IGNORECASE):
+                    try:
+                        parsed[key].append(int(match.group(1)))
+                    except (TypeError, ValueError):
+                        continue
+
+    for key, label, _patterns in _R25B_VALIDATED_TOTALS:
+        if key not in canonical_totals:
+            continue
+        try:
+            canonical_value = int(canonical_totals[key])
+        except (TypeError, ValueError):
+            warnings.append(
+                f"Round 25 / Phase B: canonical_totals[{key!r}] is not an int "
+                f"({canonical_totals.get(key)!r}); validator skipped this metric."
+            )
+            continue
+        narrated_values = parsed[key]
+        if not narrated_values:
+            warnings.append(
+                f"Round 25 / Phase B: no narrated value found for {label} "
+                f"(canonical={canonical_value}). The Portfolio Snapshot block "
+                "may have been omitted or reformatted by the LLM."
+            )
+            continue
+        bad = [v for v in narrated_values if v != canonical_value]
+        if bad:
+            errors.append(
+                f"Round 25 / Phase B: {label} drift detected. "
+                f"Canonical={canonical_value}, narrated={bad}. "
+                "The LLM rendered a value that disagrees with the canonical "
+                "pipeline; either the prompt substitutions did not reach the "
+                "model or the model overrode them. Block the build."
+            )
+
+    metrics: Dict[str, Any] = {f"narrated_{k}": v for k, v in parsed.items()}
+    metrics["canonical_totals_checked"] = sorted(
+        k for k in canonical_totals.keys() if k in parsed
+    )
+
+    errors = sorted(errors)
+    warnings = sorted(warnings)
+    result: ConsistencyResultContract = {
+        "is_valid": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings,
+        "metrics": metrics,
+    }
+    if raise_on_drift and errors:
+        raise ValueError("; ".join(errors))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Round 25 / Phase C: risk-band narrative drift validator.
+#
+# The "All Customers in Trouble" block in ``PROMPT_PORTFOLIO_TEMPLATE``
+# emits one ``Risk Level: <BAND>`` line per troubled customer.  The
+# canonical pipeline reports ``portfolio_metrics["high_risk_customers"]``
+# = number of customers in CRITICAL or HIGH bands.  Pre-Round 25 the
+# LLM was free to:
+#   - invent compound labels ("HIGH/CRITICAL", "MEDIUM/LOW")
+#   - promote/demote bands relative to the canonical assignment
+#   - list more or fewer CRITICAL+HIGH customers than the dashboard tile
+#
+# This validator catches all three cases by:
+#   1. Asserting every ``Risk Level: <X>`` matches one of the five
+#      canonical labels (no compound, no synonyms like "MODERATE").
+#   2. Counting narrated CRITICAL+HIGH lines and comparing to the
+#      canonical ``high_risk_customers`` count.
+#
+# It returns a separate ConsistencyResultContract so callers can
+# combine it with ``validate_word_numeric_drift`` results without
+# having to teach the latter about a fundamentally different
+# matching strategy.
+# ---------------------------------------------------------------------------
+
+
+_R25C_CANONICAL_BANDS = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "HEALTHY")
+# Round 25 / Phase C: ``Risk Level:`` followed by a single canonical
+# band token.  ``[\*\s\[]*`` lets the regex tolerate the prompt's
+# bold-and-bracket formatting (e.g. ``Risk Level: **[HIGH]**``).
+_R25C_RISK_LEVEL_RE = re.compile(
+    r"risk\s+level\s*:\s*[\*\s\[]*([A-Za-z][A-Za-z/_-]*)",
+    flags=re.IGNORECASE,
+)
+
+
+def validate_word_risk_band_claims(
+    rendered: Any,
+    canonical_high_risk_customers: int,
+    *,
+    raise_on_drift: bool = False,
+) -> ConsistencyResultContract:
+    """Round 25 / Phase C post-render validator for risk-band narratives.
+
+    Scans the rendered Word doc for ``Risk Level: <BAND>`` lines and
+    asserts:
+
+    - Each band is one of the five canonical labels (CRITICAL, HIGH,
+      MEDIUM, LOW, HEALTHY).  Compound labels (``HIGH/CRITICAL``,
+      ``MEDIUM/LOW``) and synonyms (``MODERATE``) trip an error.
+    - The number of narrated CRITICAL+HIGH lines equals
+      ``canonical_high_risk_customers`` (the canonical
+      ``portfolio_metrics["high_risk_customers"]`` count).
+
+    Parameters
+    ----------
+    rendered:
+        A ``docx.Document`` instance, an iterable of paragraph
+        strings, or a single multi-line string.
+    canonical_high_risk_customers:
+        The authoritative count from
+        ``portfolio_metrics["high_risk_customers"]``.
+    raise_on_drift:
+        When ``True`` and any drift is detected, raise ``ValueError``.
+
+    Returns
+    -------
+    A ``ConsistencyResultContract`` dict with parsed risk-band
+    statistics under ``metrics``:
+    - ``narrated_risk_levels``: list of every band token found, in
+      order
+    - ``narrated_critical_high_count``: count of CRITICAL+HIGH lines
+    - ``invalid_band_labels``: list of any non-canonical labels found
+    - ``canonical_high_risk_customers``: echo of the input value
+    """
+
+    paragraphs = _r25b_extract_paragraphs(rendered)
+
+    narrated_levels: list[str] = []
+    invalid_labels: list[str] = []
+
+    for paragraph in paragraphs:
+        if not paragraph:
+            continue
+        for match in _R25C_RISK_LEVEL_RE.finditer(paragraph):
+            raw = match.group(1) or ""
+            token = raw.strip().upper().rstrip(".:,;]*")
+            if not token:
+                continue
+            # Round 25 / Phase C: explicitly reject compound bands
+            # that contain a separator AFTER the regex captured a
+            # single word -- the regex doesn't allow ``/`` so we
+            # must look back into the surrounding paragraph for the
+            # full token.  Pull a wider match to detect compounds.
+            full_pattern = re.compile(
+                r"risk\s+level\s*:\s*[\*\s\[]*([A-Za-z][A-Za-z/_\-\s]*?)(?:[\*\]\.,;\s]|$)",
+                flags=re.IGNORECASE,
+            )
+            wide = full_pattern.search(paragraph[match.start():])
+            if wide:
+                wide_token = wide.group(1).strip().upper()
+                if "/" in wide_token or "-" in wide_token or " " in wide_token.strip():
+                    invalid_labels.append(wide_token)
+                    continue
+                token = wide_token
+            if token not in _R25C_CANONICAL_BANDS:
+                invalid_labels.append(token)
+                continue
+            narrated_levels.append(token)
+
+    critical_high = sum(1 for b in narrated_levels if b in {"CRITICAL", "HIGH"})
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if invalid_labels:
+        errors.append(
+            "Round 25 / Phase C: non-canonical risk band label(s) detected in "
+            f"narrative: {sorted(set(invalid_labels))}. "
+            "The PROMPT_PORTFOLIO_TEMPLATE 'All Customers in Trouble' block "
+            "binds the LLM to the five canonical bands "
+            "(CRITICAL, HIGH, MEDIUM, LOW, HEALTHY) -- compound labels and "
+            "synonyms are forbidden."
+        )
+
+    try:
+        canon_high = int(canonical_high_risk_customers)
+    except (TypeError, ValueError):
+        warnings.append(
+            "Round 25 / Phase C: canonical_high_risk_customers is not an "
+            f"int ({canonical_high_risk_customers!r}); CRITICAL+HIGH "
+            "parity check skipped."
+        )
+        canon_high = None  # type: ignore[assignment]
+
+    if canon_high is not None:
+        if not narrated_levels and not invalid_labels:
+            warnings.append(
+                "Round 25 / Phase C: no Risk Level lines found in the "
+                "rendered narrative. The 'All Customers in Trouble' block "
+                "may have been omitted by the LLM."
+            )
+        elif critical_high != canon_high:
+            errors.append(
+                "Round 25 / Phase C: CRITICAL+HIGH narrative drift. "
+                f"Canonical portfolio_metrics['high_risk_customers']={canon_high}, "
+                f"narrated CRITICAL+HIGH lines={critical_high}. "
+                "Block the build -- the dashboard tile and the trouble-spot "
+                "list must agree."
+            )
+
+    metrics: Dict[str, Any] = {
+        "narrated_risk_levels": narrated_levels,
+        "narrated_critical_high_count": critical_high,
+        "invalid_band_labels": sorted(set(invalid_labels)),
+        "canonical_high_risk_customers": canonical_high_risk_customers,
+    }
+
+    errors = sorted(errors)
+    warnings = sorted(warnings)
+    result: ConsistencyResultContract = {
+        "is_valid": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings,
+        "metrics": metrics,
+    }
+    if raise_on_drift and errors:
+        raise ValueError("; ".join(errors))
+    return result

@@ -215,10 +215,24 @@ def test_validator_with_extras_matches_portfolio_metrics_universe() -> None:
     ``build_portfolio_metrics(extra_customer_frames=...)`` and
     ``portfolio_metrics["total_customers"]`` == validator's
     ``metrics["total_customers"]``.  No more "Portfolio metric
-    mismatch"."""
+    mismatch".
+
+    Round 25 / Phase A update: the validator's headline
+    ``metrics["total_customers"]`` now derives from the narrow
+    ``count_customers(ab_df, csone_df, pulse_df=...)`` shape (the
+    same shape the Excel ``Summary`` row uses).  Callers must
+    therefore thread ``pulse_df`` (typically the
+    ``csconsole_customer_pulse`` frame) for the validator's narrow
+    headline universe to equal the ``portfolio_metrics`` headline
+    universe.  The Round 19 golden fixture's
+    ``csconsole_customer_pulse`` carries DeltaCo + EpsilonInc so
+    the narrow universe still resolves to 5 customers, preserving
+    the EXPECTED_KPIS["total_customers"] invariant.
+    """
     ab_df = make_ab_df()
     csone_df = make_csone_df()
     extras = make_extra_frames()
+    csconsole_customer_pulse = extras[1]
     expected_total = EXPECTED_KPIS["total_customers"]  # 5
 
     pm = cm.build_portfolio_metrics(
@@ -233,21 +247,30 @@ def test_validator_with_extras_matches_portfolio_metrics_universe() -> None:
         f"EXPECTED_KPIS['total_customers'] == {expected_total}."
     )
 
+    # Round 25 / Phase A: thread ``pulse_df`` so the validator's
+    # narrow ``total_customers`` count matches the PM headline.  Pre-
+    # Round 25, threading just ``extra_frames`` was sufficient because
+    # the validator widened the universe with all extras; under Round
+    # 25 the headline is the (AB ∪ CSOne ∪ Pulse) shape only.
     result_with_extras = validate_report_consistency(
         ab_df,
         csone_df,
         portfolio_metrics=pm,
         extra_frames=extras,
+        pulse_df=csconsole_customer_pulse,
     )
     assert result_with_extras["metrics"]["total_customers"] == expected_total, (
-        "R22-001 contract: the validator must compute the SAME "
-        f"total_customers ({expected_total}) as build_portfolio_metrics "
-        "when the caller threads the same extras through both helpers."
+        "R22-001 / Round 25 contract: the validator's narrow "
+        f"total_customers ({expected_total}) must equal "
+        "build_portfolio_metrics' total_customers when the caller "
+        "threads ``pulse_df`` (csconsole_customer_pulse) into the "
+        "validator."
     )
     assert result_with_extras["is_valid"], (
-        "R22-001 contract: the validator must NOT raise 'Portfolio "
-        "metric mismatch' when extras are threaded consistently.  "
-        f"Errors observed: {result_with_extras.get('errors')}"
+        "R22-001 / Round 25 contract: the validator must NOT raise "
+        "'Portfolio metric mismatch' when ``pulse_df`` (and extras) "
+        "are threaded consistently.  Errors observed: "
+        f"{result_with_extras.get('errors')}"
     )
 
 

@@ -12423,6 +12423,13 @@ def run_comprehensive_analysis(analysis_id):
                 _sw_defects = {'total_defects': 0, 'defect_by_customer': {}}
                 _psirt = {'total_vulnerabilities': 0, 'vulnerability_by_customer': {}}
 
+            # Round 25 / Phase C: thread ``risk_profiles`` (the dict
+            # built above by ``compute_customer_risk_profile`` per
+            # customer) into the briefing so it emits the canonical
+            # Risk Bands section.  Without this, the LLM has no anchor
+            # for the "Risk Level" labels in the trouble-spot block and
+            # free-styles compound labels like "HIGH/CRITICAL" that
+            # disagree with the dashboard tile.
             portfolio_briefing = _create_briefing_book(f"{status['manager']}'s Portfolio", ab_norm, csone_df, ext_bugs, ext_incidents, [], pd.DataFrame(), None, engagement_summary, {
                 'action_plans': filtered_action_plans,
                 'customer_pulse': filtered_customer_pulse,
@@ -12432,12 +12439,131 @@ def run_comprehensive_analysis(analysis_id):
                 arr_impact=None,
                 feature_requests=feature_requests if feature_requests and feature_requests.get('total_requests', 0) > 0 else None,
                 software_defects=_sw_defects if _sw_defects.get('total_defects', 0) > 0 else None,
-                psirt_vulns=_psirt if _psirt.get('total_vulnerabilities', 0) > 0 else None)
-            portfolio_prompt = PROMPT_PORTFOLIO_TEMPLATE.format(MANAGER=status['manager'], TECHNOLOGY=status['tech'])
+                psirt_vulns=_psirt if _psirt.get('total_vulnerabilities', 0) > 0 else None,
+                risk_profiles=risk_profiles if isinstance(risk_profiles, dict) else None)
+            # Round 25 / Phase B: pin the canonical totals into the
+            # prompt body via ``.format(...)`` substitutions so the
+            # LLM cannot free-style "Total Customers: 27" while the
+            # canonical pipeline says 37.  The post-render validator
+            # in ``report_consistency.validate_word_numeric_drift``
+            # blocks the build if the rendered narrative drifts.  All
+            # placeholders are populated from ``portfolio_metrics``
+            # (which Round 25 / Phase A pinned to the displayed-
+            # sheets universe) plus a fallback ``count_customers``
+            # call so partial-data runs still get an honest number.
+            try:
+                _r25b_total_customers = int(portfolio_metrics.get("total_customers", 0) or 0)
+            except Exception:
+                _r25b_total_customers = 0
+            try:
+                _r25b_total_barriers = int(portfolio_metrics.get("total_barriers", 0) or 0)
+            except Exception:
+                _r25b_total_barriers = 0
+            try:
+                _r25b_tac_cases = int(portfolio_metrics.get("total_cases", 0) or 0)
+            except Exception:
+                _r25b_tac_cases = 0
+            try:
+                _r25b_p1 = int(
+                    portfolio_metrics.get(
+                        "critical_p1", portfolio_metrics.get("p1_cases", 0) or 0
+                    )
+                    or 0
+                )
+            except Exception:
+                _r25b_p1 = 0
+            try:
+                _r25b_p2 = int(
+                    portfolio_metrics.get(
+                        "high_p2", portfolio_metrics.get("p2_cases", 0) or 0
+                    )
+                    or 0
+                )
+            except Exception:
+                _r25b_p2 = 0
+            try:
+                _r25b_bems = int(portfolio_metrics.get("bems_count", 0) or 0)
+            except Exception:
+                _r25b_bems = 0
+            portfolio_prompt = PROMPT_PORTFOLIO_TEMPLATE.format(
+                MANAGER=status['manager'],
+                TECHNOLOGY=status['tech'],
+                TOTAL_CUSTOMERS=_r25b_total_customers,
+                TOTAL_BARRIERS=_r25b_total_barriers,
+                TAC_CASES=_r25b_tac_cases,
+                P1_CASES=_r25b_p1,
+                P2_CASES=_r25b_p2,
+                BEMS_ESCALATIONS=_r25b_bems,
+            )
             portfolio_summary = generate_llm_response(portfolio_prompt, portfolio_briefing)
             
             # Check if AI response is valid
             if portfolio_summary and not portfolio_summary.startswith("ERROR:"):
+                # Round 25 / Phase B: post-render numeric drift validator.
+                # The prompt above pinned the canonical totals via
+                # ``.format(...)`` substitutions; if the LLM still emits
+                # a number that disagrees with the canonical pipeline,
+                # block the build before the artifact reaches the user
+                # rather than ship a numerically dishonest report.
+                # ``ADOPTIQ_NONSTRICT_R25B=1`` opts out for emergency
+                # hotfix scenarios.
+                try:
+                    from report_consistency import (
+                        validate_word_numeric_drift as _r25b_validator,
+                        validate_word_risk_band_claims as _r25c_validator,
+                    )
+                    _r25b_drift_strict = str(
+                        os.getenv("ADOPTIQ_NONSTRICT_R25B", "0")
+                    ).strip().lower() not in {"1", "true", "yes", "on"}
+                    _r25b_drift_result = _r25b_validator(
+                        portfolio_summary,
+                        canonical_totals={
+                            "total_customers": _r25b_total_customers,
+                            "total_barriers": _r25b_total_barriers,
+                            "total_cases": _r25b_tac_cases,
+                            "bems_count": _r25b_bems,
+                        },
+                        raise_on_drift=_r25b_drift_strict,
+                    )
+                    if _r25b_drift_result.get("warnings"):
+                        logger.warning(
+                            "[R25B] Portfolio numeric drift validator warnings: %s",
+                            _r25b_drift_result["warnings"],
+                        )
+                    # Round 25 / Phase C: also validate the narrated
+                    # risk bands.  Pulled from portfolio_metrics so a
+                    # drift between dashboard tile (Critical+High = 1)
+                    # and narrative (3 customers labelled CRITICAL or
+                    # HIGH) blocks the build.  Same opt-out env var as
+                    # Phase B since both are part of the same Round 25
+                    # numeric-honesty contract.
+                    try:
+                        _r25c_canon_high = int(
+                            portfolio_metrics.get("high_risk_customers", 0) or 0
+                        )
+                    except Exception:
+                        _r25c_canon_high = 0
+                    _r25c_drift_result = _r25c_validator(
+                        portfolio_summary,
+                        canonical_high_risk_customers=_r25c_canon_high,
+                        raise_on_drift=_r25b_drift_strict,
+                    )
+                    if _r25c_drift_result.get("warnings"):
+                        logger.warning(
+                            "[R25C] Portfolio risk-band validator warnings: %s",
+                            _r25c_drift_result["warnings"],
+                        )
+                except ValueError as _r25b_drift_err:
+                    logger.error(
+                        "[R25B/R25C] Portfolio numeric or risk-band drift detected; blocking report build: %s",
+                        _r25b_drift_err,
+                    )
+                    raise
+                except Exception as _r25b_other_err:
+                    logger.warning(
+                        "[R25B/R25C] Portfolio drift validator unavailable (%s); proceeding without strict check.",
+                        _r25b_other_err,
+                    )
                 # Use clean builder to parse AI output and remove ALL markdown symbols
                 report_builder.parse_ai_output_and_add(portfolio_summary)
                 logger.info(f"[[OK]] Portfolio AI analysis completed successfully - NO markdown symbols")
@@ -12762,7 +12888,28 @@ def run_comprehensive_analysis(analysis_id):
 
         logger.info(f"[[DOC]] Saving main Word document with clean formatting (NO markdown symbols)...")
         docx_path = f"{base}.docx"
-        report_builder.save(docx_path)
+        # Round 25 / Phase E: stamp ``doc.core_properties`` with the
+        # portfolio identity so the recipient's File > Properties dialog
+        # shows ``Title: Brian Frazier All Contact Center - Executive
+        # Analysis - 2026-04-25`` rather than an empty title with the
+        # python-docx default ``author='python-docx'`` (and the 2013
+        # ``created`` date that came with it).  ``manager`` + ``tech``
+        # are already in scope here from the analysis status dict.
+        try:
+            _r25e_customer_name = f"{manager} {tech}".strip()
+        except Exception:
+            _r25e_customer_name = None
+        try:
+            _r25e_subject = (
+                f"AdoptIQ Comprehensive Executive Report - {tech} - {days}d"
+            )
+        except Exception:
+            _r25e_subject = None
+        report_builder.save(
+            docx_path,
+            customer_name=_r25e_customer_name,
+            report_subject=_r25e_subject,
+        )
         logger.info(f"[[OK]] Clean executive report saved (NO ## symbols): {docx_path}")
         
         # === 4. Create Enhanced Reports ===

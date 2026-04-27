@@ -1722,12 +1722,26 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
     # That bypassed the canonical helper and let
     # build_portfolio_metrics' (account-map-blind) count win, which
     # disagreed with the leader/renewal dashboards. Surface the failure.
+    #
+    # Round 25 / Phase A: pin ``total_customers`` to the narrow
+    # AB ∪ CSOne ∪ Pulse universe so the EI Word headline and the
+    # Excel Summary row both derive from the same call shape.  The
+    # wider extras-aware count is preserved as
+    # ``portfolio_metrics["total_customers_with_extras"]`` for any
+    # downstream consumer (defect linkage / per-section coverage)
+    # that legitimately needs it.
     try:
+        portfolio_metrics["total_customers_with_extras"] = cm.count_customers(
+            ab_df=ab_for_check,
+            csone_df=csone_for_check,
+            pulse_df=csconsole_customer_pulse,
+            extra_frames=_ei_extra_frames,
+            account_to_customer=_account_to_customer,
+        )
         portfolio_metrics["total_customers"] = cm.count_customers(
             ab_df=ab_for_check,
             csone_df=csone_for_check,
-            extra_frames=_ei_extra_frames,
-            account_to_customer=_account_to_customer,
+            pulse_df=csconsole_customer_pulse,
         )
     except Exception as _cc_exc:
         logger.error(
@@ -1760,6 +1774,7 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
         factual_claims=factual_claims,
         extra_frames=_ei_extra_frames or None,
         account_to_customer=_account_to_customer,
+        pulse_df=csconsole_customer_pulse,
     )
     if not consistency["is_valid"]:
         raise ValueError(f"Executive consistency checks failed: {'; '.join(consistency['errors'])}")

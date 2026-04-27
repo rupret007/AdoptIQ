@@ -7890,335 +7890,476 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
         base_path = str(sheets_or_path)
         sheets = title_or_sheets if title_or_sheets else {}
     
-    try:
-        # Use enhanced Excel formatter for better output
-        from enhanced_excel_formatter import create_enhanced_excel_report
-        
-        # Extract data from sheets dict
-        ab_data = sheets.get("AB_Detail_All", pd.DataFrame())
-        csone_data = sheets.get("CSOne_Detail_All", pd.DataFrame())
-        ext_bugs = sheets.get("External_Bugs", [])
-        ext_incidents = sheets.get("External_Incidents", [])
-        
-        # Convert DataFrames to lists of dicts if needed
-        if isinstance(ext_bugs, pd.DataFrame) and not ext_bugs.empty:
-            ext_bugs = ext_bugs.to_dict('records')
-        if isinstance(ext_incidents, pd.DataFrame) and not ext_incidents.empty:
-            ext_incidents = ext_incidents.to_dict('records')
-        
-        # Create enhanced Excel report
-        enhanced_path = f"{base_path}_enhanced.xlsx"
-        create_enhanced_excel_report(
-            enhanced_path, 
-            manager,  # Use actual manager name
-            technology,  # Use actual technology
-            days,  # Use actual days
-            ab_data, 
-            csone_data,
-            ext_bugs,
-            ext_incidents,
-            None,  # ai_insights
-            csconsole_data  # Add CSConsole data
-        )
-        
-        return enhanced_path
-        
-    except Exception as e:
-        logger.warning(f"Enhanced Excel formatter failed, falling back to basic: {e}")
-        # Fallback: write main sheets plus CSConsole data so report is accurate and complete
-        csconsole_sheet_names = {
-            "action_plans": "CSConsole_Action_Plans",
-            "customer_pulse": "CSConsole_Customer_Pulse",
-            "success_priorities": "CSConsole_Success_Priorities",
-            "adoption_barriers": "CSConsole_Adoption_Barriers",
-        }
-        import numpy as _np
+    # Round 25 / Phase D: prior to this round the writer wrapped the
+    # call body in a `try: from enhanced_excel_formatter ... except: ...`
+    # fallback.  ``enhanced_excel_formatter`` was never present in the
+    # repository (verified with ``rg`` -- there is no module file, no
+    # entry-point, no historical commit that ever shipped one), so every
+    # report fell through to the ``except`` branch and the generated
+    # ``Report_Info`` sheet announced ``Export type: Standard (fallback)``
+    # plus a reassuring note that ``the enhanced formatter was not
+    # available``.  That framing was dishonest -- the inline body is the
+    # canonical writer and there is no enhanced path to fall back from.
+    # Promote the body to the function-level path and rewrite the
+    # Report_Info row to reflect reality (see lower in this function).
+    csconsole_sheet_names = {
+        "action_plans": "CSConsole_Action_Plans",
+        "customer_pulse": "CSConsole_Customer_Pulse",
+        "success_priorities": "CSConsole_Success_Priorities",
+        "adoption_barriers": "CSConsole_Adoption_Barriers",
+    }
+    import numpy as _np
 
-        def _defang_formulas(df: pd.DataFrame) -> pd.DataFrame:
-            """Prefix string cells starting with =, +, -, or @ with a quote to prevent Excel formula injection."""
-            for col in df.columns:
-                if df[col].dtype == object:
-                    df[col] = df[col].apply(
-                        lambda v: "'" + v if isinstance(v, str) and v and v[0] in ('=', '+', '-', '@') else v
-                    )
-            return df
-
-        def _r12_sanitize_sheet_name(raw) -> str:
-            """Round 12 / Phase 9.8: produce a sheet name Excel will
-            accept.  Excel rejects ``[`` ``]`` ``:`` ``*`` ``?``
-            ``/`` ``\\`` and the leading/trailing apostrophe, and
-            silently truncates beyond 31 characters.  Strip the
-            invalid characters to ``_`` (preserving readability)
-            then truncate to 31.  Fall back to ``"Sheet"`` for
-            empty / None / all-invalid inputs so the writer never
-            fails on a degenerate name.
-            """
-            try:
-                _name = str(raw) if raw is not None else "Sheet"
-            except Exception:
-                _name = "Sheet"
-            for _bad in ('[', ']', ':', '*', '?', '/', '\\'):
-                _name = _name.replace(_bad, '_')
-            _name = _name.strip("'").strip()
-            if not _name:
-                _name = "Sheet"
-            return _name[:31]
-        with pd.ExcelWriter(f"{base_path}.xlsx", engine="xlsxwriter") as xw:
-            # Round 15 / Phase 2.4: Summary sheet first.  This is the
-            # tab the recipient lands on when they double-click the
-            # file; pre-Round-15 they landed on ``Report_Info`` (which
-            # was a 3-row metadata stub).  KPIs are sourced from the
-            # ``canonical_metrics`` helpers so the workbook summary
-            # never disagrees with the Word-report narrative.
-            try:
-                _r15_summary_ts: str | None = None
-                try:
-                    _r15_summary_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                except Exception:
-                    _r15_summary_ts = None
-                _r15_write_summary_sheet(
-                    xw,
-                    sheets,
-                    csconsole_data,
-                    manager=manager,
-                    tech=technology,
-                    days=days,
-                    generated_at_utc_iso_z=_r15_summary_ts,
+    def _defang_formulas(df: pd.DataFrame) -> pd.DataFrame:
+        """Prefix string cells starting with =, +, -, or @ with a quote to prevent Excel formula injection."""
+        for col in df.columns:
+            if df[col].dtype == object:
+                df[col] = df[col].apply(
+                    lambda v: "'" + v if isinstance(v, str) and v and v[0] in ('=', '+', '-', '@') else v
                 )
-            except Exception as _summary_err:
-                logger.debug("Round 15 summary sheet skipped: %s", _summary_err)
+        return df
 
-            # Round 15 / Phase 2.5: workbook-wide table-name registry
-            # so the polish pass can guarantee uniqueness across every
-            # sheet (Excel rejects duplicate Table names).
-            _r15_used_table_names: set[str] = set()
-
-            report_info = pd.DataFrame([
-                ["Export type", "Standard (fallback)"],
-                ["Note", "This report was generated using the standard Excel export. The enhanced formatter was not available; all data is present and accurate."],
-            ], columns=["Item", "Value"])
-            report_info.to_excel(xw, sheet_name="Report_Info", index=False)
-            _used_sheet_names = {"Summary", "Report_Info"}
-
-            # Round 13 / Phase 9.8: previously the fallback path emitted
-            # raw ``df.to_excel(...)`` with no header bolding, no
-            # frozen panes, no column-width autofit, and no zebra
-            # striping.  When the enhanced formatter was available the
-            # workbook had a polished header / autofit pass; when it
-            # wasn't (e.g. xlsxwriter unavailable, or the formatter
-            # raised), the user opened a wall of unformatted text and
-            # blamed the report.  Add a minimal styling pass that
-            # mirrors the enhanced formatter's *visual* contract:
-            # bold header row, autofiltered table, frozen header,
-            # and width-fit columns (capped at a sane max so a
-            # rogue 50KB cell value can't blow up the workbook).
+    def _r12_sanitize_sheet_name(raw) -> str:
+        """Round 12 / Phase 9.8: produce a sheet name Excel will
+        accept.  Excel rejects ``[`` ``]`` ``:`` ``*`` ``?``
+        ``/`` ``\\`` and the leading/trailing apostrophe, and
+        silently truncates beyond 31 characters.  Strip the
+        invalid characters to ``_`` (preserving readability)
+        then truncate to 31.  Fall back to ``"Sheet"`` for
+        empty / None / all-invalid inputs so the writer never
+        fails on a degenerate name.
+        """
+        try:
+            _name = str(raw) if raw is not None else "Sheet"
+        except Exception:
+            _name = "Sheet"
+        for _bad in ('[', ']', ':', '*', '?', '/', '\\'):
+            _name = _name.replace(_bad, '_')
+        _name = _name.strip("'").strip()
+        if not _name:
+            _name = "Sheet"
+        return _name[:31]
+    with pd.ExcelWriter(f"{base_path}.xlsx", engine="xlsxwriter") as xw:
+        # Round 15 / Phase 2.4: Summary sheet first.  This is the
+        # tab the recipient lands on when they double-click the
+        # file; pre-Round-15 they landed on ``Report_Info`` (which
+        # was a 3-row metadata stub).  KPIs are sourced from the
+        # ``canonical_metrics`` helpers so the workbook summary
+        # never disagrees with the Word-report narrative.
+        try:
+            _r15_summary_ts: str | None = None
             try:
-                _r13_book = xw.book  # xlsxwriter.Workbook
-                _r13_header_fmt = _r13_book.add_format({
-                    'bold': True,
-                    'bg_color': '#0076CE',
-                    'font_color': '#FFFFFF',
-                    'border': 1,
-                    'align': 'center',
-                    'valign': 'vcenter',
-                })
+                _r15_summary_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             except Exception:
-                _r13_header_fmt = None
+                _r15_summary_ts = None
+            _r15_write_summary_sheet(
+                xw,
+                sheets,
+                csconsole_data,
+                manager=manager,
+                tech=technology,
+                days=days,
+                generated_at_utc_iso_z=_r15_summary_ts,
+            )
+        except Exception as _summary_err:
+            logger.debug("Round 15 summary sheet skipped: %s", _summary_err)
 
-            def _r13_fallback_apply_styling(_df, _ws):
-                """Round 13 / Phase 9.8: bold header, autofilter, freeze
-                pane, and per-column width autofit.  Defensive --
-                styling is best-effort and never breaks the export."""
-                if _ws is None or _df is None:
-                    return
-                try:
-                    _ncols = int(_df.shape[1])
-                    _nrows = int(_df.shape[0])
-                except Exception:
-                    return
-                if _ncols <= 0:
-                    return
-                try:
-                    if _r13_header_fmt is not None:
-                        for _col_idx, _col_name in enumerate(list(_df.columns)):
-                            _ws.write(0, _col_idx, str(_col_name), _r13_header_fmt)
-                except Exception:
-                    pass
-                try:
-                    _ws.freeze_panes(1, 0)
-                except Exception:
-                    pass
-                try:
-                    if _nrows > 0:
-                        _ws.autofilter(0, 0, _nrows, max(0, _ncols - 1))
-                except Exception:
-                    pass
-                try:
-                    for _col_idx, _col_name in enumerate(list(_df.columns)):
-                        try:
-                            _series = _df.iloc[:, _col_idx]
-                            _max_len = max(
-                                int(_series.astype(str).map(len).max() or 0),
-                                len(str(_col_name)),
-                            )
-                        except Exception:
-                            _max_len = len(str(_col_name))
-                        # Cap to 60 so a giant free-text cell can't
-                        # explode the column width (Excel UI gets
-                        # unusable past ~80 chars).
-                        _ws.set_column(_col_idx, _col_idx, min(60, max(8, _max_len + 2)))
-                except Exception:
-                    pass
+        # Round 15 / Phase 2.5: workbook-wide table-name registry
+        # so the polish pass can guarantee uniqueness across every
+        # sheet (Excel rejects duplicate Table names).
+        _r15_used_table_names: set[str] = set()
 
+        # Round 25 / Phase D: rewrite the metadata rows to reflect
+        # reality.  Pre-Round-25 these said ``Standard (fallback)`` plus
+        # ``the enhanced formatter was not available`` -- but that
+        # ``enhanced_excel_formatter`` module never existed, so every
+        # report shipped with the same misleading framing.  Drop the
+        # ``(fallback)`` suffix and replace the apologetic note with a
+        # neutral generation-timestamp record.  ``Generated at (UTC)``
+        # is computed inline so timezone drift on the host clock does
+        # not desync the metadata from the workbook's other UTC-Z
+        # stamps (Summary sheet, filename suffix, etc.).
+        try:
+            _r25d_generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            _r25d_generated_at = ""
+        report_info = pd.DataFrame([
+            ["Export type", "Standard"],
+            ["Generated at (UTC)", _r25d_generated_at],
+        ], columns=["Item", "Value"])
+        report_info.to_excel(xw, sheet_name="Report_Info", index=False)
+        _used_sheet_names = {"Summary", "Report_Info"}
+
+        # Round 13 / Phase 9.8: previously the fallback path emitted
+        # raw ``df.to_excel(...)`` with no header bolding, no
+        # frozen panes, no column-width autofit, and no zebra
+        # striping.  When the enhanced formatter was available the
+        # workbook had a polished header / autofit pass; when it
+        # wasn't (e.g. xlsxwriter unavailable, or the formatter
+        # raised), the user opened a wall of unformatted text and
+        # blamed the report.  Add a minimal styling pass that
+        # mirrors the enhanced formatter's *visual* contract:
+        # bold header row, autofiltered table, frozen header,
+        # and width-fit columns (capped at a sane max so a
+        # rogue 50KB cell value can't blow up the workbook).
+        try:
+            _r13_book = xw.book  # xlsxwriter.Workbook
+            _r13_header_fmt = _r13_book.add_format({
+                'bold': True,
+                'bg_color': '#0076CE',
+                'font_color': '#FFFFFF',
+                'border': 1,
+                'align': 'center',
+                'valign': 'vcenter',
+            })
+        except Exception:
+            _r13_header_fmt = None
+
+        def _r13_fallback_apply_styling(_df, _ws):
+            """Round 13 / Phase 9.8: bold header, autofilter, freeze
+            pane, and per-column width autofit.  Defensive --
+            styling is best-effort and never breaks the export."""
+            if _ws is None or _df is None:
+                return
             try:
-                _r13_fallback_apply_styling(report_info, xw.sheets.get("Report_Info"))
+                _ncols = int(_df.shape[1])
+                _nrows = int(_df.shape[0])
+            except Exception:
+                return
+            if _ncols <= 0:
+                return
+            try:
+                if _r13_header_fmt is not None:
+                    for _col_idx, _col_name in enumerate(list(_df.columns)):
+                        _ws.write(0, _col_idx, str(_col_name), _r13_header_fmt)
+            except Exception:
+                pass
+            try:
+                _ws.freeze_panes(1, 0)
+            except Exception:
+                pass
+            try:
+                if _nrows > 0:
+                    _ws.autofilter(0, 0, _nrows, max(0, _ncols - 1))
+            except Exception:
+                pass
+            try:
+                for _col_idx, _col_name in enumerate(list(_df.columns)):
+                    try:
+                        _series = _df.iloc[:, _col_idx]
+                        _max_len = max(
+                            int(_series.astype(str).map(len).max() or 0),
+                            len(str(_col_name)),
+                        )
+                    except Exception:
+                        _max_len = len(str(_col_name))
+                    # Cap to 60 so a giant free-text cell can't
+                    # explode the column width (Excel UI gets
+                    # unusable past ~80 chars).
+                    _ws.set_column(_col_idx, _col_idx, min(60, max(8, _max_len + 2)))
             except Exception:
                 pass
 
-            for name, df in sheets.items():
-                if df is None: continue
-                if not isinstance(df, pd.DataFrame):
-                    try:
-                        df = pd.DataFrame(df) if df else pd.DataFrame()
-                    except Exception as _conv_err:
-                        logger.debug(f"Skipping sheet '{name}': cannot convert to DataFrame: {_conv_err}")
-                        continue
-                df_copy = df.copy()
-                for col in df_copy.select_dtypes(include=['datetimetz']).columns:
-                    if df_copy[col].dt.tz is not None:
-                        df_copy[col] = df_copy[col].dt.tz_convert(None)
-                df_copy = df_copy.replace([_np.inf, -_np.inf], _np.nan)
-                df_copy = _defang_formulas(df_copy)
+        try:
+            _r13_fallback_apply_styling(report_info, xw.sheets.get("Report_Info"))
+        except Exception:
+            pass
 
-                # Round 15 / Phase 1.2: project every sheet through the
-                # customer-facing column SSoT before write.  Defensive --
-                # if the schema call raises for any reason we fall back
-                # to the un-curated frame so the report still ships.
+        # Round 25 / Phase F.2: HTML strip pass on Excel object columns.
+        # Snowflake rich-text views were leaking ``<a href...>``,
+        # ``<img src...>``, and ``<p>``/``<strong>`` markup into
+        # ``AB_Detail_All`` and ``CSConsole_Customer_Pulse`` cells.
+        # Excel renders ``<`` literally so the recipient saw raw HTML
+        # in place of the intended text.  Strip tags + unescape
+        # entities (``&amp;`` -> ``&``) before write so the workbook
+        # ships clean, human-readable text.
+        try:
+            from data_normalization import strip_html_from_dataframe as _r25f_strip_html
+        except Exception:
+            _r25f_strip_html = None
+
+        for name, df in sheets.items():
+            if df is None: continue
+            if not isinstance(df, pd.DataFrame):
                 try:
-                    df_copy = _r15_apply_export_schema(df_copy, sheet_name=name)
-                except Exception as _schema_err:
+                    df = pd.DataFrame(df) if df else pd.DataFrame()
+                except Exception as _conv_err:
+                    logger.debug(f"Skipping sheet '{name}': cannot convert to DataFrame: {_conv_err}")
+                    continue
+            df_copy = df.copy()
+            for col in df_copy.select_dtypes(include=['datetimetz']).columns:
+                if df_copy[col].dt.tz is not None:
+                    df_copy[col] = df_copy[col].dt.tz_convert(None)
+            df_copy = df_copy.replace([_np.inf, -_np.inf], _np.nan)
+            df_copy = _defang_formulas(df_copy)
+            # Round 25 / Phase F.2: scrub HTML markup from the two
+            # known-affected sheets.  Other sheets are left alone
+            # because they're either auto-generated (no HTML risk) or
+            # already plain-text by contract.
+            if _r25f_strip_html is not None and name in ("AB_Detail_All", "CSConsole_Customer_Pulse"):
+                try:
+                    df_copy = _r25f_strip_html(df_copy)
+                except Exception as _strip_err:
                     logger.debug(
-                        "Round 15 export schema skipped for sheet '%s': %s",
+                        "Round 25 / Phase F.2: HTML strip skipped for "
+                        "sheet '%s': %s",
                         name,
-                        _schema_err,
+                        _strip_err,
                     )
 
-                # Round 12 / Phase 9.8: previously the fallback sheet
-                # name was only truncated to 31 characters but the
-                # Excel-invalid characters ``[ ] : * ? / \`` (and the
-                # leading/trailing apostrophe) were NOT stripped, so
-                # an upstream ``name`` like
-                # ``"Adoption Barriers (P1*/P2)"`` would land with the
-                # ``*`` intact and openpyxl would raise
-                # ``InvalidWorkbookException`` mid-write -- losing
-                # every still-pending sheet.  Sanitize before the
-                # truncation step so the workbook never sees a name
-                # Excel will reject.
-                sheet = _r12_sanitize_sheet_name(name)
-                base_sheet = sheet
-                suffix = 2
-                while sheet in _used_sheet_names:
-                    sheet = f"{base_sheet[:28]}_{suffix}"
-                    suffix += 1
-                _used_sheet_names.add(sheet)
-                if hasattr(df_copy, "to_excel"):
-                    df_copy.to_excel(xw, sheet_name=sheet, index=False)
-                else:
-                    pd.DataFrame(df_copy).to_excel(xw, sheet_name=sheet, index=False)
-                # Round 13 / Phase 9.8: apply the shared fallback
-                # styling pass so this fallback workbook visually
-                # matches the enhanced formatter's contract.
-                try:
-                    _r13_fallback_apply_styling(df_copy, xw.sheets.get(sheet))
-                except Exception:
-                    pass
-                # Round 15 / Phase 2.6: convert to a real Excel Table
-                # (banded rows / native filter UX) and layer per-column
-                # formats + conditional formatting (risk 3-color scale,
-                # severity tier bands, status grey/yellow/red, days-open
-                # data bar).  Defensive -- the previous styling pass
-                # already shipped a usable sheet if this fails.
-                try:
-                    _r15_apply_excel_polish(
-                        _r13_book,
-                        xw.sheets.get(sheet),
-                        df_copy,
-                        sheet,
-                        _r15_used_table_names,
-                    )
-                except Exception as _polish_err:
-                    logger.debug(
-                        "Round 15 visual polish skipped for sheet '%s': %s",
-                        sheet,
-                        _polish_err,
-                    )
-            if csconsole_data:
-                for key, sheet_name in csconsole_sheet_names.items():
-                    df = csconsole_data.get(key)
-                    if df is not None and hasattr(df, "empty") and not df.empty:
-                        df_copy = df.copy()
-                        for col in df_copy.select_dtypes(include=['datetimetz']).columns:
-                            if df_copy[col].dt.tz is not None:
-                                df_copy[col] = df_copy[col].dt.tz_convert(None)
-                        df_copy = _defang_formulas(df_copy)
-                        # Round 15 / Phase 1.2: same column-curation
-                        # filter for the CSConsole branch -- this is
-                        # where ``CSConsole_Customer_Pulse`` was leaking
-                        # ETL_ID / DELETE_FLAG / EDWSF_* etc.
+            # Round 15 / Phase 1.2: project every sheet through the
+            # customer-facing column SSoT before write.  Defensive --
+            # if the schema call raises for any reason we fall back
+            # to the un-curated frame so the report still ships.
+            try:
+                df_copy = _r15_apply_export_schema(df_copy, sheet_name=name)
+            except Exception as _schema_err:
+                logger.debug(
+                    "Round 15 export schema skipped for sheet '%s': %s",
+                    name,
+                    _schema_err,
+                )
+
+            # Round 12 / Phase 9.8: previously the fallback sheet
+            # name was only truncated to 31 characters but the
+            # Excel-invalid characters ``[ ] : * ? / \`` (and the
+            # leading/trailing apostrophe) were NOT stripped, so
+            # an upstream ``name`` like
+            # ``"Adoption Barriers (P1*/P2)"`` would land with the
+            # ``*`` intact and openpyxl would raise
+            # ``InvalidWorkbookException`` mid-write -- losing
+            # every still-pending sheet.  Sanitize before the
+            # truncation step so the workbook never sees a name
+            # Excel will reject.
+            sheet = _r12_sanitize_sheet_name(name)
+            base_sheet = sheet
+            suffix = 2
+            while sheet in _used_sheet_names:
+                sheet = f"{base_sheet[:28]}_{suffix}"
+                suffix += 1
+            _used_sheet_names.add(sheet)
+            if hasattr(df_copy, "to_excel"):
+                df_copy.to_excel(xw, sheet_name=sheet, index=False)
+            else:
+                pd.DataFrame(df_copy).to_excel(xw, sheet_name=sheet, index=False)
+            # Round 13 / Phase 9.8: apply the shared fallback
+            # styling pass so this fallback workbook visually
+            # matches the enhanced formatter's contract.
+            try:
+                _r13_fallback_apply_styling(df_copy, xw.sheets.get(sheet))
+            except Exception:
+                pass
+            # Round 15 / Phase 2.6: convert to a real Excel Table
+            # (banded rows / native filter UX) and layer per-column
+            # formats + conditional formatting (risk 3-color scale,
+            # severity tier bands, status grey/yellow/red, days-open
+            # data bar).  Defensive -- the previous styling pass
+            # already shipped a usable sheet if this fails.
+            try:
+                _r15_apply_excel_polish(
+                    _r13_book,
+                    xw.sheets.get(sheet),
+                    df_copy,
+                    sheet,
+                    _r15_used_table_names,
+                )
+            except Exception as _polish_err:
+                logger.debug(
+                    "Round 15 visual polish skipped for sheet '%s': %s",
+                    sheet,
+                    _polish_err,
+                )
+        if csconsole_data:
+            for key, sheet_name in csconsole_sheet_names.items():
+                df = csconsole_data.get(key)
+                if df is not None and hasattr(df, "empty") and not df.empty:
+                    df_copy = df.copy()
+                    for col in df_copy.select_dtypes(include=['datetimetz']).columns:
+                        if df_copy[col].dt.tz is not None:
+                            df_copy[col] = df_copy[col].dt.tz_convert(None)
+                    df_copy = _defang_formulas(df_copy)
+                    # Round 25 / Phase F.2: HTML strip pass for the
+                    # CSConsole_Customer_Pulse branch.  This branch is
+                    # responsible for half of the leaked ``<a>`` /
+                    # ``<img>`` cells in the reference report (the AB
+                    # branch covers the other half).
+                    if _r25f_strip_html is not None and sheet_name == "CSConsole_Customer_Pulse":
                         try:
-                            df_copy = _r15_apply_export_schema(df_copy, sheet_name=sheet_name)
-                        except Exception as _schema_err:
+                            df_copy = _r25f_strip_html(df_copy)
+                        except Exception as _strip_err:
                             logger.debug(
-                                "Round 15 export schema skipped for sheet '%s': %s",
+                                "Round 25 / Phase F.2: HTML strip "
+                                "skipped for CSConsole sheet '%s': %s",
                                 sheet_name,
-                                _schema_err,
+                                _strip_err,
                             )
-                        # Round 12 / Phase 9.8: see comment above --
-                        # ``csconsole_sheet_names`` is hard-coded today
-                        # but a future caller could easily inject an
-                        # invalid character via key rename, so route
-                        # through the same sanitizer.
-                        _r13_cs_sheet = _r12_sanitize_sheet_name(sheet_name)
-                        df_copy.to_excel(
-                            xw,
-                            sheet_name=_r13_cs_sheet,
-                            index=False,
+                    # Round 15 / Phase 1.2: same column-curation
+                    # filter for the CSConsole branch -- this is
+                    # where ``CSConsole_Customer_Pulse`` was leaking
+                    # ETL_ID / DELETE_FLAG / EDWSF_* etc.
+                    try:
+                        df_copy = _r15_apply_export_schema(df_copy, sheet_name=sheet_name)
+                    except Exception as _schema_err:
+                        logger.debug(
+                            "Round 15 export schema skipped for sheet '%s': %s",
+                            sheet_name,
+                            _schema_err,
                         )
-                        # Round 13 / Phase 9.8: apply the same fallback
-                        # styling pass to CSConsole sheets so the
-                        # workbook is uniformly styled.
-                        try:
-                            _r13_fallback_apply_styling(df_copy, xw.sheets.get(_r13_cs_sheet))
-                        except Exception:
-                            pass
-                        # Round 15 / Phase 2.7: same Round-15 polish pass
-                        # for CSConsole sheets so the table / conditional-
-                        # formatting contract is uniform across the
-                        # workbook (CSConsole_Customer_Pulse used to
-                        # ship as a flat unformatted dump even after
-                        # Phase 1 column curation).
-                        try:
-                            _r15_apply_excel_polish(
-                                _r13_book,
-                                xw.sheets.get(_r13_cs_sheet),
-                                df_copy,
-                                _r13_cs_sheet,
-                                _r15_used_table_names,
-                            )
-                        except Exception as _polish_err:
-                            logger.debug(
-                                "Round 15 visual polish skipped for CSConsole sheet '%s': %s",
-                                _r13_cs_sheet,
-                                _polish_err,
-                            )
-        return f"{base_path}.xlsx"
+                    # Round 12 / Phase 9.8: see comment above --
+                    # ``csconsole_sheet_names`` is hard-coded today
+                    # but a future caller could easily inject an
+                    # invalid character via key rename, so route
+                    # through the same sanitizer.
+                    _r13_cs_sheet = _r12_sanitize_sheet_name(sheet_name)
+                    df_copy.to_excel(
+                        xw,
+                        sheet_name=_r13_cs_sheet,
+                        index=False,
+                    )
+                    # Round 13 / Phase 9.8: apply the same fallback
+                    # styling pass to CSConsole sheets so the
+                    # workbook is uniformly styled.
+                    try:
+                        _r13_fallback_apply_styling(df_copy, xw.sheets.get(_r13_cs_sheet))
+                    except Exception:
+                        pass
+                    # Round 15 / Phase 2.7: same Round-15 polish pass
+                    # for CSConsole sheets so the table / conditional-
+                    # formatting contract is uniform across the
+                    # workbook (CSConsole_Customer_Pulse used to
+                    # ship as a flat unformatted dump even after
+                    # Phase 1 column curation).
+                    try:
+                        _r15_apply_excel_polish(
+                            _r13_book,
+                            xw.sheets.get(_r13_cs_sheet),
+                            df_copy,
+                            _r13_cs_sheet,
+                            _r15_used_table_names,
+                        )
+                    except Exception as _polish_err:
+                        logger.debug(
+                            "Round 15 visual polish skipped for CSConsole sheet '%s': %s",
+                            _r13_cs_sheet,
+                            _polish_err,
+                        )
+    return f"{base_path}.xlsx"
 
 # --------------------------- LLM prompt ---------------------------
-def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incidents, matches, matched_df, db_profile, engagement_counts=None, csconsole_data=None, arr_data=None, arr_impact=None, feature_requests=None, software_defects=None, psirt_vulns=None):
-    """Creates a detailed text block for the LLM prompt."""
+def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incidents, matches, matched_df, db_profile, engagement_counts=None, csconsole_data=None, arr_data=None, arr_impact=None, feature_requests=None, software_defects=None, psirt_vulns=None, risk_profiles=None):
+    """Creates a detailed text block for the LLM prompt.
+
+    Round 25 / Phase C: ``risk_profiles`` (a dict of customer_name ->
+    profile dict containing ``risk_score`` and/or ``risk_level``) is
+    optional.  When supplied, the briefing emits a
+    ``Canonical Risk Bands`` section that the
+    ``PROMPT_PORTFOLIO_TEMPLATE`` "All Customers in Trouble" block
+    binds the LLM to.  The post-render validator
+    (``report_consistency.validate_word_numeric_drift``) then asserts
+    the number of narrated ``Risk Level: CRITICAL`` /
+    ``Risk Level: HIGH`` lines equals the canonical
+    ``high_risk_customers`` count.
+    """
     briefing = []
     briefing.append(f"## Analyst's Briefing Book for: {data_scope}")
     briefing.append("---")
+
+    # Round 25 / Phase C: emit the canonical risk-band section first so
+    # the LLM sees the authoritative band assignments before any of the
+    # downstream "customers in trouble" prompts.  Pre-Round 25 the LLM
+    # had no anchor for the Risk Level labels and would free-style
+    # compound bands ("HIGH/CRITICAL") or invent CRITICAL where the
+    # canonical pipeline reported HIGH (the reference Brian Frazier /
+    # All Contact Center / 90d report enumerated FARMERS=CRITICAL,
+    # NATIONAL GRID=CRITICAL, WINTRUST=HIGH while the dashboard tile
+    # said Critical+High = 1).  This section is the truth source the
+    # post-render validator's CRITICAL+HIGH count enforces.
+    if risk_profiles:
+        # Round 25 / Phase C: derive each customer's authoritative band
+        # from the canonical 0-100 thresholds.  Honor an explicit
+        # ``risk_level`` on the profile (the canonical scorer already
+        # populates this) before falling back to a score-based bucketing.
+        try:
+            from risk_scoring import RISK_BAND_THRESHOLDS as _R25C_THRESHOLDS
+        except Exception:
+            _R25C_THRESHOLDS = {
+                "CRITICAL": 80.0,
+                "HIGH": 60.0,
+                "MEDIUM": 40.0,
+                "LOW": 20.0,
+            }
+
+        def _r25c_band_from_score(score: float) -> str:
+            try:
+                s = float(score)
+            except (TypeError, ValueError):
+                return "UNKNOWN"
+            if s >= float(_R25C_THRESHOLDS.get("CRITICAL", 80.0)):
+                return "CRITICAL"
+            if s >= float(_R25C_THRESHOLDS.get("HIGH", 60.0)):
+                return "HIGH"
+            if s >= float(_R25C_THRESHOLDS.get("MEDIUM", 40.0)):
+                return "MEDIUM"
+            if s >= float(_R25C_THRESHOLDS.get("LOW", 20.0)):
+                return "LOW"
+            return "HEALTHY"
+
+        briefing.append("### Canonical Risk Bands (Round 25 / Phase C)")
+        briefing.append(
+            "**These bands are computed by the canonical risk-scoring "
+            "pipeline. Use them VERBATIM when assigning a Risk Level "
+            "to any customer below. Do NOT invent compound labels "
+            "(no \"HIGH/CRITICAL\", no \"MEDIUM/LOW\") and do NOT "
+            "promote/demote bands. The five canonical labels are: "
+            "CRITICAL, HIGH, MEDIUM, LOW, HEALTHY.**"
+        )
+        try:
+            _r25c_rows: list[tuple[str, float, str]] = []
+            for _r25c_name, _r25c_profile in (risk_profiles or {}).items():
+                if not _r25c_name:
+                    continue
+                if not isinstance(_r25c_profile, dict):
+                    continue
+                try:
+                    _r25c_score = float(_r25c_profile.get("risk_score") or 0.0)
+                except (TypeError, ValueError):
+                    _r25c_score = 0.0
+                _r25c_label = _r25c_profile.get("risk_level")
+                _r25c_label_str = str(_r25c_label or "").upper().strip()
+                if _r25c_label_str not in {
+                    "CRITICAL", "HIGH", "MEDIUM", "LOW", "HEALTHY",
+                }:
+                    _r25c_label_str = _r25c_band_from_score(_r25c_score)
+                _r25c_rows.append((str(_r25c_name), _r25c_score, _r25c_label_str))
+            _r25c_rank = {
+                "CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "HEALTHY": 4,
+            }
+            _r25c_rows.sort(
+                key=lambda r: (
+                    _r25c_rank.get(r[2], 5),
+                    -float(r[1]),
+                    r[0].lower(),
+                )
+            )
+            for _r25c_name, _r25c_score, _r25c_label_str in _r25c_rows:
+                briefing.append(
+                    f"- **{_r25c_name}** -- Risk Level: {_r25c_label_str} "
+                    f"(canonical risk_score={_r25c_score:.1f})"
+                )
+            if not _r25c_rows:
+                briefing.append(
+                    "_No risk profiles available for this run._ "
+                    "Narrate this gap explicitly in the report rather "
+                    "than inventing risk levels."
+                )
+        except Exception as _r25c_emit_err:
+            logger.warning(
+                "Round 25 / Phase C: failed to emit canonical risk-band "
+                "list (%s); LLM will fall back to free-form bands.",
+                _r25c_emit_err,
+            )
+        briefing.append("")
+        briefing.append("---")
 
     # ARR by Customer (strategic prioritization - high-value accounts need extra attention)
     # Round 11 / Phase 1.4: compute a *single* ``_briefing_amount_prefix``
@@ -9797,6 +9938,15 @@ PROMPT_PORTFOLIO_TEMPLATE = """
 
 **YOUR MISSION:** Give executives **VISIBILITY INTO WHAT'S REALLY HAPPENING**. Surface the trouble spots, critical defects, escalations, and adoption barriers that need executive attention. Be direct, data-driven, and problem-focused.
 
+**🔒 CANONICAL TOTALS (Round 25 / Phase B — MUST use these exact values):**
+The following totals are computed by the canonical metrics pipeline directly from the displayed data sheets (Adoption Barriers ∪ TAC ∪ Customer Pulse).  When the **Executive Summary: What's Really Happening** "Portfolio Snapshot" block below names a count, you MUST use the value listed here verbatim.  Do NOT recompute, round, summarize as a range, or substitute "approximately" -- a downstream validator compares your rendered numbers to these canonical values and will block the report build on any drift.
+- **Total Customers:** {TOTAL_CUSTOMERS}
+- **Active Adoption Barriers:** {TOTAL_BARRIERS}
+- **TAC Cases (total):** {TAC_CASES}
+- **TAC Cases (P1 / Critical):** {P1_CASES}
+- **TAC Cases (P2 / High):** {P2_CASES}
+- **BEMS Escalations:** {BEMS_ESCALATIONS}
+
 **CRITICAL REQUIREMENTS:**
 - **Show the Problems:** Don't sugarcoat - executives need to see the real issues
 - **Cite Specifics:** Reference actual record identifiers from the data: AB-IDs for adoption barriers, SP-IDs for success priorities, AP-IDs for action plans, CSC IDs for software defects, BEMS IDs for escalations, Case IDs for TAC cases, and incident IDs for service disruptions. These identifiers let readers verify and follow up on each claim
@@ -9832,12 +9982,12 @@ PROMPT_PORTFOLIO_TEMPLATE = """
 
 ## **Executive Summary: What's Really Happening**
 
-**Portfolio Snapshot:**
-• **Total Customers:** [Number]
-• **Active Adoption Barriers:** [Number with severity breakdown]
-• **TAC Cases:** [Total with P1/P2 count]
-• **BEMS Escalations:** [Count - THIS IS CRITICAL]
-• **Known Defects Impacting Portfolio:** [Count from help.webex.com]
+**Portfolio Snapshot:** (use the CANONICAL TOTALS above verbatim)
+• **Total Customers:** {TOTAL_CUSTOMERS}
+• **Active Adoption Barriers:** {TOTAL_BARRIERS} (provide severity breakdown narrative -- do NOT change the total)
+• **TAC Cases:** {TAC_CASES} (with {P1_CASES} P1 and {P2_CASES} P2)
+• **BEMS Escalations:** {BEMS_ESCALATIONS} - THIS IS CRITICAL
+• **Known Defects Impacting Portfolio:** [Count from help.webex.com -- cite the briefing's Help Center section verbatim]
 • **Trend Direction:** [Improving/Stable/Deteriorating with evidence]
 
 **The Truth About This Portfolio** (3-4 sentences):
@@ -9877,7 +10027,17 @@ PROMPT_PORTFOLIO_TEMPLATE = """
 
 *List every customer **listed in this briefing book** that has severe issues, sorted by risk level. Do NOT limit to just 5. Round 6 / Phase 3.4: This is intentionally scoped to "customers listed in the briefing" rather than "ALL customers" -- if the briefing was truncated or partial, only the customers it actually contains are valid; do not invent or extrapolate to customers it does not name. If the briefing notes a partial fetch, say so explicitly here.*
 
-**1. [Customer Name] - Risk Level: [HIGH/CRITICAL]**
+**🔒 Round 25 / Phase C — RISK BAND BINDING (READ BEFORE WRITING):**
+The briefing book contains a section titled **"Canonical Risk Bands (Round 25 / Phase C)"** with each customer's authoritative risk band (CRITICAL / HIGH / MEDIUM / LOW / HEALTHY) computed by the canonical risk-scoring pipeline.  When you assign a `Risk Level:` to any customer below, you MUST use the band listed there verbatim.  Specifically:
+
+- Use ONLY these five labels: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `HEALTHY`.
+- Do NOT invent compound labels like "HIGH/CRITICAL" or "MEDIUM/LOW".  Pick the one canonical band the briefing assigns.
+- Do NOT promote, demote, merge, or substitute bands ("MODERATE" → MEDIUM is a substitution; do not do this).
+- Do NOT list a customer as CRITICAL or HIGH unless the briefing's "Canonical Risk Bands" section says so.  A downstream validator counts narrated CRITICAL+HIGH lines and compares to the canonical `high_risk_customers` count -- any drift blocks the report build.
+
+If the briefing's canonical risk-band section is missing or truncated, say so explicitly in the narrative ("canonical risk-band data was unavailable for this run") and do not free-style.
+
+**1. [Customer Name] - Risk Level: [CRITICAL]**
 • **Problem Summary:** [What's really going wrong?]
 • **Adoption Barriers:** [X barriers] - **Key Issue:** [Main blocking issue with details]
 • **TAC Cases:** [Y cases, Z are P1/P2] - **Active Problems:** [Specific issues]
@@ -9886,7 +10046,7 @@ PROMPT_PORTFOLIO_TEMPLATE = """
 • **Business Impact:** [How is this affecting their business?]
 • **Immediate Action Needed:** [Specific, actionable next step]
 
-**2. [Customer Name] - Risk Level: [HIGH/MEDIUM]**
+**2. [Customer Name] - Risk Level: [HIGH]**
 • [Same detailed format - continue for ALL troubled customers]
 
 **3. [Customer Name] - Risk Level: [MEDIUM]**
@@ -9895,8 +10055,10 @@ PROMPT_PORTFOLIO_TEMPLATE = """
 **4. [Customer Name] - Risk Level: [MEDIUM]**
 • [Same detailed format]
 
-**5. [Customer Name] - Risk Level: [MEDIUM/LOW]**
+**5. [Customer Name] - Risk Level: [LOW]**
 • [Same detailed format]
+
+*Round 25 / Phase C: each `Risk Level: [X]` MUST be one of the five canonical bands (CRITICAL, HIGH, MEDIUM, LOW, HEALTHY) -- never a compound like "HIGH/CRITICAL" or "MEDIUM/LOW".*
 
 ---
 
@@ -11557,8 +11719,88 @@ def main():
         learned = get_learned_insights(manager, tech, limit=5)
         if learned:
             portfolio_briefing = learned + "\n\n---\n\n" + portfolio_briefing
-        portfolio_prompt = PROMPT_PORTFOLIO_TEMPLATE.format(MANAGER=manager, TECHNOLOGY=tech)
+        # Round 25 / Phase B: pin canonical totals into the prompt
+        # body so the LLM cannot free-style numbers that disagree
+        # with the canonical pipeline.  The CLI path doesn't pre-
+        # build a portfolio_metrics dict (the comprehensive Flask
+        # path does that); compute the headline totals inline via
+        # the canonical helpers so the prompt substitutions are
+        # always populated with verifiable values.
+        try:
+            import canonical_metrics as _r25b_cm
+            _r25b_pulse_for_count = locals().get("filtered_customer_pulse")
+            _r25b_total_customers = int(_r25b_cm.count_customers(
+                ab_df=ab_norm, csone_df=csone_df,
+                pulse_df=_r25b_pulse_for_count,
+            ) or 0)
+            _r25b_total_barriers = int(_r25b_cm.count_total_barriers(ab_norm) or 0)
+            _r25b_tac_cases = int(_r25b_cm.count_total_tac(csone_df) or 0)
+            _r25b_p1 = int(_r25b_cm.count_p1(csone_df) or 0)
+            _r25b_p2 = int(_r25b_cm.count_p2(csone_df) or 0)
+            _r25b_bems = int(_r25b_cm.count_bems(csone_df) or 0)
+        except Exception as _r25b_err:
+            logger.warning(
+                "Round 25 / Phase B: canonical totals fallback to 0 (CLI path): %s",
+                _r25b_err,
+            )
+            _r25b_total_customers = _r25b_total_barriers = _r25b_tac_cases = 0
+            _r25b_p1 = _r25b_p2 = _r25b_bems = 0
+        portfolio_prompt = PROMPT_PORTFOLIO_TEMPLATE.format(
+            MANAGER=manager,
+            TECHNOLOGY=tech,
+            TOTAL_CUSTOMERS=_r25b_total_customers,
+            TOTAL_BARRIERS=_r25b_total_barriers,
+            TAC_CASES=_r25b_tac_cases,
+            P1_CASES=_r25b_p1,
+            P2_CASES=_r25b_p2,
+            BEMS_ESCALATIONS=_r25b_bems,
+        )
         portfolio_summary = generate_llm_response(portfolio_prompt, portfolio_briefing)
+        # Round 25 / Phase B: post-render numeric drift validator.  See
+        # the matching block in ``app_simple.py`` for the full rationale.
+        # The validator scans the LLM-rendered ``portfolio_summary``
+        # before it lands in the Word doc and blocks the build on any
+        # drift between the narrated numbers and the canonical totals
+        # passed to the prompt above.
+        if portfolio_summary and not portfolio_summary.startswith("ERROR:"):
+            try:
+                from report_consistency import (
+                    validate_word_numeric_drift as _r25b_validator,
+                    validate_word_risk_band_claims as _r25c_validator,
+                )
+                _r25b_drift_strict = str(
+                    os.getenv("ADOPTIQ_NONSTRICT_R25B", "0")
+                ).strip().lower() not in {"1", "true", "yes", "on"}
+                _r25b_drift_result = _r25b_validator(
+                    portfolio_summary,
+                    canonical_totals={
+                        "total_customers": _r25b_total_customers,
+                        "total_barriers": _r25b_total_barriers,
+                        "total_cases": _r25b_tac_cases,
+                        "bems_count": _r25b_bems,
+                    },
+                    raise_on_drift=_r25b_drift_strict,
+                )
+                if _r25b_drift_result.get("warnings"):
+                    logger.warning(
+                        "[R25B] Portfolio numeric drift validator warnings (CLI path): %s",
+                        _r25b_drift_result["warnings"],
+                    )
+                # Round 25 / Phase C: CLI path doesn't compute a
+                # portfolio_metrics dict (the comprehensive flow does);
+                # skip the risk-band validator unless future work wires
+                # a canonical high_risk_customers value through here.
+            except ValueError as _r25b_drift_err:
+                logger.error(
+                    "[R25B/R25C] Portfolio drift detected (CLI path); blocking report build: %s",
+                    _r25b_drift_err,
+                )
+                raise
+            except Exception as _r25b_other_err:
+                logger.warning(
+                    "[R25B/R25C] Portfolio drift validator unavailable (CLI path) (%s); proceeding without strict check.",
+                    _r25b_other_err,
+                )
         append_to_word_report(doc, portfolio_summary)
 
         # Generate customer deep dives

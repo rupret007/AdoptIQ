@@ -287,6 +287,19 @@ def make_risk_profiles() -> Dict[str, Dict[str, Any]]:
 # Adds DeltaCo + EpsilonInc to the customer universe (neither appears
 # in csone_df or ab_df). Total customer universe becomes:
 #   {AcmeCorp, BetaInc, GammaLLC, DeltaCo, EpsilonInc} = 5
+#
+# Round 25 / Phase A note: ``csconsole_customer_pulse`` is the frame
+# the production formatters thread into ``count_customers(...,
+# pulse_df=...)`` for the headline ``Total Customers`` tile.  After
+# Round 25 the headline narrows to the (AB ∪ CSOne ∪ Pulse) universe
+# only, so this frame must contribute BOTH "extra" customers
+# (DeltaCo + EpsilonInc) to keep the fixture's
+# ``EXPECTED_KPIS["total_customers"] == 5`` invariant intact.  Pre-
+# Round 25 the headline also pulled customers from action_plans /
+# success_priorities / adoption_barriers, which let those frames
+# carry the unique names; under Round 25 the headline ignores
+# extras entirely and only ``customer_pulse`` is part of the
+# displayed universe.
 
 def make_extra_frames() -> List[pd.DataFrame]:
     """Minimal CSConsole-style frames that contribute new customer names."""
@@ -294,8 +307,16 @@ def make_extra_frames() -> List[pd.DataFrame]:
         {"RELATED_CUSTOMER__C": "DeltaCo", "ID": "AP001"},
         {"RELATED_CUSTOMER__C": "AcmeCorp", "ID": "AP002"},  # already known; dedup
     ])
+    # Round 25 / Phase A: customer_pulse must carry both DeltaCo and
+    # EpsilonInc so the narrow ``count_customers(ab_df, csone_df,
+    # pulse_df=customer_pulse)`` headline shape used by both Word and
+    # Excel still produces the expected 5-customer universe.  Pre-
+    # Round 25 it was acceptable for DeltaCo to live only in
+    # ``action_plans`` because the headline also widened via extras;
+    # that is no longer true.
     csconsole_customer_pulse = pd.DataFrame([
         {"RELATED_CUSTOMER__C": "EpsilonInc", "ID": "CP001"},
+        {"RELATED_CUSTOMER__C": "DeltaCo", "ID": "CP002"},
     ])
     csconsole_success_priorities = pd.DataFrame([
         {"RELATED_CUSTOMER__C": "DeltaCo", "ID": "SP001"},  # already added by AP frame
