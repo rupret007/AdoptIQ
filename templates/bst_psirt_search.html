@@ -282,11 +282,23 @@
 
     .classification-restricted {
         background: var(--cisco-warning);
-        color: #333;
+        color: var(--text-primary);  /* Round 24 / theme-parity */
+    }
+
+    /* Round 24 / theme-parity: --cisco-warning (brand orange) does not
+       theme-flip per Round 13 invariant, so var(--text-primary) above
+       must be pinned to a dark hex in dark mode -- otherwise the badge
+       reads as off-white on bright orange (poor contrast).  The
+       sibling .classification-internal below already uses color:#fff
+       on the same orange and is left intentionally inconsistent
+       because it was inconsistent pre-fix and the plan only flagged
+       the two literal swaps. */
+    [data-bs-theme="dark"] .classification-restricted {
+        color: var(--cisco-gray-900);
     }
 
     .classification-internal {
-        background: #ff9800;
+        background: var(--cisco-warning);  /* Round 24 / theme-parity */
         color: #fff;
     }
 
