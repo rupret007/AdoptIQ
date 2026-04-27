@@ -2504,3 +2504,87 @@ Net test delta: **2293 → 2294 passed** (+1: new Round 23.2 marker test), skip 
 | Phase 5 — floor pin update + new marker test | UPDATED | `tests/test_round20_in_locals_simplification.py` |
 
 **Trailer:** Made-with: Cursor
+
+## Round 26 — handoff 2026-04-26
+
+**What changed (plain English):**
+- Added pytest regression coverage for Round 26 / Phase B user-facing ``/api/intel/status`` and ``/api/intel/refresh`` aliases (parity with corpus endpoints, method limits, CSRF + internal-token auth).
+
+**Files touched:**
+- `tests/test_round26_intel_alias_endpoints.py` — NEW — six tests pinning intel alias contracts and auth delegation to `api_corpus_refresh`.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round26_intel_alias_endpoints.py` — shape parity vs `/api/corpus/status`, 405 on wrong methods, refresh payload + CSRF/internal-token gates.
+
+**Verify status:**
+- `make verify` — fail
+- pytest: 2367 passed / 2 skipped / **2 failed** (full suite); `tests/test_round26_intel_alias_endpoints.py` alone: **6 passed**
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `tests/test_round17_2_sharepoint.py:430` / `:464` — `test_resolve_index_sources_*` expect `user_downloads` last but corpus now emits `intel_uploads`; likely corpus_bootstrap ordering change vs test expectations (unrelated to Round 26 intel aliases).
+
+**Known deferrals (intentional non-fixes):**
+- Full-suite green not restored in this session — failures pre-exist intel-alias test addition; scope was new regression file only.
+
+**Trailer:** Made-with: Cursor
+
+## Round 26 — handoff 2026-04-26
+
+**What changed (plain English):**
+- Added pytest regression coverage for `POST /api/intel/upload` (Round 26 / Phase D): feature flag 403, happy-path xlsx save under `tmp_path`, bad extension, missing `file`, empty body, distinct stored names for two CSV uploads, path-traversal filename sanitization.
+
+**Files touched:**
+- `tests/test_round26_intel_upload_validates_file.py` — new 7-test module for intel upload validation and persistence.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round26_intel_upload_validates_file.py`::all — pins flag gate, allow-list, multipart shape, empty file, collision-safe names (content-differing CSV pair under pytest hash-prefix behavior), `secure_filename` + resolved path inside upload dir.
+
+**Verify status:**
+- `make verify` — not run
+- pytest: 7 passed / 0 skipped (narrow: `tests/test_round26_intel_upload_validates_file.py`)
+- ruff: not run
+- bandit HIGH/MED: not run
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `tests/test_round26_intel_upload_validates_file.py` — `test_upload_filename_is_randomized_to_prevent_collisions` uses two different file bodies because `_r13_unique_upload_filename` hashes content under `PYTEST_CURRENT_TEST`; same body + same name would overwrite in test mode.
+
+**Known deferrals (intentional non-fixes):**
+- Full `make verify` — user request scoped to the new test module only.
+
+**Trailer:** Made-with: Cursor
+
+## Round 26.2 — handoff 2026-04-26
+
+**What changed (plain English):**
+- Added static-analysis pytest regression module for `static/js/intel_status.js` (Round 26 / Phase C): poll cadence, endpoints, CSRF headers, `credentials: 'same-origin'`, no `.innerHTML`, `paint` dispatcher lockstep, `visibilitychange` repoll, refresh debounce ≥1000 ms.
+
+**Files touched:**
+- `tests/test_round26_intel_status_js_poll_cadence.py` — NEW — 11 collected items (parametrized POLL_* / CSRF header checks).
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round26_intel_status_js_poll_cadence.py` — file size, URL literals, POLL_FAST_MS/POLL_SLOW_MS regex, CSRF meta + headers, same-origin count, innerHTML ban, paint block contains paintBadge+paintBanner, visibilitychange, REFRESH_DEBOUNCE_MS ≥ 1000.
+
+**Verify status:**
+- `make verify` — not run
+- pytest: 11 passed / 0 skipped (narrow: `tests/test_round26_intel_status_js_poll_cadence.py` via `python3 -m pytest`)
+- ruff: not run
+- bandit HIGH/MED: not run
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `tests/test_round26_intel_status_js_poll_cadence.py` — `credentials: 'same-origin'` asserted via `count >= 2` (status GET + refresh POST + upload POST = 3 in JS); test only requires ≥2.
+
+**Known deferrals (intentional non-fixes):**
+- Full `make verify` — user request scoped to the new test module only; `python` not on PATH in agent shell — used `python3`.
+
+**Trailer:** Made-with: Cursor
