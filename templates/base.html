@@ -35,6 +35,13 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
 
+    {# Round 26 / Phase C: site-wide CSRF token meta so the
+       AdoptIQ Intelligence navbar badge (and any other site-wide
+       JS that POSTs to authenticated routes) can read the token
+       from every page, not just /analyze.  Per-page heads can
+       still override or duplicate this; Flask-WTF accepts either. #}
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+
     <!-- Round 6 / Phase 2.10: site-wide Content Security Policy.
          Previously the strict CSP only lived in analyze.html, leaving
          the rest of the app (history, help, ask_ai, leader_report_form,
@@ -1117,6 +1124,31 @@
                             <i class="fas fa-robot me-1"></i>Ask AI
                         </a>
                     </li>
+                    {# Round 26 / Phase C: compact AdoptIQ Intelligence
+                       status badge.  Always rendered in the navbar so
+                       users on any page (history, help, ask_ai...) can
+                       see whether the indexer is idle, running, or has
+                       errored without navigating away.  The
+                       ``data-intel-badge`` hook is read by
+                       /static/js/intel_status.js, which polls
+                       /api/intel/status (5 s while running, 60 s idle)
+                       and rewrites this element's classes/text/title.
+                       Initial state is "idle" so the page does not
+                       show a misleading spinner before the first poll
+                       lands. #}
+                    <li class="nav-item d-flex align-items-center me-2">
+                        <a class="nav-link"
+                           href="{{ url_for('index') }}#adoptiq-intel-banner"
+                           data-intel-badge
+                           data-state="idle"
+                           title="AdoptIQ Intelligence: idle">
+                            <span class="badge rounded-pill bg-secondary"
+                                  style="font-weight: 500;">
+                                <i class="fas fa-brain me-1" aria-hidden="true"></i>
+                                <span data-intel-badge-text>Intelligence</span>
+                            </span>
+                        </a>
+                    </li>
                     {# Round 17.4 / Phase 6.4: theme toggle button.
                        ``aria-pressed`` is updated by theme-toggle.js
                        on every flip so screen readers announce the
@@ -1213,6 +1245,13 @@
        Loaded after Bootstrap so DOM is ready and Bootstrap's own
        data-bs-theme handlers don't fight ours. #}
     <script src="{{ url_for('static', filename='js/theme-toggle.js') }}"></script>
+    {# Round 26 / Phase C: site-wide AdoptIQ Intelligence status
+       poller.  Drives the navbar badge ([data-intel-badge]) and,
+       when present, the larger banner on / ([data-intel-banner]).
+       Polls /api/intel/status and POSTs CSRF-validated refreshes.
+       Loaded after Bootstrap so DOM and the badge element exist
+       when the script runs. #}
+    <script src="{{ url_for('static', filename='js/intel_status.js') }}"></script>
     {# Round 8 / Phase 5.5: client-side fallback to populate the
        footer copyright year if the server context processor failed
        to set ``adoptiq_footer_year``.  This avoids the previous

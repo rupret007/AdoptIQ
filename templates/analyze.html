@@ -55,6 +55,102 @@
                 <button type="button" class="btn-close btn-close-sm" data-bs-dismiss="alert" aria-label="Close"></button>
             </div>
 
+            {# Round 26 / Phase C: AdoptIQ Intelligence status banner.
+
+               Surfaces the live state of the background CSOne / OneDrive
+               indexer that powers Ask AI, Customer 360, and Playbook
+               grounding.  Polled by /static/js/intel_status.js against
+               /api/intel/status (5 s while running, 60 s idle).  The
+               "Run now" button POSTs to /api/intel/refresh with the
+               page CSRF token; the upload control (rendered when
+               ``intel_upload_enabled`` is true -- see Phase D) lets a
+               user drop a CSOne export so the indexer ingests it on
+               the next pass.
+
+               The banner is intentionally rendered with a neutral
+               "idle" state in server HTML so that:
+                 * users with JS disabled still see a usable summary;
+                 * the navbar badge in base.html and this banner share
+                   the same default until the first poll lands. #}
+            <section id="adoptiq-intel-banner"
+                     class="card shadow-cisco fade-in mb-4"
+                     data-intel-banner
+                     data-state="{{ intel_status.boot.state if intel_status and intel_status.boot else 'idle' }}"
+                     style="animation-delay: 0.27s;"
+                     aria-live="polite"
+                     aria-atomic="true">
+                <div class="card-body py-3">
+                    <div class="d-flex flex-wrap align-items-center gap-3">
+                        <div class="flex-grow-1">
+                            <h2 class="h6 mb-1">
+                                <i class="fas fa-brain me-2 text-primary" aria-hidden="true"></i>
+                                AdoptIQ Intelligence
+                            </h2>
+                            <p class="mb-0 small text-muted" data-intel-banner-summary>
+                                {% if not intel_status or not intel_status.enabled %}
+                                    Idle &mdash; intelligence indexing is disabled.
+                                    Enable <code>CORPUS_KNOWLEDGE_ENABLED</code> to power Ask AI grounding.
+                                {% elif intel_status.boot.in_progress %}
+                                    Indexing CSOne reports&hellip;
+                                {% elif intel_status.boot.last_finished_at %}
+                                    Last run finished {{ intel_status.boot.last_finished_at }}.
+                                {% else %}
+                                    Idle &mdash; no run yet this session.
+                                {% endif %}
+                            </p>
+                        </div>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="badge rounded-pill bg-secondary"
+                                  data-intel-banner-state-pill>
+                                <span data-intel-banner-state-text>Idle</span>
+                            </span>
+                            <button type="button"
+                                    class="btn btn-sm btn-outline-primary"
+                                    data-intel-run-now
+                                    title="Trigger an incremental indexing pass">
+                                <i class="fas fa-sync-alt me-1" aria-hidden="true"></i>
+                                Run now
+                            </button>
+                        </div>
+                    </div>
+                    {# Round 26 / Phase D: optional drop-zone for
+                       user-uploaded CSOne reports.  Only rendered
+                       when the server-side feature flag is on so the
+                       UI never lies about an inactive endpoint. #}
+                    {% if intel_upload_enabled %}
+                    <div class="mt-3 pt-3 border-top">
+                        <form id="adoptiq-intel-upload-form"
+                              method="POST"
+                              action="{{ url_for('api_intel_upload') }}"
+                              enctype="multipart/form-data"
+                              class="d-flex flex-wrap align-items-center gap-2">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <label for="adoptiq-intel-upload-file"
+                                   class="form-label mb-0 small text-muted">
+                                <i class="fas fa-file-upload me-1" aria-hidden="true"></i>
+                                Add a CSOne report to the index:
+                            </label>
+                            <input type="file"
+                                   id="adoptiq-intel-upload-file"
+                                   name="file"
+                                   accept=".xlsx,.xls,.csv,.docx,.pdf"
+                                   class="form-control form-control-sm"
+                                   style="max-width: 320px;"
+                                   required>
+                            <button type="submit"
+                                    class="btn btn-sm btn-outline-secondary">
+                                <i class="fas fa-upload me-1" aria-hidden="true"></i>
+                                Upload &amp; index
+                            </button>
+                            <span class="small text-muted"
+                                  data-intel-upload-feedback
+                                  aria-live="polite"></span>
+                        </form>
+                    </div>
+                    {% endif %}
+                </div>
+            </section>
+
             <!-- Analysis Form -->
             <div class="card shadow-cisco fade-in" style="animation-delay: 0.3s;" role="main">
                 <div class="card-header">
