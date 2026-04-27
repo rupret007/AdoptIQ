@@ -65,12 +65,19 @@ APP_SIMPLE = REPO_ROOT / "app_simple.py"
 # commit db0803e (end of Round 18) AND has been 84 since Round 14
 # (commit 9d53b94, 10+ commits ago).  Round 20 lowered it from 84 to 65
 # by simplifying 19 dead-branch guard sites in run_compact_analysis.
+# Round 23 / R22-NEXT-001 lowered it from 65 to 42 by replacing all
+# closure-binding ``in locals()`` checks inside the nested
+# ``generate_report`` / ``generate_excel`` functions with explicit
+# ctx-dict access (the antipattern was actively dropping csconsole-only
+# customers from the renewal risk universe and hardcoding
+# recent_window_days=30 -- this was a behaviour-changing fix, not just
+# hygiene).
 #
 # Future rounds that simplify MORE sites should lower this floor in the
 # same change; rounds that intentionally introduce a new ``in locals()``
 # pattern (e.g. for legitimate ``'cur' in locals()`` cleanup-after-try
 # discipline) should raise the floor and document why in the audit row.
-_R20_IN_LOCALS_FLOOR = 65
+_R20_IN_LOCALS_FLOOR = 40
 
 
 def test_in_locals_count_is_at_or_below_post_r20_floor() -> None:
@@ -153,31 +160,91 @@ def test_r20_001_simplifications_do_not_regress() -> None:
     )
 
 
-def test_in_locals_inside_nested_functions_remains_documented_as_known_bug() -> None:
-    """Round 20 deliberately did NOT simplify ``in locals()`` sites
-    inside the nested ``generate_report`` (L7062) / ``generate_excel``
-    (L7335) functions because they are closure-binding bugs, not just
-    dead-branch antipatterns -- ``locals()`` inside a nested function
-    doesn't include free vars from the enclosing scope, so the else
-    branch always runs and outer-scope data is silently dropped at the
-    call site.  Fixing those is behavior-changing and warrants its
-    own round.
+def test_closure_binding_pattern_inside_nested_functions_is_gone() -> None:
+    """Round 23 / R22-NEXT-001 fixed the closure-binding bug inside
+    the nested ``generate_report`` (L7073) / ``generate_excel`` (L7395)
+    functions in ``run_compact_analysis``.
 
-    This test pins that at least ONE of the well-known nested-function
-    antipattern sites still exists, so a future session cannot silently
-    "fix" them without explicit acknowledgement that the receiver
-    behavior is changing.
+    Before the fix, those nested functions used
+    ``X if 'X' in locals() else FALLBACK`` to read outer-scope frames.
+    Inside a nested Python function, ``locals()`` does NOT include free
+    variables captured from the enclosing scope, so every such guard
+    always took the FALLBACK branch -- silently dropping csconsole-only
+    customers from the renewal risk universe and hardcoding
+    ``recent_window_days=30`` regardless of the ``days`` parameter.
+
+    The fix introduced an explicit ``_r23_ctx`` dict in the OUTER scope
+    (where ``locals()`` works correctly for capturing
+    conditionally-bound names like ``data_retrieved_at``) and threaded
+    it as a default argument into both nested functions.
+
+    This test pins three properties:
+
+    1. The legacy closure-binding marker (``team_subs_df_unfiltered if
+       'team_subs_df_unfiltered' in locals() else None``) is GONE --
+       a future session cannot silently re-introduce it.
+    2. The replacement ``_r23_ctx`` outer-scope dict is present with
+       the correct shape so a future session cannot silently rip it
+       out and re-introduce free-variable lookups.
+    3. Both nested functions accept ``_ctx=_r23_ctx`` as their default
+       argument so the binding flows correctly at call time.
     """
     src = APP_SIMPLE.read_text(encoding="utf-8")
-    # L7076 (now drifted, but the pattern is unique): inside generate_report
-    # passing team_subs_df_unfiltered into build_customer_lookup.
-    nested_bug_marker = "team_subs_df_unfiltered if 'team_subs_df_unfiltered' in locals() else None"
-    assert nested_bug_marker in src, (
-        "R20-NEXT-001 regression: the documented closure-binding bug "
-        "site inside generate_report (passing "
-        "``team_subs_df_unfiltered`` to ``build_customer_lookup``) is "
-        "no longer present.  If you intentionally fixed this, "
-        "(a) verify the receiver behavior change is desired, "
-        "(b) update or remove this test, and "
-        "(c) remove the R20-NEXT-001 entry from QUALITY_AUDIT.md."
+
+    # 1. The legacy closure-binding pattern must be gone.
+    legacy_marker = (
+        "team_subs_df_unfiltered if 'team_subs_df_unfiltered' in locals() else None"
     )
+    assert legacy_marker not in src, (
+        "R22-NEXT-001 regression: the closure-binding pattern is back. "
+        "Inside ``generate_report`` / ``generate_excel`` this guard "
+        "always took the False branch (free vars are not in "
+        "``locals()``), silently dropping csconsole-only customers "
+        "from the renewal risk universe and hardcoding "
+        "recent_window_days=30.  Restore the ``_r23_ctx``-based "
+        "ctx-dict access introduced in Round 23."
+    )
+
+    # 2. The replacement ctx dict must exist with the expected shape.
+    ctx_dict_marker = "_r23_ctx = {  # Round 23 / R22-NEXT-001"
+    assert ctx_dict_marker in src, (
+        "R22-NEXT-001 regression: the explicit ``_r23_ctx`` outer-scope "
+        "dict that replaces the closure-binding pattern is missing.  "
+        "It must be built in ``run_compact_analysis`` BEFORE the "
+        "nested ``generate_report`` / ``generate_excel`` are defined, "
+        "so the captured outer-scope frames flow through ``_ctx`` at "
+        "call time."
+    )
+    # The ctx must include the customer-counting frames that were the
+    # primary victims of the closure-binding bug.
+    for frame_key in (
+        "'team_subs_df_unfiltered'",
+        "'csconsole_action_plans'",
+        "'csconsole_customer_pulse'",
+        "'csconsole_success_priorities'",
+        "'csconsole_adoption_barriers'",
+        "'days'",
+    ):
+        assert frame_key in src, (
+            f"R22-NEXT-001 regression: ``_r23_ctx`` is missing the "
+            f"{frame_key} entry.  All five csconsole/customer frames "
+            f"plus the ``days`` parameter must flow through the ctx "
+            f"dict so the renewal-risk universe stays aligned with "
+            f"the headline ``total_customers`` and so "
+            f"``recent_window_days`` is honoured."
+        )
+
+    # 3. Both nested functions must accept _ctx=_r23_ctx as default arg.
+    nested_signatures = (
+        "def generate_report(_ctx=_r23_ctx):  # Round 23 / R22-NEXT-001",
+        "def generate_excel(_ctx=_r23_ctx):  # Round 23 / R22-NEXT-001",
+    )
+    for sig in nested_signatures:
+        assert sig in src, (
+            f"R22-NEXT-001 regression: nested function signature "
+            f"{sig!r} is missing.  Both ``generate_report`` and "
+            f"``generate_excel`` must capture ``_r23_ctx`` as a "
+            f"default argument so the outer-scope frames flow at "
+            f"definition time rather than via the broken "
+            f"free-variable / ``locals()`` lookup."
+        )

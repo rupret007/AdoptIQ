@@ -1,0 +1,18 @@
+{
+  "table_count": 3,
+  "tiles": {
+    "BEMS Escalations": "4",
+    "Critical (P1)": "4",
+    "Critical ABs": null,
+    "Escalated Cases": null,
+    "High (P2)": "4",
+    "Security Vulnerabilities": "0",
+    "Software Defects": "0",
+    "Support Cases": "20",
+    "Total Customers": "5"
+  },
+  "verification": {
+    "Total Adoption Barriers": null,
+    "Total Support Cases": null
+  }
+}

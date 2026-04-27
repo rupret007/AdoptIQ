@@ -7065,12 +7065,39 @@ def run_compact_analysis(analysis_id):
         # This ensures we have the right count even if nested function scope has issues
         team_subs_for_customer_counting = team_subs_df_unfiltered if not team_subs_df_unfiltered.empty else team_subs_df
         logger.info(f"[CUSTOMER_COUNT] Will use {len(team_subs_for_customer_counting)} subscriptions for customer counting")
-        
+
+        # Round 23 / R22-NEXT-001: build an explicit context dict so the
+        # nested ``generate_report`` and ``generate_excel`` defined below
+        # can reach outer-scope frames without the broken
+        # ``X if 'X' in locals() else FALLBACK`` closure-binding guard.
+        # Inside a nested Python function, ``locals()`` does NOT include
+        # free variables captured from the enclosing scope, so every such
+        # guard always took the FALLBACK branch -- silently dropping
+        # csconsole-only customers from the renewal risk universe and
+        # hardcoding ``recent_window_days`` to 30 regardless of input.
+        # For ``data_retrieved_at`` (genuinely conditional in outer scope:
+        # only bound at L6499 inside ``if _drt is not None:``),
+        # ``locals().get()`` at the OUTER scope correctly resolves to
+        # ``None`` when unbound; that resolution is captured here so the
+        # nested function can reference it without raising NameError.
+        _r23_ctx = {  # Round 23 / R22-NEXT-001
+            'team_subs_df_unfiltered': team_subs_df_unfiltered,
+            'csconsole_action_plans': csconsole_action_plans,
+            'csconsole_customer_pulse': csconsole_customer_pulse,
+            'csconsole_success_priorities': csconsole_success_priorities,
+            'csconsole_adoption_barriers': csconsole_adoption_barriers,
+            'software_defects': software_defects,
+            'psirt_vulns': psirt_vulns,
+            'partial_data_warnings': partial_data_warnings,
+            'data_retrieved_at': locals().get('data_retrieved_at'),
+            'days': days,
+        }
+
         # Generate report with timeout protection
         try:
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-            
-            def generate_report():
+
+            def generate_report(_ctx=_r23_ctx):  # Round 23 / R22-NEXT-001
                 """Generate the Executive Intelligence Report in a separate thread"""
                 try:
                     logger.info(f"[EXEC-REPORT] === STARTING EXECUTIVE INTELLIGENCE REPORT ===")
@@ -7082,57 +7109,61 @@ def run_compact_analysis(analysis_id):
                     # subscription-only / pulse-only customers are not
                     # silently dropped from the renewal table (which
                     # would make the risk row count < total_customers).
+                    # Round 23 / R22-NEXT-001: outer-scope frames flow
+                    # via ``_ctx`` (was: broken ``'X' in locals()`` checks
+                    # that always evaluated False inside this nested fn).
+                    _ei_extra_frames = None  # Round 23 / R22-NEXT-001
+                    _ei_account_to_customer = None  # Round 23 / R22-NEXT-001
                     try:
                         _ei_lookup = build_customer_lookup(
-                            team_subs_df_unfiltered if 'team_subs_df_unfiltered' in locals() else None
+                            _ctx.get('team_subs_df_unfiltered')  # Round 23 / R22-NEXT-001
                         )
                         _ei_account_to_customer = (_ei_lookup or {}).get("account_to_customer", {}) or {}
                         _ei_extra_frames = []
+                        # Round 23 / R22-NEXT-001: iterate the captured
+                        # ctx dict directly. Round 10 / Phase 7.1 still
+                        # applies: ``csconsole_action_plans`` contributes
+                        # action-plan-only customers to the renewal
+                        # universe. ``ap_df`` was a back-compat
+                        # placeholder that was never bound in
+                        # ``run_compact_analysis``; dropped here.
                         for _df_name in (
                             'team_subs_df_unfiltered',
                             'csconsole_customer_pulse',
                             'csconsole_success_priorities',
                             'csconsole_adoption_barriers',
-                            # Round 10 / Phase 7.1: include
-                            # ``csconsole_action_plans`` (the variable
-                            # actually defined in
-                            # ``run_compact_analysis``) so action-plan-only
-                            # customers land in the renewal risk universe
-                            # the same way they do in the EI Word
-                            # dashboard. ``ap_df`` is kept for
-                            # back-compat with other call sites that
-                            # use that name.
                             'csconsole_action_plans',
-                            'ap_df',
                         ):
-                            if _df_name in locals():
-                                _val = locals()[_df_name]
-                                if isinstance(_val, pd.DataFrame) and not _val.empty:
-                                    _ei_extra_frames.append(_val)
+                            _val = _ctx.get(_df_name)  # Round 23 / R22-NEXT-001
+                            if isinstance(_val, pd.DataFrame) and not _val.empty:
+                                _ei_extra_frames.append(_val)
+                        _r23_days = _ctx.get('days')  # Round 23 / R22-NEXT-001
                         risk_scores = calculate_renewal_risk_scores(
                             ab_norm,
                             csone_df,
                             extra_frames=_ei_extra_frames if _ei_extra_frames else None,
                             account_to_customer=_ei_account_to_customer,
-                            # Phase 4.2: thread analysis horizon.
-                            recent_window_days=int(days) if 'days' in locals() and days else 30,
+                            # Phase 4.2: thread analysis horizon (was
+                            # hardcoded to 30 by the closure-binding bug).
+                            recent_window_days=int(_r23_days) if _r23_days else 30,  # Round 23 / R22-NEXT-001
                         )
                     except Exception as _ei_rs_err:
                         logger.debug(
                             f"[EXEC-REPORT] Falling back to AB+CSOne-only risk universe: {_ei_rs_err}"
                         )
+                        _r23_days = _ctx.get('days')  # Round 23 / R22-NEXT-001
                         risk_scores = calculate_renewal_risk_scores(
                             ab_norm,
                             csone_df,
-                            recent_window_days=int(days) if 'days' in locals() and days else 30,
+                            recent_window_days=int(_r23_days) if _r23_days else 30,  # Round 23 / R22-NEXT-001
                         )
                     # Phase 1.2: assert risk row count >= total_customers floor.
                     try:
                         _ei_total_customers = cm.count_customers(
                             ab_df=ab_norm,
                             csone_df=csone_df,
-                            extra_frames=_ei_extra_frames if '_ei_extra_frames' in locals() else None,
-                            account_to_customer=_ei_account_to_customer if '_ei_account_to_customer' in locals() else None,
+                            extra_frames=_ei_extra_frames if _ei_extra_frames else None,
+                            account_to_customer=_ei_account_to_customer or None,
                         )
                         if _ei_total_customers and len(risk_scores) < _ei_total_customers:
                             logger.warning(
@@ -7234,6 +7265,18 @@ def run_compact_analysis(analysis_id):
                         logger.info(f"[EXEC-REPORT] Using team_subs_for_customer_counting: {len(team_subs_for_customer_counting)} subscriptions (UNFILTERED: {not team_subs_df_unfiltered.empty})")
                         team_subs_for_counting = team_subs_for_customer_counting
                         
+                        # Round 23 / R22-NEXT-001: pull csconsole_* /
+                        # software_defects / psirt_vulns /
+                        # partial_data_warnings / data_retrieved_at from
+                        # the captured ctx dict instead of via the
+                        # broken ``'X' in locals()`` closure-binding
+                        # check. ``or pd.DataFrame()`` keeps the original
+                        # empty-default semantics for the never-bound
+                        # case (e.g. early initialization paths).
+                        _r23_ap = _ctx.get('csconsole_action_plans')  # Round 23 / R22-NEXT-001
+                        _r23_cp = _ctx.get('csconsole_customer_pulse')  # Round 23 / R22-NEXT-001
+                        _r23_sp = _ctx.get('csconsole_success_priorities')  # Round 23 / R22-NEXT-001
+                        _r23_cab = _ctx.get('csconsole_adoption_barriers')  # Round 23 / R22-NEXT-001
                         result = create_executive_intelligence_report(
                             analysis_id, manager, technology, days,
                             ab_norm, csone_df, ai_insights, 
@@ -7245,31 +7288,37 @@ def run_compact_analysis(analysis_id):
                             chart_paths=chart_paths,
                             feature_requests=feature_requests,
                             team_subs_df=team_subs_for_counting,  # Use UNFILTERED for customer counting
-                            csconsole_action_plans=csconsole_action_plans if 'csconsole_action_plans' in locals() else pd.DataFrame(),
-                            csconsole_customer_pulse=csconsole_customer_pulse if 'csconsole_customer_pulse' in locals() else pd.DataFrame(),
-                            csconsole_success_priorities=csconsole_success_priorities if 'csconsole_success_priorities' in locals() else pd.DataFrame(),
-                            csconsole_adoption_barriers=csconsole_adoption_barriers if 'csconsole_adoption_barriers' in locals() else pd.DataFrame(),
-                            software_defects=software_defects if 'software_defects' in locals() else {'total_defects': 0, 'total_cases_with_defects': 0, 'defect_by_customer': {}},
-                            psirt_vulns=psirt_vulns if 'psirt_vulns' in locals() else {'total_vulnerabilities': 0, 'cve_ids': set(), 'psirt_advisories': set(), 'vulnerability_by_customer': {}},
+                            csconsole_action_plans=_r23_ap if _r23_ap is not None else pd.DataFrame(),  # Round 23 / R22-NEXT-001
+                            csconsole_customer_pulse=_r23_cp if _r23_cp is not None else pd.DataFrame(),  # Round 23 / R22-NEXT-001
+                            csconsole_success_priorities=_r23_sp if _r23_sp is not None else pd.DataFrame(),  # Round 23 / R22-NEXT-001
+                            csconsole_adoption_barriers=_r23_cab if _r23_cab is not None else pd.DataFrame(),  # Round 23 / R22-NEXT-001
+                            software_defects=_ctx.get('software_defects') or {'total_defects': 0, 'total_cases_with_defects': 0, 'defect_by_customer': {}},  # Round 23 / R22-NEXT-001
+                            psirt_vulns=_ctx.get('psirt_vulns') or {'total_vulnerabilities': 0, 'cve_ids': set(), 'psirt_advisories': set(), 'vulnerability_by_customer': {}},  # Round 23 / R22-NEXT-001
                             # Phase 1.3b: bubble fetch failures into the report
                             # so the reader sees a banner instead of a confident
                             # zero on the affected sections.
-                            partial_data_warnings=(partial_data_warnings if 'partial_data_warnings' in locals() else None),
+                            partial_data_warnings=_ctx.get('partial_data_warnings'),  # Round 23 / R22-NEXT-001
                             # Phase 3.1: render "Data as of" alongside
                             # "Generated" so the cover page distinguishes
                             # data freshness from render time.
-                            data_retrieved_at=(data_retrieved_at if 'data_retrieved_at' in locals() else None),
+                            data_retrieved_at=_ctx.get('data_retrieved_at'),  # Round 23 / R22-NEXT-001
                         )
                     else:
                         logger.warning("[EXEC-REPORT] Executive formatter not available, using enhanced compact report fallback")
+                        # Round 23 / R22-NEXT-001: same ctx-based
+                        # csconsole_* threading as the primary path.
+                        _r23_ap = _ctx.get('csconsole_action_plans')  # Round 23 / R22-NEXT-001
+                        _r23_cp = _ctx.get('csconsole_customer_pulse')  # Round 23 / R22-NEXT-001
+                        _r23_sp = _ctx.get('csconsole_success_priorities')  # Round 23 / R22-NEXT-001
+                        _r23_cab = _ctx.get('csconsole_adoption_barriers')  # Round 23 / R22-NEXT-001
                         result = _create_enhanced_compact_report(
                             base, manager, technology, days, ai_insights,
                             csone_df, ab_norm, pd.DataFrame(), {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}, chart_paths, feature_requests,
                             team_subs_df=team_subs_for_counting,
-                            csconsole_action_plans=csconsole_action_plans if 'csconsole_action_plans' in locals() else pd.DataFrame(),
-                            csconsole_customer_pulse=csconsole_customer_pulse if 'csconsole_customer_pulse' in locals() else pd.DataFrame(),
-                            csconsole_success_priorities=csconsole_success_priorities if 'csconsole_success_priorities' in locals() else pd.DataFrame(),
-                            csconsole_adoption_barriers=csconsole_adoption_barriers if 'csconsole_adoption_barriers' in locals() else pd.DataFrame()
+                            csconsole_action_plans=_r23_ap if _r23_ap is not None else pd.DataFrame(),  # Round 23 / R22-NEXT-001
+                            csconsole_customer_pulse=_r23_cp if _r23_cp is not None else pd.DataFrame(),  # Round 23 / R22-NEXT-001
+                            csconsole_success_priorities=_r23_sp if _r23_sp is not None else pd.DataFrame(),  # Round 23 / R22-NEXT-001
+                            csconsole_adoption_barriers=_r23_cab if _r23_cab is not None else pd.DataFrame()  # Round 23 / R22-NEXT-001
                         )
                     
                     logger.info(f"[EXEC-REPORT] Report creation returned: {result}")
@@ -7300,14 +7349,20 @@ def run_compact_analysis(analysis_id):
                 # This ensures consistent customer counting in fallback path too
                 logger.info(f"[EXEC-REPORT] Fallback: Using team_subs_for_customer_counting: {len(team_subs_for_customer_counting)} subscriptions (UNFILTERED: {not team_subs_df_unfiltered.empty})")
                 team_subs_for_counting = team_subs_for_customer_counting
+                # Round 23 / R22-NEXT-001: this is OUTER ``run_compact_analysis``
+                # scope, so ``csconsole_*`` were always bound by L6435/6508/6522
+                # and the original ``X if 'X' in locals() else FALLBACK`` always
+                # took the True branch -- R20-001 dead-code antipattern, not a
+                # closure-binding bug.  Simplified for clarity; behaviour
+                # unchanged.
                 exec_report_path = _create_enhanced_compact_report(
                     base, manager, technology, days, ai_insights,
                     csone_df, ab_norm, pd.DataFrame(), {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}, chart_paths, feature_requests,
                     team_subs_df=team_subs_for_counting,  # Use UNFILTERED for customer counting
-                    csconsole_action_plans=csconsole_action_plans if 'csconsole_action_plans' in locals() else pd.DataFrame(),
-                    csconsole_customer_pulse=csconsole_customer_pulse if 'csconsole_customer_pulse' in locals() else pd.DataFrame(),
-                    csconsole_success_priorities=csconsole_success_priorities if 'csconsole_success_priorities' in locals() else pd.DataFrame(),
-                    csconsole_adoption_barriers=csconsole_adoption_barriers if 'csconsole_adoption_barriers' in locals() else pd.DataFrame()
+                    csconsole_action_plans=csconsole_action_plans,  # Round 23 / R22-NEXT-001
+                    csconsole_customer_pulse=csconsole_customer_pulse,  # Round 23 / R22-NEXT-001
+                    csconsole_success_priorities=csconsole_success_priorities,  # Round 23 / R22-NEXT-001
+                    csconsole_adoption_barriers=csconsole_adoption_barriers,  # Round 23 / R22-NEXT-001
                 )
                 logger.info(f"[EXEC-REPORT] SUCCESS: Enhanced Compact Report created: {exec_report_path}")
         except Exception as e:
@@ -7343,7 +7398,7 @@ def run_compact_analysis(analysis_id):
         try:
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
             
-            def generate_excel():
+            def generate_excel(_ctx=_r23_ctx):  # Round 23 / R22-NEXT-001
                 """Generate the Excel report in a separate thread"""
                 try:
                     logger.info(" Calculating risk scores...")
@@ -7352,41 +7407,55 @@ def run_compact_analysis(analysis_id):
                     # and account_to_customer map into the Excel risk
                     # table so the Risk_Summary sheet covers the same
                     # customers as the Word headline / Compact / EI.
+                    # Round 23 / R22-NEXT-001: outer-scope frames flow
+                    # via ``_ctx`` (was: broken ``'X' in locals()``
+                    # closure-binding check that always evaluated False
+                    # inside this nested fn, hardcoding
+                    # ``recent_window_days=30`` and dropping
+                    # csconsole-only customers from the Risk_Summary
+                    # sheet -- so the workbook silently disagreed with
+                    # the Word headline).
+                    _xl_extra_frames = None  # Round 23 / R22-NEXT-001
+                    _xl_account_to_customer = None  # Round 23 / R22-NEXT-001
                     try:
                         _xl_lookup = build_customer_lookup(
-                            team_subs_df_unfiltered if 'team_subs_df_unfiltered' in locals() else None
+                            _ctx.get('team_subs_df_unfiltered')  # Round 23 / R22-NEXT-001
                         )
                         _xl_account_to_customer = (_xl_lookup or {}).get("account_to_customer", {}) or {}
                         _xl_extra_frames = []
+                        # Round 23 / R22-NEXT-001: iterate ctx directly
+                        # (``ap_df`` was never bound in
+                        # ``run_compact_analysis`` -- dropped).
                         for _df_name in (
                             'team_subs_df_unfiltered',
                             'csconsole_customer_pulse',
                             'csconsole_success_priorities',
                             'csconsole_adoption_barriers',
-                            # Round 10 / Phase 7.1: see EI loop above.
                             'csconsole_action_plans',
-                            'ap_df',
                         ):
-                            if _df_name in locals():
-                                _val = locals()[_df_name]
-                                if isinstance(_val, pd.DataFrame) and not _val.empty:
-                                    _xl_extra_frames.append(_val)
+                            _val = _ctx.get(_df_name)  # Round 23 / R22-NEXT-001
+                            if isinstance(_val, pd.DataFrame) and not _val.empty:
+                                _xl_extra_frames.append(_val)
+                        _r23_days = _ctx.get('days')  # Round 23 / R22-NEXT-001
                         risk_scores = calculate_renewal_risk_scores(
                             ab_norm,
                             csone_df,
                             extra_frames=_xl_extra_frames if _xl_extra_frames else None,
                             account_to_customer=_xl_account_to_customer,
-                            # Phase 4.2: thread analysis horizon.
-                            recent_window_days=int(days) if 'days' in locals() and days else 30,
+                            # Phase 4.2: thread analysis horizon (was
+                            # hardcoded to 30 by the closure-binding
+                            # bug).
+                            recent_window_days=int(_r23_days) if _r23_days else 30,  # Round 23 / R22-NEXT-001
                         )
                     except Exception as _xl_rs_err:
                         logger.debug(
                             f"[EXCEL] Falling back to AB+CSOne-only risk universe: {_xl_rs_err}"
                         )
+                        _r23_days = _ctx.get('days')  # Round 23 / R22-NEXT-001
                         risk_scores = calculate_renewal_risk_scores(
                             ab_norm,
                             csone_df,
-                            recent_window_days=int(days) if 'days' in locals() and days else 30,
+                            recent_window_days=int(_r23_days) if _r23_days else 30,  # Round 23 / R22-NEXT-001
                         )
                     logger.info(f"[[CHART]] Risk scores calculated for {len(risk_scores)} customers")
                     # Phase 1.2: floor assertion vs total_customers.
@@ -7394,8 +7463,8 @@ def run_compact_analysis(analysis_id):
                         _xl_total_customers = cm.count_customers(
                             ab_df=ab_norm,
                             csone_df=csone_df,
-                            extra_frames=_xl_extra_frames if '_xl_extra_frames' in locals() else None,
-                            account_to_customer=_xl_account_to_customer if '_xl_account_to_customer' in locals() else None,
+                            extra_frames=_xl_extra_frames if _xl_extra_frames else None,
+                            account_to_customer=_xl_account_to_customer or None,
                         )
                         if _xl_total_customers and len(risk_scores) < _xl_total_customers:
                             logger.warning(
@@ -7641,28 +7710,29 @@ def run_compact_analysis(analysis_id):
         # legacy AB-only count silently dropped subscription-only and
         # pulse-only customers from the Excel total.
         try:
-            _customer_lookup = build_customer_lookup(
-                team_subs_df_unfiltered if 'team_subs_df_unfiltered' in locals() else None
-            )
+            # Round 23 / R22-NEXT-001: this is OUTER ``run_compact_analysis``
+            # scope, so ``team_subs_df_unfiltered`` and the ``csconsole_*``
+            # frames are guaranteed bound by the L6435/6508/6522 fetch block
+            # before the Excel section runs.  The original ``X if 'X' in
+            # locals() else FALLBACK`` was R20-001 dead-code antipattern;
+            # ``ap_df`` was never bound in this function (R14-006) and is
+            # dropped from the iteration.  Behaviour unchanged.
+            _customer_lookup = build_customer_lookup(team_subs_df_unfiltered)  # Round 23 / R22-NEXT-001
             _account_to_customer = (_customer_lookup or {}).get("account_to_customer", {}) or {}
             _extra_frames = []
-            for _df_name in (
-                'team_subs_df_unfiltered',
-                'csconsole_customer_pulse',
-                'csconsole_success_priorities',
-                'csconsole_adoption_barriers',
-                # Round 10 / Phase 7.1: include the actual variable name
-                # used in this scope (``csconsole_action_plans``) so the
-                # Excel total_customers headline matches the Word
+            for _candidate_df in (  # Round 23 / R22-NEXT-001
+                team_subs_df_unfiltered,
+                csconsole_customer_pulse,
+                csconsole_success_priorities,
+                csconsole_adoption_barriers,
+                # Round 10 / Phase 7.1: include csconsole_action_plans so
+                # the Excel total_customers headline matches the Word
                 # headline that already uses the same dataframe via
                 # ``cm.count_customers``.
-                'csconsole_action_plans',
-                'ap_df',
+                csconsole_action_plans,
             ):
-                if _df_name in locals():
-                    _val = locals()[_df_name]
-                    if isinstance(_val, pd.DataFrame) and not _val.empty:
-                        _extra_frames.append(_val)
+                if isinstance(_candidate_df, pd.DataFrame) and not _candidate_df.empty:
+                    _extra_frames.append(_candidate_df)
             total_customers = cm.count_customers(
                 ab_df=ab_norm,
                 csone_df=csone_df,
