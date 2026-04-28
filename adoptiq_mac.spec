@@ -81,14 +81,14 @@ hidden_imports = [
     'ask_ai_corpus',
     'report_corpus_context',
     'adoptiq_settings',
-    # Round 17.2 -- SharePoint Microsoft Graph pull.  Pull msal and
-    # keyring (plus the macOS-native keyring backend) into the bundle
-    # so the device-code flow + secure token cache work in the
-    # frozen .app build.
-    'sharepoint_corpus_source',
-    'msal', 'msal.application', 'msal.authority', 'msal.token_cache',
-    'keyring', 'keyring.backend', 'keyring.backends',
-    'keyring.backends.macOS', 'keyring.backends.fail',
+    # Round 17.2 -> Round 36: SharePoint Microsoft Graph pull retired.
+    # The MSAL/Graph runtime path was blocked by Cisco tenant admin-
+    # consent on the default Microsoft Graph PowerShell client ID.
+    # AdoptIQ now uses the OneDrive desktop client's local mirror at
+    # Config.CSONE_ONEDRIVE_FOLDER -- no MSAL, no keyring, no token
+    # cache to bundle.  The ``sharepoint_corpus_source`` module was
+    # deleted; ``msal`` and ``keyring`` were dropped from
+    # requirements.txt.
     # Round 32 / Phase 1.B -- bundle matplotlib + Pillow so chart
     # generation in the executive report actually produces images
     # in the packaged .app.  Build6 had matplotlib in ``excludes``
