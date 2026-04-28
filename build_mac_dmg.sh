@@ -6,34 +6,54 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-# Round 35 / native-corpus: bake the AdoptIQ Knowledge Corpus into an
-# encrypted SQLite snapshot BEFORE PyInstaller runs so the spec file
-# can pick up the four artifacts (corpus.db.enc, sentinel.json,
-# corpus.db.salt, corpus.sentinel.lock.json) under ``bake/``.  The
-# salt filename is ``corpus.db.salt`` (NOT ``salt.bin``) -- it is
-# pinned by ``corpus_crypto._salt_path_for`` which derives the salt
-# path from the encrypted DB via ``with_suffix(".salt")``.
+# Round 35 + Round 36 / native-corpus: bake the AdoptIQ Knowledge
+# Corpus into an encrypted SQLite snapshot BEFORE PyInstaller runs so
+# the spec file can pick up the four artifacts (corpus.db.enc,
+# sentinel.json, corpus.db.salt, corpus.sentinel.lock.json) under
+# ``bake/``.  The salt filename is ``corpus.db.salt`` (NOT
+# ``salt.bin``) -- it is pinned by ``corpus_crypto._salt_path_for``
+# which derives the salt path from the encrypted DB via
+# ``with_suffix(".salt")``.
+#
+# Round 36: the MSAL/Graph device-code path was removed.  The bake
+# now reads a local directory (the OneDrive desktop client's mirror
+# of the canonical AdoptIQ corpus folder).  Source resolution order:
+#   1. ADOPTIQ_BAKE_FIXTURE_DIR env var     (build operator override)
+#   2. Config.CSONE_ONEDRIVE_FOLDER         (default: the operator's
+#                                           OneDrive sync mirror)
+# Both must point at a real local directory containing parseable
+# files; the bake refuses to commit an empty corpus.
 #
 # Skip-mode controls (any one of these turns the bake into a no-op
 # that emits a marker file):
-#   * ADOPTIQ_BAKE_CORPUS=0           (env)
-#   * ADOPTIQ_BAKE_AUTH_MODE=offline  (env; future-proofs for cert auth)
-#   * pass --no-bake on the build command line via ADOPTIQ_BAKE_EXTRA_ARGS
+#   * ADOPTIQ_BAKE_CORPUS=0  (env)
+#   * pass --no-bake on the build command line via
+#     ADOPTIQ_BAKE_EXTRA_ARGS
 #
-# When skipped, the spec file's ``baked_corpus`` data entries gracefully
-# degrade because the bake artifacts are absent (the spec file uses a
-# ``Path.exists()`` check; see ``adoptiq_mac.spec``).  The runtime
-# bootstrap then auto-mints a fresh local sentinel and refreshes
-# from the share once the user signs in -- legacy / pre-Round-35
-# behavior.
+# When skipped, the spec file's ``baked_corpus`` data entries
+# gracefully degrade because the bake artifacts are absent (the spec
+# file uses a ``Path.exists()`` check; see ``adoptiq_mac.spec``).
+# The runtime bootstrap then auto-mints a fresh local sentinel and
+# the daily refresh worker re-indexes from
+# Config.CSONE_ONEDRIVE_FOLDER once OneDrive sync catches up --
+# legacy / pre-Round-35 behavior.
 echo
 echo "=============================================="
-echo "  Round 35: Baking AdoptIQ Knowledge Corpus"
+echo "  Round 35/36: Baking AdoptIQ Knowledge Corpus"
 echo "=============================================="
 echo
 BAKE_FLAG="${ADOPTIQ_BAKE_CORPUS:-1}"
-BAKE_AUTH_MODE="${ADOPTIQ_BAKE_AUTH_MODE:-device_code}"
 BAKE_EXTRA_ARGS="${ADOPTIQ_BAKE_EXTRA_ARGS:-}"
+# Round 36: ADOPTIQ_BAKE_FIXTURE_DIR overrides the default
+# Config.CSONE_ONEDRIVE_FOLDER source.  Quoted explicitly because the
+# canonical OneDrive mirror path contains spaces
+# ("OneDrive-Cisco/AI Projects/...").
+BAKE_FIXTURE_DIR="${ADOPTIQ_BAKE_FIXTURE_DIR:-}"
+# Round 36: ADOPTIQ_BAKE_AUTH_MODE is accepted for back-compat (the
+# old build harness exported it) but no longer affects bake behavior;
+# the bake_corpus.py script logs a deprecation warning when it sees
+# the flag.  Operators do not need to set it.
+BAKE_AUTH_MODE_LEGACY="${ADOPTIQ_BAKE_AUTH_MODE:-}"
 BAKE_PYTHON_BIN="python3"
 if [[ -x ".venv/bin/python" ]]; then
   BAKE_PYTHON_BIN=".venv/bin/python"
@@ -42,16 +62,30 @@ if [[ "$BAKE_FLAG" == "0" || "$BAKE_FLAG" == "false" || "$BAKE_FLAG" == "no" ]];
   echo "ADOPTIQ_BAKE_CORPUS=$BAKE_FLAG -- skipping corpus bake"
   "$BAKE_PYTHON_BIN" scripts/bake_corpus.py --bake-dir bake --no-bake
 else
-  echo "Bake auth mode: $BAKE_AUTH_MODE"
-  if ! "$BAKE_PYTHON_BIN" scripts/bake_corpus.py \
-        --bake-dir bake \
-        --auth-mode "$BAKE_AUTH_MODE" \
-        $BAKE_EXTRA_ARGS; then
-    echo
-    echo "ERROR: bake_corpus.py failed.  To skip the bake (corpus will"
-    echo "       refresh at runtime from the user's MSAL session)"
-    echo "       re-run with: ADOPTIQ_BAKE_CORPUS=0 ./build_mac_dmg.sh"
-    exit 1
+  if [[ -n "$BAKE_FIXTURE_DIR" ]]; then
+    echo "Bake source: $BAKE_FIXTURE_DIR (ADOPTIQ_BAKE_FIXTURE_DIR override)"
+    if ! "$BAKE_PYTHON_BIN" scripts/bake_corpus.py \
+          --bake-dir bake \
+          --source "$BAKE_FIXTURE_DIR" \
+          $BAKE_EXTRA_ARGS; then
+      echo
+      echo "ERROR: bake_corpus.py failed.  To skip the bake (the"
+      echo "       runtime daily refresh will repopulate the corpus"
+      echo "       from Config.CSONE_ONEDRIVE_FOLDER on first launch)"
+      echo "       re-run with: ADOPTIQ_BAKE_CORPUS=0 ./build_mac_dmg.sh"
+      exit 1
+    fi
+  else
+    echo "Bake source: Config.CSONE_ONEDRIVE_FOLDER (default)"
+    if ! "$BAKE_PYTHON_BIN" scripts/bake_corpus.py \
+          --bake-dir bake \
+          $BAKE_EXTRA_ARGS; then
+      echo
+      echo "ERROR: bake_corpus.py failed.  Pass ADOPTIQ_BAKE_FIXTURE_DIR"
+      echo "       to point at a different local directory, or skip the"
+      echo "       bake entirely with: ADOPTIQ_BAKE_CORPUS=0 ./build_mac_dmg.sh"
+      exit 1
+    fi
   fi
 fi
 echo
