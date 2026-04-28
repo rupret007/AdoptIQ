@@ -6,6 +6,56 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
+# Round 35 / native-corpus: bake the AdoptIQ Knowledge Corpus into an
+# encrypted SQLite snapshot BEFORE PyInstaller runs so the spec file
+# can pick up the four artifacts (corpus.db.enc, sentinel.json,
+# corpus.db.salt, corpus.sentinel.lock.json) under ``bake/``.  The
+# salt filename is ``corpus.db.salt`` (NOT ``salt.bin``) -- it is
+# pinned by ``corpus_crypto._salt_path_for`` which derives the salt
+# path from the encrypted DB via ``with_suffix(".salt")``.
+#
+# Skip-mode controls (any one of these turns the bake into a no-op
+# that emits a marker file):
+#   * ADOPTIQ_BAKE_CORPUS=0           (env)
+#   * ADOPTIQ_BAKE_AUTH_MODE=offline  (env; future-proofs for cert auth)
+#   * pass --no-bake on the build command line via ADOPTIQ_BAKE_EXTRA_ARGS
+#
+# When skipped, the spec file's ``baked_corpus`` data entries gracefully
+# degrade because the bake artifacts are absent (the spec file uses a
+# ``Path.exists()`` check; see ``adoptiq_mac.spec``).  The runtime
+# bootstrap then auto-mints a fresh local sentinel and refreshes
+# from the share once the user signs in -- legacy / pre-Round-35
+# behavior.
+echo
+echo "=============================================="
+echo "  Round 35: Baking AdoptIQ Knowledge Corpus"
+echo "=============================================="
+echo
+BAKE_FLAG="${ADOPTIQ_BAKE_CORPUS:-1}"
+BAKE_AUTH_MODE="${ADOPTIQ_BAKE_AUTH_MODE:-device_code}"
+BAKE_EXTRA_ARGS="${ADOPTIQ_BAKE_EXTRA_ARGS:-}"
+BAKE_PYTHON_BIN="python3"
+if [[ -x ".venv/bin/python" ]]; then
+  BAKE_PYTHON_BIN=".venv/bin/python"
+fi
+if [[ "$BAKE_FLAG" == "0" || "$BAKE_FLAG" == "false" || "$BAKE_FLAG" == "no" ]]; then
+  echo "ADOPTIQ_BAKE_CORPUS=$BAKE_FLAG -- skipping corpus bake"
+  "$BAKE_PYTHON_BIN" scripts/bake_corpus.py --bake-dir bake --no-bake
+else
+  echo "Bake auth mode: $BAKE_AUTH_MODE"
+  if ! "$BAKE_PYTHON_BIN" scripts/bake_corpus.py \
+        --bake-dir bake \
+        --auth-mode "$BAKE_AUTH_MODE" \
+        $BAKE_EXTRA_ARGS; then
+    echo
+    echo "ERROR: bake_corpus.py failed.  To skip the bake (corpus will"
+    echo "       refresh at runtime from the user's MSAL session)"
+    echo "       re-run with: ADOPTIQ_BAKE_CORPUS=0 ./build_mac_dmg.sh"
+    exit 1
+  fi
+fi
+echo
+
 ./build_mac.sh
 
 # Round 28 / pipeline-drift workaround (matches the documented note

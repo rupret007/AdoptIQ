@@ -20,6 +20,37 @@ def _datas():
             datas.append((cert_path, 'certifi'))
     except Exception:
         pass
+
+    # Round 35 / native-corpus: bundle the bake artifacts produced by
+    # ``scripts/bake_corpus.py`` (invoked by ``build_mac_dmg.sh`` BEFORE
+    # PyInstaller).  Each entry ships under
+    # ``AdoptIQ.app/Contents/Resources/baked_corpus/`` and is read at
+    # runtime by ``corpus_bootstrap``, which copies the encrypted
+    # database to a writable user dir on first launch.
+    #
+    # Each artifact is opt-in: when ``ADOPTIQ_BAKE_CORPUS=0`` (or the
+    # bake script crashes), the files are absent and PyInstaller would
+    # otherwise abort with "missing source file".  ``Path.exists()``
+    # gates each one so a skipped/failed bake still produces a working
+    # .app -- the user just sees the "Awaiting sign-in" state on first
+    # run and the corpus refreshes from the source share once they
+    # connect.
+    bake_dir = os.path.join(root, 'bake')
+    # ``corpus.db.salt`` matches ``corpus_crypto._salt_path_for`` --
+    # changing this name here without updating the bake script and
+    # ``corpus_bootstrap._BAKED_CORPUS_FILES`` would ship a phantom
+    # salt path that the runtime never finds, regenerating the salt
+    # on first launch and bricking the encrypted DB.
+    for fname in (
+        'corpus.db.enc',
+        'sentinel.json',
+        'corpus.db.salt',
+        'corpus.sentinel.lock.json',
+    ):
+        candidate = os.path.join(bake_dir, fname)
+        if os.path.exists(candidate):
+            datas.append((candidate, 'baked_corpus'))
+
     return datas
 
 
