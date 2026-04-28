@@ -40,12 +40,14 @@ Design contract
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
 import sqlite3
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -535,7 +537,14 @@ def get_or_create_local_sentinel(encrypted_path: Path | str) -> bytes:
 def _try_resolve_sentinel(root: Path | str | None) -> Optional[bytes]:
     """Best-effort: return sentinel bytes if ``root`` carries the
     sentinel file, otherwise ``None``.  Never raises -- callers are
-    expected to fall through to the next root."""
+    expected to fall through to the next root.
+
+    Round 34 / A2 caveat: this helper still swallows
+    ``CorpusCryptoError`` so a *missing* sentinel path falls through
+    to the next root.  The fail-loud-on-corrupt behavior the user
+    requested lives in :func:`_resolve_sentinel_strict` below, which
+    is what :func:`open_corpus_for_user` calls.
+    """
     if root is None:
         return None
     try:
@@ -548,6 +557,153 @@ def _try_resolve_sentinel(root: Path | str | None) -> Optional[bytes]:
         return read_sentinel_bytes(path)
     except CorpusCryptoError:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Round 34 / A1 -- sentinel pinning to prevent bricking on availability change
+# ---------------------------------------------------------------------------
+
+#: Round 34 / A1: filename of the sidecar lock that records WHICH
+#: sentinel sealed the encrypted corpus.  Lives next to ``corpus.db.enc``
+#: so it travels with the encrypted DB and inherits its 0o600 hardening.
+#:
+#: Why a lock?  Without it, the priority order in
+#: :func:`open_corpus_for_user` (OneDrive > SharePoint > local-mint)
+#: causes a bricking regression: a user who starts on the auto-minted
+#: local sentinel cannot open their corpus once SharePoint sync later
+#: delivers a different sentinel, because ``derive_key`` produces a
+#: different AES key and ``decrypt_bytes`` fails the GCM tag check.
+#: The lock pins the digest of whichever sentinel actually sealed the
+#: DB so subsequent opens always re-derive the same key.
+_SENTINEL_LOCK_NAME: str = "corpus.sentinel.lock.json"
+
+#: Lock-file schema version.  Pinned in tests so a future migration
+#: is a deliberate, breaking change.
+_SENTINEL_LOCK_SCHEMA: int = 1
+
+
+def _sentinel_lock_path(encrypted_path: Path | str) -> Path:
+    return Path(encrypted_path).parent / _SENTINEL_LOCK_NAME
+
+
+def _sentinel_digest_prefix(sentinel_bytes: bytes) -> str:
+    """Return the first 16 hex chars of SHA-256(sentinel_bytes).
+    8 bytes / 64 bits -- comfortably collision-resistant for the
+    handful of sentinels a single install ever sees, and short
+    enough to scan in logs / lock files."""
+    h = hashes.Hash(hashes.SHA256())
+    h.update(bytes(sentinel_bytes))
+    return h.finalize().hex()[:16]
+
+
+def _read_sentinel_lock(encrypted_path: Path | str) -> Optional[dict]:
+    """Read the sidecar lock if present.  Returns ``None`` when
+    absent.  Raises :class:`CorpusCryptoError` when present but
+    unparseable / wrong-schema -- a corrupt lock is fail-loud so an
+    operator investigates rather than silently re-pinning."""
+    lock_path = _sentinel_lock_path(encrypted_path)
+    if not lock_path.exists() or not lock_path.is_file():
+        return None
+    try:
+        raw = lock_path.read_text(encoding="utf-8")
+    except OSError as read_err:
+        raise CorpusCryptoError(
+            f"sentinel lock read failed: {read_err}"
+        ) from read_err
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as parse_err:
+        raise CorpusCryptoError(
+            f"sentinel lock is not valid JSON ({parse_err}); refusing to "
+            f"silently re-pin -- inspect {lock_path}"
+        ) from parse_err
+    if not isinstance(data, dict):
+        raise CorpusCryptoError(
+            f"sentinel lock at {lock_path} is not a JSON object"
+        )
+    schema = data.get("schema")
+    if schema != _SENTINEL_LOCK_SCHEMA:
+        raise CorpusCryptoError(
+            f"sentinel lock at {lock_path} has unknown schema={schema!r}; "
+            f"expected {_SENTINEL_LOCK_SCHEMA}"
+        )
+    digest_prefix = data.get("sentinel_sha256_prefix")
+    if not isinstance(digest_prefix, str) or len(digest_prefix) != 16:
+        raise CorpusCryptoError(
+            f"sentinel lock at {lock_path} has malformed digest prefix"
+        )
+    return data
+
+
+def _write_sentinel_lock(
+    encrypted_path: Path | str,
+    sentinel_bytes: bytes,
+    source: str,
+) -> None:
+    """Mint or refresh the sidecar lock so subsequent opens re-pin
+    on the same sentinel.  Mode 0o600.  ``source`` is one of
+    ``"onedrive"``, ``"sharepoint"``, ``"local"`` for diagnostics."""
+    lock_path = _sentinel_lock_path(encrypted_path)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as mk_err:
+        raise CorpusCryptoError(
+            f"sentinel lock parent mkdir failed: {mk_err}"
+        ) from mk_err
+    payload = {
+        "schema": _SENTINEL_LOCK_SCHEMA,
+        "sentinel_sha256_prefix": _sentinel_digest_prefix(sentinel_bytes),
+        "source": source,
+        "minted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    body = json.dumps(payload, sort_keys=True).encode("utf-8")
+    fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, body)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.chmod(lock_path, 0o600)
+    except OSError as chmod_err:  # pragma: no cover - exotic FS
+        logger.debug("chmod 0600 failed for %s: %s", lock_path, chmod_err)
+
+
+def _enumerate_candidate_sentinels(
+    onedrive_root: Path | str | None,
+    sharepoint_root: Path | str | None,
+    encrypted_path: Path | str,
+    allow_local_sentinel: bool,
+) -> list[tuple[str, bytes]]:
+    """Round 34 / A1: build the (source, bytes) candidate list in
+    priority order so :func:`open_corpus_for_user` can try each
+    against the lock until one matches.
+
+    Local-sentinel candidate is included only when one ALREADY
+    exists on disk -- we never auto-mint while resolving against
+    a lock, because minting would clobber the digest the lock
+    expects.  Fresh-install minting is a separate code path.
+    """
+    out: list[tuple[str, bytes]] = []
+    od = _try_resolve_sentinel(onedrive_root)
+    if od:
+        out.append(("onedrive", od))
+    sp = _try_resolve_sentinel(sharepoint_root)
+    if sp:
+        out.append(("sharepoint", sp))
+    if allow_local_sentinel:
+        local_path = _local_sentinel_path(encrypted_path)
+        if local_path.exists() and local_path.is_file():
+            try:
+                local_bytes = local_path.read_bytes()
+            except OSError as read_err:
+                # Corrupt local sentinel is fail-loud here too.
+                raise CorpusCryptoError(
+                    f"local sentinel read failed: {read_err}"
+                ) from read_err
+            if local_bytes:
+                out.append(("local", local_bytes))
+    return out
 
 
 def open_corpus_for_user(
@@ -563,7 +719,8 @@ def open_corpus_for_user(
     with a human-readable reason when any step fails (missing
     sentinel = missing SharePoint ACL = corpus unavailable).
 
-    Round 33 / Build8 sentinel resolution order:
+    Round 33 / Build8 sentinel resolution priority (used for *fresh*
+    installs and as the ordering for :func:`_enumerate_candidate_sentinels`):
 
     1. ``onedrive_root`` (legacy default; preserved verbatim so
        installs with a synced OneDrive sentinel continue to behave
@@ -576,21 +733,84 @@ def open_corpus_for_user(
        that *require* a SharePoint-delivered sentinel for ACL
        enforcement can pass ``False`` to preserve the legacy
        fail-loud behavior.
+
+    Round 34 / A1 anti-bricking: once an encrypted corpus exists,
+    the sentinel that sealed it is pinned in
+    ``corpus.sentinel.lock.json`` (sidecar of the encrypted DB).
+    Subsequent opens consult the lock and re-derive the same key
+    even if a higher-priority sentinel becomes available later
+    (e.g., SharePoint sync delivers a different sentinel after the
+    user already minted a local one).  Without this pin, a sentinel
+    rotation silently bricks the corpus with ``InvalidTag``.
+
+    Migration of an existing install onto a different sentinel is
+    intentionally NOT silent -- delete the lock and re-seal under
+    the new sentinel via a separate operator action.
     """
-    sentinel_bytes = _try_resolve_sentinel(onedrive_root)
-    if not sentinel_bytes:
-        sentinel_bytes = _try_resolve_sentinel(sharepoint_root)
-    if not sentinel_bytes:
-        if allow_local_sentinel:
+    enc_p = Path(encrypted_path)
+    lock = _read_sentinel_lock(enc_p)
+    candidates = _enumerate_candidate_sentinels(
+        onedrive_root, sharepoint_root, encrypted_path, allow_local_sentinel,
+    )
+
+    if lock is not None:
+        # Existing install with a pinned sentinel.  Walk candidates and
+        # pick the one whose digest matches the lock; ignore priority
+        # changes (that's the whole point of pinning).
+        target_digest = lock["sentinel_sha256_prefix"]
+        chosen: Optional[tuple[str, bytes]] = None
+        for source, candidate_bytes in candidates:
+            if _sentinel_digest_prefix(candidate_bytes) == target_digest:
+                chosen = (source, candidate_bytes)
+                break
+        if chosen is None:
+            raise CorpusCryptoError(
+                f"corpus sentinel lock at {_sentinel_lock_path(enc_p)} pins "
+                f"digest_prefix={target_digest} (source={lock.get('source')!r}, "
+                f"minted_at={lock.get('minted_at')!r}) but none of the available "
+                f"sentinel roots produce that digest.  This typically means a "
+                f"sentinel rotated, SharePoint delivered a different sentinel "
+                f"than the one that sealed the corpus, or the original sentinel "
+                f"is missing.  Restore the original sentinel, or migrate the "
+                f"corpus deliberately by removing the lock and re-indexing."
+            )
+        sentinel_bytes = chosen[1]
+    else:
+        # No lock -- legacy install, fresh install, or operator-deleted lock.
+        if candidates:
+            # Use the highest-priority candidate that exists on disk.
+            sentinel_bytes = candidates[0][1]
+            chosen = candidates[0]
+        elif allow_local_sentinel:
             sentinel_bytes = get_or_create_local_sentinel(encrypted_path)
+            chosen = ("local", sentinel_bytes)
         else:
             # Preserve the legacy error message so existing tests /
             # operator runbooks keep matching.
             sentinel = resolve_sentinel_path(onedrive_root)
             sentinel_bytes = read_sentinel_bytes(sentinel)
+            chosen = ("onedrive", sentinel_bytes)
+
     salt = get_or_create_salt(encrypted_path)
     key = derive_key(sentinel_bytes, salt)
-    return open_encrypted_corpus(encrypted_path, key, create_if_missing=create_if_missing)
+    handle = open_encrypted_corpus(
+        encrypted_path, key, create_if_missing=create_if_missing,
+    )
+    # Mint / refresh the lock only after a successful open so a
+    # decrypt failure (e.g., legacy install whose existing salt is
+    # incompatible) cannot leave behind a misleading lock.
+    if lock is None:
+        try:
+            _write_sentinel_lock(encrypted_path, sentinel_bytes, chosen[0])
+        except CorpusCryptoError as lock_err:
+            # Lock write is best-effort -- log and proceed.  A failed
+            # write means the next open re-walks the priority order
+            # (same as today) but the corpus itself opens.
+            logger.warning(
+                "Round 34 / A1: sentinel lock write failed (%s); next open "
+                "will re-walk priority order", lock_err,
+            )
+    return handle
 
 
 __all__ = [
@@ -607,4 +827,9 @@ __all__ = [
     "open_encrypted_corpus",
     "read_sentinel_bytes",
     "resolve_sentinel_path",
+    # Round 34 / A1
+    "_sentinel_lock_path",
+    "_sentinel_digest_prefix",
+    "_read_sentinel_lock",
+    "_write_sentinel_lock",
 ]
