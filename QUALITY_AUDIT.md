@@ -3650,3 +3650,181 @@ addition of ARR rendering must include the multi-currency branch).
   did not retroactively backfill them.
 
 **Trailer:** Made-with: Cursor
+
+## Round 37 — handoff 2026-04-28
+
+> Round 37 is the admin-console enhancement pass that the user
+> queued after Round 36 + Build10 shipped.  The user observed:
+> "the server shows to start server while running in admin
+> console, we should do this next pass focused on admin console
+> and enhancing it."  Scope was sized to a tight, low-risk pass
+> (no rebuild of the 3,900-LOC inline-HTML admin module) covering
+> the start-server bug, R36 OneDrive surface in the admin tile,
+> the dead SharePoint sub-block, and a refresh-while-busy guard.
+
+**Backstory (the "Start Server while running" bug):**
+The packaged `.app` runs the main UI on port 15152 (and admin on
+5152) per `app_simple._resolve_main_port()` / `_resolve_admin_port()`.
+The admin module's `MAIN_APP_URL = os.environ.get('ADOPTIQ_MAIN_URL',
+'http://localhost:5151')` was captured at import time, and
+`_start_admin_server_in_thread()` never set the env, so the admin
+defaulted to probing `localhost:5151` --- which the main app no
+longer binds to.  The TCP probe always failed, `get_server_status()`
+returned `running=False`, and the Server Status tile rendered the
+"Start Server" form while the server was alive on 15152.  Two-layer
+fix: parent process now writes the env BEFORE importing the admin,
+AND `_main_app_host_port()` re-reads the env per call.
+
+**What changed:**
+- `app_simple._start_admin_server_in_thread()`: write
+  `os.environ['ADOPTIQ_MAIN_URL'] = f"http://127.0.0.1:{
+  _resolve_main_port()}"` BEFORE the `from
+  enhanced_admin_dashboard_v2 import` line.  Test
+  (`test_round37_admin_main_url_resolution.py::
+  test_app_simple_writes_adoptiq_main_url_before_admin_import`)
+  greps the source to enforce ordering.
+- `enhanced_admin_dashboard_v2._main_app_host_port()`: re-read
+  `os.environ.get('ADOPTIQ_MAIN_URL')` per call instead of
+  trusting the import-time captured constant.  Defense in depth.
+- `enhanced_admin_dashboard_v2.server_status` module-level dict:
+  flip initial `'port': 5000` -> `None` so the tile shows "N/A"
+  before the first probe instead of falsely advertising 5000
+  (a port the main app has not bound to since Round 17.3).
+- Admin "AdoptIQ Intelligence" tile: surface `boot.onedrive_status`
+  / `boot.onedrive_file_count` from the Round 36 `/api/corpus/status`
+  payload as a colored pill (green `synced`, yellow `not synced`,
+  gray `unknown`) plus the canonical OneDrive folder name in the
+  helper text so the operator knows what to sync.  Added defaults
+  to the corpus_status fallback dict so a missing field on the
+  upstream response cannot crash the dashboard render.
+- Admin Intelligence tile: drop the legacy SharePoint sub-block
+  (`<strong>SharePoint pull:</strong>` + sign-in / refresh button
+  pair).  Round 36 made `boot.sharepoint` always None on the
+  upstream payload, so the block was rendering dead UI.
+- Admin module: delete `/sharepoint_signin` + `/sharepoint_refresh`
+  Flask routes and their view functions
+  (`sharepoint_signin_route`, `sharepoint_refresh_route`).  Their
+  upstreams were deleted in Round 36 so calling them would just
+  produce a 404 from MAIN_APP_URL -- cleaner to delete than leave
+  a broken proxy.
+- Admin Intelligence tile: rename "Run incremental" -> "Re-index
+  now" (matches analyze-page panel labelling).  Disable both
+  refresh buttons (Re-index now + Rebuild) while
+  `boot.in_progress` is true so the operator cannot stack
+  refresh requests on an active index pass.  Tooltip explains
+  the disabled state.
+- Bumped `Config.ADOPTIQ_BUILD` from `"10"` to `"11"`.
+
+**Files touched:**
+- `app_simple.py` — write `ADOPTIQ_MAIN_URL` before admin import
+- `enhanced_admin_dashboard_v2.py` —
+  `_main_app_host_port` env-reread, `server_status` default port
+  flipped to None, OneDrive sync row, dead SharePoint block
+  removed, sharepoint_signin/refresh routes deleted, Re-index
+  now rename + in-progress disable, corpus_status defaults
+  augmented with `onedrive_status` / `onedrive_file_count`
+- `config.py` — Build11 bump
+- `CLAUDE.md` — Round 37 paragraph under Admin Console section
+
+**SSoT modules touched:** config, enhanced_admin_dashboard_v2
+
+**Tests added/updated (Round 37):**
+- `tests/test_round37_admin_main_url_resolution.py` (NEW, 7 tests) ---
+  pins `_main_app_host_port()` re-reads env per call AND that
+  `app_simple._start_admin_server_in_thread` writes
+  `ADOPTIQ_MAIN_URL` BEFORE importing the admin module
+- `tests/test_round37_admin_start_server_button_hidden_when_running.py`
+  (NEW, 4 tests) --- pins the Server Status tile renders "Stop
+  Server" when `running=True` and "Start Server" when
+  `running=False`, plus the legacy `port: 5000` is gone from
+  the default
+- `tests/test_round37_admin_intelligence_tile_renders_onedrive.py`
+  (NEW, 5 tests) --- pins the OneDrive sync row renders for
+  `synced` / `not_synced` / `unknown`, hides when the upstream
+  field is None (back-compat), pluralizes "1 file ready" vs
+  "N files ready" correctly
+- `tests/test_round37_admin_sharepoint_routes_removed.py` (NEW,
+  8 tests) --- pins the two retired routes return 404, the view
+  functions are gone from the source, the SharePoint UI block
+  is gone from the template, and an end-to-end dashboard render
+  succeeds without the block
+- `tests/test_round37_admin_corpus_refresh_button.py` (NEW,
+  6 tests) --- pins the "Re-index now" rename, the
+  `in_progress` disable on both Re-index and Rebuild buttons,
+  the `/corpus_refresh` POST route still registered, the old
+  "Run incremental" label is gone
+- `tests/test_round26_admin_tile_shows_per_source_and_errors.py` ---
+  updated `test_admin_tile_buttons_renamed` to expect "Re-index
+  now" instead of "Run incremental"; loosened the strict
+  `>Rebuild<` substring to a regex that tolerates the new
+  multi-line button format
+
+**Verify status:**
+- pytest: 2821 passed / 2 skipped (was 2790 at end of Round 36;
+  +31 net from Round 37: +30 new R37 tests across five files +
+  1 R26 test re-purposed).
+- Build11 (`OUTBOX/AdoptIQ-v1.0.4-build11.dmg`):
+  SHA-256 = `f3c52ceeb620c3de17adcf86a4640bfe1959a21ba6b0365dd3cbc24c5c14236d`,
+  size = 397 MB (corpus baked from local OneDrive sync mirror,
+  same env as Build10).  Note: the build script reads
+  `ADOPTIQ_BUILD` from the env (default "1"), not from
+  `config.py`, so the DMG was renamed from `build1` to `build11`
+  manually.  Following the Round 35 -> 36 -> 37 cadence, the
+  in-app `Config.ADOPTIQ_BUILD` is the source of truth and
+  reports "11" correctly.
+
+**Hot spots Claude should audit first (Round 37):**
+1. `app_simple._start_admin_server_in_thread` env ordering --
+   Python module imports are cached, so writing
+   `ADOPTIQ_MAIN_URL` AFTER the admin import would silently
+   noop on every subsequent call.  The
+   `test_app_simple_writes_adoptiq_main_url_before_admin_import`
+   regex pin enforces ordering at the source level; verify
+   that grep cannot be fooled by a comment that mentions the
+   env var name.
+2. `_main_app_host_port` env-reread cost -- called on every
+   admin dashboard render (which auto-refreshes every 30s in
+   the JS).  Confirm the `os.environ.get` lookup is cheap
+   enough that we don't introduce a hot-path stall.
+3. The `boot.in_progress` disable on the Re-index and Rebuild
+   buttons -- if an index pass crashes without resetting
+   `in_progress=False`, the operator is stuck with both
+   buttons disabled forever.  Cross-check that
+   `corpus_bootstrap` clears `in_progress` in a `finally:`
+   block so an exception cannot leave the state pinned.
+4. The new `corpus_status` defaults
+   (`onedrive_status: None`, `onedrive_file_count: None`) on
+   the admin upstream-fetch fallback -- a brand-new install
+   that boots the admin BEFORE the main app's first index
+   pass should still render the tile; verify that the
+   `{% if _od_status %}` guard tolerates the None case.
+5. The five retired R37 SharePoint admin proxy tests
+   (well, one new test that pins they are retired) --
+   ensure no other test in the suite still POSTs to
+   `/sharepoint_signin` or `/sharepoint_refresh` against
+   the admin app expecting a 200 / 302.
+
+**Known deferrals (intentional non-fixes, carried into a
+future round):**
+- **Cancel button on Currently-Running-Reports panel** --
+  needs a new main-app cancel endpoint contract; out of scope
+  for the admin pass.
+- **Splitting the 3,900-LOC inline-HTML admin module into
+  proper Jinja templates** -- multi-day rebuild; deferred to
+  a Round 38+ "admin rebuild" pass if/when the user wants it.
+- **Live log tail / structured-logs viewer** -- separate
+  round.
+- **Schema-version drift alerts on the corpus tile** --
+  separate round.
+- **Cross-platform admin discovery** -- Windows admin still
+  needs `ADOPTIQ_MAIN_URL` set manually; the
+  `_start_admin_server_in_thread` writeback only fires on
+  the canonical .app boot path.  Out of scope for now.
+- **`build_mac_dmg.sh` reading `ADOPTIQ_BUILD` from
+  `config.py`** -- the script defaults to `"1"` from env if
+  unset, which produced `AdoptIQ-v1.0.4-build1.dmg` instead
+  of `build11.dmg` until manually renamed.  Cleaner fix is
+  to source it from `config.py` directly.  Tracked for the
+  next build-pipeline pass.
+
+**Trailer:** Made-with: Cursor
