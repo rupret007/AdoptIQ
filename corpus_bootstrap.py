@@ -116,6 +116,26 @@ class CorpusBootState:
     last_successful_refresh_ts: Optional[float] = None
     last_refresh_attempt_ts: Optional[float] = None
     last_refresh_error: Optional[str] = None
+    # Round 36 / onedrive-sync-auth: snapshot of whether the OneDrive
+    # sync client has the canonical AdoptIQ folder mirrored to disk.
+    # Replaces the MSAL/Graph "is the user signed into SharePoint?"
+    # check -- we trust that the OneDrive desktop client handled
+    # auth/MFA/admin-consent and just verify the result by stat()ing
+    # the folder.
+    #
+    #   * ``"synced"``     -- ``Config.CSONE_ONEDRIVE_FOLDER`` exists,
+    #                         is a directory, and contains at least one
+    #                         non-empty file.  Daily refresh enabled.
+    #   * ``"not_synced"`` -- folder is missing, empty, or unreadable.
+    #                         Daily refresh paused; baked snapshot is
+    #                         the only source of truth.
+    #   * ``None``         -- check has not run yet (first boot, before
+    #                         the bootstrap thread populates state).
+    #
+    # ``onedrive_file_count`` is the number of real files seen at the
+    # last check (0 when not_synced).
+    onedrive_status: Optional[str] = None
+    onedrive_file_count: Optional[int] = None
 
 
 _STATE: CorpusBootState = CorpusBootState()
@@ -156,6 +176,8 @@ def get_state() -> CorpusBootState:
             last_successful_refresh_ts=_STATE.last_successful_refresh_ts,
             last_refresh_attempt_ts=_STATE.last_refresh_attempt_ts,
             last_refresh_error=_STATE.last_refresh_error,
+            onedrive_status=_STATE.onedrive_status,
+            onedrive_file_count=_STATE.onedrive_file_count,
         )
 
 
@@ -166,6 +188,70 @@ def is_enabled() -> bool:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------------------
+# Round 36 / onedrive-sync-auth: presence check
+# ---------------------------------------------------------------------------
+
+
+def _check_onedrive_sync_status() -> tuple[str, int, Optional[str]]:
+    """Round 36: probe whether the OneDrive desktop client has the
+    canonical AdoptIQ corpus folder synced to disk.  Replaces the
+    legacy MSAL/Graph ``_is_sharepoint_signed_in`` check -- we trust
+    that the OneDrive client handled auth/MFA/admin-consent and just
+    verify the result by ``Path.is_dir()`` + counting non-empty
+    files.
+
+    Returns a 3-tuple ``(status, file_count, path)``:
+
+    * ``status``     -- ``"synced"``     when the folder exists, is a
+                        directory, and contains at least one
+                        non-empty file.
+                        ``"not_synced"`` when the folder is missing,
+                        unreadable, empty, or all entries are
+                        zero-byte placeholder stubs (OneDrive
+                        on-demand files that have not been pulled).
+                        ``"unknown"``    when ``Config.CSONE_ONEDRIVE_FOLDER``
+                        is not configured.
+    * ``file_count`` -- number of real (size > 0) files seen at the
+                        top level + immediate children.  Bounded
+                        scan -- we stop after seeing 1 real file
+                        when only deciding ``synced`` vs
+                        ``not_synced`` so a huge folder does not
+                        wedge boot.
+    * ``path``       -- the configured folder path (str), or ``None``
+                        when not configured.
+
+    Never raises -- any ``OSError`` collapses to ``("not_synced", 0,
+    path)``.
+    """
+    onedrive_root = getattr(Config, "CSONE_ONEDRIVE_FOLDER", None)
+    if not onedrive_root:
+        return "unknown", 0, None
+    path_str = str(onedrive_root)
+    try:
+        root = Path(path_str)
+        if not root.is_dir():
+            return "not_synced", 0, path_str
+        real_files = 0
+        for entry in root.iterdir():
+            try:
+                if entry.is_file() and entry.stat().st_size > 0:
+                    real_files += 1
+                    if real_files >= 1:
+                        # Short-circuit: we only need to know whether
+                        # the folder is synced, not the exact count.
+                        # The full count is computed by the indexer's
+                        # walker on the next refresh pass.
+                        break
+            except OSError:
+                continue
+        if real_files >= 1:
+            return "synced", real_files, path_str
+        return "not_synced", 0, path_str
+    except OSError:
+        return "not_synced", 0, path_str
 
 
 # ---------------------------------------------------------------------------
@@ -347,26 +433,6 @@ def _should_refresh(
     return (now - float(last_refresh_ts)) >= float(interval_s)
 
 
-def _is_sharepoint_signed_in() -> bool:
-    """Return True when the keyring carries a usable refresh token so
-    the daily worker can pull updates without prompting the user."""
-    if not bool(getattr(Config, "ADOPTIQ_SHAREPOINT_ENABLED", False)):
-        return False
-    try:
-        import sharepoint_corpus_source as _sp
-    except Exception:  # noqa: BLE001 - never bubble
-        return False
-    try:
-        client = _sp.build_default_client()
-    except Exception:  # noqa: BLE001
-        return False
-    try:
-        info = client.get_token_info()
-    except Exception:  # noqa: BLE001
-        return False
-    return bool(getattr(info, "has_refresh_token", False))
-
-
 def _daily_refresh_loop() -> None:
     """Body of the daily-refresh daemon.
 
@@ -377,7 +443,12 @@ def _daily_refresh_loop() -> None:
       * a baked corpus install or prior refresh has populated
         ``_STATE.last_successful_refresh_ts``, AND
       * ``_should_refresh()`` says we're past the 24h window, AND
-      * the user is signed into SharePoint.
+      * the OneDrive desktop client has the canonical AdoptIQ folder
+        synced to disk (``_check_onedrive_sync_status() == "synced"``).
+
+    Round 36 / onedrive-sync-auth: the legacy MSAL refresh-token gate
+    has been removed -- we trust the OneDrive desktop client to keep
+    the local mirror current, and just verify by stat()ing the folder.
 
     Refreshes piggy-back on ``request_refresh()`` -> the existing
     ``_run_index_pass()`` machinery, which already writes the
@@ -386,7 +457,7 @@ def _daily_refresh_loop() -> None:
     leaves the prior corpus intact (Phase 4c atomic-swap semantics).
     """
     logger.info(
-        "Round 35 / corpus_bootstrap: daily refresh worker started "
+        "Round 36 / corpus_bootstrap: daily refresh worker started "
         "(interval=%.0fs tick=%.0fs)",
         _DAILY_REFRESH_INTERVAL_S, _DAILY_REFRESH_TICK_S,
     )
@@ -405,16 +476,26 @@ def _daily_refresh_loop() -> None:
                 continue
             if not _should_refresh(last_refresh_ts=last_ts):
                 continue
-            if not _is_sharepoint_signed_in():
+            # Round 36: probe the OneDrive sync mirror.  If the user
+            # has not signed into OneDrive (or the folder was deleted
+            # locally) we skip silently; the panel surfaces
+            # ``onedrive_status="not_synced"`` so the user knows
+            # daily refresh is paused.
+            od_status, od_count, _ = _check_onedrive_sync_status()
+            with _BOOT_LOCK:
+                _STATE.onedrive_status = od_status
+                _STATE.onedrive_file_count = od_count
+            if od_status != "synced":
                 logger.debug(
-                    "Round 35 / corpus_bootstrap: daily refresh skipped "
-                    "(user not signed in)"
+                    "Round 36 / corpus_bootstrap: daily refresh skipped "
+                    "(onedrive_status=%s)",
+                    od_status,
                 )
                 continue
             logger.info(
-                "Round 35 / corpus_bootstrap: triggering daily refresh "
-                "(last_successful=%s)",
-                last_ts,
+                "Round 36 / corpus_bootstrap: triggering daily refresh "
+                "(last_successful=%s onedrive_files=%s)",
+                last_ts, od_count,
             )
             with _BOOT_LOCK:
                 _STATE.last_refresh_attempt_ts = time.time()
@@ -425,16 +506,16 @@ def _daily_refresh_loop() -> None:
                 with _BOOT_LOCK:
                     _STATE.last_refresh_error = type(refresh_err).__name__
                 logger.warning(
-                    "Round 35 / corpus_bootstrap: daily refresh raised: %s",
+                    "Round 36 / corpus_bootstrap: daily refresh raised: %s",
                     type(refresh_err).__name__,
                 )
         except Exception as loop_err:  # noqa: BLE001 - never bubble
             logger.warning(
-                "Round 35 / corpus_bootstrap: daily refresh loop iteration "
+                "Round 36 / corpus_bootstrap: daily refresh loop iteration "
                 "failed: %s",
                 type(loop_err).__name__,
             )
-    logger.info("Round 35 / corpus_bootstrap: daily refresh worker exiting")
+    logger.info("Round 36 / corpus_bootstrap: daily refresh worker exiting")
 
 
 def start_daily_refresh_worker() -> bool:
@@ -534,27 +615,23 @@ def _accumulate_index_stats(target: IndexStats, source: IndexStats) -> None:
 
 
 def _resolve_index_sources() -> list[dict[str, object]]:
-    """Round 17.1 + 17.2 + 26: enumerate the corpus index sources for
+    """Round 17.1 + 26 + 36: enumerate the corpus index sources for
     the current bootstrap pass.  Order matters because ``index_folder``
     rebuilds only on the first source -- subsequent sources do
     incremental upserts on top of the rows the first source wrote.
 
-    Priority:
+    Priority (Round 36 - MSAL/Graph removed):
 
-    1. ``sharepoint_csone`` -- the local cache populated by
-       :func:`sharepoint_corpus_source.refresh_local_cache` when
-       ``Config.ADOPTIQ_SHAREPOINT_ENABLED`` is on.  Skipped silently
-       (``dir=None``) when SharePoint is disabled, no folder URL is
-       configured, or the user has not yet completed the device-code
-       sign-in (``RefreshStats.error_kind == 'auth_required'``).
-    2. ``onedrive`` -- the synced OneDrive folder
+    1. ``onedrive`` -- the synced OneDrive folder
        (``Config.CSONE_ONEDRIVE_FOLDER``); appended only when the
        resolved directory actually exists so we don't waste a walker
-       pass logging a "missing" warning on every refresh.
-    3. ``user_downloads`` -- ``~/Downloads`` filtered to AdoptIQ
+       pass logging a "missing" warning on every refresh.  Now the
+       primary source -- the OneDrive desktop client handles auth /
+       MFA / admin-consent and we trust the on-disk mirror.
+    2. ``user_downloads`` -- ``~/Downloads`` filtered to AdoptIQ
        report names, when ``CSONE_INCLUDE_USER_DOWNLOADS`` is
        truthy.
-    4. ``intel_uploads`` (Round 26) -- per-user drop folder
+    3. ``intel_uploads`` (Round 26) -- per-user drop folder
        populated by ``/api/intel/upload``.  Walked when the
        directory exists.  Pre-create is gated on
        ``ADOPTIQ_INTEL_UPLOAD_ENABLED`` (Round 26 review /
@@ -562,37 +639,19 @@ def _resolve_index_sources() -> list[dict[str, object]]:
        absent unless an admin pre-seeds the directory by hand --
        at which point the walker still picks it up.
 
+    Round 36 / onedrive-sync-auth: the legacy ``sharepoint_csone``
+    source has been removed.  MSAL/Graph runtime auth was blocked
+    by Cisco tenant admin-consent on the default Microsoft Graph
+    PowerShell client ID; the OneDrive desktop client already
+    handles that auth flow and produces the same files on disk
+    under ``Config.CSONE_ONEDRIVE_FOLDER``.
+
     Each entry is a self-describing dict so the admin tile can render
     labels without having to hard-code the order.
     """
     sources: list[dict[str, object]] = []
 
-    # 1) SharePoint local cache (primary source; refreshed before the
-    # walker runs in :func:`_run_index_pass`).
-    sharepoint_enabled = bool(
-        getattr(Config, "ADOPTIQ_SHAREPOINT_ENABLED", False)
-    )
-    sharepoint_url = (
-        getattr(Config, "ADOPTIQ_SHAREPOINT_FOLDER_URL", None) or ""
-    ).strip()
-    sharepoint_cache = (
-        getattr(Config, "ADOPTIQ_SHAREPOINT_CACHE_DIR", None) or ""
-    ).strip()
-    if sharepoint_enabled and sharepoint_url and sharepoint_cache:
-        cache_path = Path(sharepoint_cache)
-        # We always include the source -- even if the cache directory
-        # does not yet exist -- because :func:`_run_index_pass` will
-        # create it when the SharePoint refresh succeeds.  The walker
-        # handles a missing dir gracefully (zero files seen).
-        sources.append(
-            {
-                "label": "sharepoint_csone",
-                "dir": str(cache_path),
-                "filter": "all_supported",
-            }
-        )
-
-    # 2) OneDrive sync.
+    # 1) OneDrive sync (Round 36: now the primary runtime source).
     onedrive_root = getattr(Config, "CSONE_ONEDRIVE_FOLDER", None)
     if onedrive_root:
         try:
@@ -609,12 +668,12 @@ def _resolve_index_sources() -> list[dict[str, object]]:
             )
         else:
             logger.info(
-                "Round 17.2 / corpus_bootstrap: onedrive source skipped "
+                "Round 36 / corpus_bootstrap: onedrive source skipped "
                 "(no synced copy at %s)",
                 onedrive_root,
             )
 
-    # 3) Downloads.
+    # 2) Downloads.
     include_downloads = bool(getattr(Config, "CSONE_INCLUDE_USER_DOWNLOADS", False))
     downloads_dir = getattr(Config, "CSONE_USER_DOWNLOADS_DIR", None)
     if include_downloads and downloads_dir:
@@ -628,7 +687,7 @@ def _resolve_index_sources() -> list[dict[str, object]]:
                 }
             )
 
-    # 4) Round 26: per-user uploaded CSOne reports.  We walk this
+    # 3) Round 26: per-user uploaded CSOne reports.  We walk this
     # source unconditionally when the directory exists -- not gated
     # on ``ADOPTIQ_INTEL_UPLOAD_ENABLED`` -- so admin-pre-seeded
     # files are still ingested even when the live upload endpoint
@@ -653,117 +712,6 @@ def _resolve_index_sources() -> list[dict[str, object]]:
                 }
             )
     return sources
-
-
-def _refresh_sharepoint_cache_for_bootstrap() -> Optional[dict[str, object]]:
-    """Round 17.2: pull the SharePoint share into its local cache so
-    the indexer can walk it.  Returns a dict the admin tile can
-    render (always serializable), or ``None`` when SharePoint is
-    disabled / not configured.  Auth failures are surfaced as a
-    structured field, never raised.
-    """
-    if not bool(getattr(Config, "ADOPTIQ_SHAREPOINT_ENABLED", False)):
-        return None
-    folder_url = (
-        getattr(Config, "ADOPTIQ_SHAREPOINT_FOLDER_URL", None) or ""
-    ).strip()
-    cache_dir = (
-        getattr(Config, "ADOPTIQ_SHAREPOINT_CACHE_DIR", None) or ""
-    ).strip()
-    if not folder_url or not cache_dir:
-        # Round 33 / Build8: surface "not configured" as a structured
-        # state so the analyze-page SharePoint panel can render the
-        # URL input + Save button.  Previously this returned ``None``
-        # which collapsed to "unknown" in the UI and left users
-        # without a way to fix the missing URL from the main page.
-        return {
-            "enabled": True,
-            "configured": False,
-            "folder_url": folder_url,
-            "cache_dir": cache_dir,
-            "signed_in": False,
-            "upn": None,
-            "name": None,
-            "account": None,
-            "error_kind": "not_configured",
-            "error_detail": (
-                "no SharePoint folder URL configured -- set one via the "
-                "analyze-page Intelligence card or the "
-                "ADOPTIQ_SHAREPOINT_FOLDER_URL env var"
-            ),
-            "stats": None,
-        }
-
-    try:
-        import sharepoint_corpus_source as _sp
-    except Exception as imp_err:  # noqa: BLE001 - optional dep / install issue
-        logger.warning(
-            "Round 17.2 / corpus_bootstrap: sharepoint module import failed (%s)",
-            type(imp_err).__name__,
-        )
-        return {
-            "enabled": True,
-            "configured": True,
-            "folder_url": folder_url,
-            "cache_dir": cache_dir,
-            "signed_in": False,
-            "error_kind": "import_failed",
-            "error_detail": type(imp_err).__name__,
-            "stats": None,
-        }
-
-    try:
-        client = _sp.build_default_client()
-    except Exception as build_err:  # noqa: BLE001 - never bubble
-        logger.warning(
-            "Round 17.2 / corpus_bootstrap: sharepoint client build failed (%s)",
-            type(build_err).__name__,
-        )
-        return {
-            "enabled": True,
-            "configured": True,
-            "folder_url": folder_url,
-            "cache_dir": cache_dir,
-            "signed_in": False,
-            "error_kind": "client_init_failed",
-            "error_detail": type(build_err).__name__,
-            "stats": None,
-        }
-
-    max_bytes = int(
-        getattr(client, "max_file_bytes", _sp.DEFAULT_MAX_FILE_BYTES)
-    )
-    cache_path = Path(cache_dir)
-    logger.info(
-        "Round 17.2 / corpus_bootstrap: refreshing SharePoint cache_dir=%s",
-        cache_path,
-    )
-    stats = _sp.refresh_local_cache(
-        share_url=folder_url,
-        cache_dir=cache_path,
-        client=client,
-        max_file_bytes=max_bytes,
-    )
-    token_info = client.get_token_info()
-    # Round 33 / Build8: synthesize a single ``account`` field so the
-    # analyze-page SharePoint panel JS does not need to know about
-    # both ``upn`` and ``name`` fallbacks.
-    account_label = token_info.upn or token_info.name or None
-    return {
-        "enabled": True,
-        "configured": True,
-        "folder_url": folder_url,
-        "cache_dir": str(cache_path),
-        "signed_in": bool(token_info.upn),
-        "upn": token_info.upn,
-        "name": token_info.name,
-        "account": account_label,
-        "expires_at": token_info.expires_at,
-        "expires_in_s": token_info.expires_in_s,
-        "error_kind": stats.error_kind,
-        "error_detail": stats.error_detail,
-        "stats": stats.to_dict(),
-    }
 
 
 def _run_index_pass(*, rebuild: bool) -> None:
@@ -792,11 +740,19 @@ def _run_index_pass(*, rebuild: bool) -> None:
             type(install_err).__name__,
         )
 
+    # Round 36 / onedrive-sync-auth: probe sync status before the
+    # index pass so the panel can render "synced" / "not_synced"
+    # immediately (the slow indexer walk no longer gates the UI's
+    # ability to tell the user whether OneDrive is talking to disk).
+    od_status, od_count, _ = _check_onedrive_sync_status()
+
     with _BOOT_LOCK:
         _STATE.in_progress = True
         _STATE.last_started_at = _utc_now_iso()
         _STATE.encrypted_path = str(encrypted_path)
         _STATE.onedrive_root = str(onedrive_root) if onedrive_root else None
+        _STATE.onedrive_status = od_status
+        _STATE.onedrive_file_count = od_count
         _STATE.last_error = None
         _STATE.last_error_kind = None
         _STATE.last_sources = None
@@ -806,24 +762,23 @@ def _run_index_pass(*, rebuild: bool) -> None:
         elif _STATE.source is None:
             _STATE.source = "fresh"
 
-    # Round 17.2: refresh the SharePoint cache before resolving the
-    # source list, so the cache directory is populated by the time the
-    # indexer walks it.  Auth failures are non-fatal -- the bootstrap
-    # falls through to OneDrive / Downloads.
-    sharepoint_state = _refresh_sharepoint_cache_for_bootstrap()
+    # Round 36 / onedrive-sync-auth: the legacy SharePoint cache pull
+    # has been removed -- the OneDrive desktop client mirrors the
+    # canonical folder under ``Config.CSONE_ONEDRIVE_FOLDER`` and
+    # the indexer walks it directly.  Clear any stale state from
+    # earlier rounds so the panel does not show a phantom "signed in"
+    # tile after upgrade.
     with _BOOT_LOCK:
-        _STATE.sharepoint = sharepoint_state
+        _STATE.sharepoint = None
 
     sources = _resolve_index_sources()
 
-    # Round 33 / Build8: pass the SharePoint Graph cache as a sentinel
-    # fallback so SharePoint-only installs (no synced OneDrive folder)
-    # can still encrypt the corpus.  ``open_corpus_for_user`` will fall
-    # through to an auto-minted local sentinel under
-    # ``~/Library/Application Support/AdoptIQ/knowledge/sentinel.json``
-    # if neither root carries the file -- documented in the docstring
-    # there and in ``CLAUDE.md`` / ``README.md``.
-    sharepoint_root = getattr(Config, "ADOPTIQ_SHAREPOINT_CACHE_DIR", None)
+    # Round 36 / onedrive-sync-auth: ``sharepoint_root`` is no longer
+    # passed to ``open_corpus_for_user`` -- the SharePoint cache dir
+    # has been retired.  ``open_corpus_for_user`` falls through to
+    # ``CSONE_ONEDRIVE_FOLDER`` first and then the auto-minted local
+    # sentinel under ``~/Library/Application Support/AdoptIQ/knowledge/sentinel.json``,
+    # so OneDrive-less installs still encrypt cleanly.
     handle: Optional[EncryptedCorpusHandle] = None
     try:
         try:
@@ -831,7 +786,6 @@ def _run_index_pass(*, rebuild: bool) -> None:
                 onedrive_root=onedrive_root,
                 encrypted_path=encrypted_path,
                 create_if_missing=True,
-                sharepoint_root=sharepoint_root,
             )
         except CorpusCryptoError as crypto_err:
             with _BOOT_LOCK:
@@ -957,6 +911,12 @@ def _run_index_pass(*, rebuild: bool) -> None:
             )
             return
 
+        # Round 36 / onedrive-sync-auth: re-probe after the indexer
+        # finishes so a folder that became available mid-pass (or a
+        # folder that emptied) is reflected in the next status poll
+        # without waiting for the bootstrap to re-run.
+        post_status, post_count, _ = _check_onedrive_sync_status()
+
         with _BOOT_LOCK:
             _STATE.in_progress = False
             _STATE.completed = True
@@ -969,6 +929,8 @@ def _run_index_pass(*, rebuild: bool) -> None:
             # refreshed N hours ago".
             _STATE.last_successful_refresh_ts = time.time()
             _STATE.last_refresh_error = None
+            _STATE.onedrive_status = post_status
+            _STATE.onedrive_file_count = post_count
         logger.info(
             "Round 17.1 / corpus_bootstrap: indexed files_parsed=%d chunks=%d sources=%d",
             int(aggregate.files_parsed),
@@ -1098,148 +1060,12 @@ def reset_for_tests() -> None:
     configure_connection(None)
 
 
-def begin_sharepoint_signin() -> dict[str, object]:
-    """Round 17.2: kick off a Microsoft Graph device-code sign-in for
-    the SharePoint corpus source.  Returns a dict with the
-    user-displayable code/uri so the admin tile can render the
-    prompt.  Spawns a worker thread that completes the flow and (on
-    success) triggers a corpus refresh.  Never raises -- network /
-    config failures are surfaced via the ``error`` key.
-    """
-    if not bool(getattr(Config, "ADOPTIQ_SHAREPOINT_ENABLED", False)):
-        return {"ok": False, "error": "SharePoint feature disabled"}
-    try:
-        import sharepoint_corpus_source as _sp
-    except Exception as imp_err:  # noqa: BLE001
-        return {
-            "ok": False,
-            "error": f"sharepoint module import failed: {type(imp_err).__name__}",
-        }
-    try:
-        client = _sp.build_default_client()
-    except Exception as build_err:  # noqa: BLE001
-        return {
-            "ok": False,
-            "error": f"client init failed: {type(build_err).__name__}",
-        }
-    try:
-        flow = client.start_device_code_flow()
-    except _sp.SharePointAuthRequired as auth_err:
-        return {"ok": False, "error": f"device flow init failed: {auth_err}"}
-    except Exception as err:  # noqa: BLE001
-        return {"ok": False, "error": type(err).__name__}
-
-    def _completion_worker() -> None:
-        try:
-            info = client.await_device_code_completion()
-        except Exception as werr:  # noqa: BLE001 - worker must never raise
-            logger.warning(
-                "Round 17.2 / sharepoint signin worker raised: %s",
-                type(werr).__name__,
-            )
-            return
-        if info is None:
-            logger.info("Round 17.2 / sharepoint signin worker: flow not completed")
-            return
-        # Trigger an incremental refresh now that the user is signed in.
-        try:
-            request_refresh(rebuild=False)
-        except Exception as rerr:  # noqa: BLE001
-            logger.warning(
-                "Round 17.2 / sharepoint post-signin refresh failed: %s",
-                type(rerr).__name__,
-            )
-
-    thread = threading.Thread(
-        target=_completion_worker,
-        name="adoptiq-sharepoint-signin",
-        daemon=True,
-    )
-    thread.start()
-
-    return {
-        "ok": True,
-        "user_code": flow.user_code,
-        "verification_uri": flow.verification_uri,
-        "message": flow.message,
-        "expires_in": int(flow.expires_in or 0),
-        "interval": int(flow.interval or 5),
-    }
-
-
-def request_sharepoint_refresh() -> bool:
-    """Round 17.2: convenience wrapper that triggers a corpus refresh
-    after the SharePoint cache is updated.  Returns True when a
-    refresh thread was spawned."""
-    return start_background(rebuild=False)
-
-
-def sharepoint_signout() -> dict[str, object]:
-    """Round 33 / Build8: drop the persisted SharePoint refresh-token
-    cache from both the macOS Keychain and the ``~/.adoptiq`` file
-    fallback.
-
-    Idempotent and never raises.  Returns
-    ``{"ok": True, "cleared": {"keyring": bool, "file": bool}}`` so
-    the analyze-page UI can show the user a precise confirmation
-    ("signed out of Microsoft").  An ``error`` field is present only
-    when the SharePoint module fails to import or the client cannot
-    be constructed -- the user is still effectively signed out, but
-    the response surfaces the partial state.
-    """
-    if not bool(getattr(Config, "ADOPTIQ_SHAREPOINT_ENABLED", False)):
-        return {"ok": False, "error": "SharePoint feature disabled"}
-    try:
-        import sharepoint_corpus_source as _sp
-    except Exception as imp_err:  # noqa: BLE001
-        return {
-            "ok": False,
-            "error": f"sharepoint module import failed: {type(imp_err).__name__}",
-        }
-    try:
-        client = _sp.build_default_client()
-    except Exception as build_err:  # noqa: BLE001
-        return {
-            "ok": False,
-            "error": f"client init failed: {type(build_err).__name__}",
-        }
-    try:
-        cleared = client.clear_token_cache()
-    except Exception as err:  # noqa: BLE001 - never bubble
-        logger.warning(
-            "Round 33 / Build8: sharepoint signout failed: %s",
-            type(err).__name__,
-        )
-        return {"ok": False, "error": type(err).__name__}
-    # Reset the cached SharePoint state on the boot snapshot so the
-    # status payload immediately shows "auth_required" instead of
-    # "signed_in" stale from before sign-out.
-    try:
-        with _BOOT_LOCK:
-            if _STATE.sharepoint is not None and isinstance(_STATE.sharepoint, dict):
-                _STATE.sharepoint.update({
-                    "signed_in": False,
-                    "account": None,
-                    "error_kind": "auth_required",
-                    "error_detail": "user signed out via /api/corpus/sharepoint/signout",
-                })
-    except Exception as state_err:  # noqa: BLE001
-        logger.debug(
-            "Round 33 / Build8: failed to update sharepoint boot state on signout: %s",
-            type(state_err).__name__,
-        )
-    return {"ok": True, "cleared": cleared}
-
-
 __all__ = [
     "CorpusBootState",
-    "begin_sharepoint_signin",
     "get_state",
     "is_enabled",
     "request_refresh",
-    "request_sharepoint_refresh",
     "reset_for_tests",
-    "sharepoint_signout",
     "start_background",
     "stop",
 ]
