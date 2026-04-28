@@ -2,7 +2,7 @@
 # All secrets and DB credentials come from environment variables (.env). No hardcoded credentials.
 # Version and build - updated by build scripts (macOS/Windows) before packaging.
 ADOPTIQ_VERSION = "1.0.4"
-ADOPTIQ_BUILD = "9"
+ADOPTIQ_BUILD = "10"
 
 def version_string():
     """e.g. 'v1.0.1 build 1'"""
