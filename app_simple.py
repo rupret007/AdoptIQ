@@ -192,6 +192,23 @@ def _start_admin_server_in_thread() -> None:
     if getattr(sys, "_adoptiq_admin_started", False):
         return
 
+    # Round 37 / Phase 1: pin ADOPTIQ_MAIN_URL to the live main-app
+    # port BEFORE importing the admin module.  The packaged .app
+    # runs the main UI on 15152 (and admin on 5152), but the admin
+    # module historically defaulted to localhost:5151 when the env
+    # was unset.  That made the admin's "Server Status" tile probe
+    # the wrong port, miss, decide running=False, and render the
+    # "Start Server" button while the server was right there.  The
+    # parent process owns the port; the admin reads it.  Defense in
+    # depth: enhanced_admin_dashboard_v2._main_app_host_port now
+    # also re-reads this env per call so a later rebind picks up.
+    try:
+        _main_port = _resolve_main_port()
+    except Exception:  # noqa: BLE001 - never block admin start
+        _main_port = None
+    if _main_port:
+        os.environ["ADOPTIQ_MAIN_URL"] = f"http://127.0.0.1:{_main_port}"
+
     try:
         from enhanced_admin_dashboard_v2 import admin_app, _resolve_admin_port
     except Exception as _imp_err:  # noqa: BLE001 - never block main app
