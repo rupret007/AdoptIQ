@@ -51,13 +51,14 @@
     var ENABLE_TOGGLE = '[data-intel-enable-toggle]';
     var UPLOAD_FORM_ID = 'adoptiq-intel-upload-form';
     var UPLOAD_FEEDBACK = '[data-intel-upload-feedback]';
-    // Round 33 / Build8: SharePoint connection panel selectors + URLs.
-    // Persisting the URL goes through /api/settings/sharepoint_url
-    // (CSRF + allow-list validated server-side); sign-in / sign-out
-    // hit the existing /api/corpus/sharepoint/* routes.
+    // Round 33 / Build8 -> Round 35: AdoptIQ Knowledge Corpus panel
+    // selectors + URLs.  Round 35 retired the per-user URL paste flow
+    // (the corpus URL is now hardcoded in
+    // Config.ADOPTIQ_CORPUS_SHARE_URL and the corpus itself is baked
+    // into the .app at build time).  Connect / Sign-out remain so the
+    // daily refresh worker can pull updates from the source share
+    // using the user's own MSAL token.
     var SHAREPOINT_PANEL = '[data-sharepoint-panel]';
-    var SHAREPOINT_URL_INPUT = '[data-sharepoint-url-input]';
-    var SHAREPOINT_SAVE_URL = '[data-sharepoint-save-url]';
     var SHAREPOINT_SIGNIN = '[data-sharepoint-signin]';
     var SHAREPOINT_SIGNOUT = '[data-sharepoint-signout]';
     var SHAREPOINT_FEEDBACK = '[data-sharepoint-feedback]';
@@ -68,13 +69,8 @@
     var SHAREPOINT_DEVICE_URI = '[data-sharepoint-devicecode-uri]';
     var SHAREPOINT_DEVICE_USER = '[data-sharepoint-devicecode-user]';
     var SHAREPOINT_DEVICE_STATUS = '[data-sharepoint-devicecode-status]';
-    var SHAREPOINT_URL_SAVE_URL = '/api/settings/sharepoint_url';
     var SHAREPOINT_SIGNIN_URL = '/api/corpus/sharepoint/signin';
     var SHAREPOINT_SIGNOUT_URL = '/api/corpus/sharepoint/signout';
-    // Mirrors adoptiq_settings._SHAREPOINT_URL_RE so the UI can refuse
-    // to POST a clearly-bad URL before the round-trip; the server does
-    // the authoritative check.
-    var SHAREPOINT_URL_RE = /^https:\/\/[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.sharepoint\.com\/[A-Za-z0-9._~:\/?#\[\]@!$&'()*+,;=%-]+$/;
     var POLL_FAST_MS = 5000;
     var POLL_SLOW_MS = 60000;
     var REFRESH_DEBOUNCE_MS = 2000;
@@ -469,34 +465,50 @@
         var panel = document.querySelector(SHAREPOINT_PANEL);
         if (!panel) { return; }
         var sp = (payload && payload.boot && payload.boot.sharepoint) || null;
+        var boot = (payload && payload.boot) || null;
 
+        // Round 35 panel states (corpus URL is hardcoded; ``configured``
+        // is now always true so that branch is gone):
+        //   * signed_in        -- Signed in (daily refresh active)
+        //   * auth_required    -- Awaiting sign-in (baked snapshot still
+        //                         visible to the indexer)
+        //   * refreshing       -- Refresh in progress
+        //   * baked            -- Indexed at build time, sign in to refresh
+        //   * <error_kind>     -- Refresh failed; baked corpus still
+        //                         available, last successful refresh shown
+        //                         in the account slot when known
+        //   * unknown          -- pre-poll / no payload yet
         var state = 'unknown';
         var label = 'checking\u2026';
         var pillClass = 'bg-secondary';
         var account = '';
         var signedIn = false;
-        var configured = false;
+        var refreshing = !!(boot && boot.in_progress);
+        var bootSource = (boot && typeof boot.source === 'string') ? boot.source : '';
 
         if (sp) {
-            configured = !!sp.configured;
             signedIn = !!sp.signed_in;
             account = sp.account || '';
-            if (!configured) {
-                state = 'not_configured';
-                label = 'Not configured';
-                pillClass = 'bg-warning text-dark';
+            if (refreshing) {
+                state = 'refreshing';
+                label = 'Refreshing\u2026';
+                pillClass = 'bg-primary';
             } else if (signedIn) {
                 state = 'signed_in';
                 label = 'Signed in';
                 pillClass = 'bg-success';
             } else if (sp.error_kind === 'auth_required') {
                 state = 'auth_required';
-                label = 'Sign-in required';
+                label = 'Awaiting sign-in';
                 pillClass = 'bg-warning text-dark';
             } else if (sp.error_kind) {
                 state = sp.error_kind;
-                label = String(sp.error_kind).replace(/_/g, ' ');
+                label = 'Refresh failed (' + String(sp.error_kind).replace(/_/g, ' ') + ')';
                 pillClass = 'bg-danger';
+            } else if (bootSource === 'baked') {
+                state = 'baked';
+                label = 'Indexed (sign in to refresh)';
+                pillClass = 'bg-info text-dark';
             } else {
                 state = 'unknown';
                 label = 'Status unknown';
@@ -517,35 +529,28 @@
 
         var acctEl = panel.querySelector(SHAREPOINT_ACCOUNT);
         if (acctEl) {
-            acctEl.textContent = signedIn && account ? ('Connected as ' + account) : '';
+            if (signedIn && account) {
+                acctEl.textContent = 'Connected as ' + account;
+            } else if (bootSource === 'baked' && boot && boot.indexed_at) {
+                acctEl.textContent = 'Last bake ' + String(boot.indexed_at);
+            } else {
+                acctEl.textContent = '';
+            }
         }
 
         var signinBtn = panel.querySelector(SHAREPOINT_SIGNIN);
         var signoutBtn = panel.querySelector(SHAREPOINT_SIGNOUT);
         if (signinBtn) {
-            signinBtn.style.display = (configured && !signedIn) ? '' : 'none';
+            signinBtn.style.display = signedIn ? 'none' : '';
         }
         if (signoutBtn) {
             signoutBtn.style.display = signedIn ? '' : 'none';
         }
 
-        // Hide the device-code modal as soon as we observe signed_in.
         if (signedIn) {
             hideSharepointDeviceCode();
             stopSharepointSigninPoll();
         }
-
-        // Reflect the persisted folder URL into the input only when the
-        // user is not currently editing it.  ``document.activeElement``
-        // check avoids stomping on a value the user just typed.
-        try {
-            var input = panel.querySelector(SHAREPOINT_URL_INPUT);
-            if (input && document.activeElement !== input && sp && typeof sp.folder_url === 'string') {
-                if (!input.value && sp.folder_url) {
-                    input.value = sp.folder_url;
-                }
-            }
-        } catch (_) { /* non-fatal */ }
     }
 
     function hideSharepointDeviceCode() {
@@ -628,59 +633,6 @@
             });
         };
         sharepointSigninPollHandle = window.setTimeout(tick, SHAREPOINT_SIGNIN_POLL_MS);
-    }
-
-    function bindSharepointUrlSave() {
-        var btn = document.querySelector(SHAREPOINT_SAVE_URL);
-        if (!btn) { return; }
-        btn.addEventListener('click', function (ev) {
-            ev.preventDefault();
-            if (btn.disabled) { return; }
-            var input = document.querySelector(SHAREPOINT_URL_INPUT);
-            var url = input ? String(input.value || '').trim() : '';
-            if (url && !SHAREPOINT_URL_RE.test(url)) {
-                setSharepointFeedback(
-                    'error',
-                    'Invalid URL \u2014 must be https://<tenant>.sharepoint.com/...'
-                );
-                return;
-            }
-            btn.disabled = true;
-            setSharepointFeedback('pending', 'Saving\u2026');
-            var token = getCsrfToken();
-            fetch(SHAREPOINT_URL_SAVE_URL, {
-                method: 'POST',
-                credentials: 'same-origin',
-                headers: {
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': token,
-                    'X-CSRF-Token': token
-                },
-                body: JSON.stringify({ url: url })
-            }).then(function (resp) {
-                var ok = resp.ok;
-                var status = resp.status;
-                return resp.json().catch(function () { return null; }).then(function (data) {
-                    return { ok: ok, status: status, data: data };
-                });
-            }).then(function (result) {
-                if (!result.ok || !result.data || result.data.ok !== true) {
-                    var msg = (result.data && result.data.error) || ('HTTP ' + result.status);
-                    setSharepointFeedback('error', 'Save failed: ' + msg);
-                    return;
-                }
-                setSharepointFeedback(
-                    'success',
-                    result.data.configured ? 'URL saved.' : 'URL cleared.'
-                );
-                pollOnce();
-            }).catch(function () {
-                setSharepointFeedback('error', 'Save failed: network error');
-            }).then(function () {
-                btn.disabled = false;
-            });
-        });
     }
 
     function bindSharepointSignin() {
@@ -785,7 +737,6 @@
         bindRefreshButton();
         bindUploadForm();
         bindEnableToggle();
-        bindSharepointUrlSave();
         bindSharepointSignin();
         bindSharepointSignout();
         if (typeof document.addEventListener === 'function') {

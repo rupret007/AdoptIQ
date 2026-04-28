@@ -48,15 +48,19 @@ logger = logging.getLogger(__name__)
 # a ``(coercer, default)`` tuple so callers can rely on the returned
 # value's type.
 #
-# Round 33 / Build8: ``sharepoint_folder_url`` joins the schema so the
-# analyze-page Intelligence card can persist a per-user SharePoint
-# folder URL without baking a hardcoded personal/tenant URL into the
-# build.  Validation lives in ``_VALIDATORS`` below so a hand-edited
-# settings.json containing an arbitrary URL cannot redirect Graph
-# downloads to an attacker-controlled host.
+# Round 33 / Build8 added ``sharepoint_folder_url`` to let the
+# analyze-page Intelligence card persist a per-user SharePoint folder
+# URL.  Round 35 retires that surface in favor of the hardcoded
+# :data:`Config.ADOPTIQ_CORPUS_SHARE_URL` -- the corpus is now baked
+# into the .app at build time and refreshed daily from a single
+# source-of-truth share link, so per-user URL persistence is no longer
+# meaningful.  The key is intentionally absent from ``_SCHEMA`` so any
+# legacy ``settings.json`` containing it is silently ignored on load
+# and stripped on save.  ``is_valid_sharepoint_url`` is still exported
+# as a defense-in-depth helper for any caller that wants to validate a
+# SharePoint URL before handing it to the Graph fetcher.
 _SCHEMA: Dict[str, tuple] = {
     "corpus_knowledge_enabled": (bool, False),
-    "sharepoint_folder_url": (str, ""),
 }
 
 SETTINGS_FILENAME = "settings.json"
@@ -94,9 +98,12 @@ def _is_valid_sharepoint_url(value: Any) -> bool:
 # Per-key validators.  A validator returning False causes the key to
 # be dropped (with a warning) on both load and save.  Keys without a
 # validator entry pass through after type coercion.
-_VALIDATORS: Dict[str, Callable[[Any], bool]] = {
-    "sharepoint_folder_url": _is_valid_sharepoint_url,
-}
+#
+# Round 35: ``sharepoint_folder_url`` was removed from ``_SCHEMA`` so
+# its validator entry is no longer needed.  ``_is_valid_sharepoint_url``
+# is still exposed below for callers that want to vet a SharePoint URL
+# (e.g., bake script's env-override sanity check).
+_VALIDATORS: Dict[str, Callable[[Any], bool]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -274,10 +281,11 @@ def schema_keys() -> tuple:
 def is_valid_sharepoint_url(value: Any) -> bool:
     """Public alias for the SharePoint URL allow-list check.
 
-    Use from request handlers (``POST /api/settings/sharepoint_url``)
-    so the route can return a 400 before ever calling
-    :func:`save_settings` -- otherwise the save would silently drop
-    the value and the user would see no feedback.
+    Round 35 retired the ``POST /api/settings/sharepoint_url`` route
+    that originally consumed this helper.  It remains exported for
+    defense-in-depth checks elsewhere -- notably so the bake script
+    can vet an ``ADOPTIQ_CORPUS_SHARE_URL`` env override before
+    handing it to the Graph fetcher.
     """
     return _is_valid_sharepoint_url(value)
 

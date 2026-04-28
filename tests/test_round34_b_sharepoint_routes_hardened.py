@@ -1,10 +1,11 @@
-"""Round 34 / B -- harden the three new Build8 SharePoint POST routes.
+"""Round 34 / B -- harden the new Build8 SharePoint POST routes.
 
-Build8 added three POST routes for the user-facing SharePoint panel:
+Build8 originally added three POST routes for the user-facing
+SharePoint panel:
 
   * ``POST /api/corpus/sharepoint/signin``
   * ``POST /api/corpus/sharepoint/signout``
-  * ``POST /api/settings/sharepoint_url``
+  * ``POST /api/settings/sharepoint_url``  (RETIRED in Round 35)
 
 They were CSRF-protected via ``_r17_2_authorize_corpus_admin`` but
 were NOT in ``_SENSITIVE_ENDPOINTS``, so they bypassed:
@@ -14,7 +15,15 @@ were NOT in ``_SENSITIVE_ENDPOINTS``, so they bypassed:
     X-Content-Type-Options: nosniff, X-Frame-Options: DENY,
     Referrer-Policy: no-referrer, per-response CSP)
 
-Round 34 / B1 adds them to ``_SENSITIVE_ENDPOINTS``.
+Round 34 / B1 added them to ``_SENSITIVE_ENDPOINTS``.
+
+Round 35 / native-corpus retired the per-user URL paste UI, so the
+``/api/settings/sharepoint_url`` route is gone.  This file now
+exercises only the two remaining sign-in / sign-out routes; the
+SharePoint URL allow-list helper (``is_valid_sharepoint_url``)
+stays exported as a defense-in-depth helper for any caller that
+still needs to validate a tenant URL (e.g. an env-overridden
+``ADOPTIQ_CORPUS_SHARE_URL``).
 
 Round 34 / B2 also adds Host-header validation as defense-in-depth
 against DNS rebinding -- an attacker tab on ``evil.com`` whose DNS
@@ -36,38 +45,47 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
-def test_b1_three_new_routes_in_sensitive_endpoints():
-    """The three Build8 routes must be in ``_SENSITIVE_ENDPOINTS`` so
-    they pick up the localhost gate AND the response headers."""
+def test_b1_two_remaining_sharepoint_routes_in_sensitive_endpoints():
+    """The two surviving Build8 routes (sign-in / sign-out) must be
+    in ``_SENSITIVE_ENDPOINTS`` so they pick up the localhost gate
+    AND the response headers.
+
+    Round 35 retired ``api_settings_sharepoint_url`` (URL paste UI is
+    gone), so it is no longer in the sensitive set.
+    """
     import app_simple
 
     sensitive = app_simple._SENSITIVE_ENDPOINTS
     for endpoint in (
         "api_corpus_sharepoint_signin",
         "api_corpus_sharepoint_signout",
-        "api_settings_sharepoint_url",
     ):
         assert endpoint in sensitive, (
             f"endpoint {endpoint!r} missing from _SENSITIVE_ENDPOINTS; "
             f"would bypass localhost gate + security headers"
         )
+    # And the retired endpoint must NOT be in the set -- if a future
+    # round re-adds the route, it should be re-hardened explicitly.
+    assert "api_settings_sharepoint_url" not in sensitive, (
+        "Round 35 retired api_settings_sharepoint_url; resurrecting "
+        "it in _SENSITIVE_ENDPOINTS without re-registering the route "
+        "leaks a phantom endpoint name into the gate."
+    )
 
 
-def test_b1_sharepoint_url_response_carries_security_headers(client, app):
-    """A successful POST through ``/api/settings/sharepoint_url`` must
-    carry the standard sensitive-route response headers."""
+def test_b1_retired_sharepoint_url_route_is_gone(client, app):
+    """Round 35: the URL paste route is retired.  POST against the
+    legacy path must 404 -- header hardening is moot when the route
+    no longer exists."""
     app.config["WTF_CSRF_ENABLED"] = False
     resp = client.post(
         "/api/settings/sharepoint_url",
-        json={"url": ""},  # empty = clear; valid per is_valid_sharepoint_url
+        json={"url": ""},
     )
-    # The route may 200 or 500 depending on whether settings.json is
-    # writable in the test env.  The header gate is independent of
-    # the body.  Headers must be present either way.
-    assert resp.headers.get("Cache-Control") == "no-store"
-    assert resp.headers.get("X-Content-Type-Options") == "nosniff"
-    assert resp.headers.get("X-Frame-Options") == "DENY"
-    assert resp.headers.get("Referrer-Policy") == "no-referrer"
+    assert resp.status_code in (404, 405), (
+        f"Round 35 retired POST /api/settings/sharepoint_url; "
+        f"expected 404/405, got {resp.status_code}"
+    )
 
 
 def test_b1_sharepoint_signin_response_carries_security_headers(client, app):
@@ -199,16 +217,21 @@ def test_b2_public_ui_shells_unaffected_by_host_check(client, app):
     assert resp.status_code == 200
 
 
-def test_b2_host_gate_protects_new_sharepoint_post_routes(client, app):
-    """End-to-end pin: the THREE Build8 POST routes that area B added
-    to ``_SENSITIVE_ENDPOINTS`` must reject a hostile Host header
-    even when CSRF is disabled (test mode).  Without this gate, a
-    DNS-rebinding tab could drive the SharePoint sign-in flow."""
+def test_b2_host_gate_protects_remaining_sharepoint_post_routes(client, app):
+    """End-to-end pin: the two surviving Build8 POST routes that area
+    B added to ``_SENSITIVE_ENDPOINTS`` must reject a hostile Host
+    header even when CSRF is disabled (test mode).  Without this
+    gate, a DNS-rebinding tab could drive the SharePoint sign-in
+    flow.
+
+    Round 35 retired ``/api/settings/sharepoint_url``; it is now a
+    404 regardless of Host header (covered by
+    ``test_b1_retired_sharepoint_url_route_is_gone``).
+    """
     app.config["WTF_CSRF_ENABLED"] = False
     for path in (
         "/api/corpus/sharepoint/signin",
         "/api/corpus/sharepoint/signout",
-        "/api/settings/sharepoint_url",
     ):
         resp = client.post(
             path,

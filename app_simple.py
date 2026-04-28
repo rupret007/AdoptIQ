@@ -802,7 +802,6 @@ _SENSITIVE_ENDPOINTS = {
     # surface gets.  Add them here.
     'api_corpus_sharepoint_signin',
     'api_corpus_sharepoint_signout',
-    'api_settings_sharepoint_url',
 }
 
 # Round 13 / Phase 4.1: UI shells (``index``, ``help``, etc.) are
@@ -1388,20 +1387,14 @@ try:
             "Config.CORPUS_KNOWLEDGE_ENABLED=%s",
             Config.CORPUS_KNOWLEDGE_ENABLED,
         )
-    # Round 33 / Build8: bridge persisted SharePoint folder URL into
-    # Config so the bootstrap loop and Graph client see the user's
-    # selection without a process restart.  ``load_settings`` already
-    # validated the value against
-    # ``adoptiq_settings.is_valid_sharepoint_url`` (and dropped it
-    # otherwise), so anything we see here is allow-listed.
-    _r33_sp_url = _r32_persisted.get("sharepoint_folder_url")
-    if isinstance(_r33_sp_url, str) and _r33_sp_url:
-        Config.ADOPTIQ_SHAREPOINT_FOLDER_URL = _r33_sp_url
-        logging.getLogger(__name__).info(
-            "Round 33 / Build8: settings.json override -> "
-            "Config.ADOPTIQ_SHAREPOINT_FOLDER_URL=<%d chars>",
-            len(_r33_sp_url),
-        )
+    # Round 33 / Build8 -> Round 35: the per-user SharePoint folder URL
+    # bridge was retired here because the corpus URL is now hardcoded
+    # in :data:`Config.ADOPTIQ_CORPUS_SHARE_URL` (and
+    # ``ADOPTIQ_SHAREPOINT_FOLDER_URL`` is a back-compat alias that
+    # already inherits the same default in ``config.py``).  Any
+    # ``sharepoint_folder_url`` left over in a legacy ``settings.json``
+    # is silently ignored on read because the key is no longer in
+    # :data:`adoptiq_settings._SCHEMA`.
 except Exception as _r32_settings_err:  # noqa: BLE001 - never block boot
     logging.getLogger(__name__).debug(
         "Round 32 / Phase 2.E: settings override skipped (%s)",
@@ -15770,75 +15763,14 @@ def api_corpus_sharepoint_signout():
     return jsonify(result), 200
 
 
-@app.route('/api/settings/sharepoint_url', methods=['POST'])
-def api_settings_sharepoint_url():
-    """Round 33 / Build8: persist the per-user SharePoint folder URL.
-
-    Body shape: ``{"url": "https://<tenant>.sharepoint.com/<path>"}``.
-    An empty string clears the persisted value (the next bootstrap
-    falls through to the env var, then to the empty config default
-    which is treated as "not configured" by the indexer).
-
-    Validation reuses
-    :func:`adoptiq_settings.is_valid_sharepoint_url` so the route
-    rejects with HTTP 400 *before* writing -- otherwise
-    :func:`save_settings` would silently drop the value and the user
-    would see no feedback.
-
-    Auth: same dual-path as ``/api/settings/intelligence`` -- CSRF
-    token or ``X-AdoptIQ-Internal`` header.
-    """
-    auth_err = _r17_2_authorize_corpus_admin()
-    if auth_err is not None:
-        body, code = auth_err
-        return jsonify(body), code
-
-    payload = request.get_json(silent=True) or {}
-    if not isinstance(payload, dict):
-        return jsonify({'ok': False, 'error': 'invalid JSON payload'}), 400
-    if 'url' not in payload:
-        return jsonify({'ok': False, 'error': 'missing required field "url"'}), 400
-    raw = payload.get('url')
-    if raw is None:
-        url = ''
-    elif isinstance(raw, str):
-        url = raw.strip()
-    else:
-        return jsonify({'ok': False, 'error': 'url must be a string'}), 400
-
-    try:
-        import adoptiq_settings as _settings
-    except Exception as imp_err:  # noqa: BLE001
-        logger.exception("Round 33 / Build8: adoptiq_settings import failed")
-        return jsonify({
-            'ok': False,
-            'error': f'settings_module_unavailable: {type(imp_err).__name__}',
-        }), 500
-
-    if url and not _settings.is_valid_sharepoint_url(url):
-        return jsonify({
-            'ok': False,
-            'error': 'invalid SharePoint URL (must be https://<tenant>.sharepoint.com/<path>)',
-        }), 400
-
-    try:
-        merged = dict(_settings.load_settings() or {})
-        merged['sharepoint_folder_url'] = url
-        _settings.save_settings(merged)
-    except Exception as save_err:  # noqa: BLE001
-        logger.exception("Round 33 / Build8: settings.json write failed")
-        return jsonify({
-            'ok': False,
-            'url': str(getattr(Config, 'ADOPTIQ_SHAREPOINT_FOLDER_URL', '') or ''),
-            'error': f'settings_write_failed: {type(save_err).__name__}',
-        }), 500
-
-    Config.ADOPTIQ_SHAREPOINT_FOLDER_URL = url
-    return jsonify({
-        'ok': True,
-        'url': url,
-        'configured': bool(url),
-    }), 200
+# Round 33 / Build8 -> Round 35: ``POST /api/settings/sharepoint_url``
+# was retired in Round 35 along with the analyze-page URL paste field.
+# The corpus URL is now hardcoded in
+# :data:`Config.ADOPTIQ_CORPUS_SHARE_URL` (env-overridable for ops
+# only), the corpus is baked into the .app at build time, and the
+# daily refresh worker pulls updates from that single source of truth.
+# The ``api_corpus_sharepoint_{signin,signout}`` routes above remain so
+# users can grant / revoke MSAL access for the daily refresh.
 
 
 @app.route('/api/corpus/sharepoint/refresh', methods=['POST'])

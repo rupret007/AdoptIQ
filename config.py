@@ -262,28 +262,38 @@ class Config:
         str(os.environ.get('ADOPTIQ_SHAREPOINT_ENABLED', 'true')).strip().lower()
         in {'1', 'true', 'yes', 'on'}
     )
-    # Round 33 / Build8: previously this defaulted to a personal Cisco
-    # SharePoint URL (``jestory_cisco_com``), which leaked operator
-    # identity into every shipped build and -- because nobody else had
-    # access to that folder -- caused indexing to silently fail with
-    # ``auth_required`` / 404 on every fresh install.  The new
-    # resolution order is:
+    # Round 35 / native-corpus: the canonical OneDrive/SharePoint share
+    # URL for the AdoptIQ knowledge corpus.  Hardcoded so the analyze
+    # page no longer needs a URL-paste UI, and so DMG bake at build
+    # time and per-user daily refresh both target the same source of
+    # truth.  Env-overridable for ops/testing/CI flexibility but never
+    # surfaced in ``settings.json`` (per-user override was the Build8
+    # design and is intentionally retired in Round 35).  The default
+    # points at the AdoptIQ_CSOne_Reports share which is configured
+    # for "People in Cisco with the link can edit" -- so any signed-in
+    # Cisco user can fetch via the Microsoft Graph ``/shares/u!{token}/
+    # driveItem`` endpoint (sharing-link form, not canonical Graph
+    # drive item path).
+    ADOPTIQ_CORPUS_SHARE_URL = (
+        os.environ.get('ADOPTIQ_CORPUS_SHARE_URL')
+        or 'https://cisco-my.sharepoint.com/:f:/r/personal/jestory_cisco_com/Documents/AI%20Projects/AdoptIQ_CSOne_Reports?csf=1&web=1&e=O3a4Ij'
+    )
+    # Round 33 / Build8 -> Round 35: ``ADOPTIQ_SHAREPOINT_FOLDER_URL``
+    # was the Build8 per-user URL slot (settings.json paste UI bridged
+    # this).  Round 35 retires the per-user paste UI in favor of the
+    # hardcoded ``ADOPTIQ_CORPUS_SHARE_URL`` above, so this attribute
+    # is now a backward-compat alias that defaults to the canonical
+    # corpus URL.  Existing consumers in ``corpus_bootstrap.py`` keep
+    # working without code churn; new code should reference
+    # ``ADOPTIQ_CORPUS_SHARE_URL`` directly.
     #
-    #   1. ``settings.json`` ``sharepoint_folder_url`` (per-user, set
-    #      via the analyze-page Intelligence card -- bridged by the
-    #      Round 32 startup hook in ``app_simple.py``).
-    #   2. ``ADOPTIQ_SHAREPOINT_FOLDER_URL`` env var (set by admins
-    #      who want to bake a tenant-wide default into a deployment).
-    #   3. Empty string -- the bootstrap treats this as "not
-    #      configured" and the analyze-page banner prompts the user to
-    #      paste their own folder URL.
-    #
-    # ``adoptiq_settings.is_valid_sharepoint_url`` enforces the
-    # ``https://<tenant>.sharepoint.com/<path>`` allow-list so a
-    # hand-edited settings.json cannot redirect Graph downloads to an
-    # attacker-controlled host.
+    # ``adoptiq_settings.is_valid_sharepoint_url`` (kept exported for
+    # back-compat) still enforces the ``https://<tenant>.sharepoint
+    # .com/<path>`` allow-list as a defense-in-depth check on any
+    # operator-supplied env override.
     ADOPTIQ_SHAREPOINT_FOLDER_URL = (
-        os.environ.get('ADOPTIQ_SHAREPOINT_FOLDER_URL') or ''
+        os.environ.get('ADOPTIQ_SHAREPOINT_FOLDER_URL')
+        or ADOPTIQ_CORPUS_SHARE_URL
     )
     # Microsoft-owned public client id ("Microsoft Graph PowerShell").
     # Public, not a secret -- listed in MSAL sample code.  Operators

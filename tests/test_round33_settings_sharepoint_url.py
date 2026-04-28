@@ -1,19 +1,24 @@
-"""Round 33 / Build8: ``adoptiq_settings`` sharepoint_folder_url
-allow-list validation, schema round-trip, and Config bridging.
+"""Round 33 / Build8 (retired in Round 35): the per-user
+``sharepoint_folder_url`` settings field is gone.  These tests now
+pin the *removal contract*:
 
-Why this test exists
---------------------
-Build7 hardcoded a personal Cisco SharePoint URL into ``config.py``,
-which leaked operator identity and -- because nobody else had access
-to that folder -- caused Intelligence indexing to silently fail with
-``auth_required`` / 404 on every fresh install.  Build8 replaces the
-default with an empty string and lets the user persist a per-user
-URL via ``settings.json``.  This test pins the validator and the
-load/save round-trip so a future regression that broadens the
-allow-list (e.g. accepts ``http://`` or arbitrary hosts) is caught
-in CI.
+* ``adoptiq_settings._SCHEMA`` no longer carries the URL key.
+* ``save_settings`` + ``load_settings`` silently strip the URL so a
+  hand-edited or downgraded ``settings.json`` cannot resurrect the
+  Build8 surface.
+* ``is_valid_sharepoint_url`` remains exported as a defense-in-depth
+  helper for any caller that needs a tenant-allow-list check (e.g.
+  validating an env-override of ``ADOPTIQ_CORPUS_SHARE_URL``).
 
-The validator must:
+The Build8 reasoning -- empty default, allow-list rejecting non-
+``*.sharepoint.com`` hosts -- is preserved in the validator tests
+below; only the user-facing knob is gone.
+
+Round 35 / native-corpus replaces the per-user URL knob with a
+hardcoded ``Config.ADOPTIQ_CORPUS_SHARE_URL`` (env-overridable for
+ops only) -- see ``tests/test_round35_corpus_url_hardcoded.py``.
+
+The validator must still:
 * accept empty strings (= "not configured" sentinel);
 * accept ``https://<tenant>.sharepoint.com/<path>`` URLs;
 * reject ``http://`` (TLS required);
@@ -40,9 +45,15 @@ def _isolate_settings_dir(tmp_path, monkeypatch):
     yield
 
 
-def test_schema_includes_sharepoint_folder_url():
+def test_schema_no_longer_carries_sharepoint_folder_url():
+    """Round 35 retired the per-user URL knob; the settings schema
+    must reflect the removal so a future regression that re-adds the
+    field is caught in CI."""
     keys = s.schema_keys()
-    assert "sharepoint_folder_url" in keys
+    assert "sharepoint_folder_url" not in keys, (
+        "Round 35 removed sharepoint_folder_url from the settings "
+        "schema; re-adding it would resurrect the Build8 paste UI."
+    )
     assert "corpus_knowledge_enabled" in keys
 
 
@@ -100,20 +111,25 @@ def test_save_drops_invalid_url_silently_then_returns_empty_load():
     assert "sharepoint_folder_url" not in loaded
 
 
-def test_save_load_round_trip_preserves_valid_url():
+def test_save_load_round_trip_drops_url_in_round35():
+    """Round 35 retired the per-user URL surface.  ``save_settings``
+    + ``load_settings`` must silently drop the key so a downgrade
+    or hand-edit cannot resurrect it."""
     url = "https://contoso.sharepoint.com/sites/team/Documents/Reports"
     s.save_settings({"sharepoint_folder_url": url})
     loaded = s.load_settings()
-    assert loaded["sharepoint_folder_url"] == url
+    assert "sharepoint_folder_url" not in loaded, (
+        "Round 35 contract violation: sharepoint_folder_url survived "
+        "a save/load round-trip via settings.json."
+    )
 
 
-def test_save_empty_string_is_persisted_as_unset():
-    """Empty string is the documented "not configured" marker; it
-    must be persisted as-is so the startup hook can fall through to
-    the env var without colliding with a stale value."""
+def test_save_empty_string_is_dropped_in_round35():
+    """Even the documented "not configured" marker (empty string) is
+    no longer a recognized settings field after Round 35."""
     s.save_settings({"sharepoint_folder_url": ""})
     loaded = s.load_settings()
-    assert loaded.get("sharepoint_folder_url") == ""
+    assert "sharepoint_folder_url" not in loaded
 
 
 def test_load_drops_invalid_url_from_disk(tmp_path, monkeypatch):
