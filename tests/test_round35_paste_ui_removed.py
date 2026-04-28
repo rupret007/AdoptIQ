@@ -51,13 +51,29 @@ def test_analyze_html_renames_panel_to_knowledge_corpus():
     assert "SharePoint connection" not in body
 
 
-def test_analyze_html_keeps_connect_and_signout_controls():
+def test_analyze_html_drops_connect_and_signout_controls():
+    """Round 36 retired MSAL device-code sign-in.  The Connect /
+    Sign out buttons (and their data-* hooks) must NOT appear in the
+    analyze.html template -- the OneDrive desktop client now handles
+    the auth/MFA/admin-consent flow and the panel is informational
+    only.
+
+    Originally Round 35 expected these controls to remain (the MSAL
+    refresh loop was kept alongside the bake).  Round 36 removed
+    that path entirely after the Cisco tenant admin-consent block;
+    the test was inverted to pin the new contract."""
     body = _ANALYZE_HTML.read_text(encoding="utf-8")
-    # MSAL device-code flow is still required for daily refresh.
-    assert "data-sharepoint-signin" in body
-    assert "data-sharepoint-signout" in body
-    assert "Connect to Microsoft" in body
-    assert "Sign out" in body
+    forbidden = (
+        "data-sharepoint-signin",
+        "data-sharepoint-signout",
+        "Connect to Microsoft",
+        "Sign out",
+    )
+    for needle in forbidden:
+        assert needle not in body, (
+            f"templates/analyze.html still references {needle!r}; "
+            "Round 36 removed the MSAL Connect / Sign out controls."
+        )
 
 
 def test_intel_status_js_drops_url_save_route():

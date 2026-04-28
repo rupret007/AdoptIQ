@@ -1,10 +1,11 @@
-"""Round 35 / native-corpus: smoke-test ``scripts/bake_corpus.py``.
+"""Round 35 + Round 36 / native-corpus: smoke-test ``scripts/bake_corpus.py``.
 
-Drives the bake script in ``--auth-mode=offline_fixture`` mode (no
-network, no MSAL) so the test suite can verify, end-to-end, that:
+Drives the bake script in local-source mode (no network, no MSAL --
+the legacy device-code path was removed in Round 36) so the test
+suite can verify, end-to-end, that:
 
 * The four ship-ready artifacts get written under ``--bake-dir``:
-  ``corpus.db.enc``, ``sentinel.json``, ``salt.bin``,
+  ``corpus.db.enc``, ``sentinel.json``, ``corpus.db.salt``,
   ``corpus.sentinel.lock.json``.
 * Each artifact is mode 0600 and the bake-dir is mode 0700, so a
   multi-user macOS host cannot read another account's encrypted DB
@@ -15,6 +16,12 @@ network, no MSAL) so the test suite can verify, end-to-end, that:
 * ``--no-bake`` and ``ADOPTIQ_BAKE_CORPUS=0`` short-circuit and
   emit the ``.bake-skipped`` marker, leaving no stale artifacts.
 
+Round 36: the ``--auth-mode``, ``--share-url``, and
+``--device-code-timeout-s`` flags are still accepted for back-compat
+with the build harness but are no-ops; the corresponding
+"--auth-mode=device_code" tests have been removed because that path
+no longer exists.
+
 The test never imports MSAL, never hits Microsoft Graph, never
 requires keychain access.  It is the contract pin for the bake
 script's deterministic, build-time outputs.
@@ -22,12 +29,9 @@ script's deterministic, build-time outputs.
 
 from __future__ import annotations
 
-import os
 import stat
 import sys
 from pathlib import Path
-
-import pytest
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -68,7 +72,7 @@ def _seed_offline_fixture(dir_: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_bake_offline_fixture_writes_four_artifacts(tmp_path, monkeypatch):
+def test_bake_local_source_writes_four_artifacts(tmp_path, monkeypatch):
     bake_dir = tmp_path / "bake"
     fixture_dir = tmp_path / "fixture"
     _seed_offline_fixture(fixture_dir)
@@ -78,8 +82,7 @@ def test_bake_offline_fixture_writes_four_artifacts(tmp_path, monkeypatch):
 
     rc = bake_module.main([
         "--bake-dir", str(bake_dir),
-        "--auth-mode", "offline_fixture",
-        "--offline-fixture", str(fixture_dir),
+        "--source", str(fixture_dir),
     ])
     assert rc == 0, f"bake_corpus.main returned non-zero exit: {rc}"
 
@@ -95,15 +98,14 @@ def test_bake_offline_fixture_writes_four_artifacts(tmp_path, monkeypatch):
         assert (bake_dir / fname).exists(), f"missing baked artifact {fname}"
 
 
-def test_bake_offline_fixture_artifacts_are_0600(tmp_path):
+def test_bake_local_source_artifacts_are_0600(tmp_path):
     bake_dir = tmp_path / "bake"
     fixture_dir = tmp_path / "fixture"
     _seed_offline_fixture(fixture_dir)
 
     rc = bake_module.main([
         "--bake-dir", str(bake_dir),
-        "--auth-mode", "offline_fixture",
-        "--offline-fixture", str(fixture_dir),
+        "--source", str(fixture_dir),
     ])
     assert rc == 0
 
@@ -125,8 +127,8 @@ def test_bake_offline_fixture_artifacts_are_0600(tmp_path):
         )
 
 
-def test_bake_offline_fixture_corpus_can_be_reopened(tmp_path):
-    """End-to-end: bake → open via corpus_crypto → assert SQLite
+def test_bake_local_source_corpus_can_be_reopened(tmp_path):
+    """End-to-end: bake -> open via corpus_crypto -> assert SQLite
     connection is usable.  Catches any drift between the bake-time
     sentinel/salt/lock minting and the runtime open path."""
     bake_dir = tmp_path / "bake"
@@ -135,8 +137,7 @@ def test_bake_offline_fixture_corpus_can_be_reopened(tmp_path):
 
     rc = bake_module.main([
         "--bake-dir", str(bake_dir),
-        "--auth-mode", "offline_fixture",
-        "--offline-fixture", str(fixture_dir),
+        "--source", str(fixture_dir),
     ])
     assert rc == 0
 
@@ -146,7 +147,6 @@ def test_bake_offline_fixture_corpus_can_be_reopened(tmp_path):
         onedrive_root=None,
         encrypted_path=bake_dir / "corpus.db.enc",
         create_if_missing=False,
-        sharepoint_root=None,
         allow_local_sentinel=True,
     )
     try:
@@ -216,8 +216,7 @@ def test_bake_skip_removes_stale_artifacts(tmp_path, monkeypatch):
     monkeypatch.delenv("ADOPTIQ_BAKE_CORPUS", raising=False)
     rc = bake_module.main([
         "--bake-dir", str(bake_dir),
-        "--auth-mode", "offline_fixture",
-        "--offline-fixture", str(fixture_dir),
+        "--source", str(fixture_dir),
     ])
     assert rc == 0
     assert (bake_dir / "corpus.db.enc").exists()
@@ -237,42 +236,56 @@ def test_bake_skip_removes_stale_artifacts(tmp_path, monkeypatch):
         )
 
 
-def test_bake_offline_fixture_requires_directory(tmp_path):
-    bake_dir = tmp_path / "bake"
-    rc = bake_module.main([
-        "--bake-dir", str(bake_dir),
-        "--auth-mode", "offline_fixture",
-        # Note: no --offline-fixture argument
-    ])
-    assert rc == 1, f"missing --offline-fixture should exit 1, got {rc}"
-
-
-def test_bake_offline_fixture_empty_dir_fails(tmp_path):
+def test_bake_empty_source_dir_fails(tmp_path):
     bake_dir = tmp_path / "bake"
     fixture_dir = tmp_path / "empty_fixture"
     fixture_dir.mkdir(parents=True, exist_ok=True)
 
     rc = bake_module.main([
         "--bake-dir", str(bake_dir),
-        "--auth-mode", "offline_fixture",
-        "--offline-fixture", str(fixture_dir),
+        "--source", str(fixture_dir),
     ])
-    # Empty fixture dir → no files staged → exit 1 (pre-index error).
-    assert rc == 1, f"empty offline fixture should exit 1, got {rc}"
+    # Empty source dir -> no files staged -> exit 1 (pre-index error).
+    assert rc == 1, f"empty source dir should exit 1, got {rc}"
 
 
-def test_bake_rejects_non_sharepoint_share_url(tmp_path, monkeypatch):
-    """The bake script enforces ``_encode_share_url_for_graph``'s
-    allow-list before opening any network connection, so an env-
-    override that points at a non-sharepoint host is refused early
-    with exit 1."""
+def test_bake_back_compat_offline_fixture_alias(tmp_path, monkeypatch):
+    """Round 36: ``--offline-fixture`` (the Round 35 flag name) must
+    still be accepted as an alias for ``--source`` so existing build
+    scripts keep working through the transition window."""
     bake_dir = tmp_path / "bake"
+    fixture_dir = tmp_path / "fixture"
+    _seed_offline_fixture(fixture_dir)
     monkeypatch.delenv("ADOPTIQ_BAKE_CORPUS", raising=False)
+
     rc = bake_module.main([
         "--bake-dir", str(bake_dir),
-        "--share-url", "https://attacker.example.com/x",
-        "--auth-mode", "device_code",
+        "--auth-mode", "offline_fixture",  # accepted (no-op) for back-compat
+        "--offline-fixture", str(fixture_dir),
     ])
-    assert rc == 1, (
-        f"non-sharepoint share URL should be rejected with exit 1, got {rc}"
+    assert rc == 0, f"--offline-fixture alias must still work, got rc={rc}"
+    assert (bake_dir / "corpus.db.enc").exists()
+
+
+def test_bake_share_url_flag_is_no_op(tmp_path, monkeypatch):
+    """Round 36: ``--share-url`` is accepted but ignored.  A bake
+    invocation that *only* passes ``--share-url`` (no source) must
+    still succeed if Config.CSONE_ONEDRIVE_FOLDER points at a
+    valid local mirror (or fail with the missing-source error,
+    which is acceptable on a non-Cisco dev box).  Either way, the
+    flag must NOT cause a network attempt or a non-zero exit
+    purely on its own."""
+    bake_dir = tmp_path / "bake"
+    fixture_dir = tmp_path / "fixture"
+    _seed_offline_fixture(fixture_dir)
+    monkeypatch.delenv("ADOPTIQ_BAKE_CORPUS", raising=False)
+
+    rc = bake_module.main([
+        "--bake-dir", str(bake_dir),
+        "--source", str(fixture_dir),
+        "--share-url", "https://attacker.example.com/x",  # ignored
+    ])
+    assert rc == 0, (
+        f"--share-url is a deprecated no-op in Round 36; bake should "
+        f"still succeed, got rc={rc}"
     )

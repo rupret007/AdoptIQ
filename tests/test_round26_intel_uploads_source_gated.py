@@ -28,40 +28,39 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def _common_three_source_setup(monkeypatch, tmp_path: Path):
-    """Set up SharePoint + OneDrive + Downloads so the base
-    source list is the canonical 3-entry shape.  Tests then
-    layer on the intel_uploads expectations."""
-    from config import Config
+def _common_two_source_setup(monkeypatch, tmp_path: Path):
+    """Round 36: set up OneDrive + Downloads so the base source list
+    is the canonical 2-entry shape (the legacy ``sharepoint_csone``
+    entry was retired with the MSAL/Graph runtime path).  Tests then
+    layer on the intel_uploads expectations.
 
-    sp_cache = tmp_path / "sp_cache"
+    Patches BOTH the live ``config.Config`` and the
+    ``corpus_bootstrap.Config`` references to be robust against
+    ``importlib.reload(config)`` pollution from sibling tests
+    (``tests/test_round35_corpus_url_hardcoded.py``) -- the bootstrap
+    module captures ``Config`` at import time and otherwise reads
+    stale defaults under that ordering.
+    """
+    import config as _live_config
+    import corpus_bootstrap as _cb
+
     od_dir = tmp_path / "od"
     dl_dir = tmp_path / "dl"
-    sp_cache.mkdir()
     od_dir.mkdir()
     dl_dir.mkdir()
 
-    monkeypatch.setattr(
-        Config, "ADOPTIQ_SHAREPOINT_ENABLED", True, raising=False
-    )
-    monkeypatch.setattr(
-        Config,
-        "ADOPTIQ_SHAREPOINT_FOLDER_URL",
-        "https://example.com/share",
-        raising=False,
-    )
-    monkeypatch.setattr(
-        Config, "ADOPTIQ_SHAREPOINT_CACHE_DIR", str(sp_cache), raising=False
-    )
-    monkeypatch.setattr(
-        Config, "CSONE_ONEDRIVE_FOLDER", str(od_dir), raising=False
-    )
-    monkeypatch.setattr(
-        Config, "CSONE_INCLUDE_USER_DOWNLOADS", True, raising=False
-    )
-    monkeypatch.setattr(
-        Config, "CSONE_USER_DOWNLOADS_DIR", str(dl_dir), raising=False
-    )
+    overrides = {
+        "CSONE_ONEDRIVE_FOLDER": str(od_dir),
+        "CSONE_INCLUDE_USER_DOWNLOADS": True,
+        "CSONE_USER_DOWNLOADS_DIR": str(dl_dir),
+    }
+    for name, value in overrides.items():
+        monkeypatch.setattr(_live_config.Config, name, value, raising=False)
+        monkeypatch.setattr(_cb.Config, name, value, raising=False)
+
+
+# Backward-compat alias (older test names referenced this helper).
+_common_three_source_setup = _common_two_source_setup
 
 
 def test_intel_uploads_absent_when_flag_off_and_dir_missing(
@@ -69,24 +68,23 @@ def test_intel_uploads_absent_when_flag_off_and_dir_missing(
 ):
     """Disabled installs that never pre-seeded the directory keep
     the original 3-source ordering.  This is the production default."""
+    import config as _live_config
     import corpus_bootstrap as cb
-    from config import Config
 
     _common_three_source_setup(monkeypatch, tmp_path)
 
-    monkeypatch.setattr(
-        Config, "ADOPTIQ_INTEL_UPLOAD_ENABLED", False, raising=False
-    )
-    monkeypatch.setattr(
-        Config,
-        "CSONE_INTEL_UPLOADS_FOLDER",
-        str(tmp_path / "intel-uploads-absent"),
-        raising=False,
-    )
+    overrides = {
+        "ADOPTIQ_INTEL_UPLOAD_ENABLED": False,
+        "CSONE_INTEL_UPLOADS_FOLDER": str(tmp_path / "intel-uploads-absent"),
+    }
+    for name, value in overrides.items():
+        monkeypatch.setattr(_live_config.Config, name, value, raising=False)
+        monkeypatch.setattr(cb.Config, name, value, raising=False)
 
     labels = [s["label"] for s in cb._resolve_index_sources()]
     assert "intel_uploads" not in labels
-    assert labels == ["sharepoint_csone", "onedrive", "user_downloads"]
+    # Round 36: sharepoint_csone source retired.
+    assert labels == ["onedrive", "user_downloads"]
 
 
 def test_intel_uploads_picked_up_when_flag_off_but_admin_pre_seeded(
@@ -96,27 +94,25 @@ def test_intel_uploads_picked_up_when_flag_off_but_admin_pre_seeded(
     enabling the user-facing upload route; the walker still
     indexes them.  This is the documented escape hatch in the
     ``_resolve_index_sources`` docstring."""
+    import config as _live_config
     import corpus_bootstrap as cb
-    from config import Config
 
     _common_three_source_setup(monkeypatch, tmp_path)
 
     intel_dir = tmp_path / "intel-uploads-preseeded"
     intel_dir.mkdir()
 
-    monkeypatch.setattr(
-        Config, "ADOPTIQ_INTEL_UPLOAD_ENABLED", False, raising=False
-    )
-    monkeypatch.setattr(
-        Config,
-        "CSONE_INTEL_UPLOADS_FOLDER",
-        str(intel_dir),
-        raising=False,
-    )
+    overrides = {
+        "ADOPTIQ_INTEL_UPLOAD_ENABLED": False,
+        "CSONE_INTEL_UPLOADS_FOLDER": str(intel_dir),
+    }
+    for name, value in overrides.items():
+        monkeypatch.setattr(_live_config.Config, name, value, raising=False)
+        monkeypatch.setattr(cb.Config, name, value, raising=False)
 
     labels = [s["label"] for s in cb._resolve_index_sources()]
+    # Round 36: sharepoint_csone source retired.
     assert labels == [
-        "sharepoint_csone",
         "onedrive",
         "user_downloads",
         "intel_uploads",
@@ -205,27 +201,25 @@ def test_intel_uploads_present_when_flag_on_and_dir_exists(
 ):
     """The happy path: operator enabled the upload endpoint and
     the bootstrap walker exposes the 4-entry source list."""
+    import config as _live_config
     import corpus_bootstrap as cb
-    from config import Config
 
     _common_three_source_setup(monkeypatch, tmp_path)
 
     intel_dir = tmp_path / "intel-uploads-enabled"
     intel_dir.mkdir()
 
-    monkeypatch.setattr(
-        Config, "ADOPTIQ_INTEL_UPLOAD_ENABLED", True, raising=False
-    )
-    monkeypatch.setattr(
-        Config,
-        "CSONE_INTEL_UPLOADS_FOLDER",
-        str(intel_dir),
-        raising=False,
-    )
+    overrides = {
+        "ADOPTIQ_INTEL_UPLOAD_ENABLED": True,
+        "CSONE_INTEL_UPLOADS_FOLDER": str(intel_dir),
+    }
+    for name, value in overrides.items():
+        monkeypatch.setattr(_live_config.Config, name, value, raising=False)
+        monkeypatch.setattr(cb.Config, name, value, raising=False)
 
     labels = [s["label"] for s in cb._resolve_index_sources()]
+    # Round 36: sharepoint_csone source retired.
     assert labels == [
-        "sharepoint_csone",
         "onedrive",
         "user_downloads",
         "intel_uploads",

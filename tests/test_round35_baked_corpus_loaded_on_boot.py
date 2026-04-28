@@ -88,6 +88,15 @@ def test_baked_corpus_dir_returns_none_when_no_bake_present(
     empty = tmp_path / "empty_baked"
     empty.mkdir()
     monkeypatch.setenv("ADOPTIQ_BAKED_CORPUS_DIR", str(empty))
+    # Round 36: redirect the dev-fallback repo ``bake/`` lookup so a
+    # local Phase 6 build artifact in the source tree does not flip
+    # the assertion.  ``_baked_corpus_dir`` resolves the repo path via
+    # ``Path(__file__).resolve().parent / "bake"`` -- pointing the
+    # module's ``__file__`` at a tmp file shifts that lookup into a
+    # tmp directory that has no bake artifact.
+    fake_module_path = tmp_path / "corpus_bootstrap_isolated.py"
+    fake_module_path.write_text("# isolated for test", encoding="utf-8")
+    monkeypatch.setattr(corpus_bootstrap, "__file__", str(fake_module_path))
     assert corpus_bootstrap._baked_corpus_dir() is None
 
 
@@ -190,6 +199,13 @@ def test_install_returns_none_when_no_baked_corpus(tmp_path, monkeypatch):
     empty = tmp_path / "no_baked"
     empty.mkdir()
     monkeypatch.setenv("ADOPTIQ_BAKED_CORPUS_DIR", str(empty))
+    # Round 36: shift the dev-fallback repo ``bake/`` lookup off the
+    # source tree so a local Phase 6 build artifact does not satisfy
+    # the resolver.  See test_baked_corpus_dir_returns_none_when_no_bake_present
+    # for the same pattern.
+    fake_module_path = tmp_path / "corpus_bootstrap_isolated.py"
+    fake_module_path.write_text("# isolated for test", encoding="utf-8")
+    monkeypatch.setattr(corpus_bootstrap, "__file__", str(fake_module_path))
 
     result = corpus_bootstrap._install_baked_corpus_if_present()
     assert result is None

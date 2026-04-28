@@ -98,37 +98,40 @@ def _build_csone_fixture(path: Path) -> None:
 
 
 def _common_intel_uploads_only_setup(monkeypatch, tmp_path: Path) -> Path:
-    """Disable the other 3 sources (sharepoint, onedrive,
-    user_downloads) and point ``CSONE_INTEL_UPLOADS_FOLDER`` at
+    """Disable the other sources (onedrive, user_downloads) and
+    point ``CSONE_INTEL_UPLOADS_FOLDER`` at
     ``tmp_path / "intel_uploads"`` so this test is the sole driver
-    of the indexer."""
-    from config import Config
+    of the indexer.
+
+    Round 36: patch BOTH the live ``config.Config`` and the
+    ``corpus_bootstrap.Config`` references to be robust against
+    test-ordering pollution from
+    ``tests/test_round35_corpus_url_hardcoded.py`` (which calls
+    ``importlib.reload(config)`` and leaves
+    ``corpus_bootstrap.Config`` pointing at the original class).
+    Without dual-patching the resolver would read stale defaults.
+    """
+    import config as _live_config
+    import corpus_bootstrap as _cb
 
     intel_dir = tmp_path / "intel_uploads"
     intel_dir.mkdir()
 
-    # Disable sharepoint/onedrive/user_downloads so source resolution
-    # collapses to the single intel_uploads entry.
-    monkeypatch.setattr(
-        Config, "ADOPTIQ_SHAREPOINT_ENABLED", False, raising=False
-    )
-    monkeypatch.setattr(
-        Config, "CSONE_ONEDRIVE_FOLDER", str(tmp_path / "absent-od"),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        Config, "CSONE_INCLUDE_USER_DOWNLOADS", False, raising=False
-    )
-    monkeypatch.setattr(
-        Config, "CSONE_USER_DOWNLOADS_DIR", str(tmp_path / "absent-dl"),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        Config, "ADOPTIQ_INTEL_UPLOAD_ENABLED", True, raising=False
-    )
-    monkeypatch.setattr(
-        Config, "CSONE_INTEL_UPLOADS_FOLDER", str(intel_dir), raising=False
-    )
+    overrides = {
+        "ADOPTIQ_SHAREPOINT_ENABLED": False,
+        "CSONE_ONEDRIVE_FOLDER": str(tmp_path / "absent-od"),
+        "CSONE_INCLUDE_USER_DOWNLOADS": False,
+        "CSONE_USER_DOWNLOADS_DIR": str(tmp_path / "absent-dl"),
+        "ADOPTIQ_INTEL_UPLOAD_ENABLED": True,
+        "CSONE_INTEL_UPLOADS_FOLDER": str(intel_dir),
+    }
+    for name, value in overrides.items():
+        monkeypatch.setattr(
+            _live_config.Config, name, value, raising=False
+        )
+        monkeypatch.setattr(
+            _cb.Config, name, value, raising=False
+        )
     return intel_dir
 
 

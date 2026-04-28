@@ -139,18 +139,26 @@ def test_allow_local_sentinel_false_preserves_legacy_failure(tmp_path):
         )
 
 
-def test_corpus_bootstrap_passes_sharepoint_root(monkeypatch, tmp_path):
-    """Smoke check that ``_run_index_pass`` plumbs
-    ``sharepoint_root=Config.ADOPTIQ_SHAREPOINT_CACHE_DIR`` into
-    ``open_corpus_for_user``.  We do not run the full bootstrap --
-    just verify the call site uses the expected keyword."""
+def test_corpus_bootstrap_drops_sharepoint_root(monkeypatch, tmp_path):
+    """Round 36 / onedrive-sync-auth: the bootstrap no longer passes a
+    ``sharepoint_root`` to ``open_corpus_for_user`` -- the legacy
+    SharePoint cache directory was retired along with the MSAL/Graph
+    runtime path.  ``open_corpus_for_user`` falls through to the
+    OneDrive root, then the auto-minted local sentinel, and the
+    sharepoint slot is no longer plumbed."""
     import corpus_bootstrap
 
     src_path = corpus_bootstrap.__file__
     with open(src_path, "r", encoding="utf-8") as fh:
         body = fh.read()
 
-    # Must call open_corpus_for_user with sharepoint_root keyword.
-    assert "sharepoint_root=sharepoint_root" in body
-    # Must derive sharepoint_root from Config.ADOPTIQ_SHAREPOINT_CACHE_DIR.
-    assert 'getattr(Config, "ADOPTIQ_SHAREPOINT_CACHE_DIR"' in body
+    # The call site must NOT pass sharepoint_root any more.
+    assert "sharepoint_root=sharepoint_root" not in body, (
+        "Round 36 retired the sharepoint_root plumbing; the bootstrap "
+        "must no longer pass it to open_corpus_for_user."
+    )
+    # And it must NOT read Config.ADOPTIQ_SHAREPOINT_CACHE_DIR.
+    assert 'Config, "ADOPTIQ_SHAREPOINT_CACHE_DIR"' not in body, (
+        "Round 36 retired the sharepoint cache; the bootstrap must "
+        "no longer read Config.ADOPTIQ_SHAREPOINT_CACHE_DIR."
+    )
