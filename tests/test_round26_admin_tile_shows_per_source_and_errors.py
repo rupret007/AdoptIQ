@@ -190,9 +190,18 @@ def test_admin_tile_caps_recent_errors_to_five(monkeypatch):
 
 @pytest.mark.flask
 def test_admin_tile_buttons_renamed(monkeypatch):
+    # Round 37 / Phase 4: the Round 26 "Run incremental" label was
+    # renamed to "Re-index now" so it matches the analyze-page
+    # corpus panel labelling.  The button still POSTs to
+    # /corpus_refresh -- only the user-visible label changed.  The
+    # multi-line ``<button ...>\n   Rebuild\n</button>`` formatting
+    # (also Round 37) means we use ``re.search`` here instead of
+    # the original strict ``>Rebuild<`` substring.
+    import re
     html = _get_dashboard_html(monkeypatch, _corpus_status_payload())
-    assert ">Run incremental<" in html
-    assert ">Rebuild<" in html
+    assert "Re-index now" in html
+    assert re.search(r">\s*Rebuild\s*</button>", html), "Rebuild button missing"
+    assert ">Run incremental<" not in html  # Round 37 retired this label
     assert ">Refresh Corpus<" not in html
     assert ">Force Rebuild<" not in html
 
