@@ -51,34 +51,21 @@
     var ENABLE_TOGGLE = '[data-intel-enable-toggle]';
     var UPLOAD_FORM_ID = 'adoptiq-intel-upload-form';
     var UPLOAD_FEEDBACK = '[data-intel-upload-feedback]';
-    // Round 33 / Build8 -> Round 35: AdoptIQ Knowledge Corpus panel
-    // selectors + URLs.  Round 35 retired the per-user URL paste flow
-    // (the corpus URL is now hardcoded in
-    // Config.ADOPTIQ_CORPUS_SHARE_URL and the corpus itself is baked
-    // into the .app at build time).  Connect / Sign-out remain so the
-    // daily refresh worker can pull updates from the source share
-    // using the user's own MSAL token.
+    // Round 33 / Build8 -> Round 36: AdoptIQ Knowledge Corpus panel.
+    // The MSAL/Graph signin/signout flow was removed in Round 36 --
+    // the OneDrive desktop client now mirrors the canonical AdoptIQ
+    // folder under Config.CSONE_ONEDRIVE_FOLDER and the daily refresh
+    // worker re-indexes from that path.  The selectors retain their
+    // ``data-sharepoint-*`` names purely for back-compat with existing
+    // CSS / templates -- the implementation is OneDrive-sync-only.
     var SHAREPOINT_PANEL = '[data-sharepoint-panel]';
-    var SHAREPOINT_SIGNIN = '[data-sharepoint-signin]';
-    var SHAREPOINT_SIGNOUT = '[data-sharepoint-signout]';
     var SHAREPOINT_FEEDBACK = '[data-sharepoint-feedback]';
     var SHAREPOINT_STATE_PILL = '[data-sharepoint-state-pill]';
     var SHAREPOINT_STATE_TEXT = '[data-sharepoint-state-text]';
     var SHAREPOINT_ACCOUNT = '[data-sharepoint-account]';
-    var SHAREPOINT_DEVICE = '[data-sharepoint-devicecode]';
-    var SHAREPOINT_DEVICE_URI = '[data-sharepoint-devicecode-uri]';
-    var SHAREPOINT_DEVICE_USER = '[data-sharepoint-devicecode-user]';
-    var SHAREPOINT_DEVICE_STATUS = '[data-sharepoint-devicecode-status]';
-    var SHAREPOINT_SIGNIN_URL = '/api/corpus/sharepoint/signin';
-    var SHAREPOINT_SIGNOUT_URL = '/api/corpus/sharepoint/signout';
     var POLL_FAST_MS = 5000;
     var POLL_SLOW_MS = 60000;
     var REFRESH_DEBOUNCE_MS = 2000;
-    // Round 33 / Build8: device-code prompts expire after ~15 minutes
-    // (server-supplied ``expires_in``).  Cap our polling in case the
-    // user closes the tab and reopens; we should never poll forever.
-    var SHAREPOINT_SIGNIN_POLL_MS = 3000;
-    var SHAREPOINT_SIGNIN_MAX_POLL_MS = 16 * 60 * 1000;
 
     function getCsrfToken() {
         try {
@@ -441,11 +428,17 @@
     }
 
     // -----------------------------------------------------------------
-    // Round 33 / Build8: SharePoint connection panel
+    // Round 36 / onedrive-sync-auth: AdoptIQ Knowledge Corpus panel
+    //
+    // Renders the corpus state from ``boot.source`` x
+    // ``boot.onedrive_status`` -- no buttons, no MSAL prompts.  The
+    // OneDrive desktop client handles auth/MFA/admin-consent and
+    // mirrors the canonical AdoptIQ folder to disk; we just stat()
+    // it and surface the result.
+    //
+    // Selectors retain their ``data-sharepoint-*`` names for
+    // back-compat with the existing analyze.html template.
     // -----------------------------------------------------------------
-
-    var sharepointSigninPollHandle = null;
-    var sharepointSigninPollDeadline = 0;
 
     function setSharepointFeedback(state, message) {
         var el = document.querySelector(SHAREPOINT_FEEDBACK);
@@ -461,60 +454,103 @@
         el.textContent = String(message == null ? '' : message);
     }
 
+    // Computes one of seven panel states from the status payload.
+    // Exposed (via window.__adoptiqCorpusPanelState) so the unit
+    // tests can pin the rendering logic without touching the DOM.
+    //
+    //   * baked_synced       -- Active. OneDrive synced (N files).
+    //                           Daily refresh enabled.
+    //   * baked_not_synced   -- Active (baked snapshot).  OneDrive
+    //                           folder not detected.
+    //   * fresh_indexing     -- Indexing OneDrive folder...
+    //   * fresh_not_synced   -- OneDrive sync required.
+    //   * refreshing         -- Daily refresh in progress.
+    //   * refresh_failed     -- Last refresh raised an error
+    //                           (baked snapshot still served).
+    //   * unknown            -- pre-poll / no payload yet.
+    function classifyCorpusPanel(payload) {
+        var boot = (payload && payload.boot) || null;
+        if (!boot) { return 'unknown'; }
+        if (boot.in_progress) { return 'refreshing'; }
+        var source = (typeof boot.source === 'string') ? boot.source : '';
+        var od = (typeof boot.onedrive_status === 'string') ? boot.onedrive_status : '';
+        if (boot.last_refresh_error) {
+            return 'refresh_failed';
+        }
+        if (source === 'baked' && od === 'synced') { return 'baked_synced'; }
+        if (source === 'baked') { return 'baked_not_synced'; }
+        if (source === 'fresh' && od === 'synced') { return 'fresh_indexing'; }
+        if (source === 'fresh') { return 'fresh_not_synced'; }
+        return 'unknown';
+    }
+
+    function corpusPanelLabel(state) {
+        switch (state) {
+            case 'baked_synced':     return 'Active \u2022 OneDrive synced';
+            case 'baked_not_synced': return 'Active \u2022 baked snapshot';
+            case 'fresh_indexing':   return 'Indexing OneDrive\u2026';
+            case 'fresh_not_synced': return 'OneDrive sync required';
+            case 'refreshing':       return 'Refreshing\u2026';
+            case 'refresh_failed':   return 'Last refresh failed';
+            default:                 return 'checking\u2026';
+        }
+    }
+
+    function corpusPanelPillClass(state) {
+        switch (state) {
+            case 'baked_synced':     return 'bg-success';
+            case 'baked_not_synced': return 'bg-info text-dark';
+            case 'fresh_indexing':   return 'bg-primary';
+            case 'fresh_not_synced': return 'bg-warning text-dark';
+            case 'refreshing':       return 'bg-primary';
+            case 'refresh_failed':   return 'bg-danger';
+            default:                 return 'bg-secondary';
+        }
+    }
+
+    function corpusPanelDetail(state, payload) {
+        var boot = (payload && payload.boot) || {};
+        var fileCount = (typeof boot.onedrive_file_count === 'number')
+            ? boot.onedrive_file_count : null;
+        switch (state) {
+            case 'baked_synced':
+                if (fileCount != null && fileCount > 0) {
+                    return 'OneDrive synced (\u2265 ' + fileCount
+                        + ' file' + (fileCount === 1 ? '' : 's')
+                        + ').  Daily refresh enabled.';
+                }
+                return 'OneDrive synced.  Daily refresh enabled.';
+            case 'baked_not_synced':
+                return 'OneDrive folder not detected.  '
+                    + 'Sign in to OneDrive and sync '
+                    + '\u201CAI Projects/AdoptIQ_CSOne_Reports\u201D '
+                    + 'to enable daily refresh.';
+            case 'fresh_indexing':
+                return 'Indexing OneDrive folder for the first time\u2026';
+            case 'fresh_not_synced':
+                return 'No baked snapshot is bundled and OneDrive sync '
+                    + 'is not detected.  Sign in to OneDrive and sync '
+                    + '\u201CAI Projects/AdoptIQ_CSOne_Reports\u201D '
+                    + 'to populate the corpus.';
+            case 'refreshing':
+                return 'Refreshing knowledge corpus from OneDrive\u2026';
+            case 'refresh_failed':
+                var detail = boot.last_refresh_error
+                    ? String(boot.last_refresh_error) : 'unknown';
+                return 'Last refresh failed (' + detail
+                    + ').  The baked snapshot is still being served.';
+            default:
+                return '';
+        }
+    }
+
     function paintSharepointPanel(payload) {
         var panel = document.querySelector(SHAREPOINT_PANEL);
         if (!panel) { return; }
-        var sp = (payload && payload.boot && payload.boot.sharepoint) || null;
-        var boot = (payload && payload.boot) || null;
-
-        // Round 35 panel states (corpus URL is hardcoded; ``configured``
-        // is now always true so that branch is gone):
-        //   * signed_in        -- Signed in (daily refresh active)
-        //   * auth_required    -- Awaiting sign-in (baked snapshot still
-        //                         visible to the indexer)
-        //   * refreshing       -- Refresh in progress
-        //   * baked            -- Indexed at build time, sign in to refresh
-        //   * <error_kind>     -- Refresh failed; baked corpus still
-        //                         available, last successful refresh shown
-        //                         in the account slot when known
-        //   * unknown          -- pre-poll / no payload yet
-        var state = 'unknown';
-        var label = 'checking\u2026';
-        var pillClass = 'bg-secondary';
-        var account = '';
-        var signedIn = false;
-        var refreshing = !!(boot && boot.in_progress);
-        var bootSource = (boot && typeof boot.source === 'string') ? boot.source : '';
-
-        if (sp) {
-            signedIn = !!sp.signed_in;
-            account = sp.account || '';
-            if (refreshing) {
-                state = 'refreshing';
-                label = 'Refreshing\u2026';
-                pillClass = 'bg-primary';
-            } else if (signedIn) {
-                state = 'signed_in';
-                label = 'Signed in';
-                pillClass = 'bg-success';
-            } else if (sp.error_kind === 'auth_required') {
-                state = 'auth_required';
-                label = 'Awaiting sign-in';
-                pillClass = 'bg-warning text-dark';
-            } else if (sp.error_kind) {
-                state = sp.error_kind;
-                label = 'Refresh failed (' + String(sp.error_kind).replace(/_/g, ' ') + ')';
-                pillClass = 'bg-danger';
-            } else if (bootSource === 'baked') {
-                state = 'baked';
-                label = 'Indexed (sign in to refresh)';
-                pillClass = 'bg-info text-dark';
-            } else {
-                state = 'unknown';
-                label = 'Status unknown';
-                pillClass = 'bg-secondary';
-            }
-        }
+        var state = classifyCorpusPanel(payload);
+        var label = corpusPanelLabel(state);
+        var pillClass = corpusPanelPillClass(state);
+        var detail = corpusPanelDetail(state, payload);
 
         panel.setAttribute('data-state', state);
 
@@ -529,201 +565,37 @@
 
         var acctEl = panel.querySelector(SHAREPOINT_ACCOUNT);
         if (acctEl) {
-            if (signedIn && account) {
-                acctEl.textContent = 'Connected as ' + account;
-            } else if (bootSource === 'baked' && boot && boot.indexed_at) {
+            var boot = (payload && payload.boot) || {};
+            if (boot.source === 'baked' && boot.indexed_at) {
                 acctEl.textContent = 'Last bake ' + String(boot.indexed_at);
             } else {
                 acctEl.textContent = '';
             }
         }
 
-        var signinBtn = panel.querySelector(SHAREPOINT_SIGNIN);
-        var signoutBtn = panel.querySelector(SHAREPOINT_SIGNOUT);
-        if (signinBtn) {
-            signinBtn.style.display = signedIn ? 'none' : '';
-        }
-        if (signoutBtn) {
-            signoutBtn.style.display = signedIn ? '' : 'none';
-        }
-
-        if (signedIn) {
-            hideSharepointDeviceCode();
-            stopSharepointSigninPoll();
+        if (detail) {
+            setSharepointFeedback(
+                state === 'fresh_not_synced' || state === 'refresh_failed'
+                    ? 'error'
+                    : 'pending',
+                detail
+            );
+        } else {
+            setSharepointFeedback(null, '');
         }
     }
 
-    function hideSharepointDeviceCode() {
-        var box = document.querySelector(SHAREPOINT_DEVICE);
-        if (box) { box.style.display = 'none'; }
-    }
+    // Exposed for unit tests (the panel rendering decisions are pure
+    // functions of the payload; tests should not need to mount a DOM
+    // to verify the four-state matrix).
+    window.__adoptiqCorpusPanelState = {
+        classify: classifyCorpusPanel,
+        label: corpusPanelLabel,
+        pillClass: corpusPanelPillClass,
+        detail: corpusPanelDetail,
+    };
 
-    function showSharepointDeviceCode(envelope) {
-        var box = document.querySelector(SHAREPOINT_DEVICE);
-        if (!box) { return; }
-        var uriEl = box.querySelector(SHAREPOINT_DEVICE_URI);
-        var userEl = box.querySelector(SHAREPOINT_DEVICE_USER);
-        var statusEl = box.querySelector(SHAREPOINT_DEVICE_STATUS);
-        var verUri = envelope && envelope.verification_uri ? String(envelope.verification_uri) : '';
-        var userCode = envelope && envelope.user_code ? String(envelope.user_code) : '';
-        if (uriEl) {
-            // Clamp to https only -- never accept a non-https
-            // verification URI from the server.
-            if (/^https:\/\//i.test(verUri)) {
-                uriEl.setAttribute('href', verUri);
-                uriEl.textContent = verUri;
-            } else {
-                uriEl.setAttribute('href', '#');
-                uriEl.textContent = 'microsoft.com/devicelogin';
-            }
-        }
-        if (userEl) {
-            userEl.textContent = userCode;
-        }
-        if (statusEl) {
-            statusEl.textContent = '';
-        }
-        box.style.display = '';
-    }
-
-    function setSharepointDeviceCodeStatus(text) {
-        var statusEl = document.querySelector(SHAREPOINT_DEVICE_STATUS);
-        if (statusEl) {
-            statusEl.textContent = String(text == null ? '' : text);
-        }
-    }
-
-    function stopSharepointSigninPoll() {
-        if (sharepointSigninPollHandle) {
-            window.clearTimeout(sharepointSigninPollHandle);
-            sharepointSigninPollHandle = null;
-        }
-        sharepointSigninPollDeadline = 0;
-    }
-
-    function startSharepointSigninPoll() {
-        stopSharepointSigninPoll();
-        sharepointSigninPollDeadline = Date.now() + SHAREPOINT_SIGNIN_MAX_POLL_MS;
-        var tick = function () {
-            if (Date.now() > sharepointSigninPollDeadline) {
-                setSharepointDeviceCodeStatus('Sign-in window expired \u2014 click Connect to try again.');
-                stopSharepointSigninPoll();
-                return;
-            }
-            fetch(STATUS_URL, {
-                method: 'GET',
-                credentials: 'same-origin',
-                headers: { 'Accept': 'application/json' }
-            }).then(function (resp) {
-                if (!resp.ok) { throw new Error('HTTP ' + resp.status); }
-                return resp.json();
-            }).then(function (data) {
-                paint(data);
-                paintSharepointPanel(data);
-                var sp = (data && data.boot && data.boot.sharepoint) || null;
-                if (sp && sp.signed_in) {
-                    setSharepointFeedback('success', 'Signed in to Microsoft.');
-                    hideSharepointDeviceCode();
-                    stopSharepointSigninPoll();
-                    return;
-                }
-                sharepointSigninPollHandle = window.setTimeout(tick, SHAREPOINT_SIGNIN_POLL_MS);
-            }).catch(function () {
-                sharepointSigninPollHandle = window.setTimeout(tick, SHAREPOINT_SIGNIN_POLL_MS);
-            });
-        };
-        sharepointSigninPollHandle = window.setTimeout(tick, SHAREPOINT_SIGNIN_POLL_MS);
-    }
-
-    function bindSharepointSignin() {
-        var btn = document.querySelector(SHAREPOINT_SIGNIN);
-        if (!btn) { return; }
-        btn.addEventListener('click', function (ev) {
-            ev.preventDefault();
-            if (btn.disabled) { return; }
-            btn.disabled = true;
-            setSharepointFeedback('pending', 'Starting Microsoft sign-in\u2026');
-            var token = getCsrfToken();
-            fetch(SHAREPOINT_SIGNIN_URL, {
-                method: 'POST',
-                credentials: 'same-origin',
-                headers: {
-                    'Accept': 'application/json',
-                    'X-CSRFToken': token,
-                    'X-CSRF-Token': token,
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                body: ''
-            }).then(function (resp) {
-                var ok = resp.ok;
-                var status = resp.status;
-                return resp.json().catch(function () { return null; }).then(function (data) {
-                    return { ok: ok, status: status, data: data };
-                });
-            }).then(function (result) {
-                if (!result.ok || !result.data || result.data.ok !== true) {
-                    var msg = (result.data && result.data.error) || ('HTTP ' + result.status);
-                    setSharepointFeedback('error', 'Sign-in failed: ' + msg);
-                    return;
-                }
-                showSharepointDeviceCode(result.data);
-                setSharepointFeedback('pending', 'Awaiting Microsoft sign-in\u2026');
-                startSharepointSigninPoll();
-            }).catch(function () {
-                setSharepointFeedback('error', 'Sign-in failed: network error');
-            }).then(function () {
-                btn.disabled = false;
-            });
-        });
-    }
-
-    function bindSharepointSignout() {
-        var btn = document.querySelector(SHAREPOINT_SIGNOUT);
-        if (!btn) { return; }
-        btn.addEventListener('click', function (ev) {
-            ev.preventDefault();
-            if (btn.disabled) { return; }
-            // eslint-disable-next-line no-alert
-            if (!window.confirm('Sign out of Microsoft?  Indexing will pause until you sign in again.')) {
-                return;
-            }
-            btn.disabled = true;
-            setSharepointFeedback('pending', 'Signing out\u2026');
-            stopSharepointSigninPoll();
-            hideSharepointDeviceCode();
-            var token = getCsrfToken();
-            fetch(SHAREPOINT_SIGNOUT_URL, {
-                method: 'POST',
-                credentials: 'same-origin',
-                headers: {
-                    'Accept': 'application/json',
-                    'X-CSRFToken': token,
-                    'X-CSRF-Token': token,
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                body: ''
-            }).then(function (resp) {
-                var ok = resp.ok;
-                return resp.json().catch(function () { return null; }).then(function (data) {
-                    return { ok: ok, data: data };
-                });
-            }).then(function (result) {
-                if (!result.ok || !result.data || result.data.ok !== true) {
-                    var msg = (result.data && result.data.error) || 'unknown error';
-                    setSharepointFeedback('error', 'Sign-out failed: ' + msg);
-                    return;
-                }
-                setSharepointFeedback('success', 'Signed out of Microsoft.');
-                pollOnce();
-            }).catch(function () {
-                setSharepointFeedback('error', 'Sign-out failed: network error');
-            }).then(function () {
-                btn.disabled = false;
-            });
-        });
-    }
-
-    // Re-paint the SharePoint panel on every status poll.
+    // Re-paint the corpus panel on every status poll.
     var _basePaint = paint;
     paint = function (payload) {
         var state = _basePaint(payload);
@@ -737,8 +609,6 @@
         bindRefreshButton();
         bindUploadForm();
         bindEnableToggle();
-        bindSharepointSignin();
-        bindSharepointSignout();
         if (typeof document.addEventListener === 'function') {
             document.addEventListener('visibilitychange', function () {
                 // When the tab becomes visible again, re-sync state

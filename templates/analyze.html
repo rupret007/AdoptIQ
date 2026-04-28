@@ -133,31 +133,32 @@
                             </button>
                         </div>
                     </div>
-                    {# Round 35 / native-corpus: AdoptIQ Knowledge Corpus
-                       sub-panel.  The corpus URL is hardcoded in
-                       Config.ADOPTIQ_CORPUS_SHARE_URL and a baked
-                       snapshot ships inside the .app, so the user no
-                       longer pastes a SharePoint folder URL.  The
-                       remaining controls let the user authenticate
-                       via Microsoft (device-code) so the daily refresh
-                       can pull updates from the source share.  Two
-                       states drive the Connect/Sign-out toggle:
+                    {# Round 36 / onedrive-sync-auth: AdoptIQ Knowledge Corpus
+                       sub-panel.  The corpus is baked into the .app at
+                       build time and refreshed daily from the OneDrive
+                       desktop client's local mirror at
+                       Config.CSONE_ONEDRIVE_FOLDER -- no MSAL, no
+                       device-code prompt, no buttons.  The pill below
+                       reflects four states driven by ``boot.source``
+                       and ``boot.onedrive_status``:
 
-                         * auth_required -- Connect to Microsoft button
-                                            that opens a device-code
-                                            modal.
-                         * signed_in     -- Account name + Sign out.
+                         * baked + synced     -- Active. OneDrive synced.
+                                                 Daily refresh enabled.
+                         * baked + not_synced -- Active (baked snapshot).
+                                                 OneDrive folder not
+                                                 detected; sign in to
+                                                 OneDrive to enable
+                                                 daily refresh.
+                         * fresh + synced     -- Indexing OneDrive folder.
+                         * fresh + not_synced -- OneDrive sync required.
 
-                       The state-pill copy reflects whether the corpus
-                       was loaded from the build-time bake or from a
-                       successful runtime refresh.  All POSTs go
-                       through the same CSRF helper as
-                       /api/settings/intelligence so a hostile origin
-                       cannot start a sign-in. #}
+                       The ``data-sharepoint-*`` selectors are kept for
+                       back-compat with the JS module name; renaming
+                       them is a follow-up. #}
                     <div class="mt-3 pt-3 border-top"
-                         id="adoptiq-sharepoint-panel"
+                         id="adoptiq-corpus-panel"
                          data-sharepoint-panel
-                         data-state="{{ intel_status.boot.sharepoint.error_kind if intel_status and intel_status.boot and intel_status.boot.sharepoint and intel_status.boot.sharepoint.error_kind else 'unknown' }}">
+                         data-state="unknown">
                         <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
                             <strong class="small">
                                 <i class="fas fa-book me-1 text-primary" aria-hidden="true"></i>
@@ -171,53 +172,9 @@
                                   data-sharepoint-account
                                   aria-live="polite"></span>
                         </div>
-                        <div class="d-flex flex-wrap align-items-center gap-2"
-                             data-sharepoint-controls>
-                            <button type="button"
-                                    class="btn btn-sm btn-primary"
-                                    data-sharepoint-signin
-                                    style="display:none;">
-                                <i class="fab fa-microsoft me-1" aria-hidden="true"></i>
-                                Connect to Microsoft
-                            </button>
-                            <button type="button"
-                                    class="btn btn-sm btn-outline-danger"
-                                    data-sharepoint-signout
-                                    style="display:none;">
-                                <i class="fas fa-sign-out-alt me-1" aria-hidden="true"></i>
-                                Sign out
-                            </button>
-                            <span class="small text-muted"
-                                  data-sharepoint-feedback
-                                  aria-live="polite"></span>
-                        </div>
-                        {# Inline device-code prompt panel.  Rendered hidden
-                           by default; the JS handler unhides it after a
-                           successful POST /api/corpus/sharepoint/signin.
-                           Uses textContent-only updates (no innerHTML) so
-                           a hostile signin envelope cannot inject
-                           script. #}
-                        <div class="alert alert-info mt-2 mb-0 small"
-                             role="status"
-                             data-sharepoint-devicecode
-                             style="display:none;">
-                            <div class="mb-1">
-                                <strong>One more step:</strong>
-                                open
-                                <a href="#"
-                                   target="_blank"
-                                   rel="noopener noreferrer"
-                                   data-sharepoint-devicecode-uri>microsoft.com/devicelogin</a>
-                                and enter this code:
-                            </div>
-                            <div class="font-monospace fs-5 fw-bold"
-                                 data-sharepoint-devicecode-user
-                                 aria-live="polite"></div>
-                            <div class="small text-muted mt-1">
-                                This page will refresh automatically once you finish signing in.
-                                <span data-sharepoint-devicecode-status></span>
-                            </div>
-                        </div>
+                        <div class="small text-muted"
+                             data-sharepoint-feedback
+                             aria-live="polite"></div>
                     </div>
                     {# Round 26 / Phase D: optional drop-zone for
                        user-uploaded CSOne reports.  Only rendered
