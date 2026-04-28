@@ -2509,6 +2509,46 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                     <strong>Schema:</strong>
                     v{{ corpus_status.corpus.schema_version }}
                 </p>
+
+                {# Round 37 / Phase 2: OneDrive sync state pill.
+
+                   Round 36 replaced MSAL/Graph runtime auth with
+                   "OneDrive sync presence as the auth signal" --
+                   AdoptIQ trusts that the OneDrive desktop client
+                   handled SSO/MFA/admin-consent and verifies by
+                   probing ``Config.CSONE_ONEDRIVE_FOLDER`` for >=1
+                   non-empty file.  ``boot.onedrive_status`` is
+                   ``"synced"`` / ``"not_synced"`` / ``"unknown"``;
+                   ``boot.onedrive_file_count`` is the count of
+                   non-empty files seen at the last probe.  Surface
+                   it here so the operator can see at a glance
+                   whether daily refresh is unblocked. #}
+                {% set _od_status = corpus_status.boot.onedrive_status %}
+                {% set _od_count  = corpus_status.boot.onedrive_file_count %}
+                {% if _od_status %}
+                <p>
+                    <strong>OneDrive sync:</strong>
+                    {% if _od_status == 'synced' %}
+                        <span class="risk-low">synced</span>
+                    {% elif _od_status == 'not_synced' %}
+                        <span class="risk-medium">not synced</span>
+                    {% else %}
+                        <span style="color:#6c757d;">unknown</span>
+                    {% endif %}
+                    {% if _od_count is not none %}
+                        &middot;
+                        {{ _od_count }} file{{ '' if _od_count == 1 else 's' }} ready
+                    {% endif %}
+                    {% if _od_status != 'synced' %}
+                    <span style="color:#6c757d; font-size:0.9em;">
+                        &mdash; sign in to OneDrive and sync
+                        <code>AI Projects/AdoptIQ_CSOne_Reports</code>
+                        to enable daily refresh
+                    </span>
+                    {% endif %}
+                </p>
+                {% endif %}
+
                 {% if corpus_status.boot.encrypted_path %}
                 <p>
                     <strong>Encrypted cache:</strong>
@@ -3014,14 +3054,23 @@ def enhanced_admin_dashboard():
             "last_error_kind": None,
             "encrypted_path": None,
             "onedrive_root": None,
+            # Round 36 / Phase 1: OneDrive sync presence is the
+            # auth signal for the Knowledge Corpus.  ``synced`` /
+            # ``not_synced`` / ``unknown`` is computed by
+            # ``corpus_bootstrap._check_onedrive_sync_status`` and
+            # surfaced via ``/api/corpus/status``; the admin tile
+            # renders it as a colored pill.
+            "onedrive_status": None,
+            "onedrive_file_count": None,
             "last_stats": None,
             # Round 17.1: per-source breakdown rendered in the
             # Corpus tile.  ``None`` means the bootstrap has not
             # recorded source-level stats yet.
             "last_sources": None,
-            # Round 17.2: SharePoint pull state (None means feature
-            # disabled / never invoked; see the public endpoint
-            # contract in app_simple.py).
+            # Round 17.2 / retired in Round 36: SharePoint pull
+            # state.  Always ``None`` after Round 36 stripped MSAL;
+            # the key is preserved for back-compat with old admin
+            # builds talking to a new main app (or vice versa).
             "sharepoint": None,
         },
         "corpus": {
