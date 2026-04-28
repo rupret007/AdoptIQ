@@ -335,10 +335,35 @@ class EncryptedCorpusHandle:
     def commit_to_disk(self) -> None:
         """Encrypt the plaintext temp file and atomically replace
         ``encrypted_path``.  Used by the indexer after every batch so
-        a crash mid-run does not lose progress."""
+        a crash mid-run does not lose progress.
+
+        Round 35 / native-corpus: we now force a WAL checkpoint before
+        reading the plaintext file.  ``apply_schema`` enables
+        ``journal_mode = WAL`` for fast concurrent reads, but WAL
+        keeps committed pages in a sibling ``-wal`` file until a
+        checkpoint flushes them into the main DB file.  Without the
+        checkpoint, ``read_bytes()`` would seal the empty main DB
+        file (just the 4096-byte header) and the WAL pages would
+        live only in the per-process plaintext temp file -- the
+        encrypted ship-ready artifact would be silently empty.
+
+        ``PRAGMA wal_checkpoint(TRUNCATE)`` flushes every committed
+        page into the main file and zero-truncates the WAL so the
+        plaintext bytes we read carry the full corpus state.  Any
+        pre-existing ``-wal`` / ``-shm`` siblings survive on disk
+        until the connection closes, but their content is now
+        durably persisted.
+        """
         if self._closed:
             raise CorpusCryptoError("handle is closed")
         self.conn.commit()
+        try:
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        except sqlite3.DatabaseError as ckpt_err:  # pragma: no cover
+            logger.debug(
+                "wal_checkpoint failed (%s); main DB may be missing pages",
+                ckpt_err,
+            )
         plaintext = self.plaintext_path.read_bytes()
         sealed = encrypt_bytes(self.key, plaintext)
         # Write to sibling tmp + os.replace for atomicity.

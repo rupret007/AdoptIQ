@@ -25,8 +25,13 @@ this module's internals.
 from __future__ import annotations
 
 import logging
+import os
+import shutil
+import sys
 import threading
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -49,6 +54,15 @@ logger = logging.getLogger(__name__)
 
 
 _BOOT_LOCK = threading.RLock()
+
+# Round 35 / native-corpus: 24h refresh cadence for the daily worker
+# that pulls updates from ``Config.ADOPTIQ_CORPUS_SHARE_URL`` on top
+# of the baked snapshot.  Hour-resolution ticks keep us responsive to
+# user sign-in events without hammering Graph.
+_DAILY_REFRESH_INTERVAL_S = 86400.0
+_DAILY_REFRESH_TICK_S = 3600.0
+_DAILY_REFRESH_RETRY_S = 3600.0
+_DAILY_REFRESH_THREAD_NAME = "adoptiq-corpus-daily-refresh"
 
 
 @dataclass
@@ -82,12 +96,34 @@ class CorpusBootState:
     # sign-in / refresh CTAs without reaching into the SharePoint
     # client.  Always serializable so the JSON payload is stable.
     sharepoint: Optional[dict[str, object]] = None
+    # Round 35 / native-corpus: how the corpus was first materialized
+    # on this install.
+    #
+    #   * ``"baked"``  -- copied from ``<sys._MEIPASS>/baked_corpus/``
+    #                     on the first launch of a freshly-installed
+    #                     .app.  ``indexed_at`` reflects the build-time
+    #                     bake timestamp so the panel can show
+    #                     "Indexed (last bake YYYY-MM-DD)".
+    #   * ``"fresh"``  -- legacy / dev path: no baked corpus shipped,
+    #                     so the indexer creates an empty DB and waits
+    #                     for the user to sign in / refresh.
+    #
+    # ``last_successful_refresh_ts`` and ``last_refresh_attempt_ts``
+    # back the daily-refresh worker's ``_should_refresh()`` math; both
+    # are float epoch seconds (None means "never").
+    source: Optional[str] = None
+    indexed_at: Optional[str] = None
+    last_successful_refresh_ts: Optional[float] = None
+    last_refresh_attempt_ts: Optional[float] = None
+    last_refresh_error: Optional[str] = None
 
 
 _STATE: CorpusBootState = CorpusBootState()
 _HANDLE: Optional[EncryptedCorpusHandle] = None
 _SIGNAL: Optional[IndexSignal] = None
 _THREAD: Optional[threading.Thread] = None
+_DAILY_REFRESH_THREAD: Optional[threading.Thread] = None
+_DAILY_REFRESH_STOP: threading.Event = threading.Event()
 
 
 def get_state() -> CorpusBootState:
@@ -115,6 +151,11 @@ def get_state() -> CorpusBootState:
             sharepoint=(
                 dict(_STATE.sharepoint) if _STATE.sharepoint is not None else None
             ),
+            source=_STATE.source,
+            indexed_at=_STATE.indexed_at,
+            last_successful_refresh_ts=_STATE.last_successful_refresh_ts,
+            last_refresh_attempt_ts=_STATE.last_refresh_attempt_ts,
+            last_refresh_error=_STATE.last_refresh_error,
         )
 
 
@@ -124,8 +165,296 @@ def is_enabled() -> bool:
 
 
 def _utc_now_iso() -> str:
-    from datetime import datetime, timezone
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------------------
+# Round 35 / native-corpus: baked-corpus discovery + install
+# ---------------------------------------------------------------------------
+
+
+# Names mirror the four artifacts ``scripts/bake_corpus.py`` writes
+# (and ``adoptiq_mac.spec`` ships under ``Resources/baked_corpus/``).
+# ``corpus.db.salt`` follows ``corpus_crypto._salt_path_for`` which
+# derives ``<encrypted_path>.with_suffix(".salt")`` -- changing this
+# tuple without updating both the bake script and the spec would
+# silently break the install path.
+_BAKED_CORPUS_FILES: tuple = (
+    "corpus.db.enc",
+    "sentinel.json",
+    "corpus.db.salt",
+    "corpus.sentinel.lock.json",
+)
+
+
+def _baked_corpus_dir() -> Optional[Path]:
+    """Return the directory containing the baked corpus, or ``None``
+    when the running build did not bundle one.
+
+    Resolution order:
+
+    1. ``ADOPTIQ_BAKED_CORPUS_DIR`` env override (test path; lets the
+       test suite point at a fixture without monkey-patching
+       ``sys._MEIPASS``).
+    2. ``<sys._MEIPASS>/baked_corpus/`` -- the PyInstaller-mounted
+       resource location used by the shipping .app.
+    3. ``<repo_root>/bake/`` -- handy when running from a dev checkout
+       after a local ``scripts/bake_corpus.py`` invocation.
+
+    Returns ``None`` (rather than raising) when no candidate exists,
+    so callers can fall through to the legacy fresh-bootstrap path
+    cleanly.
+    """
+    override = os.environ.get("ADOPTIQ_BAKED_CORPUS_DIR")
+    if override:
+        candidate = Path(override)
+        if candidate.is_dir() and (candidate / "corpus.db.enc").exists():
+            return candidate
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidate = Path(meipass) / "baked_corpus"
+        if candidate.is_dir() and (candidate / "corpus.db.enc").exists():
+            return candidate
+
+    # Dev / source-tree path: only honored when a corpus.db.enc lives
+    # there (we never want to silently treat an empty ``bake/`` skip
+    # marker as a valid baked corpus).
+    repo_bake = Path(__file__).resolve().parent / "bake"
+    if repo_bake.is_dir() and (repo_bake / "corpus.db.enc").exists():
+        return repo_bake
+
+    return None
+
+
+def _user_corpus_dir() -> Path:
+    """Return the writable directory where the runtime corpus lives."""
+    return default_db_path().parent
+
+
+def _install_baked_corpus_if_present() -> Optional[str]:
+    """If a baked corpus is bundled and the user has no corpus yet,
+    copy the four artifacts into the writable user dir.  Returns the
+    bake timestamp (ISO-8601) on success, ``None`` when no install
+    happened (no bake bundled, or user already has a corpus).
+
+    The copy is one-shot per install: if the user's
+    ``corpus.db.enc`` already exists we leave it alone -- the daily
+    refresh will keep it current and the user's prior delta is more
+    valuable than the build-time snapshot.
+
+    Each copy is atomic (sibling tmp + ``os.replace``) and the
+    destination files are chmod 0600 so a multi-user host cannot read
+    another account's encrypted DB or sentinel material.
+    """
+    bake_dir = _baked_corpus_dir()
+    if bake_dir is None:
+        return None
+    user_dir = _user_corpus_dir()
+    user_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(user_dir, 0o700)
+    except OSError:
+        pass
+
+    user_db = user_dir / "corpus.db.enc"
+    if user_db.exists():
+        # Already installed (or user has a refresh-built DB).  Leave it alone.
+        return None
+
+    indexed_at: Optional[str] = None
+    for fname in _BAKED_CORPUS_FILES:
+        src = bake_dir / fname
+        if not src.exists():
+            # The four artifacts ship together; missing any one means
+            # the bake is incomplete and the bake-source is unsafe to
+            # trust.  Roll back and let the legacy path mint a fresh
+            # local sentinel.
+            logger.warning(
+                "Round 35 / corpus_bootstrap: baked corpus incomplete "
+                "(missing %s); falling back to fresh-mint path",
+                fname,
+            )
+            for cleanup in _BAKED_CORPUS_FILES:
+                try:
+                    (user_dir / cleanup).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return None
+        dest = user_dir / fname
+        tmp = dest.with_suffix(dest.suffix + ".install-tmp")
+        try:
+            shutil.copyfile(src, tmp)
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
+            os.replace(tmp, dest)
+        except OSError as copy_err:
+            logger.warning(
+                "Round 35 / corpus_bootstrap: baked corpus copy failed "
+                "name=%s err=%s",
+                fname, type(copy_err).__name__,
+            )
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return None
+        # Capture the build-time timestamp from the bake mtime so the
+        # UI can show "Last bake YYYY-MM-DD".  Use the earliest mtime
+        # across the four files (they are all written within seconds
+        # of one another at bake time).
+        try:
+            file_iso = datetime.fromtimestamp(
+                src.stat().st_mtime, tz=timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if indexed_at is None or file_iso < indexed_at:
+                indexed_at = file_iso
+        except OSError:
+            pass
+    logger.info(
+        "Round 35 / corpus_bootstrap: installed baked corpus into %s "
+        "(bake_dir=%s indexed_at=%s)",
+        user_dir, bake_dir, indexed_at,
+    )
+    return indexed_at
+
+
+# ---------------------------------------------------------------------------
+# Round 35 / native-corpus: daily-refresh worker
+# ---------------------------------------------------------------------------
+
+
+def _should_refresh(
+    *,
+    last_refresh_ts: Optional[float],
+    now: Optional[float] = None,
+    interval_s: float = _DAILY_REFRESH_INTERVAL_S,
+) -> bool:
+    """Return True when the corpus is due for its periodic refresh.
+
+    ``last_refresh_ts`` is float epoch seconds (None ≙ never
+    refreshed).  ``now`` defaults to ``time.time()``; tests can pin
+    it to exercise edge cases without sleep.
+    """
+    if interval_s <= 0:
+        return True
+    if now is None:
+        now = time.time()
+    if last_refresh_ts is None:
+        return True
+    return (now - float(last_refresh_ts)) >= float(interval_s)
+
+
+def _is_sharepoint_signed_in() -> bool:
+    """Return True when the keyring carries a usable refresh token so
+    the daily worker can pull updates without prompting the user."""
+    if not bool(getattr(Config, "ADOPTIQ_SHAREPOINT_ENABLED", False)):
+        return False
+    try:
+        import sharepoint_corpus_source as _sp
+    except Exception:  # noqa: BLE001 - never bubble
+        return False
+    try:
+        client = _sp.build_default_client()
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        info = client.get_token_info()
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(getattr(info, "has_refresh_token", False))
+
+
+def _daily_refresh_loop() -> None:
+    """Body of the daily-refresh daemon.
+
+    Wakes once per ``_DAILY_REFRESH_TICK_S`` (1h) and triggers an
+    incremental refresh when:
+
+      * the feature flag is on,
+      * a baked corpus install or prior refresh has populated
+        ``_STATE.last_successful_refresh_ts``, AND
+      * ``_should_refresh()`` says we're past the 24h window, AND
+      * the user is signed into SharePoint.
+
+    Refreshes piggy-back on ``request_refresh()`` -> the existing
+    ``_run_index_pass()`` machinery, which already writes the
+    encrypted DB atomically (sibling-tmp + ``os.replace`` inside
+    ``EncryptedCorpusHandle.commit_to_disk``) so a mid-refresh crash
+    leaves the prior corpus intact (Phase 4c atomic-swap semantics).
+    """
+    logger.info(
+        "Round 35 / corpus_bootstrap: daily refresh worker started "
+        "(interval=%.0fs tick=%.0fs)",
+        _DAILY_REFRESH_INTERVAL_S, _DAILY_REFRESH_TICK_S,
+    )
+    while not _DAILY_REFRESH_STOP.is_set():
+        # Sleep with .wait() so stop() can interrupt the worker
+        # quickly during process shutdown.
+        if _DAILY_REFRESH_STOP.wait(_DAILY_REFRESH_TICK_S):
+            break
+        try:
+            if not is_enabled():
+                continue
+            with _BOOT_LOCK:
+                last_ts = _STATE.last_successful_refresh_ts
+                in_progress = _STATE.in_progress
+            if in_progress:
+                continue
+            if not _should_refresh(last_refresh_ts=last_ts):
+                continue
+            if not _is_sharepoint_signed_in():
+                logger.debug(
+                    "Round 35 / corpus_bootstrap: daily refresh skipped "
+                    "(user not signed in)"
+                )
+                continue
+            logger.info(
+                "Round 35 / corpus_bootstrap: triggering daily refresh "
+                "(last_successful=%s)",
+                last_ts,
+            )
+            with _BOOT_LOCK:
+                _STATE.last_refresh_attempt_ts = time.time()
+                _STATE.last_refresh_error = None
+            try:
+                request_refresh(rebuild=False)
+            except Exception as refresh_err:  # noqa: BLE001 - never bubble
+                with _BOOT_LOCK:
+                    _STATE.last_refresh_error = type(refresh_err).__name__
+                logger.warning(
+                    "Round 35 / corpus_bootstrap: daily refresh raised: %s",
+                    type(refresh_err).__name__,
+                )
+        except Exception as loop_err:  # noqa: BLE001 - never bubble
+            logger.warning(
+                "Round 35 / corpus_bootstrap: daily refresh loop iteration "
+                "failed: %s",
+                type(loop_err).__name__,
+            )
+    logger.info("Round 35 / corpus_bootstrap: daily refresh worker exiting")
+
+
+def start_daily_refresh_worker() -> bool:
+    """Spawn the daily-refresh daemon if it is not already running.
+    Returns ``True`` when a new thread was started, ``False`` when one
+    is already alive.
+    """
+    global _DAILY_REFRESH_THREAD
+    with _BOOT_LOCK:
+        if _DAILY_REFRESH_THREAD is not None and _DAILY_REFRESH_THREAD.is_alive():
+            return False
+        _DAILY_REFRESH_STOP.clear()
+        thread = threading.Thread(
+            target=_daily_refresh_loop,
+            name=_DAILY_REFRESH_THREAD_NAME,
+            daemon=True,
+        )
+        _DAILY_REFRESH_THREAD = thread
+        thread.start()
+        return True
 
 
 def _index_stats_to_dict(stats: IndexStats) -> dict[str, object]:
@@ -449,6 +778,20 @@ def _run_index_pass(*, rebuild: bool) -> None:
     onedrive_root = getattr(Config, "CSONE_ONEDRIVE_FOLDER", None)
     encrypted_path = default_db_path().with_suffix(".db.enc")
 
+    # Round 35 / native-corpus: on first launch of a freshly-installed
+    # .app, copy the baked corpus into the writable user dir so the
+    # rest of this function opens an already-populated DB instead of
+    # starting from empty.  Idempotent: subsequent launches see an
+    # existing user_db and short-circuit.
+    try:
+        baked_indexed_at = _install_baked_corpus_if_present()
+    except Exception as install_err:  # noqa: BLE001 - never bubble
+        baked_indexed_at = None
+        logger.warning(
+            "Round 35 / corpus_bootstrap: baked corpus install failed: %s",
+            type(install_err).__name__,
+        )
+
     with _BOOT_LOCK:
         _STATE.in_progress = True
         _STATE.last_started_at = _utc_now_iso()
@@ -457,6 +800,11 @@ def _run_index_pass(*, rebuild: bool) -> None:
         _STATE.last_error = None
         _STATE.last_error_kind = None
         _STATE.last_sources = None
+        if baked_indexed_at is not None and _STATE.source is None:
+            _STATE.source = "baked"
+            _STATE.indexed_at = baked_indexed_at
+        elif _STATE.source is None:
+            _STATE.source = "fresh"
 
     # Round 17.2: refresh the SharePoint cache before resolving the
     # source list, so the cache directory is populated by the time the
@@ -615,6 +963,12 @@ def _run_index_pass(*, rebuild: bool) -> None:
             _STATE.last_finished_at = _utc_now_iso()
             _STATE.last_stats = _index_stats_to_dict(aggregate)
             _STATE.last_sources = per_source if per_source else None
+            # Round 35 / native-corpus: record success so the daily-
+            # refresh worker's ``_should_refresh()`` math can advance
+            # past the 24h window and so the UI can show "last
+            # refreshed N hours ago".
+            _STATE.last_successful_refresh_ts = time.time()
+            _STATE.last_refresh_error = None
         logger.info(
             "Round 17.1 / corpus_bootstrap: indexed files_parsed=%d chunks=%d sources=%d",
             int(aggregate.files_parsed),
@@ -654,7 +1008,20 @@ def start_background(*, rebuild: bool = False) -> bool:
         )
         _THREAD = thread
         thread.start()
-        return True
+    # Round 35 / native-corpus: also kick off the daily-refresh
+    # worker.  Idempotent -- ``start_daily_refresh_worker`` no-ops
+    # when the daemon is already alive.  Spawned outside the lock so
+    # an unexpectedly-slow ``threading.Thread.start`` cannot deadlock
+    # callers of ``get_state()``.
+    try:
+        start_daily_refresh_worker()
+    except Exception as worker_err:  # noqa: BLE001 - never bubble
+        logger.warning(
+            "Round 35 / corpus_bootstrap: daily refresh worker failed "
+            "to start: %s",
+            type(worker_err).__name__,
+        )
+    return True
 
 
 def request_refresh(*, rebuild: bool = False) -> bool:
@@ -668,7 +1035,18 @@ def stop() -> None:
     """Best-effort shutdown.  Sets the indexer's stop flag and closes
     the encrypted handle.  Idempotent; safe to call from
     ``atexit``."""
-    global _HANDLE, _SIGNAL, _THREAD
+    global _HANDLE, _SIGNAL, _THREAD, _DAILY_REFRESH_THREAD
+    # Round 35 / native-corpus: signal the daily-refresh worker to
+    # exit before we close the handle so a tick already in flight does
+    # not race against the shutdown.  ``Event.set`` is safe outside
+    # the lock; the worker reads via ``Event.wait``.
+    _DAILY_REFRESH_STOP.set()
+    refresh_thread = _DAILY_REFRESH_THREAD
+    if refresh_thread is not None and refresh_thread.is_alive():
+        try:
+            refresh_thread.join(timeout=2.0)
+        except Exception:  # noqa: BLE001 - shutdown path
+            pass
     with _BOOT_LOCK:
         if _SIGNAL is not None:
             try:
@@ -678,6 +1056,7 @@ def stop() -> None:
         handle = _HANDLE
         _HANDLE = None
         _SIGNAL = None
+        _DAILY_REFRESH_THREAD = None
     if handle is not None:
         try:
             handle.close(persist=True)
@@ -694,7 +1073,16 @@ def stop() -> None:
 def reset_for_tests() -> None:
     """Wipe the singleton state.  Used by the tests in
     ``tests/test_round17_*.py``; not part of the public API."""
-    global _HANDLE, _SIGNAL, _THREAD, _STATE
+    global _HANDLE, _SIGNAL, _THREAD, _STATE, _DAILY_REFRESH_THREAD
+    # Round 35: tear down the daily-refresh worker so a test that
+    # mutates _STATE in-place does not race against an active loop.
+    _DAILY_REFRESH_STOP.set()
+    refresh_thread = _DAILY_REFRESH_THREAD
+    if refresh_thread is not None and refresh_thread.is_alive():
+        try:
+            refresh_thread.join(timeout=1.0)
+        except Exception:  # noqa: BLE001 - test path
+            pass
     with _BOOT_LOCK:
         if _HANDLE is not None:
             try:
@@ -704,7 +1092,9 @@ def reset_for_tests() -> None:
         _HANDLE = None
         _SIGNAL = None
         _THREAD = None
+        _DAILY_REFRESH_THREAD = None
         _STATE = CorpusBootState()
+    _DAILY_REFRESH_STOP.clear()
     configure_connection(None)
 
 
