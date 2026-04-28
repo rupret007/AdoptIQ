@@ -3154,3 +3154,235 @@ addition of ARR rendering must include the multi-currency branch).
   the new artefact within the usual 60s window.
 
 **Trailer:** Made-with: Cursor (Claude Opus 4.7)
+
+## Round 35 — handoff 2026-04-28
+
+> Note: Rounds 31, 32, 33, and 34 landed as commits + a stand-alone
+> "Round 34 - audit report" commit (`b375e63`) but were never
+> journaled in this file.  CLAUDE.md captures their behavior. This
+> handoff is the first journal entry since Round 30; pick up the
+> floor from Round 30 (2570 passed) and add Rounds 31–35
+> (+247 tests) to it.
+
+**What changed (plain English):**
+- Hardcoded the Knowledge Corpus source URL in `config.py:96`
+  (`Config.ADOPTIQ_CORPUS_SHARE_URL`) so every install ships with
+  the canonical Cisco-internal `AdoptIQ_CSOne_Reports` OneDrive
+  share. `Config.ADOPTIQ_SHAREPOINT_FOLDER_URL` is now a
+  back-compat alias of the same value; ops can override via the
+  `ADOPTIQ_CORPUS_SHARE_URL` env var, and
+  `adoptiq_settings.is_valid_sharepoint_url` enforces the
+  `https://<tenant>.sharepoint.com/<path>` allow-list even on env
+  overrides as defense-in-depth.
+- Added a build-time corpus bake: new `scripts/bake_corpus.py`
+  (532 LOC) is invoked from `build_mac_dmg.sh` BEFORE PyInstaller.
+  Auth modes are `device_code` (default; build operator's MSAL
+  token cache lives in macOS Keychain so re-builds are silent)
+  and `offline_fixture` (test-only, used by
+  `tests/test_round35_bake_script_smoke.py`). The script
+  downloads the share, indexes via the existing `corpus_indexer`,
+  and stages four artifacts under `bake/`: `corpus.db.enc`,
+  `sentinel.json`, `corpus.db.salt` (filename pinned by
+  `corpus_crypto._salt_path_for` — DO NOT rename to `salt.bin`),
+  and `corpus.sentinel.lock.json` (Round 34 / A1 pinning).
+  `ADOPTIQ_BAKE_CORPUS=0` (or `--no-bake`) writes a
+  `.bake-skipped` marker; `adoptiq_mac.spec` `_datas()`
+  gracefully omits the four artifacts when absent so a skipped
+  bake still produces a working `.app`.
+- Added runtime install: `corpus_bootstrap._install_baked_corpus_if_present()`
+  (`corpus_bootstrap.py:235`) copies the bundled
+  `<sys._MEIPASS>/baked_corpus/` into the user's writable
+  `~/Library/Application Support/AdoptIQ/knowledge/` on first
+  launch (mode `0o600`). Idempotent — subsequent launches see an
+  existing `corpus.db.enc` and short-circuit so the user's
+  refresh history wins.
+- Added 24h daily-refresh worker:
+  `corpus_bootstrap.start_daily_refresh_worker()`
+  (`corpus_bootstrap.py:440`) spawns a daemon thread that wakes
+  every `_DAILY_REFRESH_TICK_S` (1h) and triggers
+  `request_refresh(rebuild=False)` when (a) Intelligence is
+  enabled, (b) `_should_refresh()` (`:329`) reports the 24h
+  window has elapsed, AND (c) the user is signed into SharePoint
+  (MSAL refresh token in keychain). Refreshes piggy-back on
+  `EncryptedCorpusHandle.commit_to_disk` which writes via
+  sibling `.tmp` + `os.replace`; mid-refresh crashes leave the
+  prior corpus byte-identical (Phase 4c atomic-swap, pinned by
+  `tests/test_round35_refresh_failure_preserves_corpus.py`).
+- Latent-bug fix in `corpus_crypto.EncryptedCorpusHandle.commit_to_disk`
+  (`corpus_crypto.py:335`, checkpoint at `:361`): added
+  `PRAGMA wal_checkpoint(TRUNCATE);` before sealing the
+  encrypted DB. Without it, the encrypted artifact only
+  contained the 4096-byte SQLite header — committed pages live
+  in the WAL until checkpointed — so the bake artifact (and
+  Build8's runtime indexing) was effectively empty under the
+  previous code path.
+- Removed the Build8 user-facing URL paste UI:
+  `templates/analyze.html` lost the `data-sharepoint-url-input`
+  / `data-sharepoint-save-url` widgets (header renamed to
+  "AdoptIQ Knowledge Corpus"); `static/js/intel_status.js`
+  dropped the `/api/settings/sharepoint_url` calls and gained
+  new corpus-panel states; `app_simple.py` deleted the
+  `POST /api/settings/sharepoint_url` route and pruned it from
+  the sensitive-routes set; `adoptiq_settings.py` stripped
+  `sharepoint_folder_url` from `_SCHEMA` and silently drops
+  legacy values on load + save (back-compat).
+- Added `corpus_bootstrap.sharepoint_signout()`
+  (`corpus_bootstrap.py:1177`) so the corpus panel's signout
+  button clears both the macOS Keychain entry and the 0o600
+  fallback file (`~/.adoptiq/sharepoint_token_cache.json`).
+- Bumped `ADOPTIQ_BUILD` from `9` to `10` in `config.py:5` so
+  the in-app version string disambiguates Round-35-included vs
+  Round-34-only installs.
+
+**Files touched:**
+- `config.py` — `ADOPTIQ_CORPUS_SHARE_URL` constant + back-compat
+  alias; build bumped to `10`
+- `corpus_bootstrap.py` — bake-discovery, baked-corpus install,
+  24h daily-refresh worker, `sharepoint_signout` helper
+- `corpus_crypto.py` — WAL checkpoint inside `commit_to_disk`
+- `sharepoint_corpus_source.py` (NEW) — device-code helpers,
+  `fetch_share_link_folder`, `_encode_share_url_for_graph`
+- `adoptiq_settings.py` — schema strips `sharepoint_folder_url`
+  on load/save (silent back-compat)
+- `adoptiq_mac.spec` — `_datas()` ships `bake/` artifacts when
+  present, gracefully omits when absent
+- `build_mac_dmg.sh` — invokes `scripts/bake_corpus.py` before
+  PyInstaller; honors `ADOPTIQ_BAKE_CORPUS=0`
+- `scripts/bake_corpus.py` (NEW, 532 LOC) — bake orchestrator
+- `templates/analyze.html` — Knowledge Corpus panel (paste UI gone)
+- `static/js/intel_status.js` — selectors + corpus API calls
+- `app_simple.py` — `/api/settings/sharepoint_url` removed,
+  sensitive set pruned, daily-refresh worker kicked off
+
+**SSoT modules touched:** config, corpus_bootstrap, corpus_crypto
+
+**Tests added/updated:**
+- `tests/test_round35_bake_script_smoke.py` (9 tests) — pins the
+  bake CLI: `--no-bake` short-circuits with `.bake-skipped`,
+  `offline_fixture` mode produces all four artifacts with
+  correct filenames + permissions, salt filename matches
+  `corpus_crypto._salt_path_for`, exit codes 1/2/3/4 documented
+- `tests/test_round35_baked_corpus_loaded_on_boot.py` (7 tests) —
+  pins `_install_baked_corpus_if_present`: idempotent on
+  re-launch, partial bake (any of 4 files missing) → no
+  install, 0o600 mode preserved on copy
+- `tests/test_round35_corpus_url_hardcoded.py` (5 tests) —
+  pins the URL precedence: env override only when matches
+  `is_valid_sharepoint_url`, otherwise falls back to hardcoded
+  default; alias `ADOPTIQ_SHAREPOINT_FOLDER_URL` resolves to
+  same value
+- `tests/test_round35_daily_refresh_timer.py` (11 tests) — pins
+  the 3-condition gate (intel-enabled AND 24h-elapsed AND
+  signed-in), tick interval, stop semantics
+- `tests/test_round35_paste_ui_removed.py` (6 tests) — pins
+  template + JS + route removal so the Build8 paste UI cannot
+  silently come back
+- `tests/test_round35_refresh_failure_preserves_corpus.py` (5
+  tests) — pins atomic-swap: mid-refresh crash leaves prior
+  `corpus.db.enc` byte-identical (sibling `.tmp` + `os.replace`)
+- `tests/test_round35_share_link_encoder.py` (18 tests) —
+  pins `_encode_share_url_for_graph` bit-for-bit (base64-url
+  without padding, `u!` prefix, host allow-list,
+  case-insensitive host match, rejects non-https / non-sharepoint)
+- Updates to Round 33 + Round 34 SharePoint tests to reflect
+  the URL-paste removal:
+  `tests/test_round33_settings_overrides_sharepoint.py`,
+  `tests/test_round33_settings_sharepoint_url.py`,
+  `tests/test_round33_sharepoint_url_endpoint.py`,
+  `tests/test_round34_b_sharepoint_routes_hardened.py`
+
+**Verify status:**
+- `make verify` — **fail** (lint only; pytest + security green)
+- pytest: 2817 passed / 2 skipped (was 2570 at end of Round 30;
+  +247 across Rounds 31–35, of which +61 are Round 35)
+- ruff: **3 findings** — all S104 ("Possible binding to all
+  interfaces"), all in
+  `tests/test_round34_h1_admin_autostart_loopback_gate.py`
+  (lines 99, 151, 161). Pre-existing from Round 34; Round 35
+  did not touch this file. The literals are intentional and
+  pin the desired behavior of the
+  `ADOPTIQ_ADMIN_BIND_PUBLIC=1` opt-in gate. See **Known
+  deferrals** below.
+- bandit HIGH/MED: 0 (the 4 `nosec`-warning lines on
+  `enhanced_admin_dashboard_v2.py:3935/3945` are harmless
+  scanner noise — pre-existing nosec markers that bandit
+  acknowledges)
+- pip-audit: not run this session (no `requirements.txt`
+  changes; safe to skip but please confirm if you re-run
+  `make verify` end-to-end)
+
+**Hot spots Claude should audit first:**
+1. `corpus_bootstrap.py:235` (`_install_baked_corpus_if_present`) —
+   first-launch path that copies four artifacts from
+   `<sys._MEIPASS>/baked_corpus/` into the user's writable
+   knowledge dir. Verify it is genuinely idempotent (existing
+   `corpus.db.enc` short-circuits BEFORE any writes happen,
+   never mid-copy), tolerates a partial bake (any of the four
+   files missing → roll back, do not leave a partial install),
+   and preserves the `0o600` mode on copy.
+2. `corpus_bootstrap.py:329 + :440` (`_should_refresh` +
+   `start_daily_refresh_worker`) — scrutinize the 3-condition
+   gate (intel-enabled AND 24h-elapsed AND signed-in) for race
+   conditions between the worker thread and a user-initiated
+   refresh. The shutdown path (`_DAILY_REFRESH_STOP.wait` +
+   thread join in `reset_for_tests`) is exercised by tests but
+   the stop-during-refresh interleaving deserves a second pair
+   of eyes.
+3. `corpus_crypto.py:335` (`commit_to_disk`) — the WAL
+   checkpoint addition (`:361`) is a latent-bug fix. Confirm
+   the checkpoint runs BEFORE the `.tmp` seal, that
+   `PRAGMA wal_checkpoint(TRUNCATE)` is the right mode (not
+   `PASSIVE` or `RESTART`), and that it doesn't blow up on an
+   in-memory or non-WAL DB.
+4. `scripts/bake_corpus.py` error paths — exit codes 1/2/3/4
+   are documented in the module docstring; verify
+   `build_mac_dmg.sh` actually surfaces a non-zero exit so the
+   DMG build fails loud rather than shipping a stale or empty
+   corpus. Also confirm: the share-URL allow-list (calls
+   `_encode_share_url_for_graph` for validation) really blocks
+   non-`sharepoint.com` / non-`https` hosts even when an ops
+   env override is set.
+5. `sharepoint_corpus_source.py` (NEW, ~341 LOC) —
+   `SharePointGraphClient` token cache → keychain + `0o600`
+   fallback file path; device-code flow timeout +
+   silent-acquire fallback; `fetch_share_link_folder`
+   recursion bounds (`max-files` / `max-depth` CLI flags,
+   default 5000 / 12); `_encode_share_url_for_graph`
+   base64-url-without-padding contract (test pins it
+   bit-for-bit but cross-check against MS Graph docs).
+6. `adoptiq_settings.py` — `sharepoint_folder_url` is stripped
+   on read AND on save so existing `settings.json` files with
+   that key continue to load. Verify the strip is silent (no
+   warning logged that would alarm a user) and that the
+   resulting file is still atomic-write + `0o600`.
+
+**Known deferrals (intentional non-fixes):**
+- **Ruff S104 in `tests/test_round34_h1_admin_autostart_loopback_gate.py`**
+  (lines 99 / 151 / 161) — the literal `"0.0.0.0"` strings are
+  intentional: the test exists to prove that the
+  `ADOPTIQ_ADMIN_BIND_PUBLIC=1` opt-in gate actually allows a
+  public bind. Round 35 did not touch Round 34 code so I left
+  these alone, but `make verify` is currently red on lint
+  because of them. The clean fix is `# noqa: S104` per line
+  with a one-line rationale (or a single module-level
+  constant + one noqa). Your call whether to land that as
+  part of the Round 35 review or queue it for Round 36.
+- **End-to-end build verification** — the test suite exercises
+  the bake pipeline in `offline_fixture` mode but NOT against
+  a real device-code MSAL flow. `build_mac_dmg.sh` with
+  `ADOPTIQ_BAKE_AUTH_MODE=device_code` was NOT run this
+  session — the next physical Mac build will be the first
+  real exercise of the device-code path. Belt-and-suspenders:
+  run `python3 scripts/bake_corpus.py --auth-mode
+  offline_fixture --fixture-dir <small_csv_dir>` manually and
+  confirm the four artifacts land + `open_corpus_for_user`
+  round-trips them.
+- **Round 31/32/33/34 audit entries are NOT in
+  `QUALITY_AUDIT.md`** — they were captured in `CLAUDE.md` and
+  in commit `b375e63` ("Round 34 - audit report") but never
+  journaled here. The bottom of this file ended at Round 30
+  before today's entry. This is a Cursor-side cleanup, not a
+  Round 35 problem; flagging for completeness so you don't
+  spend time hunting for them.
+
+**Trailer:** Made-with: Cursor

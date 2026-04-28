@@ -15537,6 +15537,18 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             # serializable dict otherwise (see
             # :func:`corpus_bootstrap._refresh_sharepoint_cache_for_bootstrap`).
             "sharepoint": None,
+            # Round 35 / native-corpus: bake provenance + daily-refresh
+            # timer state.  Mirrored from
+            # :class:`corpus_bootstrap.CorpusBootState`; see the
+            # corresponding ``getattr(... )`` block in the success
+            # branch below for field semantics.  Default to ``None``
+            # so the JS panel falls through to the "Status unknown"
+            # label rather than crashing on undefined keys.
+            "source": None,
+            "indexed_at": None,
+            "last_successful_refresh_ts": None,
+            "last_refresh_attempt_ts": None,
+            "last_refresh_error": None,
         },
         "corpus": {
             "files_total": 0,
@@ -15567,6 +15579,28 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             "encrypted_path": boot_state.encrypted_path,
             "onedrive_root": boot_state.onedrive_root,
             "sharepoint": boot_state.sharepoint,
+            # Round 35 / native-corpus: surface the bake provenance +
+            # daily-refresh timer state so ``static/js/intel_status.js``
+            # can render the new "Indexed (sign in to refresh)" /
+            # "Last bake YYYY-MM-DD" panel labels and so operators can
+            # debug a stalled refresh worker without grepping logs.
+            # ``source`` is "baked" when the .app shipped with a
+            # pre-indexed corpus and "fresh" when the runtime auto-
+            # minted one.  ``indexed_at`` is the bake timestamp (UTC
+            # ISO-8601).  The three ``*_refresh_*`` fields are
+            # populated by the daily-refresh worker and stay None
+            # until the first refresh attempt.
+            "source": getattr(boot_state, "source", None),
+            "indexed_at": getattr(boot_state, "indexed_at", None),
+            "last_successful_refresh_ts": getattr(
+                boot_state, "last_successful_refresh_ts", None,
+            ),
+            "last_refresh_attempt_ts": getattr(
+                boot_state, "last_refresh_attempt_ts", None,
+            ),
+            "last_refresh_error": getattr(
+                boot_state, "last_refresh_error", None,
+            ),
         }
         # Round 17.1: also surface per-source counts under
         # ``corpus.sources`` so the admin Corpus tile can render the
