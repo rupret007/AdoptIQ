@@ -241,81 +241,40 @@ class Config:
         in {'1', 'true', 'yes', 'on'}
     )
 
-    # Round 17.2: SharePoint Microsoft Graph corpus source.
-    #
-    # When enabled, AdoptIQ pulls raw CSOne report files from a
-    # delegated-share folder URL using the Microsoft Graph PowerShell
-    # public client + device-code flow, caches them under
-    # ``ADOPTIQ_SHAREPOINT_CACHE_DIR`` (default
-    # ``~/.adoptiq/cache/sharepoint_csone``) and indexes that cache
-    # before falling through to ``CSONE_ONEDRIVE_FOLDER`` and
-    # ``CSONE_USER_DOWNLOADS_DIR``.  No tenant-specific app
-    # registration is required; the client id is the public
-    # Microsoft Graph PowerShell value baked into MSAL samples and is
-    # explicitly NOT a secret.  The user signs in once via the
-    # device-code flow; the refresh token is persisted in the macOS
-    # Keychain (via ``keyring``) with a 0600 file fallback under
-    # ``~/.adoptiq``.  Defaults: feature is on by default once a
-    # share URL is configured; auth state being absent simply skips
-    # the source on the first launch.
-    ADOPTIQ_SHAREPOINT_ENABLED = (
-        str(os.environ.get('ADOPTIQ_SHAREPOINT_ENABLED', 'true')).strip().lower()
-        in {'1', 'true', 'yes', 'on'}
-    )
+    # Round 17.2 -> Round 36: SharePoint Microsoft Graph corpus
+    # source has been retired.  The MSAL/Graph runtime path was
+    # blocked by Cisco tenant admin-consent on the default Microsoft
+    # Graph PowerShell client ID (14d82eec-204b-4c2f-b7e8-296a70dab67e),
+    # so AdoptIQ now relies on the OneDrive desktop client to mirror
+    # the canonical AdoptIQ corpus folder under
+    # ``CSONE_ONEDRIVE_FOLDER`` and walks that path directly.
+    # The ``ADOPTIQ_SHAREPOINT_*`` settings below are kept for back-
+    # compat with operator env scripts and tests that reference them;
+    # no runtime code path consumes any of them as of Round 36.
+    ADOPTIQ_SHAREPOINT_ENABLED = False  # Round 36: hard-disabled.
     # Round 35 / native-corpus: the canonical OneDrive/SharePoint share
-    # URL for the AdoptIQ knowledge corpus.  Hardcoded so the analyze
-    # page no longer needs a URL-paste UI, and so DMG bake at build
-    # time and per-user daily refresh both target the same source of
-    # truth.  Env-overridable for ops/testing/CI flexibility but never
-    # surfaced in ``settings.json`` (per-user override was the Build8
-    # design and is intentionally retired in Round 35).  The default
-    # points at the AdoptIQ_CSOne_Reports share which is configured
-    # for "People in Cisco with the link can edit" -- so any signed-in
-    # Cisco user can fetch via the Microsoft Graph ``/shares/u!{token}/
-    # driveItem`` endpoint (sharing-link form, not canonical Graph
-    # drive item path).
+    # URL for the AdoptIQ knowledge corpus.  Retained as documentation
+    # / for the bake script's logging output -- the runtime indexer
+    # never opens this URL (it walks ``CSONE_ONEDRIVE_FOLDER``).
     ADOPTIQ_CORPUS_SHARE_URL = (
         os.environ.get('ADOPTIQ_CORPUS_SHARE_URL')
         or 'https://cisco-my.sharepoint.com/:f:/r/personal/jestory_cisco_com/Documents/AI%20Projects/AdoptIQ_CSOne_Reports?csf=1&web=1&e=O3a4Ij'
     )
-    # Round 33 / Build8 -> Round 35: ``ADOPTIQ_SHAREPOINT_FOLDER_URL``
-    # was the Build8 per-user URL slot (settings.json paste UI bridged
-    # this).  Round 35 retires the per-user paste UI in favor of the
-    # hardcoded ``ADOPTIQ_CORPUS_SHARE_URL`` above, so this attribute
-    # is now a backward-compat alias that defaults to the canonical
-    # corpus URL.  Existing consumers in ``corpus_bootstrap.py`` keep
-    # working without code churn; new code should reference
-    # ``ADOPTIQ_CORPUS_SHARE_URL`` directly.
-    #
-    # ``adoptiq_settings.is_valid_sharepoint_url`` (kept exported for
-    # back-compat) still enforces the ``https://<tenant>.sharepoint
-    # .com/<path>`` allow-list as a defense-in-depth check on any
-    # operator-supplied env override.
+    # Round 33 / Build8 -> Round 35 -> Round 36: backward-compat alias.
+    # No runtime consumer; preserved so existing tests that reference
+    # ``ADOPTIQ_SHAREPOINT_FOLDER_URL`` keep importing cleanly.
     ADOPTIQ_SHAREPOINT_FOLDER_URL = (
         os.environ.get('ADOPTIQ_SHAREPOINT_FOLDER_URL')
         or ADOPTIQ_CORPUS_SHARE_URL
     )
-    # Microsoft-owned public client id ("Microsoft Graph PowerShell").
-    # Public, not a secret -- listed in MSAL sample code.  Operators
-    # who run their own Azure AD app can override.
-    ADOPTIQ_SHAREPOINT_CLIENT_ID = (
-        os.environ.get('ADOPTIQ_SHAREPOINT_CLIENT_ID')
-        or '14d82eec-204b-4c2f-b7e8-296a70dab67e'
-    )
-    ADOPTIQ_SHAREPOINT_AUTHORITY = (
-        os.environ.get('ADOPTIQ_SHAREPOINT_AUTHORITY')
-        or 'https://login.microsoftonline.com/common'
-    )
-    ADOPTIQ_SHAREPOINT_CACHE_DIR = os.environ.get(
-        'ADOPTIQ_SHAREPOINT_CACHE_DIR'
-    ) or str(Path.home() / '.adoptiq' / 'cache' / 'sharepoint_csone')
-    # Per-file cap (50 MiB) -- aligned with corpus_indexer's
-    # ``_MAX_PARSE_BYTES`` so files we download will not be silently
-    # rejected by the indexer.  Operators with larger reports can
-    # raise via env, but be aware the indexer will skip them.
-    ADOPTIQ_SHAREPOINT_MAX_FILE_BYTES = int(
-        os.environ.get('ADOPTIQ_SHAREPOINT_MAX_FILE_BYTES') or (50 * 1024 * 1024)
-    )
+    # Round 36: dead settings retained as ``None`` so any operator env
+    # script that exports these vars does not crash on missing
+    # attribute access.  Removing them entirely is deferred to a
+    # later round once the operator runbooks have been refreshed.
+    ADOPTIQ_SHAREPOINT_CLIENT_ID = None
+    ADOPTIQ_SHAREPOINT_AUTHORITY = None
+    ADOPTIQ_SHAREPOINT_CACHE_DIR = None
+    ADOPTIQ_SHAREPOINT_MAX_FILE_BYTES = 50 * 1024 * 1024
 
     # CSOne shared folder URL: opens in browser so users can download and
     # upload when the OneDrive folder isn't synced.  Configure via

@@ -5,9 +5,10 @@ The corpus database carries customer-confidential data (case history,
 sentiment, escalation context).  At rest we keep it encrypted under
 ``~/Library/Application Support/AdoptIQ/knowledge/corpus.db.enc`` (or
 the Windows equivalent) with a key derived from a sentinel file
-inside the user's CSOne corpus root -- either the local SharePoint
-cache populated by ``sharepoint_corpus_source.refresh_local_cache``
-(Round 17.2), or a locally-synced OneDrive copy of the same share.
+inside the user's CSOne corpus root -- the locally-synced OneDrive
+copy of the AdoptIQ share, mirrored by the OneDrive desktop client
+under ``Config.CSONE_ONEDRIVE_FOLDER``.  Round 36 retired the legacy
+SharePoint Graph cache path (``sharepoint_corpus_source``).
 
 Why the sentinel-derived key?
 -----------------------------
