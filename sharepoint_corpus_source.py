@@ -267,6 +267,62 @@ def encode_share_url(url: str) -> str:
     return "u!" + encoded
 
 
+# Round 35 / native-corpus: hardened wrapper around encode_share_url
+# that enforces a strict scheme + host allow-list before handing the
+# URL to Microsoft Graph.  ``Config.ADOPTIQ_CORPUS_SHARE_URL`` is
+# env-overridable for ops/testing flexibility, so this is the
+# defense-in-depth check that keeps a malicious env override from
+# redirecting Graph fetches at an attacker-controlled host.
+#
+# Allow-list (case-insensitive on host):
+#   * scheme MUST be ``https`` (no http, no file, no gopher)
+#   * host MUST end in ``.sharepoint.com`` (covers ``cisco-my``,
+#     ``cisco``, etc. tenants) -- anchored on the host suffix so a
+#     cute ``foo.sharepoint.com.attacker.tld`` cannot slip past
+#   * path MUST be non-empty -- a bare host has no folder context
+#     and Graph would refuse the request anyway, but failing fast
+#     gives a clearer error
+def _encode_share_url_for_graph(share_url: str) -> str:
+    """Encode a SharePoint share URL into the ``u!{token}`` form Graph
+    requires, after asserting the URL points at a real SharePoint
+    tenant.  Raises :class:`ValueError` on any allow-list violation.
+    """
+    if share_url is None:
+        raise ValueError("share url is None")
+    text = str(share_url).strip()
+    if not text:
+        raise ValueError("share url is empty")
+    # Use stdlib urllib so we never depend on requests for a one-shot
+    # parse (the bake script may run before the venv is fully primed).
+    try:
+        from urllib.parse import urlsplit
+    except Exception as imp_err:  # pragma: no cover - stdlib should always import
+        raise ValueError(
+            f"urlsplit unavailable: {type(imp_err).__name__}"
+        ) from imp_err
+    parts = urlsplit(text)
+    scheme = (parts.scheme or "").lower()
+    host = (parts.hostname or "").lower()
+    if scheme != "https":
+        raise ValueError(
+            f"share url must use https scheme (got {scheme!r})"
+        )
+    if not host:
+        raise ValueError("share url has no host")
+    # Anchored suffix match -- ``host.endswith('.sharepoint.com')`` is
+    # secure because urlsplit returns the bare host (no userinfo, no
+    # port).  Also accept the bare ``sharepoint.com`` apex, which
+    # Microsoft's tenant docs note as the canonical form for some
+    # commercial-cloud assets.
+    if not (host == "sharepoint.com" or host.endswith(".sharepoint.com")):
+        raise ValueError(
+            f"share url host {host!r} is not a *.sharepoint.com tenant"
+        )
+    if not parts.path or parts.path == "/":
+        raise ValueError("share url has no path component")
+    return encode_share_url(text)
+
+
 def _safe_local_filename(name: str) -> str:
     """Sanitize a remote filename for local storage.
 
@@ -918,6 +974,161 @@ class SharePointGraphClient:
         )
         return children
 
+    # Round 35 / native-corpus: ``walk_share_link_folder`` recurses
+    # into subfolders so the build-time bake and runtime daily refresh
+    # can index the entire ``AdoptIQ_CSOne_Reports`` tree (which
+    # contains nested project folders -- ``1. Adoption Barriers``,
+    # ``Circuit Project``, etc.).  ``list_share_children`` only walks
+    # the top level, which would silently ignore everything under any
+    # subfolder.
+    #
+    # Returns a flat list of *file* driveItems (folders are descended
+    # but never returned).  Each yielded item has its
+    # ``parentReference`` populated by Graph so callers can compute
+    # download URLs.  ``max_depth`` defaults to a generous 12 to
+    # prevent a hostile or accidentally-symlinked share from spinning
+    # the walker into a runaway recursion.
+    def walk_share_link_folder(
+        self,
+        share_url: str,
+        token: str,
+        *,
+        max_depth: int = 12,
+        max_files: int = 5000,
+    ) -> List[Dict[str, Any]]:
+        """Recursively walk a SharePoint shared-folder URL and return
+        every contained file driveItem.
+
+        Folders are descended but not returned.  The walker:
+
+        1. Resolves the share link via ``GET /shares/{u!token}/driveItem``
+           so we know the top-level ``(driveId, itemId)`` pair.
+        2. Lists children of that item via
+           ``GET /drives/{driveId}/items/{itemId}/children``,
+           paginating through ``@odata.nextLink``.
+        3. For each entry: if it's a folder, recurse; if it's a file,
+           append.
+
+        ``max_depth`` and ``max_files`` are belt-and-suspenders DoS
+        bounds (per CodeGuard input-validation rule) so a hostile
+        share cannot exhaust memory or wall-clock on the build
+        machine.  Both raise :class:`RuntimeError` when exceeded so
+        the caller can decide whether to fail the bake or continue
+        with a partial corpus.
+        """
+        if max_depth <= 0:
+            raise ValueError("max_depth must be > 0")
+        if max_files <= 0:
+            raise ValueError("max_files must be > 0")
+
+        # Use the hardened encoder so a malicious env override on
+        # ADOPTIQ_CORPUS_SHARE_URL fails at the encoding step rather
+        # than after a Graph round-trip.
+        encoded = _encode_share_url_for_graph(share_url)
+
+        root_url = f"{GRAPH_BASE}/shares/{encoded}/driveItem"
+        try:
+            root_resp = self._request_with_retry(root_url, token)
+            root_item = root_resp.json()
+        except SharePointAuthRequired:
+            raise
+        except Exception as err:
+            raise RuntimeError(
+                f"Graph share resolution failed: {type(err).__name__}"
+            ) from err
+        if not isinstance(root_item, dict):
+            raise RuntimeError("Graph share resolution returned non-dict")
+        parent_ref = root_item.get("parentReference") or {}
+        # The shared item may itself be a file (not a folder) -- handle
+        # that gracefully so callers can pass a single-file share URL.
+        if "folder" not in root_item:
+            # Single-file share -- return just this item.
+            return [root_item] if root_item.get("file") else []
+        drive_id = (
+            (root_item.get("parentReference") or {}).get("driveId")
+            or parent_ref.get("driveId")
+        )
+        item_id = root_item.get("id")
+        if not (drive_id and item_id):
+            raise RuntimeError(
+                "Graph share resolution missing driveId or itemId"
+            )
+
+        files: List[Dict[str, Any]] = []
+        # Worklist of (item_id, depth) pairs.  Iterative BFS keeps the
+        # stack flat regardless of share depth.
+        worklist: List[tuple] = [(item_id, 0)]
+        visited: set = set()
+        while worklist:
+            cur_id, depth = worklist.pop(0)
+            if cur_id in visited:
+                # Defense in depth: Graph should never return cycles
+                # via /children, but a misconfigured share with shared
+                # references could.
+                continue
+            visited.add(cur_id)
+            if depth >= max_depth:
+                logger.warning(
+                    "Round 35 / sharepoint: walk truncated at depth=%d "
+                    "(max_depth=%d) under drive=%s item=%s",
+                    depth, max_depth, drive_id, cur_id,
+                )
+                continue
+
+            list_url = (
+                f"{GRAPH_BASE}/drives/{drive_id}/items/{cur_id}/children"
+            )
+            while list_url:
+                if len(files) >= max_files:
+                    logger.warning(
+                        "Round 35 / sharepoint: walk truncated at "
+                        "files=%d (max_files=%d)",
+                        len(files), max_files,
+                    )
+                    return files
+                try:
+                    resp = self._request_with_retry(list_url, token)
+                    payload = resp.json()
+                except SharePointAuthRequired:
+                    raise
+                except Exception as err:
+                    raise RuntimeError(
+                        f"Graph children walk failed: {type(err).__name__}"
+                    ) from err
+                if not isinstance(payload, dict):
+                    raise RuntimeError(
+                        "Graph children walk returned non-dict"
+                    )
+                page = payload.get("value") or []
+                if not isinstance(page, list):
+                    page = []
+                for entry in page:
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_id = entry.get("id")
+                    if not entry_id:
+                        continue
+                    if "folder" in entry:
+                        worklist.append((str(entry_id), depth + 1))
+                    elif "file" in entry:
+                        files.append(entry)
+                        if len(files) >= max_files:
+                            logger.warning(
+                                "Round 35 / sharepoint: walk truncated "
+                                "at files=%d (max_files=%d)",
+                                len(files), max_files,
+                            )
+                            return files
+                next_url = payload.get("@odata.nextLink")
+                list_url = str(next_url) if next_url else ""
+                if list_url:
+                    self._sleep(self._inter_request_sleep_s)
+        logger.info(
+            "Round 35 / sharepoint: walked share files=%d depth_visited=%d",
+            len(files), len(visited),
+        )
+        return files
+
     def download_to_path(
         self,
         item: Dict[str, Any],
@@ -1313,6 +1524,134 @@ def build_default_client() -> SharePointGraphClient:
     return client
 
 
+# Round 35 / native-corpus: high-level orchestrator used by both the
+# build-time bake script (``scripts/bake_corpus.py``) and the runtime
+# daily refresh worker (``corpus_bootstrap._refresh_sharepoint_cache_for_bootstrap``).
+#
+# Resolves the share link, walks the entire folder tree, and downloads
+# every file whose extension matches :data:`ALLOWED_EXTS` into
+# ``dest_dir`` (created with mode 0o700; files written with mode
+# 0o600).  Returns a :class:`RefreshStats` snapshot the caller can log.
+#
+# ``token_provider`` is a zero-arg callable returning a fresh bearer
+# token; it indirects through MSAL so the bake script can drive
+# device-code auth and the runtime worker can use the silent cache.
+def fetch_share_link_folder(
+    share_url: str,
+    token_provider: Callable[[], str],
+    dest_dir: Path,
+    *,
+    client: Optional[SharePointGraphClient] = None,
+    allowed_exts: tuple = ALLOWED_EXTS,
+    max_bytes: int = DEFAULT_MAX_FILE_BYTES,
+) -> "RefreshStats":
+    """Resolve ``share_url``, walk it, and download every supported
+    file into ``dest_dir``.
+
+    Returns a :class:`RefreshStats` populated with per-pass totals.
+    Errors are recorded on the stats object rather than raised so the
+    caller can decide whether to fail-loud or accept a partial result
+    (the bake script fails loud; the runtime worker preserves the
+    prior corpus on partial failure -- per Phase 4c atomic-swap
+    semantics).
+
+    Security posture:
+      * ``_encode_share_url_for_graph`` enforces https + ``*.sharepoint
+        .com`` host before any network call.
+      * ``token_provider`` is invoked exactly once per call; bearer
+        tokens never live in module globals.
+      * Files are written under ``dest_dir`` with mode 0600; the
+        directory is chmod 0700 if newly created.
+      * Filenames are sanitized via :func:`_safe_local_filename` so a
+        hostile share name cannot escape ``dest_dir``.
+    """
+    if not isinstance(dest_dir, Path):
+        dest_dir = Path(str(dest_dir))
+    if client is None:
+        client = build_default_client()
+
+    stats = RefreshStats()
+    stats.started_at = datetime.now(timezone.utc).isoformat()
+    started_perf = time.monotonic()
+
+    def _finish() -> "RefreshStats":
+        stats.finished_at = datetime.now(timezone.utc).isoformat()
+        stats.elapsed_ms = int((time.monotonic() - started_perf) * 1000)
+        return stats
+
+    try:
+        token = token_provider()
+    except SharePointAuthRequired as auth_err:
+        stats.error_kind = "auth_required"
+        stats.error_detail = str(auth_err)
+        return _finish()
+    except Exception as auth_err:  # noqa: BLE001 - record, never raise
+        stats.error_kind = "token_provider_failed"
+        stats.error_detail = f"{type(auth_err).__name__}: {auth_err}"
+        return _finish()
+    if not isinstance(token, str) or not token:
+        stats.error_kind = "token_provider_returned_empty"
+        return _finish()
+
+    try:
+        items = client.walk_share_link_folder(share_url, token)
+    except SharePointAuthRequired as auth_err:
+        stats.error_kind = "auth_required"
+        stats.error_detail = str(auth_err)
+        return _finish()
+    except Exception as walk_err:  # noqa: BLE001
+        stats.error_kind = "walk_failed"
+        stats.error_detail = f"{type(walk_err).__name__}: {walk_err}"
+        return _finish()
+
+    stats.files_listed = len(items)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(dest_dir, 0o700)
+    except OSError:
+        pass
+
+    allowed_lc = tuple(ext.lower() for ext in allowed_exts)
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        if not name:
+            stats.files_skipped_unsupported += 1
+            continue
+        ext = os.path.splitext(name)[1].lower()
+        if allowed_lc and ext not in allowed_lc:
+            stats.files_skipped_unsupported += 1
+            continue
+        size = int(item.get("size") or 0)
+        if size and size > max_bytes:
+            stats.files_skipped_oversized += 1
+            continue
+        safe_name = _safe_local_filename(name)
+        # Disambiguate name collisions across nested subfolders by
+        # prepending the driveItem id (Graph-issued, opaque, safe for
+        # filenames after we strip ``!``).
+        item_id = str(item.get("id") or "").replace("!", "_")
+        if item_id:
+            safe_name = f"{item_id}__{safe_name}"
+        dest_path = dest_dir / safe_name
+        try:
+            written = client.download_to_path(
+                item, token, dest_path, max_bytes=max_bytes,
+            )
+            stats.files_downloaded += 1
+            stats.bytes_downloaded += int(written or 0)
+        except Exception as dl_err:  # noqa: BLE001 - record, continue
+            stats.files_failed += 1
+            stats.errors.append(f"{safe_name}: {type(dl_err).__name__}")
+            logger.warning(
+                "Round 35 / sharepoint: download failed name=%s err=%s",
+                safe_name, type(dl_err).__name__,
+            )
+
+    return _finish()
+
+
 __all__ = [
     "DEFAULT_AUTHORITY",
     "DEFAULT_CLIENT_ID",
@@ -1324,9 +1663,11 @@ __all__ = [
     "SharePointAuthRequired",
     "SharePointGraphClient",
     "TokenInfo",
+    "_encode_share_url_for_graph",
     "build_default_client",
     "default_cache_dir",
     "default_token_cache_path",
     "encode_share_url",
+    "fetch_share_link_folder",
     "refresh_local_cache",
 ]
