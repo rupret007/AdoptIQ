@@ -546,6 +546,18 @@ class SharePointGraphClient:
         cache cannot survive in process memory after sign-out.
         Returns the same ``{"keyring": bool, "file": bool}`` envelope
         as :meth:`KeyringTokenCache.clear`.
+
+        Round 34 / C1: serialize the in-memory state reset under
+        ``self._lock`` so a signout cannot race
+        :meth:`start_device_code_flow` /
+        :meth:`await_device_code_completion` (which also use the lock)
+        and leave ``_pending_flow`` and ``_msal_app`` in inconsistent
+        states.  A worker thread that has already obtained a local ref
+        to ``_msal_app`` may complete one in-flight Graph call after
+        signout returns -- the next call rebuilds from the cleared
+        on-disk cache.  Documented so an operator does not panic when
+        an indexing pass appears to "complete one more file" after
+        the signout button click.
         """
         cleared = {"keyring": False, "file": False}
         if self._token_cache is not None:
@@ -556,12 +568,13 @@ class SharePointGraphClient:
                     "Round 33 / Build8: sharepoint clear_token_cache failed (%s)",
                     type(err).__name__,
                 )
-        # Reset in-memory MSAL state so the next ``acquire_token_silent``
-        # rebuilds the cache from disk (which we just emptied) instead
-        # of returning a token from the previous session.
-        self._msal_app = None
-        self._msal_cache = None
-        self._pending_flow = None
+        # Round 34 / C1: reset under the lock so the device-code flow
+        # methods (which take the lock at lines 707, 733, 750) cannot
+        # observe a half-cleared state.
+        with self._lock:
+            self._msal_app = None
+            self._msal_cache = None
+            self._pending_flow = None
         return cleared
 
     # -- MSAL / token plumbing ------------------------------------------------
@@ -701,15 +714,29 @@ class SharePointGraphClient:
                 f"initiate_device_flow failed: {type(err).__name__}"
             ) from err
         if not isinstance(flow, dict) or "user_code" not in flow:
+            # Round 34 / C2: never log/raise the raw flow dict -- it
+            # carries the device code, refresh hint, and message text
+            # (which itself embeds the device code).  Surface only the
+            # fact that the payload was unexpected; the available keys
+            # are diagnostic enough to triage a Graph regression.
             raise SharePointAuthRequired(
-                f"initiate_device_flow returned unexpected payload: {flow!r}"
+                f"initiate_device_flow returned unexpected payload "
+                f"(keys={sorted(flow.keys()) if isinstance(flow, dict) else type(flow).__name__})"
             )
         with self._lock:
             self._pending_flow = flow
         msg = str(flow.get("message") or "")
+        # Round 34 / C2: do NOT log the user_code -- per the prompt,
+        # device codes must not appear in logs (or exception messages)
+        # even at DEBUG level.  The user_code is short-lived (~15 min)
+        # but anyone who reads the log within that window can complete
+        # the sign-in and steal the user's session.  Log the
+        # verification URI and expiry only -- those are not sensitive
+        # and the operator can confirm the flow started.
         logger.info(
-            "Round 17.2 / sharepoint: device-code flow started; user_code=%s verification_uri=%s expires_in=%s",
-            flow.get("user_code"),
+            "Round 17.2 / sharepoint: device-code flow started; "
+            "verification_uri=%s expires_in=%s "
+            "(user_code redacted; relayed to UI via DeviceCodeFlow)",
             flow.get("verification_uri"),
             flow.get("expires_in"),
         )
