@@ -201,8 +201,37 @@ def _start_admin_server_in_thread() -> None:
         )
         return
 
+    # Round 34 / H1: enforce the loopback default unless the operator
+    # has explicitly opted into a public bind via
+    # ``ADOPTIQ_ADMIN_BIND_PUBLIC=1``.  Pre-Round-34 the helper read
+    # ``ADOPTIQ_ADMIN_HOST`` directly, which let an operator (or a
+    # misconfigured deployment) set ``ADOPTIQ_ADMIN_HOST=0.0.0.0``
+    # WITHOUT setting the public-bind safety gate.  Net: the admin
+    # console silently bound to every interface.  CLAUDE.md is
+    # explicit: "Don't change [the loopback] default without the
+    # ADOPTIQ_ADMIN_BIND_PUBLIC=1 escape hatch."  Mirror the
+    # standalone __main__ path in enhanced_admin_dashboard_v2.py
+    # (lines 3922-3946) which already enforces this contract.
+    _admin_loopback_hosts = {"127.0.0.1", "::1", "localhost"}
+    _admin_bind_public = str(
+        os.environ.get("ADOPTIQ_ADMIN_BIND_PUBLIC", "")
+    ).strip().lower() in {"1", "true", "yes", "on"}
     host = (os.environ.get("ADOPTIQ_ADMIN_HOST") or "127.0.0.1").strip()
     if not host:
+        host = "127.0.0.1"
+    if host not in _admin_loopback_hosts and not _admin_bind_public:
+        # Operator tried to bind the admin console to a non-loopback
+        # interface without flipping the safety gate.  Refuse and
+        # fall back to loopback with a WARN so the operator sees the
+        # downgrade rather than discovering it months later from a
+        # security scan.
+        logging.getLogger(__name__).warning(
+            "Round 34 / H1: ignoring ADOPTIQ_ADMIN_HOST=%r because "
+            "ADOPTIQ_ADMIN_BIND_PUBLIC is not set; binding admin "
+            "console to 127.0.0.1.  Set ADOPTIQ_ADMIN_BIND_PUBLIC=1 "
+            "to opt into a public bind.",
+            host,
+        )
         host = "127.0.0.1"
     port = _resolve_admin_port()
 
