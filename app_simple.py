@@ -791,17 +791,10 @@ _SENSITIVE_ENDPOINTS = {
     'search_related_defects',
     'search_related_vulnerabilities',
     # Round 34 / B1: the three POST routes added in Build8 for the
-    # user-facing SharePoint panel (analyze.html) were missing from
-    # the sensitive set, so they bypassed both
-    # ``restrict_sensitive_routes_to_localhost`` and
-    # ``add_security_headers_for_sensitive_routes``.  CSRF still
-    # blocks cross-origin POST attempts, but the localhost gate and
-    # the response-hardening headers (Cache-Control: no-store,
-    # nosniff, X-Frame-Options: DENY, Referrer-Policy: no-referrer,
-    # per-response CSP) are defense-in-depth that every other admin
-    # surface gets.  Add them here.
-    'api_corpus_sharepoint_signin',
-    'api_corpus_sharepoint_signout',
+    # user-facing SharePoint panel (analyze.html) were sensitive
+    # endpoints.  Round 36 / onedrive-sync-auth retired the entire
+    # MSAL/Graph stack -- the routes themselves are gone -- so the
+    # corresponding endpoint names have been removed from this set.
 }
 
 # Round 13 / Phase 4.1: UI shells (``index``, ``help``, etc.) are
@@ -15532,10 +15525,11 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             "last_sources": None,
             "encrypted_path": None,
             "onedrive_root": None,
-            # Round 17.2: SharePoint pull state.  ``None`` when the
-            # feature is disabled or has not been invoked yet; a
-            # serializable dict otherwise (see
-            # :func:`corpus_bootstrap._refresh_sharepoint_cache_for_bootstrap`).
+            # Round 17.2 -> Round 36: legacy SharePoint pull state.
+            # The MSAL/Graph stack was retired in Round 36 (replaced
+            # by the ``onedrive_status`` field below); this key is
+            # kept for back-compat with existing JS callers and is
+            # always ``None``.
             "sharepoint": None,
             # Round 35 / native-corpus: bake provenance + daily-refresh
             # timer state.  Mirrored from
@@ -15549,6 +15543,16 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             "last_successful_refresh_ts": None,
             "last_refresh_attempt_ts": None,
             "last_refresh_error": None,
+            # Round 36 / onedrive-sync-auth: presence check for the
+            # OneDrive desktop client's mirror of the canonical
+            # AdoptIQ corpus folder.  ``onedrive_status`` is one of
+            # ``"synced"`` / ``"not_synced"`` / ``"unknown"`` / ``None``
+            # (None = bootstrap has not run yet).  ``onedrive_file_count``
+            # is the number of real files seen at the last probe; 0
+            # when ``not_synced``.  See
+            # :func:`corpus_bootstrap._check_onedrive_sync_status`.
+            "onedrive_status": None,
+            "onedrive_file_count": None,
         },
         "corpus": {
             "files_total": 0,
@@ -15600,6 +15604,15 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             ),
             "last_refresh_error": getattr(
                 boot_state, "last_refresh_error", None,
+            ),
+            # Round 36 / onedrive-sync-auth: surface the OneDrive
+            # presence check so ``static/js/intel_status.js`` can
+            # render "OneDrive synced (N files)" / "OneDrive folder
+            # not detected" / "Status unknown" without reaching into
+            # the bootstrap module.
+            "onedrive_status": getattr(boot_state, "onedrive_status", None),
+            "onedrive_file_count": getattr(
+                boot_state, "onedrive_file_count", None,
             ),
         }
         # Round 17.1: also surface per-source counts under
@@ -15745,97 +15758,14 @@ def _r17_2_authorize_corpus_admin() -> Optional[Tuple[Dict[str, Any], int]]:
     return None
 
 
-@app.route('/api/corpus/sharepoint/signin', methods=['POST'])
-def api_corpus_sharepoint_signin():
-    """Round 17.2: kick off a Microsoft Graph device-code sign-in for
-    the SharePoint corpus pull.  Returns the user-displayable code +
-    verification URI so the admin tile can render the prompt.  The
-    completion of the flow is handled on a worker thread inside
-    :func:`corpus_bootstrap.begin_sharepoint_signin` -- this endpoint
-    returns immediately so the admin UI is never blocked.
-    """
-    auth_err = _r17_2_authorize_corpus_admin()
-    if auth_err is not None:
-        body, status = auth_err
-        return jsonify(body), status
-    try:
-        import corpus_bootstrap as _r17_cb
-        result = _r17_cb.begin_sharepoint_signin()
-    except Exception as err:  # noqa: BLE001 - never bubble
-        logger.warning(
-            "Round 17.2 / sharepoint signin endpoint failed: %s",
-            type(err).__name__,
-        )
-        return jsonify({'ok': False, 'error': type(err).__name__}), 200
-    return jsonify(result), 200
-
-
-@app.route('/api/corpus/sharepoint/signout', methods=['POST'])
-def api_corpus_sharepoint_signout():
-    """Round 33 / Build8: drop the persisted SharePoint refresh-token
-    cache so the user is forced through the device-code flow again on
-    the next index attempt.
-
-    Auth: same dual-path as ``/api/corpus/sharepoint/signin`` -- a
-    Flask-WTF CSRF token (browser path) **or** matching
-    ``X-AdoptIQ-Internal`` header (server-to-server).  Idempotent --
-    calling twice is harmless and returns ``ok: True`` both times.
-    """
-    auth_err = _r17_2_authorize_corpus_admin()
-    if auth_err is not None:
-        body, status = auth_err
-        return jsonify(body), status
-    try:
-        import corpus_bootstrap as _r17_cb
-        result = _r17_cb.sharepoint_signout()
-    except Exception as err:  # noqa: BLE001 - never bubble
-        logger.warning(
-            "Round 33 / Build8 / sharepoint signout endpoint failed: %s",
-            type(err).__name__,
-        )
-        return jsonify({'ok': False, 'error': type(err).__name__}), 200
-    return jsonify(result), 200
-
-
-# Round 33 / Build8 -> Round 35: ``POST /api/settings/sharepoint_url``
-# was retired in Round 35 along with the analyze-page URL paste field.
-# The corpus URL is now hardcoded in
-# :data:`Config.ADOPTIQ_CORPUS_SHARE_URL` (env-overridable for ops
-# only), the corpus is baked into the .app at build time, and the
-# daily refresh worker pulls updates from that single source of truth.
-# The ``api_corpus_sharepoint_{signin,signout}`` routes above remain so
-# users can grant / revoke MSAL access for the daily refresh.
-
-
-@app.route('/api/corpus/sharepoint/refresh', methods=['POST'])
-def api_corpus_sharepoint_refresh():
-    """Round 17.2: trigger an incremental SharePoint cache refresh +
-    corpus re-index.  Equivalent to ``/api/corpus/refresh`` but
-    documented separately so the admin tile can label the button
-    accurately ("Refresh SharePoint corpus")."""
-    auth_err = _r17_2_authorize_corpus_admin()
-    if auth_err is not None:
-        body, status = auth_err
-        return jsonify(body), status
-    refresh_started = False
-    refresh_error: Optional[str] = None
-    try:
-        import corpus_bootstrap as _r17_cb
-        if not _r17_cb.is_enabled():
-            refresh_error = 'CORPUS_KNOWLEDGE_ENABLED is false'
-        else:
-            refresh_started = bool(_r17_cb.request_sharepoint_refresh())
-    except Exception as err:  # noqa: BLE001
-        logger.warning(
-            "Round 17.2 / sharepoint refresh endpoint failed: %s",
-            type(err).__name__,
-        )
-        refresh_error = type(err).__name__
-    payload = _r17_corpus_status_payload()
-    payload['refresh_started'] = refresh_started
-    if refresh_error:
-        payload['refresh_error'] = refresh_error
-    return jsonify(payload), 200
+# Round 36 / onedrive-sync-auth: the legacy MSAL/Graph SharePoint
+# routes (signin / signout / refresh) have been removed.  The OneDrive
+# desktop client handles auth/MFA/admin-consent and mirrors the
+# canonical AdoptIQ corpus folder under ``Config.CSONE_ONEDRIVE_FOLDER``;
+# the daily-refresh worker re-indexes from that path once per 24h with
+# no user-facing sign-in step.  Use ``POST /api/corpus/refresh`` (or
+# the user-facing ``POST /api/intel/refresh`` alias) to trigger an
+# on-demand re-index.
 
 
 # ---------------------------------------------------------------------------
