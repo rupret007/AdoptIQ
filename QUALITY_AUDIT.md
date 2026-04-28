@@ -3828,3 +3828,217 @@ future round):**
   next build-pipeline pass.
 
 **Trailer:** Made-with: Cursor
+
+## Round 38 — handoff 2026-04-28
+
+> Round 38 fixes the leader-report
+> "Leader report cannot be generated: csone missing or empty.
+> See logs for details." false-positive that the user reported
+> after Build11 / Round 37 shipped.  Root cause is a load-order
+> bug unmasked by Round 14 / Phase 2.4: the leader worker called
+> `raise_validation_error_if_invalid` BEFORE loading the CSOne
+> file, and the OneDrive autodiscovery fallback set
+> `csone_file_provided=True` against an empty placeholder
+> DataFrame, which promoted `csone` to required and tripped the
+> empty-data branch in the validator.  User chose option C
+> ("Two-pass: validate snowflake+team_subs first, then load
+> CSOne, then validate csone separately") and explicitly asked
+> us to audit the other report paths for the same shape while
+> we were in here.
+
+**Backstory (the load-order bug):**
+Pre-Round-14, the leader worker had `csone_file_provided = (
+'csone_file' in locals())` -- a bare-name `in locals()` check
+that was always False because `csone_path` was computed AFTER
+the validation block.  The dead code masked the bug by
+accident.  Round 14 / Phase 2.4 ("ruff-clean rewrite,
+preserving behavior") changed it to
+`csone_file_provided = bool(locals().get('csone_file') or
+locals().get('csone_path'))` which correctly resolves True
+when an upstream `csone_file` is bound.  When OneDrive
+autodiscovery returned a path (the macro drops daily reports
+into the synced folder), the resolved-True flag combined
+with `csone_data=pd.DataFrame()` (file not loaded yet) and
+the validator's `csone_file_provided + csone_data.empty`
+branch fired the abort.  Round 38 fixes the load-order
+itself rather than re-instating the dead-code mask.
+
+**What changed:**
+- `app_simple.start_leader_report` (`/start_leader_report`
+  endpoint) -- split single `csone_file` variable into
+  `csone_file_explicit` (set only when
+  `request.files['csone_file']` was provided) and
+  `csone_file_autopicked` (set only when
+  `get_latest_csone_from_folder()` returned a path).
+  Resolved-effective path is `csone_file_explicit or
+  csone_file_autopicked`.  Status dict now persists
+  `csone_file_was_uploaded: bool(csone_file_explicit)` and
+  `csone_file_path: <resolved>` alongside the back-compat
+  `csone_file` key (kept pointing at the resolved path so
+  existing log lines / progress messages keep working).
+- `app_simple.run_leader_report_generation` worker --
+  restructured single validation block into a two-pass
+  design:
+  - **Pass 1 (early)** validates ONLY `snowflake` +
+    `team_subscriptions`.  Hard-codes
+    `csone_file_provided=False` against an empty placeholder
+    so the load-order bug cannot regress (the previous
+    `locals().get('csone_file')` heuristic is gone).
+  - **CSOne load relocated up** to immediately after Pass 1
+    (was previously below the broken Pass 1 call).
+    `_resolve_csone_path_safe` + `load_csone_excel` +
+    `_prepare_csone` + `_apply_scope_filter_csone` all run
+    before any csone-aware validation.
+  - **Pass 2 (after load)** is gated by
+    `status.get('csone_file_was_uploaded')`.  When True
+    (operator explicitly uploaded), validate `csone` against
+    the real loaded `csone_df` -- empty after scoping is
+    fail-loud.  When False (autodiscovery hit) and the
+    loaded frame is empty, log a warning naming the
+    autodiscovered file and append a
+    `partial_data_warnings` entry tagged
+    `kind='autodiscovered_empty_after_scope'` so the report
+    banner is honest about the degraded TAC sections, but
+    do NOT abort.
+- The Round 30 / M4 non-raising re-validation block (which
+  promotes optional fetch errors into
+  `_r30_leader_partial_warnings`) keeps working unchanged --
+  it just now sits between Pass 1 and the CSOne load, which
+  is fine because leader has no csconsole optional fetches.
+- Bumped `Config.ADOPTIQ_BUILD` from `"11"` to `"12"`.
+
+**Audit of other report paths (done):**
+- `run_compact_analysis` -- already loads CSOne BEFORE
+  validating; passes real `csone_df`.  Not affected.
+- `run_comprehensive_analysis` -- same shape.  Not
+  affected.
+- `run_customer_renewal_analysis` -- already loads
+  `customer_csone` BEFORE validating; passes real loaded
+  frame.  Not affected.
+- `run_subscription_analysis` -- passes
+  `csone_data=pd.DataFrame()` BUT
+  `required_sources=['team_subscriptions']` (no `csone`
+  in the required list), so the empty placeholder is
+  never compared against the required-but-empty branch.
+  Not affected.
+- Whole-file regex audit confirms the leader Pass 1 call
+  is the ONLY validator call that pairs
+  `csone_data=pd.DataFrame()` with a required-sources
+  list that does not also exclude csone -- and that's
+  intentional now (Pass 2 covers the real csone check
+  after the load).
+
+**Files touched:**
+- `app_simple.py` -- endpoint provenance split + worker
+  two-pass validation + relocated CSOne load
+- `config.py` -- Build12 bump + Round 38 doc comment
+
+**SSoT modules touched:** config (build bump only)
+
+**Tests added (Round 38):**
+- `tests/test_round38_leader_csone_validation_two_pass.py`
+  (NEW, 6 tests) -- pins Pass 1 excludes `csone` from
+  required-sources, Pass 1 hard-codes
+  `csone_file_provided=False`, Pass 2 is guarded by
+  `_csone_was_uploaded`, Pass 2 uses
+  `required_sources=['csone']` + real `csone_df`,
+  autodiscovery-empty branch emits the soft-fail
+  `partial_data_warning` (does NOT raise), and the CSOne
+  load happens before the Pass 2 validator call (byte-offset
+  ordering check).
+- `tests/test_round38_leader_endpoint_provenance.py`
+  (NEW, 3 tests) -- end-to-end via Flask test client:
+  explicit upload sets `csone_file_was_uploaded=True` and
+  the upload path wins over the autopicked path; no-upload
+  + autopicked sets `csone_file_was_uploaded=False`; nothing
+  provided still writes both keys (False + falsy path) so
+  worker code can use `status.get(...)` without KeyError.
+- `tests/test_round38_other_report_paths_unchanged.py`
+  (NEW, 5 tests) -- audit pin: compact / comprehensive /
+  renewal validator calls still pass real-loaded
+  `csone_data`; subscription doesn't include `csone` in
+  required-sources; whole-file scan that the leader Pass 1
+  call is the ONLY allowed
+  `csone_data=pd.DataFrame()`-with-required-sources shape.
+
+**Verify status:**
+- pytest: 2835 passed / 2 skipped (was 2821 at end of
+  Round 37; +14 net from Round 38: 6 + 3 + 5 = 14 new R38
+  tests, no existing tests modified).
+- Build12 (`OUTBOX/AdoptIQ-v1.0.4-build12.dmg`):
+  SHA-256 = `4d55f2416265d38db16801935de5153c8536e1927fdcdbe2e8155356b7520773`,
+  size = 419 MB (corpus baked from local OneDrive sync
+  mirror, same env as Build10 / Build11).  This time the
+  build operator exported `ADOPTIQ_BUILD=12` BEFORE running
+  the script so the DMG landed on the right filename
+  directly, no manual rename (R37 deferral workaround until
+  the build script learns to source from `config.py`).
+
+**Hot spots Claude should audit first (Round 38):**
+1. The `_csone_was_uploaded` guard on Pass 2 -- if a future
+   refactor inverts the boolean (e.g. `if not
+   _csone_was_uploaded:`) autodiscovery hits would fail loud
+   again and explicit uploads would soft-fail, which is the
+   exact opposite of the contract.  The
+   `test_pass2_runs_only_when_csone_file_was_uploaded`
+   regex pin enforces the if-block shape but cannot catch
+   a clean inversion -- worth a manual eyeball after any
+   leader-worker edit.
+2. The `csone_file_was_uploaded` provenance flag on the
+   endpoint -- if a future edit collapses
+   `csone_file_explicit` and `csone_file_autopicked` back
+   into a single `csone_file` variable for any reason, the
+   worker's Pass 2 guard reads False on every run and
+   explicit uploads silently degrade to the autodiscovery
+   soft-fail path.  The
+   `test_explicit_upload_sets_csone_file_was_uploaded_true`
+   end-to-end test catches this but only via the Flask
+   test client, so a refactor that bypasses the test
+   client would slip through.
+3. The relocated CSOne load -- if a future refactor moves
+   it back below the Pass 2 validator (e.g. for a
+   "performance tweak"), Pass 2 would validate against an
+   empty placeholder again, which is the original bug
+   reborn.  The
+   `test_csone_load_block_runs_before_pass2` byte-offset
+   check enforces ordering at the source level.
+4. Other report paths -- the
+   `test_only_leader_pass1_is_allowed_to_pair_empty_csone_with_required_sources`
+   audit pin would trip if a future round added a similar
+   pre-load validator call elsewhere in `app_simple.py`
+   without explicitly excluding `csone` from
+   required-sources.  Don't ignore it; the leader two-pass
+   pattern is the reference fix shape.
+5. Round 30 / M4 partial-warnings block -- it now sees the
+   real loaded `csone_df` instead of the empty placeholder,
+   which is more accurate but technically a behavior
+   change.  Confirm the leader Word/Excel partial-data
+   banner still renders correctly when there are no
+   optional fetch errors (the most common case).
+
+**Known deferrals (intentional non-fixes, carried into a
+future round):**
+- **Build script `ADOPTIQ_BUILD` env-vs-config sourcing**
+  (carried from R37 deferrals) -- the Build12 invocation
+  still required `export ADOPTIQ_BUILD=12` before running
+  `./build_mac_dmg.sh`.  Cleaner fix is to source it from
+  `config.py` directly.  Still tracked for the next
+  build-pipeline pass.
+- **Cancel button on Currently-Running-Reports panel**
+  (carried from R37 deferrals).
+- **Renewal-path provenance split** -- the renewal
+  validator already gets real-loaded `customer_csone`, so
+  the same R14 dead-code-masked bug is not reachable.
+  Audit confirmed no fix needed.
+- **Comprehensive / compact path refactor** -- same audit
+  verdict as renewal; not touching.
+- **Validator behaviour change for "csone autodiscovered
+  but empty"** -- currently the soft-fail path emits a
+  `partial_data_warnings` entry, but the user-facing
+  banner copy may want a separate kind / verbiage so an
+  operator can distinguish "OneDrive sync is empty" from
+  "OneDrive sync has files but they all scoped to zero
+  TAC cases".  Out of scope for this round; tracked for
+  a future banner-copy pass.
+
+**Trailer:** Made-with: Cursor
