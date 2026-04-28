@@ -19413,29 +19413,50 @@ def start_leader_report():
         if not is_valid_days:
             return jsonify({'success': False, 'error': error_msg}), 400
         
-        # Handle optional CSOne file upload
-        csone_file = None
+        # Handle optional CSOne file upload.
+        #
+        # Round 38 / Phase 1: split the explicit-upload path from the
+        # OneDrive-autodiscovery fallback so the worker's two-pass
+        # validator can distinguish "operator clicked Upload and chose
+        # this file" (treat csone as required, fail loud if empty)
+        # from "no upload, but we found a file in the synced OneDrive
+        # folder" (treat csone as optional, degrade gracefully if
+        # empty).  Pre-Round-38 both code paths collapsed into one
+        # ``csone_file`` variable, which let an autodiscovered file
+        # masquerade as an explicit upload and short-circuit the
+        # leader report with a "csone missing or empty" error before
+        # the file was even loaded.
+        csone_file_explicit: Optional[str] = None
         if 'csone_file' in request.files:
             file = request.files['csone_file']
             if file and file.filename:
                 is_valid, error_msg = validate_file_upload(file)
                 if not is_valid:
                     return jsonify({'success': False, 'error': error_msg}), 400
-                
+
                 import uuid as _uuid
                 raw_name = secure_filename(file.filename)
                 filename = _r13_unique_upload_filename(_uuid, raw_name, file)
                 filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                 file.save(filepath)
-                csone_file = filepath
-        # When no file: use most recent from OneDrive folder (macro places reports daily)
-        if not csone_file:
-            csone_file = get_latest_csone_from_folder()
-        
+                csone_file_explicit = filepath
+        # When no explicit upload: try the most recent .xlsx from the
+        # OneDrive folder (macro places reports daily).  This is a
+        # convenience hop; it MUST NOT be promoted to a fail-loud
+        # required source by the worker.
+        csone_file_autopicked: Optional[str] = None
+        if not csone_file_explicit:
+            csone_file_autopicked = get_latest_csone_from_folder()
+
+        # Resolved-effective path the worker actually loads.  Either
+        # the explicit upload or the autodiscovered fallback (or
+        # ``None`` if neither was found).
+        csone_file = csone_file_explicit or csone_file_autopicked
+
         # Generate unique analysis ID
         timestamp = int(time.time())
         analysis_id = f"Leader_{_sanitize_analysis_id_part(manager)}_{days}d_{timestamp}"
-        
+
         # Initialize status
         with analysis_status_lock:
             analysis_status[analysis_id] = {
@@ -19447,7 +19468,23 @@ def start_leader_report():
                 'manager': manager,
                 'days': days,
                 'report_type': 'leader',
+                # Back-compat: the worker still reads ``csone_file`` for
+                # path resolution and several log lines downstream key
+                # off this name.  We keep it pointing at the resolved-
+                # effective path.
                 'csone_file': csone_file,
+                # Round 38 / Phase 1: explicit provenance flag the
+                # worker reads to decide whether to fail loud on an
+                # empty csone load (Pass 2 validation).  TRUE iff the
+                # operator actively uploaded a file via the UI;
+                # FALSE when only OneDrive autodiscovery returned a
+                # path.
+                'csone_file_was_uploaded': bool(csone_file_explicit),
+                # Round 38 / Phase 1: canonical resolved-effective
+                # path (mirrors ``csone_file`` above; named
+                # explicitly so future code paths don't have to
+                # reverse-engineer the legacy key).
+                'csone_file_path': csone_file,
                 'results': None,
                 'error': None
             }
