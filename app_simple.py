@@ -761,6 +761,19 @@ _SENSITIVE_ENDPOINTS = {
     'search_psirt_advisory',
     'search_related_defects',
     'search_related_vulnerabilities',
+    # Round 34 / B1: the three POST routes added in Build8 for the
+    # user-facing SharePoint panel (analyze.html) were missing from
+    # the sensitive set, so they bypassed both
+    # ``restrict_sensitive_routes_to_localhost`` and
+    # ``add_security_headers_for_sensitive_routes``.  CSRF still
+    # blocks cross-origin POST attempts, but the localhost gate and
+    # the response-hardening headers (Cache-Control: no-store,
+    # nosniff, X-Frame-Options: DENY, Referrer-Policy: no-referrer,
+    # per-response CSP) are defense-in-depth that every other admin
+    # surface gets.  Add them here.
+    'api_corpus_sharepoint_signin',
+    'api_corpus_sharepoint_signout',
+    'api_settings_sharepoint_url',
 }
 
 # Round 13 / Phase 4.1: UI shells (``index``, ``help``, etc.) are
@@ -898,11 +911,88 @@ def _is_local_client(req) -> bool:
     return ip in ('127.0.0.1', '::1', 'localhost')
 
 
+# Round 34 / B2: DNS-rebinding defense.  An attacker page on evil.com
+# (TTL=0) can flip its DNS A-record to 127.0.0.1 between the page load
+# and a subsequent fetch, so the browser's same-origin policy still
+# treats the response as belonging to evil.com.  ``_is_local_client``
+# checks the connecting peer (``request.remote_addr``) which IS
+# 127.0.0.1 in that case -- so the localhost gate alone does NOT
+# block it.  The defense is to validate ``request.host`` (the Host
+# header the browser actually sent) against an allow-list of expected
+# hostnames.  Only sensitive endpoints get the check -- public UI
+# shells like / are intentionally left permissive so a LAN preview or
+# port-forward still renders.
+_HOST_ALLOWLIST_DEFAULT: frozenset[str] = frozenset({
+    "127.0.0.1", "::1", "localhost",
+    # Common dev / packaged-app combinations.  Wildcard ports are
+    # handled separately because ``Host`` includes ``:port``.
+})
+
+
+def _allowed_hostname(host: str) -> bool:
+    """Return True if ``host`` (as captured by ``request.host``) is in
+    the allow-list.  ``host`` may include a ``:port`` suffix; we strip
+    it because the listener is loopback-bound and the port is
+    implementation-detail.
+
+    Operators that bind to a non-loopback interface (LAN IP via
+    ``ADOPTIQ_BIND_HOST``) can extend the allow-list via the
+    comma-separated env var ``ADOPTIQ_HOST_ALLOWLIST``.  IPv6 literals
+    arrive bracketed (``[::1]:5151``); strip the brackets for the
+    comparison.
+    """
+    if not host:
+        return False
+    # Strip ``:port`` -- but only if it looks like a port (digits).
+    # IPv6 literals use ``[addr]:port`` so we handle the bracket form
+    # by removing the brackets first and then peeling off ``:port``.
+    bare = host
+    if bare.startswith("[") and "]" in bare:
+        # ``[::1]:5151`` -> ``::1`` (and we drop everything after ``]``)
+        rb = bare.index("]")
+        bare = bare[1:rb]
+    elif ":" in bare and bare.rsplit(":", 1)[-1].isdigit():
+        bare = bare.rsplit(":", 1)[0]
+    bare = bare.lower().strip()
+    if bare in _HOST_ALLOWLIST_DEFAULT:
+        return True
+    extra = os.environ.get("ADOPTIQ_HOST_ALLOWLIST", "")
+    if extra:
+        for token in extra.split(","):
+            token = token.strip().lower()
+            if token and bare == token:
+                return True
+    # Honor the explicit ADOPTIQ_BIND_HOST so an operator who runs the
+    # app bound to a LAN IP also gets through the gate.
+    bind_host = (os.environ.get("ADOPTIQ_BIND_HOST", "") or "").strip().lower()
+    if bind_host and bare == bind_host:
+        return True
+    return False
+
+
 @app.before_request
 def restrict_sensitive_routes_to_localhost():
     endpoint = request.endpoint or ''
-    if endpoint in _SENSITIVE_ENDPOINTS and not _is_local_client(request):
+    if endpoint not in _SENSITIVE_ENDPOINTS:
+        return None
+    # Layer 1: the connecting peer must be loopback (or a user who
+    # explicitly bound to a non-loopback interface).
+    if not _is_local_client(request):
         return jsonify({'success': False, 'error': 'Forbidden: local access only'}), 403
+    # Round 34 / B2: layer 2 -- the Host header the browser sent must
+    # be one of the expected hostnames so a DNS-rebinding tab on
+    # ``evil.com`` cannot drive these endpoints just because the TCP
+    # connection happens to be over loopback.
+    try:
+        host_header = request.host or ""
+    except Exception:  # noqa: BLE001 - defensive
+        host_header = ""
+    if not _allowed_hostname(host_header):
+        return jsonify({
+            'success': False,
+            'error': 'Forbidden: unexpected Host header',
+        }), 403
+    return None
 
 
 @app.after_request
