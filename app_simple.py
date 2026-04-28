@@ -19580,48 +19580,55 @@ def run_leader_report_generation(analysis_id):
         except Exception as e:
             logger.warning(f"[[WARNING]] Failed to fetch team subscriptions: {e}")
 
-        # Phase 1.1: Validate required data sources for the leader report.
-        # Leader requires Snowflake connectivity + at least one team subscription;
-        # CSOne is layered in below and treated as optional (handled by
-        # leader_report_generator), so it is intentionally not in required_sources.
-        logger.info("[[VALIDATION]] Validating data sources for leader report...")
+        # Phase 1.1 / Round 38 / Phase 2: Two-pass data validation for
+        # the leader report.
+        #
+        # ``Pass 1`` (early) checks ONLY the absolute prerequisites
+        # (Snowflake connectivity + at least one team subscription).
+        # CSOne is intentionally NOT promoted to required here, even
+        # if a file path was resolved upstream.  Pre-Round-38 the
+        # early validator received ``csone_file_provided=True`` from
+        # any path (including the OneDrive autodiscovery fallback)
+        # which combined with ``csone_data=pd.DataFrame()`` (the file
+        # had not been loaded yet) caused a hard "csone missing or
+        # empty" error before the worker ever opened the file -- the
+        # exact false-positive Round 38 fixes.
+        #
+        # ``Pass 2`` (later, after the CSOne file is actually loaded)
+        # only fails loud if the operator EXPLICITLY uploaded a
+        # CSOne file (``status['csone_file_was_uploaded']`` set by
+        # the endpoint).  An OneDrive-autodiscovered file that
+        # produces zero scoped rows is logged + emitted as a
+        # ``partial_data_warnings`` entry but does not abort the
+        # report.
+        logger.info("[[VALIDATION]] Pass 1: validating Snowflake + team subscriptions for leader report...")
+        _r30_leader_partial_warnings: List[Dict[str, Any]] = []
+        _leader_required_pass1 = ['snowflake', 'team_subscriptions']
         try:
-            # Round 2 / Phase 4.3: when the operator uploaded a CSOne
-            # file for the leader job, treat ``csone`` as required so
-            # the report fails loud if the upload produced zero rows
-            # rather than silently shipping a leader report without
-            # TAC evidence.
-            # Round 14 / Phase 2.4: previously this used a bare-name
-            # ``locals()`` membership check on csone_path / csone_file,
-            # but csone_path is computed *after* this validation block,
-            # so the bare-name reference was always dead and the
-            # short-circuit always returned False.  Use
-            # ``locals().get(...)`` so the lookup is explicit and
-            # ruff-clean while preserving behavior.
-            _scope_locals = locals()
-            _leader_csone_provided = bool(
-                _scope_locals.get('csone_file')
-                or _scope_locals.get('csone_path')
-            )
-            _leader_required = ['snowflake', 'team_subscriptions']
             raise_validation_error_if_invalid(
                 report_type='leader',
                 snowflake_ctx=ctx,
                 team_subs_df=team_subs_df,
                 ab_data=pd.DataFrame(),
                 csone_data=pd.DataFrame(),
-                required_sources=_leader_required,
-                csone_file_provided=_leader_csone_provided,
+                required_sources=_leader_required_pass1,
+                # Round 38 / Phase 2: csone is validated in Pass 2
+                # below against the actual loaded DataFrame, not at
+                # Pass 1 against a pre-load empty placeholder.
+                csone_file_provided=False,
             )
-            logger.info("[[VALIDATION]] Leader report data sources validated")
+            logger.info("[[VALIDATION]] Pass 1 OK: Snowflake + team subscriptions validated")
 
             # Round 30 / M4: collect any optional fetch errors via a
             # non-raising re-validation so we can promote them into a
             # ``leader_partial_data_warnings`` list that drives the leader
             # Word/Excel partial-data banner.  Leader path doesn't carry
             # csconsole_* frames here, so this primarily covers any
-            # future expansion -- we still run it for symmetry.
-            _r30_leader_partial_warnings: List[Dict[str, Any]] = []
+            # future expansion -- we still run it for symmetry.  Note:
+            # this runs against the same pre-load empty csone_data as
+            # Pass 1 because optional CSOne fetch errors are not a thing
+            # (the csone file is loaded synchronously below, not fetched
+            # via an optional API).
             try:
                 from data_source_validator import (
                     validate_data_sources_for_report as _r30_validate,
@@ -19633,8 +19640,8 @@ def run_leader_report_generation(analysis_id):
                     team_subs_df=team_subs_df,
                     ab_data=pd.DataFrame(),
                     csone_data=pd.DataFrame(),
-                    required_sources=_leader_required,
-                    csone_file_provided=_leader_csone_provided,
+                    required_sources=_leader_required_pass1,
+                    csone_file_provided=False,
                 )
                 _r30_opt = _r30_opt_errs(_r30_err_details)
                 for _src_key, _src_err in (_r30_opt or {}).items():
@@ -19654,7 +19661,7 @@ def run_leader_report_generation(analysis_id):
                     _r30_pdw_err,
                 )
         except DataSourceValidationError as ve:
-            logger.error(f"[[VALIDATION]] Leader data validation failed: {ve}")
+            logger.error(f"[[VALIDATION]] Pass 1 failed: {ve}")
             with analysis_status_lock:
                 status['status'] = 'error'
                 status['error'] = 'Leader report data validation failed'
@@ -19666,14 +19673,24 @@ def run_leader_report_generation(analysis_id):
                 save_analysis_status()
             return
 
+        # Round 38 / Phase 3: CSOne file load was relocated UP to here
+        # (was previously at the end of this function block, after the
+        # broken validator).  Loading first lets Pass 2 below validate
+        # against the real DataFrame instead of a pre-load empty
+        # placeholder.
         with analysis_status_lock:
             _update_progress(status, 8, 'Loading and scoping CSOne data...', 'CSOne Processing')
-        
+
         # Load and scope CSOne data to team portfolio (same approach as Comprehensive report)
         csone_df = pd.DataFrame()
         # Resolve CSOne path safely (prevents path traversal)
         csone_path = _resolve_csone_path_safe(csone_file) if csone_file else None
-        # When no file provided: try OneDrive folder (macro places reports daily)
+        # When no file provided: try OneDrive folder (macro places reports daily).
+        # Round 38 / Phase 3: this fallback already ran in the endpoint
+        # (``/run_leader``) when computing ``csone_file_autopicked``;
+        # the second call here is a belt-and-suspenders refresh for
+        # workers that were started directly (e.g. tests) without
+        # going through the endpoint provenance split.
         if not csone_path:
             csone_path = get_latest_csone_from_folder()
         if csone_path and os.path.exists(csone_path):
@@ -19681,7 +19698,7 @@ def run_leader_report_generation(analysis_id):
             csone_df_raw = load_csone_excel(csone_path)
             raw_count = len(csone_df_raw) if csone_df_raw is not None and not csone_df_raw.empty else 0
             logger.info(f"[[FILE]] Raw CSOne file: {raw_count} cases")
-            
+
             csone_df_prepared = _prepare_csone(csone_df_raw if csone_df_raw is not None else pd.DataFrame(), team_subs_df)
             if not team_subs_df.empty:
                 # Scope to team portfolio: team customers, date range (same as Comprehensive)
@@ -19695,9 +19712,66 @@ def run_leader_report_generation(analysis_id):
                 csone_df = _apply_scope_filter_csone_inclusive(csone_df_prepared, "All", days)
                 csone_count = len(csone_df)
                 logger.warning(f"[[WARNING]] No team subscriptions - using {csone_count} cases (date filter only)")
-            
+
             with analysis_status_lock:
                 _update_progress(status, 12, f'Loaded {csone_count} TAC cases in scope for team...', 'CSOne Processing')
+
+        # Round 38 / Phase 2: Pass 2 validation -- fail loud iff the
+        # operator EXPLICITLY uploaded a CSOne file but the loaded
+        # DataFrame is empty.  OneDrive-autodiscovered hits never
+        # raise here; they get a partial_data_warning so the report
+        # banner is honest, then continue with reduced detail.
+        _csone_was_uploaded = bool(status.get('csone_file_was_uploaded'))
+        if _csone_was_uploaded:
+            try:
+                raise_validation_error_if_invalid(
+                    report_type='leader',
+                    snowflake_ctx=ctx,
+                    team_subs_df=team_subs_df,
+                    ab_data=pd.DataFrame(),
+                    # Pass 2 sees the REAL loaded csone_df.  An empty
+                    # frame here means the explicit upload genuinely
+                    # produced zero rows after scoping -- the exact
+                    # condition Round 2 / Phase 4.3 was designed to
+                    # surface.
+                    csone_data=csone_df,
+                    required_sources=['csone'],
+                    csone_file_provided=True,
+                )
+                logger.info("[[VALIDATION]] Pass 2 OK: explicit CSOne upload contains scoped TAC cases")
+            except DataSourceValidationError as ve:
+                logger.error(f"[[VALIDATION]] Pass 2 failed (explicit upload empty after scope): {ve}")
+                with analysis_status_lock:
+                    status['status'] = 'error'
+                    status['error'] = 'Leader report data validation failed'
+                    status['message'] = (
+                        f"Leader report cannot be generated: {', '.join(ve.missing_sources)} "
+                        "missing or empty. See logs for details."
+                    )
+                    status['completion_time'] = _now_utc_iso_z()
+                    save_analysis_status()
+                return
+        elif csone_df.empty and csone_path:
+            # Autodiscovery picked something up but it scoped to zero
+            # rows.  Honest banner, no abort.
+            try:
+                _autopicked_basename = os.path.basename(csone_path)
+            except Exception:
+                _autopicked_basename = '<unknown>'
+            logger.warning(
+                "[[VALIDATION]] Leader: autodiscovered CSOne file %s scoped to "
+                "zero TAC cases for this team/period; continuing with degraded report",
+                _autopicked_basename,
+            )
+            _r30_leader_partial_warnings.append({
+                'dataset': 'csone',
+                'kind': 'autodiscovered_empty_after_scope',
+                'effect': (
+                    "OneDrive-autodiscovered CSOne file produced zero TAC cases "
+                    "after scoping to this manager's team and the selected window. "
+                    "Leader-report TAC sections render with reduced detail."
+                ),
+            })
         
         with analysis_status_lock:
             _update_progress(status, 13, 'Gathering external intelligence (defects, incidents)...', 'External Intelligence')
