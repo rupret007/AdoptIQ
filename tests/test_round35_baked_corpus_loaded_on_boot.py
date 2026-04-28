@@ -141,6 +141,15 @@ def test_install_baked_corpus_copies_all_four_files(tmp_path, monkeypatch):
 
 
 def test_install_baked_corpus_is_idempotent(tmp_path, monkeypatch):
+    """Round 35 contract -- install must NO-OP when the user already
+    has a HEALTHY (decryptable) corpus.
+
+    Round 39 update: this test now monkeypatches the probe-decrypt
+    helper to return ``True`` so the idempotency contract is exercised
+    in isolation from the crypto stack.  The replaces-broken-corpus
+    contract has its own dedicated test in
+    ``tests/test_round39_self_heal_crypto_failure.py``.
+    """
     bake_dir = tmp_path / "baked"
     _seed_bake_dir(bake_dir)
     monkeypatch.setenv("ADOPTIQ_BAKED_CORPUS_DIR", str(bake_dir))
@@ -150,14 +159,20 @@ def test_install_baked_corpus_is_idempotent(tmp_path, monkeypatch):
 
     user_dir = corpus_bootstrap._user_corpus_dir()
     # User edits / refreshes their own corpus -> we MUST NOT clobber
-    # it on the second launch.
+    # it on the second launch when the corpus is HEALTHY.  Monkeypatch
+    # the probe so the dummy bytes count as "healthy" for this test.
     user_db = user_dir / "corpus.db.enc"
     user_db.write_bytes(b"user-refreshed-content")
+    monkeypatch.setattr(
+        corpus_bootstrap, "_probe_existing_corpus_decrypts",
+        lambda _user_db: True,
+    )
 
     second = corpus_bootstrap._install_baked_corpus_if_present()
     assert second is None, (
-        "install must NO-OP when the user already has a corpus.db.enc; "
-        "the daily refresh worker is responsible for keeping it current."
+        "install must NO-OP when the user already has a healthy "
+        "corpus.db.enc; the daily refresh worker is responsible for "
+        "keeping it current."
     )
     assert user_db.read_bytes() == b"user-refreshed-content", (
         "second install must not overwrite the user's existing corpus"

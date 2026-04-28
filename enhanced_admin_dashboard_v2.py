@@ -3169,6 +3169,57 @@ def corpus_refresh_route():
 # admin needs.
 
 
+@admin_app.route('/corpus_reset', methods=['POST'])
+def corpus_reset_route():
+    """Round 39 / corpus crypto self-heal -- proxy a CSRF-protected
+    Reset Corpus request to the main app's ``/api/corpus/reset``
+    endpoint.  Mirrors the auth + transport pattern of
+    :func:`corpus_refresh_route`.
+
+    Strategy: validate the admin CSRF token first, then make a
+    server-to-server HTTP call with the ``X-AdoptIQ-Internal`` header
+    so the main app can authorize without us holding its CSRF token.
+    """
+    _require_admin_csrf()
+    reset_status = 'unknown'
+    try:
+        import requests as _r39_req
+        headers = {}
+        _internal_tok = os.environ.get('ADOPTIQ_INTERNAL_TOKEN')
+        if _internal_tok:
+            headers['X-AdoptIQ-Internal'] = _internal_tok
+        resp = _r39_req.post(
+            f'{MAIN_APP_URL.rstrip("/")}/api/corpus/reset',
+            data={},
+            headers=headers,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json() or {}
+            if data.get('ok') and data.get('refresh_started'):
+                reset_status = 'reset+refresh started'
+            elif data.get('ok'):
+                reset_status = 'reset (refresh did not start)'
+            else:
+                reset_status = data.get('reason') or 'reset failed'
+        elif resp.status_code == 403:
+            reset_status = 'CSRF/auth rejected by main app'
+        else:
+            reset_status = f'main app HTTP {resp.status_code}'
+    except Exception as err:
+        log_error(
+            'WARNING',
+            f'Round 39 corpus_reset proxy failed: {type(err).__name__}',
+            'corpus_reset_route',
+        )
+        reset_status = 'unreachable'
+    return redirect(url_for(
+        'enhanced_admin_dashboard',
+        message=f'Corpus reset: {reset_status}',
+        message_type=('success' if 'started' in reset_status else 'warning'),
+    ))
+
+
 @admin_app.route('/start_server', methods=['POST'])
 def start_server_route():
     """Start the AdoptIQ server"""

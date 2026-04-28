@@ -67,24 +67,29 @@ from leader_mock_harness import (  # noqa: E402
 def _summary_table_rows(doc) -> List[List[str]]:
     """Return the rows of the Team Activity Summary table.
 
-    The Leader formatter's ``_create_summary_table`` builds a 7-column
-    table whose header row exactly matches
+    Round 39 / Phase 1.2: ``_create_summary_table`` now builds an
+    8-column table whose header row exactly matches
     ``['Team Member', 'Action Plans', 'Adoption Barriers',
-    'Customer Pulse', 'BEMS', 'Sentiment'|'Sentiment (ARR-enriched)',
-    'Total Activities']``. We locate the table by header row.
+    'Customer Pulse', 'TAC Cases', 'BEMS',
+    'Sentiment'|'Sentiment (ARR-enriched)', 'Total Activities']``.
+    Pre-Round-39 the table omitted the TAC column (7 cols), so a
+    director comparing the per-CSSM TAC count from the Activity
+    Counts Cross-Check against the Team Activity Summary saw two
+    different "Total Activities" values for the same person.
     """
     for table in doc.tables:
         if not table.rows:
             continue
         header = [cell.text.strip() for cell in table.rows[0].cells]
         if (
-            len(header) == 7
+            len(header) == 8
             and header[0] == "Team Member"
             and header[1] == "Action Plans"
             and header[2] == "Adoption Barriers"
             and header[3] == "Customer Pulse"
-            and header[4] == "BEMS"
-            and header[6] == "Total Activities"
+            and header[4] == "TAC Cases"
+            and header[5] == "BEMS"
+            and header[7] == "Total Activities"
         ):
             return [
                 [cell.text.strip() for cell in row.cells]
@@ -208,14 +213,17 @@ def test_leader_renders_against_golden_fixture(monkeypatch, tmp_path):
         f"{total_row[1]}."
     )
 
-    # Total Activities = APs + ABs + CPs + BEMS. With APs=0,
-    # BEMS=combined AB+TAC count >= 0, and AB=10 / CP=8, the floor is
-    # 18; the actual value depends on how many BEMS markers the AB
-    # frame has (the Round 19 AB fixture has none) and the CSOne-side
-    # BEMS column, which mode='combined_ab_tac' counts per-row from
-    # the TAC frame. We assert the floor and the upper bound so the
-    # test pins the contract without coupling to BEMS internals.
-    total_activities = int(total_row[6])
+    # Round 39 / Phase 1.2: Team Activity Summary now exposes 8 columns
+    # (Member, AP, AB, CP, TAC, BEMS, Sentiment, Total Activities) so
+    # the canonical AP+AB+CP+TAC+BEMS total visibly reconciles in the
+    # report. Total Activities is at index 7 (was 6 pre-Round-39).
+    # With APs=0, BEMS=combined AB+TAC count >= 0, and AB=10 / CP=8,
+    # the floor is 18; the actual value depends on how many BEMS
+    # markers the AB frame has (the Round 19 AB fixture has none) and
+    # the CSOne-side BEMS column, which mode='combined_ab_tac' counts
+    # per-row from the TAC frame. We assert the floor so the test
+    # pins the contract without coupling to BEMS internals.
+    total_activities = int(total_row[7])
     assert total_activities >= expected_abs + expected_cps, (
         f"Round 23.1 / R22-NEXT-LEADER: Leader summary TOTAL Total "
         f"Activities = {total_activities} below the AB+CP floor of "

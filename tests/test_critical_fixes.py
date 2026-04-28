@@ -2369,12 +2369,20 @@ class TestRound31Fixes:
         assert "Check logs for details" in src
 
     def test_h2_leader_report_validation_uses_get(self):
-        """H2: leader_report_generator.py validation_results must use .get() for safe access."""
+        """H2: leader_report_generator.py validation_results must use .get() for safe access.
+
+        Round 39 / Phase 2.3: widened the search window from 2500
+        to 3500 bytes.  The original window placed the second pattern
+        at offset 2378; Round 39's doc comments + late-penalty hook
+        in ``_add_validation_section`` pushed it to offset 2602.  The
+        underlying invariant (both .get() patterns present in the
+        validation-section renderer) is unchanged.
+        """
         with open(os.path.join(_PROJECT_ROOT, 'leader_report_generator.py'), encoding='utf-8') as f:
             src = f.read()
         idx = src.find('Data Validation & Verification')
         assert idx != -1
-        section = src[idx:idx + 2500]
+        section = src[idx:idx + 3500]
         assert "validation_results.get('summary'" in section
         assert "(validation_results.get('validation_checks') or {}).get('data_sources'" in section
 
@@ -2562,22 +2570,36 @@ class TestEnhancedInsightsTimestampColumns:
     """Guard Snowflake timestamp column names for engagement queries."""
 
     def test_customer_pulse_query_uses_createddate(self):
+        """Round 39 / Phase 2.2: the customer-pulse query was
+        refactored to use ``FROM {_cp_table}`` with the table name in
+        a separate string literal (so the column-existence pre-check
+        helper can substitute NULL for missing optional columns).
+        The test now anchors on the table-name string literal and
+        widens the search window to cover the f-string SQL block.
+        The underlying invariant -- engagement queries reference
+        ``CREATEDDATE`` (the actual Snowflake column name), not
+        ``CREATED_DATE`` -- is unchanged.
+        """
         with open(os.path.join(_PROJECT_ROOT, 'enhanced_snowflake_insights.py'), encoding='utf-8') as f:
             src = f.read()
-        marker = "FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C"
+        marker = '_cp_table = "EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C"'
         idx = src.find(marker)
-        assert idx != -1
-        section = src[max(0, idx - 260):idx + 260]
+        assert idx != -1, "Round 39 / Phase 2.2: _cp_table literal missing"
+        # Widened to 1500 because the Round 39 helper-driven SQL block
+        # carries the column-existence guard before the SQL itself.
+        section = src[idx:idx + 1500]
         assert "CREATEDDATE" in section
         assert "CREATED_DATE" not in section
 
     def test_success_priority_query_uses_createddate(self):
+        """Round 39 / Phase 2.2 -- same refactor reasoning as
+        ``test_customer_pulse_query_uses_createddate`` above."""
         with open(os.path.join(_PROJECT_ROOT, 'enhanced_snowflake_insights.py'), encoding='utf-8') as f:
             src = f.read()
-        marker = "FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C"
+        marker = '_sp_table = "EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C"'
         idx = src.find(marker)
-        assert idx != -1
-        section = src[max(0, idx - 260):idx + 260]
+        assert idx != -1, "Round 39 / Phase 2.2: _sp_table literal missing"
+        section = src[idx:idx + 1500]
         assert "CREATEDDATE" in section
         assert "CREATED_DATE" not in section
 

@@ -15743,6 +15743,94 @@ def api_corpus_refresh():
     return jsonify(payload), 200
 
 
+@app.route('/api/corpus/reset', methods=['POST'])
+def api_corpus_reset():
+    """Round 39 / corpus crypto self-heal -- manual escape hatch when
+    the user's encrypted corpus cannot be decrypted (auth-tag
+    mismatch, sentinel rotated out from under the install, etc.).
+
+    Auth contract is identical to ``/api/corpus/refresh``: a Flask-WTF
+    CSRF token (browser path) **or** a constant-time-compared
+    ``X-AdoptIQ-Internal`` header (admin-app proxy path).
+
+    Action sequence:
+
+      1. Preserve the user's four corpus artifacts as
+         ``<name>.broken-<utc>`` (single rolling backup, ~280 MB cap;
+         older ``.broken-*`` sidecars are pruned first so disk usage
+         is bounded).
+      2. Trigger a refresh which, on the next bootstrap pass, copies
+         the bundled baked snapshot back into the user dir.
+
+    Never bubbles -- on internal failure returns
+    ``{"ok": False, "reason": "..."}`` with HTTP 200 so the panel can
+    render the error inline rather than treating it as a network
+    fault.
+    """
+    authorized = False
+    _internal_expected = os.environ.get('ADOPTIQ_INTERNAL_TOKEN', '')
+    _internal_provided = request.headers.get('X-AdoptIQ-Internal', '')
+    if (
+        _internal_expected
+        and _internal_provided
+        and secrets.compare_digest(str(_internal_expected), str(_internal_provided))
+    ):
+        authorized = True
+    if not authorized and app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(
+                request.headers.get('X-CSRFToken')
+                or request.headers.get('X-CSRF-Token')
+                or request.form.get('csrf_token')
+            )
+            authorized = True
+        except Exception:
+            authorized = False
+    elif not authorized and not app.config.get('WTF_CSRF_ENABLED', True):
+        authorized = True
+
+    if not authorized:
+        return jsonify({
+            'ok': False,
+            'error': 'CSRF validation failed',
+        }), 403
+
+    preserved_suffix: Optional[str] = None
+    preserved_count = 0
+    refresh_started = False
+    reset_error: Optional[str] = None
+    try:
+        import corpus_bootstrap as _r39_cb
+        preserved_suffix, preserved_count = _r39_cb.reset_user_corpus()
+        try:
+            refresh_started = bool(_r39_cb.request_refresh(rebuild=True))
+        except Exception as refresh_err:  # noqa: BLE001 - reset already done
+            logger.warning(
+                "Round 39 / api_corpus_reset: refresh after reset failed: %s",
+                type(refresh_err).__name__,
+            )
+            reset_error = type(refresh_err).__name__
+    except Exception as err:  # noqa: BLE001 - never bubble
+        logger.warning(
+            "Round 39 / api_corpus_reset failed: %s",
+            type(err).__name__,
+        )
+        return jsonify({
+            'ok': False,
+            'reason': type(err).__name__,
+        }), 200
+
+    payload = {
+        'ok': True,
+        'preserved_as_suffix': preserved_suffix,
+        'preserved_count': int(preserved_count),
+        'refresh_started': refresh_started,
+    }
+    if reset_error:
+        payload['refresh_error'] = reset_error
+    return jsonify(payload), 200
+
+
 def _r17_2_authorize_corpus_admin() -> Optional[Tuple[Dict[str, Any], int]]:
     """Round 17.2: shared CSRF / internal-token check used by the
     SharePoint endpoints.  Returns ``None`` when the request is
@@ -15830,6 +15918,16 @@ def api_intel_refresh():
     ("Run AdoptIQ Intelligence now") without importing admin URLs.
     """
     return api_corpus_refresh()
+
+
+@app.route('/api/intel/reset', methods=['POST'])
+def api_intel_reset():
+    """Round 39 / corpus crypto self-heal -- user-facing alias for
+    ``/api/corpus/reset`` so the analyze-page panel button can post
+    here without referencing admin URLs.  Auth + payload shape are
+    inherited verbatim from :func:`api_corpus_reset`.
+    """
+    return api_corpus_reset()
 
 
 @app.route('/api/settings/intelligence', methods=['POST'])
@@ -20381,7 +20479,14 @@ def run_leader_report_generation(analysis_id):
                              'Detail': '', 'Generated_At': ''},
                             {'Field': 'Analysis_Id', 'Value': str(analysis_id),
                              'Detail': '', 'Generated_At': ''},
-                            {'Field': 'Sheets_Written', 'Value': str(sheets_written),
+                            # Round 39 / Phase 4.5: count Report_Info
+                            # itself as a written sheet so this field
+                            # matches the actual workbook tab count.
+                            # Pre-Round-39 the value was the count of
+                            # data sheets BEFORE Report_Info was
+                            # written, so a workbook with 11 tabs
+                            # advertised "Sheets_Written = 10".
+                            {'Field': 'Sheets_Written', 'Value': str(sheets_written + 1),
                              'Detail': '', 'Generated_At': ''},
                             {'Field': 'Partial_Data_Warning_Count', 'Value': str(len(_leader_pdw)),
                              'Detail': '', 'Generated_At': ''},
@@ -20837,6 +20942,54 @@ def _check_port_available(port):
     return (False, pid, name)
 
 
+def _probe_existing_adoptiq(port, timeout=2.0):
+    """Best-effort check whether the TCP listener on ``port`` is another
+    live AdoptIQ instance (vs. an unrelated process happening to hold the
+    same port).
+
+    Round 38.1 / Build13: when the user double-clicks the .app while an
+    instance is already running, the prior behaviour was to show an
+    osascript dialog ("Quit it and start this one?") that opened *behind*
+    other windows.  After a 15s osascript timeout the new process called
+    ``sys.exit(0)`` silently, so the user perceived the .app as having
+    "bounced for a few minutes then stopped".
+
+    The correct UX is: when an existing AdoptIQ is detected on the port,
+    skip the dialog entirely and just re-focus the browser to the
+    existing instance.  This helper returns ``True`` only when an HTTP
+    probe of ``http://127.0.0.1:<port>/`` succeeds AND the body contains
+    an AdoptIQ marker, so we never mistake an unrelated server (e.g.
+    ``Duo Desktop`` or a stray Werkzeug from another project) for our
+    own.
+
+    The probe is best-effort (short timeout, errors swallowed) because
+    the duplicate-launch path must remain fast and never block boot.
+    """
+    try:
+        port_int = int(port)
+    except (TypeError, ValueError):
+        return False
+    if not (1 <= port_int <= 65535):
+        return False
+    try:
+        import urllib.request as _urlreq
+    except ImportError:  # pragma: no cover - stdlib always present
+        return False
+    try:
+        # Round 38.1: ruff S310 ignored intentionally. The URL is built
+        # from a literal http:// scheme + 127.0.0.1 host + an int that
+        # we validated above to be in 1..65535. There is no user-supplied
+        # scheme, host, or path that could escape to file://, gopher://,
+        # or off-box; the probe is deliberately loopback-only.
+        with _urlreq.urlopen(  # noqa: S310  # nosec B310
+            'http://127.0.0.1:%d/' % port_int, timeout=timeout
+        ) as resp:
+            body = resp.read(4096).decode('utf-8', errors='ignore').lower()
+    except Exception:
+        return False
+    return 'adoptiq' in body
+
+
 # Round 17.3: resolve the main-app TCP port from the environment so
 # operators can move AdoptIQ off a contested port without a rebuild.
 # 5151 is adjacent to the user's other 5150 ("Van Halen") app and out
@@ -20958,6 +21111,26 @@ if __name__ == '__main__':
 
     available, other_pid, other_name = _check_port_available(PORT)
     if not available:
+        # Round 38.1 / Build13: short-circuit when the listener IS already
+        # AdoptIQ.  The previous flow blocked on an osascript dialog that
+        # opened behind other windows, then silently exited after 15s,
+        # producing the "bounced for a few minutes then stopped" symptom
+        # the user reported.  When we can prove the existing process is
+        # an AdoptIQ instance, just re-focus the browser there and exit
+        # cleanly -- no dialog, no Dock-bounce-into-the-void.
+        if _probe_existing_adoptiq(PORT):
+            print("AdoptIQ is already running on http://localhost:%s/ -- "
+                  "opening that instance." % PORT)
+            try:
+                webbrowser.open('http://localhost:%s/' % PORT)
+            except Exception as _open_err:
+                logger.debug(
+                    "Round 38.1: webbrowser.open failed for existing "
+                    "AdoptIQ instance on port %s: %s",
+                    PORT, _open_err,
+                )
+            sys.exit(0)
+
         print("")
         print("Port %s is in use by another program." % PORT)
         if other_pid and other_name:
@@ -20971,13 +21144,28 @@ if __name__ == '__main__':
         # Packaged Mac: native dialog so user can choose to quit the other instance
         if getattr(sys, 'frozen', False) and sys.platform == 'darwin':
             import subprocess as _sub
-            _script = (
+            # Round 38.1 / Build13: ``tell application "System Events" to
+            # activate`` brings the dialog window to the foreground so
+            # the user actually sees it.  Without this prefix the dialog
+            # opens behind whatever app the user was using and they
+            # report the .app as "broken" because they never see the
+            # prompt.  The probe above already handles the
+            # AdoptIQ-vs-AdoptIQ case; this defence is for the rare
+            # "some non-AdoptIQ process is on 5151" path.
+            _dialog = (
                 'display dialog "Port %s is in use (another AdoptIQ may be running). '
                 'Quit it and start this one?" with title "AdoptIQ" '
                 'buttons {"Cancel", "Quit other & start"} default button 2' % PORT
             )
             try:
-                _r = _sub.run(['osascript', '-e', _script], capture_output=True, text=True, timeout=15)
+                _r = _sub.run(
+                    [
+                        'osascript',
+                        '-e', 'tell application "System Events" to activate',
+                        '-e', _dialog,
+                    ],
+                    capture_output=True, text=True, timeout=15,
+                )
             except Exception:
                 _r = None
             if _r and _r.returncode == 0 and 'Quit other & start' in (_r.stdout or ''):

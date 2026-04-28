@@ -61,6 +61,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = [
     "S101",  # assert in tests is required
+    "S104",  # "0.0.0.0" / non-loopback strings are test inputs verifying admin-bind security gate
     "S105",  # hardcoded test passwords
     "S106",  # hardcoded test creds in fixtures
     "S108",  # hardcoded /tmp paths in tests

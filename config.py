@@ -17,7 +17,111 @@ ADOPTIQ_VERSION = "1.0.4"
 # Round 37's Build11 admin-console fixes (Start Server tile,
 # OneDrive sync surfacing, SharePoint sub-block removal,
 # Re-index now button) ship in this build too.
-ADOPTIQ_BUILD = "12"
+#
+# Round 38.1 / Build13 ships a tiny duplicate-launch UX fix:
+# the user reported the .app "just bounced and would not open"
+# but the actual ``adoptiq.<pid>.log`` showed the FIRST launch
+# was healthy and serving traffic; the symptom came from a
+# SECOND double-click while the first instance was still on
+# port 5151.  The previous behaviour was to spawn an osascript
+# ``display dialog`` that opened *behind* other windows, then
+# silently exit after a 15s timeout.  Build13 adds a tiny HTTP
+# probe of 127.0.0.1:<port>/ -- when the existing listener
+# returns AdoptIQ-marked HTML we just ``webbrowser.open`` to
+# the running instance and exit cleanly, no dialog.  And when
+# the dialog IS shown (rare non-AdoptIQ port collision) we
+# now ``tell application "System Events" to activate`` first
+# so it surfaces to the front.  No boot-order, corpus, or
+# Round 38 leader-report changes ship in this build.
+#
+# Round 38.2 / Build14 ships a one-line indentation fix in
+# ``leader_report_generator._compute_customer_health`` plus a
+# full audit of the file's 29 ``if not df.empty:`` sites.
+# The user re-tested the leader report against Build13 and hit
+# ``KeyError: '_bu_disp'`` deep in Document Generation: the
+# ``_bu_disp`` transient column was assigned INSIDE an
+# ``if not stalled.empty:`` block but accessed UNCONDITIONALLY
+# on the next line, raising for any CSSM whose open APs were
+# all <=30 days old.  The bug was masked pre-Round-38 because
+# the leader report aborted at validation when CSOne was
+# empty/missing, so Document Generation rarely ran on real
+# data.  Round 38's two-pass fix correctly let the report
+# through and surfaced the latent indentation issue.  Build14
+# moves the for-loop INSIDE the guard.  The Phase 2 audit
+# verified 28 of the file's 29 if-not-empty sites already use
+# the correct guard pattern; only the one site needed fixing.
+# No boot-order, corpus, validation, or Round 38.1 duplicate-
+# launch changes ship in this build.
+#
+# Round 39 / Build15 ships the corpus-crypto self-heal fix.  Every
+# user upgrading from a prior build hit
+# "Last run failed (crypto) -- authentication tag mismatch (wrong key,
+# tampered ciphertext, or sentinel changed)" because each bake mints a
+# fresh sentinel and the previous install's encrypted DB sat on disk
+# undecryptable.  The Round 35 install path was strictly one-shot
+# (``if user_db.exists(): return None``) so the bundled snapshot was
+# never copied over the broken file.  Round 39 adds a probe-decrypt
+# step: a healthy corpus is left alone (Round 35 idempotency
+# preserved), a broken corpus is preserved as ``<name>.broken-<utc>``
+# (single rolling backup, ~280 MB cap) and the bake snapshot is
+# reinstalled in place.  Defense in depth: the bake script now does a
+# decrypt round-trip self-test so an internally inconsistent bake
+# cannot reach users; ``/api/corpus/reset`` (with admin proxy
+# ``/corpus_reset`` and user-facing alias ``/api/intel/reset``) and a
+# Reset corpus button on the analyze panel give the user a manual
+# escape hatch when self-heal cannot run (no bake bundled, e.g.
+# dev-checkout build).  32 new tests pin every branch.
+#
+# Round 39 / Phase B / Build16 ships the leader-report accuracy
+# wave triggered by the Brian Frazier 90d audit (two real reports
+# in ~/Downloads/).  Phase B addresses one catastrophic accuracy
+# bug, three "internally inconsistent numbers" bugs, plus 200+
+# leaks of raw Snowflake error strings and dev-phase markers into
+# customer-facing text.  Concretely:
+#   * TAC cases are now joined to CSSMs via the authoritative
+#     ``SUBSCRIPTION_ID`` (with ``ACCOUNT_ID_C`` and exact
+#     normalized customer name as second/third tier) instead of
+#     a 2-word name-overlap fuzzy matcher that double-counted
+#     ERIE INSURANCE GROUP <-> FARMERS INSURANCE GROUP and
+#     overstated Angelica's 63 by ~5x.
+#   * "Total Activities" is unified across all three writers
+#     (Team Activity Summary, per-member Activity Summary, and
+#     the Activity Counts Cross-Check) to the canonical
+#     ``cm.ACTIVITIES_MODE_FULL`` formula (AP+AB+CP+TAC+BEMS).
+#   * The hard-coded "requires immediate attention with high
+#     volumes ..." narrative branch is replaced with rate +
+#     absolute-floor health assessment so a low-volume CSSM
+#     (e.g. William Phillips: 0 ABs, 5 TAC, 2 customers) gets
+#     "manageable load" rather than the boilerplate alarm.
+#   * Snowflake ``section_errors`` are sanitized through
+#     ``_sanitize_snowflake_error`` (strips error codes, trace
+#     IDs, ``Round N / Phase X.Y`` markers, ``__C`` column
+#     identifiers, and SQL bodies) and rendered as a single
+#     friendly line.  The validator now drops Data Quality
+#     Score and flips overall_status to DEGRADED when section
+#     errors fired during the run.
+#   * ``enhanced_snowflake_insights`` queries gracefully degrade
+#     when the Snowflake schema dropped a column
+#     (``CISCO_TIER_RANKING__C``, ``ARR_AMOUNT``, ``SUBJECT_C``):
+#     missing non-critical columns become NULL, missing critical
+#     columns short-circuit to a typed empty-result row.
+#   * Historical-context corpus rendering: SharePoint legacy
+#     paragraph removed, ``status?`` / ``sev?`` placeholders
+#     replaced with em-dashes, prior cases deduped by case
+#     number (most-recent-wins), and float case numbers coerced
+#     to int-shaped strings.
+#   * Per-account polish: severity/category counts split by
+#     record type so AB string-severity isn't averaged with
+#     numeric TAC priority, empty "Technology Assignment
+#     Breakdown" heading is dropped, account names with ``__``
+#     separators are rendered with comma-space via the new
+#     ``data_normalization.normalize_for_display`` helper, and
+#     ``Sheets_Written`` in Excel ``Report_Info`` correctly
+#     includes the Report_Info sheet itself.
+# Seven new ``tests/test_round39_*`` files (88 new asserts) pin
+# each fix.  No boot order, corpus self-heal, or Round 38.x
+# changes ship in this build.
+ADOPTIQ_BUILD = "16"
 
 def version_string():
     """e.g. 'v1.0.1 build 1'"""

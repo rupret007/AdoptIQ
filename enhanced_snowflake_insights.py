@@ -193,12 +193,91 @@ def _log_query_fallback(context: str, exc: Exception) -> None:
 
 class EnhancedSnowflakeInsights:
     """Enhanced insights system using all discovered Snowflake tables"""
-    
+
     def __init__(self, ctx):
         self.ctx = ctx
         self.insights_data = {}
         self.source_attribution = {}
         self._skip_warned = set()  # log once when optional tables/columns are unavailable
+
+    # ------------------------------------------------------------------
+    # Round 39 / Phase 2.2: schema-drift-tolerant column resolver.
+    # ------------------------------------------------------------------
+    #
+    # The pre-Round-39 queries hard-coded ``CISCO_TIER_RANKING__C``,
+    # ``ARR_AMOUNT``, ``SUBJECT_C``, etc.  When the upstream Snowflake
+    # schema dropped or renamed any of those columns the query raised
+    # ``invalid identifier 'CISCO_TIER_RANKING__C'`` and the error
+    # leaked verbatim into customer-facing report text -- the audit
+    # found the same SQL compilation error rendered 100+ times in a
+    # single Brian Frazier 90d report.
+    #
+    # ``_resolve_columns`` consults the cached column set for a given
+    # table (via ``adoptiq_backend._get_table_columns``) and returns:
+    #   * the SELECT projection - real columns where they exist, NULL
+    #     placeholders where they do not, all aliased to the requested
+    #     name so downstream ``dict(zip(...))`` consumers see a stable
+    #     row shape.
+    #   * the set of missing columns so callers can decide whether to
+    #     short-circuit when a CRITICAL column is gone.
+
+    def _table_columns_safe(self, table_name: str) -> set:
+        """Cached column-set lookup that never raises and always
+        returns a set (empty when introspection fails / ctx is mock).
+        """
+        if not table_name:
+            return set()
+        try:
+            from adoptiq_backend import _get_table_columns
+        except Exception:
+            return set()
+        try:
+            cols = _get_table_columns(self.ctx, table_name) or set()
+            return {str(c).upper().strip() for c in cols}
+        except Exception as _exc:
+            logger.debug(
+                "Round 39 / Phase 2.2: _get_table_columns(%s) failed: %s",
+                table_name, _exc,
+            )
+            return set()
+
+    def _resolve_columns(
+        self,
+        table_name: str,
+        candidate_cols: List[str],
+    ) -> Tuple[str, set]:
+        """Build a SELECT projection that only references columns
+        present in ``table_name``.
+
+        Returns ``(select_clause, missing_columns)`` where:
+        - ``select_clause`` is a comma-separated SQL fragment with
+          NULL placeholders for missing columns aliased back to the
+          requested name (so ``dict(zip(..., row))`` consumers stay
+          shape-stable);
+        - ``missing_columns`` is the set of upper-cased column names
+          that are not present in the live schema.
+
+        When introspection fails entirely (empty cached set) we
+        return the verbatim column list so the existing query path is
+        preserved -- the column-existence guard only kicks in when we
+        have a positive signal that the column is gone.
+        """
+        live_cols = self._table_columns_safe(table_name)
+        # An empty live_cols set means introspection didn't run (mock
+        # ctx / restricted role / Snowflake hiccup).  Fall back to the
+        # original behavior so we don't silently strip every column.
+        if not live_cols:
+            return ", ".join(candidate_cols), set()
+        missing: set = set()
+        projection: List[str] = []
+        for col in candidate_cols:
+            up = str(col).upper().strip()
+            if up in live_cols:
+                projection.append(col)
+            else:
+                projection.append(f"NULL AS {col}")
+                missing.add(up)
+        return ", ".join(projection), missing
         
     def get_comprehensive_customer_insights(self, customer_name: str, days: int) -> Dict:
         """Get comprehensive insights from all available Snowflake tables.
@@ -369,16 +448,52 @@ class EnhancedSnowflakeInsights:
         }
         
         try:
+            # Round 39 / Phase 2.2: probe the live schema and substitute
+            # NULL placeholders for any columns that have been renamed
+            # / dropped upstream (e.g. ``CISCO_TIER_RANKING__C``,
+            # ``ABC_CATEGORY__C``).  Pre-Round-39 a missing column
+            # raised ``invalid identifier`` which leaked verbatim into
+            # the report.  If the CRITICAL columns
+            # (``ACCOUNT_ID_C`` + ``BU_ACCOUNT_NAME``) themselves are
+            # missing we short-circuit with a "column_missing" error
+            # so the downstream renderer surfaces an honest
+            # "section unavailable" notice instead of running an
+            # all-NULL query.
+            _account_table = "CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY"
+            _account_cols = [
+                "ACCOUNT_ID_C",
+                "BU_ACCOUNT_NAME",
+                "RENEWAL_RISK_CATEGORY",
+                "CONTRACT_STATUS",
+                "CISCO_TIER_RANKING__C",
+                "ABC_CATEGORY__C",
+            ]
+            _account_select, _account_missing = self._resolve_columns(_account_table, _account_cols)
+            _critical_account = {"ACCOUNT_ID_C", "BU_ACCOUNT_NAME"}
+            if _critical_account & _account_missing:
+                _missing_critical = sorted(_critical_account & _account_missing)
+                logger.warning(
+                    "Round 39 / Phase 2.2: %s missing critical column(s) %s; "
+                    "skipping account insights for %s.",
+                    _account_table, _missing_critical, _redact_customer(customer_name),
+                )
+                insights['error'] = (
+                    f"column_missing: {_account_table} missing required column(s) "
+                    f"{_missing_critical}."
+                )
+                return insights
+            if _account_missing:
+                logger.info(
+                    "Round 39 / Phase 2.2: %s missing optional column(s) %s; "
+                    "substituting NULL in projection.",
+                    _account_table, sorted(_account_missing),
+                )
+
             # Primary Account Information
-            account_query = """
-            SELECT 
-                ACCOUNT_ID_C,
-                BU_ACCOUNT_NAME,
-                RENEWAL_RISK_CATEGORY,
-                CONTRACT_STATUS,
-                CISCO_TIER_RANKING__C,
-                ABC_CATEGORY__C
-            FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
+            account_query = f"""
+            SELECT
+                {_account_select}
+            FROM {_account_table}
             WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
             -- Round 12 / Phase 7.2: stable ORDER BY before LIMIT so
             -- Snowflake cannot return non-deterministic windows on
@@ -386,7 +501,7 @@ class EnhancedSnowflakeInsights:
             ORDER BY ACCOUNT_ID_C NULLS LAST, BU_ACCOUNT_NAME NULLS LAST
             LIMIT 10
             """
-            
+
             # Round 7 / Phase 2.5: enforce table-policy allowlist on every execute.
             cur = _PolicyEnforcingCursor(self.ctx.cursor(), context="enhanced_snowflake_insights")
             try:
@@ -460,23 +575,54 @@ class EnhancedSnowflakeInsights:
         }
         
         try:
+            # Round 39 / Phase 2.2: column-existence pre-check.
+            # ARR_AMOUNT is the financial workhorse for this section --
+            # if it is missing the whole "arr_data" block becomes
+            # meaningless, so we short-circuit with a structured error
+            # instead of returning a frame full of NULLs that the
+            # renderer would interpret as $0.
+            _contract_table = "CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU"
+            _contract_cols = [
+                "CONTRACT_NUMBER",
+                "SERVICE_END_DATE",
+                "C_360_SERVICE_TIER_C",
+                "ARR_AMOUNT",
+                "ACCOUNT_ID_C",
+                "CURRENCY_CODE",
+            ]
+            _contract_select, _contract_missing = self._resolve_columns(_contract_table, _contract_cols)
+            _critical_contract = {"ACCOUNT_ID_C", "ARR_AMOUNT"}
+            if _critical_contract & _contract_missing:
+                _missing_critical = sorted(_critical_contract & _contract_missing)
+                logger.warning(
+                    "Round 39 / Phase 2.2: %s missing critical column(s) %s; "
+                    "skipping contract insights for %s.",
+                    _contract_table, _missing_critical, _redact_customer(customer_name),
+                )
+                insights['error'] = (
+                    f"column_missing: {_contract_table} missing required column(s) "
+                    f"{_missing_critical}."
+                )
+                return insights
+            if _contract_missing:
+                logger.info(
+                    "Round 39 / Phase 2.2: %s missing optional column(s) %s; "
+                    "substituting NULL in projection.",
+                    _contract_table, sorted(_contract_missing),
+                )
+
             # Contract Information
             # Round 7 / Phase 2.4: pull CURRENCY_CODE so total_arr can
             # be reported with an explicit currency or marked UNKNOWN
             # when the contract set mixes currencies (the previous code
             # silently summed JPY + USD + EUR into a "$" total).
-            contract_query = """
-            SELECT 
-                CONTRACT_NUMBER,
-                SERVICE_END_DATE,
-                C_360_SERVICE_TIER_C,
-                ARR_AMOUNT,
-                ACCOUNT_ID_C,
-                CURRENCY_CODE
-            FROM CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU 
+            contract_query = f"""
+            SELECT
+                {_contract_select}
+            FROM {_contract_table}
             WHERE UPPER(ACCOUNT_ID_C) IN (
-                SELECT UPPER(ACCOUNT_ID_C) 
-                FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
+                SELECT UPPER(ACCOUNT_ID_C)
+                FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY
                 WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
             )
             AND SERVICE_END_DATE >= %s
@@ -731,22 +877,34 @@ class EnhancedSnowflakeInsights:
             logger.info("Policy: Skipping ESA_C360_SUCCESS_PRIORITY__C queries in enhanced engagement insights.")
 
         try:
+            # Round 39 / Phase 2.2: pre-check ESA_C360_CS_TASK__C columns once
+            # (used by both AP and AB queries below).  ID + ACCOUNT_ID_C +
+            # CREATED_DATE are required for the join+filter; SUBJECT_C and
+            # status/category columns get NULL substitution if missing.
+            _cs_task_table = "EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C"
+            _ap_cols = ["ID", "SUBJECT_C", "STATUS_C", "ACCOUNT_ID_C", "CREATED_DATE"]
+            _ap_select, _ap_missing = self._resolve_columns(_cs_task_table, _ap_cols)
+            _ab_cols = ["ID", "SUBJECT_C", "AB_CATEGORY_C", "SEVERITY_C", "ACCOUNT_ID_C", "CREATED_DATE"]
+            _ab_select, _ab_missing = self._resolve_columns(_cs_task_table, _ab_cols)
+            _critical_cs_task = {"ID", "ACCOUNT_ID_C", "CREATED_DATE"}
+
             # Round 7 / Phase 2.5: enforce table-policy allowlist on every execute.
             cur = _PolicyEnforcingCursor(self.ctx.cursor(), context="enhanced_snowflake_insights")
             try:
-                if not block_cs_task:
-                    ap_query = """
-                    SELECT 
-                        ID,
-                        SUBJECT_C,
-                        STATUS_C,
-                        ACCOUNT_ID_C,
-                        CREATED_DATE
-                    FROM EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C 
+                if not block_cs_task and not (_critical_cs_task & _ap_missing):
+                    if _ap_missing:
+                        logger.info(
+                            "Round 39 / Phase 2.2: %s missing AP column(s) %s; substituting NULL.",
+                            _cs_task_table, sorted(_ap_missing),
+                        )
+                    ap_query = f"""
+                    SELECT
+                        {_ap_select}
+                    FROM {_cs_task_table}
                     WHERE record_type_id = '0122T000000QHBGQA4'
                     AND UPPER(ACCOUNT_ID_C) IN (
-                        SELECT UPPER(ACCOUNT_ID_C) 
-                        FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
+                        SELECT UPPER(ACCOUNT_ID_C)
+                        FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY
                         WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
                     )
                     AND CREATED_DATE >= %s
@@ -771,19 +929,20 @@ class EnhancedSnowflakeInsights:
                             'verification_method': f"Search by ID where record_type_id = '0122T000000QHBGQA4' for accounts matching '{customer_name}'"
                         })
 
-                    ab_query = """
-                    SELECT 
-                        ID,
-                        SUBJECT_C,
-                        AB_CATEGORY_C,
-                        SEVERITY_C,
-                        ACCOUNT_ID_C,
-                        CREATED_DATE
-                    FROM EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C 
+                if not block_cs_task and not (_critical_cs_task & _ab_missing):
+                    if _ab_missing:
+                        logger.info(
+                            "Round 39 / Phase 2.2: %s missing AB column(s) %s; substituting NULL.",
+                            _cs_task_table, sorted(_ab_missing),
+                        )
+                    ab_query = f"""
+                    SELECT
+                        {_ab_select}
+                    FROM {_cs_task_table}
                     WHERE record_type_id = '0122T000000GJfTQAW'
                     AND UPPER(ACCOUNT_ID_C) IN (
-                        SELECT UPPER(ACCOUNT_ID_C) 
-                        FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
+                        SELECT UPPER(ACCOUNT_ID_C)
+                        FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY
                         WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
                     )
                     AND CREATED_DATE >= %s
@@ -808,27 +967,46 @@ class EnhancedSnowflakeInsights:
                             'verification_method': f"Search by ID where record_type_id = '0122T000000GJfTQAW' for accounts matching '{customer_name}'"
                         })
 
-                cp_query = """
-                SELECT 
-                    ID,
-                    SUBJECT_C,
-                    STATUS_C,
-                    ACCOUNT__C,
-                    CREATEDDATE
-                FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C 
-                WHERE UPPER(ACCOUNT__C) IN (
-                    SELECT UPPER(ACCOUNT_ID_C) 
-                    FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY 
-                    WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
-                )
-                AND CREATEDDATE >= %s
-                -- Round 12 / Phase 7.2: deterministic LIMIT window.
-                ORDER BY CREATEDDATE DESC NULLS LAST, ID NULLS LAST
-                LIMIT 20
-                """
-                # Round 7 / Phase 2.1: bind explicit UTC window start.
-                cur.execute(cp_query, (f'%{customer_name}%', _utc_window_start_iso(days)))
-                cp_results = cur.fetchall()
+                # Round 39 / Phase 2.2: pre-check ESA_C360_CUSTOMER_PULSE__C
+                # columns; ID + ACCOUNT__C + CREATEDDATE are the
+                # critical join+filter set, the other columns get NULL
+                # substitution if missing.
+                _cp_table = "EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C"
+                _cp_cols = ["ID", "SUBJECT_C", "STATUS_C", "ACCOUNT__C", "CREATEDDATE"]
+                _cp_select, _cp_missing = self._resolve_columns(_cp_table, _cp_cols)
+                _critical_cp = {"ID", "ACCOUNT__C", "CREATEDDATE"}
+                if _critical_cp & _cp_missing:
+                    logger.warning(
+                        "Round 39 / Phase 2.2: %s missing critical column(s) %s; "
+                        "skipping customer_pulse insights for %s.",
+                        _cp_table, sorted(_critical_cp & _cp_missing),
+                        _redact_customer(customer_name),
+                    )
+                    cp_results = []
+                else:
+                    if _cp_missing:
+                        logger.info(
+                            "Round 39 / Phase 2.2: %s missing optional column(s) %s; "
+                            "substituting NULL.",
+                            _cp_table, sorted(_cp_missing),
+                        )
+                    cp_query = f"""
+                    SELECT
+                        {_cp_select}
+                    FROM {_cp_table}
+                    WHERE UPPER(ACCOUNT__C) IN (
+                        SELECT UPPER(ACCOUNT_ID_C)
+                        FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY
+                        WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
+                    )
+                    AND CREATEDDATE >= %s
+                    -- Round 12 / Phase 7.2: deterministic LIMIT window.
+                    ORDER BY CREATEDDATE DESC NULLS LAST, ID NULLS LAST
+                    LIMIT 20
+                    """
+                    # Round 7 / Phase 2.1: bind explicit UTC window start.
+                    cur.execute(cp_query, (f'%{customer_name}%', _utc_window_start_iso(days)))
+                    cp_results = cur.fetchall()
                 if cp_results:
                     _CP_LIMIT = 20
                     insights['customer_pulse'] = {
@@ -844,37 +1022,56 @@ class EnhancedSnowflakeInsights:
                     })
 
                 if not block_success_priority:
-                    # NOTE: RELATED_CUSTOMER__C in the success-priority table is a
-                    # *customer name* (not an 18-char Salesforce ID), so the
-                    # previous subselect compared a name to ACCOUNT_ID_C and
-                    # returned zero rows for nearly every portfolio. We now
-                    # match RELATED_CUSTOMER__C against BU_ACCOUNT_NAME (and
-                    # the user-supplied name as a fallback) so counts are
-                    # actually populated.
-                    sp_query = """
-                    SELECT
-                        ID,
-                        SUBJECT_C,
-                        PRIORITY_C,
-                        RELATED_CUSTOMER__C,
-                        CREATEDDATE
-                    FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C
-                    WHERE (
-                        UPPER(RELATED_CUSTOMER__C) IN (
-                            SELECT UPPER(BU_ACCOUNT_NAME)
-                            FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY
-                            WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
+                    # Round 39 / Phase 2.2: column-existence pre-check for
+                    # ESA_C360_SUCCESS_PRIORITY__C.  ID + RELATED_CUSTOMER__C +
+                    # CREATEDDATE are critical for the join+filter; SUBJECT_C
+                    # / PRIORITY_C get NULL substitution if missing.
+                    _sp_table = "EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C"
+                    _sp_cols = ["ID", "SUBJECT_C", "PRIORITY_C", "RELATED_CUSTOMER__C", "CREATEDDATE"]
+                    _sp_select, _sp_missing = self._resolve_columns(_sp_table, _sp_cols)
+                    _critical_sp = {"ID", "RELATED_CUSTOMER__C", "CREATEDDATE"}
+                    if _critical_sp & _sp_missing:
+                        logger.warning(
+                            "Round 39 / Phase 2.2: %s missing critical column(s) %s; "
+                            "skipping success_priorities for %s.",
+                            _sp_table, sorted(_critical_sp & _sp_missing),
+                            _redact_customer(customer_name),
                         )
-                        OR UPPER(RELATED_CUSTOMER__C) LIKE UPPER(%s)
-                    )
-                    AND CREATEDDATE >= %s
-                    -- Round 12 / Phase 7.2: deterministic LIMIT window.
-                    ORDER BY CREATEDDATE DESC NULLS LAST, ID NULLS LAST
-                    LIMIT 20
-                    """
-                    # Round 7 / Phase 2.1: bind explicit UTC window start.
-                    cur.execute(sp_query, (f'%{customer_name}%', f'%{customer_name}%', _utc_window_start_iso(days)))
-                    sp_results = cur.fetchall()
+                        sp_results = []
+                    else:
+                        if _sp_missing:
+                            logger.info(
+                                "Round 39 / Phase 2.2: %s missing optional column(s) %s; "
+                                "substituting NULL.",
+                                _sp_table, sorted(_sp_missing),
+                            )
+                        # NOTE: RELATED_CUSTOMER__C in the success-priority table is a
+                        # *customer name* (not an 18-char Salesforce ID), so the
+                        # previous subselect compared a name to ACCOUNT_ID_C and
+                        # returned zero rows for nearly every portfolio. We now
+                        # match RELATED_CUSTOMER__C against BU_ACCOUNT_NAME (and
+                        # the user-supplied name as a fallback) so counts are
+                        # actually populated.
+                        sp_query = f"""
+                        SELECT
+                            {_sp_select}
+                        FROM {_sp_table}
+                        WHERE (
+                            UPPER(RELATED_CUSTOMER__C) IN (
+                                SELECT UPPER(BU_ACCOUNT_NAME)
+                                FROM CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY
+                                WHERE UPPER(BU_ACCOUNT_NAME) LIKE UPPER(%s)
+                            )
+                            OR UPPER(RELATED_CUSTOMER__C) LIKE UPPER(%s)
+                        )
+                        AND CREATEDDATE >= %s
+                        -- Round 12 / Phase 7.2: deterministic LIMIT window.
+                        ORDER BY CREATEDDATE DESC NULLS LAST, ID NULLS LAST
+                        LIMIT 20
+                        """
+                        # Round 7 / Phase 2.1: bind explicit UTC window start.
+                        cur.execute(sp_query, (f'%{customer_name}%', f'%{customer_name}%', _utc_window_start_iso(days)))
+                        sp_results = cur.fetchall()
                     if sp_results:
                         _SP_LIMIT = 20
                         insights['success_priorities'] = {

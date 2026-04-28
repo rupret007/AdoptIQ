@@ -158,6 +158,61 @@ def _safe_str(value: object, *, limit: int = _MAX_LINE_CHARS) -> str:
     return body
 
 
+def _coerce_case_number(value: object) -> str:
+    """Round 39 / Phase 3.4 -- render case numbers as integer-shaped
+    strings so the corpus loader's NaN-coerced float columns
+    (``1141876078.0``) don't leak the ``.0`` suffix into the
+    customer-facing report.
+
+    Pipeline: NFKC + control-char strip via ``_safe_str``, then one
+    extra trailing-``.0`` chop so floats render as their integer
+    representation while genuine non-numeric IDs (rare, e.g. CSOne
+    might one day issue alphanumerics) pass through unchanged.
+    """
+    raw = _safe_str(value, limit=40)
+    if not raw:
+        return ""
+    if re.fullmatch(r"\s*-?\d+\.0+\s*", raw):
+        try:
+            return str(int(float(raw)))
+        except (TypeError, ValueError):
+            return raw.strip()
+    return raw
+
+
+def _dedupe_cases(cases: "tuple[HistoricalCase, ...] | list[HistoricalCase]") -> "list[HistoricalCase]":
+    """Round 39 / Phase 3.3 -- collapse duplicates by case_number.
+
+    The corpus loader can return the same CSOne case once per source
+    snapshot it appears in (a single 90-day case may show in 5+ daily
+    rollup files).  Pre-Round-39 the renderer printed every duplicate,
+    so a single case rendered 5x per customer.  We sort by
+    ``opened_at`` descending (most-recent first) before deduping so
+    the surviving record is the freshest snapshot's view of the case.
+    Cases without a usable ``case_number`` fall through unchanged so
+    we never silently drop them.
+    """
+    if not cases:
+        return []
+    items = list(cases)
+    try:
+        items.sort(key=lambda c: (c.opened_at or "", c.case_number or ""), reverse=True)
+    except Exception:
+        pass
+    seen: set = set()
+    out: list = []
+    for case in items:
+        cn = _coerce_case_number(case.case_number)
+        if not cn:
+            out.append(case)
+            continue
+        if cn in seen:
+            continue
+        seen.add(cn)
+        out.append(case)
+    return out
+
+
 def _is_safe_chunk(text: str) -> bool:
     """Defense-in-depth -- run free-form corpus text through the
     Round 17 prompt-safety validator before letting it into a
@@ -299,7 +354,12 @@ def build_historical_context(
                 source_files.append(src)
             cases.append(
                 HistoricalCase(
-                    case_number=_safe_str(case.case_number, limit=40),
+                    # Round 39 / Phase 3.4: coerce ``case_number`` to
+                    # an integer-shaped string so downstream consumers
+                    # never see ``1141876078.0`` (the float form leaks
+                    # in when the corpus loader's pandas column comes
+                    # back as a NaN-coerced float64 dtype).
+                    case_number=_coerce_case_number(case.case_number),
                     severity=_safe_str(case.severity, limit=20),
                     status=_safe_str(case.status, limit=24),
                     summary=summary,
@@ -410,10 +470,15 @@ def render_to_text(context: HistoricalContext) -> str:
         lines.append(header)
         if entry.cases:
             lines.append("  Prior cases:")
-            for case in entry.cases:
+            # Round 39 / Phase 3.3: dedupe by case_number; Round 39 /
+            # Phase 3.4: coerce float case-numbers to integer strings.
+            for case in _dedupe_cases(entry.cases):
                 summary = case.summary or "(no summary)"
+                _cn = _coerce_case_number(case.case_number) or "\u2014"
+                _sev = (case.severity or "").strip() or "\u2014"
+                _stat = (case.status or "").strip() or "\u2014"
                 lines.append(
-                    f"    - {case.case_number} [{case.severity}/{case.status}] "
+                    f"    - {_cn} [{_sev}/{_stat}] "
                     f"opened={case.opened_at or '-'}; closed={case.closed_at or '-'}; "
                     f"summary={summary}"
                 )
@@ -449,11 +514,21 @@ def render_to_word(doc: object, context: HistoricalContext) -> None:
 
     try:
         add_heading("Historical Context", level=1)
+        # Round 39 / Phase 3.1: the SharePoint runtime path was
+        # retired in Round 36 (CLAUDE.md "Native Knowledge Corpus
+        # (Round 35 -> Round 36)" section).  Drop the misleading
+        # "SharePoint share..." text that survived in this docx
+        # paragraph.  The OneDrive desktop client now handles SSO,
+        # MFA, and admin-consent and the corpus indexer reads its
+        # synced copy directly.  We name the canonical folder so the
+        # reader knows which OneDrive directory underpins the
+        # historical context.
         add_paragraph(
-            "Drawn from the CSOne Knowledge Corpus (prior daily reports). "
-            "Sourced from the SharePoint share "
-            "AI Projects/AdoptIQ_CSOne_Reports (with your synced "
-            "OneDrive copy and Downloads folder as fallbacks)."
+            "Drawn from the AdoptIQ Knowledge Corpus (prior daily "
+            "reports). Sourced from the local OneDrive sync of "
+            "'AI Projects/AdoptIQ_CSOne_Reports' (with the user's "
+            "Downloads folder and ad-hoc Intelligence uploads as "
+            "fallbacks)."
         )
 
         if not context.available or not context.entries:
@@ -483,13 +558,27 @@ def render_to_word(doc: object, context: HistoricalContext) -> None:
 
                 if entry.cases:
                     add_paragraph("Prior cases:")
-                    for case in entry.cases:
+                    # Round 39 / Phase 3.3: dedupe by case_number so a
+                    # single CSOne case that shows up in 5 daily
+                    # rollups doesn't render 5x per customer.
+                    for case in _dedupe_cases(entry.cases):
                         summary = case.summary or "(no summary)"
+                        # Round 39 / Phase 3.2: replace "sev?" /
+                        # "status?" placeholders with em-dashes so the
+                        # report doesn't leak literal question-mark
+                        # placeholders into the customer-facing text.
+                        # Round 39 / Phase 3.4: coerce case_number
+                        # through ``_coerce_case_number`` so floats
+                        # like ``1141876078.0`` render as integer
+                        # strings.
+                        _cn = _coerce_case_number(case.case_number) or "\u2014"
+                        _sev = (case.severity or "").strip() or "\u2014"
+                        _stat = (case.status or "").strip() or "\u2014"
                         add_paragraph(
                             _safe_str(
-                                f"  - {case.case_number} "
-                                f"[{case.severity or 'sev?'} / "
-                                f"{case.status or 'status?'}] "
+                                f"  - {_cn} "
+                                f"[{_sev} / "
+                                f"{_stat}] "
                                 f"opened={case.opened_at or '-'}; "
                                 f"closed={case.closed_at or '-'}; "
                                 f"summary={summary}",

@@ -18,7 +18,7 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from adoptiq_backend import _ensure_outputs, _utc_window_start_iso
 from enhanced_snowflake_insights import EnhancedSnowflakeInsights
-from data_normalization import detect_bems_mask, extract_bems_ids_from_row, normalize_customer_name, normalize_severity_label
+from data_normalization import detect_bems_mask, extract_bems_ids_from_row, normalize_customer_name, normalize_for_display, normalize_severity_label
 from snowflake_table_policy import is_table_blocked
 import canonical_metrics as cm
 
@@ -121,6 +121,76 @@ def _r12_hex_to_rgb(_hex_str: str) -> RGBColor:
 CANONICAL_RISK_HIGH_RGB = _r12_hex_to_rgb(_R12_LRG_HIGH_HEX)
 CANONICAL_RISK_MED_RGB = _r12_hex_to_rgb(_R12_LRG_MED_HEX)
 CANONICAL_RISK_LOW_RGB = _r12_hex_to_rgb(_R12_LRG_LOW_HEX)
+
+
+# Round 39 / Phase 2.1: customer-facing message used in place of raw
+# Snowflake errors / dev-phase markers / column names when an Enhanced
+# Snowflake Insights sub-section fails. The pre-Round-39 renderer
+# spilled raw SQL compilation errors (``invalid identifier
+# 'CISCO_TIER_RANKING__C'``), trace IDs (``01c40515-...``), Round/Phase
+# markers (``Round 7 / Phase 2.5``), and internal column names
+# (``ARR_AMOUNT``, ``SUBJECT_C``) into customer-visible text 100+ times
+# per report. The sanitized message is logged at WARNING level via
+# ``logger.warning`` for ops debugging.
+_SNOWFLAKE_USER_FACING_MSG = (
+    "Some enhanced Snowflake insights are temporarily unavailable; this does "
+    "not affect the canonical AP/AB/CP/TAC counts above. (Technical details "
+    "have been logged for the operations team.)"
+)
+
+
+def _sanitize_snowflake_error(raw: Any) -> str:
+    """Round 39 / Phase 2.1: scrub a raw Snowflake error string before
+    it is rendered into a customer-facing report.
+
+    Strips:
+    - SQL compilation error preambles and the SQL text that follows
+    - Snowflake error codes of the form ``NNNNNN (XXXXX)``
+    - UUID-shaped trace IDs (8-4-4-4-12 hex segments)
+    - Round/Phase development markers (``Round 7 / Phase 2.5``)
+    - identifiers ending in ``__C`` (Salesforce-style schema names)
+    - ``ARR_AMOUNT``, ``SUBJECT_C``, ``CISCO_TIER_RANKING__C``-style
+      ALL_CAPS column names
+    - any remaining ``invalid identifier 'XYZ'`` callouts
+
+    Returns the canonical user-facing message when the input contains
+    any of the above patterns; otherwise returns a length-capped,
+    whitespace-collapsed version of the raw text so genuinely benign
+    messages still surface.
+    """
+    import re as _re_local
+    try:
+        text = "" if raw is None else str(raw)
+    except Exception:
+        return _SNOWFLAKE_USER_FACING_MSG
+    if not text.strip():
+        return _SNOWFLAKE_USER_FACING_MSG
+
+    # If the message looks like raw Snowflake / SQL output, replace it
+    # with the user-facing message in full.
+    leak_patterns = [
+        r"SQL\s+compilation\s+error",
+        r"\b\d{6}\s*\(\w+\)",                       # Snowflake error code
+        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"   # UUID trace ID
+        r"[0-9a-f]{4}-[0-9a-f]{12}\b",
+        r"Round\s+\d+(?:\.\d+)?\s*/\s*Phase\s+\d+(?:\.\d+)?",
+        r"\b[A-Z][A-Z0-9_]+__C\b",                  # Salesforce __C identifier
+        r"\binvalid\s+identifier\b",
+        r"\bCISCO_TIER_RANKING\b",
+        r"\bARR_AMOUNT\b",
+        r"\bSUBJECT_C\b",
+    ]
+    for _pat in leak_patterns:
+        if _re_local.search(_pat, text, _re_local.IGNORECASE):
+            return _SNOWFLAKE_USER_FACING_MSG
+
+    # Otherwise just collapse whitespace and cap length so the section
+    # error stays short and printable.
+    cleaned = _re_local.sub(r"\s+", " ", text).strip()
+    if len(cleaned) > 200:
+        cleaned = cleaned[:199] + "\u2026"
+    return cleaned
+
 
 class LeaderReportGenerator:
     """Generates comprehensive leader reports showing team member activities"""
@@ -372,6 +442,18 @@ class LeaderReportGenerator:
         # validator that runs during report generation can read
         # ``self.strict_mode`` without changing every signature.
         self.strict_mode = bool(strict_mode)
+        # Round 39 / Phase 2.3: accumulate the count of distinct
+        # ``section_errors`` rendered during report body generation so
+        # ``_generate_validation_summary`` can drop the data quality
+        # score below 100 and ``_add_validation_section`` can surface
+        # an honest "Snowflake sub-sections unavailable" warning.
+        # Without this, the validator ran BEFORE any renderer saw a
+        # section_error, so a degraded run rendered "Validation Status:
+        # PASSED, Data Quality Score: 100/100" alongside dozens of
+        # missing-insight blocks -- a self-contradiction a director
+        # would catch on first read.
+        self._section_error_count: int = 0
+        self._section_error_kinds: set = set()
         self._setup_document_settings()
     
     def _setup_document_settings(self):
@@ -1476,140 +1558,256 @@ class LeaderReportGenerator:
         logger.info(f"  - Total unique team customers from Snowflake: {len(all_team_customers)}")
         logger.debug(f"  - Sample team customers: {list(all_team_customers)[:5]}")
         
-        # Try to match TAC cases to team members based on customer names
-        # Use aggressive fuzzy matching for better customer name matching
-        for cssm_name, data in team_data.items():
-            customers = data['customers']
-            
-            if not customers:
-                data['tac_cases'] = pd.DataFrame()
-                logger.info(f"  {cssm_name}: No customers assigned")
-                continue
-            
-            # Log this team member's customers for debugging
-            # Round 7 / Phase 6.3: counts at INFO, names at DEBUG only.
-            logger.info(f"  {cssm_name} has {len(customers)} customers")
-            logger.debug(f"    Sample: {list(customers[:3])}")
-            
-            # Normalize customer names for better matching.
-            # Round 7 / Phase 6.8: route both sides through the
-            # canonical ``normalize_customer_name`` from
-            # ``data_normalization`` so TAC matching uses the same
-            # whitespace-collapsed, stripped form as the Snowflake
-            # joins (``build_customer_lookup``, ``ROW_CONTRACTS``).
-            # The previous ``str(c).upper().strip()`` could disagree
-            # with the canonical normalizer on multi-space / tab /
-            # NBSP names and silently miss a TAC case that the
-            # subscriptions side counted.  We then upper-case for the
-            # in-this-function fuzzy comparison; canonical form
-            # remains the source of truth at the join boundary.
-            try:
-                from data_normalization import normalize_customer_name as _norm_cust_p68
-            except Exception:
-                def _norm_cust_p68(v):
-                    return str(v or "").strip()
-            normalized_customers = [
-                _norm_cust_p68(c).upper().strip()
-                for c in customers
-                if c and _norm_cust_p68(c) != "Unknown"
-            ]
+        # Round 39 / Phase 1.1: replace the fuzzy 2-word-overlap matcher
+        # with an authoritative SUBSCRIPTION_ID join.  The pre-Round-39
+        # ``matches_customer`` closure returned True whenever a CSSM
+        # customer and a CSOne customer shared 2 words (or 1 word if
+        # either was short), which double-attributed cases like FARMERS
+        # INSURANCE GROUP / ERIE INSURANCE GROUP to multiple CSSMs and
+        # inflated the team-total TAC count.  The replacement uses three
+        # priority tiers so each TAC row lands on at most ONE CSSM:
+        #   1. SUBSCRIPTION_ID -> CSSM (authoritative; from Snowflake DSM)
+        #   2. ACCOUNT_ID_C   -> CSSM (account-level fallback)
+        #   3. exact normalized customer name (case-folded, suffix-stripped)
+        # If still unmatched, the row is logged as partial-data.
+        #
+        # Round 7 / Phase 6.8 spirit preserved: the customer-name fallback
+        # routes through the canonical ``data_normalization`` helpers
+        # (``_clean_name_for_key`` / ``normalize_customer_name``) so the
+        # CSOne and Snowflake sides agree on whitespace, NFKC, and
+        # corporate-suffix collapsing.  Round 39 strengthens the
+        # comparison from upper-case + naive ``in`` to a full case-folded
+        # join key so "Acme Co." and "ACME CO" no longer drift apart.
+        try:
+            from data_normalization import (
+                _clean_name_for_key as _r39_key,
+                normalize_customer_name as _r39_norm,
+            )
+        except Exception:
+            def _r39_key(v):
+                return str(v or "").strip().casefold()
+            def _r39_norm(v):
+                return str(v or "").strip()
 
-            # Create a mask for aggressive fuzzy matching
-            def matches_customer(csone_customer):
-                if pd.isna(csone_customer):
-                    return False
-                # Round 7 / Phase 6.8: normalize the CSOne side via
-                # the canonical helper too, so a NBSP-padded CSOne row
-                # (common when copy-pasted from the web UI) matches a
-                # plain-space Snowflake row.
-                csone_norm_canonical = _norm_cust_p68(csone_customer)
-                if csone_norm_canonical == "Unknown":
-                    return False
-                csone_norm = csone_norm_canonical.upper().strip()
-                
-                # Remove common suffixes/prefixes that might differ
-                csone_clean = csone_norm.replace(' INC', '').replace(' LLC', '').replace(' LTD', '').replace(' CORP', '').replace(',', '').strip()
-                
-                # Check for exact match first
-                if csone_norm in normalized_customers:
-                    return True
-                
-                # Check if CSOne customer contains any of the team's customers (or vice versa)
-                for customer in normalized_customers:
-                    customer_clean = customer.replace(' INC', '').replace(' LLC', '').replace(' LTD', '').replace(' CORP', '').replace(',', '').strip()
-                    
-                    # Partial match - either direction
-                    if len(customer_clean) >= 5:  # Only match if meaningful length
-                        if customer_clean in csone_clean or csone_clean in customer_clean:
-                            return True
-                        
-                        # Try word-by-word matching for multi-word names
-                        customer_words = set(customer_clean.split())
-                        csone_words = set(csone_clean.split())
-                        
-                        # If they share significant words, consider it a match
-                        if customer_words and csone_words:
-                            overlap = customer_words.intersection(csone_words)
-                            # Match if they share at least 2 meaningful words, or 1 word if both names are short
-                            if len(overlap) >= 2 or (len(overlap) >= 1 and min(len(customer_words), len(csone_words)) <= 2):
-                                return True
-                
-                return False
-            
-            mask = csone_filtered[customer_col].apply(matches_customer)
-            cssm_cases = csone_filtered[mask].copy()
-            data['tac_cases'] = cssm_cases
-            
-            # Validation and detailed logging
-            if len(cssm_cases) > 0:
-                matched_customers = cssm_cases[customer_col].unique()
-                # Round 7 / Phase 6.3: keep counts at INFO; demote
-                # per-customer names to DEBUG so production INFO logs
-                # don't carry portfolio-customer identifiers.
-                logger.info(f"  OK: {cssm_name}: {len(cssm_cases)} TAC cases matched (last {days} days)")
-                logger.info(f"    Matched {len(matched_customers)} unique customers")
-                for cust in list(matched_customers)[:5]:
-                    logger.debug(f"      - {cust}")
-                if len(matched_customers) > 5:
-                    logger.debug(f"      ... and {len(matched_customers) - 5} more")
-                
-                # Validate date range of matched cases
-                if date_col in cssm_cases.columns:
-                    case_dates = cssm_cases[date_col].dropna()
-                    if not case_dates.empty:
-                        logger.info(f"    Case date range: {case_dates.min().strftime('%Y-%m-%d')} to {case_dates.max().strftime('%Y-%m-%d')}")
+        sub_to_cssm: Dict[str, str] = {}
+        account_to_cssm: Dict[str, str] = {}
+        cust_key_to_cssm: Dict[str, str] = {}
+        sub_collisions: List[str] = []
+        account_collisions: List[str] = []
+        cust_collisions: List[str] = []
+
+        # Skip data items that aren't per-CSSM dicts (defensive against
+        # special metadata keys that might be added in the future).
+        def _is_cssm_data(d):
+            return isinstance(d, dict) and 'subscriptions' in d and 'customers' in d
+
+        for cssm_name, data in team_data.items():
+            if not _is_cssm_data(data):
+                continue
+            subs_df = data.get('subscriptions', pd.DataFrame())
+            if isinstance(subs_df, pd.DataFrame) and not subs_df.empty:
+                if 'SUBSCRIPTION_ID' in subs_df.columns:
+                    for sid in subs_df['SUBSCRIPTION_ID'].dropna().astype(str).str.strip().unique():
+                        if not sid or sid.lower() in ('nan', 'none'):
+                            continue
+                        existing = sub_to_cssm.get(sid)
+                        if existing is None:
+                            sub_to_cssm[sid] = cssm_name
+                        elif existing != cssm_name:
+                            # Subscription claimed by two CSSMs - keep first owner
+                            # deterministically (sorted by name) and log.
+                            winner = sorted([existing, cssm_name])[0]
+                            loser = sorted([existing, cssm_name])[1]
+                            sub_to_cssm[sid] = winner
+                            sub_collisions.append(f"{sid} -> {winner} (also seen on {loser})")
+                if 'ACCOUNT_ID_C' in subs_df.columns:
+                    for aid in subs_df['ACCOUNT_ID_C'].dropna().astype(str).str.strip().unique():
+                        if not aid or aid.lower() in ('nan', 'none'):
+                            continue
+                        existing = account_to_cssm.get(aid)
+                        if existing is None:
+                            account_to_cssm[aid] = cssm_name
+                        elif existing != cssm_name:
+                            winner = sorted([existing, cssm_name])[0]
+                            loser = sorted([existing, cssm_name])[1]
+                            account_to_cssm[aid] = winner
+                            account_collisions.append(f"{aid} -> {winner} (also seen on {loser})")
+            customers = data.get('customers') or []
+            for cust in customers:
+                key = _r39_key(cust)
+                if not key:
+                    continue
+                existing = cust_key_to_cssm.get(key)
+                if existing is None:
+                    cust_key_to_cssm[key] = cssm_name
+                elif existing != cssm_name:
+                    winner = sorted([existing, cssm_name])[0]
+                    loser = sorted([existing, cssm_name])[1]
+                    cust_key_to_cssm[key] = winner
+                    cust_collisions.append(f"{cust} -> {winner} (also seen on {loser})")
+
+        # Detect TAC join columns on the CSOne side.  Both
+        # 'SUBSCRIPTION_ID' (canonical) and 'Subscription Reference Id'
+        # (legacy CSOne export header) appear in real-world exports.
+        sub_id_col = None
+        for cand in ('SUBSCRIPTION_ID', 'Subscription Reference Id', 'Subscription ID', 'subscription_id'):
+            if cand in csone_filtered.columns:
+                sub_id_col = cand
+                break
+        account_id_col = None
+        for cand in ('ACCOUNT_ID_C', 'Account ID', 'account_id_c', 'Account Id'):
+            if cand in csone_filtered.columns:
+                account_id_col = cand
+                break
+
+        # Reset the index so we can safely use positional .iloc lookups
+        # below regardless of whether the date filter produced gaps.
+        csone_filtered = csone_filtered.reset_index(drop=True)
+
+        # Per-CSSM index buckets - exactly one CSSM per row by construction.
+        cssm_indices: Dict[str, List[int]] = {
+            name: [] for name, data in team_data.items() if _is_cssm_data(data)
+        }
+        unmatched_count = 0
+        matched_by_sub = 0
+        matched_by_account = 0
+        matched_by_name = 0
+
+        for idx in range(len(csone_filtered)):
+            row = csone_filtered.iloc[idx]
+            owner = None
+
+            # Priority 1: subscription id (authoritative)
+            if sub_id_col is not None:
+                v = row.get(sub_id_col) if hasattr(row, 'get') else None
+                if v is not None and not pd.isna(v):
+                    v_str = str(v).strip()
+                    # CSOne sometimes exports IDs as floats (e.g. 12345.0);
+                    # strip the trailing ".0" so we match the integer-string
+                    # form stored on the Snowflake side.
+                    if v_str.endswith('.0'):
+                        v_str = v_str[:-2]
+                    if v_str and v_str.lower() not in ('nan', 'none'):
+                        owner = sub_to_cssm.get(v_str)
+                        if owner:
+                            matched_by_sub += 1
+
+            # Priority 2: account id (covers Account-level matches when
+            # the SUBSCRIPTION_ID column is missing or blank).
+            if owner is None and account_id_col is not None:
+                v = row.get(account_id_col) if hasattr(row, 'get') else None
+                if v is not None and not pd.isna(v):
+                    v_str = str(v).strip()
+                    if v_str.endswith('.0'):
+                        v_str = v_str[:-2]
+                    if v_str and v_str.lower() not in ('nan', 'none'):
+                        owner = account_to_cssm.get(v_str)
+                        if owner:
+                            matched_by_account += 1
+
+            # Priority 3: exact normalized customer name (case-folded,
+            # suffix-stripped via _clean_name_for_key).  This is the
+            # ONLY place customer-name matching happens; the previous
+            # 2-word-overlap heuristic is GONE so unrelated customers
+            # like ERIE / FARMERS no longer get cross-attributed.
+            if owner is None and customer_col:
+                v = row.get(customer_col) if hasattr(row, 'get') else None
+                if v is not None and not pd.isna(v):
+                    key = _r39_key(v)
+                    if key:
+                        owner = cust_key_to_cssm.get(key)
+                        if owner:
+                            matched_by_name += 1
+
+            if owner is not None:
+                cssm_indices[owner].append(idx)
             else:
-                logger.warning(f"  WARN: {cssm_name}: No TAC cases matched")
-                if len(customers) > 0:
-                    logger.warning(f"    Despite having {len(customers)} customers assigned")
-                    logger.warning(f"    Possible reasons:")
-                    logger.warning(f"      1. Customer names differ between Snowflake and CSOne")
-                    logger.warning(f"      2. No TAC cases for these customers in the time period")
-                    logger.warning(f"      3. Customer name format mismatch")
-        
+                unmatched_count += 1
+
+        # Assign rows back to each CSSM.  Use .iloc with the integer
+        # bucket so rows land in deterministic order.
+        for cssm_name, data in team_data.items():
+            if not _is_cssm_data(data):
+                continue
+            indices = cssm_indices.get(cssm_name, [])
+            if indices:
+                data['tac_cases'] = csone_filtered.iloc[indices].copy().reset_index(drop=True)
+            else:
+                data['tac_cases'] = pd.DataFrame()
+
+        # Per-CSSM logging (counts at INFO, customer names at DEBUG).
+        for cssm_name, data in team_data.items():
+            if not _is_cssm_data(data):
+                continue
+            cssm_cases = data.get('tac_cases', pd.DataFrame())
+            n = self.safe_len(cssm_cases)
+            if n > 0:
+                logger.info(f"  OK: {cssm_name}: {n} TAC cases attributed (last {days} days)")
+                if customer_col and customer_col in cssm_cases.columns:
+                    matched_customers = cssm_cases[customer_col].dropna().unique()
+                    logger.info(f"    Across {len(matched_customers)} unique customers")
+                    for cust in list(matched_customers)[:5]:
+                        logger.debug(f"      - {cust}")
+                    if len(matched_customers) > 5:
+                        logger.debug(f"      ... and {len(matched_customers) - 5} more")
+            else:
+                logger.warning(f"  WARN: {cssm_name}: No TAC cases attributed")
+
         # Final TAC matching summary
-        logger.info(f"\n{'='*60}")
-        logger.info(f"TAC CASE MATCHING SUMMARY")
-        total_tac_cases = sum(self.safe_len(data['tac_cases']) for data in team_data.values())
-        members_with_cases = sum(1 for data in team_data.values() if self.safe_len(data['tac_cases']) > 0)
-        logger.info(f"Total TAC cases matched: {total_tac_cases}")
-        logger.info(f"Team members with TAC cases: {members_with_cases} of {self.safe_len(team_data)}")
+        total_tac_cases = sum(
+            self.safe_len(data.get('tac_cases', pd.DataFrame()))
+            for data in team_data.values()
+            if _is_cssm_data(data)
+        )
+        members_with_cases = sum(
+            1
+            for data in team_data.values()
+            if _is_cssm_data(data) and self.safe_len(data.get('tac_cases', pd.DataFrame())) > 0
+        )
         csone_filtered_len = self.safe_len(csone_filtered)
-        logger.info(f"Match rate: {total_tac_cases}/{csone_filtered_len} ({total_tac_cases/csone_filtered_len*100:.1f}%)" if csone_filtered_len > 0 else "No cases to match")
-        
-        if total_tac_cases == 0:
-            logger.warning(f"WARN: VALIDATION WARNING: No TAC cases matched for any team member!")
-            logger.warning(f"  This could indicate:")
-            logger.warning(f"    1. Customer name mismatch between systems")
-            logger.warning(f"    2. All cases are outside the {days}-day timeframe")
-            logger.warning(f"    3. Wrong CSOne file uploaded")
-        elif total_tac_cases < csone_filtered_len * 0.5:
-            logger.warning(f"WARN: VALIDATION WARNING: Less than 50% of TAC cases were matched")
-            logger.warning(f"  Review customer name matching logic")
-        else:
-            logger.info(f"OK: TAC case matching appears successful")
-        
+
+        logger.info(f"\n{'='*60}")
+        logger.info(f"TAC CASE MATCHING SUMMARY (Round 39 / SUBSCRIPTION_ID join)")
+        logger.info(f"  Total TAC cases in window: {csone_filtered_len}")
+        logger.info(f"  Matched by SUBSCRIPTION_ID: {matched_by_sub}")
+        logger.info(f"  Matched by ACCOUNT_ID_C:    {matched_by_account}")
+        logger.info(f"  Matched by exact name:      {matched_by_name}")
+        logger.info(f"  Unmatched:                  {unmatched_count}")
+        logger.info(f"  Total attributed:           {total_tac_cases}")
+        logger.info(f"  Team members with cases:    {members_with_cases} of {len(cssm_indices)}")
+        if csone_filtered_len > 0:
+            logger.info(f"  Match rate: {total_tac_cases}/{csone_filtered_len} ({total_tac_cases/csone_filtered_len*100:.1f}%)")
+        if sub_collisions:
+            logger.warning(f"  Subscription-id collisions (kept first deterministically): {len(sub_collisions)}")
+            for c in sub_collisions[:5]:
+                logger.warning(f"    {c}")
+        if unmatched_count > 0:
+            logger.warning(
+                f"  WARN: {unmatched_count} TAC cases could not be attributed to any "
+                f"CSSM (no SUBSCRIPTION_ID, ACCOUNT_ID_C, or exact-name match)."
+            )
         logger.info(f"{'='*60}\n")
+
+        # Stash the summary on the generator instance so the wrapper
+        # (``generate_leader_report`` module-level helper) can surface
+        # any unmatched-TAC count as a partial-data warning instead of
+        # silently dropping rows.
+        self._tac_match_summary = {
+            'total_tac_in_window': csone_filtered_len,
+            'matched_total': total_tac_cases,
+            'matched_by_subscription': matched_by_sub,
+            'matched_by_account': matched_by_account,
+            'matched_by_name': matched_by_name,
+            'unmatched': unmatched_count,
+            'members_with_cases': members_with_cases,
+            'team_size': len(cssm_indices),
+            'subscription_collisions': sub_collisions,
+            'account_collisions': account_collisions,
+            'name_collisions': cust_collisions,
+            'sub_id_col': sub_id_col,
+            'account_id_col': account_id_col,
+            'customer_col': customer_col,
+        }
     
     def _create_title_page(self, manager_name: str, days: int, direct_reports: List[Dict]):
         """Create title page for the leader report"""
@@ -1913,11 +2111,14 @@ class LeaderReportGenerator:
         return cm.count_bems(data.get('tac_cases', pd.DataFrame()))
     
     def _add_technology_breakdown(self, team_data: Dict[str, Dict]):
-        """Add technology breakdown by team member"""
-        tech_heading = self.doc.add_heading('Technology Assignment Breakdown', level=2)
-        if tech_heading.runs:
-            tech_heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+        """Add technology breakdown by team member.
+
+        Round 39 / Phase 4.2: defer the heading until we know the
+        breakdown has actual data.  Pre-Round-39 the heading was
+        unconditionally written first, so portfolios with no
+        ``PRODUCT_NAME`` values rendered an orphan "Technology
+        Assignment Breakdown" header with nothing beneath it.
+        """
         # Collect technology data from subscriptions
         tech_breakdown = {}
         
@@ -1957,6 +2158,13 @@ class LeaderReportGenerator:
         all_techs = sorted(set(tech for member_techs in tech_breakdown.values() for tech in member_techs.keys()))
         
         if all_techs:
+            # Round 39 / Phase 4.2: render the heading INSIDE the
+            # data-present branch so we never produce an orphan
+            # "Technology Assignment Breakdown" header on portfolios
+            # with no PRODUCT_NAME data.
+            tech_heading = self.doc.add_heading('Technology Assignment Breakdown', level=2)
+            if tech_heading.runs:
+                tech_heading.runs[0].font.color.rgb = CISCO_BLUE
             num_cols = len(all_techs) + 2  # +1 for name, +1 for total
             table = self.doc.add_table(rows=len(team_data) + 2, cols=num_cols)
             table.style = 'Light Grid Accent 1'
@@ -2565,21 +2773,80 @@ class LeaderReportGenerator:
         summary_text = f"{cssm_name} manages {total_customers} customer accounts{sentiment_context}. "
         summary_text += f"Portfolio shows {total_barriers} adoption barriers, {total_action_plans} action plans, and {total_tac_cases} TAC cases recorded over the last {days} days. "
         
-        # Add health assessment and sentiment context
+        # Round 39 / Phase 1.3: re-ground the health assessment with
+        # per-customer rates AND absolute-volume floors so portfolios
+        # like William Phillips's (0 ABs, 5 TAC, 2 customers) no longer
+        # trip the "high volumes" branch on a single low-count signal.
+        # Pre-Round-39 the third branch fired whenever
+        # ``total_barriers > total_customers OR total_tac_cases > total_customers * 0.5``,
+        # which evaluated True for almost every CSSM with non-trivial
+        # TAC traffic and rendered "requires immediate attention" 10 of
+        # 11 times in the Brian Frazier 90d audit -- false alarms
+        # eroded executive trust in the report.
+        #
+        # New thresholds:
+        #   - Healthy:   AB == 0 AND TAC == 0
+        #   - Manageable load: low absolute counts (AB+TAC <= 5) regardless of rate
+        #   - Generally healthy: AB rate <= 0.5/customer AND TAC rate <= 0.3/customer
+        #   - High volume (immediate attention): EITHER (AB >= 10 AND AB rate > 1/customer)
+        #                                        OR (TAC >= 10 AND TAC rate > 0.5/customer)
+        #   - Mixed health: anything else (the catch-all describes signals honestly,
+        #                   never claims "high volumes")
+        ab_per_customer = (total_barriers / total_customers) if total_customers > 0 else 0.0
+        tac_per_customer = (total_tac_cases / total_customers) if total_customers > 0 else 0.0
+
         if total_barriers == 0 and total_tac_cases == 0:
-            summary_text += "The portfolio demonstrates excellent health with no significant barriers or technical issues requiring attention. "
+            summary_text += (
+                "The portfolio demonstrates excellent health with no significant "
+                "barriers or technical issues requiring attention. "
+            )
             if sentiment_summary == "Positive":
-                summary_text += "Strong customer sentiment further validates the health of these relationships. "
-        elif total_barriers <= total_customers * 0.5 and total_tac_cases <= total_customers * 0.3:
-            summary_text += "The portfolio shows generally healthy customer relationships with manageable levels of adoption challenges. "
+                summary_text += (
+                    "Strong customer sentiment further validates the health of "
+                    "these relationships. "
+                )
+        elif (total_barriers + total_tac_cases) <= 5:
+            summary_text += (
+                f"The portfolio carries a manageable load ({total_barriers} adoption "
+                f"barriers, {total_tac_cases} TAC cases across {total_customers} "
+                f"customers); standard cadence engagement is sufficient. "
+            )
             if sentiment_summary == "Positive":
-                summary_text += "Positive customer sentiment indicates strong relationship management despite some challenges. "
-        elif total_barriers > total_customers or total_tac_cases > total_customers * 0.5:
-            summary_text += "The portfolio requires immediate attention with high volumes of adoption barriers and technical issues across multiple accounts. "
+                summary_text += (
+                    "Positive customer sentiment confirms the relationship "
+                    "trajectory is on track. "
+                )
+        elif ab_per_customer <= 0.5 and tac_per_customer <= 0.3:
+            summary_text += (
+                "The portfolio shows generally healthy customer relationships with "
+                "manageable levels of adoption challenges relative to its size. "
+            )
+            if sentiment_summary == "Positive":
+                summary_text += (
+                    "Positive customer sentiment indicates strong relationship "
+                    "management despite some challenges. "
+                )
+        elif (
+            (total_barriers >= 10 and ab_per_customer > 1.0)
+            or (total_tac_cases >= 10 and tac_per_customer > 0.5)
+        ):
+            summary_text += (
+                f"The portfolio requires immediate attention: {total_barriers} "
+                f"adoption barriers ({ab_per_customer:.1f}/customer) and "
+                f"{total_tac_cases} TAC cases ({tac_per_customer:.1f}/customer) "
+                f"across {total_customers} accounts indicate sustained pressure. "
+            )
         else:
-            summary_text += "The portfolio shows mixed health with some accounts requiring focused intervention and support. "
+            summary_text += (
+                f"The portfolio shows mixed health -- {total_barriers} barriers "
+                f"and {total_tac_cases} TAC cases across {total_customers} "
+                f"customers point to a few accounts needing focused intervention. "
+            )
             if sentiment_summary == "Negative":
-                summary_text += "Negative sentiment trends suggest proactive engagement is needed to prevent further deterioration. "
+                summary_text += (
+                    "Negative sentiment trends suggest proactive engagement is "
+                    "needed to prevent further deterioration. "
+                )
         
         # Add specific insights
         if high_priority_barriers > 0:
@@ -2715,22 +2982,29 @@ class LeaderReportGenerator:
             heading_run.font.color.rgb = CISCO_BLUE
         
         # Description
+        # Round 39 / Phase 1.2: the per-CSSM TAC column is now part of
+        # the summary so the "Total Activities" column visibly reconciles
+        # against AP + AB + CP + TAC + BEMS.  Pre-Round-39 the table
+        # rendered the BEMS+CP+AB+AP sum but no TAC column, which made
+        # the Activity Counts Cross-Check (5 columns including TAC) and
+        # the Team Activity Summary (4 columns excluding TAC) visibly
+        # disagree on what "Total Activities" means.
         desc_para = self.doc.add_paragraph()
         desc_para.add_run(
             f'Overview of Action Plans (AP), Adoption Barriers (AB), Customer Pulse (CP), '
-            f'BEMS escalations, and Customer Sentiment per team member over the last {days} days.\n\n'
+            f'TAC cases, BEMS escalations, and Customer Sentiment per team member over the last {days} days.\n\n'
         )
-        
+
         # NEW: Add CSS to Customer Ratio Chart
         self._add_css_to_customer_ratio_chart(team_data)
-        
+
         # Create enhanced summary table with sentiment
-        # Header: Person | APs | ABs | CPs | BEMS | Sentiment | Total Activities
+        # Header: Person | APs | ABs | CPs | TAC | BEMS | Sentiment | Total Activities
         num_rows = self.safe_len(team_data) + 2  # +1 for header, +1 for totals
-        table = self.doc.add_table(rows=num_rows, cols=7)
+        table = self.doc.add_table(rows=num_rows, cols=8)
         table.style = 'Light Grid Accent 1'
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        
+
         # Header row
         # Round 4 / Phase 3.7: when the optional ARR sentiment
         # analyzer is wired in, the "Sentiment" column is no longer
@@ -2741,7 +3015,7 @@ class LeaderReportGenerator:
             'Sentiment (ARR-enriched)' if getattr(self, 'arr_sentiment_analyzer', None) else 'Sentiment'
         )
         header_cells = table.rows[0].cells
-        headers = ['Team Member', 'Action Plans', 'Adoption Barriers', 'Customer Pulse', 'BEMS', _sentiment_label, 'Total Activities']
+        headers = ['Team Member', 'Action Plans', 'Adoption Barriers', 'Customer Pulse', 'TAC Cases', 'BEMS', _sentiment_label, 'Total Activities']
         
         for i, header_text in enumerate(headers):
             cell = header_cells[i]
@@ -2761,6 +3035,7 @@ class LeaderReportGenerator:
         total_aps = 0
         total_abs = 0
         total_cps = 0
+        total_tac = 0  # Round 39 / Phase 1.2: track TAC for unified total
         total_bems = 0
         row_idx = 1
         for cssm_name in sorted(team_data.keys()):
@@ -2790,36 +3065,43 @@ class LeaderReportGenerator:
             num_aps = self.safe_len(data['action_plans'])
             num_abs = self.safe_len(data['adoption_barriers'])
             num_cps = self.safe_len(data['customer_pulse'])
-            
+            num_tac = self.safe_len(data.get('tac_cases', pd.DataFrame()))
+
             # Count BEMS escalations (combined AB+TAC for the Leader summary).
             num_bems = self._count_bems_escalations(data)
 
-            # Canonical Leader-summary "Total Activities" = AP + AB + CP + BEMS.
-            # Named mode prevents silent drift back to AP+AB+CP or AP+AB+CP+TAC.
+            # Round 39 / Phase 1.2: canonical "Total Activities" = AP + AB + CP + TAC + BEMS.
+            # All three rendering sites (Team Activity Summary, per-member
+            # sub-table, Activity Counts Cross-Check) now use the same
+            # ACTIVITIES_MODE_FULL formula so a director comparing the
+            # three columns sees identical numbers for the same person.
             num_total = cm.count_total_activities(
                 action_plans_df=data.get('action_plans'),
                 ab_df=data.get('adoption_barriers'),
                 customer_pulse_df=data.get('customer_pulse'),
+                tac_df=data.get('tac_cases'),
                 bems_count=num_bems,
-                mode=cm.ACTIVITIES_MODE_LEADER_SUMMARY,
+                mode=cm.ACTIVITIES_MODE_FULL,
             )
-            
+
             total_aps += num_aps
             total_abs += num_abs
             total_cps += num_cps
+            total_tac += num_tac
             total_bems += num_bems
-            
+
             row_cells = table.rows[row_idx].cells
             row_cells[0].text = cssm_name
             row_cells[1].text = str(num_aps)
             row_cells[2].text = str(num_abs)
             row_cells[3].text = str(num_cps)
-            row_cells[4].text = str(num_bems)
-            row_cells[5].text = team_sentiment
-            row_cells[6].text = str(num_total)
-            
+            row_cells[4].text = str(num_tac)
+            row_cells[5].text = str(num_bems)
+            row_cells[6].text = team_sentiment
+            row_cells[7].text = str(num_total)
+
             # Center align numeric cells
-            for i in range(1, 7):
+            for i in range(1, 8):
                 if row_cells[i].paragraphs:
                     row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             
@@ -2835,16 +3117,18 @@ class LeaderReportGenerator:
             # the historical 14% lighter tint of CRITICAL we use as
             # ``#FFE6E6``-replacement) so the leader sentiment column
             # and the chart pages render consistent risk colours.
-            if row_cells[5].paragraphs and row_cells[5].paragraphs[0].runs:
-                if row_cells[5].paragraphs and row_cells[5].paragraphs[0].runs:
-                    if team_sentiment == "Positive":
-                        row_cells[5].paragraphs[0].runs[0].font.color.rgb = CANONICAL_RISK_LOW_RGB
-                    elif team_sentiment == "Negative":
-                        row_cells[5].paragraphs[0].runs[0].font.color.rgb = CANONICAL_RISK_HIGH_RGB
-                    else:
-                        row_cells[5].paragraphs[0].runs[0].font.color.rgb = RGBColor(0x7f, 0x7f, 0x7f)
+            # Round 39 / Phase 1.2: Sentiment column moved from index 5
+            # to index 6 when TAC Cases was inserted between CP (3) and
+            # BEMS (5).
+            if row_cells[6].paragraphs and row_cells[6].paragraphs[0].runs:
+                if team_sentiment == "Positive":
+                    row_cells[6].paragraphs[0].runs[0].font.color.rgb = CANONICAL_RISK_LOW_RGB
+                elif team_sentiment == "Negative":
+                    row_cells[6].paragraphs[0].runs[0].font.color.rgb = CANONICAL_RISK_HIGH_RGB
+                else:
+                    row_cells[6].paragraphs[0].runs[0].font.color.rgb = RGBColor(0x7f, 0x7f, 0x7f)
 
-            # Highlight BEMS if > 0
+            # Highlight BEMS if > 0 (BEMS now at index 5 after TAC insert)
             if num_bems > 0:
                 shading_elm = OxmlElement('w:shd')
                 # Round 13 / Phase 5.3: shade BEMS rows with the
@@ -2860,7 +3144,7 @@ class LeaderReportGenerator:
                 except Exception:
                     _r13_bems_fill = 'D62728'
                 shading_elm.set(qn('w:fill'), _r13_bems_fill)
-                row_cells[4]._element.get_or_add_tcPr().append(shading_elm)
+                row_cells[5]._element.get_or_add_tcPr().append(shading_elm)
             
             # Add individual summary paragraph immediately after this team member's row
             # This is where the black arrow points in the user's image
@@ -2884,18 +3168,20 @@ class LeaderReportGenerator:
 
             row_idx += 1
         
-        # Totals row
+        # Totals row (Round 39 / Phase 1.2: 8-column layout with TAC + canonical AP+AB+CP+TAC+BEMS total)
+        _grand_total = total_aps + total_abs + total_cps + total_tac + total_bems
         totals_cells = table.rows[row_idx].cells
         totals_cells[0].text = 'TOTAL'
         totals_cells[1].text = str(total_aps)
         totals_cells[2].text = str(total_abs)
         totals_cells[3].text = str(total_cps)
-        totals_cells[4].text = str(total_bems)
-        totals_cells[5].text = "Team Avg"
-        totals_cells[6].text = str(total_aps + total_abs + total_cps + total_bems)
-        
+        totals_cells[4].text = str(total_tac)
+        totals_cells[5].text = str(total_bems)
+        totals_cells[6].text = "Team Avg"
+        totals_cells[7].text = str(_grand_total)
+
         # Bold totals row
-        for i in range(7):
+        for i in range(8):
             if totals_cells[i].paragraphs and totals_cells[i].paragraphs[0].runs:
                 totals_cells[i].paragraphs[0].runs[0].font.bold = True
             if i > 0:
@@ -2904,30 +3190,34 @@ class LeaderReportGenerator:
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), 'E8E8E8')
             totals_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-        
+
         # Add insights paragraph
+        # Round 39 / Phase 4.3: each bullet ends with a newline so
+        # adjacent items don't visually run together (pre-Round-39
+        # the "619• Total Action Plans..." glyph collision was caused
+        # by the BEMS run dropping its trailing newline).
         self.doc.add_paragraph('\n')
         insights_heading = self.doc.add_heading('Key Insights', level=2)
         if insights_heading.runs:
             insights_heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         insights_para = self.doc.add_paragraph()
-        insights_para.add_run(f'• Total team activities: {total_aps + total_abs + total_cps + total_bems}\n')
+        insights_para.add_run(f'• Total team activities: {_grand_total}\n')
         insights_para.add_run(f'• Total Action Plans: {total_aps}\n')
         insights_para.add_run(f'• Total Adoption Barriers: {total_abs}\n')
         insights_para.add_run(f'• Total Customer Pulse records: {total_cps}\n')
-        insights_para.add_run(f'• Total BEMS Escalations: {total_bems}')
+        insights_para.add_run(f'• Total TAC Cases: {total_tac}\n')
+        insights_para.add_run(f'• Total BEMS Escalations: {total_bems}\n')
         if total_bems > 0:
             insights_para.runs[-1].font.color.rgb = RGBColor(255, 0, 0)
             insights_para.runs[-1].font.bold = True
-        insights_para.add_run('\n')
-        
+
         # Fix: Check both total > 0 AND team_data not empty to prevent division by zero
         team_size = self.safe_len(team_data)
-        if total_abs + total_aps + total_cps + total_bems > 0 and team_size > 0:
+        if _grand_total > 0 and team_size > 0:
             insights_para.add_run(
                 f'• Average activities per team member: '
-                f'{(total_aps + total_abs + total_cps + total_bems) / team_size:.1f}\n'
+                f'{_grand_total / team_size:.1f}\n'
             )
         
         # NEW: Add Technology Breakdown
@@ -3450,12 +3740,24 @@ class LeaderReportGenerator:
                 open_ap = ap[ap[status_col].apply(self._is_status_open)].copy()
                 ages = (now - _date(open_ap[date_col])).dt.days
                 stalled = open_ap[ages > 30].copy()
+                # Round 38.2 / Build14: the for-loop below USED TO live
+                # at this same indent level, OUTSIDE the
+                # ``if not stalled.empty:`` guard.  ``_bu_disp`` is
+                # assigned inside the guard but was being accessed
+                # unconditionally on the next line, which raised
+                # ``KeyError: '_bu_disp'`` for any CSSM whose open APs
+                # were ALL <=30 days old (no stalled rows).  The bug
+                # was masked pre-Round-38 because the leader report
+                # used to abort at validation when CSOne was empty,
+                # so Document Generation rarely ran on real data.
+                # Round 38's two-pass fix correctly let the report
+                # through and surfaced the latent indentation issue.
                 if not stalled.empty:
                     stalled['_bu_disp'] = (
                         stalled['BU_NAME'].dropna().astype(str).apply(_r13_norm_cust_lr)
                     )
-                for name, count in stalled['_bu_disp'].dropna().value_counts().items():
-                    rows.setdefault(name, {"customer": name}).update({"stalled_aps": int(count)})
+                    for name, count in stalled['_bu_disp'].dropna().value_counts().items():
+                        rows.setdefault(name, {"customer": name}).update({"stalled_aps": int(count)})
 
         if ab is not None and not ab.empty and 'BU_NAME' in ab.columns:
             status_col = next((c for c in ('STATUS_C', 'STATUS') if c in ab.columns), None)
@@ -4144,22 +4446,31 @@ class LeaderReportGenerator:
             cap_run.font.color.rgb = CISCO_GRAY
     
     def _add_team_member_activity_table(self, cssm_name: str, data: Dict):
-        """Add a detailed activity table for an individual team member"""
+        """Add a detailed activity table for an individual team member.
+
+        Round 39 / Phase 1.2: this table now exposes TAC Cases and BEMS
+        columns alongside AP/AB/CP and uses the canonical
+        ``ACTIVITIES_MODE_FULL`` total (AP+AB+CP+TAC+BEMS).  Pre-Round-39
+        this site rendered AP+AB+CP only, which made the same person
+        carry three different "Total Activities" numbers across the Team
+        Activity Summary, this per-member table, and the Activity
+        Counts Cross-Check -- all three now agree.
+        """
         # Add spacing
         self.doc.add_paragraph()
-        
+
         # Table heading
         table_heading = self.doc.add_heading('Activity Summary', level=3)
         if table_heading.runs:
             table_heading.runs[0].font.color.rgb = CISCO_BLUE
-        
-        # Create table with 5 columns: Team Member, Action Plans, Adoption Barriers, Customer Pulse, Total Activities
-        table = self.doc.add_table(rows=2, cols=5)  # Header + 1 data row
+
+        # Create table with 7 columns: Team Member, Action Plans, Adoption Barriers, Customer Pulse, TAC Cases, BEMS, Total Activities
+        table = self.doc.add_table(rows=2, cols=7)  # Header + 1 data row
         table.style = 'Light Grid Accent 1'
-        
+
         # Header row
         header_cells = table.rows[0].cells
-        headers = ['Team Member', 'Action Plans', 'Adoption Barriers', 'Customer Pulse', 'Total Activities']
+        headers = ['Team Member', 'Action Plans', 'Adoption Barriers', 'Customer Pulse', 'TAC Cases', 'BEMS', 'Total Activities']
         for i, header_text in enumerate(headers):
             header_cells[i].text = header_text
             if header_cells[i].paragraphs and header_cells[i].paragraphs[0].runs:
@@ -4170,10 +4481,10 @@ class LeaderReportGenerator:
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '0076CE')  # Cisco blue
             header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-        
+
         # Data row
         data_cells = table.rows[1].cells
-        
+
         # Safe length calculation with None handling
         def safe_len(obj):
             if obj is None:
@@ -4182,41 +4493,47 @@ class LeaderReportGenerator:
                 return len(obj)
             except (TypeError, AttributeError):
                 return 0
-        
+
         num_aps = safe_len(data.get('action_plans', []))
         num_abs = safe_len(data.get('adoption_barriers', []))
         num_cps = safe_len(data.get('customer_pulse', []))
-        # Canonical "member_table" total = AP + AB + CP. This per-member table
-        # intentionally excludes TAC and BEMS (those have their own sections).
+        num_tac = safe_len(data.get('tac_cases', pd.DataFrame()))
+        num_bems = self._count_bems_escalations(data)
+
+        # Canonical "full" total = AP + AB + CP + TAC + BEMS.
         num_total = cm.count_total_activities(
             action_plans_df=data.get('action_plans'),
             ab_df=data.get('adoption_barriers'),
             customer_pulse_df=data.get('customer_pulse'),
-            mode=cm.ACTIVITIES_MODE_MEMBER_TABLE,
+            tac_df=data.get('tac_cases'),
+            bems_count=num_bems,
+            mode=cm.ACTIVITIES_MODE_FULL,
         )
-        
+
         # Populate data cells
         data_cells[0].text = cssm_name
         data_cells[1].text = str(num_aps)
         data_cells[2].text = str(num_abs)
         data_cells[3].text = str(num_cps)
-        data_cells[4].text = str(num_total)
-        
+        data_cells[4].text = str(num_tac)
+        data_cells[5].text = str(num_bems)
+        data_cells[6].text = str(num_total)
+
         # Center align numeric cells
-        for i in range(1, 5):
+        for i in range(1, 7):
             if data_cells[i].paragraphs:
                 data_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+
         # Add light gray background to data row
-        for i in range(5):
+        for i in range(7):
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), 'F8F8F8')  # Light gray
             data_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-        
+
         # Make total activities bold
-        if data_cells[4].paragraphs and data_cells[4].paragraphs[0].runs:
-            data_cells[4].paragraphs[0].runs[0].font.bold = True
-        
+        if data_cells[6].paragraphs and data_cells[6].paragraphs[0].runs:
+            data_cells[6].paragraphs[0].runs[0].font.bold = True
+
         # Add spacing after table
         self.doc.add_paragraph()
     
@@ -4246,11 +4563,23 @@ class LeaderReportGenerator:
         # Determine specific technology for this customer
         customer_technology = self._get_customer_specific_technology(customer, data)
         
+        # Round 39 / Phase 4.4: prettify ``__`` separators in the
+        # display label so account names like
+        # ``"TRIBUNAL...__GOBIERNO...__MX"`` render as a comma-
+        # separated list a reader can parse.  We keep the raw
+        # ``customer`` string untouched for downstream lookups (the
+        # raw form is the join key against ``BU_NAME``); only the
+        # heading text is rewritten.
+        try:
+            _customer_display = normalize_for_display(customer)
+        except Exception:
+            _customer_display = customer
+
         # Customer heading with technology context
         if customer_technology and customer_technology != 'Contact Center':
-            customer_heading = self.doc.add_heading(f'Account: {customer} ({customer_technology})', level=4)
+            customer_heading = self.doc.add_heading(f'Account: {_customer_display} ({customer_technology})', level=4)
         else:
-            customer_heading = self.doc.add_heading(f'Account: {customer}', level=4)
+            customer_heading = self.doc.add_heading(f'Account: {_customer_display}', level=4)
         if customer_heading.runs:
             customer_heading.runs[0].font.color.rgb = CISCO_BLUE
         
@@ -4636,22 +4965,36 @@ class LeaderReportGenerator:
         total_activities = len(all_items)
         
         # Status breakdown
-        status_counts = {}
-        category_counts = {}
-        severity_counts = {}
-        
+        # Round 39 / Phase 4.1: split severity / category counters by
+        # record type so the per-account summary stops mixing TAC
+        # numeric priorities (1-4) with AB string severities
+        # (Low/Medium/High) in a single line.  Pre-Round-39 the
+        # rendered text read like "Severity Breakdown: 3 (1), Medium
+        # (3)" which is unparseable -- "3" reads as either a TAC
+        # priority or a literal severity bucket called "3".
+        status_counts: dict = {}
+        ab_severity_counts: dict = {}
+        tac_priority_counts: dict = {}
+        ab_category_counts: dict = {}
+        tac_category_counts: dict = {}
+
         for item in all_items:
-            # Status counts
+            _itype = str(item.get('type') or '').upper()
+            # Status counts (status semantics are consistent across
+            # AP/AB/CP/TAC -- "open", "closed", etc. -- so a single
+            # bucket is honest).
             status = str(item.get('status', 'Unknown') or 'Unknown')
             status_counts[status] = status_counts.get(status, 0) + 1
-            
-            # Category counts
+
             category = str(item.get('category', 'Unknown') or 'Unknown')
-            category_counts[category] = category_counts.get(category, 0) + 1
-            
-            # Severity counts
             severity = str(item.get('severity', 'Unknown') or 'Unknown')
-            severity_counts[severity] = severity_counts.get(severity, 0) + 1
+
+            if _itype == 'TAC':
+                tac_priority_counts[severity] = tac_priority_counts.get(severity, 0) + 1
+                tac_category_counts[category] = tac_category_counts.get(category, 0) + 1
+            elif _itype in ('AB', 'AP'):
+                ab_severity_counts[severity] = ab_severity_counts.get(severity, 0) + 1
+                ab_category_counts[category] = ab_category_counts.get(category, 0) + 1
         
         # Create account summary table
         summary_table = self.doc.add_table(rows=1, cols=2)
@@ -4674,7 +5017,26 @@ class LeaderReportGenerator:
             shading_elm.set(qn('w:fill'), '007BC7')
             cell._element.get_or_add_tcPr().append(shading_elm)
         
-        # Add summary rows
+        # Round 39 / Phase 4.1: derive Top Category / Top Severity
+        # from the AB-side counters specifically so the summary row
+        # doesn't surface a TAC numeric priority labelled "Severity".
+        # The AB counters are the most useful "what's hurting this
+        # account" signal; TAC counts get their own dedicated rows
+        # in the breakdown below.
+        _top_category = (
+            max(ab_category_counts.items(), key=lambda x: x[1])[0]
+            if ab_category_counts
+            else (
+                max(tac_category_counts.items(), key=lambda x: x[1])[0]
+                if tac_category_counts
+                else 'N/A'
+            )
+        )
+        _top_severity = (
+            max(ab_severity_counts.items(), key=lambda x: x[1])[0]
+            if ab_severity_counts
+            else 'N/A'
+        )
         summary_data = [
             ('Total Activities', str(total_activities)),
             ('Action Plans', str(ap_count)),
@@ -4683,8 +5045,8 @@ class LeaderReportGenerator:
             ('TAC Cases', str(tac_count)),
             ('', ''),  # Spacer
             ('Top Status', max(status_counts.items(), key=lambda x: x[1])[0] if status_counts else 'N/A'),
-            ('Top Category', max(category_counts.items(), key=lambda x: x[1])[0] if category_counts else 'N/A'),
-            ('Top Severity', max(severity_counts.items(), key=lambda x: x[1])[0] if severity_counts else 'N/A'),
+            ('Top AB Category', _top_category),
+            ('Top AB Severity', _top_severity),
         ]
         
         for metric, value in summary_data:
@@ -4710,19 +5072,51 @@ class LeaderReportGenerator:
             status_breakdown = ', '.join([f"{status} ({count})" for status, count in sorted(status_counts.items())])
             status_para.add_run(status_breakdown)
         
-        if category_counts:
+        # Round 39 / Phase 4.1: render AB and TAC breakdowns on
+        # SEPARATE labeled lines so a reader can tell numeric TAC
+        # priorities apart from string AB severities.  Pre-Round-39
+        # one Counter held both, producing unparseable output like
+        # "Severity Breakdown: 3 (1), Medium (3)".
+        if ab_category_counts:
             self.doc.add_paragraph()
             category_para = self.doc.add_paragraph()
-            category_para.add_run('Category Breakdown: ').font.bold = True
-            category_breakdown = ', '.join([f"{category} ({count})" for category, count in sorted(category_counts.items())])
-            category_para.add_run(category_breakdown)
-        
-        if severity_counts:
+            category_para.add_run('AB Category Breakdown: ').font.bold = True
+            category_para.add_run(
+                ', '.join([
+                    f"{c} ({n})" for c, n in sorted(ab_category_counts.items())
+                ])
+            )
+
+        if ab_severity_counts:
             self.doc.add_paragraph()
             severity_para = self.doc.add_paragraph()
-            severity_para.add_run('Severity Breakdown: ').font.bold = True
-            severity_breakdown = ', '.join([f"{severity} ({count})" for severity, count in sorted(severity_counts.items())])
-            severity_para.add_run(severity_breakdown)
+            severity_para.add_run('AB Severity Breakdown: ').font.bold = True
+            severity_para.add_run(
+                ', '.join([
+                    f"{s} ({n})" for s, n in sorted(ab_severity_counts.items())
+                ])
+            )
+
+        if tac_category_counts:
+            self.doc.add_paragraph()
+            tac_cat_para = self.doc.add_paragraph()
+            tac_cat_para.add_run('TAC Category Breakdown: ').font.bold = True
+            tac_cat_para.add_run(
+                ', '.join([
+                    f"{c} ({n})" for c, n in sorted(tac_category_counts.items())
+                ])
+            )
+
+        if tac_priority_counts:
+            self.doc.add_paragraph()
+            tac_prio_para = self.doc.add_paragraph()
+            tac_prio_para.add_run('TAC Priority Breakdown: ').font.bold = True
+            tac_prio_para.add_run(
+                ', '.join([
+                    f"P{s} ({n})" if str(s).strip().isdigit() else f"{s} ({n})"
+                    for s, n in sorted(tac_priority_counts.items())
+                ])
+            )
         
         # Add account health indicator
         self.doc.add_paragraph()
@@ -4730,7 +5124,15 @@ class LeaderReportGenerator:
         health_para.add_run('Account Health: ').font.bold = True
         
         # Simple health calculation
-        high_severity_count = severity_counts.get('High', 0) + severity_counts.get('Critical', 0)
+        # Round 39 / Phase 4.1: read from the AB-side severity counter
+        # specifically (the legacy combined ``severity_counts`` dict
+        # is now intentionally empty -- see the Phase 4.1 split
+        # above).  Without this fix the Account Health pill would
+        # always read "Good" because ``severity_counts.get('High')``
+        # returned 0 by definition.
+        high_severity_count = (
+            ab_severity_counts.get('High', 0) + ab_severity_counts.get('Critical', 0)
+        )
         open_ab_count = status_counts.get('Open', 0) + status_counts.get('New', 0)
         
         # Round 13 / Phase 5.2: previously the Account Health pill
@@ -4935,13 +5337,15 @@ class LeaderReportGenerator:
                 'resolved_abs': resolved_ab_count,
                 'completed_aps': completed_ap_count,
                 'impact_score': impact_score,
-                # Canonical "overall_summary" total = AP + AB + CP + TAC.
+                # Round 39 / Phase 1.2: canonical "full" total = AP + AB + CP + TAC + BEMS.
+                # All three Leader-report writers now use this same formula.
                 'total_activities': cm.count_total_activities(
                     action_plans_df=data.get('action_plans'),
                     ab_df=data.get('adoption_barriers'),
                     customer_pulse_df=data.get('customer_pulse'),
                     tac_df=data.get('tac_cases'),
-                    mode=cm.ACTIVITIES_MODE_OVERALL_SUMMARY,
+                    bems_count=bems_count,
+                    mode=cm.ACTIVITIES_MODE_FULL,
                 ),
             })
         
@@ -4994,8 +5398,10 @@ class LeaderReportGenerator:
             # dashboard figure from the same run.
             ('BEMS Escalations (combined AB+TAC; TAC-only=' + str(total_bems_tac_only) + ')',
              str(total_bems), f"{total_bems/avg_divisor:.1f}"),
-            # Aggregate "overall_summary" total = AP + AB + CP + TAC across all members.
-            ('Total Activities', str(total_aps + total_abs + total_cps + total_tac_cases), f"{(total_aps + total_abs + total_cps + total_tac_cases)/avg_divisor:.1f}")
+            # Round 39 / Phase 1.2: canonical "full" aggregate = AP + AB + CP + TAC + BEMS
+            # across all members so this row matches the Team Activity Summary
+            # TOTAL row and the Activity Counts Cross-Check grand total.
+            ('Total Activities', str(total_aps + total_abs + total_cps + total_tac_cases + total_bems), f"{(total_aps + total_abs + total_cps + total_tac_cases + total_bems)/avg_divisor:.1f}")
         ]
         
         for metric, total, avg in stats_data:
@@ -5183,15 +5589,42 @@ class LeaderReportGenerator:
                     # Phase 4.3: render an explicit "section
                     # unavailable" note for any sub-section that
                     # failed instead of silently dropping it.
+                    # Round 39 / Phase 2.1: scrub raw Snowflake error
+                    # text through ``_sanitize_snowflake_error`` and
+                    # collapse repeated identical messages so the
+                    # report shows ONE user-facing line per failure
+                    # type instead of dozens of verbatim SQL errors.
                     section_errors = (customer_insights or {}).get('section_errors') or {}
                     if section_errors:
                         warn_para = self.doc.add_paragraph()
                         warn_run = warn_para.add_run('⚠️ Some Snowflake sub-sections were unavailable for this customer:')
                         warn_run.font.bold = True
                         warn_run.font.color.rgb = RGBColor(204, 102, 0)
+                        _seen_msgs: set = set()
                         for _section, _err in sorted(section_errors.items()):
+                            _sanitized = _sanitize_snowflake_error(_err)
+                            # Log raw error for ops debugging (never rendered).
+                            try:
+                                logger.warning(
+                                    "Round 39 / Phase 2.1: enhanced insights section %r failed for customer; "
+                                    "raw=%r sanitized=%r", _section, _err, _sanitized,
+                                )
+                            except Exception:
+                                pass
+                            _key = (_section, _sanitized)
+                            if _key in _seen_msgs:
+                                continue
+                            _seen_msgs.add(_key)
                             err_para = self.doc.add_paragraph(style='List Bullet')
-                            err_para.add_run(f"{_section}: {_err}")
+                            err_para.add_run(f"{_section}: {_sanitized}")
+                            # Round 39 / Phase 2.3: feed the validator
+                            # so the data quality score actually drops
+                            # below 100 when sections are missing.
+                            try:
+                                self._section_error_count += 1
+                                self._section_error_kinds.add(str(_section))
+                            except Exception:
+                                pass
                         insights_added = True
 
                     if customer_insights and customer_insights.get('insights'):
@@ -5526,7 +5959,20 @@ class LeaderReportGenerator:
         return validation_results
     
     def _verify_data_sources(self, team_data: Dict[str, Dict]) -> Dict:
-        """Verify data sources and completeness"""
+        """Verify data sources and completeness.
+
+        Round 39 / Phase 2.3: ``csone_data_loaded`` now reflects truth
+        -- it flips True as soon as ANY CSSM has a non-empty
+        ``tac_cases`` DataFrame (those rows are sourced exclusively
+        from CSOne via ``add_tac_cases_from_csone``).  Pre-Round-39
+        the validator hard-coded ``csone_data_loaded = False`` and the
+        Data Sources Verification block in the report always read
+        "CSOne Data: WARN: Not Available" even when the TAC_Cases
+        sheet contained hundreds of rows from CSOne -- a self-
+        contradicting reading a director would catch on first scan.
+        ``team_roster_loaded`` is similarly grounded in the actual
+        roster size rather than left at the default ``False``.
+        """
         logger.info("Verifying data sources...")
         
         source_verification = {
@@ -5545,8 +5991,16 @@ class LeaderReportGenerator:
                 logger.warning("  WARN: No Snowflake connection")
         except Exception as e:
             logger.error(f"  ✗ Snowflake connection failed: {e}")
-        
+
+        # Round 39 / Phase 2.3: ground ``team_roster_loaded`` in the
+        # actual roster size rather than the silent False default.
+        try:
+            source_verification['team_roster_loaded'] = bool(self.team_roster)
+        except Exception:
+            source_verification['team_roster_loaded'] = False
+
         # Check team data completeness
+        any_tac_loaded = False
         for cssm_name, data in team_data.items():
             # Safe length calculation with None handling
             def safe_len(obj):
@@ -5556,37 +6010,69 @@ class LeaderReportGenerator:
                     return len(obj)
                 except (TypeError, AttributeError):
                     return 0
-            
+
+            tac_count = safe_len(data.get('tac_cases', []))
+            if tac_count > 0:
+                any_tac_loaded = True
+
             completeness = {
                 'subscriptions': safe_len(data.get('subscriptions', [])),
                 'customers': safe_len(data.get('customers', [])),
                 'action_plans': safe_len(data.get('action_plans', [])),
                 'adoption_barriers': safe_len(data.get('adoption_barriers', [])),
                 'customer_pulse': safe_len(data.get('customer_pulse', [])),
-                'tac_cases': safe_len(data.get('tac_cases', []))
+                'tac_cases': tac_count,
             }
             source_verification['data_completeness'][cssm_name] = completeness
-            
+
             logger.info(f"  {cssm_name}: {completeness}")
-        
+
+        # Round 39 / Phase 2.3: TAC cases come exclusively from
+        # CSOne (``add_tac_cases_from_csone``); seeing >=1 row across
+        # the team proves the CSOne file loaded successfully.
+        source_verification['csone_data_loaded'] = any_tac_loaded
+        if any_tac_loaded:
+            logger.info("  OK: CSOne data loaded (TAC cases present)")
+        else:
+            logger.info("  WARN: No TAC cases attributed; CSOne may be empty/missing")
+
         return source_verification
     
     def _cross_check_activity_counts(self, team_data: Dict[str, Dict]) -> Dict:
-        """Cross-check activity counts for consistency"""
+        """Cross-check activity counts for consistency.
+
+        Round 39 / Phase 1.2: ``calculated_total`` and ``grand_total``
+        now use the canonical ``ACTIVITIES_MODE_FULL`` formula
+        (AP + AB + CP + TAC + BEMS) so this cross-check section reports
+        the SAME "Total Activities" as the Team Activity Summary table
+        and the per-member Activity Summary.  Pre-Round-39 this site
+        used AP+AB+CP only, which produced an Activity Counts
+        Cross-Check column that disagreed with the Team Activity
+        Summary's Total Activities for every CSSM with non-zero TAC or
+        BEMS counts.
+        """
         logger.info("Cross-checking activity counts...")
-        
+
         cross_checks = {
             'individual_totals': {},
             'team_totals': {},
             'consistency_checks': {}
         }
-        
+
         team_total_aps = 0
         team_total_abs = 0
         team_total_cps = 0
         team_total_tac = 0
-        
+        team_total_bems = 0
+
+        # Skip non-CSSM-data dict entries defensively (e.g. summary keys
+        # that callers might attach to the team_data mapping).
+        def _is_cssm_data(d):
+            return isinstance(d, dict) and 'subscriptions' in d and 'customers' in d
+
         for cssm_name, data in team_data.items():
+            if not _is_cssm_data(data):
+                continue
             # Safe length calculation with None handling
             def safe_len(obj):
                 if obj is None:
@@ -5595,42 +6081,49 @@ class LeaderReportGenerator:
                     return len(obj)
                 except (TypeError, AttributeError):
                     return 0
-            
+
             # Individual counts
             aps = safe_len(data.get('action_plans', []))
             abs_count = safe_len(data.get('adoption_barriers', []))
             cps = safe_len(data.get('customer_pulse', []))
             tac = safe_len(data.get('tac_cases', []))
-            total = aps + abs_count + cps
-            
+            bems = self._count_bems_escalations(data)
+            total = aps + abs_count + cps + tac + bems
+
             individual_totals = {
                 'action_plans': aps,
                 'adoption_barriers': abs_count,
                 'customer_pulse': cps,
                 'tac_cases': tac,
-                'calculated_total': total
+                'bems': bems,
+                'calculated_total': total,
             }
-            
+
             cross_checks['individual_totals'][cssm_name] = individual_totals
-            
+
             # Add to team totals
             team_total_aps += aps
             team_total_abs += abs_count
             team_total_cps += cps
             team_total_tac += tac
-            
-            logger.info(f"  {cssm_name}: AP={aps}, AB={abs_count}, CP={cps}, TAC={tac}, Total={total}")
-        
+            team_total_bems += bems
+
+            logger.info(f"  {cssm_name}: AP={aps}, AB={abs_count}, CP={cps}, TAC={tac}, BEMS={bems}, Total={total}")
+
         # Team totals
         cross_checks['team_totals'] = {
             'action_plans': team_total_aps,
             'adoption_barriers': team_total_abs,
             'customer_pulse': team_total_cps,
             'tac_cases': team_total_tac,
-            'grand_total': team_total_aps + team_total_abs + team_total_cps
+            'bems': team_total_bems,
+            'grand_total': team_total_aps + team_total_abs + team_total_cps + team_total_tac + team_total_bems,
         }
-        
-        logger.info(f"  Team Totals: AP={team_total_aps}, AB={team_total_abs}, CP={team_total_cps}, TAC={team_total_tac}")
+
+        logger.info(
+            f"  Team Totals: AP={team_total_aps}, AB={team_total_abs}, "
+            f"CP={team_total_cps}, TAC={team_total_tac}, BEMS={team_total_bems}"
+        )
         
         # Consistency checks with safe length calculation
         def safe_len_for_consistency(obj):
@@ -5886,7 +6379,18 @@ class LeaderReportGenerator:
         return tac_validation
     
     def _generate_validation_summary(self, validation_results: Dict) -> Dict:
-        """Generate a summary of validation results"""
+        """Generate a summary of validation results.
+
+        Round 39 / Phase 2.3: the summary is now computed in two
+        passes -- this method runs at validation time (before the
+        report body is rendered, so ``self._section_error_count`` is
+        still 0), and ``_add_validation_section`` calls back into
+        ``_apply_late_quality_penalties`` once the body finishes
+        rendering to fold in any Snowflake sub-section failures the
+        renderer surfaced.  This avoids a self-contradicting report
+        where "Validation Status: PASSED, Data Quality Score: 100/100"
+        sits next to dozens of "section unavailable" notices.
+        """
         summary = {
             'overall_status': 'PASSED',
             'critical_issues': [],
@@ -5921,16 +6425,79 @@ class LeaderReportGenerator:
             summary['recommendations'].append("Manual verification of activity counts recommended")
         
         return summary
+
+    def _apply_late_quality_penalties(self, summary: Dict) -> Dict:
+        """Round 39 / Phase 2.3 -- fold body-time signals into the score.
+
+        Called from ``_add_validation_section`` after the report body
+        has finished rendering so ``self._section_error_count`` and
+        ``self._section_error_kinds`` reflect what the reader actually
+        sees.  Each distinct missing sub-section costs 5 points,
+        capped at 30 total (so the score never falls below ``70 -
+        snowflake_penalty``).  We also append a warning so the
+        Validation Summary text honestly references the missing
+        Snowflake insights instead of reading "PASSED, 100/100" next
+        to dozens of yellow "section unavailable" notes.
+        """
+        try:
+            n_kinds = len(getattr(self, '_section_error_kinds', set()) or set())
+            n_total = int(getattr(self, '_section_error_count', 0) or 0)
+        except Exception:
+            n_kinds = 0
+            n_total = 0
+        if n_kinds == 0 and n_total == 0:
+            return summary
+        try:
+            penalty = min(30, 5 * max(n_kinds, 1))
+            summary['data_quality_score'] = max(0, int(summary.get('data_quality_score', 100)) - penalty)
+            kinds_label = ', '.join(sorted(getattr(self, '_section_error_kinds', set()) or set())) or 'unknown'
+            summary.setdefault('warnings', []).append(
+                f"Enhanced Snowflake insights degraded: "
+                f"{n_total} sub-section failure(s) across {n_kinds} kind(s) "
+                f"({kinds_label}); see per-customer 'section unavailable' notes."
+            )
+            if summary.get('overall_status') == 'PASSED':
+                summary['overall_status'] = 'DEGRADED'
+            if summary['data_quality_score'] < 90:
+                summary.setdefault('recommendations', []).append(
+                    "Re-run after the Snowflake schema-drift items are addressed; "
+                    "these sub-sections were skipped because their source columns are missing."
+                )
+        except Exception:
+            pass
+        return summary
     
     def _add_validation_section(self, validation_results: Dict):
-        """Add a validation and verification section to the report"""
+        """Add a validation and verification section to the report.
+
+        Round 39 / Phase 2.3: re-evaluate the data quality score with
+        ``_apply_late_quality_penalties`` immediately before
+        rendering, so the rendered "Validation Status" / "Data Quality
+        Score" reflects any Snowflake sub-section failures the body
+        renderers surfaced.  The validator itself runs BEFORE the
+        body, so without this call the summary would always read
+        "PASSED, 100/100" even on heavily-degraded runs.
+        """
         self.doc.add_page_break()
-        
+
         # Validation heading
         validation_heading = self.doc.add_heading('Data Validation & Verification', level=1)
         if validation_heading.runs:
             validation_heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+
+        # Round 39 / Phase 2.3: fold body-time section_error signals
+        # into the summary in-place so the rest of this renderer
+        # (status line, score line, warnings list, recommendations)
+        # all see the corrected values.
+        try:
+            _summary_in = validation_results.get('summary') or {}
+            validation_results['summary'] = self._apply_late_quality_penalties(_summary_in)
+        except Exception as _r39_late_err:  # noqa: BLE001
+            logger.warning(
+                "Round 39 / Phase 2.3: late quality penalty hook failed: %s",
+                type(_r39_late_err).__name__,
+            )
+
         # Summary
         summary = validation_results.get('summary', {})
         summary_para = self.doc.add_paragraph()
@@ -5975,13 +6542,15 @@ class LeaderReportGenerator:
         if counts_heading.runs:
             counts_heading.runs[0].font.color.rgb = CISCO_BLUE
         
-        # Create table for activity counts verification
-        table = self.doc.add_table(rows=1, cols=6)
+        # Round 39 / Phase 1.2: 7 columns including BEMS so the cross-check
+        # rendering carries the same column set as the canonical
+        # AP+AB+CP+TAC+BEMS total formula.
+        table = self.doc.add_table(rows=1, cols=7)
         table.style = 'Light Grid Accent 1'
-        
+
         # Header
         header_cells = table.rows[0].cells
-        headers = ['Team Member', 'Action Plans', 'Adoption Barriers', 'Customer Pulse', 'TAC Cases', 'Total']
+        headers = ['Team Member', 'Action Plans', 'Adoption Barriers', 'Customer Pulse', 'TAC Cases', 'BEMS', 'Total']
         for i, header_text in enumerate(headers):
             header_cells[i].text = header_text
             if header_cells[i].paragraphs and header_cells[i].paragraphs[0].runs:
@@ -5992,7 +6561,7 @@ class LeaderReportGenerator:
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '0076CE')
             header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-        
+
         # Data rows
         cross_checks = validation_results['cross_checks']['activity_counts']
         for cssm_name, totals in cross_checks['individual_totals'].items():
@@ -6002,10 +6571,11 @@ class LeaderReportGenerator:
             row_cells[2].text = str(totals['adoption_barriers'])
             row_cells[3].text = str(totals['customer_pulse'])
             row_cells[4].text = str(totals['tac_cases'])
-            row_cells[5].text = str(totals['calculated_total'])
-            
+            row_cells[5].text = str(totals.get('bems', 0))
+            row_cells[6].text = str(totals['calculated_total'])
+
             # Center align numeric cells
-            for i in range(1, 6):
+            for i in range(1, 7):
                 if row_cells[i].paragraphs:
                     row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         
@@ -6093,13 +6663,39 @@ class LeaderReportGenerator:
                 # Phase 4.3: surface sub-section failures so the
                 # reader sees "section unavailable" instead of the
                 # section silently disappearing from the doc.
+                # Round 39 / Phase 2.1: route raw section_errors through
+                # ``_sanitize_snowflake_error`` and dedupe by sanitized
+                # message so the customer-facing doc never shows raw
+                # SQL compilation errors, dev-phase markers, trace
+                # IDs, or internal column names.
                 _section_errs = (enhanced_data or {}).get('section_errors') or {}
                 if _section_errs:
                     self.doc.add_paragraph(
                         "  ⚠️ Some Snowflake sub-sections were unavailable for this customer:"
                     )
+                    _seen_section_msgs: set = set()
                     for _section, _err in sorted(_section_errs.items()):
-                        self.doc.add_paragraph(f"    • {_section}: {_err}")
+                        _sanitized = _sanitize_snowflake_error(_err)
+                        try:
+                            logger.warning(
+                                "Round 39 / Phase 2.1: enhanced insights section %r failed; "
+                                "raw=%r sanitized=%r", _section, _err, _sanitized,
+                            )
+                        except Exception:
+                            pass
+                        _key = (_section, _sanitized)
+                        if _key in _seen_section_msgs:
+                            continue
+                        _seen_section_msgs.add(_key)
+                        self.doc.add_paragraph(f"    • {_section}: {_sanitized}")
+                        # Round 39 / Phase 2.3: feed the validator
+                        # so the data quality score actually drops
+                        # below 100 when sections are missing.
+                        try:
+                            self._section_error_count += 1
+                            self._section_error_kinds.add(str(_section))
+                        except Exception:
+                            pass
 
                 if enhanced_data and enhanced_data.get('insights'):
                     insights = enhanced_data['insights']
@@ -6523,7 +7119,32 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
         if csone_df is not None and not csone_df.empty:
             _cb(84, 'Integrating TAC cases from CSOne...', 'TAC Integration')
             generator.add_tac_cases_from_csone(team_data, csone_df, days)
-            
+
+            # Round 39 / Phase 1.1: surface unmatched TAC rows as a
+            # partial-data warning so the report banner stays honest
+            # about how many CSOne rows could not be attributed via
+            # SUBSCRIPTION_ID / ACCOUNT_ID_C / exact-name match.
+            try:
+                _tac_summary = getattr(generator, '_tac_match_summary', None)
+                if isinstance(_tac_summary, dict):
+                    _unmatched = int(_tac_summary.get('unmatched') or 0)
+                    if _unmatched > 0 and isinstance(partial_data_warnings, list):
+                        partial_data_warnings.append({
+                            'dataset': 'csone_tac',
+                            'kind': 'tac_unmatched_after_subscription_join',
+                            'error': (
+                                f"{_unmatched} TAC case(s) in the {days}-day window "
+                                f"could not be attributed to any CSSM via "
+                                f"SUBSCRIPTION_ID, ACCOUNT_ID_C, or exact customer "
+                                f"name. These rows are excluded from per-CSSM totals."
+                            ),
+                        })
+            except Exception as _r39_pdw_err:  # noqa: BLE001
+                logger.debug(
+                    "Round 39: failed to surface unmatched-TAC partial-data warning: %s",
+                    _r39_pdw_err,
+                )
+
             _cb(85, 'Validating data integrity...', 'Data Validation')
             validation_results = generator._validate_and_verify_data(team_data, days)
             
@@ -6572,6 +7193,33 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             )
             generator._add_section_separator()
             generator._add_validation_section(validation_results)
+            # Round 39 / Phase 2.3: surface body-time section_errors
+            # into ``partial_data_warnings`` so the Excel
+            # ``Report_Info.Partial_Data_Warning_Count`` field is
+            # honest (pre-Round-39 it stayed at 0 even with hundreds
+            # of "section unavailable" notes).  Run AFTER
+            # ``_add_validation_section`` so the renderers have had a
+            # chance to populate ``self._section_error_count``.
+            try:
+                _gen_kinds = sorted(getattr(generator, '_section_error_kinds', set()) or set())
+                _gen_count = int(getattr(generator, '_section_error_count', 0) or 0)
+                if _gen_count > 0 and isinstance(partial_data_warnings, list):
+                    partial_data_warnings.append({
+                        'dataset': 'enhanced_snowflake_insights',
+                        'kind': 'section_unavailable',
+                        'error': (
+                            f"{_gen_count} sub-section failure(s) across "
+                            f"{len(_gen_kinds) or 1} kind(s) "
+                            f"({', '.join(_gen_kinds) or 'unknown'}); these are "
+                            f"marked 'section unavailable' in per-customer detail."
+                        ),
+                    })
+            except Exception as _r39_se_err:  # noqa: BLE001
+                logger.debug(
+                    "Round 39 / Phase 2.3: failed to roll section_errors into "
+                    "partial_data_warnings (post-TAC): %s",
+                    _r39_se_err,
+                )
             try:
                 _r17_status_tac = _r17_append_historical_context(
                     generator.doc, team_data,
@@ -6594,6 +7242,28 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             validation_results = generator._validate_and_verify_data(team_data, days)
             
             generator._add_validation_section(validation_results)
+            # Round 39 / Phase 2.3: same section_errors -> partial_data_warnings
+            # roll-up as the post-TAC branch above.
+            try:
+                _gen_kinds_nt = sorted(getattr(generator, '_section_error_kinds', set()) or set())
+                _gen_count_nt = int(getattr(generator, '_section_error_count', 0) or 0)
+                if _gen_count_nt > 0 and isinstance(partial_data_warnings, list):
+                    partial_data_warnings.append({
+                        'dataset': 'enhanced_snowflake_insights',
+                        'kind': 'section_unavailable',
+                        'error': (
+                            f"{_gen_count_nt} sub-section failure(s) across "
+                            f"{len(_gen_kinds_nt) or 1} kind(s) "
+                            f"({', '.join(_gen_kinds_nt) or 'unknown'}); these are "
+                            f"marked 'section unavailable' in per-customer detail."
+                        ),
+                    })
+            except Exception as _r39_se_err2:  # noqa: BLE001
+                logger.debug(
+                    "Round 39 / Phase 2.3: failed to roll section_errors into "
+                    "partial_data_warnings (no-TAC): %s",
+                    _r39_se_err2,
+                )
             try:
                 _r17_status_no_tac = _r17_append_historical_context(
                     generator.doc, team_data,

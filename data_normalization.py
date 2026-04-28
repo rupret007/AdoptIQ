@@ -211,6 +211,40 @@ def normalize_customer_name(value: Any) -> str:
     return text
 
 
+def normalize_for_display(value: Any) -> str:
+    """Round 39 / Phase 4.4 -- prepare a customer or account name for
+    rendering in customer-facing reports.
+
+    The Snowflake ``BU_ACCOUNT_NAME`` field sometimes carries
+    multi-segment account labels separated with ``__`` (a CSOne /
+    Salesforce convention used to encode parent/child or jurisdiction
+    boundaries).  When those raw strings flowed into the leader and
+    executive reports they printed as e.g.
+    ``"TRIBUNAL...__GOBIERNO...__MX"`` -- a reader couldn't tell
+    whether the underscores were significant or noise.
+
+    This helper:
+
+    1. Runs the value through :func:`normalize_customer_name` so it
+       inherits the same NFKC + whitespace collapse policy.
+    2. Replaces any run of ``_`` characters of length >= 2 with
+       ``", "`` so the segments read as a list a human can parse.
+    3. Collapses any leading / trailing comma noise that might appear
+       if the upstream string started or ended with the separator.
+
+    Single underscores (e.g. ``"Acme_Subsidiary"``) are preserved on
+    purpose -- those occur in real customer names and the Round 39
+    audit only flagged the ``__`` (double-underscore) case.
+    """
+    text = normalize_customer_name(value)
+    if not text or text == "Unknown":
+        return text
+    text = re.sub(r"_{2,}", ", ", text)
+    text = re.sub(r"\s*,\s*,\s*", ", ", text)
+    text = text.strip().strip(",").strip()
+    return text or "Unknown"
+
+
 def build_customer_lookup(team_subs_df: Optional[pd.DataFrame]) -> Dict[str, Any]:
     """Build account-id and fuzzy customer-name lookups from subscription data.
 

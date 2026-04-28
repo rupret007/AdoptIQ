@@ -131,6 +131,21 @@
                                 <i class="fas fa-sync-alt me-1" aria-hidden="true"></i>
                                 Run now
                             </button>
+                            {# Round 39 / corpus crypto self-heal: manual
+                               escape hatch.  Hidden by default; the
+                               intel_status.js module unhides it only
+                               when ``boot.last_error_kind === 'crypto'``
+                               so a healthy install never sees a
+                               destructive control.  Confirms via a
+                               native confirm() prompt before POSTing. #}
+                            <button type="button"
+                                    class="btn btn-sm btn-outline-warning"
+                                    data-intel-reset
+                                    hidden
+                                    title="Replace the local encrypted corpus from the bundled snapshot">
+                                <i class="fas fa-undo me-1" aria-hidden="true"></i>
+                                Reset corpus
+                            </button>
                         </div>
                     </div>
                     {# Round 36 / onedrive-sync-auth: AdoptIQ Knowledge Corpus

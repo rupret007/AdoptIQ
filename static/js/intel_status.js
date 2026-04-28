@@ -42,6 +42,13 @@
 
     var STATUS_URL = '/api/intel/status';
     var REFRESH_URL = '/api/intel/refresh';
+    // Round 39 / corpus crypto self-heal: manual escape hatch endpoint.
+    // Wired up to [data-intel-reset], which the paint() wrapper unhides
+    // only when boot.last_error_kind === 'crypto'.  Confirms via a
+    // native confirm() prompt before POSTing -- the action preserves
+    // the user's current encrypted DB as <name>.broken-<utc> and
+    // reinstalls the bundled baked snapshot.
+    var RESET_URL = '/api/intel/reset';
     // Round 32 / Phase 2.E: persistent on/off toggle for AdoptIQ
     // Intelligence.  POSTs JSON {"enabled": bool} to the server,
     // which writes ~/Library/Application Support/AdoptIQ/settings.json
@@ -331,6 +338,108 @@
         });
     }
 
+    // Round 39 / corpus crypto self-heal -- bind the manual "Reset
+    // corpus" button.  The button stays hidden in healthy states; the
+    // paint() wrapper below unhides it ONLY when the boot payload has
+    // last_error_kind === 'crypto', so a healthy install never sees a
+    // destructive control.  The click handler confirms before POSTing.
+    function bindResetButton() {
+        var btn = document.querySelector('[data-intel-reset]');
+        if (!btn) { return; }
+        btn.addEventListener('click', function (ev) {
+            ev.preventDefault();
+            if (btn.disabled) { return; }
+            var ok = window.confirm(
+                'Reset the local corpus?  Your current encrypted '
+                + 'database will be preserved on disk as a .broken '
+                + 'backup, then replaced from the bundled snapshot.  '
+                + 'The next refresh will pick up any newer OneDrive '
+                + 'files.  Continue?'
+            );
+            if (!ok) { return; }
+            btn.disabled = true;
+            setRefreshFeedback('pending', 'Resetting corpus\u2026');
+            var token = getCsrfToken();
+            fetch(RESET_URL, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-CSRFToken': token,
+                    'X-CSRF-Token': token,
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: ''
+            }).then(function (resp) {
+                var ok2 = resp.ok;
+                var status = resp.status;
+                return resp.json().catch(function () { return null; }).then(
+                    function (data) {
+                        return { ok: ok2, status: status, data: data };
+                    }
+                );
+            }).then(function (result) {
+                if (!result.ok) {
+                    setRefreshFeedback(
+                        'error', 'Reset failed: HTTP ' + result.status
+                    );
+                    return;
+                }
+                var data = result.data || {};
+                if (data.ok === false) {
+                    setRefreshFeedback(
+                        'error',
+                        'Reset failed: ' + (data.reason || 'unknown reason')
+                    );
+                    return;
+                }
+                var preserved = (typeof data.preserved_count === 'number')
+                    ? data.preserved_count : 0;
+                if (data.refresh_started === true) {
+                    setRefreshFeedback(
+                        'success',
+                        'Corpus reset (preserved ' + preserved
+                        + ' file' + (preserved === 1 ? '' : 's')
+                        + '); reindexing\u2026'
+                    );
+                    pollOnce();
+                } else {
+                    setRefreshFeedback(
+                        'success',
+                        'Corpus reset (preserved ' + preserved
+                        + ' file' + (preserved === 1 ? '' : 's')
+                        + ').'
+                    );
+                }
+            }).catch(function () {
+                setRefreshFeedback('error', 'Reset failed: network error');
+            }).then(function () {
+                window.setTimeout(function () {
+                    btn.disabled = false;
+                    pollOnce();
+                }, REFRESH_DEBOUNCE_MS);
+            });
+        });
+    }
+
+    // Round 39: visibility toggle for [data-intel-reset].  Only shown
+    // when boot.last_error_kind === 'crypto'; healthy installs and
+    // non-crypto error states keep the button hidden so a careless
+    // click cannot wipe a working corpus.
+    function paintResetButtonVisibility(payload) {
+        var btn = document.querySelector('[data-intel-reset]');
+        if (!btn) { return; }
+        var kind = (payload && payload.boot && payload.boot.last_error_kind)
+            ? String(payload.boot.last_error_kind) : '';
+        if (kind === 'crypto') {
+            btn.hidden = false;
+            btn.removeAttribute('hidden');
+        } else {
+            btn.hidden = true;
+            btn.setAttribute('hidden', '');
+        }
+    }
+
     function bindUploadForm() {
         var form = document.getElementById(UPLOAD_FORM_ID);
         if (!form) { return; }
@@ -602,11 +711,17 @@
         try {
             paintSharepointPanel(payload);
         } catch (_) { /* never break the navbar badge on a panel error */ }
+        try {
+            // Round 39 / corpus crypto self-heal: toggle the Reset
+            // corpus button visibility per status payload.
+            paintResetButtonVisibility(payload);
+        } catch (_) { /* never break the badge on a button-toggle error */ }
         return state;
     };
 
     function init() {
         bindRefreshButton();
+        bindResetButton();
         bindUploadForm();
         bindEnableToggle();
         if (typeof document.addEventListener === 'function') {

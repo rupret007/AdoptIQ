@@ -377,6 +377,54 @@ def _index_into_encrypted_corpus(downloads_dir: Path, bake_dir: Path) -> int:
         except OSError as err:  # pragma: no cover - exotic FS
             logger.warning("chmod 0600 on %s failed: %s", p, err)
     logger.info("bake artifacts written: %s", ", ".join(p.name for p in expected))
+
+    # Round 39 / corpus crypto self-heal -- decrypt round-trip self-test.
+    # The structural verify above only confirms the four files exist;
+    # it does not prove the .enc actually decrypts with the bundled
+    # sentinel/lock/salt.  A bake regression that ships an internally
+    # inconsistent set would silently brick every user install (the
+    # runtime self-heal cannot save them because they have no
+    # working snapshot to fall back to).  A 1-second open-and-close
+    # at bake time catches that class of regression before PyInstaller
+    # ever sees the artifacts.
+    selftest_handle = None
+    try:
+        selftest_handle = open_corpus_for_user(
+            onedrive_root=None,
+            encrypted_path=encrypted_path,
+            create_if_missing=False,
+            allow_local_sentinel=True,
+        )
+        cur = selftest_handle.conn.cursor()
+        cur.execute("SELECT count(*) FROM sqlite_master")
+        _ = cur.fetchone()
+    except Exception as selftest_err:  # noqa: BLE001 - we want fail-loud here
+        logger.error(
+            "Round 39 / bake decrypt self-test failed: %s -- "
+            "deleting bake artifacts so a malformed bake cannot be "
+            "bundled into the .app",
+            selftest_err,
+        )
+        if selftest_handle is not None:
+            try:
+                selftest_handle.close(persist=False)
+            except Exception:  # noqa: BLE001 - cleanup path
+                pass
+        for p in expected:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return 5
+    else:
+        try:
+            selftest_handle.close(persist=False)
+        except Exception:  # noqa: BLE001 - cleanup path
+            pass
+        logger.info(
+            "Round 39 / bake decrypt self-test ok (sqlite_master "
+            "readable; bundle is internally consistent)"
+        )
     return 0
 
 

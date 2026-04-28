@@ -318,16 +318,158 @@ def _user_corpus_dir() -> Path:
     return default_db_path().parent
 
 
-def _install_baked_corpus_if_present() -> Optional[str]:
-    """If a baked corpus is bundled and the user has no corpus yet,
-    copy the four artifacts into the writable user dir.  Returns the
-    bake timestamp (ISO-8601) on success, ``None`` when no install
-    happened (no bake bundled, or user already has a corpus).
+# ---------------------------------------------------------------------------
+# Round 39 / corpus crypto self-heal: probe-and-recover helpers
+# ---------------------------------------------------------------------------
 
-    The copy is one-shot per install: if the user's
-    ``corpus.db.enc`` already exists we leave it alone -- the daily
-    refresh will keep it current and the user's prior delta is more
-    valuable than the build-time snapshot.
+
+def _probe_existing_corpus_decrypts(user_db: Path) -> bool:
+    """Round 39: probe whether the user's existing ``corpus.db.enc``
+    can actually be decrypted with the sentinel/lock/salt sitting next
+    to it.  Returns ``True`` when the open + close round-trips
+    cleanly; ``False`` when ``open_corpus_for_user`` raises
+    :class:`CorpusCryptoError` (the InvalidTag class of failures the
+    self-heal path was built for).
+
+    Any non-crypto exception is left to bubble -- those represent
+    real OS-level failures (permission denied, ENOSPC, etc.) that
+    the caller must surface, not silently overwrite a healthy user
+    corpus over.
+
+    The probe opens with ``create_if_missing=False`` so a missing DB
+    cannot accidentally be auto-minted as part of the diagnostic; it
+    must be a real prior install.
+    """
+    onedrive_root = getattr(Config, "CSONE_ONEDRIVE_FOLDER", None)
+    handle: Optional[EncryptedCorpusHandle] = None
+    try:
+        handle = open_corpus_for_user(
+            onedrive_root=onedrive_root,
+            encrypted_path=user_db,
+            create_if_missing=False,
+        )
+    except CorpusCryptoError:
+        return False
+    finally:
+        if handle is not None:
+            try:
+                handle.close(persist=False)
+            except Exception:  # noqa: BLE001 - probe path
+                logger.debug(
+                    "Round 39 / corpus_bootstrap: probe handle close failed",
+                    exc_info=True,
+                )
+    return True
+
+
+def _read_lock_minted_at(user_dir: Path) -> Optional[str]:
+    """Round 39: best-effort read of ``corpus.sentinel.lock.json``'s
+    ``minted_at`` field for forensic logging.  Returns ``None`` when
+    the lock is missing, malformed, or unreadable -- never raises."""
+    import json
+    try:
+        lock_path = user_dir / "corpus.sentinel.lock.json"
+        if not lock_path.is_file():
+            return None
+        with lock_path.open("rb") as fh:
+            data = json.loads(fh.read().decode("utf-8"))
+        if not isinstance(data, dict):
+            return None
+        minted = data.get("minted_at")
+        return str(minted) if minted else None
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+
+
+def _preserve_broken_corpus(user_dir: Path) -> Optional[str]:
+    """Round 39: rotate the four current corpus artifacts to
+    ``<name>.broken-<utc_iso>`` so we keep one rolling backup of the
+    last broken state for forensics, then bound disk usage by deleting
+    any *prior* ``*.broken-*`` files first.  Returns the timestamp
+    suffix on success, ``None`` when the user_dir has no corpus.db.enc
+    to preserve (idempotent no-op).
+
+    Renames are atomic (``os.replace``); a partial failure logs and
+    returns ``None`` but does not raise (the install path then falls
+    back to the existing-file branch and the user keeps their broken
+    corpus rather than ending up in a half-renamed state).
+
+    Cap at one rolling backup: a stuck-bake-loop must not accumulate
+    280-MB sidecars on every boot.
+    """
+    user_db = user_dir / "corpus.db.enc"
+    if not user_db.exists():
+        return None
+
+    # First, prune any prior .broken-* sidecars (cap=1).  Done before
+    # the rename so a crash here cannot leave us with two backup sets.
+    try:
+        for child in user_dir.iterdir():
+            try:
+                name = child.name
+                if any(name.startswith(f + ".broken-") for f in _BAKED_CORPUS_FILES):
+                    child.unlink(missing_ok=True)
+            except OSError:
+                continue
+    except OSError as prune_err:
+        logger.warning(
+            "Round 39 / corpus_bootstrap: prior broken-backup prune "
+            "failed: %s",
+            type(prune_err).__name__,
+        )
+
+    # Compute the suffix once so the four files share one timestamp
+    # (makes correlating them in support trivial).
+    suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    renamed: list[Path] = []
+    for fname in _BAKED_CORPUS_FILES:
+        src = user_dir / fname
+        if not src.exists():
+            # Some artifacts may be missing already (e.g., legacy
+            # install with no lock).  Skip silently.
+            continue
+        dest = user_dir / f"{fname}.broken-{suffix}"
+        try:
+            os.replace(src, dest)
+            renamed.append(dest)
+        except OSError as rename_err:
+            logger.warning(
+                "Round 39 / corpus_bootstrap: broken-corpus preserve "
+                "failed name=%s err=%s",
+                fname, type(rename_err).__name__,
+            )
+            # Roll back any successful renames so we do not leave a
+            # half-renamed state (that would confuse subsequent boots
+            # into thinking the corpus is gone when it is just
+            # mid-rename).
+            for moved in renamed:
+                try:
+                    original = user_dir / moved.name.split(".broken-", 1)[0]
+                    os.replace(moved, original)
+                except OSError:
+                    pass
+            return None
+    return suffix if renamed else None
+
+
+def _install_baked_corpus_if_present() -> Optional[str]:
+    """If a baked corpus is bundled, ensure the writable user dir has a
+    healthy decryptable corpus.  Returns the bake timestamp (ISO-8601)
+    on success, ``None`` when no install happened (no bake bundled,
+    user already has a healthy corpus, or self-heal could not run).
+
+    Round 35 (initial behavior): on a clean install, copy the four
+    artifacts into the user dir.  Idempotent -- a healthy existing
+    corpus is left alone so the user's daily-refresh delta is
+    preserved across launches.
+
+    Round 39 (self-heal): if the user's existing ``corpus.db.enc``
+    fails to decrypt (auth-tag mismatch, missing matching sentinel,
+    etc.), preserve the broken artifacts as ``<name>.broken-<utc>``
+    (single rolling backup, ~280 MB cap) and reinstall the baked
+    snapshot.  This recovers the canonical upgrade-handoff failure
+    where a previous build's sentinel does not match the current
+    build's bundled crypto material.
 
     Each copy is atomic (sibling tmp + ``os.replace``) and the
     destination files are chmod 0600 so a multi-user host cannot read
@@ -344,9 +486,48 @@ def _install_baked_corpus_if_present() -> Optional[str]:
         pass
 
     user_db = user_dir / "corpus.db.enc"
+    self_healed = False
     if user_db.exists():
-        # Already installed (or user has a refresh-built DB).  Leave it alone.
-        return None
+        # Round 39: probe-and-recover.  A healthy corpus short-circuits
+        # (existing happy path); a broken corpus is preserved aside
+        # and we fall through to the install loop.
+        if _probe_existing_corpus_decrypts(user_db):
+            # Round 39 UX: the user has a healthy corpus from a prior
+            # bake -- preserve that fact in ``_STATE`` so the analyze
+            # panel labels it "Active * OneDrive synced" rather than
+            # the misleading "Indexing OneDrive..." that the fresh
+            # path defaults to.  ``indexed_at`` comes from the
+            # user's lock (whichever build minted it) so the panel
+            # can still show the bake provenance.
+            with _BOOT_LOCK:
+                if _STATE.source is None:
+                    _STATE.source = "baked"
+                    minted = _read_lock_minted_at(user_dir)
+                    if minted and _STATE.indexed_at is None:
+                        _STATE.indexed_at = minted
+            return None
+        prior_minted_at = _read_lock_minted_at(user_dir)
+        broken_suffix = _preserve_broken_corpus(user_dir)
+        if broken_suffix is None:
+            # Preserve failed (e.g., permission denied).  We cannot
+            # safely overwrite the broken corpus, so leave it in
+            # place; the existing CorpusCryptoError surfaces in the
+            # UI and the user can use the new Reset button.
+            logger.warning(
+                "Round 39 / corpus_bootstrap: existing corpus failed "
+                "decrypt probe but preserve step failed; leaving "
+                "user_dir untouched (user_dir=%s)",
+                user_dir,
+            )
+            return None
+        new_lock_minted_at = _read_lock_minted_at(bake_dir)
+        logger.warning(
+            "Round 39 / corpus_bootstrap: event=corpus_self_heal_invalidtag "
+            "broken_suffix=%s bake_dir=%s prior_lock_minted_at=%s "
+            "new_lock_minted_at=%s",
+            broken_suffix, bake_dir, prior_minted_at, new_lock_minted_at,
+        )
+        self_healed = True
 
     indexed_at: Optional[str] = None
     for fname in _BAKED_CORPUS_FILES:
@@ -399,11 +580,29 @@ def _install_baked_corpus_if_present() -> Optional[str]:
                 indexed_at = file_iso
         except OSError:
             pass
-    logger.info(
-        "Round 35 / corpus_bootstrap: installed baked corpus into %s "
-        "(bake_dir=%s indexed_at=%s)",
-        user_dir, bake_dir, indexed_at,
-    )
+    if self_healed:
+        logger.info(
+            "Round 39 / corpus_bootstrap: self-healed baked corpus "
+            "into %s (bake_dir=%s indexed_at=%s)",
+            user_dir, bake_dir, indexed_at,
+        )
+    else:
+        logger.info(
+            "Round 35 / corpus_bootstrap: installed baked corpus into %s "
+            "(bake_dir=%s indexed_at=%s)",
+            user_dir, bake_dir, indexed_at,
+        )
+    # Round 39: stash the self-heal flag on the module-level state so
+    # ``_run_index_pass`` can set ``_STATE.source = "self_healed_baked"``
+    # without changing this function's return type (callers that only
+    # check truthiness keep working).  We also set ``indexed_at`` here
+    # because the ``_run_index_pass`` block that normally writes it is
+    # guarded on ``_STATE.source is None`` and we just set source.
+    if self_healed:
+        with _BOOT_LOCK:
+            _STATE.source = "self_healed_baked"
+            if indexed_at is not None:
+                _STATE.indexed_at = indexed_at
     return indexed_at
 
 
@@ -993,6 +1192,64 @@ def request_refresh(*, rebuild: bool = False) -> bool:
     return start_background(rebuild=rebuild)
 
 
+def reset_user_corpus() -> tuple[Optional[str], int]:
+    """Round 39: public entry point for the "Reset corpus" UI button.
+
+    Preserves the user's current four corpus artifacts as
+    ``<name>.broken-<utc_iso>`` (single rolling backup) and returns
+    ``(suffix, count_preserved)``.  When no corpus is present on disk
+    returns ``(None, 0)``.  The caller is expected to follow up with
+    ``request_refresh(rebuild=True)`` so the bootstrap path then
+    reinstalls the baked snapshot and walks the index sources.
+
+    Closes the in-process handle (if any) before renaming so the
+    sqlite plaintext temp file does not race against the rename.
+    """
+    global _HANDLE, _SIGNAL
+    user_dir = _user_corpus_dir()
+    # Close any live handle so the rename does not race against an
+    # active sqlite connection (Windows would refuse the rename
+    # outright; macOS would leave the temp plaintext orphaned).
+    with _BOOT_LOCK:
+        if _SIGNAL is not None:
+            try:
+                _SIGNAL.stop_requested = True
+            except Exception:  # noqa: BLE001 - best effort
+                pass
+        handle = _HANDLE
+        _HANDLE = None
+        _SIGNAL = None
+    if handle is not None:
+        try:
+            handle.close(persist=True)
+        except Exception:  # noqa: BLE001 - best effort
+            logger.debug(
+                "Round 39 / corpus_bootstrap: handle close on reset failed",
+                exc_info=True,
+            )
+    configure_connection(None)
+
+    suffix = _preserve_broken_corpus(user_dir)
+    if suffix is None:
+        return None, 0
+    # Count is whatever the four-file rotation actually moved -- we
+    # re-walk the directory so the answer reflects disk truth, not a
+    # buffered guess.
+    preserved = 0
+    try:
+        for entry in user_dir.iterdir():
+            if entry.name.endswith(f".broken-{suffix}"):
+                preserved += 1
+    except OSError:
+        pass
+    logger.warning(
+        "Round 39 / corpus_bootstrap: event=corpus_reset_via_api ts=%s "
+        "preserved_count=%d source=user_initiated",
+        _utc_now_iso(), preserved,
+    )
+    return suffix, preserved
+
+
 def stop() -> None:
     """Best-effort shutdown.  Sets the indexer's stop flag and closes
     the encrypted handle.  Idempotent; safe to call from
@@ -1066,6 +1323,7 @@ __all__ = [
     "is_enabled",
     "request_refresh",
     "reset_for_tests",
+    "reset_user_corpus",
     "start_background",
     "stop",
 ]

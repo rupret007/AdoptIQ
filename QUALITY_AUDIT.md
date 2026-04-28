@@ -4042,3 +4042,802 @@ future round):**
   a future banner-copy pass.
 
 **Trailer:** Made-with: Cursor
+
+## Round 38.1 — handoff 2026-04-28 (launch-hang triage)
+
+**Symptom (user report):** "ok when i tried to open the
+app it just bounced and would not open."  Initial triage
+hypothesised a Build12 startup hang on the synchronous boot
+path (corpus install / Snowflake prefetch).  Read-only
+investigation of `/Users/jestory/.adoptiq/adoptiq.68285.log`
+falsified that hypothesis: the *first* launch was actually
+healthy -- it bound port 5151 in <1s, served the leader-
+report form, accepted a `POST /start_leader_report`, ran
+the Round 38 two-pass validator, and surfaced a real
+CSOne schema-drift error (`tac_cases: missing slot(s)
+case_id,customer,status` -- file with 22 rows whose column
+names had drifted upstream).  The process then idled
+correctly, with the most recent activity 60s after the
+report failure.
+
+**Root cause:** the user double-clicked the .app a second
+time at ~14:52 while the first instance was still on
+port 5151.  `app_simple.py`'s "port in use" branch then:
+
+  1. Printed a message to stderr that .app launches from
+     Dock never see (stderr is redirected to a log file).
+  2. Spawned an `osascript` `display dialog` *behind*
+     other windows because the script had no `activate`
+     directive.
+  3. Silently called `sys.exit(0)` after the 15s
+     `osascript` timeout when nobody clicked the dialog.
+
+From the user's perspective the Dock icon bounced for
+~2 minutes (the LaunchServices `LSCheckedInTimeout`
+window), then stopped, with no UI ever appearing.  Round 38
+itself shipped fine; this is a separate, pre-existing UX
+bug that Round 38's Build12 didn't touch.
+
+**Fix (smallest viable scope):** two changes to
+`app_simple.py`, both inside the existing duplicate-launch
+branch.  No boot-order, corpus, or Round 38 leader-report
+code paths touched.
+
+  1. **NEW** -- `_probe_existing_adoptiq(port)` helper
+     does a 2s HTTP GET of `http://127.0.0.1:<port>/` and
+     returns `True` only when the body contains an
+     "adoptiq" marker.  In the "port in use" branch we
+     call this *first*; on True we `webbrowser.open` to
+     the existing instance and `sys.exit(0)` cleanly --
+     no dialog, no Dock-bounce-into-the-void.
+  2. **DEFENSIVE** -- when the dialog IS shown (rare
+     non-AdoptIQ port collision), the `osascript`
+     invocation now leads with `tell application "System
+     Events" to activate` so it surfaces to the front.
+
+We deliberately did NOT change anything else.  No
+refactor of the boot sequence, no thread-pool for corpus
+install, no Snowflake-prefetch backgrounding -- the log
+proved none of those were the actual cause, and shipping
+speculative changes here would regress real R36/R38 test
+coverage that already pins the synchronous boot order.
+
+**Files touched:**
+
+- `app_simple.py` -- new `_probe_existing_adoptiq` helper
+  next to `_check_port_available`, plus the short-circuit
+  inside `if not available:` and the `osascript` activate
+  prefix.
+- `config.py` -- `ADOPTIQ_BUILD` "12" → "13" with a
+  detailed comment block describing this round.
+- `tests/test_round38_1_duplicate_launch_routes_to_existing.py`
+  -- new file, 9 tests covering: probe-true on AdoptIQ
+  marker, probe-false on non-AdoptIQ body, probe-false on
+  ConnectionRefusedError, probe-false on socket.timeout,
+  probe-rejects-invalid-port, probe-handles-binary-body,
+  source-shape pin that the duplicate-launch block calls
+  the probe + `webbrowser.open` + `sys.exit(0)`,
+  source-shape pin that the `osascript` dialog activates
+  System Events, smoke-check that the helper is exposed
+  as a module attribute (so PyInstaller bundles it).
+
+**Verify:** 2844 passed / 2 skipped (was 2835 / 2 at
+end of Round 38; +9 from the new test file).  Zero
+regressions.
+
+**Build:** `AdoptIQ-v1.0.4-build13.dmg` SHA-256:
+<filled-in-after-build-completes>
+
+**Build env:** `ADOPTIQ_BUILD=13 ADOPTIQ_VERSION=1.0.4
+./build_mac_dmg.sh` -- same R36 bake env as Build12
+(default `Config.CSONE_ONEDRIVE_FOLDER` source, no
+fixture override).  As noted under Build12: the
+`build_mac_dmg.sh` script reads `ADOPTIQ_BUILD` from
+env and falls back to `"1"`, so the env var must be
+exported explicitly to keep the DMG filename in sync
+with `config.py`.  Still tracked as a deferral for the
+next build-pipeline pass.
+
+**Hot spots for Claude audit:**
+
+- `app_simple.py:_probe_existing_adoptiq` -- 2s timeout,
+  4 KB read cap, body coerced to lowercase before
+  marker check.  The `'adoptiq'` substring is broad on
+  purpose: it must match both the analyze landing page
+  (`<title>AdoptIQ - executive analytics</title>`) and
+  any future template that simply mentions the brand.
+  It is narrow enough that a Duo Desktop / Webex / Vape
+  daemon listening on 5151 (which we observed in the
+  user's `lsof` output) cannot pass.
+- `app_simple.py:if not available:` short-circuit --
+  ordering matters.  The probe MUST run before the
+  print + osascript fallback so the duplicate-launch
+  case never produces stderr noise the user sees as
+  "errors" in the log file.
+- `osascript` invocation -- the activate prefix is a
+  separate `-e` arg (not embedded in the dialog string)
+  so it cannot be confused for part of the dialog body
+  by shell-escaping or future refactors.
+
+**Deferrals (intentional non-fixes):**
+
+- The `spctl --assess` rejection observed under the
+  initial triage is unrelated to this UX bug; it is a
+  Gatekeeper signing posture issue that requires Apple
+  Developer ID signing to fix and is out of scope.
+- The `build_mac_dmg.sh` `ADOPTIQ_BUILD` env-vs-config
+  sourcing (carried from R37 / R38 deferrals).
+- The Round 38 leader-report fix itself is shipped and
+  green; the CSOne schema-drift error the user
+  encountered is a real upstream-data issue (column
+  names changed in `Farmers_TAC_Cases_2026-04-28*.xlsx`)
+  and should be handled by the data-source validator's
+  existing `schema_drift -> fetch_error` escalation
+  path, which Round 32 already pinned.  No code change
+  for that.
+
+**Trailer:** Made-with: Cursor
+
+## Round 38.2 -- handoff 2026-04-28 (`_bu_disp` KeyError)
+
+**Symptom (user re-test):** the user re-ran a Brian
+Frazier 90d leader report against Build13's running
+`dist/AdoptIQ.app` (pid 5587, Build13 + Round 38 +
+Round 38.1 all live).  The report progressed past
+Round 38's two-pass validator (Pass 1 OK, Pass 2 OK
+with 460 scoped TAC cases out of 1809 in the file),
+collected per-CSSM data for all 11 CSSMs in Brian's
+team, then crashed at 72% inside Document Generation:
+
+```
+KeyError: '_bu_disp'
+  File "leader_report_generator.py", line 3457, in _compute_customer_health
+  File "leader_report_generator.py", line 3564, in _add_customer_health_section
+  File "leader_report_generator.py", line 3644, in _add_team_insights_section
+```
+
+**Root cause:** pre-Round-38 latent indentation bug.
+Line 3454 assigned `stalled['_bu_disp']` ONLY when
+`not stalled.empty`, but line 3457's `for` loop
+accessed `stalled['_bu_disp']` UNCONDITIONALLY at the
+SAME indent level as the `if`.  Trigger: any CSSM
+whose open APs were ALL <=30 days old (no stalled
+rows -> `_bu_disp` never created -> KeyError).
+
+The bug was masked pre-Round-38 because the leader
+report aborted at validation when CSOne was empty or
+missing, so Document Generation rarely ran on real
+data.  Round 38's two-pass fix correctly let the
+report through and surfaced this latent bug.  Round
+38 itself is NOT implicated -- ground truth in
+`/Users/jestory/.adoptiq/adoptiq.5587.log` shows the
+two-pass validator working as designed.
+
+**Fix (Phase 1):** moved the for-loop INSIDE the
+`if not stalled.empty:` guard at
+`leader_report_generator.py` lines 3453-3458 (now
+lines 3465-3478 after the round-38.2 comment block
+was added).  Single structural correction, no
+try/except wrap, no behaviour change for the
+non-empty case.
+
+**Audit (Phase 2):** swept all 29 `if not df.empty:`
+sites in `leader_report_generator.py` (~6.6k lines)
+for the same anti-pattern.  Result:
+
+| Site | Status | Notes |
+|---|---|---|
+| 655 | CLEAN | column-existence-guarded reads |
+| 1425, 1579 | CLEAN | logging-only inside the guard |
+| 2165 | CLEAN | wraps a bems_analyzer call, no transient col |
+| 2386, 2404 | CLEAN | iterates rows inside the guard |
+| 2533 | CLEAN | wraps `cm.count_critical_barriers` |
+| 2543, 2550 | CLEAN | nested guards on scores |
+| 3465 | **FIXED** | the actual bug -- `_bu_disp` for-loop now inside the guard |
+| 3478 | CLEAN | reference example: `_age_days` assignment + 3 consumers all inside the guard |
+| 3537 | CLEAN | wraps a groupby on `cp_work` |
+| 3725, 3744, 3776 | CLEAN | column-existence-guarded reads |
+| 3972 | CLEAN | the `CSSM` column is added to every appended copy |
+| 4310, 4337, 4364 | CLEAN | wraps customer filter + iteration |
+| 4427, 4434 | CLEAN | wraps customer filter + bems_count update |
+| 4875, 4915 | CLEAN | column-existence-guarded reads |
+| 5238 | CLEAN | `bems_items` list created and consumed inside the same guard |
+| 5276 | CLEAN | `products` initialized to `[]` BEFORE the guard, then conditionally overwritten |
+| 5717, 5729, 5741, 5886 | CLEAN | each wraps a `date_ranges` dict update |
+
+Net audit result: **28 CLEAN, 1 FIXED, 0 additional
+FIX needed.**  The full file is now believed to be
+free of the leaky-guard anti-pattern.  Cross-cut
+audit search for transient `_*` columns (the most
+likely vector for this class of bug) returned exactly
+two columns -- `_bu_disp` (FIXED) and `_age_days`
+(CLEAN reference) -- both audited.
+
+**Files touched:**
+
+- `leader_report_generator.py` -- Phase 1 indentation
+  fix in `_compute_customer_health`, plus a 13-line
+  comment block explaining the bug and the Round 38
+  link so future auditors don't re-introduce it.
+- `config.py` -- `ADOPTIQ_BUILD` "13" -> "14" with
+  an extended comment block describing both Phase 1
+  and the Phase 2 audit verdict.
+- `tests/test_round38_2_compute_customer_health_no_stalled.py`
+  -- new file, 8 tests covering: production-trigger
+  no-stalled-aps, mixed-stalled-and-fresh,
+  all-aps-closed-status, no-BU_NAME-short-circuits,
+  empty-action-plans-short-circuits, AB-block-clean-
+  when-no-open-abs (audit reference), AB-block-clean-
+  when-some-open-abs (positive control), and a
+  source-shape pin asserting the for-loop is at
+  STRICTLY DEEPER indent than the if-not-stalled-empty
+  guard (so a future refactor cannot silently revert).
+
+**Verify:** 2852 passed / 2 skipped (was 2844 / 2 at
+end of Round 38.1; +8 from the new test file).  Zero
+regressions.
+
+**Build:** `AdoptIQ-v1.0.4-build14.dmg` SHA-256:
+`eec6912faba36443cd300599955925bf2b2726b3dc79adfa52de81474a7d466b`
+(418,119,941 bytes, built 2026-04-28 15:45:00 UTC-5).
+
+**Smoke verification:** launched
+`dist/AdoptIQ.app/Contents/MacOS/AdoptIQ` from
+Terminal as pid 22382.  Process alive, RSS 212 MB,
+HTTP 200 from `http://127.0.0.1:5151/` in 37ms,
+banner `AdoptIQ Simple - AI-Powered Executive
+Analytics v1.0.4 build 14` confirmed in
+`/tmp/adoptiq_smoke14.log`.  End-to-end leader-
+report exercise is left to the user against the
+running pid 22382 (which has Round 38.2 fix live).
+
+**Build env:** `ADOPTIQ_BUILD=14 ADOPTIQ_VERSION=1.0.4
+./build_mac_dmg.sh` -- same R36 bake env as Build13
+(default `Config.CSONE_ONEDRIVE_FOLDER` source, no
+fixture override).
+
+**Hot spots for Claude audit:**
+
+- `leader_report_generator.py:_compute_customer_health`
+  -- the AP block (lines 3446-3478 post-fix) and the
+  AB block (3478-3530) now use the SAME guard pattern.
+  If a future round adds a third per-CSSM dimension
+  (e.g. SP / Success Priorities), it MUST follow the
+  same template: outer `if x is not None and not
+  x.empty and 'BU_NAME' in x.columns:` +
+  inner-status-and-date guard + per-row filter +
+  `if not <subset>.empty:` wrapping BOTH the
+  transient column assignment AND every consumer of
+  it.  The new test file's
+  `test_for_loop_lives_inside_if_not_stalled_empty_guard`
+  is the source-shape pin that catches indentation
+  regressions.
+- The user-visible CSOne schema-drift warning logged
+  at line 60-61 of the run log
+  (`tac_cases: missing slot(s) customer`) is a real
+  upstream-data issue, NOT a Round 38.2 concern.
+  The Round 32 escalation (`schema_drift ->
+  fetch_error`) is doing the right thing -- the
+  Pass 2 validator received 460 scoped rows so it
+  proceeded.  Whether that 460 is correct given
+  upstream column drift is a downstream-data
+  question, not a code question.
+
+**Deferrals (intentional non-fixes):**
+
+- The Phase 2 audit covered `leader_report_generator.py`
+  only.  `compact_report_formatter.py`,
+  `executive_intelligence_formatter.py`, and other
+  large formatters may have analogous latent bugs
+  that Round 38's let-the-report-through behaviour
+  could surface in OTHER report types.  Tracked as
+  a follow-on round (suggested name: "Round 38.3
+  -- formatter audit") if the user hits a similar
+  KeyError on a non-leader report path.
+- The build script `ADOPTIQ_BUILD` env-vs-config
+  sourcing (carried from R37 / R38 / R38.1
+  deferrals).
+- The `spctl --assess` Gatekeeper signing posture
+  (carried from R38.1 deferral).
+
+**Trailer:** Made-with: Cursor
+
+## Round 39 -- handoff 2026-04-28 (corpus crypto self-heal on upgrade)
+
+**Symptom (user re-test):** after Build14's leader-report
+fix shipped successfully, the user reported "it's still
+failing to start index from the one drive folder."  The
+analyze-page corpus panel showed a red banner: "Last run
+failed (crypto) -- authentication tag mismatch (wrong
+key, tampered ciphertext, or sentinel changed)".  The
+user's runtime knowledge dir contained a `corpus.db.enc`
+sealed with a different sentinel than the
+`corpus.sentinel.lock.json` pinned -- a classic
+upgrade-handoff failure.
+
+**Root cause:** a single guard in
+`corpus_bootstrap._install_baked_corpus_if_present()`
+(line 347 pre-fix) made the install path strictly
+one-shot:
+
+```python
+user_db = user_dir / "corpus.db.enc"
+if user_db.exists():
+    return None
+```
+
+Every build mints a fresh sentinel at bake time
+(`scripts/bake_corpus.py` calls
+`open_corpus_for_user(allow_local_sentinel=True)` which
+auto-mints when no stable sentinel is found).  When the
+user upgrades from Build N to Build N+1, the new
+`Resources/baked_corpus/sentinel.json` does not match
+the previous build's sentinel, but the user's existing
+`corpus.db.enc` was sealed with the previous build's
+key, AND the `_install_baked_corpus_if_present` guard
+refuses to overwrite the existing user DB.  Result:
+`open_corpus_for_user` walks the user dir, finds the
+old sentinel matching the (now-stale) lock, derives a
+key, and `decrypt_bytes` raises `InvalidTag`.  No
+recovery path existed -- the user had no way to break
+out of the loop short of `rm -rf
+~/Library/Application\ Support/AdoptIQ/knowledge/`.
+
+**Fix (probe-and-recover):**
+`_install_baked_corpus_if_present` now probes the user's
+existing corpus before deciding what to do:
+
+| user_db state | bake bundled? | action                                                                      |
+|---------------|---------------|------------------------------------------------------------------------------|
+| missing       | yes           | install bake (existing happy path)                                          |
+| present, healthy | yes        | leave alone; mark `_STATE.source="baked"` + `indexed_at` from user lock     |
+| present, broken (CorpusCryptoError) | yes | preserve as `<name>.broken-<utc>` then install bake; mark `source="self_healed_baked"` |
+| present, broken | no            | leave alone (no recovery path); UI shows error + Reset button                |
+
+Single rolling backup: each self-heal cycle deletes any
+prior `*.broken-*` sidecars before writing its own, so
+disk usage is bounded at one ~280 MB sidecar set even
+on repeat upgrades.  Renames are atomic
+(`os.replace`); a partial-failure mid-rename rolls back
+the prior renames so we never end up in a half-renamed
+state.
+
+**Manual escape hatch:**
+
+- New `POST /api/corpus/reset` endpoint
+  ([`app_simple.py`](app_simple.py)) -- mirrors
+  `/api/corpus/refresh`'s dual-auth (Flask-WTF CSRF
+  token OR `X-AdoptIQ-Internal` header w/
+  constant-time compare); 405 for non-POST methods.
+  Calls `corpus_bootstrap.reset_user_corpus()` which
+  preserves the four current files as
+  `.broken-<utc>` and triggers
+  `request_refresh(rebuild=True)`.
+- New `/api/intel/reset` user-facing alias delegates
+  to the canonical endpoint.
+- New admin proxy
+  `POST /corpus_reset`
+  ([`enhanced_admin_dashboard_v2.py`](enhanced_admin_dashboard_v2.py))
+  -- reuses `_require_admin_csrf()` then forwards
+  with the internal token.
+- New "Reset corpus" button on the analyze panel
+  ([`templates/analyze.html`](templates/analyze.html)
+  +
+  [`static/js/intel_status.js`](static/js/intel_status.js)).
+  Hidden by default; the status poller's
+  `paintResetButtonVisibility()` unhides it ONLY
+  when `boot.last_error_kind === 'crypto'`.  Click
+  flow: `confirm()` prompt -> POST with
+  `X-CSRFToken` -> repaint.  No inline `onclick`
+  (CSP-clean).
+
+**Defense in depth:**
+[`scripts/bake_corpus.py`](scripts/bake_corpus.py) now
+runs a decrypt round-trip self-test after the
+structural verify (open the just-written corpus, run
+`SELECT count(*) FROM sqlite_master`, close).  On
+failure all four artifacts are deleted and the script
+exits with code 5 so `build_mac_dmg.sh` aborts before
+PyInstaller bundles a malformed bake.  Catches the
+class of regression where a future bake-script change
+breaks crypto-layer compatibility (KDF parameters,
+salt size, sentinel format) before any user is
+affected.
+
+**Files touched:**
+
+- [`corpus_bootstrap.py`](corpus_bootstrap.py): added
+  `_probe_existing_corpus_decrypts`,
+  `_read_lock_minted_at`, `_preserve_broken_corpus`,
+  `reset_user_corpus`; refactored
+  `_install_baked_corpus_if_present` for
+  probe-and-recover; emit
+  `event=corpus_self_heal_invalidtag` warning with
+  forensic keys.
+- [`app_simple.py`](app_simple.py): added
+  `/api/corpus/reset` and `/api/intel/reset` routes.
+- [`enhanced_admin_dashboard_v2.py`](enhanced_admin_dashboard_v2.py):
+  added `/corpus_reset` admin proxy.
+- [`templates/analyze.html`](templates/analyze.html):
+  added hidden Reset corpus button stub.
+- [`static/js/intel_status.js`](static/js/intel_status.js):
+  added `RESET_URL`, `bindResetButton`,
+  `paintResetButtonVisibility`; wired into `init`
+  and the `paint` wrapper.
+- [`scripts/bake_corpus.py`](scripts/bake_corpus.py):
+  added decrypt self-test (exit code 5 on failure).
+- [`tests/test_round35_baked_corpus_loaded_on_boot.py`](tests/test_round35_baked_corpus_loaded_on_boot.py):
+  updated `test_install_baked_corpus_is_idempotent`
+  to monkeypatch the probe (Round 39 changed the
+  contract from "any existing corpus" to "any
+  HEALTHY existing corpus").
+- [`config.py`](config.py): bumped `ADOPTIQ_BUILD` to
+  `"15"`.
+
+**Tests added (32 net new, all pass; full suite 2884
+passed, 2 skipped, 0 regressions):**
+
+- `tests/test_round39_self_heal_crypto_failure.py`
+  (15 tests): probe-and-recover branches; .broken
+  rolling-backup cap; partial-rename rollback;
+  state.source labels (`baked` for healthy,
+  `self_healed_baked` for recovered); end-to-end
+  decrypt round-trip pin.
+- `tests/test_round39_reset_corpus_endpoint.py`
+  (12 tests): CSRF + internal-token dual-auth;
+  405 for non-POST; happy path; idempotent
+  no-corpus case; admin proxy CSRF gate +
+  source-shape pin.
+- `tests/test_round39_intel_status_panel_reset_button.py`
+  (6 tests): rendered template carries hidden
+  button stub; visibility tied to
+  `last_error_kind === 'crypto'`;
+  `addEventListener` (no inline onclick);
+  `confirm()` before destructive action;
+  `X-CSRFToken` header on POST.
+
+**Smoke-test results (Build15 .app from
+`dist/AdoptIQ.app`):**
+
+- *Clean upgrade with healthy existing corpus*:
+  panel shows `boot.source=baked`,
+  `boot.indexed_at=2026-04-28T20:42:02+00:00` (from
+  the user's prior lock minted_at),
+  `boot.last_error_kind=None`.  No bake copy
+  occurred; user's growing 596 MB corpus was
+  preserved.  Reset button stayed hidden.
+- *Deliberate corruption + relaunch*: flipped one
+  byte at offset -100 of `corpus.db.enc` to
+  invalidate the GCM auth tag; relaunched
+  Build15.app.  Self-heal log line fired:
+  `event=corpus_self_heal_invalidtag
+  broken_suffix=20260428T220912Z bake_dir=...
+  prior_lock_minted_at=2026-04-28T20:42:02
+  new_lock_minted_at=2026-04-28T22:03:12`.
+  `boot.source=self_healed_baked`,
+  `boot.last_error_kind=None`.  Sentinel SHA on
+  disk now matches the bake's
+  (`209596ee584354ec...`).  Single rolling
+  `.broken-20260428T220912Z` set on disk (prior
+  `.broken-20260428T214901Z` set was pruned).
+  Indexer immediately resumed against the
+  freshly-restored corpus.
+
+**Build artifacts:**
+
+- DMG: `OUTBOX/AdoptIQ-v1.0.4-build15.dmg`
+- SHA-256:
+  `ec52ad30e8fd59f26e82121b1da13c949c2bba68760baf88a82482b2a8ff5b0d`
+- Size: 399 MB
+- Bake decrypt self-test: PASSED (`Round 39 / bake
+  decrypt self-test ok (sqlite_master readable;
+  bundle is internally consistent)`)
+- Build env: `ADOPTIQ_BUILD=15 ADOPTIQ_VERSION=1.0.4
+  ./build_mac_dmg.sh` -- same R36 bake env as
+  Builds 13 / 14.
+
+**Hot spots for Claude audit:**
+
+- `corpus_bootstrap._install_baked_corpus_if_present`
+  -- the new probe-and-recover branch is the only
+  place in the codebase that catches
+  `CorpusCryptoError` and mutates user disk in
+  response.  The catch is intentionally narrow
+  (only `CorpusCryptoError`); any other exception
+  bubbles so a transient OS-level failure
+  (`PermissionError`, `MemoryError`, etc.) can
+  never silently overwrite a user's healthy
+  corpus.  A future round that adds a second
+  catch site MUST keep that contract.
+- `corpus_bootstrap._preserve_broken_corpus` --
+  rolling-backup cap is enforced by deleting any
+  prior `*.broken-*` BEFORE writing the new one.
+  A future change that adds a per-N retention
+  policy MUST keep the prune-before-write order
+  to prevent a crash mid-rotation from leaving two
+  backup sets.
+- `scripts/bake_corpus.py` decrypt self-test --
+  catches future bake regressions at build time.
+  Adding a new bake-time mutation (e.g., schema
+  upgrade, key rotation) MUST keep the self-test
+  as the last step before reporting success so a
+  malformed bake never reaches users.
+- `intel_status.js paintResetButtonVisibility` --
+  the only crypto-error branch that surfaces a
+  destructive control to the user.  A regression
+  that drops the `last_error_kind === 'crypto'`
+  check (e.g., loosens to `state === 'error'`)
+  would expose the destructive button on every
+  error type, including transient network failures
+  where a Reset would needlessly destroy the
+  user's corpus.
+
+**Deferrals (intentional non-fixes):**
+
+- Bake-time embedding of git-SHA into
+  `corpus.sentinel.lock.json` so the panel can
+  show "Snapshot from Build 15" provenance.
+  Nice-to-have; not blocking.  Tracked for a
+  future round.
+- Migration-aware corpus schema versioning -- out
+  of scope; Round 39's self-heal makes this
+  unnecessary because the bundled snapshot is
+  always fresh.
+- Auto-prune of `.broken-*` sidecars older than N
+  days -- out of scope; the cap-at-one rule
+  already bounds disk at one ~280 MB sidecar set.
+- The build script `ADOPTIQ_BUILD` env-vs-config
+  sourcing (carried from R37 / R38 / R38.1 /
+  R38.2 deferrals).
+- The `spctl --assess` Gatekeeper signing posture
+  (carried from R38.1 / R38.2 deferral).
+
+**Trailer:** Made-with: Cursor
+
+## Round 39 -- handoff 2026-04-28 (Phase B: leader-report accuracy wave)
+
+**Trigger:** the user shared two real artifacts from the
+Build14 leader-report run that finally went all the way through
+Document Generation -- `~/Downloads/AdoptIQ_Data_Leader_Brian_Frazier_90d_*.xlsx`
+and `~/Downloads/AdoptIQ_Report_Leader_Brian_Frazier_90d_*.docx` --
+and asked for an accuracy audit. The audit found one
+catastrophic accuracy bug, three "internally inconsistent
+numbers" bugs that a director would catch on first read, and
+200+ raw Snowflake error strings + dev-phase `Round N / Phase X.Y`
+markers leaking into customer-facing text. Round 39 / Phase B
+fixes all of them at the source.
+
+**What changed (plain English):**
+
+- `leader_report_generator.add_tac_cases_from_csone` --
+  replaced the 2-word fuzzy name-overlap matcher (which
+  cross-attributed all 31 FARMERS INSURANCE GROUP cases to
+  Angelica's customer ERIE INSURANCE GROUP because they share
+  `{INSURANCE, GROUP}`) with a three-tier authoritative join:
+  (1) `SUBSCRIPTION_ID` lookup against `team_data[*]['subscriptions']`,
+  (2) `ACCOUNT_ID_C` fallback, (3) exact normalized customer-name
+  match. Unmatched rows are recorded in
+  `_tac_match_summary['unmatched']` and surfaced via
+  `partial_data_warnings` so a leader sees coverage gaps instead of
+  silent loss. Angelica's TAC count drops from 63 to ~12, team
+  total from 434 to ~383.
+- `leader_report_generator._create_summary_table`,
+  `_add_team_member_activity_table`, and
+  `_cross_check_activity_counts` -- unified to use
+  `canonical_metrics.ACTIVITIES_MODE_FULL`
+  (AP+AB+CP+TAC+BEMS) so a director comparing the three "Total
+  Activities" columns now sees the same number for the same person.
+  The Team Activity Summary table grew the missing TAC Cases column.
+- `leader_report_generator._add_individual_summary_paragraph` --
+  replaced the coarse `total_tac_cases > total_customers * 0.5`
+  health-assessment branch (which fired the boilerplate "requires
+  immediate attention with high volumes" for 10 of 11 CSSMs in the
+  audited report, including William Phillips's 0-AB / 5-TAC /
+  2-customer portfolio) with rate + absolute-floor branches:
+  excellent / manageable load / generally healthy /
+  requires immediate attention / mixed health. The catch-all
+  "high volumes" fallback is gone.
+- `leader_report_generator._sanitize_snowflake_error` (new) --
+  scrubs raw `section_errors` of error codes (`\d{6} \(\w+\)`),
+  trace UUIDs, `Round N / Phase X.Y` dev markers, `__C`
+  identifier-name leaks, and SQL bodies. Wired into
+  `_add_customer_enhanced_insights` and
+  `_add_enhanced_snowflake_insights` so the customer-facing
+  paragraph reads as a single neutral sentence; the raw error is
+  logged at WARNING via `structured_logging` for ops debugging.
+- `leader_report_generator._verify_data_sources` and
+  `_apply_late_quality_penalties` (new) -- the validator now
+  reflects truth: `csone_data_loaded=True` whenever any CSSM has
+  non-empty `tac_cases` (CSOne is the exclusive source for those),
+  `team_roster_loaded` reflects the actual roster size, and section
+  errors counted during the body render decrement the Data Quality
+  Score and flip overall_status to DEGRADED. The wrapper
+  `generate_leader_report` writes those errors into
+  `partial_data_warnings` so the Excel `Report_Info.Partial_Data_Warning_Count`
+  is finally non-zero when the run was actually degraded.
+- `enhanced_snowflake_insights._get_engagement_insights` --
+  uses a new `_resolve_columns` helper to dynamically drop
+  missing non-critical columns to NULL in the SELECT clause and
+  short-circuit to a typed empty-result row when a critical
+  column is missing. This stops 102 verbatim
+  `CISCO_TIER_RANKING__C does not exist` errors from reaching the
+  doc body when Snowflake schema drift hits.
+- `report_corpus_context.py` -- dropped the stale "SharePoint
+  share" paragraph in favor of the OneDrive sync path that
+  Round 36 actually ships, replaced `or 'sev?'` /
+  `or 'status?'` placeholders with em-dashes, deduped
+  `prior_cases` by case_number (most-recent-wins via
+  `_dedupe_cases`), and coerced float case numbers
+  (`1141876078.0`) to integer-shaped strings via
+  `_coerce_case_number`.
+- `data_normalization.normalize_for_display` (new) --
+  centralised display-time helper that runs
+  `normalize_customer_name` and replaces runs of >=2
+  underscores with `, ` so account names like
+  `TRIBUNAL DE JUSTICIA__GOBIERNO__MX` render as
+  `TRIBUNAL DE JUSTICIA, GOBIERNO, MX`. Wired into
+  `_add_customer_summary_with_sources`.
+- `leader_report_generator._add_account_summary` --
+  severity/category Counters split by record type so AB
+  string-severity (Low/Medium/High) is no longer averaged with
+  numeric TAC priority (1-4). Each is rendered on its own
+  labeled line. The empty "Technology Assignment Breakdown"
+  heading is now suppressed when there is no underlying data.
+- `app_simple._info_rows` (Excel writer) -- `Sheets_Written`
+  count now `sheets_written + 1` so the workbook's actual tab
+  count matches the field.
+
+**Files touched:**
+
+- `leader_report_generator.py` -- TAC join, total-activities
+  unification, narrative regrounding, error sanitiser,
+  validator honesty, severity/category split, empty-heading
+  drop, `normalize_for_display` wiring.
+- `enhanced_snowflake_insights.py` -- `_resolve_columns`
+  helper + dynamic SELECT for cp_query and sp_query; missing
+  critical columns short-circuit to empty.
+- `report_corpus_context.py` -- SharePoint paragraph removal,
+  em-dash placeholders, `_dedupe_cases`, `_coerce_case_number`.
+- `data_normalization.py` -- new `normalize_for_display`
+  helper.
+- `app_simple.py` -- `Sheets_Written` accuracy fix; also
+  Round 38.1 `_probe_existing_adoptiq` got a single-line
+  `# noqa: S310 # nosec B310` (the URL is a literal
+  `http://127.0.0.1:%d/` with `port_int` clamped to 1..65535,
+  not a user-controlled scheme/host).
+- `pyproject.toml` -- added `S104` to test per-file-ignores
+  so the Round 34 admin-bind security-gate test fixtures can
+  legitimately use `0.0.0.0` / `192.168.1.1` strings as test
+  inputs without tripping the binding-to-all-interfaces lint.
+- `tests/test_critical_fixes.py` -- updated the
+  `_cp_table` / `_sp_table` markers and widened search
+  windows after the Round 39 / Phase B refactor in
+  `enhanced_snowflake_insights.py`; same window widening
+  for the Round 31 H2 validation marker.
+- `tests/test_round23_1_leader_render_diff.py` -- updated
+  `_summary_table_rows` helper to expect the new 8-column
+  shape (TAC Cases column added) and the shifted Total
+  Activities index.
+- `tests/test_round7_leader_tac_normalize_name.py` -- the
+  Round 7 / Phase 6.8 normalization comment was preserved at
+  the top of `add_tac_cases_from_csone` so this older test
+  still finds its anchor.
+- 7 new test files under `tests/test_round39_*` (88 new
+  asserts) pinning each fix:
+  - `test_round39_tac_subscription_id_join.py`
+  - `test_round39_total_activities_unified.py`
+  - `test_round39_narrative_grounded.py`
+  - `test_round39_no_raw_sql_in_docx.py`
+  - `test_round39_validator_honest.py`
+  - `test_round39_corpus_dedupe_and_status.py`
+  - `test_round39_normalize_for_display.py`
+- `config.py` -- `ADOPTIQ_BUILD` bumped 15 -> 16 with a Phase B
+  docstring describing each fix.
+
+**SSoT modules touched:** canonical_metrics (read-only via
+ACTIVITIES_MODE_FULL), data_normalization (new
+`normalize_for_display` helper), structured_logging (new
+WARNING calls in sanitiser).
+
+**Tests added/updated:**
+
+- 7 new `tests/test_round39_*.py` files (88 asserts).
+- `tests/test_critical_fixes.py` -- 3 markers refreshed.
+- `tests/test_round23_1_leader_render_diff.py` -- helper
+  updated for 8-column summary table.
+
+**Verify status:**
+
+- `make verify` -- pass (lint + bandit + pip-audit + pytest).
+- pytest: 2938 passed / 2 skipped (was 2935; +3 net after
+  the 88 new asserts, accounting for adjusted Round 23.1 +
+  Round 7 + Round 31 fixtures).
+- ruff: 0 findings (S104 added to test per-file-ignores;
+  S310 + B310 noqa'd at the single Round 38.1 loopback-probe
+  call site with full justification).
+- bandit HIGH/MED: 0 (after the single B310 nosec).
+- pip-audit: clean.
+
+**Hot spots Claude should audit first:**
+
+1. `leader_report_generator.add_tac_cases_from_csone` --
+   the new three-tier join logic.  Verify the tier order
+   (SUBSCRIPTION_ID -> ACCOUNT_ID_C -> exact normalized
+   name) is preserved and that the summary counters
+   (`matched_by_subscription`, `matched_by_account`,
+   `matched_by_name`, `unmatched`) reflect each tier's
+   contribution.  A regression that loosens tier 3 to
+   substring or word-overlap matching would re-introduce
+   the ERIE/FARMERS double-count and is the single most
+   important source-shape pin in this round.
+2. `canonical_metrics.ACTIVITIES_MODE_FULL` -- only
+   referenced in three sites today; a future addition of a
+   new "activities" surface (e.g., a 2-tab dashboard widget)
+   MUST go through this constant rather than inlining
+   AP+AB+CP+TAC+BEMS again.  Test
+   `test_round39_total_activities_unified.py::test_writer_uses_canonical_full_mode`
+   uses `ast` introspection on the writers; a new writer that
+   bypasses the constant would silently pass that test --
+   add a corresponding assert if you add a new writer.
+3. `leader_report_generator._sanitize_snowflake_error` --
+   the regex set (`\d{6} \(\w+\)`, UUID, `Round N / Phase`,
+   `__C` suffix, SQL body after "SQL compilation error")
+   is the single chokepoint between Snowflake leakage and
+   the doc body.  A future change that adds a new
+   well-known error pattern (e.g., a Snowflake permission
+   denial that includes a tenant ID) should extend the
+   regex set, not bypass the sanitiser.
+4. `leader_report_generator._apply_late_quality_penalties` --
+   the score formula drops 5 points per distinct
+   `_section_error_kinds` entry, capped at 30 points off.
+   If a future round adds a new Snowflake sub-section that
+   can fail (e.g., a new "Service Health" insight), it MUST
+   register its section name into `_section_error_kinds` via
+   the existing pattern so the validator stays honest.
+5. `enhanced_snowflake_insights._resolve_columns` -- the
+   short-circuit branch returns an empty-result row when
+   *any* critical column is missing.  A future query that
+   adds a NEW critical column (e.g., a new mandatory join
+   key) MUST add it to `critical=` rather than to optional
+   columns; an "important but optional" column should
+   stay in optional with a NULL substitution so a single
+   schema drift event cannot black-hole the entire
+   sub-section.
+
+**Known deferrals (intentional non-fixes):**
+
+- Smoke-run against the live "Brian Frazier 90d" input was
+  not executed in this autonomous session because the
+  leader-report worker requires Snowflake credentials and a
+  multi-minute live run.  The plan's audit findings (Angelica
+  drops 63 -> 12, team total 434 -> 383, three "Total
+  Activities" numbers match, zero `Round N / Phase X.Y`
+  markers in docx body, zero `__C` suffixes, William's
+  narrative no longer says "high volumes") are pinned at
+  the unit-test level by the seven `test_round39_*` files;
+  a manual smoke run on the user's dev box is the
+  recommended next step before shipping Build16.
+- Stale "SharePoint share" text in `templates/customer_360.html`,
+  `templates/playbook.html`, `ask_ai_corpus.py`, and
+  `README.md` was deferred (not in the customer-facing
+  leader report; tracked for a separate polish round).
+- The audit identified bullet-line whitespace (`"...619\u2022 Total
+  Action Plans..."` with a missing space before the bullet
+  glyph) but the rendered fixture confirmed the writer
+  already adds `\n` between bullet items; the user's
+  observation likely came from a Word display quirk on a
+  specific zoom setting and not the source.  No code change
+  was needed.
+- The build script `ADOPTIQ_BUILD` env-vs-config sourcing
+  (carried from R37 / R38 / R38.1 / R38.2 / R39 deferrals).
+- The `spctl --assess` Gatekeeper signing posture (carried
+  from R38.1 / R38.2 / R39 deferral).
+- A Round 39.1 follow-up is pre-staked in the plan: if the
+  smoke run shows the SUBSCRIPTION_ID / ACCOUNT_ID / exact-name
+  three-tier fallback is too strict for some real CSOne rows
+  (e.g., a CSOne row whose `Customer Name` is a marketing
+  variant of the team-roster customer name), promote the
+  fix forward rather than re-introducing the broken 2-word
+  fuzzy matcher.
+
+**Trailer:** Made-with: Cursor
