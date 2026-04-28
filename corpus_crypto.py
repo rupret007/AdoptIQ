@@ -209,7 +209,18 @@ def _salt_path_for(db_path: Path) -> Path:
 
 def get_or_create_salt(db_path: Path | str) -> bytes:
     """Read the per-install salt, generating one if necessary.  The
-    salt file is created with mode ``0600``."""
+    salt file is created with mode ``0600``.
+
+    Round 34 / A2 -- fail-loud on corrupt salt: if the salt file
+    exists but has the wrong size (truncated, partial-write
+    leftover, accidental corruption), and an encrypted corpus has
+    already been sealed under SOME salt, raise instead of silently
+    regenerating.  Silent regeneration was the old behavior; it
+    produces a fresh AES key under HKDF and the existing
+    corpus.db.enc decrypts to gibberish (InvalidTag), bricking the
+    install.  An operator who actually wants to reset can delete
+    the encrypted corpus AND the salt together.
+    """
     db_p = Path(db_path)
     salt_path = _salt_path_for(db_p)
     if salt_path.exists() and salt_path.is_file():
@@ -219,12 +230,28 @@ def get_or_create_salt(db_path: Path | str) -> bytes:
             raise CorpusCryptoError(f"salt read failed: {read_err}") from read_err
         if len(data) == _SALT_BYTES:
             return data
-        # Length mismatch -- regenerate.
+        # Length mismatch.  Round 34 / A2: the legacy "regenerate
+        # silently" branch bricked any existing encrypted corpus
+        # because HKDF over a fresh salt produces a different key.
+        # Only safe to regenerate when there is NO encrypted corpus
+        # to brick.  Otherwise fail loud and let the operator
+        # intervene.
+        if db_p.exists():
+            raise CorpusCryptoError(
+                f"corpus salt at {salt_path} is corrupt "
+                f"(expected {_SALT_BYTES} bytes, got {len(data)}); "
+                f"silently regenerating would brick the existing "
+                f"encrypted corpus at {db_p}.  Restore the original "
+                f"salt from a backup, or delete BOTH the salt and "
+                f"the encrypted corpus to start over."
+            )
+        # No corpus to brick -- safe to regenerate.
     salt_path.parent.mkdir(parents=True, exist_ok=True)
     new_salt = secrets.token_bytes(_SALT_BYTES)
     fd = os.open(str(salt_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, new_salt)
+        os.fsync(fd)
     finally:
         os.close(fd)
     try:
@@ -535,15 +562,20 @@ def get_or_create_local_sentinel(encrypted_path: Path | str) -> bytes:
 
 
 def _try_resolve_sentinel(root: Path | str | None) -> Optional[bytes]:
-    """Best-effort: return sentinel bytes if ``root`` carries the
-    sentinel file, otherwise ``None``.  Never raises -- callers are
-    expected to fall through to the next root.
+    """Return sentinel bytes if ``root`` carries the sentinel file.
 
-    Round 34 / A2 caveat: this helper still swallows
-    ``CorpusCryptoError`` so a *missing* sentinel path falls through
-    to the next root.  The fail-loud-on-corrupt behavior the user
-    requested lives in :func:`_resolve_sentinel_strict` below, which
-    is what :func:`open_corpus_for_user` calls.
+    Round 34 / A2 contract change: this helper now distinguishes
+    "path absent" (legitimate fall-through to the next root, returns
+    ``None``) from "path present but unreadable / empty / oversized"
+    (a real problem the operator must investigate, propagates
+    ``CorpusCryptoError``).  Pre-A2 the helper swallowed all errors,
+    so a corrupt OneDrive sentinel silently fell through to local-mint
+    and the operator never learned their primary sentinel was broken.
+
+    The "path absent" branch still includes the case where
+    ``resolve_sentinel_path`` raises (e.g., the env-var override
+    contains a path separator) -- that's a config-error, not
+    corpus-data-error, so we still tolerate it via ``None``.
     """
     if root is None:
         return None
@@ -553,10 +585,8 @@ def _try_resolve_sentinel(root: Path | str | None) -> Optional[bytes]:
         return None
     if path is None or not path.exists() or not path.is_file():
         return None
-    try:
-        return read_sentinel_bytes(path)
-    except CorpusCryptoError:
-        return None
+    # Path is present.  Any failure from here is fail-loud per A2.
+    return read_sentinel_bytes(path)
 
 
 # ---------------------------------------------------------------------------
