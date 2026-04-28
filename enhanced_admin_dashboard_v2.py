@@ -115,6 +115,13 @@ def _r12_admin_utc_iso_z() -> str:
 # Main app URL (for container: set ADOPTIQ_MAIN_URL=http://adoptiq-main:5151)
 # Round 17.3: default port moved from 5001 -> 5151 (Van Halen-adjacent,
 # out of macOS AirPlay Receiver / Flask-default conflict zone).
+# Round 37 / Phase 1: this module-level constant is captured at import
+# time, but the parent process (``app_simple._start_admin_server_in_thread``)
+# now writes ``ADOPTIQ_MAIN_URL=http://127.0.0.1:<live-main-port>`` BEFORE
+# importing this module, so the captured value is correct on the .app
+# launch path.  ``_main_app_host_port`` re-reads the env on every call as
+# defense in depth so a later rebind (or a test that monkeypatches the
+# env) is picked up without a module reload.
 MAIN_APP_URL = os.environ.get('ADOPTIQ_MAIN_URL', 'http://localhost:5151')
 
 # Round 17.3: env-overridable admin port (default 5152, was 5002).  See
@@ -152,10 +159,20 @@ def _resolve_admin_port(env=None):
 
 
 def _main_app_host_port():
-    """Parse MAIN_APP_URL into (host, port) for socket check."""
+    """Parse the live ``ADOPTIQ_MAIN_URL`` into (host, port) for the socket check.
+
+    Round 37 / Phase 1: re-read the env per call instead of trusting the
+    module-level ``MAIN_APP_URL`` constant captured at import time.  The
+    constant is fine on the canonical .app boot path because
+    ``app_simple._start_admin_server_in_thread`` writes the env BEFORE
+    importing this module, but environments that import the module first
+    (e.g. tests, dev shells) and then set the env would otherwise see a
+    stale value forever.  Cheap and removes a foot-gun.
+    """
     try:
         from urllib.parse import urlparse
-        p = urlparse(MAIN_APP_URL)
+        live_url = os.environ.get('ADOPTIQ_MAIN_URL') or MAIN_APP_URL
+        p = urlparse(live_url)
         host = p.hostname or '127.0.0.1'
         # Round 17.3: fallback bumped from 5000 -> 5151 to match the new
         # main-app default; only exercised when ``ADOPTIQ_MAIN_URL`` is
@@ -221,12 +238,18 @@ def _inject_admin_csrf():
 
 # Global variables for comprehensive monitoring
 server_process = None
+# Round 37 / Phase 1: initial ``port`` flipped from 5000 -> None so the
+# Server Status tile renders "N/A" before the first probe instead of
+# falsely advertising a port the main app never bound to.  ``host`` and
+# ``port`` are populated by the first ``get_server_status()`` call from
+# ``_main_app_host_port()`` which now reads the live env.
 server_status = {
     'running': False,
     'pid': None,
     'start_time': None,
-    'port': 5000,
-    'last_check': None
+    'host': None,
+    'port': None,
+    'last_check': None,
 }
 
 # Enhanced monitoring data
