@@ -335,17 +335,28 @@ SQLite databases:
 
 Path resolution is **inline** in multiple modules (`_APP_SUPPORT` in `app_simple.py`, `incident_storage._db_path`, `enhanced_admin_dashboard_v2._get_db_path`). There is no single dedicated `path_helper.py` module.
 
-### Settings precedence (Round 32 / Phase 2.E, extended Round 33 / Build8)
+### Settings precedence (Round 32 / Phase 2.E, extended Round 33 / Build8, narrowed Round 35)
 
 Persistent feature flags resolve in this order, highest precedence first:
 
-1. `settings.json` (managed by `adoptiq_settings.py`; mode `0600`, parent dir `0700`, atomic `os.replace` writes; allow-listed keys only -- currently `corpus_knowledge_enabled` and `sharepoint_folder_url`).
-2. Environment variable (e.g. `CORPUS_KNOWLEDGE_ENABLED=true|false`, `ADOPTIQ_SHAREPOINT_FOLDER_URL=https://...`).
-3. `config.py` default (Round 32 / Phase 2.F flipped Intelligence to default-on; Round 33 / Build8 changed `ADOPTIQ_SHAREPOINT_FOLDER_URL` default from a hardcoded personal Cisco URL to `""` -- empty surfaces as `not_configured` in the analyze-page UI).
+1. `settings.json` (managed by `adoptiq_settings.py`; mode `0600`, parent dir `0700`, atomic `os.replace` writes; allow-listed keys only -- currently just `corpus_knowledge_enabled`. The Build8 `sharepoint_folder_url` key was retired in Round 35 along with the user-facing URL paste UI; legacy values are silently dropped on load/save).
+2. Environment variable (e.g. `CORPUS_KNOWLEDGE_ENABLED=true|false`, `ADOPTIQ_CORPUS_SHARE_URL=https://...`).
+3. `config.py` default (Round 32 / Phase 2.F flipped Intelligence to default-on; Round 35 introduced `ADOPTIQ_CORPUS_SHARE_URL` as the canonical hardcoded share URL with `ADOPTIQ_SHAREPOINT_FOLDER_URL` as a backward-compat alias).
 
 Toggling Intelligence from the analyze-page banner POSTs to `POST /api/settings/intelligence` (CSRF-protected via the same dual-path as `/api/corpus/refresh`), which writes `settings.json`, mutates `Config.CORPUS_KNOWLEDGE_ENABLED` in-process, and triggers `corpus_bootstrap.request_refresh` on enable.
 
-The Round 33 / Build8 SharePoint connection sub-panel adds three more endpoints under the same auth contract: `POST /api/settings/sharepoint_url` (URL allow-list `https://<tenant>.sharepoint.com/<path>` enforced via `adoptiq_settings.is_valid_sharepoint_url`), `POST /api/corpus/sharepoint/signin` (returns the device-code envelope `{user_code, verification_uri, expires_in, message, interval}`), and `POST /api/corpus/sharepoint/signout` (delegates to `corpus_bootstrap.sharepoint_signout()` -> `SharePointGraphClient.clear_token_cache()` which drops both the macOS Keychain entry and the 0o600 fallback file `~/.adoptiq/sharepoint_token_cache.json`).
+The Round 35 "AdoptIQ Knowledge Corpus" sub-panel keeps two POST routes under the same auth contract: `POST /api/corpus/sharepoint/signin` (returns the device-code envelope `{user_code, verification_uri, expires_in, message, interval}`), and `POST /api/corpus/sharepoint/signout` (delegates to `corpus_bootstrap.sharepoint_signout()` -> `SharePointGraphClient.clear_token_cache()` which drops both the macOS Keychain entry and the 0o600 fallback file `~/.adoptiq/sharepoint_token_cache.json`). The Build8 `POST /api/settings/sharepoint_url` route is gone.
+
+### Native Knowledge Corpus (Round 35)
+
+The corpus URL is hardcoded in `Config.ADOPTIQ_CORPUS_SHARE_URL` (env-overridable for ops only). Build pipeline:
+
+1. **Bake** -- `scripts/bake_corpus.py` runs from `build_mac_dmg.sh` BEFORE PyInstaller. Auth modes: `device_code` (default; build operator signs in once via MSAL; token cache lives in the Keychain) and `offline_fixture` (test-only). Outputs four artifacts under `bake/`: `corpus.db.enc`, `sentinel.json`, `corpus.db.salt` (filename pinned by `corpus_crypto._salt_path_for`), `corpus.sentinel.lock.json`. `ADOPTIQ_BAKE_CORPUS=0` (or `--no-bake`) skips the bake and writes a `.bake-skipped` marker.
+2. **Bundle** -- `adoptiq_mac.spec` `_datas()` ships the four artifacts under `Resources/baked_corpus/` when present (gracefully omitted when bake was skipped).
+3. **Install** -- `corpus_bootstrap._install_baked_corpus_if_present()` copies `<sys._MEIPASS>/baked_corpus/` to the user's writable `~/Library/Application Support/AdoptIQ/knowledge/` on first launch (mode `0o600`). Idempotent; subsequent launches leave the user's existing corpus alone.
+4. **Daily refresh** -- `start_daily_refresh_worker()` spawns a daemon that wakes every `_DAILY_REFRESH_TICK_S` (1h) and triggers `request_refresh(rebuild=False)` when (a) Intelligence is enabled, (b) `_should_refresh()` reports the 24h window has elapsed, AND (c) the user is signed into SharePoint (MSAL refresh token in keychain). Refreshes write atomically (sibling `.tmp` + `os.replace`); mid-refresh crashes leave the prior corpus byte-identical.
+
+Round 35 also added a WAL checkpoint inside `corpus_crypto.EncryptedCorpusHandle.commit_to_disk` (`PRAGMA wal_checkpoint(TRUNCATE);`). Without it, the encrypted DB would only contain the 4096-byte SQLite header because committed pages live in the WAL until checkpointed -- the bake artifact (and Build8's runtime indexing) was effectively empty under the previous code path.
 
 ### Corpus encryption sentinel resolution (Round 33 / Build8)
 
