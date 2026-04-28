@@ -444,6 +444,22 @@
     (function () {
         'use strict';
 
+        // Round 34 / F1: defensive double-init guard.  init() registers
+        // THREE setIntervals on window (refreshInterval, elapsedInterval,
+        // elapsedWatchdog).  If a future bundle accident, hot-reload, or
+        // accidental script re-include causes the IIFE to execute twice,
+        // each ``window.X = setInterval(...)`` overwrites the prior
+        // handle and orphans the previous interval -- it keeps running
+        // but the cleanup at L689-690 / L699-700 only stops the most
+        // recent one.  Net: 6 timers running, 3 cleanup handles, double
+        // network load on /status polling and double DOM ticks on the
+        // elapsed counter.  Idempotent across DOMContentLoaded ->
+        // immediate-init races and across multi-script-include accidents.
+        // Mirrors the R26-003 pattern in static/js/intel_status.js.
+        // ROUND34_PROGRESS_DOUBLE_INIT_GUARD
+        if (window.__adoptiqProgressPageInit) { return; }
+        window.__adoptiqProgressPageInit = true;
+
         // Round 29 / L2: ``|tojson`` is the Jinja-blessed way to drop
         // a Python value into a JS context.  It HTML-escapes < / > / &
         // and emits a JSON literal, so a hostile string in
