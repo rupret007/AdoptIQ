@@ -2556,69 +2556,26 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 </p>
                 {% endif %}
 
-                {# Round 17.2: SharePoint pull state.  Rendered for
-                   every state (signed-out / signed-in / error) so the
-                   operator always knows whether the share is being
-                   pulled and who AdoptIQ is signed in as. #}
-                {% set sp = corpus_status.boot.sharepoint %}
-                {% if sp %}
-                <p style="margin-top:0.6em;">
-                    <strong>SharePoint pull:</strong>
-                    {% if not sp.enabled %}
-                        disabled
-                    {% elif not sp.configured %}
-                        not configured (set <code>ADOPTIQ_SHAREPOINT_FOLDER_URL</code>)
-                    {% elif sp.error_kind == 'auth_required' %}
-                        <span style="color:#dc3545;">sign-in required</span>
-                    {% elif sp.error_kind %}
-                        <span style="color:#dc3545;">{{ sp.error_kind }}</span>
-                        {% if sp.error_detail %}
-                            &mdash; {{ sp.error_detail }}
-                        {% endif %}
-                    {% elif sp.signed_in %}
-                        signed in
-                    {% else %}
-                        not signed in
-                    {% endif %}
-                </p>
-                {% if sp.signed_in and sp.upn %}
-                <p>
-                    <strong>SharePoint account:</strong>
-                    <code>{{ sp.upn }}</code>
-                    {% if sp.expires_at %}
-                        &middot; token expires {{ sp.expires_at }}
-                    {% endif %}
-                </p>
-                {% endif %}
-                {% if sp.stats %}
-                <p>
-                    <strong>SharePoint last refresh:</strong>
-                    listed {{ sp.stats.files_listed }}
-                    &middot; downloaded {{ sp.stats.files_downloaded }}
-                    &middot; cached {{ sp.stats.files_cached }}
-                    &middot; failed {{ sp.stats.files_failed }}
-                    &middot; bytes {{ sp.stats.bytes_downloaded }}
-                </p>
-                {% endif %}
-                <p>
-                    {% if sp.error_kind == 'auth_required' or not sp.signed_in %}
-                    <form method="POST" action="/sharepoint_signin" style="display:inline;">
-                        <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
-                        <button type="submit" class="btn btn-primary">Sign in to SharePoint</button>
-                    </form>
-                    {% endif %}
-                    <form method="POST" action="/sharepoint_refresh" style="display:inline;">
-                        <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
-                        <button type="submit" class="btn btn-success">Refresh SharePoint corpus</button>
-                    </form>
-                </p>
-                {% endif %}
+                {# Round 17.2 SharePoint sub-block removed in Round 37 /
+                   Phase 3.  The MSAL/Graph runtime path was deleted in
+                   Round 36, so ``corpus_status.boot.sharepoint`` is
+                   always ``None`` and rendering an inline form for
+                   ``/sharepoint_signin`` / ``/sharepoint_refresh``
+                   would just produce dead UI that 404s.  OneDrive sync
+                   presence is now surfaced via the
+                   ``boot.onedrive_status`` row above (Round 37 /
+                   Phase 2), and the ``Re-index now`` button below
+                   (Round 37 / Phase 4) covers the manual refresh
+                   path. #}
 
-                {# Round 17.1 + 17.2: per-source breakdown (SharePoint
-                   cache, OneDrive sync, the runtime user's Downloads).
-                   Rendered only when the bootstrap recorded per-source
-                   stats; otherwise the summary stats above are
-                   sufficient. #}
+                {# Round 17.1 + 17.2: per-source breakdown (OneDrive
+                   sync, the runtime user's Downloads, and any opt-in
+                   intel-uploads pre-seed). Rendered only when the
+                   bootstrap recorded source-level stats; otherwise
+                   the summary stats above are sufficient.  Note:
+                   the pre-Round-36 SharePoint cache source is no
+                   longer populated; the ``last_sources`` list now
+                   never includes a ``sharepoint_csone`` row. #}
                 {% if corpus_status.boot.last_sources %}
                 <p style="margin-top: 0.6em;">
                     <strong>Per-source breakdown</strong>
@@ -3187,100 +3144,14 @@ def corpus_refresh_route():
     ))
 
 
-@admin_app.route('/sharepoint_signin', methods=['POST'])
-def sharepoint_signin_route():
-    """Round 17.2 -- proxy a SharePoint device-code sign-in request to
-    the main app.  Validates the admin CSRF token first; the main
-    app authenticates the request via ``X-AdoptIQ-Internal``.  On
-    success surfaces the user_code so the operator can copy it into
-    https://microsoft.com/devicelogin in their browser.
-    """
-    _require_admin_csrf()
-    sp_msg = 'unknown'
-    try:
-        import requests as _r17_2_req
-        headers: dict[str, str] = {}
-        _internal_tok = os.environ.get('ADOPTIQ_INTERNAL_TOKEN')
-        if _internal_tok:
-            headers['X-AdoptIQ-Internal'] = _internal_tok
-        resp = _r17_2_req.post(
-            f'{MAIN_APP_URL.rstrip("/")}/api/corpus/sharepoint/signin',
-            data={},
-            headers=headers,
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            data = resp.json() or {}
-            if data.get('ok'):
-                code = data.get('user_code') or '?'
-                uri = data.get('verification_uri') or 'https://microsoft.com/devicelogin'
-                sp_msg = (
-                    f'Open {uri} and enter code {code}. '
-                    f'AdoptIQ will pick up the session automatically once you complete sign-in.'
-                )
-            elif data.get('error'):
-                sp_msg = f"sign-in failed: {data['error']}"
-        elif resp.status_code == 403:
-            sp_msg = 'CSRF/auth rejected by main app'
-        else:
-            sp_msg = f'main app HTTP {resp.status_code}'
-    except Exception as err:
-        log_error(
-            'WARNING',
-            f'Round 17.2 sharepoint_signin proxy failed: {type(err).__name__}',
-            'sharepoint_signin_route',
-        )
-        sp_msg = 'unreachable'
-    return redirect(url_for(
-        'enhanced_admin_dashboard',
-        message=f'SharePoint sign-in: {sp_msg}',
-        message_type=('success' if 'enter code' in sp_msg else 'warning'),
-    ))
-
-
-@admin_app.route('/sharepoint_refresh', methods=['POST'])
-def sharepoint_refresh_route():
-    """Round 17.2 -- proxy a SharePoint cache refresh request to the
-    main app.  Equivalent to ``/corpus_refresh`` but the labelling
-    helps operators understand which source they are pulling."""
-    _require_admin_csrf()
-    refresh_status = 'unknown'
-    try:
-        import requests as _r17_2_req
-        headers: dict[str, str] = {}
-        _internal_tok = os.environ.get('ADOPTIQ_INTERNAL_TOKEN')
-        if _internal_tok:
-            headers['X-AdoptIQ-Internal'] = _internal_tok
-        resp = _r17_2_req.post(
-            f'{MAIN_APP_URL.rstrip("/")}/api/corpus/sharepoint/refresh',
-            data={},
-            headers=headers,
-            timeout=5,
-        )
-        if resp.status_code == 200:
-            data = resp.json() or {}
-            if data.get('refresh_started'):
-                refresh_status = 'started'
-            elif data.get('refresh_error'):
-                refresh_status = data.get('refresh_error')
-            else:
-                refresh_status = 'no-op'
-        elif resp.status_code == 403:
-            refresh_status = 'CSRF/auth rejected by main app'
-        else:
-            refresh_status = f'main app HTTP {resp.status_code}'
-    except Exception as err:
-        log_error(
-            'WARNING',
-            f'Round 17.2 sharepoint_refresh proxy failed: {type(err).__name__}',
-            'sharepoint_refresh_route',
-        )
-        refresh_status = 'unreachable'
-    return redirect(url_for(
-        'enhanced_admin_dashboard',
-        message=f'SharePoint refresh: {refresh_status}',
-        message_type=('success' if refresh_status == 'started' else 'warning'),
-    ))
+# Round 37 / Phase 3: ``/sharepoint_signin`` and ``/sharepoint_refresh``
+# admin proxy routes were removed.  Their main-app upstreams
+# (``/api/corpus/sharepoint/signin|signout|refresh``) were deleted in
+# Round 36 when the MSAL/Graph runtime path went away, so calling
+# these proxy routes would just produce a 404 from MAIN_APP_URL.
+# OneDrive sync presence is now the corpus auth signal, and
+# ``/corpus_refresh`` (kept) is the only manual-refresh contract the
+# admin needs.
 
 
 @admin_app.route('/start_server', methods=['POST'])
