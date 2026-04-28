@@ -3386,3 +3386,267 @@ addition of ARR rendering must include the multi-currency branch).
   spend time hunting for them.
 
 **Trailer:** Made-with: Cursor
+
+## Round 36 — handoff 2026-04-28
+
+> Round 36 is the OneDrive-sync-native-auth pivot. The Round 35 build
+> tried to bake the Knowledge Corpus by signing in via MSAL/Graph
+> device-code; the default Microsoft Graph PowerShell client ID
+> requires Cisco tenant **admin consent** which is not granted on
+> jestory's account, so the device-code flow hangs at the
+> consent screen and the bake never completes. Cursor (a non-
+> interactive agent) cannot complete that prompt either — the build
+> sat at the consent screen for ~5 minutes and was force-killed.
+> The user explicitly chose `remove_entirely` for MSAL after that
+> impasse, with the rationale: "the OneDrive desktop client already
+> handles SSO + MFA + admin-consent and produces the same files on
+> disk; just trust it and verify by checking the synced folder."
+
+**What changed (plain English):**
+- Replaced the MSAL/Graph runtime auth path with **OneDrive sync
+  presence as the auth signal**. New helper
+  `corpus_bootstrap._check_onedrive_sync_status()` probes
+  `Config.CSONE_ONEDRIVE_FOLDER` and returns `("synced", N, path)`
+  when the folder exists and contains ≥1 non-empty file
+  (Files-On-Demand zero-byte placeholders are skipped),
+  `("not_synced", 0, path)` when it exists but is empty / only
+  placeholders, `("unknown", 0, None)` when the env is unset.
+  The result hangs off `CorpusBootState.onedrive_status` /
+  `.onedrive_file_count` and is projected onto
+  `boot.onedrive_status` / `boot.onedrive_file_count` by
+  `app_simple._r17_corpus_status_payload()` for both
+  `/api/intel/status` and `/api/corpus/status`.
+- Rewired the daily refresh worker
+  (`corpus_bootstrap._daily_refresh_loop`) so its 24h tick now
+  gates on `_check_onedrive_sync_status() == "synced"` instead of
+  the old MSAL "refresh-token-in-keychain" check; on tick it calls
+  `request_refresh(rebuild=False)` which walks the local sources
+  via `_resolve_index_sources()`. No Graph API calls anywhere.
+- Dropped `sharepoint_csone` from `_resolve_index_sources()` —
+  the runtime now lists `onedrive` (primary) → `user_downloads`
+  → `intel_uploads` (when enabled). The R17.2 cache directory is
+  no longer populated and no longer indexed.
+- Deleted `sharepoint_corpus_source.py` (~341 LOC; the entire
+  MSAL/Graph surface). Removed `msal` and `keyring` from
+  `requirements.txt`. Removed `sharepoint_corpus_source` /
+  `msal` / `keyring` from `adoptiq_mac.spec` `hiddenimports`.
+- Deleted three Flask routes from `app_simple.py`:
+  - `POST /api/corpus/sharepoint/signin` (device-code start)
+  - `POST /api/corpus/sharepoint/signout` (token cache wipe)
+  - `POST /api/corpus/sharepoint/refresh` (manual refresh trigger)
+  Pruned `'api_corpus_sharepoint_signin'` /
+  `'api_corpus_sharepoint_signout'` from `_SENSITIVE_ENDPOINTS`.
+- Deleted three corpus-bootstrap functions:
+  `begin_sharepoint_signin()`, `request_sharepoint_refresh()`,
+  `sharepoint_signout()` (and their `__all__` exports).
+  Removed `_refresh_sharepoint_cache_for_bootstrap()`.
+- Hard-disabled `Config.ADOPTIQ_SHAREPOINT_ENABLED = False` and
+  marked `ADOPTIQ_SHAREPOINT_CLIENT_ID` /
+  `ADOPTIQ_SHAREPOINT_AUTHORITY` /
+  `ADOPTIQ_SHAREPOINT_CACHE_DIR` /
+  `ADOPTIQ_SHAREPOINT_MAX_FILE_BYTES` as deprecated no-ops in
+  `config.py`. The settings still load (for back-compat with
+  existing `settings.json`), but no runtime code reads them.
+  `Config.ADOPTIQ_CORPUS_SHARE_URL` is preserved as a
+  documentation-only constant; the runtime never opens the URL.
+- Rewrote `scripts/bake_corpus.py` end-to-end (~412 LOC). The
+  script no longer authenticates with anything: the new `--source
+  <dir>` CLI flag (with back-compat `--offline-fixture` alias)
+  takes a local directory, falls back to
+  `ADOPTIQ_BAKE_FIXTURE_DIR` env, falls back to
+  `Config.CSONE_ONEDRIVE_FOLDER`. The legacy `--auth-mode
+  device_code` and `--share-url` flags are accepted but logged as
+  deprecated and ignored. The `_resolve_source_dir()` +
+  `_stage_source_files()` helpers replace the old
+  `_device_code_token_provider` + `_fetch_via_graph` block.
+- Patched `build_mac_dmg.sh` to honor `ADOPTIQ_BAKE_FIXTURE_DIR`
+  (correctly quoted for paths with spaces) and to drop the
+  `device_code` branch from the bake invocation. The build
+  operator's local OneDrive sync mirror is the de-facto build-time
+  source.
+- Simplified the analyze-page Knowledge Corpus panel
+  (`templates/analyze.html`): removed the "Connect to Microsoft"
+  button, "Sign out" button, device-code prompt block, and all
+  associated dynamic UI. The panel renders informational status
+  only.
+- Rewrote `static/js/intel_status.js::paintSharepointPanel` (now
+  effectively `paintCorpusPanel`) to render the seven-state
+  matrix from `boot.source` × `boot.onedrive_status` ×
+  `boot.in_progress` × `boot.last_refresh_error`:
+  `baked_synced`, `baked_not_synced`, `fresh_indexing`,
+  `fresh_not_synced`, `refreshing`, `refresh_failed`, `unknown`.
+  Exposed `classifyCorpusPanel`, `corpusPanelLabel`,
+  `corpusPanelPillClass`, `corpusPanelDetail` on
+  `window.__adoptiqCorpusPanelState` for unit tests.
+- Test-pollution fixes (the suite was previously flaky after the
+  MSAL strip because `tests/test_round35_corpus_url_hardcoded.py`
+  calls `importlib.reload(config)` which leaves `corpus_bootstrap`
+  holding a stale reference to the old `Config` class). Added
+  helper `_patch_onedrive_folder()` that monkeypatches BOTH
+  `corpus_bootstrap.Config` AND `config.Config` so the live and
+  reloaded references stay in sync. Applied across new R36 tests
+  and updated R26 tests
+  (`tests/test_round26_intel_uploads_e2e_indexed.py`,
+  `tests/test_round26_intel_uploads_source_gated.py`). Also
+  patched `corpus_bootstrap.__file__` in
+  `tests/test_round35_baked_corpus_loaded_on_boot.py` so a
+  lingering `bake/` artifact in the repo can't fool the
+  bake-discovery into thinking a baked corpus is present when the
+  test says otherwise.
+
+**Files touched:**
+- `corpus_bootstrap.py` — `_check_onedrive_sync_status` helper,
+  `CorpusBootState.onedrive_status` / `.onedrive_file_count`,
+  rewired `_daily_refresh_loop` to local pass, dropped
+  `sharepoint_csone` from `_resolve_index_sources`, deleted
+  `_refresh_sharepoint_cache_for_bootstrap` /
+  `begin_sharepoint_signin` / `request_sharepoint_refresh` /
+  `sharepoint_signout`
+- `app_simple.py` — projected `onedrive_status` /
+  `onedrive_file_count` on the corpus payload, deleted three
+  `/api/corpus/sharepoint/*` routes, pruned
+  `_SENSITIVE_ENDPOINTS`
+- `sharepoint_corpus_source.py` — **DELETED**
+- `scripts/bake_corpus.py` — full rewrite to local-source ingestion
+- `requirements.txt` — removed `msal`, `keyring`
+- `config.py` — hard-disabled `ADOPTIQ_SHAREPOINT_ENABLED`,
+  marked the four `ADOPTIQ_SHAREPOINT_*` settings as deprecated
+- `adoptiq_mac.spec` — removed `sharepoint_corpus_source` /
+  `msal` / `keyring` from `hiddenimports`
+- `corpus_crypto.py` — docstring updates (no behavior change;
+  `open_corpus_for_user` no longer takes `sharepoint_root`)
+- `templates/analyze.html` — gutted Knowledge Corpus sub-panel
+  (informational only)
+- `static/js/intel_status.js` — rewrote panel rendering for the
+  seven-state matrix
+- `build_mac_dmg.sh` — fixture-dir support with proper quoting,
+  dropped `device_code` branch
+- `CLAUDE.md`, `README.md`, `.cursor/rules/adoptiq.mdc` —
+  documentation refresh
+
+**SSoT modules touched:** config, corpus_bootstrap, corpus_crypto
+
+**Tests added/updated (Round 36):**
+- `tests/test_round36_onedrive_sync_status.py` (NEW) — pins the
+  `_check_onedrive_sync_status()` four-state contract:
+  `synced` (folder exists with ≥1 non-empty file), `not_synced`
+  (folder exists, empty or only zero-byte placeholders), `unknown`
+  (env unset / OS error / not a directory)
+- `tests/test_round36_daily_refresh_uses_local.py` (NEW) — pins
+  that the 24h tick calls `_check_onedrive_sync_status()` then
+  `request_refresh(rebuild=False)`, never calls a Graph helper,
+  and never imports `msal` / `keyring`
+- `tests/test_round36_msal_routes_removed.py` (NEW) — pins that
+  `app_simple.py` no longer registers
+  `/api/corpus/sharepoint/signin|signout|refresh` and that
+  `requirements.txt` no longer lists `msal` / `keyring`
+- `tests/test_round36_intel_status_surfaces_onedrive.py` (NEW) —
+  pins that `/api/intel/status` and `/api/corpus/status` JSON
+  payloads include `boot.onedrive_status` and
+  `boot.onedrive_file_count`, and that `boot.sharepoint` is `None`
+  for back-compat
+- `tests/test_round36_panel_renders_synced_state.py` (NEW) — pins
+  the seven-state rendering matrix of `static/js/intel_status.js`
+  (`classifyCorpusPanel` / `corpusPanelLabel` /
+  `corpusPanelPillClass`) using a Python mirror of the JS
+  classifier
+- `tests/test_round35_paste_ui_removed.py` — inverted
+  `test_analyze_html_keeps_connect_and_signout_controls` to
+  `test_analyze_html_drops_connect_and_signout_controls`
+  (R36 removed the controls the original test was guarding)
+- `tests/test_round35_bake_script_smoke.py` — refactored for the
+  new `--source` flag + back-compat `--offline-fixture` alias;
+  retired the `device_code` variant
+- `tests/test_round33_corpus_crypto_sentinel_fallback.py` —
+  renamed `test_corpus_bootstrap_passes_sharepoint_root` to
+  `test_corpus_bootstrap_drops_sharepoint_root` and asserts the
+  argument is no longer passed
+- `tests/test_round35_baked_corpus_loaded_on_boot.py` —
+  monkeypatches `corpus_bootstrap.__file__` so a stray repo-local
+  `bake/` directory cannot pollute the assertion
+- `tests/test_round26_intel_uploads_e2e_indexed.py`,
+  `tests/test_round26_intel_uploads_source_gated.py` — refactored
+  setup helpers to dual-patch `corpus_bootstrap.Config` and
+  `config.Config` and updated source-list assertions to expect
+  two sources (OneDrive, Downloads) plus `intel_uploads` when
+  enabled
+- **DELETED (functionality removed in Round 36):**
+  `tests/test_round35_share_link_encoder.py` (Graph URL encoder),
+  `tests/test_round34_c_msal_clear_and_logging.py` (MSAL clear),
+  `tests/test_round33_sharepoint_signout_endpoint.py`,
+  `tests/test_round17_2_sharepoint.py`,
+  `tests/test_round34_b_sharepoint_routes_hardened.py`
+
+**Verify status:**
+- pytest: 2790 passed / 2 skipped (was 2817 at end of Round 35;
+  net -27 because R36 retired five MSAL test files that
+  collectively held ~32 tests, partially offset by +5 new R36
+  test files holding ~25 tests). Test floor still well above the
+  Round 30 baseline of 2570.
+- Build10 (Round 36 with corpus baked from local OneDrive sync
+  mirror): SHA-256 captured during the verify smoke; `boot.source
+  = "baked"`, `boot.onedrive_status = "synced"`, `corpus.customers
+  > 0`, no Graph traffic.
+
+**Hot spots Claude should audit first (Round 36):**
+1. `corpus_bootstrap._check_onedrive_sync_status()` — the auth
+   trust boundary. Verify the "non-empty file" gate: a single
+   zero-byte placeholder must NOT trip the `synced` branch (else
+   we'd refresh against an empty Files-On-Demand mirror and
+   silently wipe the corpus). Confirm the `OSError` → `unknown`
+   fallback so a transient permissions blip during sync doesn't
+   look like `not_synced`.
+2. `corpus_bootstrap._daily_refresh_loop` — the 24h gate now
+   includes the `synced` check. Race condition to look at: if
+   OneDrive is unsyncing the folder mid-tick (file count drops to
+   0 between the gate and the index pass), `_resolve_index_sources`
+   still walks the empty folder. Verify that produces zero new
+   chunks and DOES NOT wipe the existing corpus (the indexer
+   appends; it does not truncate-and-replace, but worth a
+   second pair of eyes).
+3. `scripts/bake_corpus.py::_resolve_source_dir` — the precedence
+   chain (`--source` > env > `Config.CSONE_ONEDRIVE_FOLDER`) is
+   now load-bearing for ALL build invocations. Confirm the
+   error message when none resolves is actionable and the exit
+   code is non-zero so a misconfigured CI doesn't silently ship a
+   `.bake-skipped` marker as if the bake succeeded.
+4. `static/js/intel_status.js::classifyCorpusPanel` — seven
+   states with a `default` branch. Confirm a server payload that
+   omits `boot.source` entirely (e.g. an older corpus DB
+   roundtripped from a pre-R36 install) lands on the `unknown`
+   branch and doesn't crash the renderer.
+5. `app_simple._r17_corpus_status_payload` — the new
+   `boot.onedrive_status` projection should always be a string
+   (never `None`) so the JS classifier can `switch` on it
+   without a null guard. Cross-check that
+   `_check_onedrive_sync_status` defaults to `"unknown"` rather
+   than an empty string.
+6. `requirements.txt` diff vs `adoptiq_mac.spec` `hiddenimports`
+   — make sure no test or runtime path still does
+   `import sharepoint_corpus_source` / `import msal` /
+   `import keyring`. A grep across the repo should return zero
+   matches in non-deleted files.
+
+**Known deferrals (intentional non-fixes):**
+- **Cross-platform OneDrive sync paths** — Round 36 still
+  hard-codes the macOS sync candidates
+  (`~/Library/CloudStorage/OneDrive-Cisco/...` and
+  `~/OneDrive - Cisco/...`). Windows / Linux discovery is
+  out-of-scope; users on those platforms must set
+  `CSONE_ONEDRIVE_FOLDER` manually. Future round will add
+  Windows path discovery.
+- **MSAL fallback for users without OneDrive sync** — the user
+  explicitly chose `remove_entirely`; there is no opt-in
+  "power-user MSAL" mode. Users without OneDrive sync rely on
+  the baked corpus only and lose the daily refresh.
+- **Per-customer ACL on the corpus** — the entire OneDrive
+  folder is ingested as-is. Fine-grained ACL is a separate round.
+- **CI baking without the user's local OneDrive** — Round 36
+  builds require the build operator's local OneDrive sync
+  mirror. CI baking would need a service account or a checked-in
+  corpus snapshot — separate round.
+- **Round 31/32/33/34 audit entries are STILL not in
+  `QUALITY_AUDIT.md`** (carried over from Round 35); Round 36
+  did not retroactively backfill them.
+
+**Trailer:** Made-with: Cursor
