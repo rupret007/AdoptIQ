@@ -433,6 +433,72 @@ def concentration_note_text(concentration: Optional[Dict[str, Any]]) -> Optional
     return CONCENTRATION_MULTICURRENCY_NOTE
 
 
+def _safe_annotate_with_contract(
+    df: 'pd.DataFrame',
+    *,
+    dataset: str,
+    source_label: str,
+) -> 'pd.DataFrame':
+    """Round 34 / D -- fail-loud wrapper around
+    :func:`data_contracts.annotate_with_contract`.
+
+    Pre-Round-34: every caller wrapped ``annotate_with_contract`` in
+    ``try/except Exception as _annot_err: logger.debug(...)``.  When
+    annotation crashed for any reason (import failure, attribute
+    issue, an unexpected raise inside the contract code), the error
+    was logged at DEBUG and the dataframe carried NO
+    ``fetch_error`` / ``fetch_error_kind`` annotation.  Downstream
+    code therefore treated the frame as "valid" and the operator's
+    only signal was a single DEBUG line they would never see in
+    production.  The "thin report" symptom (executive summary
+    rendering almost nothing because a critical dataframe lost its
+    schema_drift signal) was the visible failure.
+
+    Fix: WARN-level log of the failure, plus an explicit
+    ``fetch_error`` stamp with kind ``contract_annotation_failure``
+    so the existing partial-data banner pipeline (analyze.html
+    banner + Word "⚠ Partial Data Warning" section + Excel
+    Data_Unavailable rows) actually surfaces the loss.
+
+    The wrapper is best-effort about stamping (it must NEVER raise
+    from a load path), so a stamp failure also falls through to
+    WARN -- but the load itself completes.
+    """
+    try:
+        from data_contracts import annotate_with_contract as _annotate
+        _annotate(df, dataset=dataset)
+        return df
+    except Exception as annot_err:  # noqa: BLE001 - defensive
+        logger.warning(
+            "Round 34 / D: annotate_with_contract(%s) failed on %s "
+            "load (%s: %s); stamping fetch_error so downstream "
+            "renderers surface the contract-annotation gap",
+            dataset, source_label,
+            type(annot_err).__name__, annot_err,
+        )
+        # Best-effort stamp.  ``df.attrs`` is a plain dict on
+        # pandas DataFrames; only fails if df is not a DataFrame
+        # (also possible -- caller may have passed None).
+        try:
+            if hasattr(df, 'attrs'):
+                # Don't clobber an existing fetch_error -- the
+                # original failure is more informative.
+                if not df.attrs.get('fetch_error'):
+                    df.attrs['fetch_error'] = (
+                        f"contract_annotation_failure on {dataset}: "
+                        f"{type(annot_err).__name__}"
+                    )
+                    df.attrs['fetch_error_kind'] = 'contract_annotation_failure'
+                    df.attrs.setdefault('fetch_error_dataset', dataset)
+        except Exception as stamp_err:  # noqa: BLE001 - never raise
+            logger.warning(
+                "Round 34 / D: could not stamp fetch_error after "
+                "contract failure on %s: %s",
+                dataset, stamp_err,
+            )
+        return df
+
+
 def _empty_df_with_fetch_error(dataset: str, exc: Exception) -> pd.DataFrame:
     """
     Return an empty DataFrame whose ``.attrs`` carries the source dataset
@@ -1042,12 +1108,11 @@ def load_csone_excel(path: Optional[Path]) -> pd.DataFrame:
         # prefetch path.  Without this, an upstream column rename in
         # the Excel template would silently zero out TAC/BEMS counts
         # downstream.
-        try:
-            from data_contracts import annotate_with_contract as _annotate
-            _annotate(df, dataset="tac_cases")
-            _annotate(df, dataset="bems_rows")
-        except Exception as _annot_err:
-            logger.debug("annotate_with_contract(csone) skipped: %s", _annot_err)
+        # Round 34 / D: route through fail-loud helper so any
+        # contract-annotation crash stamps fetch_error on the df
+        # instead of silently dropping the schema_drift signal.
+        _safe_annotate_with_contract(df, dataset="tac_cases", source_label="csone_excel")
+        _safe_annotate_with_contract(df, dataset="bems_rows", source_label="csone_excel")
         return df
     except Exception as e:
         logger.error(f"Failed to load CSOne Excel file: {e}")
@@ -2201,11 +2266,8 @@ def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
         # detect schema drift on this load path.  Previously only the
         # snowflake_prefetch path called annotate_with_contract, so
         # direct fetch_team_subscriptions consumers had no contract.
-        try:
-            from data_contracts import annotate_with_contract as _annotate
-            _annotate(df, dataset="subscriptions")
-        except Exception as _annot_err:
-            logger.debug("annotate_with_contract(subscriptions) skipped: %s", _annot_err)
+        # Round 34 / D: fail-loud wrapper.
+        _safe_annotate_with_contract(df, dataset="subscriptions", source_label="team_subscriptions")
         return df
     except Exception as e:
         _log_snowflake_fallback("Team subscriptions query", e)
@@ -2488,11 +2550,8 @@ def fetch_arr_data(ctx, account_ids: List[str]) -> pd.DataFrame:
         rows = cur.fetchall()
         if not rows:
             empty = _normalize_arr_df(pd.DataFrame())
-            try:
-                from data_contracts import annotate_with_contract as _annotate
-                _annotate(empty, dataset="subscriptions")
-            except Exception as _annot_err:
-                logger.debug("annotate_with_contract(arr empty) skipped: %s", _annot_err)
+            # Round 34 / D: fail-loud wrapper (empty-arr branch).
+            _safe_annotate_with_contract(empty, dataset="subscriptions", source_label="arr_empty")
             return empty
         cols = [c[0] for c in cur.description]
         result = _normalize_arr_df(pd.DataFrame(rows, columns=cols))
@@ -2500,11 +2559,8 @@ def fetch_arr_data(ctx, account_ids: List[str]) -> pd.DataFrame:
         # frame so the same drift detection that works on the
         # snowflake_prefetch path also fires when callers reach
         # fetch_arr_data directly.
-        try:
-            from data_contracts import annotate_with_contract as _annotate
-            _annotate(result, dataset="subscriptions")
-        except Exception as _annot_err:
-            logger.debug("annotate_with_contract(arr) skipped: %s", _annot_err)
+        # Round 34 / D: fail-loud wrapper.
+        _safe_annotate_with_contract(result, dataset="subscriptions", source_label="arr_data")
         # Round 10 / Phase 9.3: stamp ``arr_schema_degraded`` on the
         # frame's ``attrs`` when one or more monetary columns were
         # absent from the introspected schema and we substituted
