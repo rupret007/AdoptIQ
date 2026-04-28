@@ -2676,16 +2676,31 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                Round 26 / Phase E: relabel the buttons to match the
                user-visible "AdoptIQ Intelligence" framing.  The
                POST target stays ``/corpus_refresh`` so admin runbooks
-               and existing tests keep working. #}
+               and existing tests keep working.
+
+               Round 37 / Phase 4: rename "Run incremental" -> "Re-index
+               now" (matches the analyze-page corpus panel labelling)
+               and disable both buttons while ``boot.in_progress`` is
+               true so the operator cannot stack refresh requests on
+               an active index pass. #}
+            {% set _corpus_busy = corpus_status.boot.in_progress %}
             <form method="POST" action="/corpus_refresh" style="display:inline;">
                 <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
-                <button type="submit" class="btn btn-primary">Run incremental</button>
+                <button type="submit" class="btn btn-primary"
+                        {% if _corpus_busy %}disabled{% endif %}
+                        title="{% if _corpus_busy %}Indexing already in progress{% else %}Re-index from OneDrive sync (incremental){% endif %}">
+                    Re-index now
+                </button>
             </form>
             <form method="POST" action="/corpus_refresh" style="display:inline;"
                   onsubmit="return confirm('Rebuild the entire encrypted cache from scratch? This may take several minutes.');">
                 <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
                 <input type="hidden" name="rebuild" value="1">
-                <button type="submit" class="btn btn-warning">Rebuild</button>
+                <button type="submit" class="btn btn-warning"
+                        {% if _corpus_busy %}disabled{% endif %}
+                        title="{% if _corpus_busy %}Indexing already in progress{% else %}Discard the encrypted cache and rebuild from scratch{% endif %}">
+                    Rebuild
+                </button>
             </form>
         </div>
 
