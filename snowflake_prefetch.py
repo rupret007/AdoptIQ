@@ -207,6 +207,115 @@ _FETCHERS = {
 logger = logging.getLogger(__name__)
 
 
+# Round 30 / L2: defensive contract check that every datetime-typed
+# column on a prefetched Snowflake frame is tz-aware UTC.  The
+# ``ALTER SESSION SET TIMEZONE='UTC'`` we issue at connect time
+# (adoptiq_backend._instrument_snowflake_connection) ensures Snowflake
+# returns rows in UTC, but the connector's ``fetch_pandas_*`` API can
+# still produce tz-naive ``datetime64[ns]`` columns when the source
+# column type is ``TIMESTAMP_NTZ`` (no explicit zone).  The compact /
+# executive 30-day window math now compares against
+# ``datetime.now(timezone.utc)`` (Round 30 / H3), so a tz-naive
+# ``date_opened`` column would raise ``TypeError: Invalid comparison
+# between dtype=datetime64[ns] and Timestamp``.  This helper warns
+# (or raises in strict mode) so the contract violation surfaces at
+# prefetch time rather than midway through report rendering.
+_DATETIME_COLUMN_HINTS: Tuple[str, ...] = (
+    "DATE", "TIME", "AT", "OPENED", "CLOSED", "CREATED",
+    "MODIFIED", "UPDATED", "_TS", "_DT",
+)
+
+
+def _assert_datetime_columns_tz_aware(
+    df: Optional[pd.DataFrame],
+    *,
+    dataset_name: str = "<unknown>",
+    strict: Optional[bool] = None,
+) -> None:
+    """Round 30 / L2: assert that every datetime column is tz-aware.
+
+    Iterates over ``df.columns`` and inspects every column whose
+    dtype is ``datetime64[ns, ...]`` or ``datetime64[ns]``.  When a
+    column is tz-naive AND its name looks like a timestamp/date
+    column (matched against :data:`_DATETIME_COLUMN_HINTS`), emit a
+    structured WARN so operators see the drift at fetch time.  When
+    ``strict`` is ``True`` (or ``ADOPTIQ_STRICT_MODE`` env var is
+    enabled), raise ``ValueError`` instead so CI and dev runs catch
+    the violation immediately.
+
+    Tolerated:
+
+    - Empty / ``None`` frames (no-op).
+    - Columns whose dtype is not ``datetime64`` (e.g. plain ``object``
+      columns containing ISO strings -- those are normalized later
+      by ``pd.to_datetime(..., utc=True)`` at the call site).
+    - Columns whose name does not look like a date/time column
+      (e.g. ``ACCOUNT_ID_C`` is ``object`` but happens to be parsed
+      as ``datetime64`` by an upstream test fixture).
+    """
+
+    if df is None:
+        return
+    try:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return
+    except Exception:  # noqa: BLE001
+        return
+
+    # Resolve strict mode the same way ``_assert_arr_attrs`` does.
+    if strict is None:
+        try:
+            _env = str(os.environ.get("ADOPTIQ_STRICT_MODE", "0")).strip().lower()
+            strict = _env in ("1", "true", "yes", "on")
+        except Exception:  # noqa: BLE001
+            strict = False
+
+    naive_columns: List[str] = []
+    for col in df.columns:
+        try:
+            dtype = df[col].dtype
+        except Exception:  # noqa: BLE001
+            continue
+        # Only inspect datetime-typed columns.
+        if not str(dtype).startswith("datetime64"):
+            continue
+        # tz-aware dtypes look like ``datetime64[ns, UTC]`` -- the
+        # presence of a comma is the canonical signal.  pandas also
+        # exposes ``DatetimeTZDtype`` which carries a ``.tz``
+        # attribute; check both for back-compat.
+        is_tz_aware = "," in str(dtype) or getattr(dtype, "tz", None) is not None
+        if is_tz_aware:
+            continue
+        # Only flag columns whose NAME looks like a timestamp.
+        col_upper = str(col).upper()
+        if not any(hint in col_upper for hint in _DATETIME_COLUMN_HINTS):
+            continue
+        naive_columns.append(str(col))
+
+    if not naive_columns:
+        return
+
+    extra = {
+        "event": "snowflake.tz_naive_datetime_columns",
+        "dataset_name": dataset_name,
+        "naive_columns": naive_columns,
+        "note": (
+            "Snowflake returned tz-naive datetime columns despite "
+            "ALTER SESSION SET TIMEZONE='UTC'.  Source columns may be "
+            "TIMESTAMP_NTZ; coerce with pd.to_datetime(..., utc=True) "
+            "before comparing against tz-aware now()."
+        ),
+    }
+    if strict:
+        logger.error("snowflake.tz_naive_datetime_columns", extra=extra)
+        raise ValueError(
+            f"Snowflake dataset {dataset_name!r} returned tz-naive datetime "
+            f"columns: {naive_columns}.  Pin the session to UTC and coerce "
+            f"with pd.to_datetime(..., utc=True)."
+        )
+    logger.warning("snowflake.tz_naive_datetime_columns", extra=extra)
+
+
 def _normalize_account_ids(account_ids: Iterable[Any]) -> Tuple[str, ...]:
     values: List[str] = []
     for v in (account_ids or []):
@@ -497,6 +606,24 @@ class AnalysisRunContext:
                         "on %s None-result placeholder: %s",
                         dataset_name, _attr_err,
                     )
+            # Round 30 / L2: assert the contract that every datetime
+            # column on a Snowflake-sourced frame is tz-aware UTC.
+            # Combined with ``ALTER SESSION SET TIMEZONE='UTC'`` at
+            # connect time, this gives belt-and-suspenders coverage
+            # for the 30-day window math in the compact + executive
+            # reports.  Non-strict mode logs a WARN; strict mode
+            # (``ADOPTIQ_STRICT_MODE=1``) raises so CI catches the
+            # regression immediately.
+            try:
+                _assert_datetime_columns_tz_aware(df, dataset_name=dataset_name)
+            except ValueError:
+                # Re-raise so the strict-mode contract violation surfaces.
+                raise
+            except Exception as _tz_err:  # noqa: BLE001
+                logger.debug(
+                    "Round 30 / L2: tz-aware datetime assertion skipped for %s: %s",
+                    dataset_name, _tz_err,
+                )
             # Phase 4.1: validate row-level schema for datasets that
             # have a contract. Annotation stashes the result on
             # ``df.attrs['row_contract']`` so downstream consumers can

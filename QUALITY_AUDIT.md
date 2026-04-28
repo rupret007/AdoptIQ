@@ -2643,3 +2643,514 @@ Net test delta: **2293 → 2294 passed** (+1: new Round 23.2 marker test), skip 
 - **Customer-name list shape in `portfolio_metrics`** — if `customer_names` key is absent, the R27 portfolio gate degrades to no-allowlist mode (entity check skipped) rather than failing. Acceptable for first landing; refine the SSoT contract in a follow-up if the rejection rate is unacceptable.
 
 **Trailer:** Made-with: Claude Opus 4.7 (1M context)
+
+## Round 29 — handoff 2026-04-27
+
+**What changed (plain English):**
+Round 29 closes the 1 medium and 5 low findings Claude Code raised in its
+read-only review of Round 28, plus a small surface my own audit picked
+up (a Python-side test pinned to `static/css/style.css` that wouldn't
+catch a `url_for('static', filename='css/style.css')` regression).
+My broader sweep — inline-HTML f-string routes, `|safe` filter usage in
+JS contexts, missing error handlers, orphan templates, and template
+inheritance — found no additional critical/medium offenders, so this
+round stayed a focused polish pass on top of Round 28's theme
+unification work.
+
+- **M1 — `base.html` now declares the missing semantic tokens.** The
+  Round-28 plan promised `--success-bg` / `--success-fg` /
+  `--warning-bg` / `--warning-fg` / `--danger-bg` / `--danger-fg` /
+  `--info-card-border` (plus a `--info-tint-bg` helper for the
+  cyan/orange running/info pill) but they never landed; child
+  templates therefore had to hardcode `rgba(0, 166, 81, 0.08)` style
+  literals inline and dual-write a `[data-bs-theme="dark"] .selector`
+  rule for every status surface. Tokens are now declared in BOTH the
+  `:root` block and the `[data-bs-theme="dark"]` override block, so
+  the dark/light toggle re-skins all four surfaces (status-box,
+  csone-status, partial-warnings, previous-reports-strip) from a
+  single source of truth.
+- **L1 — `app_simple.progress()` no longer returns inline-HTML 404s.**
+  Three branches inside `progress()` previously returned a raw
+  `f"<h1>Analysis not found</h1><p>Analysis ID: {analysis_id_safe}</p>..."`
+  with HTTP 404, which bypassed the Round-28 `@app.errorhandler(404)`
+  and showed an unthemed page without the navbar / sun-moon toggle.
+  All three now `abort(404)`, so the same handler that catches unknown
+  URLs catches "id is well-formed but not in memory / file / report
+  history" hits and renders `templates/404.html`. The `try/except
+  Exception:` guard around the file-load path was extended with an
+  `isinstance(e, HTTPException): raise` re-raise so the new `abort`
+  isn't swallowed by the broad-except.
+- **L2 — `progress.html` uses `|tojson`, not `|safe` against pre-jsonified strings.**
+  The previous JS interpolation was
+  `var ANALYSIS_ID = {{ analysis_id_json|safe }};` where
+  `analysis_id_json` was pre-built via `json.dumps(...)` in the route.
+  That works in the common case but is fragile: anyone who later
+  routes a non-jsonified value into the same Jinja slot loses the
+  `</script>` escape, and the route ends up needing a matching
+  `json.dumps` for every JS-context value. Switched to
+  `var ANALYSIS_ID = {{ analysis_id|tojson }};` /
+  `var CSRF_TOKEN = {{ csrf_token_value|tojson }};` so Jinja owns the
+  JS-context escaping (`|tojson` escapes `<`/`>`/`&` and emits a JSON
+  literal directly).
+- **L3 — Early-paint `<script>` honours `prefers-color-scheme`.**
+  Round 28 wired `static/js/theme-toggle.js::detectPreferredTheme()`
+  to consult `window.matchMedia('(prefers-color-scheme: light)')` for
+  first-time visitors, but that script runs after `DOMContentLoaded`,
+  so the early-paint inline `<script>` at the top of `base.html`
+  (which runs synchronously to set `data-bs-theme` before any styles
+  apply) still painted dark on first visit and theme-toggle.js then
+  flipped it to light, producing a visible flash. The early-paint
+  block now mirrors the same OS-preference detection (wrapped in
+  `try/catch` so a SecurityError in private mode falls back to the
+  dark default) so the very first paint already matches the OS
+  preference when `localStorage` has no stored choice.
+- **L4 — Dead code in `progress()` removed.** With L1 in place, the
+  `import html as html_module` and `analysis_id_safe = html_module.escape(analysis_id)`
+  lines in `progress()` were only ever feeding the three inline
+  f-string returns and the two `/download/<id>/<type>` anchor `href`s
+  in `progress.html` (where Jinja's autoescape already covers the
+  HTML-context interpolation). Both lines are gone; the template now
+  references the raw `{{ analysis_id }}` and Jinja autoescapes it.
+  `analysis_id_json` and `csrf_token_json` are dropped from the
+  context dict because nothing references them anymore (the template
+  consumes the raw values via `|tojson`).
+- **L5 — Round-28 orphan-CSS test relaxed to match the HTML-side
+  pattern.** `tests/test_round28_no_orphan_style_css.py::test_no_runtime_python_module_references_style_css`
+  pinned the literal `"static/css/style.css"`, which would miss a
+  `url_for('static', filename='css/style.css')` regression in Python
+  code. Relaxed to `"css/style.css"` to match the HTML-side scan
+  (`test_no_template_references_style_css`); `_ALLOWED_REFS` still
+  exempts the two tombstone-style guards that mention the path on
+  purpose.
+
+**Files touched:**
+- `templates/base.html` — added `--success-bg` / `--success-fg` /
+  `--warning-bg` / `--warning-fg` / `--danger-bg` / `--danger-fg` /
+  `--info-card-border` / `--info-tint-bg` to `:root` (light defaults
+  match the inlined tints from `progress.html`/`previous_reports.html`
+  pre-Round-29) and to `[data-bs-theme="dark"]` (orange-friendly
+  variants for the dark canvas). Mirrored the OS-preference detection
+  inside the early-paint inline `<script>` block.
+- `templates/progress.html` — replaced inline `rgba(...)` literals on
+  `.status-box.{running,completed,error}`, `.csone-status.csone-{success,warning,error}`,
+  `.step-item.done`, `.partial-warnings-box`, `.cancel-btn`,
+  `.error-strip`, `.download-error-strip`, `.previous-reports-strip`,
+  `.customer-progress-card`, `.info-card`, `.download-links a` with
+  `var(--success-bg)` / `var(--warning-bg)` / `var(--danger-bg)` /
+  `var(--info-tint-bg)` / `var(--success-fg)` / `var(--warning-fg)` /
+  `var(--danger-fg)` / `var(--info-card-border)`. Switched JS
+  interpolation from `analysis_id_json|safe` / `csrf_token_json|safe`
+  to `analysis_id|tojson` / `csrf_token_value|tojson`. Switched
+  download anchor `href` interpolation from `{{ analysis_id_safe }}`
+  to `{{ analysis_id }}` (Jinja autoescape).
+- `templates/previous_reports.html` — replaced inline `rgba(...)`
+  literals on `.report-item:hover` (and the dark-theme variant),
+  `.file-type.word`, `.file-type.excel`, `.download-btn.excel` with
+  the same semantic tokens. Removed the dual-write
+  `[data-bs-theme="dark"] .report-item:hover` rule (the token-flip
+  in base.html now does the work).
+- `app_simple.py` — added `abort` to the `flask` import. In
+  `progress()`: dropped `import html as html_module` + the
+  `analysis_id_safe = html_module.escape(...)` line; replaced three
+  `return f"<h1>Analysis not found</h1>..."` returns with `abort(404)`;
+  added `isinstance(e, HTTPException): raise` re-raise inside the
+  `except Exception:` guard so `abort(404)` isn't swallowed; updated
+  the context dict to pass the raw `analysis_id` instead of
+  `analysis_id_safe` and dropped `analysis_id_json` /
+  `csrf_token_json`.
+- `tests/test_round28_no_orphan_style_css.py` — relaxed the
+  Python-side scan from `"static/css/style.css"` to `"css/style.css"`
+  to match the HTML-side scan.
+- `tests/test_round29_progress_404_uses_branded_template.py` — NEW —
+  hits `/progress/<bogus-uuid>` and asserts 404 + branded body
+  (`data-bs-theme=`, `id="theme-toggle"`, `Page Not Found`) +
+  absence of legacy `<h1>Analysis not found</h1>` marker.
+- `tests/test_round29_progress_uses_tojson_not_safe.py` — NEW — pins
+  `|tojson` on `analysis_id` and `csrf_token_value` in
+  `progress.html`, asserts `analysis_id_json|safe` /
+  `csrf_token_json|safe` are gone, and scans for any remaining
+  `var FOO = ...|safe` JS-context interpolation.
+- `tests/test_round29_base_html_has_semantic_tokens.py` — NEW — pins
+  the seven new semantic tokens are declared in BOTH the `:root`
+  block and the `[data-bs-theme="dark"]` block of `base.html`.
+- `tests/test_round29_early_paint_respects_prefers_color_scheme.py` —
+  NEW — pins the early-paint inline `<script>` body in `base.html`
+  contains `matchMedia` + `(prefers-color-scheme: light)`, wraps the
+  call in `try/catch`, gates the OS-preference branch on
+  `=== null` (so an explicit user toggle persists), and retains a
+  `'dark'` string fallback.
+- `tests/test_round29_progress_no_inline_status_rgba.py` — NEW —
+  scans `templates/progress.html` and `templates/previous_reports.html`
+  for the eight canonical inline tints (`rgba(0, 166, 81, 0.08)`,
+  `rgba(0, 166, 81, 0.12)`, `rgba(255, 140, 0, 0.08)`,
+  `rgba(227, 28, 61, 0.08)`, `rgba(255, 122, 26, 0.06)`,
+  `rgba(255, 122, 26, 0.08)`, `rgba(0, 188, 235, 0.06)`,
+  `rgba(0, 188, 235, 0.12)`) and asserts they are gone, plus a
+  positive flank that the new `var(--*)` tokens are referenced.
+- `QUALITY_AUDIT.md` — this Round 29 handoff section.
+- `README.md` — clarified the Round 28 entry to disclose the two
+  concurrent streams (multi-currency arithmetic safety + theme
+  unification) and added a Round 29 bullet covering this polish pass.
+
+**SSoT modules touched:** none (this round only consumed the existing
+`base.html` token system and added new tokens to it; no Python SSoT
+module changed semantics).
+
+**Tests added/updated:**
+- `tests/test_round29_progress_404_uses_branded_template.py` — 1 test.
+- `tests/test_round29_progress_uses_tojson_not_safe.py` — 2 tests.
+- `tests/test_round29_base_html_has_semantic_tokens.py` — 2 tests.
+- `tests/test_round29_early_paint_respects_prefers_color_scheme.py` —
+  3 tests.
+- `tests/test_round29_progress_no_inline_status_rgba.py` — 4 tests.
+- `tests/test_round28_no_orphan_style_css.py::test_no_runtime_python_module_references_style_css` —
+  scan pattern relaxed; same pass/fail contract.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: **2495 passed / 2 skipped** (was 2483 pre-Round-29 inclusive of Round-28 stream-A and stream-B tests; +12 new R29 tests, 0 regressions). The Round-15 reliability test
+  `test_phase_6_2_progress_view_audit_fallback_releases_lock_around_sqlite`
+  was re-anchored: its old `Analysis not found</h1>` end-marker was
+  the inline-HTML body that R29/L1 deleted, so it's now anchored on
+  the structurally-stable ``except Exception as e:`` line that
+  closes the audit-fallback branch.
+- ruff: 0 findings (changed files ran clean)
+- bandit HIGH/MED: 0 (no new exec / shell / `eval` sites)
+- pip-audit: clean (no dep changes)
+- Flask smoke check (`app.test_client()` against the running app):
+  `/progress/00000000-0000-4000-8000-000000000000` -> 404 + branded
+  body (has `data-bs-theme=`, `id="theme-toggle"`, `Page Not Found`,
+  and crucially does NOT contain the legacy `<h1>Analysis not found</h1>`
+  marker); `/previous-reports` -> 200 + branded body;
+  `/does-not-exist-r29` -> 404 + branded body.  All four checks pass
+  on this branch.
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py::progress()` `except Exception` guard — the new
+   `isinstance(e, HTTPException): raise` re-raise is essential; without
+   it the broad-except would swallow `abort(404)` and the user would
+   see a generic 404 message logged as "Error loading analysis status
+   from file: 404 Not Found". The `werkzeug.exceptions` import is
+   inside the except for tighter scope; if a future refactor moves
+   it module-level, fine, but the re-raise itself MUST stay first.
+2. `templates/base.html` `[data-bs-theme="dark"]` token block — the
+   dark `--success-fg` is `#2ecc71` (was `var(--cisco-success)` aka
+   `#00a651` in light mode). If a future round wants matplotlib chart
+   parity in dark mode they need to keep the chart-fg path on
+   `--cisco-success` rather than `--success-fg`; the `--risk-*`
+   tokens are still NOT theme-aware per the Round-13 byte-identical
+   contract, and `--success-fg` in the dark block is for screen
+   chrome only.
+3. `templates/progress.html` JS interpolation — `|tojson` will now
+   double-quote the values. The polling JS already accepts a quoted
+   string identifier (it's how `analysis_id_json|safe` worked
+   pre-Round-29), so this should be a wash. The
+   `tests/test_round28_progress_template_extends_base.py::test_progress_route_renders_template_with_theme_chrome`
+   test exercises the rendered HTML and still passes.
+4. `tests/test_round29_progress_no_inline_status_rgba.py` — the
+   banned-tint list is exhaustive for what we migrated, but does
+   not catch a *new* tint at a different alpha (e.g.
+   `rgba(0, 166, 81, 0.10)`). A more general regex (`rgba\([^)]+\)`)
+   inside any `.status-box` / `.csone-status` selector would catch
+   that, but would also flag the explanatory comment block we left
+   in. Calling out as a future tightening, deferred for now.
+
+**Known deferrals (intentional non-fixes):**
+- **Inline-HTML 400 in `progress()` for invalid analysis id.** The
+  format-gate-fails branch (`if not _is_valid_analysis_id(analysis_id):
+  return "<h1>Invalid analysis ID</h1>...", 400`) is left as inline
+  HTML because there is no `@app.errorhandler(400)` and no
+  `templates/400.html`; replacing it with `abort(400)` would just
+  swap one unthemed page for another. Realistically un-triggerable
+  from normal use (the URL `/progress/<id>` is only reached after an
+  analysis is started; only a manually-typed or tampered URL hits
+  it). Cleanup is one of: (a) add a `templates/400.html` matching
+  the 404/500 pair, (b) register `@app.errorhandler(400)` to render
+  the existing 404 with re-worded copy, or (c) treat invalid ids as
+  404 (the simplest and probably cleanest answer). Deferred to a
+  later round to keep this one diff focused on the explicit Claude
+  Code findings.
+- **Hardcoded hex tokens in pre-Round-28 templates.** Templates that
+  Round 28 did NOT migrate (`bst_psirt_search.html`,
+  `external_intelligence.html`, `leader_report_form.html`,
+  `analyze.html`, etc.) still extend `base.html` so the global
+  toggle works for navbar / footer / nav items, but they carry
+  per-page hardcoded hex values that won't pivot in dark mode. Each
+  page is functional in both themes today; the cosmetic drift is
+  not worth the diff size for a polish round.
+- **Token-system pattern docs.** The eight new tokens
+  (`--success-*` / `--warning-*` / `--danger-*` / `--info-card-border`
+  / `--info-tint-bg`) bring the semantic-token surface to a stable
+  shape. A future round could codify the contract in a `THEME.md` or
+  similar so new templates know which tokens to consume; deferred to
+  whenever the next theme-touching feature ships.
+- **Round 28 / Stream A residuals.** All Round 28 multi-currency /
+  determinism deferrals tracked in the original Round 27 handoff
+  (`_COMMON_REFERENCE_NUMBERS` whitelist, heuristic
+  `validate_no_invented_entities`, per-sentence citation requirement,
+  proxy-aware throttle keying, `MIN_CHUNK_TOKENS=12` corpus index)
+  remain open and roll forward into the appropriate later rounds as
+  scoped — they are unchanged by Round 29 because Round 29 only
+  touched UI/template/error-handler surfaces.
+
+**Build artefact:**
+- `AdoptIQ-v1.0.4-build4.dmg` — same shipping vehicle as Round 28
+  build3, rebuilt with `ADOPTIQ_BUILD=4` so the in-app version
+  string disambiguates Round-29-included vs Round-28-only installs.
+  The Round-28 pipeline-drift workaround (`--no-internet-enable`
+  guard around the codesign step in `build_mac_dmg.sh`) stays in
+  place. OneDrive mirror picked up the new artefact within the
+  usual 60s window.
+
+**Trailer:** Made-with: Cursor (Claude Opus 4.7)
+
+## Round 30 — handoff 2026-04-27
+
+**What changed (plain English):**
+Round 30 closes all 14 findings from Claude Code's read-only logic / accuracy
+review of Round 29 (4 HIGH, 6 MEDIUM, 3 LOW, 1 INFO).  The work was grouped
+by surface area (R27 regressions, multi-currency disclosure, cross-report
+parity, time/window correctness, failure-vs-zero disclosure, hygiene) so
+the diffs and tests cluster naturally.  Two findings (H4, M6) were
+regressions Round 27 introduced and were addressed first as one-line / few-
+line fixes with a clean rollback path.  The remaining twelve were pre-
+existing accuracy / parity gaps.
+
+The most consequential fix is M5 (the ARR-frame `attrs` contract): every
+ARR-consuming function now calls `_assert_arr_attrs(df)` at its entry,
+which warns by default and raises in strict mode (`ADOPTIQ_STRICT_MODE=1`)
+if the frame did not pass through `_normalize_arr_df`.  This was the
+silent-bypass surface that allowed multi-currency portfolios to render a
+single comparable ARR headline in any consumer that forgot to call the
+normalizer.  The contract is documented in the `_normalize_arr_df`
+docstring so future ARR consumers know what attrs to expect.
+
+The I1 finding ("concentration skipped note never surfaces") was reframed
+during implementation: the backend at `adoptiq_backend.py:4622-4654` was
+already populating `insights['concentration']` with the right
+`not_comparable_across_currencies` flag and `note` text — the gap was
+that no renderer was reading the flag.  Round 30 wires the new
+`concentration_note_text` helper into the leader title-page advisory and
+the executive ARR Exposure section so the backend note surfaces verbatim.
+Compact does not render ARR totals at all (verified via grep) so the
+compact branch lands as a negative pin in the test suite (any future
+addition of ARR rendering must include the multi-currency branch).
+
+**Findings closed (14 of 14):**
+
+- **H1 (HIGH) — Compact + Leader miss multi-currency disclosure.**
+  Executive ARR Exposure already rendered `"multi-currency -- not summed
+  across currencies"` per-currency (`executive_intelligence_formatter.py
+  :1495-1525`); leader and compact did not.  Compact does not render ARR
+  totals so the H1a fix is a negative pin (any future ARR rendering in
+  compact must add the multi-currency branch).  Leader gained a title-
+  page italic footer that consumes `arr_impact.is_multi_currency` and
+  emits the same "mixes currencies (...) not summed across currencies
+  and not directly comparable" wording the executive uses.
+- **H2 (HIGH) — BEMS analyzer exception silently degrades.**  When the
+  advanced BEMS analyzer raises, the leader report previously fell
+  through to `_add_bems_summary` (basic) under the same heading, so the
+  reader could not tell which path ran.  Round 30 categorizes the
+  exception via `error_classifier.classify_exception` and renders a red-
+  warning paragraph (`"BEMS strategic analysis incomplete – reverted to
+  basic counts (reason: <category>)."`) before the basic summary call.
+- **H3 (HIGH) — Compact recent-window strips tz offsets.**
+  `compact_report_formatter.py:2102` previously called `pd.to_datetime`
+  without `utc=True` and then compared against
+  `datetime.now(timezone.utc).replace(tzinfo=None)`.  Both sides are
+  now tz-aware UTC, so a tz-aware input keeps its offset (was being
+  silently coerced to naive local-equivalent).  The Round 8 / Phase
+  3.4 comment was updated to document the new contract.
+- **H4 (HIGH, R27 regression) — Portfolio gate fails open on empty
+  allowlist.**  The Round-27 entity-grounding gate at `app_simple.py
+  :12766` had an inline `or None` fallback that collapsed an empty set
+  to `None`, which the validator documents as "skip the entity check
+  entirely."  Dropped the fallback; the empty set now reaches the
+  validator so every claimed entity is rejected (fail closed).
+- **M1 (MEDIUM) — Inline status regex bypasses canonical lifecycle
+  helpers.**  `leader_report_generator.py:4673` used
+  `status_norm.str.contains(r'closed|resolved|complete')` for the
+  resolved-AB count and a similar regex at `:4683` for completed action
+  plans.  Both now route through `canonical_metrics.count_closed_barriers`
+  and `canonical_metrics.count_action_plan_completed` (a new helper, since
+  the old one only existed for cases).  The legacy regex remains as a
+  defensive `except` fallback only.
+- **M2 (MEDIUM) — Truncation flags don't reach user-visible disclosure.**
+  `incident_storage.py` returned `was_truncated` / `list_truncated`
+  flags but the leader / executive / compact renderers never read them.
+  Round 30 threads the flags into each renderer's signature and emits a
+  per-section truncation banner (`"table truncated; fetch limit reached"`
+  on leader / executive, a global "External Intelligence Capped" warning
+  on compact).
+- **M3 (MEDIUM) — Compact "Customers with Barriers" uses inline
+  `.nunique()`.**  `compact_report_formatter.py:1848` had inlined the
+  customer-count shape; routed through new
+  `canonical_metrics.count_customers_with_barriers` which applies
+  `normalize_customer_name` + NFKC + whitespace collapse for byte-stable
+  parity with leader / executive.
+- **M4 (MEDIUM) — Optional-source `error_details` never surfaces.**
+  `data_source_validator.py` stored optional CSConsole / ARR fetch
+  errors in `error_details` but `is_valid` was gated on `missing_sources`
+  only.  Added `has_optional_fetch_errors` + `get_optional_fetch_errors`
+  helpers; each report writer now calls both and emits a "Partial Data
+  Warning" banner immediately after the title page when optional fetches
+  failed (separate code path from the missing-required branch).
+- **M5 (MEDIUM) — Multi-currency stamping contract not enforced.**  The
+  `_normalize_arr_df` closure stamped `attrs['is_multi_currency']` /
+  `attrs['currencies_present']` but no consumer asserted the contract
+  was held.  Added `_assert_arr_attrs(df)` (`adoptiq_backend.py:281`)
+  which is warn-by-default + strict under `ADOPTIQ_STRICT_MODE=1`.
+  Documented the contract in the `_normalize_arr_df` docstring.  Every
+  ARR-consuming entry point now calls the guard.
+- **M6 (MEDIUM, R27 regression) — Validator exception accepts LLM
+  output.**  Round-27 wrapped `validate_narrative` in `try/except
+  Exception` for resilience but the `except` block returned the raw
+  LLM text, which silently disabled HTML-injection / ungrounded-numbers
+  / invented-entities checks if the validator regressed.  Both `except`
+  blocks (`app_simple.py:12780-12785` portfolio + `:13091-13097`
+  customer) now substitute `GROUNDING_FAILURE_PLACEHOLDER`, treating
+  exception identically to rejection.
+- **L1 (LOW) — Naive `datetime.now()` in export script.**
+  `export_adrian_snowflake_records.py:645` stamped the output filename
+  with the host's local timezone; replaced with `datetime.now(UTC)` to
+  match the cutoff_date computed at line 652.
+- **L2 (LOW) — Snowflake datetime columns not asserted tz-aware at
+  ingest.**  Added `_assert_datetime_columns_tz_aware(df, expected_cols)`
+  helper to `snowflake_prefetch.py` (warns on naive datetime columns,
+  raises in strict mode).  Belt-and-suspenders: `adoptiq_backend.py`
+  also issues `ALTER SESSION SET TIMEZONE = 'UTC'` on connection setup.
+- **L3 (LOW) — Inconsistent divide-by-zero guards.**  Replaced 11
+  inline `x/y if y > 0 else 0` ternaries in `adoptiq_backend.py` with
+  `_safe_div(num, den, default=...)`.  Added a regex regression scan
+  (`tests/test_round30_l3_safe_div_used_uniformly.py`) that fails CI
+  if a future change reintroduces the pattern.
+- **I1 (INFO, reframed) — Concentration "skipped" note never surfaces
+  in reports.**  Backend was already correct (`adoptiq_backend.py
+  :4622-4654` populates `insights['concentration']` for the multi-
+  currency case with the right flag + note text).  The fix is renderer-
+  side: added `concentration_note_text` helper + new
+  `CONCENTRATION_MULTICURRENCY_NOTE` constant; leader title-page
+  advisory and executive ARR Exposure section now render the note as a
+  second italic paragraph adjacent to the multi-currency disclosure.
+
+**Files touched:**
+- `adoptiq_backend.py` — `_assert_arr_attrs` helper; `_normalize_arr_df`
+  docstring documents the attrs contract; `concentration_note_text` +
+  `CONCENTRATION_MULTICURRENCY_NOTE` (Round 30 / I1); `ALTER SESSION
+  SET TIMEZONE = 'UTC'` on connect (L2); 11 inline ternary divisions
+  replaced with `_safe_div` (L3); `_window_meta` truncation tag on
+  the last record of `unique_incidents` (M2).
+- `app_simple.py` — H4 fix at `:12766` (drop `or None` fallback); M6
+  fix in both R27 except blocks (`:12780-12785` portfolio,
+  `:13091-13097` customer) substitutes `GROUNDING_FAILURE_PLACEHOLDER`;
+  M2 truncation flags threaded into report builders; M4 optional-
+  fetch-error promotion via `data_source_validator.get_optional_fetch_errors`.
+- `compact_report_formatter.py` — M3 routes "Customers with Barriers"
+  through `cm.count_customers_with_barriers`; H3 passes `utc=True` to
+  `pd.to_datetime` and drops `.replace(tzinfo=None)` at `:2102`; M2
+  intel-truncation banner; M4 partial-data-warning banner.
+- `leader_report_generator.py` — H1b title-page multi-currency
+  advisory (Word path); H2 BEMS exception classification + degradation
+  banner via `error_classifier`; M1 routes resolved-AB and completed-AP
+  counts through canonical helpers; M2 truncation banner threaded into
+  `_add_external_intelligence_section`; M4 partial-data-warning banner
+  rendered immediately after the title page; I1 concentration_note
+  paragraph adjacent to the multi-currency advisory.
+- `executive_intelligence_formatter.py` — M5 calls `_assert_arr_attrs`
+  on entry to ARR Exposure; M2 truncation disclosure in Known Issues
+  + Service Incidents; I1 concentration_note rendering.
+- `data_source_validator.py` — `has_optional_fetch_errors` and
+  `get_optional_fetch_errors` helpers (M4).
+- `snowflake_prefetch.py` — `_assert_datetime_columns_tz_aware` helper
+  (L2).
+- `export_adrian_snowflake_records.py` — L1 (`datetime.now(UTC)`).
+- `canonical_metrics.py` — `count_customers_with_barriers` (M3),
+  `count_action_plan_completed` (M1), `count_closed_barriers` (M1).
+- `tests/test_round30_*.py` — 14 new test files, one per finding (see
+  "Tests added/updated" below).
+- `tests/test_cross_report_parity.py` — extended with 4 multi-currency
+  parity tests (canonical disclosure phrase, concentration_note
+  surfacing, attrs contract enforcement, behavioural pin).
+- `QUALITY_AUDIT.md` — this Round 30 handoff section.
+- `README.md` — Round 30 bullet covering the logic / accuracy / parity
+  sweep.
+- `CLAUDE.md` — test-count baseline bumped (Round 29: 2495 → Round 30:
+  2570).
+
+**SSoT modules touched:** `canonical_metrics.py` (added
+`count_customers_with_barriers`, `count_action_plan_completed`,
+`count_closed_barriers` so the lifecycle definition lives in one place),
+`adoptiq_backend.py` (`concentration_note_text` /
+`CONCENTRATION_MULTICURRENCY_NOTE` + `_assert_arr_attrs` /
+`_normalize_arr_df` contract).
+
+**Tests added/updated:**
+- `tests/test_round30_h4_portfolio_gate_empty_allowlist_fails_closed.py` — 3 tests
+- `tests/test_round30_m6_validator_exception_substitutes_placeholder.py` — 3 tests
+- `tests/test_round30_h1_leader_renders_multicurrency_disclosure.py` — 3 tests
+- `tests/test_round30_h1_executive_renders_multicurrency_disclosure.py` — 3 tests
+- `tests/test_round30_m5_arr_attrs_contract_enforced.py` — 5 tests
+- `tests/test_round30_i1_concentration_skipped_note_renders.py` — 6 tests
+- `tests/test_round30_h3_compact_recent_window_tz_invariant.py` — 4 tests
+- `tests/test_round30_l1_export_uses_utc_now.py` — 2 tests
+- `tests/test_round30_l2_snowflake_columns_tz_aware.py` — 6 tests
+- `tests/test_round30_m1_leader_open_closed_uses_canonical.py` — 4 tests
+- `tests/test_round30_m3_compact_customers_with_barriers_uses_canonical.py` — 4 tests
+- `tests/test_round30_h2_bems_exception_renders_degradation_banner.py` — 3 tests
+- `tests/test_round30_m2_truncation_flags_reach_report.py` — 4 tests
+- `tests/test_round30_m4_partial_data_banner_emitted.py` — 9 tests
+- `tests/test_round30_l3_safe_div_used_uniformly.py` — 5 tests
+- `tests/test_cross_report_parity.py` — extended with 4 new tests
+  (multi-currency disclosure, concentration note parity, attrs
+  contract enforcement, behavioural attrs pin)
+
+**Verify status:**
+- pytest: **2570 passed / 2 skipped** (was 2495 pre-Round-30; +75 new
+  tests, 0 regressions).
+- ruff: 0 findings (changed files ran clean).
+- bandit HIGH/MED: 0 (no new exec / shell / `eval` sites).
+- pip-audit: clean (no dep changes).
+
+**Hot spots Claude should audit first:**
+1. `adoptiq_backend._assert_arr_attrs` is currently warn-by-default
+   so the contract can be observed for one verification cycle without
+   breaking any caller that has not yet been migrated.  Round 31
+   should flip the default to `strict=True` once the WARNING is silent
+   in production logs for one cycle.
+2. `leader_report_generator.py:4890-4901` keeps the legacy regex as
+   a defensive `except` fallback.  The canonical path is primary; the
+   fallback is belt-and-suspenders only and can be removed in a later
+   round once the canonical helpers have been observed clean for one
+   cycle.
+3. M2's truncation banner uses a length-based heuristic for the
+   `intel_fetch_limit` in addition to the `_window_meta.truncated`
+   flag from `incident_storage`.  The heuristic is conservative (a
+   fetch that returns exactly the limit is treated as potentially
+   truncated) so we err on the side of disclosure.
+
+**Known deferrals (intentional non-fixes):**
+- **`_assert_arr_attrs` strict-mode default flip.**  Currently the
+  helper warns by default so the migration period catches any consumer
+  that bypasses `_normalize_arr_df` without breaking the report.  Flip
+  to `strict=True` default in Round 31 after one verification cycle.
+- **Legacy lifecycle regex in `except` fallback.**  Both the AB and
+  AP counts in `leader_report_generator.py` keep the old regex inside
+  defensive `except` blocks.  Removable once the canonical helpers
+  have been observed clean in production logs for one cycle.
+- **Compact ARR rendering.**  The H1a finding was reframed because
+  compact does NOT render ARR totals (no headline currency math
+  surface).  If a future round adds ARR rendering to compact, the
+  negative pin in
+  `tests/test_round30_h1_executive_renders_multicurrency_disclosure.py`
+  forces the multi-currency branch to land at the same time.
+
+**Build artefact:**
+- `AdoptIQ-v1.0.4-build5.dmg` — combined build covering all 14
+  Round 30 findings, rebuilt with `ADOPTIQ_BUILD=5` so the in-app
+  version string disambiguates Round-30-included vs Round-29-only
+  installs.  The Round-28 pipeline-drift workaround
+  (`--no-internet-enable` guard around the codesign step in
+  `build_mac_dmg.sh`) stays in place.  OneDrive mirror picks up
+  the new artefact within the usual 60s window.
+
+**Trailer:** Made-with: Cursor (Claude Opus 4.7)

@@ -254,8 +254,18 @@ def test_marker_phase_5_7_health_grade_canonical() -> None:
     assert _has_marker("adoptiq_backend.py", "5.7")
 
 
-def test_marker_phase_5_8_css_risk_vars() -> None:
-    assert _has_marker("static/css/style.css", "5.8")
+def test_marker_phase_5_8_css_risk_vars_retired_in_round_28() -> None:
+    # Round 28 removed the orphan ``static/css/style.css`` (parallel theme
+    # system that drifted from ``templates/base.html``).  The canonical
+    # ``--risk-*`` tokens that Phase 5.8 codified now live exclusively in
+    # ``templates/base.html`` (covered by Phase 5.9 below).  This test is
+    # kept as a tombstone so a future re-introduction of the orphan CSS
+    # file is a deliberate, reviewed decision.
+    style_css = REPO_ROOT.joinpath("static/css/style.css")
+    assert not style_css.exists(), (
+        "static/css/style.css was deleted in Round 28; do not re-add it. "
+        "Put new theme tokens directly in templates/base.html instead."
+    )
 
 
 def test_marker_phase_5_9_base_html_tokens() -> None:

@@ -108,10 +108,28 @@ def test_r27_portfolio_gate_calls_validate_narrative_with_briefing():
     """The portfolio-summary wiring must pass ``portfolio_briefing``
     to ``validate_narrative`` so entity / number checks anchor on the
     same briefing the LLM saw, not on a re-derived briefing that could
-    drift."""
+    drift.
+
+    Round 30 / H4 update: the allowlist is passed *directly* now.  The
+    earlier ``_r27_allowed_port if _r27_allowed_port else None``
+    fallback caused the gate to fail OPEN on an empty entity allowlist
+    (the empty set collapsed to ``None`` which ``validate_narrative``
+    treats as "skip the entity check entirely").  Post-R30 the call
+    site must pass the set directly, so an empty allowlist fails CLOSED
+    (every candidate flagged as invented).
+    """
     src = _read_app_simple()
-    assert "validate_narrative(\n                            portfolio_summary,\n                            portfolio_briefing,\n                            allowed_entities=_r27_allowed_port if _r27_allowed_port else None,\n                        )" in src, (
+    assert "validate_narrative(\n                            portfolio_summary,\n                            portfolio_briefing,\n                            allowed_entities=_r27_allowed_port,\n                        )" in src, (
         "portfolio_summary validate_narrative call signature drifted"
+    )
+    # Negative pin: the pre-R30 ``or None`` fallback must NOT come back.
+    assert (
+        "allowed_entities=_r27_allowed_port if _r27_allowed_port else None"
+        not in src
+    ), (
+        "Round 30 / H4 regression: portfolio gate restored the "
+        "fail-OPEN ``or None`` fallback that empty-set-collapses to "
+        "``None`` and skips the entity check entirely."
     )
 
 
@@ -144,12 +162,20 @@ def test_r27_legacy_flag_opts_out_at_both_sites():
 
 
 def test_r27_validator_import_failure_does_not_break_report():
-    """Mirror of the Round 16 / Phase 3.4 contract: a validator
-    regression (import failure, regex bug, anything raised inside
-    ``validate_narrative``) must NEVER break the report pipeline.
-    Both gates must wrap the validator call in ``try/except Exception``
-    and fall back to passing the original LLM text through with a
-    WARNING log."""
+    """A validator regression (import failure, regex bug, anything
+    raised inside ``validate_narrative``) must NEVER break the report
+    pipeline.  Both gates must wrap the validator call in
+    ``try/except Exception``.
+
+    Round 30 / M6 update: the original Round-27 contract was
+    "exception != rejection -- accept the LLM text as-is on validator
+    failure."  That asymmetry silently disables ALL validator checks
+    (HTML injection, ungrounded numbers, invented entities) on a
+    validator regression.  Post-R30 the contract is symmetric:
+    exception is treated identically to a rejection -- both paths
+    substitute ``GROUNDING_FAILURE_PLACEHOLDER``.  This test now pins
+    the symmetric behavior.
+    """
     src = _read_app_simple()
     # Both gates must catch any exception and log a warning.
     for marker in (
@@ -157,13 +183,31 @@ def test_r27_validator_import_failure_does_not_break_report():
         "except Exception as _r27_anv_port_err:",
     ):
         assert marker in src, f"missing defensive except: {marker}"
-    # The fallback log message must mention "accepting LLM output as-is"
-    # so an operator triaging the WARNING knows the report still
-    # rendered with the un-validated text.
-    assert src.count("accepting LLM output as-is") >= 2, (
-        "Expected 2 'accepting LLM output as-is' fallback log lines "
-        "(one per gate); validator-down behavior must not silently change"
+    # Round 30 / M6: both except blocks must substitute the placeholder
+    # rather than accept the LLM output.  The handler narrates the
+    # change with "exception treated as rejection" or
+    # "substituting placeholder".
+    assert src.count("Round 30 / M6") >= 2, (
+        "Expected at least two 'Round 30 / M6' markers (one per "
+        "validator-exception block) so the post-R30 contract is "
+        "discoverable by future readers"
     )
+    # The pre-R30 "accepting LLM output as-is" fallback must not come
+    # back at the R27 portfolio/customer gate sites.  (Round 16's
+    # ai_insights_raw path still uses that older language and may
+    # contribute one occurrence; we only forbid the R27 sites here.)
+    for r27_block_anchor in (
+        "Round 27 / R27-AI-GATE-PORTFOLIO: validator",
+        "Round 27 / R27-AI-GATE-CUSTOMER: validator",
+    ):
+        if r27_block_anchor in src:
+            block_start = src.index(r27_block_anchor)
+            block = src[block_start:block_start + 2000]
+            assert "accepting LLM output as-is" not in block, (
+                f"Round 30 / M6 regression near '{r27_block_anchor}': "
+                "the validator-exception path reverted to accepting the "
+                "LLM text as-is; it must substitute the placeholder."
+            )
 
 
 def test_r27_portfolio_gate_does_not_raise_unlike_r25b_r25c():

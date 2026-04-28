@@ -1080,8 +1080,20 @@ class ExecutiveIntelligenceFormatter:
                 customer_para.add_run(f'• {customer}: ').bold = True
                 customer_para.add_run(', '.join([f'[{v}]' for v in vuln_list]))
     
-    def add_known_defects_section(self, ext_bugs: List = None):
-        """Add Known Software Defects section - CRITICAL for matching example reports"""
+    def add_known_defects_section(
+        self,
+        ext_bugs: List = None,
+        intel_truncated: Optional[Dict[str, Any]] = None,
+        intel_fetch_limit: Optional[int] = None,
+    ):
+        """Add Known Software Defects section - CRITICAL for matching example reports.
+
+        Round 30 / M2: when the upstream ``incident_storage`` fetch hit
+        ``ADOPTIQ_INTEL_LIST_LIMIT`` for bugs, append a truncation
+        disclosure right next to the summary line so a reader cannot
+        mistake a capped sample (e.g. "newest 1,000 of N") for the
+        complete population.
+        """
         header = self.doc.add_heading('Known Software Defects (help.webex.com)', level=1)
         if header.runs:
             header.runs[0].font.color.rgb = WARNING_ORANGE
@@ -1092,8 +1104,30 @@ class ExecutiveIntelligenceFormatter:
         if ext_bugs and len(ext_bugs) > 0:
             # Summary
             summary_para = self.doc.add_paragraph()
-            summary_para.add_run(f'Total Known Defects: ').bold = True
+            summary_para.add_run('Total Known Defects: ').bold = True
             summary_para.add_run(f'{len(ext_bugs)}')
+            # Round 30 / M2: truncation disclosure for the bugs list.
+            try:
+                _bugs_truncated = bool(
+                    isinstance(intel_truncated, dict)
+                    and intel_truncated.get('bugs')
+                )
+            except Exception:  # noqa: BLE001
+                _bugs_truncated = False
+            if _bugs_truncated:
+                _trunc_para = self.doc.add_paragraph()
+                if intel_fetch_limit and isinstance(intel_fetch_limit, int) and intel_fetch_limit > 0:
+                    _msg = (
+                        f"Table truncated; fetch limit reached -- shown {len(ext_bugs)} "
+                        f"of most-recent {intel_fetch_limit} rows; older rows omitted."
+                    )
+                else:
+                    _msg = (
+                        f"Table truncated; fetch limit reached -- shown {len(ext_bugs)} "
+                        "most-recent rows; older rows omitted."
+                    )
+                _trunc_run = _trunc_para.add_run(_msg)
+                _trunc_run.italic = True
             
             # FIXED: Display ALL defects for complete visibility
             self.doc.add_paragraph()
@@ -1124,8 +1158,19 @@ class ExecutiveIntelligenceFormatter:
                     _state, source_label='Software defects feed (help.webex.com)'
                 ))
     
-    def add_service_incidents_section(self, ext_incidents: List = None):
-        """Add Service Incidents section from status.webex.com"""
+    def add_service_incidents_section(
+        self,
+        ext_incidents: List = None,
+        intel_truncated: Optional[Dict[str, Any]] = None,
+        intel_fetch_limit: Optional[int] = None,
+    ):
+        """Add Service Incidents section from status.webex.com.
+
+        Round 30 / M2: thread the storage-layer ``list_truncated``
+        flag for incidents into the Word output so the reader sees
+        an explicit "table truncated" disclosure when the upstream
+        feed returned a capped sample.
+        """
         header = self.doc.add_heading('Recent Service Incidents', level=1)
         if header.runs:
             header.runs[0].font.color.rgb = WARNING_ORANGE
@@ -1158,10 +1203,33 @@ class ExecutiveIntelligenceFormatter:
 
             # Summary
             summary_para = self.doc.add_paragraph()
-            summary_para.add_run(f'Total Incidents: ').bold = True
+            summary_para.add_run('Total Incidents: ').bold = True
             summary_para.add_run(f'{len(ext_incidents)}')
             if _cache_only:
                 summary_para.add_run(' (cached)')
+
+            # Round 30 / M2: truncation disclosure for incidents.
+            try:
+                _inc_truncated = bool(
+                    isinstance(intel_truncated, dict)
+                    and intel_truncated.get('incidents')
+                )
+            except Exception:  # noqa: BLE001
+                _inc_truncated = False
+            if _inc_truncated:
+                _trunc_para = self.doc.add_paragraph()
+                if intel_fetch_limit and isinstance(intel_fetch_limit, int) and intel_fetch_limit > 0:
+                    _msg = (
+                        f"Table truncated; fetch limit reached -- shown {len(ext_incidents)} "
+                        f"of most-recent {intel_fetch_limit} rows; older rows omitted."
+                    )
+                else:
+                    _msg = (
+                        f"Table truncated; fetch limit reached -- shown {len(ext_incidents)} "
+                        "most-recent rows; older rows omitted."
+                    )
+                _trunc_run = _trunc_para.add_run(_msg)
+                _trunc_run.italic = True
 
             # FIXED: Display ALL incidents for complete visibility
             self.doc.add_paragraph()
@@ -1350,7 +1418,9 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
                                         software_defects: Dict = None, psirt_vulns: Dict = None,
                                         partial_data_warnings: List[Dict[str, Any]] = None,
                                         data_retrieved_at: Optional[datetime] = None,
-                                        strict_mode: bool = False) -> str:
+                                        strict_mode: bool = False,
+                                        intel_truncated: Optional[Dict[str, Any]] = None,
+                                        intel_fetch_limit: Optional[int] = None) -> str:
     """
     Create an Executive Intelligence Report.
 
@@ -1492,6 +1562,21 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
     # bogus single-currency headline.  Single-currency portfolios get
     # the resolved currency code prefix instead of a hardcoded "$".
     try:
+        # Round 30 / M5: enforce the ARR-frame attrs contract before
+        # we consume ``arr_data.attrs`` (or ``arr_impact['is_multi_currency']``)
+        # below.  ``_assert_arr_attrs`` warns (or raises in strict mode)
+        # when an upstream caller forgot to route ``arr_data`` through
+        # ``_normalize_arr_df``, preventing the multi-currency
+        # disclosure from silently degrading to single-currency
+        # rendering.
+        try:
+            from adoptiq_backend import _assert_arr_attrs as _r30_assert_arr
+            _r30_assert_arr(
+                arr_data,
+                function_name='executive_intelligence_formatter.arr_exposure',
+            )
+        except ImportError:
+            pass
         _has_arr_data = (
             arr_data is not None
             and getattr(arr_data, "empty", True) is False
@@ -1531,6 +1616,29 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
                 formatter.doc.add_paragraph(
                     f"ARR records analyzed: {_row_count:,}"
                 )
+            # Round 30 / I1: surface the concentration "skipped" note
+            # adjacent to the multi-currency disclosure so the reader
+            # understands why the usual Top-5 / HHI callouts are
+            # missing.  ``arr_impact['concentration_note']`` is stamped
+            # by ``app_simple.calculate_arr_impact_for_issues`` (and
+            # mirrors the backend-supplied ``note`` text from
+            # ``derive_portfolio_intelligence``).  The helper returns
+            # ``None`` for single-currency portfolios, so a falsy
+            # check is sufficient.
+            try:
+                _r30_conc_note = (
+                    (_ai or {}).get('concentration_note')
+                    if isinstance(_ai, dict) else None
+                )
+                if _r30_conc_note and isinstance(_r30_conc_note, str):
+                    _r30_note_p = formatter.doc.add_paragraph()
+                    _r30_note_run = _r30_note_p.add_run(_r30_conc_note.strip())
+                    _r30_note_run.italic = True
+            except Exception as _r30_conc_err:  # noqa: BLE001
+                logger.warning(
+                    "Round 30 / I1: concentration note render failed: %s",
+                    _r30_conc_err,
+                )
     except Exception as _arr_render_err:
         logger.warning(
             "Round 13 / Phase 1.9: ARR Exposure section render failed: %s",
@@ -1553,10 +1661,18 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
         formatter.add_psirt_vulnerabilities_section(psirt_vulns)
     
     # Add Known Defects section (from help.webex.com)
-    formatter.add_known_defects_section(ext_bugs)
+    formatter.add_known_defects_section(
+        ext_bugs,
+        intel_truncated=intel_truncated,
+        intel_fetch_limit=intel_fetch_limit,
+    )
     
     # Add Service Incidents section (from status.webex.com)
-    formatter.add_service_incidents_section(ext_incidents)
+    formatter.add_service_incidents_section(
+        ext_incidents,
+        intel_truncated=intel_truncated,
+        intel_fetch_limit=intel_fetch_limit,
+    )
     
     # Add recommendations
     formatter.add_recommendations_section(ai_insights)

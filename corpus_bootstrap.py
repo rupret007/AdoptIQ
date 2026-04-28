@@ -342,7 +342,28 @@ def _refresh_sharepoint_cache_for_bootstrap() -> Optional[dict[str, object]]:
         getattr(Config, "ADOPTIQ_SHAREPOINT_CACHE_DIR", None) or ""
     ).strip()
     if not folder_url or not cache_dir:
-        return None
+        # Round 33 / Build8: surface "not configured" as a structured
+        # state so the analyze-page SharePoint panel can render the
+        # URL input + Save button.  Previously this returned ``None``
+        # which collapsed to "unknown" in the UI and left users
+        # without a way to fix the missing URL from the main page.
+        return {
+            "enabled": True,
+            "configured": False,
+            "folder_url": folder_url,
+            "cache_dir": cache_dir,
+            "signed_in": False,
+            "upn": None,
+            "name": None,
+            "account": None,
+            "error_kind": "not_configured",
+            "error_detail": (
+                "no SharePoint folder URL configured -- set one via the "
+                "analyze-page Intelligence card or the "
+                "ADOPTIQ_SHAREPOINT_FOLDER_URL env var"
+            ),
+            "stats": None,
+        }
 
     try:
         import sharepoint_corpus_source as _sp
@@ -395,6 +416,10 @@ def _refresh_sharepoint_cache_for_bootstrap() -> Optional[dict[str, object]]:
         max_file_bytes=max_bytes,
     )
     token_info = client.get_token_info()
+    # Round 33 / Build8: synthesize a single ``account`` field so the
+    # analyze-page SharePoint panel JS does not need to know about
+    # both ``upn`` and ``name`` fallbacks.
+    account_label = token_info.upn or token_info.name or None
     return {
         "enabled": True,
         "configured": True,
@@ -403,6 +428,7 @@ def _refresh_sharepoint_cache_for_bootstrap() -> Optional[dict[str, object]]:
         "signed_in": bool(token_info.upn),
         "upn": token_info.upn,
         "name": token_info.name,
+        "account": account_label,
         "expires_at": token_info.expires_at,
         "expires_in_s": token_info.expires_in_s,
         "error_kind": stats.error_kind,
@@ -442,6 +468,14 @@ def _run_index_pass(*, rebuild: bool) -> None:
 
     sources = _resolve_index_sources()
 
+    # Round 33 / Build8: pass the SharePoint Graph cache as a sentinel
+    # fallback so SharePoint-only installs (no synced OneDrive folder)
+    # can still encrypt the corpus.  ``open_corpus_for_user`` will fall
+    # through to an auto-minted local sentinel under
+    # ``~/Library/Application Support/AdoptIQ/knowledge/sentinel.json``
+    # if neither root carries the file -- documented in the docstring
+    # there and in ``CLAUDE.md`` / ``README.md``.
+    sharepoint_root = getattr(Config, "ADOPTIQ_SHAREPOINT_CACHE_DIR", None)
     handle: Optional[EncryptedCorpusHandle] = None
     try:
         try:
@@ -449,6 +483,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
                 onedrive_root=onedrive_root,
                 encrypted_path=encrypted_path,
                 create_if_missing=True,
+                sharepoint_root=sharepoint_root,
             )
         except CorpusCryptoError as crypto_err:
             with _BOOT_LOCK:
@@ -749,6 +784,63 @@ def request_sharepoint_refresh() -> bool:
     return start_background(rebuild=False)
 
 
+def sharepoint_signout() -> dict[str, object]:
+    """Round 33 / Build8: drop the persisted SharePoint refresh-token
+    cache from both the macOS Keychain and the ``~/.adoptiq`` file
+    fallback.
+
+    Idempotent and never raises.  Returns
+    ``{"ok": True, "cleared": {"keyring": bool, "file": bool}}`` so
+    the analyze-page UI can show the user a precise confirmation
+    ("signed out of Microsoft").  An ``error`` field is present only
+    when the SharePoint module fails to import or the client cannot
+    be constructed -- the user is still effectively signed out, but
+    the response surfaces the partial state.
+    """
+    if not bool(getattr(Config, "ADOPTIQ_SHAREPOINT_ENABLED", False)):
+        return {"ok": False, "error": "SharePoint feature disabled"}
+    try:
+        import sharepoint_corpus_source as _sp
+    except Exception as imp_err:  # noqa: BLE001
+        return {
+            "ok": False,
+            "error": f"sharepoint module import failed: {type(imp_err).__name__}",
+        }
+    try:
+        client = _sp.build_default_client()
+    except Exception as build_err:  # noqa: BLE001
+        return {
+            "ok": False,
+            "error": f"client init failed: {type(build_err).__name__}",
+        }
+    try:
+        cleared = client.clear_token_cache()
+    except Exception as err:  # noqa: BLE001 - never bubble
+        logger.warning(
+            "Round 33 / Build8: sharepoint signout failed: %s",
+            type(err).__name__,
+        )
+        return {"ok": False, "error": type(err).__name__}
+    # Reset the cached SharePoint state on the boot snapshot so the
+    # status payload immediately shows "auth_required" instead of
+    # "signed_in" stale from before sign-out.
+    try:
+        with _BOOT_LOCK:
+            if _STATE.sharepoint is not None and isinstance(_STATE.sharepoint, dict):
+                _STATE.sharepoint.update({
+                    "signed_in": False,
+                    "account": None,
+                    "error_kind": "auth_required",
+                    "error_detail": "user signed out via /api/corpus/sharepoint/signout",
+                })
+    except Exception as state_err:  # noqa: BLE001
+        logger.debug(
+            "Round 33 / Build8: failed to update sharepoint boot state on signout: %s",
+            type(state_err).__name__,
+        )
+    return {"ok": True, "cleared": cleared}
+
+
 __all__ = [
     "CorpusBootState",
     "begin_sharepoint_signin",
@@ -757,6 +849,7 @@ __all__ = [
     "request_refresh",
     "request_sharepoint_refresh",
     "reset_for_tests",
+    "sharepoint_signout",
     "start_background",
     "stop",
 ]

@@ -291,7 +291,8 @@ class LeaderReportGenerator:
     
     def __init__(self, ctx, team_roster: List[Tuple[str, str, str]],
                  data_retrieved_at: Optional[datetime] = None,
-                 strict_mode: bool = False):
+                 strict_mode: bool = False,
+                 arr_impact: Optional[Dict] = None):
         """
         Initialize the leader report generator
         
@@ -311,6 +312,17 @@ class LeaderReportGenerator:
                 code should forward the user's strict-mode preference
                 here so downstream validation matches the executive
                 intelligence path (Round 7 / Phase 1.8).
+            arr_impact: Round 30 / H1b — optional ARR impact dict (the
+                same shape executive_intelligence_formatter receives).
+                The leader report intentionally excludes ARR figures
+                from its output (see ``self.arr_sentiment_analyzer = None``
+                below), but it DOES surface a one-line "this portfolio
+                mixes currencies" advisory on the title page when
+                ``arr_impact.get('is_multi_currency') is True``.  This
+                lets readers cross-referencing the executive ARR
+                Exposure section know that the underlying figures are
+                not currency-comparable.  Default ``None`` keeps the
+                title page unchanged for callers that don't pass it.
         """
         if ctx is None:
             raise ValueError("Snowflake connection context (ctx) cannot be None. Please ensure database connection is established.")
@@ -323,6 +335,11 @@ class LeaderReportGenerator:
         self.bems_analyzer = BEMSEscalationAnalyzer() if BEMSEscalationAnalyzer else None
         # ARR is intentionally excluded from reporting outputs.
         self.arr_sentiment_analyzer = None
+        # Round 30 / H1b: keep the upstream ARR-impact summary so the
+        # title page can render a multi-currency advisory.  We never
+        # render ARR figures themselves (see comment above + the docs
+        # in ``__init__``).
+        self.arr_impact = arr_impact if isinstance(arr_impact, dict) else None
         # Round 5 / Phase 6.10: ``datetime.utcnow()`` is deprecated in
         # Python 3.12+ (returns naive UTC, ambiguous when serialized).
         # Use ``datetime.now(timezone.utc)`` so the data-retrieval stamp
@@ -400,7 +417,10 @@ class LeaderReportGenerator:
         ext_incidents: List[Dict] = None,
         software_defects: Dict = None,
         psirt_vulns: Dict = None,
-        progress_callback=None
+        progress_callback=None,
+        intel_truncated: Optional[Dict[str, Any]] = None,
+        intel_fetch_limit: Optional[int] = None,
+        partial_data_warnings: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[Document, str, Dict, List]:
         """
         Generate comprehensive leader report for a manager
@@ -443,7 +463,39 @@ class LeaderReportGenerator:
         
         _cb(70, 'Building title page...', 'Document Generation')
         self._create_title_page(manager_name, days, direct_reports)
-        
+
+        # Round 30 / M4: render a "Partial Data Warning" banner immediately
+        # after the title page so the reader cannot mistake an empty
+        # optional-source section (e.g. CSConsole action plans / customer
+        # pulse) for "no data" when it was actually a fetch failure.  The
+        # banner is suppressed when no warnings were promoted, keeping the
+        # happy-path Word output unchanged.
+        try:
+            if partial_data_warnings:
+                self.doc.add_heading("⚠ Partial Data Warning", level=1)
+                self.doc.add_paragraph(
+                    "One or more upstream data sources failed to load for "
+                    "this run. Sections that depend on the affected sources "
+                    "are marked \"unavailable\" rather than rendered as "
+                    "zero. Rerun once the source is reachable for a complete "
+                    "picture."
+                )
+                for _w in partial_data_warnings:
+                    if not isinstance(_w, dict):
+                        continue
+                    _ds = str(_w.get('dataset') or 'unknown')
+                    _err = str(_w.get('error') or 'unknown error')
+                    _kind = str(_w.get('kind') or 'runtime')
+                    self.doc.add_paragraph(
+                        f"• {_ds} ({_kind}): {_err}", style='List Bullet'
+                    )
+                self.doc.add_paragraph("")
+        except Exception as _r30_pdw_err:  # noqa: BLE001
+            logger.warning(
+                "Round 30 / M4: leader partial-data banner failed (continuing): %s",
+                _r30_pdw_err,
+            )
+
         _cb(71, 'Building team summary table...', 'Document Generation')
         self._create_summary_table(team_data, days)
 
@@ -470,7 +522,11 @@ class LeaderReportGenerator:
         self._add_section_separator()
         
         _cb(77, 'Adding external intelligence section...', 'Document Generation')
-        self._add_external_intelligence_section(ext_bugs, ext_incidents, software_defects, psirt_vulns)
+        self._add_external_intelligence_section(
+            ext_bugs, ext_incidents, software_defects, psirt_vulns,
+            intel_truncated=intel_truncated,
+            intel_fetch_limit=intel_fetch_limit,
+        )
         
         self._add_section_separator()
         
@@ -1635,7 +1691,67 @@ class LeaderReportGenerator:
         team_run.font.size = Pt(14)
         team_run.font.color.rgb = CISCO_BLUE
         team_run.font.bold = True
-        
+
+        # Round 30 / H1b: surface a multi-currency advisory on the title
+        # page when the upstream portfolio mixes currencies.  The leader
+        # report does NOT render ARR dollar figures of its own (see the
+        # ``__init__`` docstring + the ``ARR is intentionally excluded
+        # from reporting outputs`` comment above), so the only way a
+        # currency mismatch could mislead a reader is via a cross-
+        # reference to the executive's ARR Exposure section or via an
+        # AI-generated narrative that quotes ARR figures.  This advisory
+        # makes the disclaimer explicit and aligned with the executive
+        # / compact ARR Exposure phrasing ("multi-currency -- not summed
+        # across currencies").
+        try:
+            _r30_arr_impact = getattr(self, 'arr_impact', None)
+            if isinstance(_r30_arr_impact, dict) and bool(
+                _r30_arr_impact.get('is_multi_currency')
+            ):
+                _r30_ccys = _r30_arr_impact.get('currencies_present') or []
+                if isinstance(_r30_ccys, (list, tuple, set)):
+                    _r30_ccy_str = ', '.join(
+                        sorted(str(c).strip().upper() for c in _r30_ccys if c)
+                    )
+                else:
+                    _r30_ccy_str = ''
+                _r30_para = self.doc.add_paragraph()
+                _r30_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                _r30_run = _r30_para.add_run(
+                    "\nNote: this portfolio mixes currencies"
+                    + (f" ({_r30_ccy_str})" if _r30_ccy_str else "")
+                    + ". ARR figures referenced in cross-report "
+                    "summaries are not summed across currencies and "
+                    "are not directly comparable."
+                )
+                _r30_run.font.size = Pt(10)
+                _r30_run.font.color.rgb = CISCO_GRAY
+                _r30_run.font.italic = True
+                # Round 30 / I1: when the upstream impact dict carries a
+                # ``concentration_note`` (stamped by
+                # ``app_simple.calculate_arr_impact_for_issues`` via the
+                # canonical ``adoptiq_backend.concentration_note_text``
+                # helper), surface that note on a second line of the
+                # advisory so leaders see the same "Top-5 / HHI skipped"
+                # explanation that the executive ARR Exposure section
+                # renders.
+                _r30_conc_note = _r30_arr_impact.get('concentration_note')
+                if _r30_conc_note and isinstance(_r30_conc_note, str):
+                    _r30_conc_para = self.doc.add_paragraph()
+                    _r30_conc_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    _r30_conc_run = _r30_conc_para.add_run(_r30_conc_note.strip())
+                    _r30_conc_run.font.size = Pt(10)
+                    _r30_conc_run.font.color.rgb = CISCO_GRAY
+                    _r30_conc_run.font.italic = True
+        except Exception as _r30_arr_advisory_err:  # noqa: BLE001
+            # Defensive: title-page rendering must not fail because of
+            # an optional advisory.  Log and continue.
+            logger.warning(
+                "[[ARR]] Round 30 / H1b: leader title-page multi-"
+                "currency advisory failed: %s",
+                _r30_arr_advisory_err,
+            )
+
         self.doc.add_page_break()
         
         # Report Data Sources – canonical sources used by all AdoptIQ reports
@@ -2084,7 +2200,53 @@ class LeaderReportGenerator:
                     self.doc.add_paragraph()
         except Exception as e:
             logger.warning(f"Advanced BEMS analysis failed, using basic method: {e}")
-        
+            # Round 30 / H2: previously the BEMS analyzer exception was
+            # logged to stderr only and we silently fell through to the
+            # basic ``_add_bems_summary`` path with the same heading,
+            # leaving the reader unable to tell which path actually
+            # ran.  Render a visible degradation banner before
+            # delegating so the report explicitly discloses that the
+            # advanced strategic analysis was skipped, plus a
+            # classified reason that does not leak internal class
+            # paths or stack traces.
+            try:
+                from error_classifier import classify_analysis_error as _r30_classify_h2
+                _r30_classification = _r30_classify_h2(e)
+                _r30_kind = (_r30_classification.kind or "analysis.unknown").split(".")[0]
+            except Exception as _r30_classify_err:  # noqa: BLE001
+                logger.debug(
+                    "Round 30 / H2: error classifier unavailable for BEMS "
+                    "degradation banner: %s",
+                    _r30_classify_err,
+                )
+                _r30_kind = type(e).__name__ or "Exception"
+            try:
+                _r30_banner = self.doc.add_paragraph()
+                _r30_banner.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                _r30_banner_run = _r30_banner.add_run(
+                    "BEMS strategic analysis incomplete -- reverted to basic counts "
+                    f"(reason: {_r30_kind}).  Detailed escalations still listed below; "
+                    "advanced risk-assessment, strategic recommendations, and "
+                    "trend insights were not generated for this run."
+                )
+                _r30_banner_run.bold = True
+                _r30_banner_run.font.size = Pt(10)
+                _r30_banner_run.font.italic = True
+                # Render in the canonical CRITICAL red so the banner
+                # is clearly a degradation notice, mirroring the BEMS
+                # heading colour.
+                try:
+                    _r30_banner_run.font.color.rgb = CANONICAL_RISK_HIGH_RGB
+                except Exception:  # noqa: BLE001 - colour is purely cosmetic
+                    pass
+                self.doc.add_paragraph()
+            except Exception as _r30_banner_err:  # noqa: BLE001
+                logger.warning(
+                    "Round 30 / H2: failed to render BEMS degradation "
+                    "banner (continuing without it): %s",
+                    _r30_banner_err,
+                )
+
         # Call the existing detailed BEMS summary method
         self._add_bems_summary(team_data)
     
@@ -2093,9 +2255,26 @@ class LeaderReportGenerator:
         ext_bugs: List[Dict] = None,
         ext_incidents: List[Dict] = None,
         software_defects: Dict = None,
-        psirt_vulns: Dict = None
+        psirt_vulns: Dict = None,
+        intel_truncated: Optional[Dict[str, Any]] = None,
+        intel_fetch_limit: Optional[int] = None,
     ):
-        """Add External Intelligence section (defects, PSIRT, incidents) - uses all data sources"""
+        """Add External Intelligence section (defects, PSIRT, incidents) - uses all data sources.
+
+        Round 30 / M2: ``intel_truncated`` is the dict produced by
+        :func:`incident_storage.get_all_external_intel` (key
+        ``list_truncated``) and may carry ``incidents`` / ``bugs`` /
+        ``maintenances`` boolean flags signalling that the upstream
+        fetch hit ``ADOPTIQ_INTEL_LIST_LIMIT`` and therefore returned
+        only the most recent N rows.  When a flag is set we append a
+        ``" (table truncated; fetch limit reached)"`` disclosure to
+        the corresponding sub-section so the reader cannot mistake a
+        capped sample for the full population.
+
+        ``intel_fetch_limit`` is the ``list_fetch_limit`` int from the
+        same intel dict, included in the disclosure when known so the
+        reader can see exactly how many rows were retained.
+        """
         has_defects = software_defects and software_defects.get('total_defects', 0) > 0
         has_psirt = psirt_vulns and psirt_vulns.get('total_vulnerabilities', 0) > 0
         has_bugs = ext_bugs and len(ext_bugs) > 0
@@ -2103,21 +2282,48 @@ class LeaderReportGenerator:
         
         if not (has_defects or has_psirt or has_bugs or has_incidents):
             return
-        
+
+        # Round 30 / M2: helper to format the truncation suffix for each
+        # sub-section.  Returns an empty string when the upstream fetch
+        # was complete so the existing rendering is unchanged in the
+        # happy path.
+        def _r30_trunc_suffix(key: str, *, shown: int) -> str:
+            try:
+                if not intel_truncated or not isinstance(intel_truncated, dict):
+                    return ''
+                if not intel_truncated.get(key):
+                    return ''
+            except Exception:  # noqa: BLE001
+                return ''
+            if intel_fetch_limit and isinstance(intel_fetch_limit, int) and intel_fetch_limit > 0:
+                return (
+                    f' (table truncated; fetch limit reached -- shown {shown} of '
+                    f'most-recent {intel_fetch_limit} rows; older rows omitted)'
+                )
+            return (
+                f' (table truncated; fetch limit reached -- shown {shown} most-recent rows; '
+                'older rows omitted)'
+            )
+
         self.doc.add_heading('External Intelligence & Known Issues', level=1)
         
         # Software defects from customer data
         if has_defects:
             para = self.doc.add_paragraph()
-            para.add_run(f'Software Defects: ').bold = True
+            para.add_run('Software Defects: ').bold = True
             para.add_run(f'{software_defects.get("total_defects", 0)} unique BST/CSC defects in {software_defects.get("total_cases_with_defects", 0)} cases. ')
             para.add_run('Source: CSOne, Adoption Barriers.\n').italic = True
         
         # External bugs from help.webex.com
         if has_bugs:
             para = self.doc.add_paragraph()
-            para.add_run(f'Known Issues (help.webex.com): ').bold = True
-            para.add_run(f'{len(ext_bugs)} publicly referenced defects.\n')
+            para.add_run('Known Issues (help.webex.com): ').bold = True
+            _bug_count = len(ext_bugs)
+            _bug_suffix = _r30_trunc_suffix('bugs', shown=_bug_count)
+            para.add_run(f'{_bug_count} publicly referenced defects{_bug_suffix}.\n')
+            if _bug_suffix:
+                _disc = self.doc.add_paragraph()
+                _disc.add_run(_bug_suffix.lstrip(' (').rstrip(').')).italic = True
         
         # PSIRT vulnerabilities
         if has_psirt:
@@ -2125,15 +2331,20 @@ class LeaderReportGenerator:
             vuln_count = psirt_vulns.get('total_vulnerabilities', 0)
             cve_count = len(psirt_vulns.get('cve_ids', set()))
             psirt_count = len(psirt_vulns.get('psirt_advisories', set()))
-            para.add_run(f'Security Vulnerabilities: ').bold = True
+            para.add_run('Security Vulnerabilities: ').bold = True
             para.add_run(f'{vuln_count} total ({cve_count} CVEs, {psirt_count} PSIRT advisories). ')
             para.add_run('Source: CSOne, Adoption Barriers.\n').italic = True
         
         # Service incidents
         if has_incidents:
             para = self.doc.add_paragraph()
-            para.add_run(f'Service Incidents (status.webex.com): ').bold = True
-            para.add_run(f'{len(ext_incidents)} incidents in analysis period.\n')
+            para.add_run('Service Incidents (status.webex.com): ').bold = True
+            _inc_count = len(ext_incidents)
+            _inc_suffix = _r30_trunc_suffix('incidents', shown=_inc_count)
+            para.add_run(f'{_inc_count} incidents in analysis period{_inc_suffix}.\n')
+            if _inc_suffix:
+                _disc = self.doc.add_paragraph()
+                _disc.add_run(_inc_suffix.lstrip(' (').rstrip(').')).italic = True
     
     def _add_bems_summary(self, team_data: Dict[str, Dict]):
         """Add BEMS escalation summary with details"""
@@ -4668,21 +4879,44 @@ class LeaderReportGenerator:
                     # drop rows from the team summary count.
                     status_series = abs_df['STATUS_C']
                     open_ab_count = int(status_series.apply(self._is_status_open).sum())
-                    status_norm = status_series.astype(str).str.strip().str.lower()
-                    resolved_ab_count = int(
-                        status_norm.str.contains(r'closed|resolved|complete', case=False, na=False).sum()
-                    )
+                    # Round 30 / M1: route through the canonical
+                    # ``count_closed_barriers`` helper so this count
+                    # matches the lifecycle definition every other
+                    # report uses.  The previous inline regex
+                    # (``r'closed|resolved|complete'``) bypassed the
+                    # normalization map and over-counted labels like
+                    # "Resolved (Pending Customer Review)" while
+                    # silently missing any synonym not in the regex.
+                    try:
+                        resolved_ab_count = int(cm.count_closed_barriers(abs_df))
+                    except Exception:  # noqa: BLE001
+                        # Defensive fallback: keep the legacy regex
+                        # behaviour so a stale fixture cannot break
+                        # the leader report at runtime.  The canonical
+                        # path is the primary, this is belt-and-
+                        # suspenders only.
+                        status_norm = status_series.astype(str).str.strip().str.lower()
+                        resolved_ab_count = int(
+                            status_norm.str.contains(r'closed|resolved|complete', case=False, na=False).sum()
+                        )
 
             if not data.get('action_plans', pd.DataFrame()).empty:
                 ap_df = data['action_plans']
                 if 'STATUS_C' in ap_df.columns:
-                    # Round 6 / Phase 5.6: normalize STATUS_C the same
-                    # way before pattern matching so "Done"/"DONE"/
-                    # "  done  " all collapse onto the same bucket.
-                    _ap_status_norm = ap_df['STATUS_C'].astype(str).str.strip().str.lower()
-                    completed_ap_count = int(
-                        _ap_status_norm.str.contains(r'complete|closed|done', case=False, na=False).sum()
-                    )
+                    # Round 30 / M1: route through canonical
+                    # ``count_action_plan_completed`` so the leader
+                    # "completed action plans" tally honors the SSoT
+                    # status normalization map (including labels like
+                    # "Closed - Will Not Complete" that should NOT be
+                    # counted as a success).  See the docstring in
+                    # ``canonical_metrics.count_action_plan_completed``.
+                    try:
+                        completed_ap_count = int(cm.count_action_plan_completed(ap_df))
+                    except Exception:  # noqa: BLE001
+                        _ap_status_norm = ap_df['STATUS_C'].astype(str).str.strip().str.lower()
+                        completed_ap_count = int(
+                            _ap_status_norm.str.contains(r'complete|closed|done', case=False, na=False).sum()
+                        )
 
             # Blended impact: resolved work + completed plans, lightly
             # discounted by currently-open high-severity load.
@@ -6229,7 +6463,11 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                           software_defects: Dict = None, psirt_vulns: Dict = None,
                           progress_callback=None,
                           data_retrieved_at: Optional[datetime] = None,
-                          strict_mode: bool = False) -> Tuple[str, str, Dict]:
+                          strict_mode: bool = False,
+                          arr_impact: Optional[Dict] = None,
+                          intel_truncated: Optional[Dict[str, Any]] = None,
+                          intel_fetch_limit: Optional[int] = None,
+                          partial_data_warnings: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, str, Dict]:
     """
     Main function to generate leader report
     
@@ -6261,17 +6499,24 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
         # Round 7 / Phase 6.11: forward strict_mode through to the
         # generator so partial-data conditions raise instead of being
         # silently swallowed when callers opt in.
+        # Round 30 / H1b: forward the optional ``arr_impact`` summary so
+        # the title-page multi-currency advisory can render when the
+        # upstream portfolio mixes currencies.
         generator = LeaderReportGenerator(
             ctx, team_roster,
             data_retrieved_at=data_retrieved_at,
             strict_mode=strict_mode,
+            arr_impact=arr_impact,
         )
         
         doc, filepath, team_data, direct_reports = generator.generate_leader_report(
             manager_name, days,
             ext_bugs=ext_bugs, ext_incidents=ext_incidents,
             software_defects=software_defects, psirt_vulns=psirt_vulns,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            intel_truncated=intel_truncated,
+            intel_fetch_limit=intel_fetch_limit,
+            partial_data_warnings=partial_data_warnings,
         )
         logger.info(f"generator.generate_leader_report() completed. filepath: {filepath}")
         
@@ -6286,13 +6531,45 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             generator.doc = Document()
             generator._setup_document_settings()
             generator._create_title_page(manager_name, days, direct_reports)
+            # Round 30 / M4: re-render the partial-data banner during TAC
+            # regeneration so the post-TAC document stays in parity with the
+            # initial pass.
+            try:
+                if partial_data_warnings:
+                    generator.doc.add_heading("⚠ Partial Data Warning", level=1)
+                    generator.doc.add_paragraph(
+                        "One or more upstream data sources failed to load "
+                        "for this run. Sections that depend on the affected "
+                        "sources are marked \"unavailable\" rather than "
+                        "rendered as zero. Rerun once the source is "
+                        "reachable for a complete picture."
+                    )
+                    for _w in partial_data_warnings:
+                        if not isinstance(_w, dict):
+                            continue
+                        _ds = str(_w.get('dataset') or 'unknown')
+                        _err = str(_w.get('error') or 'unknown error')
+                        _kind = str(_w.get('kind') or 'runtime')
+                        generator.doc.add_paragraph(
+                            f"• {_ds} ({_kind}): {_err}", style='List Bullet'
+                        )
+                    generator.doc.add_paragraph("")
+            except Exception as _r30_pdw_err:  # noqa: BLE001
+                logger.warning(
+                    "Round 30 / M4: post-TAC leader partial-data banner failed: %s",
+                    _r30_pdw_err,
+                )
             generator._create_summary_table(team_data, days)
             generator._create_adoptiq_summaries_per_person(team_data, days)
             generator._create_detailed_ab_list(team_data)
             generator._add_section_separator()
             generator._add_bems_escalation_section(team_data)
             generator._add_section_separator()
-            generator._add_external_intelligence_section(ext_bugs, ext_incidents, software_defects, psirt_vulns)
+            generator._add_external_intelligence_section(
+                ext_bugs, ext_incidents, software_defects, psirt_vulns,
+                intel_truncated=intel_truncated,
+                intel_fetch_limit=intel_fetch_limit,
+            )
             generator._add_section_separator()
             generator._add_validation_section(validation_results)
             try:

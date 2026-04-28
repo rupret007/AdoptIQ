@@ -104,6 +104,26 @@
                                   data-intel-banner-state-pill>
                                 <span data-intel-banner-state-text>Idle</span>
                             </span>
+                            {# Round 32 / Phase 2.E: persistent toggle for
+                               AdoptIQ Intelligence (CORPUS_KNOWLEDGE_ENABLED).
+                               POSTs to /api/settings/intelligence which
+                               writes ~/Library/Application Support/AdoptIQ/settings.json
+                               and mutates Config in-process so the change
+                               is durable across restarts without anyone
+                               touching env vars or launchctl. #}
+                            <div class="form-check form-switch mb-0 me-1"
+                                 title="Enable/disable AdoptIQ Intelligence">
+                                <input class="form-check-input"
+                                       type="checkbox"
+                                       role="switch"
+                                       id="adoptiq-intel-toggle"
+                                       data-intel-enable-toggle
+                                       {% if intel_status and intel_status.enabled %}checked{% endif %}>
+                                <label class="form-check-label small text-muted"
+                                       for="adoptiq-intel-toggle">
+                                    Enabled
+                                </label>
+                            </div>
                             <button type="button"
                                     class="btn btn-sm btn-outline-primary"
                                     data-intel-run-now
@@ -111,6 +131,106 @@
                                 <i class="fas fa-sync-alt me-1" aria-hidden="true"></i>
                                 Run now
                             </button>
+                        </div>
+                    </div>
+                    {# Round 33 / Build8: SharePoint connection sub-panel.
+                       Three states are rendered by static/js/intel_status.js
+                       based on intel_status.boot.sharepoint:
+
+                         * not_configured -- URL field + Save URL.
+                         * auth_required  -- Connect to Microsoft button
+                                             that opens a device-code modal
+                                             (verification URI + user code).
+                         * signed_in      -- Account name + Sign out.
+
+                       The initial server-rendered HTML uses neutral copy
+                       so users with JS disabled still see a usable
+                       summary that points them at the admin console.
+                       All form posts go through the same CSRF helper as
+                       /api/settings/intelligence so a hostile origin
+                       cannot start a sign-in or rewrite the URL. #}
+                    <div class="mt-3 pt-3 border-top"
+                         id="adoptiq-sharepoint-panel"
+                         data-sharepoint-panel
+                         data-state="{{ intel_status.boot.sharepoint.error_kind if intel_status and intel_status.boot and intel_status.boot.sharepoint and intel_status.boot.sharepoint.error_kind else 'unknown' }}">
+                        <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+                            <strong class="small">
+                                <i class="fab fa-microsoft me-1 text-primary" aria-hidden="true"></i>
+                                SharePoint connection
+                            </strong>
+                            <span class="badge rounded-pill bg-secondary"
+                                  data-sharepoint-state-pill>
+                                <span data-sharepoint-state-text>checking&hellip;</span>
+                            </span>
+                            <span class="small text-muted ms-auto"
+                                  data-sharepoint-account
+                                  aria-live="polite"></span>
+                        </div>
+                        <div class="d-flex flex-wrap align-items-center gap-2"
+                             data-sharepoint-controls>
+                            <label for="adoptiq-sharepoint-url"
+                                   class="form-label mb-0 small text-muted">
+                                Folder URL:
+                            </label>
+                            <input type="url"
+                                   id="adoptiq-sharepoint-url"
+                                   data-sharepoint-url-input
+                                   class="form-control form-control-sm"
+                                   style="max-width: 480px;"
+                                   placeholder="https://&lt;tenant&gt;.sharepoint.com/&hellip;"
+                                   autocomplete="off"
+                                   spellcheck="false"
+                                   value="{{ (intel_status.boot.sharepoint.folder_url if intel_status and intel_status.boot and intel_status.boot.sharepoint and intel_status.boot.sharepoint.folder_url else (sharepoint_folder_url or '')) }}">
+                            <button type="button"
+                                    class="btn btn-sm btn-outline-secondary"
+                                    data-sharepoint-save-url>
+                                <i class="fas fa-save me-1" aria-hidden="true"></i>
+                                Save URL
+                            </button>
+                            <button type="button"
+                                    class="btn btn-sm btn-primary"
+                                    data-sharepoint-signin
+                                    style="display:none;">
+                                <i class="fab fa-microsoft me-1" aria-hidden="true"></i>
+                                Connect to Microsoft
+                            </button>
+                            <button type="button"
+                                    class="btn btn-sm btn-outline-danger"
+                                    data-sharepoint-signout
+                                    style="display:none;">
+                                <i class="fas fa-sign-out-alt me-1" aria-hidden="true"></i>
+                                Sign out
+                            </button>
+                            <span class="small text-muted"
+                                  data-sharepoint-feedback
+                                  aria-live="polite"></span>
+                        </div>
+                        {# Inline device-code prompt panel.  Rendered hidden
+                           by default; the JS handler unhides it after a
+                           successful POST /api/corpus/sharepoint/signin.
+                           Uses textContent-only updates (no innerHTML) so
+                           a hostile signin envelope cannot inject
+                           script. #}
+                        <div class="alert alert-info mt-2 mb-0 small"
+                             role="status"
+                             data-sharepoint-devicecode
+                             style="display:none;">
+                            <div class="mb-1">
+                                <strong>One more step:</strong>
+                                open
+                                <a href="#"
+                                   target="_blank"
+                                   rel="noopener noreferrer"
+                                   data-sharepoint-devicecode-uri>microsoft.com/devicelogin</a>
+                                and enter this code:
+                            </div>
+                            <div class="font-monospace fs-5 fw-bold"
+                                 data-sharepoint-devicecode-user
+                                 aria-live="polite"></div>
+                            <div class="small text-muted mt-1">
+                                This page will refresh automatically once you finish signing in.
+                                <span data-sharepoint-devicecode-status></span>
+                            </div>
                         </div>
                     </div>
                     {# Round 26 / Phase D: optional drop-zone for
@@ -1306,6 +1426,56 @@ const AnalysisFormManager = (() => {
                 setTimeout(() => {
                     window.location.href = finalRedirectUrl;
                 }, 1000);
+                // Round 33 / Build8: redirect-fallback safety net.  If
+                // ``window.location.href = ...`` is silently blocked
+                // (browser extension, SPA pushState bug, CSP
+                // ``frame-ancestors``-induced unload abort, etc.) the
+                // user previously sat on the analyze page with no
+                // indication that the analysis was already running on
+                // the server.  Render a visible "Open progress page"
+                // link 3.5s after success so they always have an
+                // escape hatch.  We use ``setTimeout`` rather than
+                // ``visibilitychange`` because the failure mode is
+                // exactly that the navigation never starts, so the
+                // page never hides.
+                // ROUND33_ANALYZE_REDIRECT_FALLBACK
+                setTimeout(() => {
+                    try {
+                        if (
+                            typeof window.location.pathname === 'string'
+                            && window.location.pathname.indexOf('/progress/') === 0
+                        ) {
+                            return;  // navigation succeeded
+                        }
+                        let host = document.getElementById('analyze-redirect-fallback');
+                        if (!host) {
+                            host = document.createElement('div');
+                            host.id = 'analyze-redirect-fallback';
+                            host.className = 'alert alert-info mt-3';
+                            host.setAttribute('role', 'status');
+                            const note = document.createElement('div');
+                            note.className = 'mb-2';
+                            note.textContent = 'Your analysis is running on the server. Auto-redirect did not fire.';
+                            const link = document.createElement('a');
+                            link.className = 'btn btn-sm btn-primary';
+                            link.href = finalRedirectUrl;
+                            link.rel = 'noopener noreferrer';
+                            link.textContent = 'Open progress page';
+                            host.appendChild(note);
+                            host.appendChild(link);
+                            const formEl = document.getElementById('analysisForm');
+                            if (formEl && formEl.parentNode) {
+                                formEl.parentNode.insertBefore(host, formEl);
+                            } else {
+                                document.body.appendChild(host);
+                            }
+                        }
+                    } catch (_fallbackErr) {
+                        try {
+                            console.warn('[adoptiq] analyze redirect fallback failed: ' + (_fallbackErr && _fallbackErr.message));
+                        } catch (_) { /* ignore */ }
+                    }
+                }, 3500);
                 return;
             } else {
                 throw new Error(data.error || 'Unknown error occurred');

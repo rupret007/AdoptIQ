@@ -2,7 +2,7 @@
 
 PyInstaller builds are OS-specific. Build Windows artifacts on Windows (or via CI on a Windows runner).
 
-> **Pre-build sanity check (recommended).** Run `make verify` before building so you catch test/lint/security/audit regressions on the source tree before they ship in a binary. Current baseline: 1949 passed / 2 skipped, ruff clean, no HIGH/MED bandit findings, no pip-audit vulns.
+> **Pre-build sanity check (recommended).** Run `make verify` before building so you catch test/lint/security/audit regressions on the source tree before they ship in a binary. Current baseline (Round 28 close-out): 2445 passed / 2 skipped, ruff clean, no HIGH/MED bandit findings, no pip-audit vulns.
 
 ## Local Windows build
 

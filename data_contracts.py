@@ -16,11 +16,57 @@ source schema do not break the build.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, TypedDict
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+# Round 32 / Phase 1.A: Snowflake custom-object namespacing prefixes
+# we strip during column-name normalization so a real column like
+# ``AB_C__BU_NAME`` can satisfy the ``customer`` slot whose alias list
+# only contains ``BU_NAME``.  These prefixes were observed silently
+# wiping the adoption_barriers / customer_pulse contracts in build6
+# (see ~/.adoptiq/adoptiq.46198.log lines 174 / 172).  Trailing ``_C``
+# / ``__C`` is the Salesforce custom-field marker that some Snowflake
+# views strip and others leave in place.
+_NORMALIZE_PREFIXES: Tuple[str, ...] = (
+    "AB_C__", "AB__", "BARRIER_C__", "BARRIER__",
+    "PULSE_C__", "PULSE__", "CASE_C__", "CASE__",
+    "ACCOUNT_C__", "ACCOUNT__", "CSONE_C__", "CSONE__",
+)
+_NORMALIZE_SUFFIXES: Tuple[str, ...] = ("__C", "_C")
+_BOM_OR_WS_RE = re.compile(r"[\s\ufeff\u200b]+")
+
+
+def _normalize_column_name(name: Any) -> str:
+    """Return a normalized form of ``name`` for resilient alias matching.
+
+    Round 32 / Phase 1.A: strips whitespace + BOM/zero-width chars,
+    case-folds, strips common Snowflake namespacing prefixes, and
+    strips Salesforce ``__C`` / ``_C`` suffixes.  This is *only* used
+    by ``validate_row_contract``'s alias resolver — the actual column
+    in the DataFrame is left untouched, so callers that read the raw
+    upstream name continue to work.
+    """
+    if name is None:
+        return ""
+    s = _BOM_OR_WS_RE.sub("", str(name)).lower()
+    if not s:
+        return ""
+    for prefix in _NORMALIZE_PREFIXES:
+        p = prefix.lower()
+        if s.startswith(p):
+            s = s[len(p):]
+            break
+    for suffix in _NORMALIZE_SUFFIXES:
+        sfx = suffix.lower()
+        if s.endswith(sfx) and len(s) > len(sfx):
+            s = s[: -len(sfx)]
+            break
+    return s
 
 
 # ---------------------------------------------------------------------------
@@ -178,33 +224,55 @@ def validate_row_contract(
         pass
 
     # Round 7 / Phase 2.7: alias resolution is now case-insensitive.
-    # Upstream Snowflake views frequently uppercase column names while
-    # Excel imports often arrive in mixed case (e.g. ``Severity`` vs
-    # ``SEVERITY_C``).  The previous strict ``alias in columns``
-    # comparison treated those as different columns and reported a
-    # bogus contract violation, which then suppressed downstream
-    # rendering even though the data was actually present.
+    # Round 32 / Phase 1.A: alias resolution also strips Snowflake
+    # namespacing prefixes (``AB_C__``, ``PULSE_C__``, ...) and
+    # Salesforce ``__C`` / ``_C`` suffixes via ``_normalize_column_name``,
+    # because build6 silently lost adoption_barriers / customer_pulse
+    # / tac_cases / bems_rows in production runs when upstream views
+    # delivered prefix-namespaced columns.  The first matching alias
+    # for each slot is recorded in ``matched_columns`` so the
+    # annotator can copy the value into a canonical-name column for
+    # downstream consumers that read ``df["customer"]`` directly.
     columns_raw: List[str] = [str(c) for c in df.columns]
     columns_set: Set[str] = set(columns_raw)
     columns_ci_map: Dict[str, str] = {c.lower(): c for c in columns_raw}
+    columns_norm_map: Dict[str, str] = {}
+    for c in columns_raw:
+        norm = _normalize_column_name(c)
+        if norm and norm not in columns_norm_map:
+            columns_norm_map[norm] = c
+
     missing_slots: List[str] = []
+    matched_columns: Dict[str, str] = {}
     for slot, aliases in ROW_CONTRACT_ALIASES[dataset].items():
-        matched = False
+        matched_col: Optional[str] = None
         for alias in aliases:
-            if alias in columns_set:
-                matched = True
+            alias_str = str(alias)
+            if alias_str in columns_set:
+                matched_col = alias_str
                 break
-            ci_hit = columns_ci_map.get(str(alias).lower())
+            ci_hit = columns_ci_map.get(alias_str.lower())
             if ci_hit is not None:
-                matched = True
+                matched_col = ci_hit
                 logger.debug(
                     "[[CONTRACT]] Round 7 / Phase 2.7: %s slot %r matched "
                     "alias %r via case-insensitive lookup (actual column %r).",
-                    dataset, slot, alias, ci_hit,
+                    dataset, slot, alias_str, ci_hit,
                 )
                 break
-        if not matched:
+            norm_hit = columns_norm_map.get(_normalize_column_name(alias_str))
+            if norm_hit is not None:
+                matched_col = norm_hit
+                logger.debug(
+                    "[[CONTRACT]] Round 32 / Phase 1.A: %s slot %r matched "
+                    "alias %r via normalized lookup (actual column %r).",
+                    dataset, slot, alias_str, norm_hit,
+                )
+                break
+        if matched_col is None:
             missing_slots.append(slot)
+        else:
+            matched_columns[slot] = matched_col
 
     is_valid = not missing_slots
     error_message = ""
@@ -232,6 +300,8 @@ def validate_row_contract(
         "is_valid": is_valid,
         "missing_slots": missing_slots,
         "present_columns": sorted(columns_raw),
+        "matched_columns": matched_columns,
+        "row_count": int(len(df.index)),
         "error_message": error_message,
     }
 
@@ -245,14 +315,55 @@ def annotate_with_contract(
     """Run the row contract and stash the result onto ``df.attrs`` so
     downstream callers can detect schema drift without re-running the
     check. Returns ``df`` for chaining.
+
+    Round 32 / Phase 1.A behavior:
+
+    * For every slot that resolved to an actual column, copy that
+      column's values into a canonical-name column (e.g. ``customer``
+      from ``BU_NAME``) iff the canonical name is not already present.
+      Downstream code that dereferences ``df["customer"]`` then
+      stops silently emitting empty sections when upstream uses a
+      legacy or namespaced name.
+
+    * If a non-empty frame fails the contract AND it does not already
+      carry a ``fetch_error`` annotation (the fetcher already owns
+      that signal for fetch failures), stamp
+      ``df.attrs['fetch_error']`` + ``fetch_error_kind='schema_drift'``
+      so the existing report banners surface the issue instead of
+      silently producing an empty section.
+
+    * Empty frames with missing slots are *not* escalated to
+      ``fetch_error``: zero rows is a legitimate query result and the
+      fetcher would have set ``fetch_error`` itself if the upstream
+      call truly failed.
     """
     if df is None:
         return df
     result = validate_row_contract(df, dataset=dataset, raise_on_missing=raise_on_missing)
+
+    matched_cols = result.get("matched_columns") or {}
+    if isinstance(df, pd.DataFrame) and matched_cols:
+        for slot, src_col in matched_cols.items():
+            try:
+                if not slot or slot in df.columns or src_col not in df.columns:
+                    continue
+                df[slot] = df[src_col]
+            except Exception as _copy_err:  # noqa: BLE001 - never break callers
+                logger.debug(
+                    "[[CONTRACT]] Round 32 / Phase 1.A: failed to copy "
+                    "%s -> canonical %r on %s: %s",
+                    src_col, slot, dataset, _copy_err,
+                )
+
+    soft_pass = (not result["is_valid"]) and (result.get("row_count", 0) == 0)
+
     contract_blob = {
         "dataset": dataset,
         "is_valid": result["is_valid"],
         "missing_slots": result["missing_slots"],
+        "matched_columns": dict(matched_cols),
+        "row_count": int(result.get("row_count", 0) or 0),
+        "soft_pass": bool(soft_pass),
         "error_message": result["error_message"],
     }
     # Round 2 / Phase 4.4: a single frame can satisfy more than one
@@ -268,6 +379,22 @@ def annotate_with_contract(
     existing = [c for c in existing if c.get("dataset") != dataset]
     existing.append(contract_blob)
     df.attrs["row_contracts"] = existing
+
+    if (not result["is_valid"]) and not soft_pass and not df.attrs.get("fetch_error"):
+        missing = ",".join(result["missing_slots"]) or "unknown"
+        df.attrs["fetch_error"] = (
+            f"schema_drift:{dataset}: missing slot(s) {missing} on a "
+            f"non-empty result ({contract_blob['row_count']} row(s)); "
+            "upstream column names changed - report banner will surface this."
+        )
+        df.attrs["fetch_error_kind"] = "schema_drift"
+        df.attrs.setdefault("fetch_error_dataset", dataset)
+        logger.warning(
+            "[[CONTRACT]] Round 32 / Phase 1.A: escalated schema_drift to "
+            "fetch_error on %s (%d row(s), missing slots: %s)",
+            dataset, contract_blob['row_count'], missing,
+        )
+
     return df
 
 

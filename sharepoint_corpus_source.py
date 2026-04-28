@@ -429,6 +429,43 @@ class KeyringTokenCache:
                 type(err).__name__,
             )
 
+    def clear(self) -> dict:
+        """Round 33 / Build8: drop the persisted token cache from both
+        keyring and the file fallback.
+
+        Idempotent and never raises -- a missing entry is treated as
+        success.  Returns a small ``dict`` describing what was cleared
+        so the calling endpoint can include it in the JSON response
+        for diagnostics ("we cleared the keyring entry but the file
+        fallback was already absent").
+        """
+        cleared = {"keyring": False, "file": False}
+        with self._lock:
+            if self._keyring is not None:
+                try:
+                    self._keyring.delete_password(self._service, self._account)
+                    cleared["keyring"] = True
+                except Exception as err:  # noqa: BLE001 - missing entry, etc.
+                    # ``keyring.errors.PasswordDeleteError`` is the
+                    # documented "no such entry" signal.  Anything else
+                    # is also non-fatal -- we still want to clear the
+                    # file fallback below.
+                    logger.debug(
+                        "Round 33 / Build8: sharepoint keyring delete skipped (%s)",
+                        type(err).__name__,
+                    )
+            if self._fallback_path is not None:
+                try:
+                    if self._fallback_path.exists():
+                        self._fallback_path.unlink()
+                        cleared["file"] = True
+                except Exception as err:  # noqa: BLE001 - never bubble
+                    logger.warning(
+                        "Round 33 / Build8: sharepoint token file delete failed (%s)",
+                        type(err).__name__,
+                    )
+        return cleared
+
 
 # ---------------------------------------------------------------------------
 # SharePoint Graph client
@@ -497,6 +534,35 @@ class SharePointGraphClient:
         # request shows the code to the user.
         self._pending_flow: Optional[Dict[str, Any]] = None
         self._lock = threading.Lock()
+
+    # -- Sign-out -------------------------------------------------------------
+
+    def clear_token_cache(self) -> dict:
+        """Round 33 / Build8: drop the persisted refresh-token cache so
+        the next call to :meth:`acquire_token_silent` returns ``None``
+        and the analyze-page UI can re-prompt the user for sign-in.
+
+        Idempotent.  Resets the in-memory MSAL handles too so a stale
+        cache cannot survive in process memory after sign-out.
+        Returns the same ``{"keyring": bool, "file": bool}`` envelope
+        as :meth:`KeyringTokenCache.clear`.
+        """
+        cleared = {"keyring": False, "file": False}
+        if self._token_cache is not None:
+            try:
+                cleared = self._token_cache.clear()
+            except Exception as err:  # noqa: BLE001 - never bubble
+                logger.warning(
+                    "Round 33 / Build8: sharepoint clear_token_cache failed (%s)",
+                    type(err).__name__,
+                )
+        # Reset in-memory MSAL state so the next ``acquire_token_silent``
+        # rebuilds the cache from disk (which we just emptied) instead
+        # of returning a token from the previous session.
+        self._msal_app = None
+        self._msal_cache = None
+        self._pending_flow = None
+        return cleared
 
     # -- MSAL / token plumbing ------------------------------------------------
 

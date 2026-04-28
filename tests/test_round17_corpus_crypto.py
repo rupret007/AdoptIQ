@@ -332,18 +332,37 @@ def test_open_encrypted_corpus_missing_without_create_raises(tmp_path: Path):
 
 
 def test_open_corpus_for_user_missing_onedrive_root_raises(tmp_path: Path):
+    """Round 33 / Build8: the default
+    ``open_corpus_for_user(allow_local_sentinel=True)`` no longer
+    raises when neither OneDrive nor SharePoint provides a sentinel
+    -- it auto-mints a local one under
+    ``<encrypted_path>.parent/sentinel.json``.  This test pins the
+    legacy fail-loud contract that operators relying on SharePoint
+    ACLs for at-rest encryption can opt back into via
+    ``allow_local_sentinel=False``."""
     enc = tmp_path / "knowledge" / "corpus.db.enc"
     with pytest.raises(CorpusCryptoError):
-        open_corpus_for_user(onedrive_root=None, encrypted_path=enc)
+        open_corpus_for_user(
+            onedrive_root=None,
+            encrypted_path=enc,
+            allow_local_sentinel=False,
+        )
 
 
 def test_open_corpus_for_user_missing_sentinel_raises(tmp_path: Path):
+    """Round 33 / Build8: see ``test_open_corpus_for_user_missing_onedrive_root_raises``
+    for the rationale.  Same fail-loud contract preserved via
+    ``allow_local_sentinel=False``."""
     onedrive = tmp_path / "OneDrive_AdoptIQ_CSOne_Reports"
     onedrive.mkdir()
     # No sentinel inside -> CorpusUnavailable-style error.
     enc = tmp_path / "knowledge" / "corpus.db.enc"
     with pytest.raises(CorpusCryptoError):
-        open_corpus_for_user(onedrive_root=onedrive, encrypted_path=enc)
+        open_corpus_for_user(
+            onedrive_root=onedrive,
+            encrypted_path=enc,
+            allow_local_sentinel=False,
+        )
 
 
 def test_open_corpus_for_user_round_trip(tmp_path: Path, monkeypatch):

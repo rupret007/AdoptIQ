@@ -14,7 +14,7 @@ python app_simple.py                        # Main app — http://localhost:5151
 python enhanced_admin_dashboard_v2.py       # Admin dashboard — http://127.0.0.1:5152
 
 # Tests
-python -m pytest -v                         # Full test suite (baseline: 1949 passed / 2 skipped)
+python -m pytest -v                         # Full test suite (baseline: 2570 passed / 2 skipped after Round 30)
 python -m pytest tests/test_canonical_metrics.py -v   # Single test file
 python -m pytest -k "ask_ai" -v            # Filter by name
 python -m pytest tests/test_round16_*.py -v # Round 16 regression suite (cross-format consistency, sort determinism, AI grounding, polish offset)
@@ -77,7 +77,26 @@ User uploads CSOne .xlsx
 ### Storage
 - macOS: `~/Library/Application Support/AdoptIQ/`
 - Windows: `%APPDATA%\AdoptIQ\`
-- Subdirs: `uploads/`, `outputs/`, `analysis_status.json`, `external_intelligence.db` (SQLite), `admin_monitoring_v2.db` (SQLite)
+- Subdirs: `uploads/`, `outputs/`, `analysis_status.json`, `external_intelligence.db` (SQLite), `admin_monitoring_v2.db` (SQLite), `settings.json` (Round 32, mode `0600`, parent dir `0700`)
+
+### Settings precedence (Round 32 / Phase 2.E, extended Round 33 / Build8)
+Persistent feature flags resolve in this order — highest precedence first:
+1. `settings.json` (managed by `adoptiq_settings.py`; allow-listed keys only — currently `corpus_knowledge_enabled` and `sharepoint_folder_url`).
+2. Environment variable (e.g. `CORPUS_KNOWLEDGE_ENABLED=true|false`, `ADOPTIQ_SHAREPOINT_FOLDER_URL=https://...`).
+3. `config.py` default.
+
+The Intelligence on/off switch in the analyze-page `[data-intel-banner]` card POSTs to `/api/settings/intelligence` (CSRF-protected via the same dual-path as `/api/corpus/refresh`), which writes `settings.json`, mutates `Config.CORPUS_KNOWLEDGE_ENABLED` in-process, and triggers `corpus_bootstrap.request_refresh` on enable. Round 32 / Phase 2.F flipped the `config.py` default to `true` so fresh installs surface Intelligence in the UI immediately.
+
+The Round 33 / Build8 SharePoint connection sub-panel (also under `[data-intel-banner]`) POSTs to `/api/settings/sharepoint_url` (URL field, allow-list `https://<tenant>.sharepoint.com/<path>` enforced via `adoptiq_settings.is_valid_sharepoint_url`), `/api/corpus/sharepoint/signin` (returns `{user_code, verification_uri, expires_in, message, interval}` for the device-code modal), and `/api/corpus/sharepoint/signout` (delegates to `corpus_bootstrap.sharepoint_signout()` → `SharePointGraphClient.clear_token_cache()` → keychain + 0o600 fallback file). The hardcoded personal Cisco URL was removed in Build8 — `Config.ADOPTIQ_SHAREPOINT_FOLDER_URL` defaults to `""` (empty) which the bootstrap surfaces as `not_configured` so the analyze-page panel prompts for a URL instead of silently 404-ing.
+
+### Corpus encryption sentinel resolution (Round 33 / Build8)
+`corpus_crypto.open_corpus_for_user` accepts both `onedrive_root` and `sharepoint_root`. Resolution order, highest precedence first:
+1. OneDrive sentinel (`<onedrive_root>/.adoptiq_corpus_sentinel.json`) — legacy default; preserved verbatim for installs with synced OneDrive.
+2. SharePoint cache sentinel (`<ADOPTIQ_SHAREPOINT_CACHE_DIR>/.adoptiq_corpus_sentinel.json`) — populated by Graph download.
+3. Auto-minted local sentinel (`<encrypted_path>.parent/sentinel.json`, mode `0o600`, parent `0o700`) — created on first run when neither root carries a sentinel. Lets SharePoint-only installs encrypt the corpus end-to-end. Operators that rely on SharePoint ACLs for at-rest enforcement can pass `allow_local_sentinel=False` to preserve the legacy fail-loud behavior.
+
+### Admin Console auto-start (Round 32 / Phase 2.D)
+`app_simple._start_admin_server_in_thread()` spawns `enhanced_admin_dashboard_v2.admin_app` on a daemon thread (default `127.0.0.1:5152`) so the packaged `.app` actually exposes the admin UI without a second process. Idempotent (`sys._adoptiq_admin_started` guard), short-circuits under pytest, and quietly downgrades on `OSError` (port already bound — assume an external admin instance owns it). The header link in `templates/base.html` opens it in a new tab with `rel="noopener noreferrer"`.
 
 ### Build Pipeline
 1. `embed_credentials.py` reads `secrets.env` → XOR+base64 → `_bundled_secrets.py`

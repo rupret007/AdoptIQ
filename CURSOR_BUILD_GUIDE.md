@@ -2,7 +2,7 @@
 
 Use this guide when building AdoptIQ for Windows on a PC. The build must run on Windows because PyInstaller produces platform-specific executables.
 
-> **Before you build:** run `make verify` (or on Windows, `python -m pytest -q && python -m ruff check .` plus `bandit -r . -ll` and `pip-audit -r requirements.txt`). The audit baseline is 1949 passed / 2 skipped, ruff clean, no HIGH/MED bandit findings.
+> **Before you build:** run `make verify` (or on Windows, `python -m pytest -q && python -m ruff check .` plus `bandit -r . -ll` and `pip-audit -r requirements.txt`). The audit baseline (Round 28 close-out) is 2445 passed / 2 skipped, ruff clean, no HIGH/MED bandit findings.
 
 ---
 
@@ -64,7 +64,7 @@ build_pc.bat
 
 1. Installs dependencies (`pip install -r requirements.txt`, `pyinstaller`)
 2. Runs `embed_credentials.py` (embeds Snowflake, Keeper, CircuIT, PSIRT from `secrets.env`; reads file as `utf-8-sig` so a BOM is OK)
-3. Updates `config.py` with version/build (v1.0.3 build 1)
+3. Updates `config.py` with version/build (v1.0.4 build 1)
 4. Runs PyInstaller with `adoptiq_pc.spec`
 5. Creates the OUTBOX release payload (6 files - see "Output location" below)
 6. Mirrors the same 6-file payload to the user's OneDrive staging folders for both PC and Mac releases

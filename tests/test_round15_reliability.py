@@ -133,9 +133,15 @@ def test_phase_6_2_progress_view_audit_fallback_releases_lock_around_sqlite():
         "missing log line was renamed.  Re-anchor this test."
     )
     start = src.index(file_missing_marker)
-    end = src.index(
-        'Analysis not found</h1><p>Analysis ID:', start
-    )
+    # Round 29 / L1: the original anchor here was the inline-HTML
+    # ``Analysis not found</h1><p>Analysis ID:`` f-string body that
+    # ``progress()`` returned at the 404 fallthrough.  Round 29
+    # replaced that with ``abort(404)``, so we re-anchor to the
+    # ``except Exception`` line that immediately follows the audit-
+    # fallback branch -- it has been the structural close of the
+    # status-file-missing branch since Round 15 landed and is much
+    # less likely to drift than the f-string body was.
+    end = src.index("except Exception as e:", start)
     region = src[start:end]
 
     assert phase_marker in region, (

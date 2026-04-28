@@ -49,6 +49,7 @@ hidden_imports = [
     'corpus_bootstrap',
     'ask_ai_corpus',
     'report_corpus_context',
+    'adoptiq_settings',
     # Round 17.2 -- SharePoint Microsoft Graph pull.  Pull msal and
     # keyring (plus the macOS-native keyring backend) into the bundle
     # so the device-code flow + secure token cache work in the
@@ -57,6 +58,15 @@ hidden_imports = [
     'msal', 'msal.application', 'msal.authority', 'msal.token_cache',
     'keyring', 'keyring.backend', 'keyring.backends',
     'keyring.backends.macOS', 'keyring.backends.fail',
+    # Round 32 / Phase 1.B -- bundle matplotlib + Pillow so chart
+    # generation in the executive report actually produces images
+    # in the packaged .app.  Build6 had matplotlib in ``excludes``
+    # which is why every report logged "Matplotlib not available".
+    # Force the headless Agg backend at runtime in the chart
+    # generation entry point (no display in a packaged app).
+    'matplotlib', 'matplotlib.pyplot', 'matplotlib.backends',
+    'matplotlib.backends.backend_agg',
+    'PIL', 'PIL.Image', 'PIL.PngImagePlugin', 'PIL.JpegImagePlugin',
 ]
 
 a = Analysis(
@@ -69,7 +79,11 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'matplotlib', 'PIL', 'tkinter', 'playwright',
+        # Round 32 / Phase 1.B -- matplotlib + PIL removed from
+        # excludes so the executive-report chart generator stops
+        # falling back to "Matplotlib not available - charts will
+        # be skipped" inside the packaged .app.
+        'tkinter', 'playwright',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

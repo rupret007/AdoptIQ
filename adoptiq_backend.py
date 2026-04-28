@@ -278,6 +278,161 @@ def _safe_div(num: Any, den: Any, default: float = 0.0) -> float:
     return float(result)
 
 
+def _assert_arr_attrs(
+    df: Optional[pd.DataFrame],
+    *,
+    function_name: str = "<unknown>",
+    strict: Optional[bool] = None,
+) -> None:
+    """Round 30 / M5: enforce the ARR-frame ``attrs`` contract.
+
+    Every DataFrame that reaches an ARR-consuming function (multi-
+    currency disclosure renderers, ``calculate_arr_impact_for_issues``,
+    ``analyze_feature_requests``, the executive / compact ARR-Exposure
+    sections, etc.) MUST have been routed through
+    ``_normalize_arr_df`` so the following ``attrs`` keys are stamped:
+
+    - ``is_multi_currency`` -- boolean, ``True`` when the frame mixes
+      distinct non-UNKNOWN currency codes.
+    - ``currencies_present`` -- sorted list of distinct currency codes
+      observed in the frame.
+
+    The contract is foundational for the multi-currency disclosure
+    surfaces (executive ARR Exposure, compact ARR Exposure, leader
+    title-page advisory).  A frame that bypasses ``_normalize_arr_df``
+    silently degrades all three surfaces to single-currency rendering,
+    which is how a portfolio with mixed currencies could end up
+    rendered as a single comparable headline ARR.
+
+    Behaviour:
+
+    - Empty / ``None`` frames are tolerated (no-op).  The empty frame
+      returned by ``_normalize_arr_df(pd.DataFrame())`` already carries
+      the stamped attrs, but legacy "placeholder" empty frames built
+      via ``pd.DataFrame()`` outside the normalizer are still in use
+      in some test fixtures, so requiring attrs on empty frames would
+      be an unnecessary back-compat break.
+    - Non-empty frames missing either attr trigger a structured WARN
+      log by default.  When ``strict`` is ``True`` (or
+      ``ADOPTIQ_STRICT_MODE`` env var is enabled) the function raises
+      ``ValueError`` so test runs and CI gates catch silent drift.
+    - The check is cheap (just two ``in`` lookups on a dict) so call
+      sites can guard every entry into an ARR consumer without
+      performance concern.
+
+    Phased rollout: this helper is currently warn-by-default so the
+    contract can be observed without breaking any caller that has not
+    yet been migrated.  Once every ARR consumer has been audited and
+    the WARNING is silent for one full verification cycle, flip the
+    default to ``strict=True`` (Round 31 follow-up).
+    """
+    if df is None:
+        return
+    try:
+        if getattr(df, 'empty', True):
+            return
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        attrs = dict(getattr(df, 'attrs', {}) or {})
+    except Exception:  # noqa: BLE001
+        attrs = {}
+    missing = [
+        k for k in ('is_multi_currency', 'currencies_present')
+        if k not in attrs
+    ]
+    if not missing:
+        return
+    # Resolve strictness: explicit param wins, then env var, else warn.
+    if strict is None:
+        try:
+            _env = str(os.environ.get('ADOPTIQ_STRICT_MODE', '0')).strip().lower()
+            strict = _env in ('1', 'true', 'yes', 'on')
+        except Exception:  # noqa: BLE001
+            strict = False
+    msg = (
+        "arr.attrs.missing"
+    )
+    extra = {
+        'event': 'arr.attrs.missing',
+        'function_name': function_name,
+        'missing_attrs': missing,
+        'columns_present': list(getattr(df, 'columns', []))[:25],
+        'row_count': int(getattr(df, 'shape', (0, 0))[0]),
+        'note': 'frame did not pass through _normalize_arr_df; '
+                'multi-currency disclosure may be silently dropped',
+    }
+    if strict:
+        logger.error(msg, extra=extra)
+        raise ValueError(
+            f"ARR frame reaching {function_name} is missing attrs "
+            f"{missing}; route the frame through _normalize_arr_df "
+            f"before consuming it."
+        )
+    logger.warning(msg, extra=extra)
+
+
+# Round 30 / I1: canonical concentration "skipped" note text.  The
+# multi-currency branch of ``derive_portfolio_intelligence`` stamps
+# ``not_comparable_across_currencies: True`` on the concentration
+# insight along with a ``note`` describing why percent / HHI / top-N
+# rankings were skipped.  Renderers (executive ARR Exposure, leader
+# title-page advisory, compact ARR Exposure) call
+# ``concentration_note_text`` to surface that note adjacent to the
+# multi-currency ARR disclosure so the reader understands why the
+# usual "Top 5 by ARR" callout is missing.
+CONCENTRATION_MULTICURRENCY_NOTE: str = (
+    "Concentration analysis skipped: portfolio mixes currencies, so "
+    "Top 5 / Top 10 percentages and the HHI index are not comparable. "
+    "Use the per-currency ARR breakdown for prioritisation."
+)
+
+
+def concentration_note_text(concentration: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Return the renderer-ready concentration note text, or ``None``.
+
+    Round 30 / I1 helper.  ``concentration`` is the dict produced by
+    :func:`derive_portfolio_intelligence` under
+    ``insights['concentration']``.  When the upstream portfolio mixes
+    currencies, the dict carries ``not_comparable_across_currencies:
+    True`` and a backend-supplied ``note``.  Renderers should surface
+    that note adjacent to the multi-currency ARR disclosure rather
+    than silently suppressing the concentration sub-section.
+
+    Returns ``None`` for single-currency portfolios (or when the dict
+    is missing / malformed) so callers can use the result directly in
+    a truthy guard:
+
+    .. code-block:: python
+
+        note = concentration_note_text(concentration_insight)
+        if note:
+            doc.add_paragraph(note, style='Intense Quote')
+
+    Behaviour:
+
+    - Returns the backend-supplied ``note`` text verbatim when present
+      (so a future change to the backend phrasing flows through to
+      every renderer with no further code change).
+    - Falls back to the module-level
+      :data:`CONCENTRATION_MULTICURRENCY_NOTE` constant when
+      ``not_comparable_across_currencies`` is set but the ``note`` key
+      is empty or missing -- guards against an upstream regression
+      that drops the note text but keeps the flag.
+    - Returns ``None`` when the concentration dict is ``None`` / empty
+      / missing the ``not_comparable_across_currencies`` flag, so
+      single-currency portfolios render no advisory.
+    """
+    if not concentration or not isinstance(concentration, dict):
+        return None
+    if not concentration.get('not_comparable_across_currencies'):
+        return None
+    note = concentration.get('note')
+    if isinstance(note, str) and note.strip():
+        return note.strip()
+    return CONCENTRATION_MULTICURRENCY_NOTE
+
+
 def _empty_df_with_fetch_error(dataset: str, exc: Exception) -> pd.DataFrame:
     """
     Return an empty DataFrame whose ``.attrs`` carries the source dataset
@@ -350,6 +505,31 @@ class _InstrumentedSnowflakeConnection:
 def _instrument_snowflake_connection(conn):
     if isinstance(conn, _InstrumentedSnowflakeConnection):
         return conn
+    # Round 30 / L2: pin every Snowflake session to UTC immediately on
+    # connect so server-side ``CURRENT_TIMESTAMP`` / ``SYSDATE`` and any
+    # implicit ``TIMESTAMP_LTZ`` -> ``TIMESTAMP_NTZ`` coercions land in
+    # UTC.  Without this, a session that inherits the warehouse default
+    # (typically ``America/Los_Angeles`` for Cisco's account) returns
+    # tz-naive timestamps that look like UTC but are actually wall-clock
+    # local, breaking 30-day window math in the compact / executive
+    # reports.  Belt-and-suspenders alongside the
+    # ``_assert_datetime_columns_tz_aware`` helper we call after each
+    # prefetch.
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute("ALTER SESSION SET TIMEZONE = 'UTC'")
+        finally:
+            try:
+                cur.close()
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as _tz_err:  # noqa: BLE001
+        logger.warning(
+            "Round 30 / L2: failed to ALTER SESSION SET TIMEZONE='UTC' "
+            "(continuing): %s",
+            _tz_err,
+        )
     return _InstrumentedSnowflakeConnection(conn)
 
 #!/usr/bin/env python3
@@ -644,11 +824,75 @@ def _is_wxcce_signature(text: str) -> bool:
     return any(marker in s for marker in enterprise_markers)
 
 
+# Round 32 / Phase 1.C: synonym map for ``All <X>`` wildcard fallbacks
+# in CSConsole technology filtering.  Keep terms broad (substrings,
+# not anchored regex) — the strict per-bucket ``TECH_FILTERS`` already
+# caught the canonical patterns; this map is the safety net for text
+# that says "Contact Center" or "Cloud Contact Center" without the
+# Webex / Cisco prefix that the strict patterns demand.
+_ALL_BUCKET_FUZZY_TERMS: Dict[str, Tuple[str, ...]] = {
+    "all contact center": (
+        "contact center", "wxcc", "ucce", "uccx", "call center",
+        "ccx", "ccp", "webex cc",
+    ),
+    "all webex calling": (
+        "webex calling", "wxc ", "calling cloud", "cloud calling",
+    ),
+    "all webex meetings & messaging": (
+        "webex meetings", "webex messaging", "messaging cloud",
+        "meetings cloud",
+    ),
+}
+
+
+def _filter_tech_text_fuzzy_all_bucket(tech_field: Any, sub_tech_field: Any, tech: str) -> bool:
+    """Permissive substring match used as a last-resort fallback for
+    ``All <X>`` filters in :func:`_filter_tech_text_enhanced`.  Returns
+    True when *any* synonym term for the bucket appears as a substring
+    of either field.  Logs at INFO when a match would have been
+    dropped by the strict matcher so the next thin-report incident
+    has a clear breadcrumb.
+    """
+    bucket = (tech or "").strip().lower()
+    terms = _ALL_BUCKET_FUZZY_TERMS.get(bucket)
+    if not terms:
+        # Generic ``All <X>`` fallback when the bucket isn't pre-registered:
+        # require the suffix word(s) to appear as a substring.
+        if not bucket.startswith("all "):
+            return False
+        suffix = bucket[len("all "):].strip()
+        if not suffix or len(suffix) < 4:
+            return False
+        terms = (suffix,)
+    haystack = " ".join(
+        s.lower() for s in (str(tech_field or ""), str(sub_tech_field or ""))
+    )
+    if not haystack.strip():
+        return False
+    for term in terms:
+        if term and term in haystack:
+            logger.info(
+                "[[FILTER]] Round 32 / Phase 1.C: fuzzy %s fallback matched on "
+                "term=%r tech_field=%r sub_tech_field=%r",
+                tech, term, str(tech_field)[:80], str(sub_tech_field)[:80],
+            )
+            return True
+    return False
+
+
 def _filter_tech_text_enhanced(tech_field: str, sub_tech_field: str, tech: str) -> bool:
     """
     Enhanced technology filtering that prioritizes Sub Technology over Tech field
     to ensure accurate categorization (e.g., UCCX showing as 'Contact Center Software' 
     in Tech field but 'UCCX' in Sub Technology field)
+
+    Round 32 / Phase 1.C: any ``All <X>`` bucket (e.g. ``All Contact
+    Center``) now also falls back to a permissive substring match on
+    the suffix when none of the strict regex patterns hit.  Build6
+    silently dropped 2 of 2 CSConsole action plans for a real
+    Contact-Center customer because the row's tech text was
+    well-formed but didn't match any of the 30+ explicit regexes;
+    see ~/.adoptiq/adoptiq.46198.log line 230.
     """
     if tech == "All": 
         return True
@@ -659,6 +903,12 @@ def _filter_tech_text_enhanced(tech_field: str, sub_tech_field: str, tech: str) 
         for contact_tech in contact_center_techs:
             if _filter_tech_text_enhanced(tech_field, sub_tech_field, contact_tech):
                 return True
+        # Round 32 / Phase 1.C: fuzzy fallback for "All Contact Center"
+        # so legitimately-tagged but non-canonical text (e.g. plain
+        # "Contact Center" or "Cloud Contact Center" without the
+        # "Webex" prefix) still survives the filter.
+        if _filter_tech_text_fuzzy_all_bucket(tech_field, sub_tech_field, tech):
+            return True
         return False
     
     # Convert to strings and lowercase
@@ -1975,13 +2225,43 @@ def fetch_arr_data(ctx, account_ids: List[str]) -> pd.DataFrame:
         return pd.DataFrame()
 
     def _normalize_arr_df(df: pd.DataFrame) -> pd.DataFrame:
+        """Round 30 / M5: canonical ARR-frame normalizer + attrs stamper.
+
+        Contract: every ARR-bearing DataFrame that reaches a downstream
+        consumer (renderers, impact calculators, sentiment analyzers)
+        MUST be routed through this function.  In addition to filling
+        in default columns and coercing numeric types, this function
+        stamps the following ``attrs`` keys (read by the multi-currency
+        disclosure surfaces):
+
+        - ``is_multi_currency`` -- ``True`` when the frame contains more
+          than one distinct non-UNKNOWN ``CURRENCY_CODE``.
+        - ``currencies_present`` -- sorted list of distinct currency
+          codes observed in the frame (including ``UNKNOWN`` if any
+          row had a missing / blank currency).
+
+        Empty frames returned by this function still carry the stamped
+        attrs (both default to ``False`` / ``[]``).  The Round 30 / M5
+        helper ``_assert_arr_attrs`` checks the contract at every
+        ARR-consuming entry point so a frame that bypasses this
+        normalizer raises (strict mode) or warns (default) instead of
+        silently degrading the multi-currency disclosure.
+        """
         if df is None or df.empty:
-            return pd.DataFrame(columns=[
+            empty = pd.DataFrame(columns=[
                 'ACCOUNT_ID_C', 'BU_NAME', 'SUBSCRIPTION_ID', 'TECHNOLOGY_C', 'SUB_TECHNOLOGY_C',
                 'STATUS_C', 'CSSM_EMAIL', 'CSSM_NAME', 'CSSM_MANAGER',
                 'ANNUAL_CONTRACT_VALUE', 'MRR', 'TCV', 'LICENSE_COUNT',
                 'CURRENCY_CODE'
             ])
+            # Round 30 / M5: stamp the empty frame with the attrs
+            # contract so callers reading attrs on a placeholder don't
+            # see a missing key (which would also bypass the
+            # ``_assert_arr_attrs`` warning even though the frame is
+            # technically conformant).
+            empty.attrs['is_multi_currency'] = False
+            empty.attrs['currencies_present'] = []
+            return empty
         normalized = df.copy()
         text_defaults = {
             'ACCOUNT_ID_C': '', 'BU_NAME': '', 'SUBSCRIPTION_ID': '',
@@ -3132,7 +3412,10 @@ def fetch_period_comparison(ctx, account_ids, days):
         curr, prev = ab_curr_total, ab_prev_total
         # Round 12 / Phase 11.1: route percent change through canonical
         # ``_r12_round_percent`` helper.
-        pct = _r12_round_percent(((curr - prev) / prev * 100) if prev > 0 else 0, 1)
+        # Round 30 / L3: replace inline ``/ if > 0`` ternary with the
+        # canonical ``_safe_div`` so NaN/None/inf inputs collapse to 0
+        # instead of silently propagating through the percentage.
+        pct = _r12_round_percent(_safe_div(curr - prev, prev) * 100, 1)
         comparison['adoption_barriers'] = {
             'current': curr, 'previous': prev,
             'change_pct': pct,
@@ -3184,7 +3467,11 @@ def fetch_period_comparison(ctx, account_ids, days):
                     prev_cnt += int(row[3] or 0)
             if curr_cnt > 0:
                 curr_avg = curr_sum / curr_cnt
-                prev_avg = prev_sum / prev_cnt if prev_cnt > 0 else curr_avg
+                # Round 30 / L3: route through ``_safe_div`` with the
+                # current-window average as the default so a missing
+                # prior window yields a no-change comparison instead of
+                # a divide-by-zero or NaN.
+                prev_avg = _safe_div(prev_sum, prev_cnt, default=curr_avg)
                 comparison['customer_pulse'] = {
                     'current_avg': round(curr_avg, 1),
                     'previous_avg': round(prev_avg, 1),
@@ -3240,7 +3527,9 @@ def fetch_period_comparison(ctx, account_ids, days):
                     ap_prev_total += int(row[1] or 0)
             curr, prev = ap_curr_total, ap_prev_total
             # Round 12 / Phase 11.1: canonical percent rounding.
-            pct = _r12_round_percent(((curr - prev) / prev * 100) if prev > 0 else 0, 1)
+            # Round 30 / L3: route through ``_safe_div`` for consistent
+            # zero/NaN handling.
+            pct = _r12_round_percent(_safe_div(curr - prev, prev) * 100, 1)
             comparison['action_plans'] = {
                 'current': curr, 'previous': prev,
                 'change_pct': pct,
@@ -3370,7 +3659,10 @@ def fetch_barrier_velocity(ctx, account_ids, days):
             'avg_new_per_week': _r12_round_percent(total_new / n_weeks, 1),
             'avg_closed_per_week': _r12_round_percent(total_closed / n_weeks, 1),
             'net_velocity_per_week': _r12_round_percent((total_new - total_closed) / n_weeks, 1),
-            'resolution_rate_pct': _r12_round_percent(total_closed / total_new * 100 if total_new > 0 else 0, 1),
+            # Round 30 / L3: ``_safe_div`` so an empty period or a
+            # NaN-coerced ``total_new`` produces ``0%`` instead of
+            # raising or polluting the rounding helper.
+            'resolution_rate_pct': _r12_round_percent(_safe_div(total_closed, total_new) * 100, 1),
         }
 
     except Exception as e:
@@ -3603,11 +3895,14 @@ def calculate_arr_at_risk(arr_df, ab_df, cases_df=None):
             result['arr_healthy'] = float(total_arr - arr_at_risk)
             # Round 12 / Phase 11.1: route ARR-at-risk percentages through
             # ``_r12_round_percent`` for half-away-from-zero parity.
+            # Round 30 / L3: ``_safe_div`` collapses to 0 for empty
+            # portfolios / non-finite totals so the percentage never
+            # leaks NaN into the LLM-facing payload.
             result['pct_at_risk'] = _r12_round_percent(
-                arr_at_risk / total_arr * 100 if total_arr > 0 else 0, 1
+                _safe_div(arr_at_risk, total_arr) * 100, 1
             )
             result['pct_critical'] = _r12_round_percent(
-                arr_critical / total_arr * 100 if total_arr > 0 else 0, 1
+                _safe_div(arr_critical, total_arr) * 100, 1
             )
         result['troubled_account_count'] = len(troubled_accounts)
         result['critical_account_count'] = len(critical_accounts)
@@ -7675,6 +7970,40 @@ Report Date: {_r12_now_utc.strftime("%B %d, %Y")} UTC
 _RE_NUMBERED_LIST_ITEM = re.compile(r'^\d+[\.\)]\s')
 
 
+# Round 27 - LLM compliance leak post-processor.
+# The PROMPT_CUSTOMER_TEMPLATE includes the literal string
+# ``Customer Health Score: [A, B, C, D, F]`` (and similar bracketed
+# enumerations) as instructions to the model -- the LLM is supposed
+# to substitute its chosen letter / value.  Across runs the LLM
+# almost always complies cleanly, but occasionally preserves the
+# brackets verbatim (e.g., ``Customer Health Score: [C]``), which
+# leaks the prompt scaffolding into the executive Word report.
+#
+# Anchored on the ``Customer Health Score:`` label so we cannot
+# accidentally rewrite legitimate bracketed evidence (e.g., the
+# ``[Theme Name]`` placeholders the LLM correctly fills with
+# bracket-stripped content elsewhere in the same report).
+_RE_HEALTH_GRADE_BRACKETS = re.compile(
+    r'(Customer Health Score:\s*)\[\s*([A-Fa-f])\s*\]'
+)
+
+
+def _sanitize_llm_grade_brackets(text: str) -> str:
+    """Round 27: strip stray brackets around the customer health grade.
+
+    Returns ``text`` unchanged when no leak is present; idempotent on
+    already-clean input.  Case is preserved for the grade letter so
+    an unexpected lowercase grade still survives the rewrite (the
+    next layer can decide whether to upper-case).
+
+    Pure function; no I/O.  Public-ish (single underscore prefix)
+    only because tests exercise it directly to pin the contract.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    return _RE_HEALTH_GRADE_BRACKETS.sub(r'\1\2', text)
+
+
 def append_to_word_report(doc_or_path, markdown_content: str, heading: str = None):
     """Enhanced Word report writer with professional executive-ready formatting - removes ALL markdown symbols"""
 
@@ -7686,7 +8015,12 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
 
     if not isinstance(markdown_content, str) or not markdown_content.strip():
         return
-    
+
+    # Round 27: post-process LLM scaffold leaks (bracketed grade
+    # letters) before any of the per-line markdown passes below.
+    # See ``_sanitize_llm_grade_brackets`` for rationale.
+    markdown_content = _sanitize_llm_grade_brackets(markdown_content)
+
     # Pre-process markdown content to ensure clean formatting
     # Remove any stray markdown symbols that aren't at line starts
     markdown_content = markdown_content.replace('**YOUR MISSION:**', 'YOUR MISSION:')
@@ -8543,7 +8877,10 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                     for _, _row in sub.head(20).iterrows():
                         _label = _row.get('BU_NAME') or _row.get('ACCOUNT_ID_C')
                         _arr_val = float(_row['ANNUAL_CONTRACT_VALUE'])
-                        pct = (_arr_val / sub_total * 100) if sub_total > 0 else 0
+                        # Round 30 / L3: route per-currency bucket share
+                        # through ``_safe_div`` to honour the canonical
+                        # zero/NaN contract.
+                        pct = _safe_div(_arr_val, sub_total) * 100
                         briefing.append(f"- **{_label}:** {ccy} {_r12_format_number(_arr_val)} ({pct:.1f}% of {ccy} bucket)")
                     if len(sub) > 20:
                         briefing.append(f"- ... and {len(sub) - 20} more {ccy} customers")
@@ -8607,7 +8944,9 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                     "against any external currency benchmark."
                 )
                 for cust, arr_val in arr_by_cust.head(20).items():
-                    pct = (arr_val / total_arr * 100) if total_arr > 0 else 0
+                    # Round 30 / L3: ``_safe_div`` for canonical
+                    # zero/NaN handling on portfolio share.
+                    pct = _safe_div(arr_val, total_arr) * 100
                     briefing.append(f"- **{cust}:** {_r12_format_number(arr_val)} ({pct:.1f}% of portfolio, currency unknown)")
                 if len(arr_by_cust) > 20:
                     briefing.append(f"- ... and {len(arr_by_cust) - 20} more customers")
@@ -8619,7 +8958,9 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                 briefing.append("### ARR by Customer (Strategic Prioritization):")
                 briefing.append("**CRITICAL:** Prioritize high-ARR customers with adoption barriers or support cases. These represent the greatest renewal risk and revenue impact.")
                 for cust, arr_val in arr_by_cust.head(20).items():
-                    pct = (arr_val / total_arr * 100) if total_arr > 0 else 0
+                    # Round 30 / L3: ``_safe_div`` for canonical
+                    # zero/NaN handling on portfolio share.
+                    pct = _safe_div(arr_val, total_arr) * 100
                     briefing.append(f"- **{cust}:** {_prefix}{_r12_format_number(arr_val)} ({pct:.1f}% of portfolio)")
                 if len(arr_by_cust) > 20:
                     briefing.append(f"- ... and {len(arr_by_cust) - 20} more customers")
@@ -8716,7 +9057,10 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
         bems_mask = detect_bems_mask(csone_norm)
         bems_cases = csone_norm[bems_mask]
         total_bems = len(bems_cases)
-        bems_rate = (total_bems / total_csone * 100) if total_csone > 0 else 0.0
+        # Round 30 / L3: ``_safe_div`` so an empty CSone universe
+        # returns 0% instead of leaking a divide-by-zero into the
+        # briefing book.
+        bems_rate = _safe_div(total_bems, total_csone) * 100
     
     # CSConsole metrics
     csconsole_action_plans = csconsole_data.get('action_plans', pd.DataFrame()) if csconsole_data else pd.DataFrame()
@@ -8848,7 +9192,10 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                     if len(monthly) >= 2:
                         recent = monthly.iloc[-1]
                         prior = monthly.iloc[-2]
-                        change_pct = ((recent - prior) / prior * 100) if prior > 0 else 0
+                        # Round 30 / L3: ``_safe_div`` for the
+                        # month-over-month change so a missing prior
+                        # period yields 0% rather than NaN.
+                        change_pct = _safe_div(recent - prior, prior) * 100
                         trend = "INCREASING" if change_pct > 10 else ("DECREASING" if change_pct < -10 else "STABLE")
                         briefing.append("### Case Volume Trend (Month-over-Month):")
                         briefing.append(f"**{trend}:** Most recent month: {int(recent)} cases | Prior month: {int(prior)} cases | Change: {change_pct:+.1f}%")
@@ -9856,7 +10203,9 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
         briefing.append("## ARR by Customer (Strategic Prioritization)")
         briefing.append("**Prioritize high-ARR customers with adoption barriers or support cases.**")
         for cust, arr_val in arr_by_cust_pairs[:20]:
-            pct = (arr_val / total_arr * 100) if total_arr > 0 else 0
+            # Round 30 / L3: ``_safe_div`` for canonical zero/NaN
+            # handling on portfolio share.
+            pct = _safe_div(arr_val, total_arr) * 100
             briefing.append(f"- **{cust}:** {_amt_pre_b}{_r12_format_number(arr_val)} ({pct:.1f}% of portfolio){_amt_suf_b}")
         if len(arr_by_cust_pairs) > 20:
             briefing.append(f"- ... and {len(arr_by_cust_pairs) - 20} more customers")
@@ -10280,7 +10629,7 @@ Generate a detailed, customer-specific report in Markdown. Do NOT omit any heade
 **Assigned CSSM:** {CSSM_NAME}
 **Technology Focus:** {TECHNOLOGY}
 
-### **Customer Health Score: [A, B, C, D, F]**
+### **Customer Health Score: <one letter A | B | C | D | F, no brackets, no quotes>**
 *Provide a comprehensive 3-4 sentence justification based on this customer's specific data related to {TECHNOLOGY} adoption and support. Include specific metrics, trend analysis, and strategic implications.*
 
 ### **1. Advanced Trend Analysis & Pattern Recognition**

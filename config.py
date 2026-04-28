@@ -2,7 +2,7 @@
 # All secrets and DB credentials come from environment variables (.env). No hardcoded credentials.
 # Version and build - updated by build scripts (macOS/Windows) before packaging.
 ADOPTIQ_VERSION = "1.0.4"
-ADOPTIQ_BUILD = "1"
+ADOPTIQ_BUILD = "8"
 
 def version_string():
     """e.g. 'v1.0.1 build 1'"""
@@ -229,8 +229,15 @@ class Config:
     # local sync the corpus surfaces as ``CorpusUnavailable`` and every
     # caller falls back to today's behavior.  Default: off, so existing
     # deployments are unchanged until explicitly enabled.
+    # Round 32 / Phase 2.F: default flipped to ``true`` so fresh
+    # installs surface AdoptIQ Intelligence in the UI immediately
+    # after install.  Operators who explicitly set the env var (e.g.
+    # ``CORPUS_KNOWLEDGE_ENABLED=false``) keep their override; the
+    # in-app toggle (``adoptiq_settings.settings.json``) sits ABOVE
+    # the env var in resolution order, so a user who flips the
+    # switch off from the UI also wins regardless of env state.
     CORPUS_KNOWLEDGE_ENABLED = (
-        str(os.environ.get('CORPUS_KNOWLEDGE_ENABLED', 'false')).strip().lower()
+        str(os.environ.get('CORPUS_KNOWLEDGE_ENABLED', 'true')).strip().lower()
         in {'1', 'true', 'yes', 'on'}
     )
 
@@ -255,9 +262,28 @@ class Config:
         str(os.environ.get('ADOPTIQ_SHAREPOINT_ENABLED', 'true')).strip().lower()
         in {'1', 'true', 'yes', 'on'}
     )
+    # Round 33 / Build8: previously this defaulted to a personal Cisco
+    # SharePoint URL (``jestory_cisco_com``), which leaked operator
+    # identity into every shipped build and -- because nobody else had
+    # access to that folder -- caused indexing to silently fail with
+    # ``auth_required`` / 404 on every fresh install.  The new
+    # resolution order is:
+    #
+    #   1. ``settings.json`` ``sharepoint_folder_url`` (per-user, set
+    #      via the analyze-page Intelligence card -- bridged by the
+    #      Round 32 startup hook in ``app_simple.py``).
+    #   2. ``ADOPTIQ_SHAREPOINT_FOLDER_URL`` env var (set by admins
+    #      who want to bake a tenant-wide default into a deployment).
+    #   3. Empty string -- the bootstrap treats this as "not
+    #      configured" and the analyze-page banner prompts the user to
+    #      paste their own folder URL.
+    #
+    # ``adoptiq_settings.is_valid_sharepoint_url`` enforces the
+    # ``https://<tenant>.sharepoint.com/<path>`` allow-list so a
+    # hand-edited settings.json cannot redirect Graph downloads to an
+    # attacker-controlled host.
     ADOPTIQ_SHAREPOINT_FOLDER_URL = (
-        os.environ.get('ADOPTIQ_SHAREPOINT_FOLDER_URL')
-        or 'https://cisco-my.sharepoint.com/:f:/r/personal/jestory_cisco_com/Documents/AI%20Projects/AdoptIQ_CSOne_Reports?csf=1&web=1&e=d5qzVl'
+        os.environ.get('ADOPTIQ_SHAREPOINT_FOLDER_URL') or ''
     )
     # Microsoft-owned public client id ("Microsoft Graph PowerShell").
     # Public, not a secret -- listed in MSAL sample code.  Operators

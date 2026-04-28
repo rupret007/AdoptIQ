@@ -335,6 +335,74 @@ def validate_data_sources_for_report(
     return is_valid, missing_sources, error_details
 
 
+# Round 30 / M4: a "Partial Data" surface lives next to the strict
+# is_valid / missing_sources boolean.  ``error_details`` already carries
+# any optional CSConsole fetch failures under ``csconsole_*`` keys;
+# this helper provides a single, well-named predicate so each report
+# writer can branch on "the report is generatable, but optional sources
+# failed" without repeating the prefix-matching logic.
+_OPTIONAL_FETCH_ERROR_KEYS: tuple = (
+    'csconsole_action_plans',
+    'csconsole_customer_pulse',
+    'csconsole_success_priorities',
+    'csconsole_adoption_barriers',
+    # ARR / renewal optional source — populated by upstream renewal
+    # validators when the SF arr feed fails but the report itself is
+    # still generatable from the required sources.
+    'arr_data',
+)
+
+
+def has_optional_fetch_errors(error_details: Optional[Dict[str, str]]) -> bool:
+    """Round 30 / M4: True iff any optional CSConsole / ARR fetch failed.
+
+    The strict ``is_valid`` flag returned by
+    :func:`validate_data_sources_for_report` only considers REQUIRED
+    sources.  When an optional CSConsole fetch fails (e.g. a transient
+    network hiccup against the CSConsole API), we still emit the
+    report -- but the reader should be told that one or more of the
+    optional sub-feeds was unavailable so they don't treat empty
+    optional sections as authoritative ("no action plans" vs "we
+    couldn't fetch action plans this run").
+
+    Returns ``False`` for ``None`` / empty dicts so callers can simply
+    ``if has_optional_fetch_errors(error_details): render_banner(...)``
+    without nullable-guard scaffolding at every call-site.
+    """
+    if not error_details or not isinstance(error_details, dict):
+        return False
+    try:
+        for key in _OPTIONAL_FETCH_ERROR_KEYS:
+            value = error_details.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+    except Exception:  # noqa: BLE001 -- defensive; never let a bad
+        # ``error_details`` shape break report generation.
+        return False
+    return False
+
+
+def get_optional_fetch_errors(error_details: Optional[Dict[str, str]]) -> Dict[str, str]:
+    """Round 30 / M4: return only the optional-source fetch errors.
+
+    Pairs with :func:`has_optional_fetch_errors`.  Useful for the
+    renderer when it wants to list "which optional sources failed"
+    in the partial-data banner without leaking required-source errors.
+    Always returns a fresh ``dict``.
+    """
+    out: Dict[str, str] = {}
+    if not error_details or not isinstance(error_details, dict):
+        return out
+    try:
+        for key in _OPTIONAL_FETCH_ERROR_KEYS:
+            value = error_details.get(key)
+            if isinstance(value, str) and value.strip():
+                out[key] = value.strip()
+    except Exception:  # noqa: BLE001
+        return {}
+    return out
+
+
 def raise_validation_error_if_invalid(
     report_type: str,
     snowflake_ctx,

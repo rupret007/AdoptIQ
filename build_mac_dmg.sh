@@ -8,10 +8,39 @@ cd "$ROOT_DIR"
 
 ./build_mac.sh
 
+# Round 28 / pipeline-drift workaround (matches the documented note
+# in the round-28 plan):
+#
+# ``build_mac.sh`` builds the .app into ``dist/AdoptIQ.app``, signs
+# it there, ships its own leaner DMG into ``OUTBOX/``, and then
+# explicitly ``rm -rf OUTBOX/AdoptIQ.app`` to keep OUTBOX free of
+# stale bundles.  This script then expects ``OUTBOX/AdoptIQ.app``
+# to exist so it can stage the richer DMG (with Unblock helper +
+# READ_ME_FIRST + README).  Without a fallback the chained build
+# always failed at the precondition check below.
+#
+# The fallback re-stages the canonical signed bundle from
+# ``dist/AdoptIQ.app`` into ``OUTBOX/AdoptIQ.app`` using ``ditto``
+# (preserves Mach-O signatures and resource forks), strips OneDrive-
+# style xattrs, and re-applies a clean adhoc deep signature.  Same
+# recipe the OneDrive-mirror branch below uses for its own
+# .app copies, so the staged bundle behaves identically.
 APP_PATH="OUTBOX/AdoptIQ.app"
 if [[ ! -d "$APP_PATH" ]]; then
-  echo "Expected app bundle missing: $APP_PATH"
-  exit 1
+  if [[ -d "dist/AdoptIQ.app" ]]; then
+    echo
+    echo "Re-staging dist/AdoptIQ.app -> OUTBOX/AdoptIQ.app"
+    echo "(build_mac.sh removes OUTBOX/AdoptIQ.app; this is the documented"
+    echo " workaround so build_mac_dmg.sh can build the richer DMG.)"
+    ditto "dist/AdoptIQ.app" "$APP_PATH"
+    xattr -cr "$APP_PATH" 2>/dev/null || true
+    codesign --force --deep --sign - --timestamp=none "$APP_PATH"
+    codesign --verify --deep --strict "$APP_PATH"
+  else
+    echo "Expected app bundle missing: $APP_PATH"
+    echo "(also tried fallback dist/AdoptIQ.app; both are absent)"
+    exit 1
+  fi
 fi
 
 VERSION="${ADOPTIQ_VERSION:-1.0.4}"

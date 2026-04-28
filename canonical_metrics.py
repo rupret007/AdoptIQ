@@ -782,6 +782,123 @@ def count_open_barriers(ab_df: Optional[pd.DataFrame]) -> int:
     return int((series == "Open").sum())
 
 
+def count_closed_barriers(ab_df: Optional[pd.DataFrame]) -> int:
+    """Round 30 / M1: Closed AB count using canonical status normalization.
+
+    Mirrors :func:`count_open_barriers` for the closed/resolved side
+    so leader / executive / compact reports stop using inline regexes
+    like ``status.contains(r'closed|resolved|complete', case=False)``
+    that conflate "Resolved" with "Resolved (Pending Customer Review)"
+    or miss synonyms when SF rolls out a new status label.
+
+    Status labels are normalized via :func:`normalize_status_label`
+    (the same helper used by the lifecycle pipeline).  Any label
+    whose normalized form is ``"Closed"`` is counted -- this includes
+    "Closed", "Resolved", "Complete", "Completed", "Done", and any
+    synonyms wired into the normalization map.
+    """
+
+    if _is_empty(ab_df):
+        return 0
+    if "case_status_norm" in ab_df.columns:
+        series = ab_df["case_status_norm"].fillna("").astype(str)
+    elif "status_norm" in ab_df.columns:
+        series = ab_df["status_norm"].fillna("").astype(str)
+    else:
+        candidates = ("AB_STATUS_C", "STATUS_C", "Status", "STATUS")
+        col = next((c for c in candidates if c in ab_df.columns), None)
+        if col is None:
+            return 0
+        series = ab_df[col].fillna("").astype(str).apply(normalize_status_label)
+    return int((series == "Closed").sum())
+
+
+def count_customers_with_barriers(ab_df: Optional[pd.DataFrame]) -> int:
+    """Round 30 / M3: distinct customers with >=1 adoption barrier.
+
+    Single source of truth for the "Customers with Barriers" tile that
+    appears in the leader, executive, and compact reports.  Without
+    this helper, each report inlined ``.nunique()`` over a different
+    candidate column (``customer_name`` vs ``BU_NAME`` vs
+    ``ACCOUNT_ID_C``) and used a different (or no) normalization
+    pass, so cosmetic spelling drift -- non-breaking spaces, casing,
+    trailing punctuation -- inflated the tile relative to the
+    voice-of-customer narrative below it.
+
+    Behaviour:
+
+    - Picks the first available customer-name column from
+      ``customer_name`` -> ``BU_NAME`` -> ``CUSTOMER_NAME`` ->
+      ``ACCOUNT_NAME``.  Falls back to ``ACCOUNT_ID_C`` if no
+      label-bearing column is present.
+    - Normalizes via :func:`normalize_customer_name` so cosmetic
+      variants ("Acme Co", "Acme co.", "Acme Co\xa0") collapse onto
+      one canonical key.
+    - Filters out empty / null normalized names.
+    - Returns ``0`` for empty / ``None`` frames.
+
+    The arithmetic ("Average Barriers per Customer") that downstream
+    callers compute against this denominator therefore agrees across
+    all three report types.
+    """
+
+    if _is_empty(ab_df):
+        return 0
+    candidates = (
+        "customer_name",
+        "BU_NAME",
+        "CUSTOMER_NAME",
+        "ACCOUNT_NAME",
+        "ACCOUNT_ID_C",
+    )
+    col = next((c for c in candidates if c in ab_df.columns), None)
+    if col is None:
+        return 0
+    try:
+        series = ab_df[col].fillna("").astype(str)
+    except Exception:  # noqa: BLE001
+        return 0
+    if col == "ACCOUNT_ID_C":
+        keys = series.str.strip()
+    else:
+        keys = series.apply(normalize_customer_name).fillna("").astype(str).str.strip()
+    keys = keys[keys != ""]
+    return int(keys.nunique())
+
+
+def count_action_plan_completed(ap_df: Optional[pd.DataFrame]) -> int:
+    """Round 30 / M1: Completed action-plan count via canonical normalization.
+
+    Action plans use the same ``STATUS_C`` schema as adoption
+    barriers and TAC cases (Round 6 / Phase 5.6 confirmed).  This
+    helper centralizes the "completed" definition (anything whose
+    normalized status is ``"Closed"``) so the leader report's
+    "completed_aps" column and any future executive / compact
+    surfaces share one source of truth.
+
+    Without this helper, the leader report previously used
+    ``status.str.contains(r'complete|closed|done', case=False)``
+    which (a) does NOT use the canonical normalization map, (b) can
+    over-count when a label like "Closed - Will Not Complete" should
+    not be considered a successful completion, and (c) drifts as new
+    SF status labels are introduced.
+    """
+
+    if _is_empty(ap_df):
+        return 0
+    if "case_status_norm" in ap_df.columns:
+        series = ap_df["case_status_norm"].fillna("").astype(str)
+    elif "status_norm" in ap_df.columns:
+        series = ap_df["status_norm"].fillna("").astype(str)
+    else:
+        candidates = ("AP_STATUS_C", "STATUS_C", "Status", "STATUS")
+        col = next((c for c in candidates if c in ap_df.columns), None)
+        if col is None:
+            return 0
+        series = ap_df[col].fillna("").astype(str).apply(normalize_status_label)
+    return int((series == "Closed").sum())
+
+
 # ---------------------------------------------------------------------------
 # Total Activities (Leader Report)
 # ---------------------------------------------------------------------------

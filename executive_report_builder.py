@@ -8,7 +8,11 @@ from typing import Optional
 from docx import Document
 from docx.shared import Inches
 
-from adoptiq_backend import create_executive_title_page, append_to_word_report
+from adoptiq_backend import (
+    create_executive_title_page,
+    append_to_word_report,
+    _sanitize_llm_grade_brackets,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -229,7 +233,14 @@ class ExecutiveReportBuilder:
                 "Round 7 / Phase 1.11: dropped %d AI output line(s) "
                 "matching prompt-injection guards.", dropped,
             )
-        return "\n".join(kept)
+        cleaned = "\n".join(kept)
+        # Round 27: strip stray brackets around the customer health
+        # grade letter (e.g., ``Customer Health Score: [C]`` ->
+        # ``Customer Health Score: C``).  Defense-in-depth alongside
+        # the same rewrite inside ``append_to_word_report``; running
+        # it here too ensures any future caller of this contract
+        # method also gets the sanitized text.
+        return _sanitize_llm_grade_brackets(cleaned)
 
     def _add_customer_separator(self):
         """Add visual separator between customer sections (page break)."""

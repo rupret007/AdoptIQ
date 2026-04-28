@@ -124,8 +124,28 @@ def test_marker_phase_4_2_analyze_html_console_log_pii() -> None:
 
 
 def test_marker_phase_4_3_progress_page_parity() -> None:
-    src = _read('app_simple.py')
-    assert 'Round 12 / Phase 4.3' in src
+    """Round 12 / Phase 4.3: the progress page must show the
+    ``Report Provenance & Disclaimer`` strip (data-as-of /
+    generated-at + the for-internal-use disclaimer) so operators
+    can sanity-check the figures before they share the artifact.
+
+    Round 28 moved the progress page from an inline f-string in
+    ``app_simple.py`` to ``templates/progress.html``.  The
+    Round 12 invariant moved with it; the marker test follows the
+    string to the new canonical location.
+    """
+    template_src = _read('templates/progress.html')
+    app_src = _read('app_simple.py')
+    assert (
+        'Round 12 / Phase 4.3' in template_src
+        or 'Round 12 / Phase 4.3' in app_src
+    ), (
+        "Round 12 / Phase 4.3 marker missing.  The 'Report "
+        "Provenance & Disclaimer' block in templates/progress.html "
+        "must keep its 'Round 12 / Phase 4.3' source-marker comment "
+        "so a future drop-in revert (or accidental re-inline) is "
+        "caught immediately."
+    )
 
 
 def test_marker_phase_4_4_external_intel_format_number() -> None:

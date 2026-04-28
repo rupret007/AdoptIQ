@@ -70,12 +70,25 @@ except Exception as _ts_err:
     )
     os.environ.setdefault("ADOPTIQ_TRUSTSTORE_INJECTED", "0")
 
-from flask import Flask, request, jsonify, redirect, url_for, send_file, render_template, Response
+from flask import Flask, request, jsonify, redirect, url_for, send_file, render_template, Response, abort
 from werkzeug.utils import secure_filename
 from flask_wtf import FlaskForm
 from flask_wtf.csrf import validate_csrf, generate_csrf
 from wtforms import SelectField, IntegerField, FileField, SubmitField, RadioField, StringField
 from wtforms.validators import DataRequired, NumberRange, Optional as OptionalValidator
+
+# Round 32 / Phase 1.B: lock matplotlib to the headless Agg backend
+# before any later import touches ``matplotlib.pyplot``.  The packaged
+# .app now ships matplotlib (build7), and matplotlib chooses its
+# backend on first ``pyplot`` import; on macOS the default is the
+# MacOSX backend which requires a Cocoa main thread and crashes when
+# called from a Flask worker thread.  Selecting Agg here is a no-op
+# when matplotlib is unavailable (e.g. minimal CI).
+try:
+    import matplotlib as _r32_matplotlib
+    _r32_matplotlib.use("Agg")
+except Exception:
+    pass
 
 # --- PyInstaller/frozen bundle support (Mac .app / Windows exe) ---
 # When running as a compiled executable, resources are in sys._MEIPASS; writable dirs go to Application Support.
@@ -159,6 +172,66 @@ except ImportError:
     get_learned_insights = lambda *a, **k: ""
     AUDIT_ENABLED = False
     logging.getLogger(__name__).info("Audit system not available")
+
+
+# Round 32 / Phase 2.D: spawn the Admin Console (port 5152) inside
+# the main app's process as a daemon thread so the bundled .app
+# actually serves http://127.0.0.1:5152/.  Build6 hidden-imported
+# enhanced_admin_dashboard_v2 for its helper functions but never
+# started the server, so the Admin Console was unreachable from a
+# packaged install.  Idempotent (guarded by ``sys._adoptiq_admin_started``)
+# and skips entirely under pytest so test fixtures don't try to bind
+# the port.  Failures (port in use, import error, generic exception)
+# log and return -- they MUST NOT block the main app from starting.
+def _start_admin_server_in_thread() -> None:
+    """Start enhanced_admin_dashboard_v2.admin_app on a daemon thread."""
+    import threading
+
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    if getattr(sys, "_adoptiq_admin_started", False):
+        return
+
+    try:
+        from enhanced_admin_dashboard_v2 import admin_app, _resolve_admin_port
+    except Exception as _imp_err:  # noqa: BLE001 - never block main app
+        logging.getLogger(__name__).warning(
+            "Round 32 / Phase 2.D: admin module unavailable; admin console "
+            "will not auto-start (%s)", _imp_err,
+        )
+        return
+
+    host = (os.environ.get("ADOPTIQ_ADMIN_HOST") or "127.0.0.1").strip()
+    if not host:
+        host = "127.0.0.1"
+    port = _resolve_admin_port()
+
+    _admin_logger = logging.getLogger(__name__)
+
+    def _run() -> None:
+        try:
+            admin_app.run(host=host, port=port, debug=False,
+                          use_reloader=False, threaded=True)
+        except OSError as e:
+            _admin_logger.warning(
+                "Round 32 / Phase 2.D: admin port %s unavailable (likely a "
+                "second AdoptIQ instance or an external admin process is "
+                "already bound); skipping in-process admin: %s",
+                port, e,
+            )
+        except Exception:  # noqa: BLE001 - daemon thread; log and exit
+            _admin_logger.exception(
+                "Round 32 / Phase 2.D: admin console crashed in background "
+                "thread; main app continuing"
+            )
+
+    t = threading.Thread(target=_run, name="adoptiq-admin", daemon=True)
+    t.start()
+    sys._adoptiq_admin_started = True
+    _admin_logger.info(
+        "Round 32 / Phase 2.D: admin console launched in background thread on "
+        "http://%s:%s/", host, port,
+    )
     
 def auto_audit_report(analysis_id: str):
     """Automatically trigger audit after report completion"""
@@ -1025,6 +1098,45 @@ def _r26_review_json_413_for_api(error):  # noqa: ARG001
     return jsonify({'ok': False, 'error': msg}), 413
 
 
+@app.errorhandler(404)
+def _r28_render_404(error):  # noqa: ARG001
+    """Round 28 / Phase 3: render the branded 404 page.
+
+    ``templates/404.html`` already extends ``base.html`` (so it
+    inherits the site-wide ``data-bs-theme`` early-paint script,
+    the navbar with the sun/moon toggle, and the semantic CSS
+    tokens), but no ``@app.errorhandler(404)`` ever registered it,
+    so users hitting an unknown route saw Werkzeug's bare default
+    page instead.  Wiring it here means the dark/light toggle is
+    preserved across error states and the look stays consistent
+    with the rest of the app.
+    """
+    try:
+        return render_template('404.html'), 404
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("404 render fallback after exception: %s", exc)
+        return "404 Not Found", 404
+
+
+@app.errorhandler(500)
+def _r28_render_500(error):  # noqa: ARG001
+    """Round 28 / Phase 3: render the branded 500 page.
+
+    Same rationale as the 404 handler above.  ``templates/500.html``
+    is already a full ``base.html`` child with a "Try Again" button
+    bound through event delegation in its ``extra_js`` block; we
+    just need to make sure Flask reaches for it whenever an
+    unhandled exception bubbles up to the framework.  Catching the
+    template render itself prevents the error handler from looping
+    if Jinja itself raises.
+    """
+    try:
+        return render_template('500.html'), 500
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("500 render fallback after exception: %s", exc)
+        return "500 Internal Server Error", 500
+
+
 # Configure logging.
 #
 # Round 5 / Phase 6.5: ``app_simple`` is the canonical entry point for
@@ -1142,6 +1254,40 @@ _apply_verbose_debug_mode()
 
 # Version and build (from config.py, updated by build_mac_dmg.sh)
 from config import ADOPTIQ_VERSION, ADOPTIQ_BUILD, version_string, Config
+# Round 32 / Phase 2.E: persisted user-settings (settings.json) win
+# over both env vars and config defaults so the in-app Intelligence
+# toggle is durable across launches without anyone editing
+# launchctl/shell env vars.  The override is silent on missing /
+# malformed file (load_settings returns ``{}`` and never raises).
+try:
+    import adoptiq_settings as _r32_settings
+    _r32_persisted = _r32_settings.load_settings()
+    if "corpus_knowledge_enabled" in _r32_persisted:
+        Config.CORPUS_KNOWLEDGE_ENABLED = bool(_r32_persisted["corpus_knowledge_enabled"])
+        logging.getLogger(__name__).info(
+            "Round 32 / Phase 2.E: settings.json override -> "
+            "Config.CORPUS_KNOWLEDGE_ENABLED=%s",
+            Config.CORPUS_KNOWLEDGE_ENABLED,
+        )
+    # Round 33 / Build8: bridge persisted SharePoint folder URL into
+    # Config so the bootstrap loop and Graph client see the user's
+    # selection without a process restart.  ``load_settings`` already
+    # validated the value against
+    # ``adoptiq_settings.is_valid_sharepoint_url`` (and dropped it
+    # otherwise), so anything we see here is allow-listed.
+    _r33_sp_url = _r32_persisted.get("sharepoint_folder_url")
+    if isinstance(_r33_sp_url, str) and _r33_sp_url:
+        Config.ADOPTIQ_SHAREPOINT_FOLDER_URL = _r33_sp_url
+        logging.getLogger(__name__).info(
+            "Round 33 / Build8: settings.json override -> "
+            "Config.ADOPTIQ_SHAREPOINT_FOLDER_URL=<%d chars>",
+            len(_r33_sp_url),
+        )
+except Exception as _r32_settings_err:  # noqa: BLE001 - never block boot
+    logging.getLogger(__name__).debug(
+        "Round 32 / Phase 2.E: settings override skipped (%s)",
+        _r32_settings_err,
+    )
 # Round 9 / Phase 1.4: enforce DEBUG=False / TESTING=False under
 # ``ADOPTIQ_PRODUCTION_READY=1`` (or FLASK_ENV=production).  Hard-fails
 # boot if either is still truthy after Config import so a stray test
@@ -4548,6 +4694,15 @@ def enrich_csone_with_arr(csone_df: pd.DataFrame, arr_data: pd.DataFrame) -> pd.
 
 def analyze_feature_requests(csone_df: pd.DataFrame, arr_data: pd.DataFrame = None) -> Dict[str, Any]:
     """Analyze feature requests from CSOne data and link to customer ARR"""
+    # Round 30 / M5: enforce the ARR-frame attrs contract so a frame
+    # that bypassed ``_normalize_arr_df`` produces a structured WARN
+    # (or raises in strict mode) rather than silently degrading the
+    # multi-currency disclosure that gates ``total_arr_impact`` below.
+    try:
+        from adoptiq_backend import _assert_arr_attrs as _r30_assert_arr
+        _r30_assert_arr(arr_data, function_name='analyze_feature_requests')
+    except ImportError:
+        pass
     # Round 12 / Phase 1.1: detect multi-currency ARR up-front and
     # gate ``total_arr_impact`` so the headline summary is honest.
     # ``total_arr_impact`` summed ``ANNUAL_CONTRACT_VALUE`` across
@@ -4698,6 +4853,17 @@ def analyze_feature_requests(csone_df: pd.DataFrame, arr_data: pd.DataFrame = No
 
 def calculate_arr_impact_for_issues(ab_norm: pd.DataFrame, arr_data: pd.DataFrame) -> Dict[str, Any]:
     """Calculate combined ARR for customers experiencing specific issues"""
+    # Round 30 / M5: enforce the ARR-frame attrs contract before
+    # consuming ``arr_data``.  The headline ``total_arr`` /
+    # ``totals_by_currency`` we return below depends on the attrs
+    # stamped by ``_normalize_arr_df``; a frame that bypassed that
+    # normalizer would silently render the multi-currency portfolio as
+    # if it were single-currency USD.
+    try:
+        from adoptiq_backend import _assert_arr_attrs as _r30_assert_arr
+        _r30_assert_arr(arr_data, function_name='calculate_arr_impact_for_issues')
+    except ImportError:
+        pass
     # Round 12 / Phase 1.2: align this function's output contract with
     # ``adoptiq_backend._get_financial_metrics`` (and Round 11 /
     # Phase 1.x gates) so consumers know whether the headline
@@ -4939,6 +5105,35 @@ def calculate_arr_impact_for_issues(ab_norm: pd.DataFrame, arr_data: pd.DataFram
         _safe_breakdown = issue_breakdown
         _safe_top_issues = top_issues
 
+    # Round 30 / I1: when the portfolio mixes currencies, surface the
+    # canonical concentration "skipped" note alongside the multi-
+    # currency disclosure so renderers can display it adjacent to the
+    # ARR Exposure section.  The note phrasing comes from
+    # ``adoptiq_backend.concentration_note_text`` which falls back to
+    # the canonical ``CONCENTRATION_MULTICURRENCY_NOTE`` constant when
+    # ``derive_portfolio_intelligence`` has not been called for this
+    # report.  Single-currency portfolios get ``None`` so renderers
+    # branch on truthiness without further plumbing.
+    _concentration_note: Optional[str] = None
+    try:
+        if _is_multi_currency:
+            from adoptiq_backend import (
+                concentration_note_text as _r30_concentration_note_text,
+                CONCENTRATION_MULTICURRENCY_NOTE as _r30_default_note,
+            )
+            _concentration_note = _r30_concentration_note_text(
+                {
+                    'not_comparable_across_currencies': True,
+                    'note': _r30_default_note,
+                }
+            )
+    except Exception as _r30_concentration_err:  # noqa: BLE001
+        logger.debug(
+            "Round 30 / I1: concentration_note_text helper unavailable: %s",
+            _r30_concentration_err,
+        )
+        _concentration_note = None
+
     return {
         "total_arr": _safe_total_arr,
         "total_mrr": _safe_total_mrr,
@@ -4950,6 +5145,7 @@ def calculate_arr_impact_for_issues(ab_norm: pd.DataFrame, arr_data: pd.DataFram
         "is_multi_currency": _is_multi_currency,
         "currencies_present": _currencies_present,
         "totals_by_currency": totals_by_currency,
+        "concentration_note": _concentration_note,
     }
 
 def _create_enhanced_compact_report(base_path: str, manager: str, technology: str, days: int, 
@@ -5105,7 +5301,115 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
     else:
         # Edge case: No customers and no data - show empty dashboard
         logger.warning(f"[[WARNING]] No customers found in any data source - dashboard will be minimal")
-    
+
+    # Round 30 / H1a: render an "ARR Exposure" section in the compact
+    # briefing that mirrors the executive_intelligence_formatter pattern
+    # at lines 1495-1525.  When the upstream ``arr_data`` frame mixes
+    # currencies (``arr_data.attrs['is_multi_currency']`` is True, set
+    # by ``adoptiq_backend._normalize_arr_df``), we disclose the
+    # per-currency breakdown rather than printing a bogus
+    # single-currency headline.  Single-currency portfolios get the
+    # resolved currency code prefix.  The compact briefing previously
+    # never surfaced ARR figures explicitly, so a multi-currency
+    # portfolio could leak comparable-looking totals via the AI
+    # narrative without any "not summed across currencies" disclaimer
+    # adjacent to it; this section is the disclosure surface.
+    try:
+        # Round 30 / M5: enforce the ARR-frame attrs contract before
+        # we consume ``arr_data.attrs.is_multi_currency`` below.  A
+        # frame that bypassed ``_normalize_arr_df`` would log a WARN
+        # here (and raise in strict mode), preventing the disclosure
+        # from silently degrading to single-currency rendering.
+        try:
+            from adoptiq_backend import _assert_arr_attrs as _r30_assert_arr
+            _r30_assert_arr(
+                arr_data,
+                function_name='_create_enhanced_compact_report.arr_exposure',
+            )
+        except ImportError:
+            pass
+        _r30_has_arr_data = (
+            arr_data is not None
+            and getattr(arr_data, "empty", True) is False
+        )
+        _r30_has_arr_impact = bool(arr_impact)
+        if _r30_has_arr_data or _r30_has_arr_impact:
+            doc.add_heading('ARR Exposure', level=1)
+            _r30_arr_p = doc.add_paragraph()
+            _r30_ai = arr_impact or {}
+            # Prefer the impact dict's flag, but fall back to the
+            # frame's attrs (the canonical contract -- both should
+            # agree because adoptiq_backend stamps both during
+            # normalization).
+            _r30_is_mixed = bool(_r30_ai.get('is_multi_currency'))
+            if not _r30_is_mixed and _r30_has_arr_data:
+                try:
+                    _r30_is_mixed = bool(arr_data.attrs.get('is_multi_currency'))
+                except Exception:  # noqa: BLE001
+                    _r30_is_mixed = False
+            _r30_by_ccy = (
+                _r30_ai.get('arr_by_currency')
+                or _r30_ai.get('totals_by_currency')
+                or {}
+            )
+            _r30_ccy = (str(_r30_ai.get('currency') or '').strip().upper()
+                        or 'USD')
+            if _r30_is_mixed and isinstance(_r30_by_ccy, dict) and _r30_by_ccy:
+                _r30_arr_p.add_run(
+                    "Total Portfolio ARR (multi-currency -- not summed "
+                    "across currencies):"
+                ).bold = True
+                for _ccy_lbl, _amt in sorted(_r30_by_ccy.items()):
+                    doc.add_paragraph(
+                        f"  {_ccy_lbl}: {float(_amt or 0):,.2f}",
+                        style='List Bullet',
+                    )
+            else:
+                _r30_total = (
+                    _r30_ai.get('total_portfolio_arr')
+                    or _r30_ai.get('total_arr')
+                    or 0
+                )
+                _r30_arr_p.add_run(
+                    f"Total Portfolio ARR: {_r30_ccy} "
+                    f"{float(_r30_total or 0):,.2f}"
+                ).bold = True
+            if _r30_has_arr_data:
+                try:
+                    _r30_rows = int(getattr(arr_data, 'shape', (0, 0))[0])
+                except Exception:  # noqa: BLE001
+                    _r30_rows = 0
+                doc.add_paragraph(
+                    f"ARR records analyzed: {_r30_rows:,}"
+                )
+            # Round 30 / I1: surface the concentration "skipped" note
+            # adjacent to the multi-currency disclosure (parity with
+            # the executive ARR Exposure section).
+            try:
+                _r30_conc_note = (
+                    _r30_ai.get('concentration_note')
+                    if isinstance(_r30_ai, dict) else None
+                )
+                if _r30_conc_note and isinstance(_r30_conc_note, str):
+                    _r30_note_p = doc.add_paragraph()
+                    _r30_note_run = _r30_note_p.add_run(_r30_conc_note.strip())
+                    _r30_note_run.italic = True
+            except Exception as _r30_conc_err:  # noqa: BLE001
+                logger.warning(
+                    "Round 30 / I1: compact concentration note render "
+                    "failed: %s",
+                    _r30_conc_err,
+                )
+    except Exception as _r30_arr_err:  # noqa: BLE001
+        # Defensive: ARR rendering must never break the compact
+        # briefing.  Mirror the executive formatter's belt-and-
+        # suspenders try/except.
+        logger.warning(
+            "[[ARR]] Round 30 / H1a: compact ARR Exposure render "
+            "failed: %s",
+            _r30_arr_err,
+        )
+
     doc.add_heading('Executive Summary', level=1)
     
     # Add Data-Driven Executive Overview (before AI narrative)
@@ -7150,6 +7454,52 @@ def run_compact_analysis(analysis_id):
                 required_sources=validation_required_sources
             )
             logger.info(f"[[VALIDATION]] All required data sources validated successfully")
+
+            # Round 30 / M4: re-run validation in non-raising mode so we can
+            # extract optional CSConsole fetch errors from ``error_details``
+            # and promote them to ``partial_data_warnings``.  This lets the
+            # downstream Word/Excel writers render an explicit "Partial
+            # Data Warning" banner for optional sources that failed (e.g.
+            # transient network failure on the CSConsole API) instead of
+            # treating empty optional sections as authoritative.
+            try:
+                from data_source_validator import (
+                    validate_data_sources_for_report as _r30_validate,
+                    get_optional_fetch_errors as _r30_opt_errs,
+                )
+                _r30_is_valid, _r30_missing, _r30_err_details = _r30_validate(
+                    report_type='compact',
+                    snowflake_ctx=ctx,
+                    team_subs_df=team_subs_df,
+                    ab_data=ab_norm,
+                    csone_data=csone_df,
+                    csconsole_action_plans=csconsole_action_plans,
+                    csconsole_customer_pulse=csconsole_customer_pulse,
+                    csconsole_success_priorities=csconsole_success_priorities,
+                    arr_data=arr_data,
+                    required_sources=validation_required_sources,
+                )
+                _r30_opt = _r30_opt_errs(_r30_err_details)
+                for _src_key, _src_err in (_r30_opt or {}).items():
+                    if any(
+                        (w or {}).get('dataset') == _src_key
+                        for w in (partial_data_warnings or [])
+                    ):
+                        continue
+                    partial_data_warnings.append({
+                        'dataset': _src_key,
+                        'error': _redact_partial_warning_error(_src_err),
+                        'kind': 'optional_fetch_failed',
+                        'effect': (
+                            f"Optional source '{_src_key}' failed to load; "
+                            "dependent sections render with reduced detail."
+                        ),
+                    })
+            except Exception as _r30_pdw_err:  # noqa: BLE001
+                logger.debug(
+                    "Round 30 / M4: optional fetch error promotion skipped (continuing): %s",
+                    _r30_pdw_err,
+                )
         except DataSourceValidationError as e:
             logger.error(f"[[VALIDATION]] Data validation failed: {e}")
             with analysis_status_lock:
@@ -7191,6 +7541,48 @@ def run_compact_analysis(analysis_id):
         # ``locals().get()`` at the OUTER scope correctly resolves to
         # ``None`` when unbound; that resolution is captured here so the
         # nested function can reference it without raising NameError.
+        # Round 30 / M2: derive ``intel_truncated`` / ``intel_fetch_limit``
+        # for downstream report writers so they can render an explicit
+        # "table truncated" disclosure instead of letting a capped sample
+        # of help.webex bugs / status.webex incidents pose as the full
+        # external-intelligence universe.  We avoid issuing an extra
+        # ``get_all_external_intel`` round-trip here -- ``ext_incidents``
+        # already carries a ``_window_meta`` tag (see
+        # ``fetch_status_incidents``) on its last record when the storage
+        # cap was hit, so we read the flag from there.  ``ext_bugs`` does
+        # not currently expose a per-record cap marker, so we fall back to
+        # a length-based heuristic against the storage layer's known cap
+        # (500 rows -- mirrors ``incident_storage._LIST_FETCH_LIMIT``).
+        _r30_intel_truncated: Dict[str, bool] = {}
+        _r30_intel_fetch_limit: Optional[int] = None
+        try:
+            _r30_intel_fetch_limit = 500  # mirrors incident_storage._LIST_FETCH_LIMIT
+            _r30_inc_trunc = False
+            try:
+                if ext_incidents and isinstance(ext_incidents, list) and ext_incidents:
+                    _wm = ext_incidents[-1].get('_window_meta') if isinstance(ext_incidents[-1], dict) else None
+                    if isinstance(_wm, dict):
+                        _r30_inc_trunc = bool(_wm.get('truncated'))
+            except Exception:  # noqa: BLE001
+                _r30_inc_trunc = False
+            _r30_bug_trunc = False
+            try:
+                if ext_bugs and isinstance(ext_bugs, list):
+                    _r30_bug_trunc = len(ext_bugs) >= _r30_intel_fetch_limit
+            except Exception:  # noqa: BLE001
+                _r30_bug_trunc = False
+            _r30_intel_truncated = {
+                'incidents': _r30_inc_trunc,
+                'bugs': _r30_bug_trunc,
+            }
+        except Exception as _r30_trunc_err:  # noqa: BLE001
+            logger.debug(
+                "Round 30 / M2: failed to derive intel_truncated for ctx (continuing): %s",
+                _r30_trunc_err,
+            )
+            _r30_intel_truncated = {}
+            _r30_intel_fetch_limit = None
+
         _r23_ctx = {  # Round 23 / R22-NEXT-001
             'team_subs_df_unfiltered': team_subs_df_unfiltered,
             'csconsole_action_plans': csconsole_action_plans,
@@ -7202,6 +7594,11 @@ def run_compact_analysis(analysis_id):
             'partial_data_warnings': partial_data_warnings,
             'data_retrieved_at': locals().get('data_retrieved_at'),
             'days': days,
+            # Round 30 / M2: forward the derived truncation flags to
+            # ``generate_report`` so the executive Word output can disclose
+            # external-intelligence truncation per sub-feed.
+            'intel_truncated': _r30_intel_truncated,
+            'intel_fetch_limit': _r30_intel_fetch_limit,
         }
 
         # Generate report with timeout protection
@@ -7413,6 +7810,14 @@ def run_compact_analysis(analysis_id):
                             # "Generated" so the cover page distinguishes
                             # data freshness from render time.
                             data_retrieved_at=_ctx.get('data_retrieved_at'),  # Round 23 / R22-NEXT-001
+                            # Round 30 / M2: forward storage-layer truncation
+                            # flags so the executive Word output can render
+                            # an explicit "table truncated" disclosure on the
+                            # incidents / bugs sub-sections instead of letting
+                            # the reader treat the capped sample as the
+                            # complete external-intelligence universe.
+                            intel_truncated=_ctx.get('intel_truncated'),
+                            intel_fetch_limit=_ctx.get('intel_fetch_limit'),
                         )
                     else:
                         logger.warning("[EXEC-REPORT] Executive formatter not available, using enhanced compact report fallback")
@@ -12159,6 +12564,48 @@ def run_comprehensive_analysis(analysis_id):
                 required_sources=validation_required_sources
             )
             logger.info(f"[[VALIDATION]] All required data sources validated successfully")
+
+            # Round 30 / M4: promote optional CSConsole fetch errors into
+            # partial_data_warnings so the comprehensive Word/Excel writers
+            # render an explicit "Partial Data" banner instead of letting
+            # the reader treat empty optional sections as authoritative.
+            try:
+                from data_source_validator import (
+                    validate_data_sources_for_report as _r30_validate,
+                    get_optional_fetch_errors as _r30_opt_errs,
+                )
+                _r30_is_valid, _r30_missing, _r30_err_details = _r30_validate(
+                    report_type='comprehensive',
+                    snowflake_ctx=ctx,
+                    team_subs_df=team_subs_df,
+                    ab_data=ab_norm,
+                    csone_data=csone_df,
+                    csconsole_action_plans=csconsole_action_plans,
+                    csconsole_customer_pulse=csconsole_customer_pulse,
+                    csconsole_success_priorities=csconsole_success_priorities,
+                    required_sources=validation_required_sources,
+                )
+                _r30_opt = _r30_opt_errs(_r30_err_details)
+                for _src_key, _src_err in (_r30_opt or {}).items():
+                    if any(
+                        (w or {}).get('dataset') == _src_key
+                        for w in (partial_data_warnings or [])
+                    ):
+                        continue
+                    partial_data_warnings.append({
+                        'dataset': _src_key,
+                        'error': _redact_partial_warning_error(_src_err),
+                        'kind': 'optional_fetch_failed',
+                        'effect': (
+                            f"Optional source '{_src_key}' failed to load; "
+                            "dependent sections render with reduced detail."
+                        ),
+                    })
+            except Exception as _r30_pdw_err:  # noqa: BLE001
+                logger.debug(
+                    "Round 30 / M4: comprehensive optional fetch error promotion skipped: %s",
+                    _r30_pdw_err,
+                )
         except DataSourceValidationError as e:
             logger.error(f"[[VALIDATION]] Data validation failed: {e}")
             update_analysis_status(analysis_id, {
@@ -12721,10 +13168,16 @@ def run_comprehensive_analysis(analysis_id):
                             # against the briefing book even with an empty
                             # allowlist.
                             pass
+                        # Round 30 / H4: pass the set directly (do not collapse
+                        # an empty allowlist to ``None``).  ``validate_narrative``
+                        # short-circuits the entity check when ``allowed_entities
+                        # is None`` -- collapsing an empty set to ``None`` made
+                        # the gate fail OPEN (skip the check entirely) instead
+                        # of fail CLOSED (every candidate flagged as invented).
                         _r27_result_port = _r27_anv_port.validate_narrative(
                             portfolio_summary,
                             portfolio_briefing,
-                            allowed_entities=_r27_allowed_port if _r27_allowed_port else None,
+                            allowed_entities=_r27_allowed_port,
                         )
                         if not _r27_result_port.is_valid:
                             logger.warning(
@@ -12739,11 +13192,33 @@ def run_comprehensive_analysis(analysis_id):
                             )
                             _r27_safe_portfolio = _r27_anv_port.GROUNDING_FAILURE_PLACEHOLDER
                     except Exception as _r27_anv_port_err:  # noqa: BLE001
+                        # Round 30 / M6: validator-exception path now treats the
+                        # exception identically to a validator REJECTION --
+                        # substitute ``GROUNDING_FAILURE_PLACEHOLDER`` instead
+                        # of accepting the LLM text unchanged.  The original
+                        # Round-27 design was "exception != rejection, keep
+                        # shipping," but that asymmetry silently disables ALL
+                        # validator checks (HTML injection, ungrounded numbers,
+                        # invented entities) on a validator regression.  The
+                        # safer contract is: if the validator did not run to a
+                        # clean ``is_valid=True`` verdict, treat the narrative
+                        # as ungrounded.
                         logger.warning(
                             "[[AI]] Round 27 / R27-AI-GATE-PORTFOLIO: validator "
-                            "raised unexpectedly (%s); accepting LLM output as-is",
+                            "raised unexpectedly (%s); substituting placeholder "
+                            "(Round 30 / M6: exception treated as rejection)",
                             _r27_anv_port_err,
                         )
+                        try:
+                            _r27_safe_portfolio = _r27_anv_port.GROUNDING_FAILURE_PLACEHOLDER
+                        except Exception:  # noqa: BLE001
+                            # Module-level constant import failed; fall back
+                            # to a literal placeholder string so the report
+                            # still renders something safe.
+                            _r27_safe_portfolio = (
+                                "AI narrative unavailable (grounding validation "
+                                "failed). See data appendix."
+                            )
                 # Use clean builder to parse AI output and remove ALL markdown symbols
                 report_builder.parse_ai_output_and_add(_r27_safe_portfolio)  # Round 27 / R27-AI-GATE-PORTFOLIO
                 logger.info(f"[[OK]] Portfolio AI analysis completed successfully - NO markdown symbols")
@@ -13050,13 +13525,28 @@ def run_comprehensive_analysis(analysis_id):
                                 )
                                 _r27_safe_storyboard = _r27_anv.GROUNDING_FAILURE_PLACEHOLDER
                         except Exception as _r27_anv_err:  # noqa: BLE001
-                            # Validator must never break the report pipeline.
-                            # Mirror the Round 16 defensive try at L7009-7018.
+                            # Round 30 / M6: validator-exception path now
+                            # treats the exception identically to a validator
+                            # REJECTION (substitute placeholder) instead of
+                            # accepting the LLM output unchanged.  See the
+                            # matching portfolio gate for the full rationale.
+                            # Validator must never break the report pipeline,
+                            # so the substitution is wrapped in its own
+                            # try/except (mirrors the Round-16 defensive try
+                            # at L7009-7018).
                             logger.warning(
                                 "[[AI]] Round 27 / R27-AI-GATE-CUSTOMER: validator "
-                                "raised unexpectedly (%s); accepting LLM output as-is",
+                                "raised unexpectedly (%s); substituting placeholder "
+                                "(Round 30 / M6: exception treated as rejection)",
                                 _r27_anv_err,
                             )
+                            try:
+                                _r27_safe_storyboard = _r27_anv.GROUNDING_FAILURE_PLACEHOLDER
+                            except Exception:  # noqa: BLE001
+                                _r27_safe_storyboard = (
+                                    "AI narrative unavailable (grounding "
+                                    "validation failed). See data appendix."
+                                )
                     # Add customer separator before each customer section (except the first)
                     if customers_actually_analyzed > 0:
                         report_builder._add_customer_separator()
@@ -13567,14 +14057,23 @@ def _build_status_from_report_history(analysis_id: str):
 @app.route('/progress/<analysis_id>')
 def progress(analysis_id):
     """Simple progress page"""
-    import html as html_module
+    # Round 29 / L4: ``import html as html_module`` and the
+    # ``analysis_id_safe = html_module.escape(...)`` line that lived
+    # here are gone -- they were only ever feeding the three inline
+    # ``<h1>Analysis not found</h1>`` f-string returns below (now
+    # ``abort(404)`` per L1) and the two ``/download/...`` anchor
+    # hrefs in ``progress.html``, where Jinja's autoescape already
+    # covers HTML-context interpolation of ``analysis_id``.  The 400
+    # branch for an invalid id keeps a small inline string because
+    # there is no ``@app.errorhandler(400)`` to render a branded
+    # page; this is documented as a residual in QUALITY_AUDIT.
     from urllib.parse import unquote
-    
+
     # URL decode the analysis_id in case it was encoded
     analysis_id = unquote(analysis_id)
     if not _is_valid_analysis_id(analysis_id):
         return "<h1>Invalid analysis ID</h1><a href='/'>Start New Analysis</a>", 400
-    analysis_id_safe = html_module.escape(analysis_id)  # Prevent XSS when embedding in HTML
+
     
     with analysis_status_lock:
         _in_memory = analysis_id in analysis_status
@@ -13618,7 +14117,11 @@ def progress(analysis_id):
                                 "Verbatim analysis id=%r not found; verbatim available sample=%r",
                                 analysis_id, list(loaded_status.keys())[:5],
                             )
-                            return f"<h1>Analysis not found</h1><p>Analysis ID: {analysis_id_safe}</p><a href='/'>Start New Analysis</a>", 404
+                            # Round 29 / L1: ``abort(404)`` so the
+                            # branded ``templates/404.html`` (themed
+                            # via base.html) renders instead of the
+                            # prior raw f-string ``<h1>``.
+                            abort(404)
             else:
                 logger.warning(f"Status file not found at: {status_file_path}. Current directory: {os.getcwd()}")
                 # Check if analysis is in memory (might have been created but not saved yet)
@@ -13666,422 +14169,81 @@ def progress(analysis_id):
                             "Verbatim analysis id=%r not found; verbatim available sample=%r",
                             analysis_id, _verbatim_sample,
                         )
-                        return f"<h1>Analysis not found</h1><p>Analysis ID: {analysis_id_safe}</p><a href='/'>Start New Analysis</a>", 404
+                        # Round 29 / L1: see same-rationale comment above.
+                        abort(404)
         except Exception as e:
+            # Round 29 / L1: the prior inline ``<h1>Analysis not
+            # found</h1>...`` string is replaced with ``abort(404)``
+            # so the branded 404 template renders.  ``abort`` raises
+            # ``HTTPException``, which is itself a subclass of
+            # ``Exception``, so we re-raise after the diagnostic
+            # log instead of letting the broad ``except Exception``
+            # swallow it as if it were a load failure.
+            from werkzeug.exceptions import HTTPException
+            if isinstance(e, HTTPException):
+                raise
             logger.error(f"Error loading analysis status from file: {e}", exc_info=True)
-            return f"<h1>Analysis not found</h1><p>The analysis could not be loaded.</p><a href='/'>Start New Analysis</a>", 404
+            abort(404)
     else:
         with analysis_status_lock:
             status = dict(analysis_status[analysis_id])
     csrf_token_value = generate_csrf() if app.config.get('WTF_CSRF_ENABLED', True) else ""
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Analysis Progress - AdoptIQ</title>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <meta name="csrf-token" content="{csrf_token_value}">
-        <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; max-width: 1000px; margin: 40px auto; padding: 20px; color: #1a1a2e; }}
-            .header {{ text-align: center; margin-bottom: 30px; }}
-            .header h1 {{ margin-bottom: 4px; }}
-            .header p {{ color: #6b7280; margin-top: 0; }}
-            .progress-bar {{ width: 100%; background-color: #e5e7eb; border-radius: 10px; margin: 16px 0; overflow: hidden; }}
-            .progress-fill {{ height: 28px; background: linear-gradient(90deg, #2563eb, #3b82f6); border-radius: 10px; transition: width 0.6s ease; }}
-            .progress-row {{ display: flex; justify-content: space-between; align-items: center; font-size: 15px; color: #374151; }}
-            .progress-pct {{ font-size: 22px; font-weight: 700; color: #1e40af; }}
-            .status-box {{ padding: 14px 18px; border-radius: 8px; margin: 16px 0; }}
-            .status-box.running {{ background-color: #eff6ff; border-left: 4px solid #3b82f6; }}
-            .status-box.completed {{ background-color: #ecfdf5; border-left: 4px solid #10b981; }}
-            .status-box.error {{ background-color: #fef2f2; border-left: 4px solid #ef4444; }}
-            .download-links {{ margin: 20px 0; }}
-            .download-links a {{ display: inline-block; margin: 8px 8px 8px 0; padding: 10px 22px; background-color: #10b981; color: white; text-decoration: none; border-radius: 6px; font-weight: 600; }}
-            .download-links a:hover {{ background-color: #059669; }}
-            .info-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0; }}
-            .info-card {{ background-color: #f9fafb; padding: 14px 16px; border-radius: 8px; border-left: 4px solid #3b82f6; }}
-            .info-card h3 {{ margin: 0 0 8px 0; font-size: 15px; color: #374151; }}
-            .info-card p {{ margin: 4px 0; font-size: 13px; }}
-            .csone-status {{ padding: 12px 16px; border-radius: 8px; margin: 12px 0; font-size: 13px; }}
-            .csone-success {{ border-left: 4px solid #10b981; background-color: #ecfdf5; }}
-            .csone-warning {{ border-left: 4px solid #f59e0b; background-color: #fffbeb; }}
-            .csone-error {{ border-left: 4px solid #ef4444; background-color: #fef2f2; }}
-            /* Step timeline */
-            .step-timeline {{ margin: 20px 0; padding: 0; list-style: none; }}
-            .step-item {{ display: flex; align-items: flex-start; padding: 6px 0; font-size: 13px; color: #9ca3af; transition: color 0.3s; }}
-            .step-item.done {{ color: #059669; }}
-            .step-item.active {{ color: #1e40af; font-weight: 600; }}
-            .step-icon {{ width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-right: 10px; flex-shrink: 0; font-size: 12px; border: 2px solid #d1d5db; background: #fff; }}
-            .step-item.done .step-icon {{ border-color: #10b981; background: #10b981; color: #fff; }}
-            .step-item.active .step-icon {{ border-color: #3b82f6; background: #eff6ff; color: #3b82f6; }}
-            @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-            .spinner {{ display: inline-block; width: 14px; height: 14px; border: 2px solid #bfdbfe; border-top-color: #3b82f6; border-radius: 50%; animation: spin 0.8s linear infinite; }}
-            .elapsed {{ font-size: 13px; color: #6b7280; text-align: center; margin: 4px 0 0 0; }}
-        </style>
-        <script>
-            const ANALYSIS_ID = {json.dumps(analysis_id)};
-            const CSRF_TOKEN = {json.dumps(csrf_token_value)};
-            const START_TS = Date.now();
-            function fmtElapsed(ms) {{
-                const s = Math.floor(ms / 1000);
-                const m = Math.floor(s / 60);
-                const sec = s % 60;
-                return m > 0 ? m + 'm ' + sec + 's' : sec + 's';
-            }}
-            // Round 5 / Phase 2.17: track the server-audited elapsed
-            // duration (set by the status payload's ``duration_seconds``
-            // / ``elapsed_seconds`` field) so the displayed elapsed
-            // time can fall back to the server clock once the run
-            // completes -- otherwise the page shows the *browser*
-            // wall-clock since the page was opened, which can drift
-            // from the actual analysis duration if the user navigated
-            // away and back, or opened the page mid-run.
-            window._serverElapsedMs = null;
-            function _esc(s) {{ var d=document.createElement('div'); d.textContent=String(s); return d.innerHTML; }}
-            function refreshStatus() {{
-                fetch('/status/' + ANALYSIS_ID)
-                .then(r => {{ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }})
-                .then(data => {{
-                    // Round 5 / Phase 2.17: capture any server-audited
-                    // elapsed/duration field so updateElapsed() can use
-                    // it instead of the browser-local START_TS.
-                    var _ds = data.duration_seconds;
-                    if (_ds == null) _ds = data.elapsed_seconds;
-                    if (typeof _ds === 'number' && isFinite(_ds) && _ds >= 0) {{
-                        window._serverElapsedMs = Math.floor(_ds * 1000);
-                    }}
-                    const bar = document.getElementById('progress');
-                    const pct = document.getElementById('progress-pct');
-                    if (bar) bar.style.width = data.progress + '%';
-                    if (pct) pct.textContent = data.progress + '%';
 
-                    const msg = document.getElementById('message');
-                    if (msg) msg.textContent = data.message || '';
+    # Round 28 / Phase 1: hand off to templates/progress.html which
+    # extends base.html (dark-default + sun/moon toggle inherited from
+    # the site-wide theme system).  The previous inline f-string body
+    # forced a hardcoded light palette and bypassed the toggle.  We
+    # only build a context dict here; the template owns layout,
+    # styling, and the polling JS.  Behaviour-affecting strings
+    # ("AdoptIQ Analysis Progress", "Cancel Analysis", "CSOne data
+    # successfully processed", every ``id="..."`` the polling JS
+    # touches) are preserved verbatim in the template.
+    _status_label = str(status['status'])
+    _status_box_class = (
+        'completed' if _status_label == 'completed'
+        else 'error' if _status_label == 'error'
+        else 'running'
+    )
+    _csone_status_value = str(status.get('csone_import_status', 'checking'))
+    _csone_visible = _csone_status_value in ('checking', 'uploaded', 'processing')
+    _data_retrieved_at = status.get('data_retrieved_at')
+    _report_generated_at = status.get('report_generated_at')
+    # Round 29 / L2 + L4: pass the raw ``analysis_id`` and
+    # ``csrf_token_value``; ``progress.html`` consumes them via
+    # ``|tojson`` (JS context) and Jinja autoescape (HTML context),
+    # which is the framework-blessed pattern.  The pre-escaped /
+    # pre-jsonified ``analysis_id_safe`` / ``analysis_id_json`` /
+    # ``csrf_token_json`` keys are dropped because nothing references
+    # them anymore.
+    _ctx = {
+        'analysis_id': analysis_id,
+        'csrf_token_value': csrf_token_value,
+        'report_type_display': get_report_type_display(status.get('report_type', 'comprehensive')),
+        'manager': str(status.get('manager', 'N/A')),
+        'technology': str(status.get('technology', 'N/A')),
+        'days': str(status.get('days', 'N/A')),
+        'start_time_display': (
+            str(status.get('start_time', 'N/A'))[:19]
+            if status.get('start_time') else 'N/A'
+        ),
+        'status_label': _status_label,
+        'current_step': str(status.get('current_step', 'N/A')),
+        'provenance_data_as_of': (
+            str(_data_retrieved_at)[:19] if _data_retrieved_at else 'pending'
+        ),
+        'provenance_generated_at': (
+            str(_report_generated_at)[:19] if _report_generated_at else 'pending'
+        ),
+        'csone_import_status': _csone_status_value,
+        'csone_import_message': str(status.get('csone_import_message', 'Processing analysis...')),
+        'csone_visible': _csone_visible,
+        'status_box_class': _status_box_class,
+        'message': str(status['message']),
+        'progress_pct': status['progress'],
+        'cancel_hidden': _status_label in ('completed', 'error', 'cancelling'),
+    }
+    return render_template('progress.html', **_ctx)
 
-                    const st = document.getElementById('status');
-                    if (st) st.textContent = data.status;
-
-
-                    const curStep = document.getElementById('current-step');
-                    if (curStep) curStep.textContent = data.current_step || '';
-
-                    // Step timeline
-                    const timeline = document.getElementById('step-timeline');
-                    if (timeline && data.completed_steps) {{
-                        let html = '';
-                        for (const s of data.completed_steps) {{
-                            html += '<li class="step-item done"><span class="step-icon">&#10003;</span>' + _esc(s) + '</li>';
-                        }}
-                        if (data.current_step && data.status !== 'completed') {{
-                            html += '<li class="step-item active"><span class="step-icon"><span class="spinner"></span></span>' + _esc(data.current_step) + '</li>';
-                        }}
-                        if (data.status === 'completed') {{
-                            html += '<li class="step-item done"><span class="step-icon">&#10003;</span>Complete</li>';
-                        }}
-                        timeline.innerHTML = html;
-                    }}
-
-                    // Customer progress
-                    if (data.customer_progress) {{
-                        const cp = data.customer_progress;
-                        const cpEl = document.getElementById('customer-progress-text');
-                        if (cpEl) {{
-                            if (cp.current) {{
-                                cpEl.innerHTML = '<strong>Current:</strong> ' + _esc(cp.current) + '<br><strong>Progress:</strong> ' + _esc(cp.completed) + '/' + _esc(cp.total) + ' customers<br><strong>Remaining:</strong> ' + _esc(cp.total - cp.completed);
-                            }} else {{
-                                cpEl.textContent = 'Processing ' + cp.total + ' customers...';
-                            }}
-                        }}
-                    }}
-
-                    // Round 12 / Phase 4.3: refresh the Report
-                    // Provenance strip from the polling payload so the
-                    // inline page picks up ``data_retrieved_at`` /
-                    // ``report_generated_at`` once the worker stamps
-                    // them, mirroring the canonical metadata block in
-                    // the Word/Excel exports.  Falls back to the
-                    // server-rendered "pending" placeholder if the
-                    // status payload has not yet attached the field.
-                    try {{
-                        var _doa = document.getElementById('provenance-data-as-of');
-                        if (_doa) {{
-                            var _v = data.data_retrieved_at;
-                            if (_v) {{ _doa.textContent = String(_v).substring(0, 19); }}
-                        }}
-                        var _dga = document.getElementById('provenance-generated-at');
-                        if (_dga) {{
-                            var _v2 = data.report_generated_at;
-                            if (_v2) {{ _dga.textContent = String(_v2).substring(0, 19); }}
-                        }}
-                    }} catch (e) {{ /* non-fatal */ }}
-
-                    // CSOne status
-                    if (data.csone_import_status) {{
-                        const cs = document.getElementById('csone-status');
-                        if (cs) {{ cs.textContent = data.csone_import_message; cs.className = 'csone-status csone-' + data.csone_import_status; }}
-                    }}
-
-                    // Round 5 / Phase 2.10: when the server reports
-                    // ``completed`` but ``partial_data_warnings`` is
-                    // non-empty, downgrade the visual treatment to the
-                    // amber "running" colour and append a "with
-                    // warnings" suffix to the status label so the user
-                    // doesn't read a green "Completed" pill and assume
-                    // the run was clean when AB / CSOne / risk_scores
-                    // actually fell back.
-                    var _hasPdw = (data.partial_data_warnings && data.partial_data_warnings.length > 0);
-                    const sb = document.getElementById('status-box');
-                    if (sb) {{
-                        if (data.status === 'completed' && _hasPdw) {{
-                            sb.className = 'status-box running';
-                        }} else {{
-                            sb.className = 'status-box ' + (data.status === 'completed' ? 'completed' : data.status === 'error' ? 'error' : 'running');
-                        }}
-                    }}
-                    if (data.status === 'completed' && _hasPdw) {{
-                        var stEl = document.getElementById('status');
-                        if (stEl && stEl.textContent.indexOf('with warnings') === -1) {{
-                            stEl.textContent = stEl.textContent + ' (with warnings)';
-                        }}
-                    }}
-
-                    // Round 4 / Phase 2.2: render partial_data_warnings
-                    // so the user sees data-quality caveats (e.g. AB
-                    // fetch failed, risk_scores unavailable, intel
-                    // feed timed out) instead of believing a 100%-
-                    // progress completion is a clean run.
-                    const pdwBox = document.getElementById('partial-warnings-box');
-                    const pdwList = document.getElementById('partial-warnings-list');
-                    if (pdwBox && pdwList) {{
-                        var warnings = data.partial_data_warnings || [];
-                        if (warnings && warnings.length > 0) {{
-                            var html = '';
-                            for (var i = 0; i < warnings.length; i++) {{
-                                var w = warnings[i];
-                                var label;
-                                if (typeof w === 'string') {{
-                                    label = w;
-                                }} else if (w && typeof w === 'object') {{
-                                    var src = w.source || w.kind || w.type || '';
-                                    var reason = w.reason || w.message || w.detail || '';
-                                    var effect = w.effect || w.impact || '';
-                                    label = (src ? src + ': ' : '') + reason + (effect ? ' (' + effect + ')' : '');
-                                }} else {{
-                                    label = String(w);
-                                }}
-                                html += '<li>' + _esc(label) + '</li>';
-                            }}
-                            pdwList.innerHTML = html;
-                            pdwBox.style.display = 'block';
-                        }} else {{
-                            pdwBox.style.display = 'none';
-                        }}
-                    }}
-
-                    if (data.status === 'completed') {{
-                        document.getElementById('downloads').style.display = 'block';
-                        var xlsLink = document.getElementById('xlsx-download');
-                        var xlsNote = document.getElementById('xlsx-unavailable');
-                        if (xlsLink && xlsNote) {{
-                            if (data.excel_available) {{
-                                xlsLink.style.display = '';
-                                xlsNote.style.display = 'none';
-                            }} else {{
-                                xlsLink.style.display = 'none';
-                                xlsNote.style.display = 'block';
-                            }}
-                        }}
-                        // Round 5 / Phase 2.11: same gating for the
-                        // Word link so we don't offer a docx download
-                        // that would 404.  ``word_available`` is sent
-                        // by the server alongside ``excel_available``.
-                        var docLink = document.getElementById('docx-download');
-                        var docNote = document.getElementById('docx-unavailable');
-                        if (docLink && docNote) {{
-                            if (data.word_available) {{
-                                docLink.style.display = '';
-                                docNote.style.display = 'none';
-                            }} else {{
-                                docLink.style.display = 'none';
-                                docNote.style.display = 'block';
-                            }}
-                        }}
-                        document.getElementById('cancel-btn').style.display = 'none';
-                        clearInterval(window.refreshInterval);
-                        clearInterval(window.elapsedInterval);
-                    }} else if (data.status === 'error') {{
-                        document.getElementById('error').style.display = 'block';
-                        document.getElementById('error').textContent = 'Error: ' + (data.error || data.message || 'Unknown error');
-                        document.getElementById('cancel-btn').style.display = 'none';
-                        clearInterval(window.refreshInterval);
-                        clearInterval(window.elapsedInterval);
-                    }} else if (data.status === 'cancelling') {{
-                        if (msg) msg.textContent = 'Cancellation requested...';
-                        document.getElementById('cancel-btn').style.display = 'none';
-                    }}
-                }})
-                .catch(function(err) {{
-                    // Round 5 / Phase 2.1: surface polling failures
-                    // (404 after eviction, 5xx, network drop, JSON
-                    // parse) instead of silently leaving the UI
-                    // frozen at the last successful tick.  We do
-                    // *not* clear the interval here so transient
-                    // hiccups self-recover; a persistent failure is
-                    // visible via the message strip.
-                    var msg2 = document.getElementById('message');
-                    if (msg2) {{
-                        msg2.textContent = 'Status update failed: ' + ((err && err.message) ? err.message : 'unknown error') + ' (will retry)';
-                    }}
-                    var sb2 = document.getElementById('status-box');
-                    if (sb2) {{ sb2.className = 'status-box error'; }}
-                }});
-            }}
-            function cancelAnalysis() {{
-                if (confirm('Are you sure you want to cancel this analysis?')) {{
-                    const headers = CSRF_TOKEN ? {{'X-CSRFToken': CSRF_TOKEN}} : {{}};
-                    fetch('/cancel/' + ANALYSIS_ID, {{method: 'POST', headers}})
-                        .then(r => {{ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }})
-                        .then(d => {{
-                            if (d.success) {{
-                                document.getElementById('cancel-btn').style.display = 'none';
-                                document.getElementById('message').textContent = 'Cancellation requested...';
-                            }} else {{ alert('Failed to cancel: ' + d.error); }}
-                        }})
-                        .catch(() => alert('Failed to cancel analysis'));
-                }}
-            }}
-            function checkDownload(ft) {{
-                const de = document.getElementById('download-error');
-                de.style.display = 'block'; de.style.backgroundColor = '#dbeafe'; de.style.color = '#1e40af';
-                de.textContent = 'Downloading ' + ft.toUpperCase() + ' file...';
-                return true;
-            }}
-            function updateElapsed() {{
-                const el = document.getElementById('elapsed');
-                if (!el) return;
-                // Round 5 / Phase 2.17: prefer the server-audited
-                // duration when present so the final number printed on
-                // a completed page reflects the actual analysis runtime
-                // rather than (now - page_open_time).
-                if (window._serverElapsedMs != null) {{
-                    el.textContent = 'Elapsed: ' + fmtElapsed(window._serverElapsedMs);
-                }} else {{
-                    el.textContent = 'Elapsed: ' + fmtElapsed(Date.now() - START_TS);
-                }}
-            }}
-            window.onload = function() {{
-                refreshStatus();
-                window.refreshInterval = setInterval(refreshStatus, 2000);
-                window.elapsedInterval = setInterval(updateElapsed, 1000);
-                updateElapsed();
-            }};
-        </script>
-    </head>
-    <body>
-        <div class="header">
-            <h1>AdoptIQ Analysis Progress</h1>
-            <p>AI-Powered Executive Analytics</p>
-        </div>
-        
-        <div class="info-grid">
-            <div class="info-card">
-                <h3>Analysis Details</h3>
-                <p><strong>Report Type:</strong> <span style="color: #1e40af; font-weight: bold;">{get_report_type_display(status.get('report_type', 'comprehensive'))}</span></p>
-                <p><strong>Manager:</strong> {html_module.escape(str(status.get('manager', 'N/A')))}</p>
-                <p><strong>Technology:</strong> {html_module.escape(str(status.get('technology', 'N/A')))}</p>
-                <p><strong>Period:</strong> {html_module.escape(str(status.get('days', 'N/A')))} days</p>
-                <p><strong>Started (UTC):</strong> {html_module.escape(str(status.get('start_time', 'N/A'))[:19] if status.get('start_time') else 'N/A')} UTC</p>
-            </div>
-            <div class="info-card">
-                <h3>Current Status</h3>
-                <p><strong>Status:</strong> <span id="status">{html_module.escape(str(status['status']))}</span></p>
-                <p><strong>Step:</strong> <span id="current-step">{html_module.escape(str(status.get('current_step', 'N/A')))}</span></p>
-            </div>
-        </div>
-
-        <!-- Round 12 / Phase 4.3: previously the inline progress page
-             dropped the user at the download links with no on-page
-             "Data as of" / "Report generated at" / disclaimer banner,
-             even though the matching Word and Excel artifacts always
-             stamp those values.  A user reading "Completed" on this
-             page therefore had no way to tell *when* the underlying
-             Snowflake/CSOne data was retrieved or that the figures
-             carry the same internal-use caveats as the downloadable
-             reports.  Surface a parity metadata strip here, populated
-             both server-side (initial render) and client-side from
-             the polling loop once ``status['status'] == 'completed'``,
-             so the inline view agrees with the canonical exports. -->
-        <div class="info-card" id="report-provenance" style="margin: 0 0 16px 0; border-left-color: #6366f1;">
-            <h3>Report Provenance &amp; Disclaimer</h3>
-            <p><strong>Data as of (UTC):</strong> <span id="provenance-data-as-of">{html_module.escape(str(status.get('data_retrieved_at', 'pending'))[:19] if status.get('data_retrieved_at') else 'pending')}</span></p>
-            <p><strong>Report generated (UTC):</strong> <span id="provenance-generated-at">{html_module.escape(str(status.get('report_generated_at', 'pending'))[:19] if status.get('report_generated_at') else 'pending')}</span></p>
-            <p style="margin-top: 8px; font-size: 12px; color: #4b5563;"><em>For internal use only. Figures are derived from Snowflake CSOne, CSSM action plans and ARR sources at the timestamp above; downstream Word/Excel exports stamp the identical metadata. Multi-currency portfolios disclose per-currency totals in the body of the canonical artifacts; do not aggregate currency-mixed sums from the headline.</em></p>
-        </div>
-        
-        <div class="csone-status csone-{html_module.escape(str(status.get('csone_import_status', 'checking')))}" id="csone-status" style="{'display: block;' if status.get('csone_import_status') in ['checking', 'uploaded', 'processing'] else 'display: none;'}">
-            {html_module.escape(str(status.get('csone_import_message', 'Processing analysis...')))}
-        </div>
-        
-        <div class="status-box {'completed' if status['status'] == 'completed' else 'error' if status['status'] == 'error' else 'running'}" id="status-box">
-            <p style="margin:0;"><strong>Current Activity:</strong> <span id="message">{html_module.escape(str(status['message']))}</span></p>
-        </div>
-
-        <!-- Round 4 / Phase 2.2: partial_data_warnings panel.  Hidden
-             by default; the polling loop populates and reveals it
-             whenever the backend reports data-quality caveats
-             (e.g. AB fetch failed, risk_scores unavailable, intel
-             feed errored).  Rendering happens client-side so the
-             user is told the truth even if the page was loaded
-             before the warning was attached. -->
-        <div id="partial-warnings-box" style="display:none; margin: 12px 0; padding: 12px 16px; background-color: #fffbeb; border-left: 4px solid #f59e0b; border-radius: 8px;">
-            <div style="font-weight: 600; color: #92400e; margin-bottom: 6px; font-size: 14px;">Data Quality Warnings</div>
-            <ul id="partial-warnings-list" style="margin: 4px 0 0 18px; padding: 0; color: #78350f; font-size: 13px;"></ul>
-        </div>
-        
-        <div class="progress-bar">
-            <div class="progress-fill" id="progress" style="width: {status['progress']}%"></div>
-        </div>
-        <div class="progress-row">
-            <span class="elapsed" id="elapsed">Elapsed: 0s</span>
-            <span class="progress-pct" id="progress-pct">{status['progress']}%</span>
-        </div>
-        
-        <!-- Step Timeline -->
-        <ul class="step-timeline" id="step-timeline">
-            <li class="step-item active"><span class="step-icon"><span class="spinner"></span></span>Starting...</li>
-        </ul>
-        
-        <!-- Customer Progress Indicator -->
-        <div id="customer-progress" style="margin: 12px 0; padding: 12px 16px; background-color: #f8fafc; border-radius: 8px; border-left: 4px solid #3b82f6;">
-            <div style="font-weight: 600; color: #1e3a8a; margin-bottom: 6px; font-size: 14px;">Customer Analysis Progress</div>
-            <div id="customer-progress-text" style="color: #4b5563; font-size: 13px;">Loading...</div>
-        </div>
-        
-        <div id="cancel-btn" style="margin: 16px 0; {'display: none;' if status['status'] in ['completed', 'error', 'cancelling'] else ''}">
-            <button onclick="cancelAnalysis()" style="padding: 10px 20px; background-color: #ef4444; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 15px; font-weight: 600;">Cancel Analysis</button>
-        </div>
-        
-        <div id="error" style="display: none; color: #b91c1c; font-weight: bold; padding: 14px; background: #fef2f2; border-radius: 8px; margin: 16px 0;"></div>
-        
-        <div id="downloads" class="download-links" style="display: {'block' if status['status'] == 'completed' else 'none'};">
-            <h3>Download Your Report:</h3>
-            <a id="docx-download" href="/download/{analysis_id_safe}/docx" onclick="return checkDownload('docx')">Download Word Report</a>
-            <span id="docx-unavailable" style="display: none; color: #6b7280; font-size: 13px; margin-left: 8px;">Word document not available for this report.</span>
-            <a id="xlsx-download" href="/download/{analysis_id_safe}/xlsx" onclick="return checkDownload('xlsx')">Download Excel Data</a>
-            <span id="xlsx-unavailable" style="display: none; color: #6b7280; font-size: 13px; margin-left: 8px;">Excel data not available for this report.</span>
-        </div>
-        
-        <div id="download-error" style="display: none; font-weight: bold; margin: 16px 0; padding: 14px; border-radius: 8px;"></div>
-        
-        <div style="margin: 20px 0; padding: 14px; background-color: #eff6ff; border-radius: 8px; font-size: 13px;">
-            <strong>Previous Reports:</strong> <a href="/previous-reports" target="_blank" rel="noopener noreferrer">Browse Previous Reports</a>
-        </div>
-        
-        <p style="font-size: 13px;"><a href="/">Start New Analysis</a></p>
-    </body>
-    </html>
-    """
-    return html_content
 
 _EXCLUDE_FROM_STATUS_API = {'word_report', 'excel_report', 'csone_file', '_thread'}
 
@@ -14234,6 +14396,48 @@ def get_status(analysis_id):
             )
         except Exception:
             pass
+
+    # Round 33 / Build8: server-authoritative elapsed timer.
+    #
+    # The progress page previously computed ``Date.now() - START_TS``
+    # client-side from a Jinja-rendered timestamp.  When the redirect
+    # to /progress/<id> failed (Round 31 sentinel-comment regression)
+    # or when the browser throttled hidden-tab setInterval, the
+    # display "froze" at 0:00 even though the report was running for
+    # several minutes.  Emit ``elapsed_seconds`` here so the client
+    # can simply read ``data.elapsed_seconds`` on every poll and
+    # stay correct even if its own clock or interval misbehaves.
+    try:
+        _start = status.get('start_time')
+        if _start is not None:
+            if isinstance(_start, datetime):
+                _t0 = _start
+            else:
+                _t0 = datetime.fromisoformat(str(_start).replace('Z', '+00:00'))
+            if _t0.tzinfo is None:
+                _t0 = _t0.replace(tzinfo=timezone.utc)
+            _end_raw = (
+                status.get('completion_time')
+                or status.get('end_time')
+            )
+            if _end_raw is not None:
+                if isinstance(_end_raw, datetime):
+                    _t1 = _end_raw
+                else:
+                    _t1 = datetime.fromisoformat(str(_end_raw).replace('Z', '+00:00'))
+                if _t1.tzinfo is None:
+                    _t1 = _t1.replace(tzinfo=timezone.utc)
+            else:
+                _t1 = datetime.now(timezone.utc)
+            _elapsed = int((_t1 - _t0).total_seconds())
+            if _elapsed < 0:
+                _elapsed = 0
+            status_copy['elapsed_seconds'] = _elapsed
+    except Exception as _r33_elapsed_err:  # noqa: BLE001 - never break /status
+        logger.debug(
+            "Round 33 / Build8: elapsed_seconds compute failed for %s: %r",
+            analysis_id, _r33_elapsed_err,
+        )
 
     return jsonify(status_copy)
 
@@ -14697,123 +14901,44 @@ def previous_reports():
             ),
         )
         
-        # Create HTML page
-        html = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Previous AdoptIQ Reports</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }}
-                .container {{ max-width: 1200px; margin: 0 auto; background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
-                h1 {{ color: #1e3a8a; text-align: center; margin-bottom: 30px; }}
-                .report-item {{ 
-                    border: 1px solid #ddd; 
-                    margin: 15px 0; 
-                    padding: 20px; 
-                    border-radius: 8px; 
-                    background-color: #fafafa;
-                    transition: background-color 0.3s;
-                }}
-                .report-item:hover {{ background-color: #f0f0f0; }}
-                .report-header {{ font-weight: bold; font-size: 16px; color: #1e3a8a; margin-bottom: 10px; }}
-                .report-details {{ color: #666; margin: 5px 0; }}
-                .download-buttons {{ margin-top: 15px; }}
-                .download-btn {{ 
-                    display: inline-block; 
-                    padding: 10px 20px; 
-                    margin: 5px; 
-                    background-color: #1e3a8a; 
-                    color: white; 
-                    text-decoration: none; 
-                    border-radius: 5px;
-                    transition: background-color 0.3s;
-                }}
-                .download-btn:hover {{ background-color: #1e40af; }}
-                .download-btn.excel {{ background-color: #0d9488; }}
-                .download-btn.excel:hover {{ background-color: #0f766e; }}
-                .no-reports {{ text-align: center; color: #666; font-style: italic; margin: 40px 0; }}
-                .back-link {{ text-align: center; margin-top: 30px; }}
-                .back-link a {{ color: #1e3a8a; text-decoration: none; }}
-                .file-info {{ display: flex; gap: 20px; margin: 10px 0; }}
-                .file-type {{ padding: 5px 10px; border-radius: 3px; font-size: 12px; font-weight: bold; }}
-                .file-type.word {{ background-color: #dbeafe; color: #1e40af; }}
-                .file-type.excel {{ background-color: #d1fae5; color: #065f46; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1> Previous AdoptIQ Reports</h1>
-        """
-        
-        if not sorted_reports:
-            html += '<div class="no-reports">No previous reports found in the output folder.</div>'
-        else:
-            for report_id, report_data in sorted_reports:
-                # Create readable name from report ID
-                readable_name = report_id.replace('_', ' ').title()
-                
-                # Round 5 / Phase 2.6: include explicit timezone label so
-                # the Modified column is unambiguous; ``os.stat`` mtime
-                # is naive local time on the host.
-                modified_str = (
-                    report_data['modified'].strftime('%Y-%m-%d %H:%M:%S') + ' (local)'
-                    if report_data['modified'] else 'Unknown'
-                )
-                
-                # Calculate total size
-                total_size_mb = (report_data['total_size'] / 1024 / 1024) if report_data['total_size'] > 0 else 0
-                
-                html += f"""
-                <div class="report-item">
-                    <div class="report-header">{readable_name}</div>
-                    <div class="report-details"><strong>Total Size:</strong> {total_size_mb:.1f} MB</div>
-                    <div class="report-details"><strong>Modified:</strong> {modified_str}</div>
-                    <div class="file-info">
-                """
-                
-                # Add file type indicators
-                if report_data['word_file']:
-                    html += '<span class="file-type word"> Word Document</span>'
-                if report_data['excel_file']:
-                    html += '<span class="file-type excel"> Excel Document</span>'
-                
-                html += """
-                    </div>
-                    <div class="download-buttons">
-                """
-                
-                # Add download buttons
-                if report_data['word_file']:
-                    html += f"""
-                        <a href="/download-file/{os.path.basename(report_data['word_file']['path'])}" class="download-btn">
- Download Word File
-                        </a>
-                    """
-                
-                if report_data['excel_file']:
-                    html += f"""
-                        <a href="/download-file/{os.path.basename(report_data['excel_file']['path'])}" class="download-btn excel">
- Download Excel File
-                        </a>
-                    """
-                
-                html += """
-                    </div>
-                </div>
-                """
-        
-        html += """
-                <div class="back-link">
-                    <a href="/"> Back to Main Page</a>
-                </div>
-            </div>
-        </body>
-        </html>
-        """
-        
-        return html
-        
+        # Round 28 / Phase 2: hand off to templates/previous_reports.html
+        # which extends base.html (dark-default + sun/moon toggle inherited
+        # from the site-wide theme system).  The previous inline f-string
+        # forced a hardcoded light palette and bypassed the toggle.  All
+        # the data-collection logic above stays unchanged; we only
+        # reshape ``sorted_reports`` so the template can iterate without
+        # leaking ``os.path`` / ``datetime`` formatting concerns into
+        # Jinja.
+        _view_reports = []
+        for report_id, report_data in sorted_reports:
+            modified_dt = report_data.get('modified')
+            modified_str = (
+                modified_dt.strftime('%Y-%m-%d %H:%M:%S') + ' (local)'
+                if modified_dt else 'Unknown'
+            )
+            total_size_bytes = report_data.get('total_size') or 0
+            total_size_mb = f"{(total_size_bytes / 1024 / 1024):.1f}" if total_size_bytes > 0 else "0.0"
+            word_file = report_data.get('word_file')
+            excel_file = report_data.get('excel_file')
+            _view_reports.append((
+                report_id,
+                {
+                    'readable_name': str(report_id).replace('_', ' ').title(),
+                    'modified_str': modified_str,
+                    'total_size_mb': total_size_mb,
+                    'word_file': (
+                        {'basename': os.path.basename(word_file['path'])}
+                        if word_file else None
+                    ),
+                    'excel_file': (
+                        {'basename': os.path.basename(excel_file['path'])}
+                        if excel_file else None
+                    ),
+                },
+            ))
+
+        return render_template('previous_reports.html', sorted_reports=_view_reports)
+
     except Exception as e:
         logger.error(f"Error browsing previous reports: {e}")
         return "Error loading previous reports. Please try again.", 500
@@ -15499,6 +15624,104 @@ def api_corpus_sharepoint_signin():
     return jsonify(result), 200
 
 
+@app.route('/api/corpus/sharepoint/signout', methods=['POST'])
+def api_corpus_sharepoint_signout():
+    """Round 33 / Build8: drop the persisted SharePoint refresh-token
+    cache so the user is forced through the device-code flow again on
+    the next index attempt.
+
+    Auth: same dual-path as ``/api/corpus/sharepoint/signin`` -- a
+    Flask-WTF CSRF token (browser path) **or** matching
+    ``X-AdoptIQ-Internal`` header (server-to-server).  Idempotent --
+    calling twice is harmless and returns ``ok: True`` both times.
+    """
+    auth_err = _r17_2_authorize_corpus_admin()
+    if auth_err is not None:
+        body, status = auth_err
+        return jsonify(body), status
+    try:
+        import corpus_bootstrap as _r17_cb
+        result = _r17_cb.sharepoint_signout()
+    except Exception as err:  # noqa: BLE001 - never bubble
+        logger.warning(
+            "Round 33 / Build8 / sharepoint signout endpoint failed: %s",
+            type(err).__name__,
+        )
+        return jsonify({'ok': False, 'error': type(err).__name__}), 200
+    return jsonify(result), 200
+
+
+@app.route('/api/settings/sharepoint_url', methods=['POST'])
+def api_settings_sharepoint_url():
+    """Round 33 / Build8: persist the per-user SharePoint folder URL.
+
+    Body shape: ``{"url": "https://<tenant>.sharepoint.com/<path>"}``.
+    An empty string clears the persisted value (the next bootstrap
+    falls through to the env var, then to the empty config default
+    which is treated as "not configured" by the indexer).
+
+    Validation reuses
+    :func:`adoptiq_settings.is_valid_sharepoint_url` so the route
+    rejects with HTTP 400 *before* writing -- otherwise
+    :func:`save_settings` would silently drop the value and the user
+    would see no feedback.
+
+    Auth: same dual-path as ``/api/settings/intelligence`` -- CSRF
+    token or ``X-AdoptIQ-Internal`` header.
+    """
+    auth_err = _r17_2_authorize_corpus_admin()
+    if auth_err is not None:
+        body, code = auth_err
+        return jsonify(body), code
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({'ok': False, 'error': 'invalid JSON payload'}), 400
+    if 'url' not in payload:
+        return jsonify({'ok': False, 'error': 'missing required field "url"'}), 400
+    raw = payload.get('url')
+    if raw is None:
+        url = ''
+    elif isinstance(raw, str):
+        url = raw.strip()
+    else:
+        return jsonify({'ok': False, 'error': 'url must be a string'}), 400
+
+    try:
+        import adoptiq_settings as _settings
+    except Exception as imp_err:  # noqa: BLE001
+        logger.exception("Round 33 / Build8: adoptiq_settings import failed")
+        return jsonify({
+            'ok': False,
+            'error': f'settings_module_unavailable: {type(imp_err).__name__}',
+        }), 500
+
+    if url and not _settings.is_valid_sharepoint_url(url):
+        return jsonify({
+            'ok': False,
+            'error': 'invalid SharePoint URL (must be https://<tenant>.sharepoint.com/<path>)',
+        }), 400
+
+    try:
+        merged = dict(_settings.load_settings() or {})
+        merged['sharepoint_folder_url'] = url
+        _settings.save_settings(merged)
+    except Exception as save_err:  # noqa: BLE001
+        logger.exception("Round 33 / Build8: settings.json write failed")
+        return jsonify({
+            'ok': False,
+            'url': str(getattr(Config, 'ADOPTIQ_SHAREPOINT_FOLDER_URL', '') or ''),
+            'error': f'settings_write_failed: {type(save_err).__name__}',
+        }), 500
+
+    Config.ADOPTIQ_SHAREPOINT_FOLDER_URL = url
+    return jsonify({
+        'ok': True,
+        'url': url,
+        'configured': bool(url),
+    }), 200
+
+
 @app.route('/api/corpus/sharepoint/refresh', methods=['POST'])
 def api_corpus_sharepoint_refresh():
     """Round 17.2: trigger an incremental SharePoint cache refresh +
@@ -15575,6 +15798,71 @@ def api_intel_refresh():
     ("Run AdoptIQ Intelligence now") without importing admin URLs.
     """
     return api_corpus_refresh()
+
+
+@app.route('/api/settings/intelligence', methods=['POST'])
+def api_settings_intelligence():
+    """Round 32 / Phase 2.E: user-facing toggle for AdoptIQ Intelligence.
+
+    Persists the desired state to ``settings.json`` (allow-listed key
+    ``corpus_knowledge_enabled``) and mutates ``Config.CORPUS_KNOWLEDGE_ENABLED``
+    in-process so the change takes effect immediately without a
+    restart.  When toggled ON, also kicks off an immediate corpus
+    refresh so the user sees the indexer move from "idle" to
+    "indexing" without a second click.
+
+    Auth: same dual-path as ``/api/corpus/refresh`` -- a Flask-WTF
+    CSRF token (browser path) **or** matching ``X-AdoptIQ-Internal``
+    header (server-to-server).
+    """
+    auth_err = _r17_2_authorize_corpus_admin()
+    if auth_err is not None:
+        body, code = auth_err
+        return jsonify(body), code
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({'ok': False, 'error': 'invalid JSON payload'}), 400
+    if 'enabled' not in payload:
+        return jsonify({'ok': False, 'error': 'missing required field "enabled"'}), 400
+    enabled = bool(payload.get('enabled'))
+
+    try:
+        import adoptiq_settings as _settings
+        merged = dict(_settings.load_settings() or {})
+        merged['corpus_knowledge_enabled'] = enabled
+        _settings.save_settings(merged)
+    except Exception as save_err:  # noqa: BLE001 - surface but never crash
+        logger.exception("Round 32 / Phase 2.E: settings.json write failed")
+        return jsonify({
+            'ok': False,
+            'enabled': bool(getattr(Config, 'CORPUS_KNOWLEDGE_ENABLED', False)),
+            'error': f'settings_write_failed: {type(save_err).__name__}',
+        }), 500
+
+    Config.CORPUS_KNOWLEDGE_ENABLED = enabled
+
+    refresh_started = False
+    refresh_error: Optional[str] = None
+    if enabled:
+        try:
+            import corpus_bootstrap as _r17_cb
+            refresh_started = bool(_r17_cb.request_refresh(rebuild=False))
+        except Exception as err:  # noqa: BLE001 - never crash on refresh fail
+            logger.warning(
+                "Round 32 / Phase 2.E: corpus refresh kickoff failed: %s",
+                type(err).__name__,
+            )
+            refresh_error = type(err).__name__
+
+    body: Dict[str, Any] = {
+        'ok': True,
+        'enabled': enabled,
+        'refresh_started': refresh_started,
+    }
+    if refresh_error:
+        body['refresh_error'] = refresh_error
+    return jsonify(body), 200
 
 
 # ---------------------------------------------------------------------------
@@ -19257,6 +19545,45 @@ def run_leader_report_generation(analysis_id):
                 csone_file_provided=_leader_csone_provided,
             )
             logger.info("[[VALIDATION]] Leader report data sources validated")
+
+            # Round 30 / M4: collect any optional fetch errors via a
+            # non-raising re-validation so we can promote them into a
+            # ``leader_partial_data_warnings`` list that drives the leader
+            # Word/Excel partial-data banner.  Leader path doesn't carry
+            # csconsole_* frames here, so this primarily covers any
+            # future expansion -- we still run it for symmetry.
+            _r30_leader_partial_warnings: List[Dict[str, Any]] = []
+            try:
+                from data_source_validator import (
+                    validate_data_sources_for_report as _r30_validate,
+                    get_optional_fetch_errors as _r30_opt_errs,
+                )
+                _r30_is_valid, _r30_missing, _r30_err_details = _r30_validate(
+                    report_type='leader',
+                    snowflake_ctx=ctx,
+                    team_subs_df=team_subs_df,
+                    ab_data=pd.DataFrame(),
+                    csone_data=pd.DataFrame(),
+                    required_sources=_leader_required,
+                    csone_file_provided=_leader_csone_provided,
+                )
+                _r30_opt = _r30_opt_errs(_r30_err_details)
+                for _src_key, _src_err in (_r30_opt or {}).items():
+                    _r30_leader_partial_warnings.append({
+                        'dataset': _src_key,
+                        'error': _redact_partial_warning_error(_src_err),
+                        'kind': 'optional_fetch_failed',
+                        'effect': (
+                            f"Optional source '{_src_key}' failed to load; "
+                            "dependent leader-report sections render with "
+                            "reduced detail."
+                        ),
+                    })
+            except Exception as _r30_pdw_err:  # noqa: BLE001
+                logger.debug(
+                    "Round 30 / M4: leader optional fetch error promotion skipped: %s",
+                    _r30_pdw_err,
+                )
         except DataSourceValidationError as ve:
             logger.error(f"[[VALIDATION]] Leader data validation failed: {ve}")
             with analysis_status_lock:
@@ -19338,6 +19665,49 @@ def run_leader_report_generation(analysis_id):
         if ctx is None:
             raise Exception("Database connection failed. Please check your VPN connection and try again.")
         
+        # Round 30 / H1b: forward the optional ``arr_impact`` so the
+        # leader title-page can render the multi-currency advisory.
+        # ``arr_impact`` is populated by ``calculate_arr_impact_for_issues``
+        # earlier in the orchestration flow; it may be missing here when
+        # the leader runs standalone, so default to an empty dict.
+        _r30_leader_arr_impact = (
+            arr_impact  # noqa: F821 (conditionally bound; guarded by 'in locals()')
+            if 'arr_impact' in locals() and isinstance(arr_impact, dict)  # noqa: F821
+            else None
+        )
+
+        # Round 30 / M2: derive ``intel_truncated`` / ``intel_fetch_limit``
+        # from the live-fetched feeds so the leader Word output can render
+        # an explicit "table truncated" disclosure when the storage cap was
+        # reached.  Mirrors the executive path in ``run_compact_analysis``.
+        _r30_leader_intel_fetch_limit: Optional[int] = 500
+        _r30_leader_intel_truncated: Dict[str, bool] = {}
+        try:
+            _r30_lead_inc_trunc = False
+            _ext_incidents = locals().get('ext_incidents') or []
+            if isinstance(_ext_incidents, list) and _ext_incidents:
+                _wm = (
+                    _ext_incidents[-1].get('_window_meta')
+                    if isinstance(_ext_incidents[-1], dict) else None
+                )
+                if isinstance(_wm, dict):
+                    _r30_lead_inc_trunc = bool(_wm.get('truncated'))
+            _r30_lead_bug_trunc = False
+            _ext_bugs = locals().get('ext_bugs') or []
+            if isinstance(_ext_bugs, list):
+                _r30_lead_bug_trunc = len(_ext_bugs) >= _r30_leader_intel_fetch_limit
+            _r30_leader_intel_truncated = {
+                'incidents': _r30_lead_inc_trunc,
+                'bugs': _r30_lead_bug_trunc,
+            }
+        except Exception as _r30_lead_trunc_err:  # noqa: BLE001
+            logger.debug(
+                "Round 30 / M2: leader intel_truncated derivation failed (continuing): %s",
+                _r30_lead_trunc_err,
+            )
+            _r30_leader_intel_truncated = {}
+            _r30_leader_intel_fetch_limit = None
+
         filepath, success_msg, team_data = generate_leader_report(
             manager_name=manager,
             days=days,
@@ -19348,7 +19718,24 @@ def run_leader_report_generation(analysis_id):
             ext_incidents=ext_incidents if 'ext_incidents' in locals() else [],
             software_defects=software_defects if 'software_defects' in locals() else None,
             psirt_vulns=psirt_vulns if 'psirt_vulns' in locals() else None,
-            progress_callback=leader_progress_cb
+            progress_callback=leader_progress_cb,
+            arr_impact=_r30_leader_arr_impact,
+            # Round 30 / M2: surface external-intelligence truncation in the
+            # leader Word output so the reader cannot mistake a capped
+            # sample of help.webex bugs / status.webex incidents for the
+            # full universe.
+            intel_truncated=_r30_leader_intel_truncated,
+            intel_fetch_limit=_r30_leader_intel_fetch_limit,
+            # Round 30 / M4: forward promoted optional-source fetch errors so
+            # the leader title page can render an explicit Partial Data
+            # Warning banner instead of letting empty optional sections look
+            # like clean zeros.
+            partial_data_warnings=(
+                _r30_leader_partial_warnings
+                if '_r30_leader_partial_warnings' in locals()
+                and _r30_leader_partial_warnings
+                else None
+            ),
         )
         
         if check_cancellation(analysis_id):
@@ -20587,4 +20974,18 @@ if __name__ == '__main__':
             logger.warning(_msg)
         except Exception:
             pass
+    # Round 32 / Phase 2.D: spawn the Admin Console (Flask app at
+    # enhanced_admin_dashboard_v2.admin_app) in a background daemon
+    # thread so the .app actually exposes http://127.0.0.1:5152/
+    # without requiring the user to launch a second process.  Build6
+    # bundled the admin module via PyInstaller hidden_imports but
+    # never started the server -- which is why the user reported
+    # "I tried going to the admin site and don't see it".  The helper
+    # short-circuits in tests and quietly logs (without aborting the
+    # main app) on OSError / port-in-use.
+    try:
+        _start_admin_server_in_thread()
+    except Exception:
+        logger.exception("Round 32 / Phase 2.D: admin auto-start raised; "
+                         "main app continuing")
     app.run(debug=False, host=_bind_host, port=PORT, use_reloader=False)

@@ -453,18 +453,141 @@ def open_encrypted_corpus(
 # ---------------------------------------------------------------------------
 
 
+#: Round 33 / Build8: filename of the auto-minted local sentinel that
+#: lives next to the encrypted corpus DB when neither OneDrive nor the
+#: SharePoint cache provides one.  Distinct from
+#: :data:`DEFAULT_SENTINEL_NAME` so a future operator can grep for it
+#: and tell which sentinel is in use.
+_LOCAL_SENTINEL_NAME: str = "sentinel.json"
+
+#: Size of the auto-minted sentinel payload (CSPRNG bytes embedded in
+#: a tiny JSON envelope).  256 bits provides ample entropy for the
+#: HKDF input on a single-user desktop install.
+_LOCAL_SENTINEL_BYTES: int = 32
+
+
+def _local_sentinel_path(encrypted_path: Path | str) -> Path:
+    """Return the canonical path for the auto-minted sentinel.  It
+    sits next to the encrypted DB so it inherits the same backup /
+    deletion semantics as the corpus itself."""
+    return Path(encrypted_path).parent / _LOCAL_SENTINEL_NAME
+
+
+def get_or_create_local_sentinel(encrypted_path: Path | str) -> bytes:
+    """Round 33 / Build8: read the locally-minted sentinel, generating
+    one with CSPRNG bytes if necessary.  The file is created with
+    mode ``0o600`` and parent ``0o700``.
+
+    Used as the *third* fallback in
+    :func:`open_corpus_for_user` -- after OneDrive and the SharePoint
+    cache -- so a SharePoint-only install (no synced OneDrive folder)
+    can still encrypt the corpus end-to-end.  The threat model:
+    single-user macOS account, file behind ``~/Library/Application
+    Support/AdoptIQ/`` with the same 0o600 / 0o700 hardening as
+    ``settings.json`` and the OAuth refresh-token cache.  Anyone with
+    write access to that directory already controls the user account.
+    """
+    path = _local_sentinel_path(encrypted_path)
+    if path.exists() and path.is_file():
+        try:
+            data = path.read_bytes()
+        except OSError as read_err:
+            raise CorpusCryptoError(
+                f"local sentinel read failed: {read_err}"
+            ) from read_err
+        if not data:
+            raise CorpusCryptoError("local sentinel is empty")
+        if len(data) > _MAX_SENTINEL_BYTES:
+            raise CorpusCryptoError(
+                f"local sentinel exceeds size cap ({len(data)} bytes)"
+            )
+        return data
+    parent = path.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as mk_err:
+        raise CorpusCryptoError(
+            f"local sentinel parent mkdir failed: {mk_err}"
+        ) from mk_err
+    try:
+        os.chmod(parent, 0o700)
+    except OSError as chmod_err:  # pragma: no cover - exotic FS
+        logger.debug("chmod 0700 failed for %s: %s", parent, chmod_err)
+    new_payload = secrets.token_bytes(_LOCAL_SENTINEL_BYTES)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, new_payload)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.chmod(path, 0o600)
+    except OSError as chmod_err:  # pragma: no cover - exotic FS
+        logger.debug("chmod 0600 failed for %s: %s", path, chmod_err)
+    logger.info(
+        "Round 33 / Build8: minted local sentinel at %s (no OneDrive or "
+        "SharePoint sentinel found); subsequent runs will reuse it",
+        path,
+    )
+    return new_payload
+
+
+def _try_resolve_sentinel(root: Path | str | None) -> Optional[bytes]:
+    """Best-effort: return sentinel bytes if ``root`` carries the
+    sentinel file, otherwise ``None``.  Never raises -- callers are
+    expected to fall through to the next root."""
+    if root is None:
+        return None
+    try:
+        path = resolve_sentinel_path(root)
+    except CorpusCryptoError:
+        return None
+    if path is None or not path.exists() or not path.is_file():
+        return None
+    try:
+        return read_sentinel_bytes(path)
+    except CorpusCryptoError:
+        return None
+
+
 def open_corpus_for_user(
     *,
     onedrive_root: Path | str | None,
     encrypted_path: Path | str,
     create_if_missing: bool = True,
+    sharepoint_root: Path | str | None = None,
+    allow_local_sentinel: bool = True,
 ) -> EncryptedCorpusHandle:
     """One-shot helper that resolves the sentinel, derives the key,
     and opens the encrypted corpus.  Raises ``CorpusCryptoError``
     with a human-readable reason when any step fails (missing
-    sentinel = missing SharePoint ACL = corpus unavailable)."""
-    sentinel = resolve_sentinel_path(onedrive_root)
-    sentinel_bytes = read_sentinel_bytes(sentinel)
+    sentinel = missing SharePoint ACL = corpus unavailable).
+
+    Round 33 / Build8 sentinel resolution order:
+
+    1. ``onedrive_root`` (legacy default; preserved verbatim so
+       installs with a synced OneDrive sentinel continue to behave
+       identically).
+    2. ``sharepoint_root`` (Graph download cache).  Only consulted
+       when (1) does not yield bytes.
+    3. Auto-minted local sentinel under
+       ``<encrypted_path>.parent/sentinel.json`` with mode 0o600.
+       Gated by ``allow_local_sentinel=True`` (default) -- callers
+       that *require* a SharePoint-delivered sentinel for ACL
+       enforcement can pass ``False`` to preserve the legacy
+       fail-loud behavior.
+    """
+    sentinel_bytes = _try_resolve_sentinel(onedrive_root)
+    if not sentinel_bytes:
+        sentinel_bytes = _try_resolve_sentinel(sharepoint_root)
+    if not sentinel_bytes:
+        if allow_local_sentinel:
+            sentinel_bytes = get_or_create_local_sentinel(encrypted_path)
+        else:
+            # Preserve the legacy error message so existing tests /
+            # operator runbooks keep matching.
+            sentinel = resolve_sentinel_path(onedrive_root)
+            sentinel_bytes = read_sentinel_bytes(sentinel)
     salt = get_or_create_salt(encrypted_path)
     key = derive_key(sentinel_bytes, salt)
     return open_encrypted_corpus(encrypted_path, key, create_if_missing=create_if_missing)
@@ -478,6 +601,7 @@ __all__ = [
     "decrypt_bytes",
     "derive_key",
     "encrypt_bytes",
+    "get_or_create_local_sentinel",
     "get_or_create_salt",
     "open_corpus_for_user",
     "open_encrypted_corpus",

@@ -16,14 +16,31 @@
        synchronous; the existing CSP allows ``script-src 'self'
        'unsafe-inline'`` so no policy change is needed.  Token
        overrides live in the ``[data-bs-theme="dark"]`` block in
-       the main inline ``<style>`` further down. #}
+       the main inline ``<style>`` further down.
+
+       Round 29 / L3: when ``localStorage`` has NO persisted theme
+       (the first-visit case), consult the OS-level
+       ``prefers-color-scheme`` media query synchronously here so a
+       light-mode-OS user does not see a flash of dark before
+       ``theme-toggle.js`` flips it after ``DOMContentLoaded``.
+       ``matchMedia`` is wrapped in a try/catch so older browsers
+       and hardened private-mode contexts still fall through to the
+       ``dark`` design default. #}
     <script>
         (function () {
             try {
                 var stored = null;
                 try { stored = window.localStorage.getItem('adoptiq-theme'); } catch (_) { /* private mode / SecurityError */ }
-                var theme = (stored === 'light' || stored === 'dark') ? stored : 'dark';
-                document.documentElement.setAttribute('data-bs-theme', theme);
+                var theme = (stored === 'light' || stored === 'dark') ? stored : null;
+                if (theme === null) {
+                    try {
+                        if (window.matchMedia &&
+                            window.matchMedia('(prefers-color-scheme: light)').matches) {
+                            theme = 'light';
+                        }
+                    } catch (_) { /* matchMedia unavailable -- fall through */ }
+                }
+                document.documentElement.setAttribute('data-bs-theme', theme || 'dark');
             } catch (_) {
                 document.documentElement.setAttribute('data-bs-theme', 'dark');
             }
@@ -183,6 +200,26 @@
             --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.08);
             --shadow-card-hover: 0 20px 40px rgba(0, 0, 0, 0.12);
             --shadow-modal: 0 25px 70px rgba(0, 0, 0, 0.25);
+
+            /*
+             * Round 29 / M1: status / accent tint tokens.  Round 28
+             * promised these but never landed them, so child templates
+             * (``progress.html``, ``previous_reports.html``) were
+             * forced to hardcode ``rgba(...)`` literals derived from
+             * the brand hexes inline -- which then could not flip
+             * with ``data-bs-theme``.  Defaults below preserve the
+             * exact tint values that lived inline in those templates,
+             * and the dark-theme overrides below pivot them to the
+             * AdoptIQ orange / dark-friendly variants.
+             */
+            --success-bg: rgba(0, 166, 81, 0.08);
+            --success-fg: var(--cisco-success);
+            --warning-bg: rgba(255, 140, 0, 0.08);
+            --warning-fg: var(--cisco-warning);
+            --danger-bg:  rgba(227, 28, 61, 0.08);
+            --danger-fg:  var(--cisco-danger);
+            --info-card-border: var(--accent-primary);
+            --info-tint-bg: rgba(0, 188, 235, 0.06);
         }
 
         /*
@@ -218,6 +255,23 @@
             --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.45);
             --shadow-card-hover: 0 20px 40px rgba(255, 122, 26, 0.25);
             --shadow-modal: 0 25px 70px rgba(0, 0, 0, 0.6);
+
+            /*
+             * Round 29 / M1: dark-theme tints for the new semantic
+             * status tokens.  Slightly stronger alpha than the light
+             * theme so the borders read against the charcoal canvas;
+             * info-card-border switches to AdoptIQ orange so the
+             * left-hand border on ``.info-card`` tracks the active
+             * accent rather than disappearing into the surface.
+             */
+            --success-bg: rgba(46, 204, 113, 0.12);
+            --success-fg: #2ecc71;
+            --warning-bg: rgba(255, 122, 26, 0.12);
+            --warning-fg: var(--adoptiq-orange-hover);
+            --danger-bg:  rgba(232,  93, 117, 0.12);
+            --danger-fg:  #ff6b81;
+            --info-card-border: var(--adoptiq-orange);
+            --info-tint-bg: rgba(255, 122, 26, 0.08);
             color-scheme: dark;
         }
 
@@ -1117,6 +1171,21 @@
                     <li class="nav-item">
                         <a class="nav-link {{ 'active' if request.endpoint == 'help' }}" href="{{ url_for('help') }}">
                             <i class="fas fa-question-circle me-1"></i>Help
+                        </a>
+                    </li>
+                    {# Round 32 / Phase 2.D: link to the in-process Admin
+                       Console (Flask app on 127.0.0.1:5152, started by
+                       app_simple._start_admin_server_in_thread()).
+                       target=_blank with rel=noopener noreferrer keeps
+                       the link from leaking the originating tab to the
+                       cross-port admin app. #}
+                    <li class="nav-item">
+                        <a class="nav-link"
+                           href="http://127.0.0.1:5152/"
+                           target="_blank"
+                           rel="noopener noreferrer"
+                           title="Open the AdoptIQ Admin Console in a new tab">
+                            <i class="fas fa-shield-alt me-1"></i>Admin Console
                         </a>
                     </li>
                     <li class="nav-item">

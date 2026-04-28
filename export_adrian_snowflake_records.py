@@ -642,7 +642,14 @@ def _write_workbook(output_path: Path, sheets: dict[str, pd.DataFrame]) -> Path:
 def _build_output_path(custom_output: str | None) -> Path:
     if custom_output:
         return Path(custom_output)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Round 30 / L1: stamp the export filename in UTC so the
+    # timestamp matches ``run_export``'s ``cutoff_date`` (which uses
+    # ``datetime.now(UTC)``) and the report-data-retrieved-at
+    # contract used by every other AdoptIQ surface.  ``datetime.now()``
+    # without a tz silently picks up the host's local timezone, which
+    # made cross-export filename comparisons unreliable when the
+    # export runs from a host whose clock drifted relative to UTC.
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     return Path(Config.OUTPUT_FOLDER) / f"Adrian_De_Leon_Snowflake_Records_{timestamp}.xlsx"
 
 

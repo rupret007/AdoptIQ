@@ -82,11 +82,36 @@ APP_SIMPLE = REPO_ROOT / "app_simple.py"
 # checks, and untouched chunks in subscription / leader / helper
 # functions queued for future rounds.
 #
+# Round 30 / M4 raised the floor from 31 to 33 by adding TWO new
+# *legitimately defensive* ``in locals()`` guards in service of the new
+# Partial Data banner contract: one in the executive-pipeline call site
+# that promotes optional CSConsole/ARR fetch errors into
+# ``partial_data_warnings`` (the local is conditionally bound only when
+# ``has_optional_fetch_errors`` returns true), and one in the leader
+# completion-record kwargs that piggy-backs ``_r30_leader_partial_warnings``
+# onto the existing report-history payload.  Both are NOT the dead-branch
+# antipattern R20-001 / R23.2 simplified -- they are the
+# ``'cur' in locals()`` / ``'_r30_leader_partial_warnings' in locals()``
+# defensive shape the docstring explicitly carves out as legitimate.
+#
+# Round 32 / Phase 1.A audit raised the floor from 33 to 34 to account
+# for the explanatory comment ``# noqa: F821 (conditionally bound;
+# guarded by 'in locals()')`` immediately above the leader
+# ``arr_impact`` guard.  The comment contains the literal token
+# ``'in locals()'`` and the regex below matches it for what it is --
+# a third occurrence -- even though it is documentation, not a real
+# guard.  Splitting into two regexes (one for the call expression and
+# one for substring-in-comment) would let us discount the comment but
+# would also let a future session sneak a real new guard in via a
+# string literal; the simpler discipline is "every literal token
+# counts, document the addition here."  No new run-time guards in
+# Round 32.
+#
 # Future rounds that simplify MORE sites should lower this floor in the
 # same change; rounds that intentionally introduce a new ``in locals()``
 # pattern (e.g. for legitimate ``'cur' in locals()`` cleanup-after-try
 # discipline) should raise the floor and document why in the audit row.
-_R20_IN_LOCALS_FLOOR = 31
+_R20_IN_LOCALS_FLOOR = 34
 
 
 def test_in_locals_count_is_at_or_below_post_r20_floor() -> None:

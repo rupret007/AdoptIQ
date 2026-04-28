@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+
+{# Round 28 / Phase 2: previous-reports browser rebuilt as a Jinja
+   child of base.html so it inherits the dark-default theme + sun/moon
+   toggle from the navbar.  The previous f-string version pinned a
+   light Bootstrap-ish palette (#f5f5f5 body, white container, navy
+   #1e3a8a headings) and ignored the toggle, breaking parity with
+   the rest of the app.  Visible strings ("Previous AdoptIQ Reports",
+   "No previous reports found in the output folder.", "Total Size",
+   "Modified", "Word Document", "Excel Document", "Download Word File",
+   "Download Excel File", "Back to Main Page") are preserved
+   verbatim because they are the user-visible contract this page
+   ships under.
+
+   Round 29 / M1: the ``rgba(...)`` tints that this template
+   carried inline on ``.file-type.word`` / ``.file-type.excel`` and
+   the ``[data-bs-theme="dark"] .report-item:hover`` orange tint
+   are now folded into the ``--info-tint-bg`` / ``--success-bg``
+   semantic tokens declared in base.html.  Both themes flip
+   automatically because the tokens are redefined in base.html's
+   ``[data-bs-theme="dark"]`` block. #}
+
+{% block title %}Previous AdoptIQ Reports{% endblock %}
+
+{% block extra_css %}
+<style>
+    .prev-reports-wrap {
+        max-width: 1200px;
+        margin: 2rem auto;
+        background-color: var(--bg-surface);
+        color: var(--text-primary);
+        padding: 1.875rem;
+        border-radius: 0.625rem;
+        box-shadow: var(--shadow-card);
+        border: 1px solid var(--border-subtle);
+    }
+    .prev-reports-wrap h1 {
+        color: var(--accent-primary);
+        text-align: center;
+        margin-bottom: 1.875rem;
+    }
+    .report-item {
+        border: 1px solid var(--border-subtle);
+        margin: 0.9375rem 0;
+        padding: 1.25rem;
+        border-radius: 0.5rem;
+        background-color: var(--bg-surface-raised);
+        color: var(--text-primary);
+        transition: background-color 0.3s ease, transform 0.2s ease;
+    }
+    .report-item:hover {
+        background-color: var(--info-tint-bg);
+        transform: translateY(-2px);
+    }
+    .report-header {
+        font-weight: 700;
+        font-size: 1rem;
+        color: var(--accent-primary);
+        margin-bottom: 0.625rem;
+    }
+    .report-details {
+        color: var(--text-secondary);
+        margin: 0.3125rem 0;
+    }
+    .download-buttons { margin-top: 0.9375rem; }
+    .download-btn {
+        display: inline-block;
+        padding: 0.625rem 1.25rem;
+        margin: 0.3125rem;
+        background-color: var(--accent-primary);
+        color: #fff;
+        text-decoration: none;
+        border-radius: 0.3125rem;
+        font-weight: 600;
+        transition: filter 0.2s ease, transform 0.2s ease;
+    }
+    .download-btn:hover {
+        filter: brightness(1.1);
+        transform: translateY(-1px);
+        color: #fff;
+    }
+    .download-btn.excel {
+        background-color: var(--success-fg);
+    }
+    .no-reports {
+        text-align: center;
+        color: var(--text-muted);
+        font-style: italic;
+        margin: 2.5rem 0;
+    }
+    .back-link {
+        text-align: center;
+        margin-top: 1.875rem;
+    }
+    .back-link a {
+        color: var(--accent-primary);
+        text-decoration: none;
+        font-weight: 600;
+    }
+    .back-link a:hover { text-decoration: underline; }
+    .file-info {
+        display: flex;
+        gap: 1.25rem;
+        margin: 0.625rem 0;
+        flex-wrap: wrap;
+    }
+    .file-type {
+        padding: 0.3125rem 0.625rem;
+        border-radius: 0.1875rem;
+        font-size: 0.75rem;
+        font-weight: 700;
+    }
+    .file-type.word {
+        background-color: var(--info-tint-bg);
+        color: var(--accent-primary);
+        border: 1px solid var(--accent-primary);
+    }
+    .file-type.excel {
+        background-color: var(--success-bg);
+        color: var(--success-fg);
+        border: 1px solid var(--success-fg);
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container">
+    <div class="prev-reports-wrap">
+        <h1>Previous AdoptIQ Reports</h1>
+
+        {% if not sorted_reports %}
+            <div class="no-reports">No previous reports found in the output folder.</div>
+        {% else %}
+            {% for report_id, report_data in sorted_reports %}
+                <div class="report-item">
+                    <div class="report-header">{{ report_data.readable_name }}</div>
+                    <div class="report-details"><strong>Total Size:</strong> {{ report_data.total_size_mb }} MB</div>
+                    <div class="report-details"><strong>Modified:</strong> {{ report_data.modified_str }}</div>
+                    <div class="file-info">
+                        {% if report_data.word_file %}
+                            <span class="file-type word"> Word Document</span>
+                        {% endif %}
+                        {% if report_data.excel_file %}
+                            <span class="file-type excel"> Excel Document</span>
+                        {% endif %}
+                    </div>
+                    <div class="download-buttons">
+                        {% if report_data.word_file %}
+                            <a href="/download-file/{{ report_data.word_file.basename }}" class="download-btn">
+                                Download Word File
+                            </a>
+                        {% endif %}
+                        {% if report_data.excel_file %}
+                            <a href="/download-file/{{ report_data.excel_file.basename }}" class="download-btn excel">
+                                Download Excel File
+                            </a>
+                        {% endif %}
+                    </div>
+                </div>
+            {% endfor %}
+        {% endif %}
+
+        <div class="back-link">
+            <a href="/">Back to Main Page</a>
+        </div>
+    </div>
+</div>
+{% endblock %}

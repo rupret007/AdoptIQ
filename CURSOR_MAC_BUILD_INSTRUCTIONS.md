@@ -69,7 +69,7 @@ Apply all required parity updates from MIGRATION_TO_MAC.md to this codebase, inc
 make verify
 ```
 
-This runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt`. All four gates must pass before producing a release build. Current baseline: **1949 passed / 2 skipped**, ruff clean, no HIGH/MED bandit findings, no pip-audit vulns.
+This runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt`. All four gates must pass before producing a release build. Current baseline (Round 28 close-out): **2445 passed / 2 skipped**, ruff clean, no HIGH/MED bandit findings, no pip-audit vulns.
 
 ## 5) Build on Mac
 

@@ -341,8 +341,27 @@ def test_marker_phase_10_3_last_7_days_failure_flag() -> None:
 
 
 def test_marker_phase_10_4_progress_started_utc_label() -> None:
-    src = _read('app_simple.py')
-    assert 'Round 11 / Phase 10.4' in src or 'Started (UTC)' in src
+    """Round 11 / Phase 10.4: the progress page must label the
+    start-time field as ``Started (UTC)`` so operators don't
+    mis-attribute the timestamp to local time.
+
+    Round 28 moved the inline f-string body of the progress page
+    into ``templates/progress.html``.  The ``Started (UTC)`` label
+    moved with it; the marker test follows the string to its new
+    canonical location instead of pretending it must still live
+    in ``app_simple.py``.
+    """
+    template_src = _read('templates/progress.html')
+    app_src = _read('app_simple.py')
+    assert (
+        'Started (UTC)' in template_src
+        or 'Round 11 / Phase 10.4' in template_src
+        or 'Round 11 / Phase 10.4' in app_src
+    ), (
+        "Round 11 / Phase 10.4: 'Started (UTC)' label must appear "
+        "in templates/progress.html (or be re-emitted from "
+        "app_simple.py if the page is ever re-inlined)."
+    )
 
 
 def test_marker_phase_10_5_customer_progress_current_normalize() -> None:

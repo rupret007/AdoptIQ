@@ -1829,23 +1829,30 @@ class CompactReportFormatter:
             overview_p.add_run(f'• Total Adoption Barriers: {len(ab_data)}\n')
             
             if 'customer_name' in ab_data.columns:
-                # Round 13 / Phase 3.13: count customers against the
-                # canonical normalized name so cosmetic spelling drift
-                # (NBSPs, casing, trailing punctuation) does not inflate
-                # the "Customers with Barriers" tile relative to the
-                # rolled-up Voice-of-Customer narrative below (which
-                # iterates per-customer).  Without this fix the tile
-                # said e.g. "12 customers" while the narrative bullet
-                # list contained 11 distinct accounts.
+                # Round 13 / Phase 3.13 + Round 30 / M3: route through the
+                # canonical ``count_customers_with_barriers`` helper so this
+                # tile, the leader version, and the executive
+                # version all agree on the denominator (and the
+                # downstream "Average Barriers per Customer" math
+                # agrees too).  The helper applies
+                # ``normalize_customer_name`` internally so cosmetic
+                # spelling drift (NBSPs, casing, trailing
+                # punctuation) cannot inflate the count.
                 try:
-                    from data_normalization import normalize_customer_name as _r13_norm_cust_voc
-                except Exception:
-                    _r13_norm_cust_voc = lambda v: v  # noqa: E731
-                _cust_norm_series = (
-                    ab_data['customer_name'].fillna('').apply(_r13_norm_cust_voc)
-                )
-                _cust_norm_series = _cust_norm_series[_cust_norm_series.astype(str) != '']
-                n_cust = int(_cust_norm_series.nunique())
+                    n_cust = int(cm.count_customers_with_barriers(ab_data))
+                except Exception:  # noqa: BLE001
+                    # Defensive fallback to the legacy inline path
+                    # so the report still renders if the helper
+                    # raises unexpectedly on a malformed frame.
+                    try:
+                        from data_normalization import normalize_customer_name as _r13_norm_cust_voc
+                    except Exception:
+                        _r13_norm_cust_voc = lambda v: v  # noqa: E731
+                    _cust_norm_series = (
+                        ab_data['customer_name'].fillna('').apply(_r13_norm_cust_voc)
+                    )
+                    _cust_norm_series = _cust_norm_series[_cust_norm_series.astype(str) != '']
+                    n_cust = int(_cust_norm_series.nunique())
                 overview_p.add_run(f'• Customers with Barriers: {n_cust}\n')
                 avg_per_customer = len(ab_data) / n_cust if n_cust > 0 else 0
                 overview_p.add_run(f'• Average Barriers per Customer: {avg_per_customer:.1f}\n')
@@ -2090,18 +2097,25 @@ class CompactReportFormatter:
             if not csone_norm.empty and 'customer_name' in csone_norm.columns and date_col_csone:
                 try:
                     csone_copy = csone_norm.copy()
-                    # Round 8 / Phase 3.4: pin the 30-day window to
-                    # the UTC clock so the cutoff does not silently
-                    # shift +/- a few hours around the daily edge
-                    # depending on the process timezone.  Strip the
-                    # tzinfo so it can be compared against the naive
-                    # ``date_opened`` column produced by
-                    # ``pd.to_datetime(..., errors='coerce')`` (which
-                    # is also naive when the source data lacks an
-                    # offset).
-                    csone_copy['date_opened'] = pd.to_datetime(csone_copy[date_col_csone], errors='coerce')
-                    _now_naive_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-                    recent_30 = csone_copy[csone_copy['date_opened'] >= (_now_naive_utc - timedelta(days=30))]
+                    # Round 8 / Phase 3.4 + Round 30 / H3: pin BOTH sides
+                    # of the comparison to a tz-AWARE UTC clock.  The
+                    # previous Round 8 contract was "both sides naive UTC"
+                    # which silently dropped the offset on tz-aware
+                    # inputs (a row stamped ``2026-04-25T22:00:00-05:00``
+                    # was coerced to a naive ``2026-04-25T22:00:00``,
+                    # placing it five hours later on the timeline than
+                    # its real UTC instant ``2026-04-26T03:00:00Z``).
+                    # ``pd.to_datetime(..., utc=True)`` normalizes
+                    # tz-aware values to UTC and stamps the column as
+                    # tz-aware; naive inputs are interpreted as UTC.
+                    # Comparing against ``datetime.now(timezone.utc)``
+                    # (tz-aware) yields a window-membership decision
+                    # that is invariant under tz-encoding drift.
+                    csone_copy['date_opened'] = pd.to_datetime(
+                        csone_copy[date_col_csone], errors='coerce', utc=True,
+                    )
+                    _now_utc_aware = datetime.now(timezone.utc)
+                    recent_30 = csone_copy[csone_copy['date_opened'] >= (_now_utc_aware - timedelta(days=30))]
 
                     # Round 12 / Phase 3.3: drive the case-volume
                     # spotlight off the normalized customer key so
@@ -2641,7 +2655,9 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
                                   csconsole_adoption_barriers: Optional[pd.DataFrame] = None,
                                   account_to_customer: Optional[Dict[str, str]] = None,
                                   partial_data_warnings: Optional[List[Dict[str, Any]]] = None,
-                                  data_retrieved_at: Optional[datetime] = None) -> str:
+                                  data_retrieved_at: Optional[datetime] = None,
+                                  intel_truncated: Optional[Dict[str, Any]] = None,
+                                  intel_fetch_limit: Optional[int] = None) -> str:
     """Create COMPREHENSIVE compact executive report focused on renewal risk with full data detail.
 
     Round 3 hardening: optional ``team_subs_df`` / CSConsole frames /
@@ -2914,6 +2930,46 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
                 formatter.doc.add_paragraph("")
             except Exception as _banner_err:
                 logger.warning("Could not render compact partial-data banner: %s", _banner_err)
+
+        # Round 30 / M2: surface external-intelligence truncation in the
+        # compact briefing so a reader cannot mistake a capped sample
+        # of incidents / bugs (when ``ADOPTIQ_INTEL_LIST_LIMIT`` is
+        # exceeded) for the full population.  The compact report does
+        # not list individual rows the way the executive / leader
+        # reports do, so render a single advisory banner that calls
+        # out which sub-feeds were capped.  Skip when no flags are
+        # set so the happy-path Word output is unchanged.
+        try:
+            _r30_truncated_keys = []
+            if isinstance(intel_truncated, dict):
+                for _k in ('incidents', 'bugs', 'maintenances'):
+                    if intel_truncated.get(_k):
+                        _r30_truncated_keys.append(_k)
+            if _r30_truncated_keys:
+                formatter.doc.add_heading(
+                    "⚠ External Intelligence Capped", level=2,
+                )
+                _r30_msg = (
+                    "The upstream external-intelligence fetch returned a "
+                    "capped sample for the following sub-feed(s): "
+                    f"{', '.join(_r30_truncated_keys)}.  Counts and "
+                    "callouts derived from these feeds reflect the "
+                    "most-recent rows only; older entries were not "
+                    "considered for this run."
+                )
+                if intel_fetch_limit and isinstance(intel_fetch_limit, int) and intel_fetch_limit > 0:
+                    _r30_msg += (
+                        f"  (Fetch cap: {intel_fetch_limit} most-recent rows per feed.)"
+                    )
+                _r30_p = formatter.doc.add_paragraph()
+                _r30_run = _r30_p.add_run(_r30_msg)
+                _r30_run.italic = True
+                formatter.doc.add_paragraph("")
+        except Exception as _r30_trunc_err:  # noqa: BLE001
+            logger.warning(
+                "Round 30 / M2: compact intel truncation banner failed: %s",
+                _r30_trunc_err,
+            )
 
         # Add At-a-Glance Dashboard (NEW - matches example report format at the top)
         # Round 25 / Phase A: ``pulse_df`` is the canonical narrow-universe

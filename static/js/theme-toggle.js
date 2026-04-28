@@ -63,6 +63,34 @@
         return isValidTheme(attr) ? attr : DEFAULT_THEME;
     }
 
+    /*
+     * Round 28 / Phase 4: deliver on the existing comment at the top
+     * of this file ("honours the OS-level prefers-color-scheme media
+     * query for first-time visitors who have NOT explicitly chosen a
+     * theme").  Until now that behaviour was promised but never
+     * implemented -- a first-time visitor on a light-mode OS still
+     * landed in dark mode because ``init()`` only consulted
+     * localStorage.  We only invoke this branch when ``localStorage``
+     * has no persisted choice; once the user toggles even once, the
+     * stored value wins on every subsequent visit so we never
+     * "fight" their explicit preference.  The matchMedia call is
+     * guarded so older browsers (or hardened private modes) that
+     * lack the API silently fall back to the dark default.
+     */
+    function detectPreferredTheme() {
+        try {
+            if (typeof window.matchMedia === 'function') {
+                var mql = window.matchMedia('(prefers-color-scheme: light)');
+                if (mql && mql.matches) {
+                    return 'light';
+                }
+            }
+        } catch (_) {
+            /* matchMedia unavailable / blocked -- fall through */
+        }
+        return DEFAULT_THEME;
+    }
+
     function applyTheme(theme) {
         var resolved = isValidTheme(theme) ? theme : DEFAULT_THEME;
         document.documentElement.setAttribute('data-bs-theme', resolved);
@@ -97,7 +125,15 @@
         if (stored !== null) {
             applyTheme(stored);
         } else {
-            updateToggleAria(getCurrentTheme());
+            // Round 28 / Phase 4: respect the OS-level
+            // ``prefers-color-scheme`` on first visit.  We do NOT
+            // persist the OS-derived choice -- so if the user later
+            // changes their OS preference, we re-detect on the next
+            // first-run rather than locking them into the previous
+            // OS state.  Once they explicitly click the toggle the
+            // ``safeWriteStored`` call inside ``toggleTheme()``
+            // upgrades the page to the persisted-preference branch.
+            applyTheme(detectPreferredTheme());
         }
 
         var btn = document.getElementById('theme-toggle');

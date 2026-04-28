@@ -1457,18 +1457,53 @@ class TestRound23Fixes:
     """Round 23: XSS escaping, path traversal, None/NaN guards, URL encoding, fetch checks."""
 
     def test_progress_html_escapes_steps(self):
-        """Progress route inline HTML should escape step names via _esc()."""
-        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+        """Progress route HTML should escape step names safely.
+
+        Round 28 migrated the progress page from an inline f-string in
+        ``app_simple.py`` to ``templates/progress.html`` (which extends
+        ``base.html``).  The Round 23 invariant still holds, just in the
+        new file: when the polling JS rebuilds the step timeline, the
+        completed-step and current-step labels are written via DOM
+        ``createTextNode``/``textContent`` rather than ``innerHTML``,
+        which is the strictly safer equivalent of the previous
+        ``_esc(s)``-based string concat.
+        """
+        progress_template = os.path.join(_PROJECT_ROOT, 'templates', 'progress.html')
+        with open(progress_template, encoding='utf-8') as f:
             src = f.read()
-        assert "_esc(s) + '</li>'" in src, "completed_steps should be escaped"
-        assert "_esc(data.current_step) + '</li>'" in src, "current_step should be escaped"
+        # Round 28: the polling JS now uses createTextNode for the
+        # step labels (DOM API, no string concat), which is even
+        # safer than the prior _esc(...) + '</li>' approach because
+        # there is no intermediate HTML string to mis-escape.
+        assert 'createTextNode(data.completed_steps[i])' in src, (
+            "completed_steps must be appended to the step <li> via "
+            "createTextNode (DOM API) so untrusted strings cannot "
+            "break out of the timeline node."
+        )
+        assert 'createTextNode(data.current_step)' in src, (
+            "current_step must be appended via createTextNode rather "
+            "than serialized into innerHTML."
+        )
 
     def test_progress_fetch_ok_checks(self):
-        """Inline progress HTML fetch calls should check r.ok."""
-        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+        """Progress page fetch calls should check r.ok.
+
+        Round 28 moved the polling JS from the inline f-string in
+        ``app_simple.py`` into ``templates/progress.html``'s
+        ``{% block extra_js %}``.  The Round 23 contract (``status``
+        and ``cancel`` must check ``r.ok`` before reading the JSON
+        body) is preserved unchanged, just relocated.
+        """
+        progress_template = os.path.join(_PROJECT_ROOT, 'templates', 'progress.html')
+        with open(progress_template, encoding='utf-8') as f:
             src = f.read()
-        progress_html = src[src.find("const ANALYSIS_ID"):src.find("</html>")]
-        assert progress_html.count('if (!r.ok)') >= 2, "status and cancel fetches need r.ok check"
+        # The two fetches live inside the {% block extra_js %} now;
+        # search the whole template body since the script is the
+        # only consumer of these strings.
+        assert src.count('if (!r.ok)') >= 2, (
+            "status and cancel fetches in templates/progress.html "
+            "must each guard on r.ok before parsing JSON."
+        )
 
     def test_insights_filename_sanitized(self):
         """enhanced_snowflake_insights.py should sanitize customer_name in filenames."""
@@ -1892,10 +1927,24 @@ class TestRound26Fixes:
         assert 'if footer.runs:' in section
 
     def test_app_previous_reports_rel(self):
-        """app_simple.py previous-reports link should have rel='noopener noreferrer'."""
-        with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
+        """The /previous-reports link should have rel='noopener noreferrer'.
+
+        Round 28 migrated the progress page (which embeds the
+        ``Browse Previous Reports`` link) from the inline f-string
+        in ``app_simple.py`` to ``templates/progress.html``.  The
+        Round 26 anti-tabnabbing contract (``rel="noopener
+        noreferrer"`` on every cross-page ``target="_blank"``) is
+        preserved -- we just look for the canonical literal in the
+        new file.
+        """
+        progress_template = os.path.join(_PROJECT_ROOT, 'templates', 'progress.html')
+        with open(progress_template, encoding='utf-8') as f:
             src = f.read()
-        assert 'href="/previous-reports" target="_blank" rel="noopener noreferrer"' in src
+        assert 'href="/previous-reports" target="_blank" rel="noopener noreferrer"' in src, (
+            "templates/progress.html: the 'Browse Previous Reports' "
+            "link must keep rel=\"noopener noreferrer\" so a hostile "
+            "previous-reports page cannot reach window.opener."
+        )
 
     def test_backend_cursor_close_logged(self):
         """adoptiq_backend.py resource cleanup should log errors instead of silent pass."""
@@ -2074,18 +2123,38 @@ class TestRound28Fixes:
         assert src.count('X-CSRFToken') >= 3, "All 3 POST fetch calls need CSRF header"
 
     def test_progress_cancel_csrf(self):
-        """H3: inline progress page cancel POST must include CSRF token.
+        """H3: progress page cancel POST must include CSRF token.
 
-        Phase 3.5: ``templates/progress.html`` was deleted because the
-        live progress page is now an inline f-string in ``app_simple.py``
-        (~lines 8424-8717). The CSRF check moved to that inline page.
+        Round 28 reversed the Phase 3.5 collapse: the live progress
+        page is once again a real Jinja child of ``base.html``
+        (``templates/progress.html``).  The CSRF contract (``meta
+        name="csrf-token"`` in <head>, ``X-CSRFToken`` header on the
+        cancel POST) is preserved verbatim in the migrated template,
+        which is now the canonical location.  The route handler in
+        ``app_simple.py`` only generates the token value -- the
+        markup that consumes it lives in the template.
         """
+        # 1) The route still mints a CSRF token value.
         with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
-            src = f.read()
-        # The inline progress HTML must still embed a csrf-token meta
-        # tag and forward X-CSRFToken on the cancel POST.
-        assert 'csrf-token' in src, "inline progress page lost csrf-token meta"
-        assert 'X-CSRFToken' in src, "inline progress page lost X-CSRFToken header on POSTs"
+            route_src = f.read()
+        assert 'csrf_token_value' in route_src, (
+            "app_simple.py progress() route must compute "
+            "csrf_token_value and pass it into the template context."
+        )
+
+        # 2) The template emits the meta tag and forwards
+        #    X-CSRFToken on the cancel POST.
+        progress_template = os.path.join(_PROJECT_ROOT, 'templates', 'progress.html')
+        with open(progress_template, encoding='utf-8') as f:
+            tmpl_src = f.read()
+        assert 'csrf-token' in tmpl_src, (
+            "templates/progress.html lost the csrf-token meta "
+            "tag; the cancel POST will be rejected by Flask-WTF."
+        )
+        assert 'X-CSRFToken' in tmpl_src, (
+            "templates/progress.html lost the X-CSRFToken header on "
+            "the cancel POST; CSRF protection requires this header."
+        )
 
     def test_renewal_analyzer_no_str_e(self):
         """H4: advanced_renewal_analyzer.py should not return str(e) in analysis results."""

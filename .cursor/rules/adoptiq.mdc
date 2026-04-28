@@ -335,6 +335,32 @@ SQLite databases:
 
 Path resolution is **inline** in multiple modules (`_APP_SUPPORT` in `app_simple.py`, `incident_storage._db_path`, `enhanced_admin_dashboard_v2._get_db_path`). There is no single dedicated `path_helper.py` module.
 
+### Settings precedence (Round 32 / Phase 2.E, extended Round 33 / Build8)
+
+Persistent feature flags resolve in this order, highest precedence first:
+
+1. `settings.json` (managed by `adoptiq_settings.py`; mode `0600`, parent dir `0700`, atomic `os.replace` writes; allow-listed keys only -- currently `corpus_knowledge_enabled` and `sharepoint_folder_url`).
+2. Environment variable (e.g. `CORPUS_KNOWLEDGE_ENABLED=true|false`, `ADOPTIQ_SHAREPOINT_FOLDER_URL=https://...`).
+3. `config.py` default (Round 32 / Phase 2.F flipped Intelligence to default-on; Round 33 / Build8 changed `ADOPTIQ_SHAREPOINT_FOLDER_URL` default from a hardcoded personal Cisco URL to `""` -- empty surfaces as `not_configured` in the analyze-page UI).
+
+Toggling Intelligence from the analyze-page banner POSTs to `POST /api/settings/intelligence` (CSRF-protected via the same dual-path as `/api/corpus/refresh`), which writes `settings.json`, mutates `Config.CORPUS_KNOWLEDGE_ENABLED` in-process, and triggers `corpus_bootstrap.request_refresh` on enable.
+
+The Round 33 / Build8 SharePoint connection sub-panel adds three more endpoints under the same auth contract: `POST /api/settings/sharepoint_url` (URL allow-list `https://<tenant>.sharepoint.com/<path>` enforced via `adoptiq_settings.is_valid_sharepoint_url`), `POST /api/corpus/sharepoint/signin` (returns the device-code envelope `{user_code, verification_uri, expires_in, message, interval}`), and `POST /api/corpus/sharepoint/signout` (delegates to `corpus_bootstrap.sharepoint_signout()` -> `SharePointGraphClient.clear_token_cache()` which drops both the macOS Keychain entry and the 0o600 fallback file `~/.adoptiq/sharepoint_token_cache.json`).
+
+### Corpus encryption sentinel resolution (Round 33 / Build8)
+
+`corpus_crypto.open_corpus_for_user(onedrive_root, encrypted_path, sharepoint_root=..., allow_local_sentinel=True)` resolves the HKDF input bytes in this order, highest precedence first:
+
+1. OneDrive sentinel (`<onedrive_root>/.adoptiq_corpus_sentinel.json`) -- legacy default; preserved verbatim for installs with a synced OneDrive copy.
+2. SharePoint cache sentinel (`<sharepoint_root>/.adoptiq_corpus_sentinel.json`) -- populated by the Microsoft Graph download.
+3. Auto-minted local sentinel (`<encrypted_path>.parent/sentinel.json`, mode `0o600`, parent `0o700`) when `allow_local_sentinel=True` (default). Lets SharePoint-only installs encrypt the corpus end-to-end.
+
+`corpus_bootstrap._run_index_pass` passes `sharepoint_root=Config.ADOPTIQ_SHAREPOINT_CACHE_DIR` so all three branches are exercised by the live indexer. Operators that want to preserve the legacy "fail loud when SharePoint ACL is missing" semantic can call `open_corpus_for_user(..., allow_local_sentinel=False)`.
+
+### Admin Console auto-start (Round 32 / Phase 2.D)
+
+`app_simple._start_admin_server_in_thread()` spawns `enhanced_admin_dashboard_v2.admin_app` on a daemon thread (default `127.0.0.1:5152`) when the main app starts, so the packaged `.app` actually exposes the admin UI without a second process. The helper is idempotent (`sys._adoptiq_admin_started`), short-circuits under pytest (so test fixtures don't bind the port), and quietly downgrades on `OSError` (port already bound -- assume an external admin instance owns it). The header link in `templates/base.html` opens it in a new tab with `rel="noopener noreferrer"`.
+
 ## Known Drift / Inconsistencies
 
 These were surfaced during code-review mining and remain visible in the repo. The bug-scrub assistant should be aware of them and is empowered to fix them when in scope:
