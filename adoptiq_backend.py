@@ -1272,6 +1272,20 @@ def _get_table_columns(ctx, table_name: str) -> set[str]:
     if ctx is None:
         return set()
     cache_key = _normalize_table_name(table_name)
+    # Round 52 / partial-data-warning fix #2: short-circuit BEFORE we cache,
+    # probe, OR register an introspection failure when the table is on the
+    # snowflake_table_policy block-list. A blocked table is a deliberate
+    # policy decision, not an operational outage, so it MUST NOT surface as
+    # a partial-data warning ("column_introspection_failure" with
+    # ``schema:EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C``). Returning an empty
+    # column set keeps every caller's "is column X available?" check honest --
+    # they will simply see no columns and degrade gracefully -- without ever
+    # touching the cursor or recording a failure for the user banner.
+    try:
+        if is_table_blocked(table_name):
+            return set()
+    except Exception:
+        pass
     now = time.monotonic()
     with _TABLE_COLUMN_CACHE_LOCK:
         entry = _TABLE_COLUMN_CACHE.get(cache_key)
@@ -2267,7 +2281,15 @@ def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
         # snowflake_prefetch path called annotate_with_contract, so
         # direct fetch_team_subscriptions consumers had no contract.
         # Round 34 / D: fail-loud wrapper.
-        _safe_annotate_with_contract(df, dataset="subscriptions", source_label="team_subscriptions")
+        # Round 52 / partial-data-warning fix #1: use the new
+        # ``team_subscriptions`` contract (no ARR slot) instead of the
+        # full ``subscriptions`` contract. This roster query intentionally
+        # does NOT SELECT ARR -- ARR is loaded by ``fetch_arr_data`` which
+        # keeps the strict ``subscriptions`` contract -- so annotating with
+        # the full contract was producing a permanent ``schema_drift``
+        # warning ("missing slot(s) arr") on every renewal run despite the
+        # data being correct.
+        _safe_annotate_with_contract(df, dataset="team_subscriptions", source_label="team_subscriptions")
         return df
     except Exception as e:
         _log_snowflake_fallback("Team subscriptions query", e)

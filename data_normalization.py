@@ -803,3 +803,76 @@ def strip_html_from_dataframe(df: "pd.DataFrame") -> "pd.DataFrame":
         except Exception:
             continue
     return out
+
+
+# ---------------------------------------------------------------------------
+# Round 52 / partial-data-warning fix #3: dtype-safe customer merge for the
+# CSConsole adoption-barriers re-annotation path.
+# ---------------------------------------------------------------------------
+#
+# ``app_simple.py`` runs a left-merge between the CSConsole adoption-barriers
+# frame (raw ``ACCOUNT_ID_C`` from ``C360_CS_TASK_C_VW``) and ``team_subs_df``
+# (``ACCOUNT_ID_C`` + ``BU_NAME``) so the contract's ``customer`` slot can
+# resolve.  Round 50 wired that merge into both compact and comprehensive
+# paths but the recurring "schema_drift: missing slot(s) customer" warning
+# kept appearing in production runs because the join key dtypes drift between
+# Snowflake fetches: one frame would carry ``ACCOUNT_ID_C`` as ``object`` and
+# the other as ``int64`` / ``Int64`` / ``float64`` (NULLs in DSM).  Pandas
+# ``merge(on=...)`` returns no rows in that case (or all-NaN BU_NAME),
+# leaving the ``customer`` slot unresolved and the prefetch-time
+# ``fetch_error`` stamp untouched.
+#
+# ``merge_customer_join_keys_dtype_safe`` normalises both join sides to a
+# common ``string`` form (NaN-safe, whitespace-trimmed, ``<NA>``-aware) BEFORE
+# the merge so the join always succeeds when the underlying account IDs match
+# regardless of upstream dtype drift.  When either input is empty / missing
+# the helper short-circuits and returns the left frame unchanged.
+
+
+def merge_customer_join_keys_dtype_safe(
+    left: Optional[pd.DataFrame],
+    right: Optional[pd.DataFrame],
+    *,
+    join_key: str = "ACCOUNT_ID_C",
+    right_columns: Optional[Sequence[str]] = None,
+    how: str = "left",
+) -> Optional[pd.DataFrame]:
+    """Left-merge ``left`` onto ``right`` after coercing the join key to a
+    consistent string dtype on both sides.
+
+    Returns ``left`` unchanged when either input is empty / missing the
+    join key. Never raises; on any unexpected error returns ``left`` and
+    leaves the caller to surface the failure via the existing
+    ``fetch_error`` channel.
+    """
+    if left is None or not isinstance(left, pd.DataFrame) or left.empty:
+        return left
+    if right is None or not isinstance(right, pd.DataFrame) or right.empty:
+        return left
+    if join_key not in left.columns or join_key not in right.columns:
+        return left
+
+    try:
+        right_subset_cols = list(right_columns) if right_columns else list(right.columns)
+        if join_key not in right_subset_cols:
+            right_subset_cols = [join_key] + [c for c in right_subset_cols if c != join_key]
+        right_subset = right[[c for c in right_subset_cols if c in right.columns]].copy()
+
+        left_copy = left.copy()
+        left_copy[join_key] = (
+            left_copy[join_key]
+            .astype("string")
+            .str.strip()
+            .replace({"<NA>": pd.NA, "None": pd.NA, "nan": pd.NA, "": pd.NA})
+        )
+        right_subset[join_key] = (
+            right_subset[join_key]
+            .astype("string")
+            .str.strip()
+            .replace({"<NA>": pd.NA, "None": pd.NA, "nan": pd.NA, "": pd.NA})
+        )
+        right_subset = right_subset.drop_duplicates(subset=[join_key])
+
+        return left_copy.merge(right_subset, on=join_key, how=how)
+    except Exception:
+        return left

@@ -130,6 +130,22 @@ ROW_CONTRACTS: Dict[str, Dict[str, Sequence[str]]] = {
         # ARR / value figure used by every dollarized aggregation.
         "arr": ("ANNUAL_RECURRING_REVENUE", "TOTAL_VALUE", "ARR", "ARR_USD"),
     },
+    # Round 52 / partial-data-warning fix #1: ``team_subscriptions`` is the
+    # roster-only shape returned by ``adoptiq_backend.get_subscriptions_for_team``.
+    # That helper SELECTs identity/join columns only (SUBSCRIPTION_ID,
+    # ACCOUNT_ID_C, BU_NAME, CSSM_EMAIL); it does NOT load ARR. Annotating
+    # this frame with the full ``subscriptions`` contract therefore always
+    # tripped a ``schema_drift`` warning for "missing slot(s) arr" on every
+    # renewal run, which surfaced as a permanent partial-data warning even
+    # though the renewal report does not need ARR from this dataset (ARR is
+    # loaded separately by ``fetch_arr_data``). The new ``team_subscriptions``
+    # contract carries only the slots the roster query actually fills, so the
+    # warning is gone for the legitimate roster path while ``fetch_arr_data``
+    # keeps the strict ``subscriptions`` contract that requires ARR.
+    "team_subscriptions": {
+        "customer": ("BU_NAME", "customer_name", "ACCOUNT_NAME", "ACCOUNT_ID_C"),
+        "subscription": ("SUBSCRIPTION_NUMBER", "SUB_REF_ID", "SUBSCRIPTION_ID"),
+    },
     "adoption_barriers": {
         "id": ("ID", "RECORD_ID", "ADOPTION_BARRIER_ID"),
         # Round 48 / F-DV-PULSE-CONTRACT-DRIFT: when the

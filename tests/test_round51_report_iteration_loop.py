@@ -232,12 +232,18 @@ def test_round51_kpi_sidecar_extracts_and_compares_docx_xlsx_values(tmp_path: Pa
     # covers the same table shape as real reports.
     from docx import Document
 
+    # Round 52 (Phase 2): use a 3-column header table so the harness'
+    # "headers + values row" heuristic applies. 2-column tables are now
+    # treated as label/value because the renewal Customer Health Dashboard
+    # and leader Team Performance Metrics both use that 2-column shape.
     doc = Document()
-    table = doc.add_table(rows=2, cols=2)
+    table = doc.add_table(rows=2, cols=3)
     table.rows[0].cells[0].text = "Total Customers"
     table.rows[0].cells[1].text = "Support Cases"
+    table.rows[0].cells[2].text = "Critical (P1)"
     table.rows[1].cells[0].text = "52"
     table.rows[1].cells[1].text = "176"
+    table.rows[1].cells[2].text = "5"
     doc.save(docx_path)
 
     workbook = openpyxl.Workbook()

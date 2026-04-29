@@ -40,53 +40,189 @@ TIMESTAMP_TOKEN_RE = re.compile(r"\b\d{8,}\b")
 RUN_SUFFIX_RE = re.compile(r"__data-loop-[^_]+__scenario-[^_]+__ts-[^_.]+\.", re.IGNORECASE)
 NUMERIC_TOKEN_RE = re.compile(r"(?<![A-Za-z])[-+]?\d+(?:,\d{3})*(?:\.\d+)?%?")
 KPI_ALIASES = {
+    # Round 52 (Phase 2): aliases keyed to the actual labels emitted by
+    # adoptiq_backend, executive_intelligence_formatter, compact_report_formatter,
+    # leader_report_generator, and the matching app_simple Excel writers.
     "total_customers": {
         "total customers",
         "customers in portfolio",
         "total customer count",
         "total customers analyzed",
+        "team size",
+        "team members",
     },
     "support_cases": {
         "support cases",
         "total support cases",
         "support cases 90d",
         "total support cases 90d",
+        "support cases 90d portfolio wide",
+        "support cases last 90 days",
+        "tac cases total",
+        "tac cases",
+        "num tac cases",
+        # Round 52 / accuracy-fix-loop: leader executive summary bullets
+        # render as "Total TAC Cases: 381". Without this alias the
+        # paragraph extractor canonicalizes nothing, leaving the gate
+        # to rely on the table heuristic alone.
+        "total tac cases",
+    },
+    # Round 52 / partial-data-warning Phase 5: ``escalated support cases``
+    # is a SUBSET of total ``support_cases`` (specifically, P1/P2 + BEMS
+    # escalations).  Folding it into the ``support_cases`` canonical
+    # caused the strict parity gate to fire on the compact report
+    # because the DOCX KPI (293 total) was overwritten by the XLSX
+    # Executive_Dashboard "Escalated Support Cases" cell (2 escalated).
+    # Track it as a distinct canonical so both metrics can stand up
+    # without colliding.
+    "escalated_support_cases": {
+        "escalated support cases",
+        "escalated cases",
+        "escalation required",
     },
     "adoption_barriers": {
         "adoption barriers",
         "total adoption barriers",
         "adoption barriers total",
+        "active adoption barriers",
+        "num adoption barriers",
     },
     "critical_barriers": {
         "critical abs",
         "critical adoption barriers",
         "critical barriers",
+        "adoption barriers critical",
     },
     "critical_cases": {
         "critical p1",
         "p1 cases",
         "critical cases",
+        "tac cases p1",
+        "p1 critical cases",
     },
     "high_cases": {
         "high p2",
         "p2 cases",
         "high cases",
+        "p2 high cases",
     },
     "bems": {
         "bems escalations",
         "bems",
+        "bems break fix",
+        "num bems",
+        # Round 52 / accuracy-fix-loop: leader bullets render as
+        # "Total BEMS Escalations: 81".
+        "total bems escalations",
+        "total bems",
     },
     "risk_score": {
         "overall risk score",
         "renewal risk score",
         "risk score",
+        "portfolio risk score",
     },
     "window_days": {
         "analysis period days",
+        "analysis period",
         "window days",
         "days",
     },
+    "manager": {
+        "manager",
+        "manager scope",
+    },
+    "technology": {
+        "technology",
+        "technology scope",
+        "technology focus",
+    },
+    # Round 52 / partial-data-warning Phase 5: text-valued canonical
+    # for the renewal Customer Health Dashboard's "Risk Category" row.
+    # Listed in ``_TEXT_VALUED_CANONICAL_KPIS`` so the numeric guard
+    # does not strip it.
+    "risk_category": {
+        "risk category",
+        "renewal risk category",
+        "overall risk category",
+    },
+    "high_risk_customers": {
+        "high risk customers",
+        "high risk customer count",
+        "critical high risk",
+    },
+    "action_plans": {
+        "action plans",
+        "num action plans",
+        # Round 52 / accuracy-fix-loop: leader bullets render as
+        # "Total Action Plans: 354".
+        "total action plans",
+    },
+    "customer_pulse": {
+        "customer pulse",
+        "customer pulse records",
+        "num customer pulse",
+        # Round 52 / accuracy-fix-loop: leader bullets render as
+        # "Total Customer Pulse records: 87" (mixed case).
+        "total customer pulse",
+        "total customer pulse records",
+    },
 }
+
+# Round 52 (Phase 2): scenario-specific required KPI keys. When strict mode is
+# enabled, the harness fails the parity gate if any of these keys is missing
+# from BOTH the DOCX KPIs and the XLSX KPIs (i.e. neither format emitted it).
+# Mismatches between formats are reported even outside strict mode.
+SCENARIO_REQUIRED_KPIS: dict[str, tuple[str, ...]] = {
+    "comprehensive": ("manager", "technology", "window_days", "total_customers"),
+    "compact": ("manager", "technology", "window_days", "total_customers"),
+    "renewal": ("technology", "window_days"),
+    "leader": ("manager", "window_days"),
+}
+
+
+# Round 52 / ship: per-scenario DOCX similarity threshold overrides.
+#
+# The default ``min_docx_similarity`` (0.55 in strict mode) is calibrated for
+# reports whose narrative is templated and largely deterministic (compact,
+# renewal, leader -- which sit at 0.91-0.99 textual_sim against a fresh
+# baseline).  The comprehensive report is materially different: it embeds an
+# AI-generated "Insights" section (Pattern N: Latent Technical Debt, Root
+# Cause Analysis, Business Impact, Evidence, ...) that the LLM regenerates
+# from scratch on every run.  Two consecutive comprehensive runs against the
+# same scope diff by ~1600 narrative paragraphs and even differ in TOTAL
+# paragraph count by ~200, so a single global text-similarity floor cannot
+# fairly cover both narrative-templated and narrative-generated reports.
+#
+# The numeric similarity gate stays at 0.80 across the board -- that is the
+# binding signal for actual data drift.  The text gate is only relaxed for
+# the AI-narrative-heavy comprehensive scenario; data accuracy guards do
+# not weaken.
+#
+# Override format: { scenario_key: { "min_docx_similarity": float,
+#                                    "min_docx_numeric_similarity": float } }
+SCENARIO_DOCX_THRESHOLD_OVERRIDES: dict[str, dict[str, float]] = {
+    "comprehensive": {
+        "min_docx_similarity": 0.40,
+    },
+}
+
+
+def effective_docx_thresholds(
+    config: "RunnerConfig", scenario_key: str
+) -> tuple[float, float]:
+    """Resolve per-scenario DOCX similarity thresholds with overrides.
+
+    Returns (min_docx_similarity, min_docx_numeric_similarity).  When no
+    override is registered for ``scenario_key``, the runner-wide config
+    defaults are used unchanged.
+    """
+    override = SCENARIO_DOCX_THRESHOLD_OVERRIDES.get(scenario_key, {})
+    min_text = float(override.get("min_docx_similarity", config.min_docx_similarity))
+    min_numeric = float(
+        override.get("min_docx_numeric_similarity", config.min_docx_numeric_similarity)
+    )
+    return min_text, min_numeric
 
 
 @dataclass(frozen=True)
@@ -122,6 +258,19 @@ class ArtifactRecord:
     baseline_path: Optional[str]
     structural: GateResult
     baseline_diff: GateResult
+    # Round 52 (Phase 1): manifest-backed baseline identity.
+    # ``baseline_source`` is one of "manifest" | "latest" | "none". When the
+    # baseline came from a manifest, ``baseline_sha256`` and
+    # ``baseline_manifest_key`` make the comparison fully reproducible without
+    # rescanning Downloads.
+    baseline_source: str = "none"
+    baseline_sha256: Optional[str] = None
+    baseline_manifest_key: Optional[str] = None
+    baseline_mtime_utc: Optional[str] = None
+    baseline_size_bytes: Optional[int] = None
+    baseline_integrity: GateResult = field(
+        default_factory=lambda: GateResult(True, {"reason": "not_applicable"})
+    )
 
 
 @dataclass
@@ -167,6 +316,13 @@ class RunnerConfig:
     min_docx_numeric_similarity: float
     max_xlsx_row_delta_ratio: float
     max_xlsx_row_delta_abs: int
+    # Round 52 (Phase 1): manifest-backed baseline configuration. None when
+    # manifest mode is not in use; required (and validated) when
+    # ``baseline_mode == "manifest"``.
+    baseline_manifest_path: Optional[Path] = None
+    init_baseline: bool = False
+    init_baseline_dir: Optional[Path] = None
+    init_baseline_label: Optional[str] = None
 
 
 def _utc_now() -> datetime:
@@ -548,79 +704,419 @@ def _canonical_kpi_label(label: str) -> Optional[str]:
     return None
 
 
+# Round 52 / partial-data-warning Phase 5: canonicals whose values are
+# inherently text (no count). Everything NOT in this set is numeric-only:
+# if the cell value is non-numeric (e.g. a data-source label like
+# "CSConsole" or "CSConsole / Snowflake C360_CS_TASK_C_VW"), the
+# extractor must SKIP it rather than canonicalize the source label as
+# a KPI value. Without this guard the leader Data Sources table feeds
+# strings like ``action_plans = "CSConsole"`` into the parity gate
+# while the XLSX reports the row count (354) -- a guaranteed mismatch
+# that masks real numerical drift.
+_TEXT_VALUED_CANONICAL_KPIS: frozenset[str] = frozenset({
+    "manager",
+    "technology",
+    "risk_category",
+})
+
+_NUMERIC_VALUE_RE = re.compile(r"^-?\$?\d[\d,]*(?:\.\d+)?\s*%?$")
+
+
+def _is_numeric_kpi_value(value: Any) -> bool:
+    """True when ``value`` looks like a count/score/percent KPI value."""
+    if value is None:
+        return False
+    text = str(value).strip()
+    if not text:
+        return False
+    return bool(_NUMERIC_VALUE_RE.match(text))
+
+
 def _normalize_kpi_value(value: Any) -> str:
     if value is None:
         return ""
     text = str(value).strip()
     text = re.sub(r"\s+", " ", text)
+    # Round 52 / partial-data-warning Phase 5: strip trailing
+    # presentational suffixes that one side adds and the other does not
+    # (e.g. risk score rendered "0.7/10" in DOCX vs "0.7" in XLSX, or
+    # window written "90 days" in one place and "90" in another). The
+    # underlying value is identical; without this normalization the
+    # parity gate fires on a purely cosmetic difference.
+    _stripped = re.sub(
+        r"\s*(?:/\s*\d+(?:\.\d+)?|\bdays?\b|\bdirect\s+reports?\b)\s*$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
+    if _stripped:
+        text = _stripped
     number = re.fullmatch(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?%?", text)
     if number:
         return text.replace(",", "")
     return text
 
 
+_PARAGRAPH_KPI_NUMERIC_RE = re.compile(
+    r"\b(?P<label>[A-Za-z][A-Za-z /()\-]{2,80}?)\s*[:\-]\s*(?P<value>-?\$?\d[\d,]*(?:\.\d+)?\s*%?)",
+)
+# Round 52 (Phase 2): a separate text-valued pass picks out short metadata
+# lines like "Manager: Brian Frazier" or "Technology: All Contact Center"
+# whose values are not numeric. Keep label class tight to avoid false hits.
+# Round 52 / partial-data-warning Phase 5: stop the value at the first
+# pipe ("|") separator. Some report headers concatenate multiple
+# label:value pairs onto one line ("Technology: All Contact Center |
+# Analysis Period: 90 days"); without this anchor the value greedily
+# consumes the trailing pairs and parity comparisons fire on a label
+# vs label-plus-suffix mismatch (the XLSX side has only "All Contact
+# Center").
+# Round 52 / ship: also stop at ``;`` so corpus-context lines like
+# ``Technology: Cloud and Hybrid Products; Observed: 2026-04-29T...;
+# Prior occurrences: 879`` (rendered by ``report_corpus_context.py``
+# inside per-customer narrative blocks) cannot greedily swallow the
+# trailing telemetry as the Technology value.  ``[^|;\n]`` still
+# captures spaces and Unicode but never crosses a pipe OR semicolon.
+_PARAGRAPH_KPI_TEXT_RE = re.compile(
+    r"^\s*(?P<label>(?:Manager(?:\s+scope)?|Technology(?:\s+scope)?|Technology\s+Focus|Risk\s+Category))\s*[:\-]\s*(?P<value>[A-Za-z][^|;\n]{0,120}?)\s*(?:[|;]|$)",
+    re.IGNORECASE,
+)
+
+# Round 52 / ship: corpus-context tells.  When the source paragraph
+# contains ANY of these markers, the line is part of a per-customer
+# narrative block (``report_corpus_context.py``) and its embedded
+# ``Technology:`` label is NOT the report-scope technology -- it's a
+# tag attached to a recurrence row.  Reject the text-KPI match
+# entirely; the XLSX side carries the report-scope technology and the
+# parity gate uses that as the source of truth.
+_CORPUS_CONTEXT_MARKERS: tuple[str, ...] = (
+    "Observed:",
+    "Prior occurrences:",
+    "Sentiment direction:",
+)
+
+
+def _looks_like_corpus_context_line(text: str) -> bool:
+    """Return True when ``text`` carries report_corpus_context tells."""
+    return any(marker in text for marker in _CORPUS_CONTEXT_MARKERS)
+
+
+def _scan_paragraph_for_kpis(text: str, values: dict[str, str]) -> None:
+    """Pick out 'Label: 12' style phrases from a paragraph string."""
+    if not text:
+        return
+    if ":" not in text and "-" not in text:
+        return
+    for match in _PARAGRAPH_KPI_NUMERIC_RE.finditer(text):
+        label = match.group("label").strip()
+        raw_value = match.group("value").strip()
+        canonical = _canonical_kpi_label(label)
+        if canonical and raw_value:
+            values.setdefault(canonical, _normalize_kpi_value(raw_value))
+    text_match = _PARAGRAPH_KPI_TEXT_RE.match(text)
+    if text_match and not _looks_like_corpus_context_line(text):
+        label = text_match.group("label").strip()
+        raw_value = text_match.group("value").strip()
+        canonical = _canonical_kpi_label(label)
+        if canonical and raw_value:
+            values.setdefault(canonical, _normalize_kpi_value(raw_value))
+
+
 def extract_docx_kpis(path: Path) -> dict[str, Any]:
-    """Extract stable table KPI values from a Word report."""
+    """Extract stable KPI values from a Word report's tables AND paragraphs."""
     doc = Document(str(path))
     values: dict[str, str] = {}
+
+    table_count = 0
     for table in doc.tables:
+        table_count += 1
         rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
         if not rows:
             continue
-        if len(rows) >= 2:
+        # Round 52 (Phase 2): the "headers + values row" heuristic only applies
+        # when the table has 3+ columns. For 2-column tables (the canonical
+        # label/value shape used by renewal Customer Health Dashboard, leader
+        # Team Performance Metrics, comprehensive Title Page metrics) row 0 is
+        # ALSO a label/value row and must not be paired with row 1.
+        # Round 52 / accuracy-fix-loop: for *multi-row* tables (e.g. the
+        # leader "Team Member Activity Breakdown" table whose rows are one
+        # CSSM each plus a TOTAL footer), pairing headers with row 1
+        # extracts the FIRST team member's per-person counts and labels
+        # them as portfolio metrics (action_plans=50 instead of 354).
+        # Prefer a row whose first cell is a totals marker; fall back to
+        # row 1 only when the table has exactly one data row (header +
+        # single value row, e.g. comprehensive Title Page metrics).
+        if len(rows) >= 2 and len(rows[0]) >= 3:
             header = rows[0]
-            second = rows[1]
-            if len(header) == len(second) and len(header) > 1:
-                for label, value in zip(header, second):
+            chosen_value_row: Optional[list[str]] = None
+            totals_markers = {"total", "totals", "team total", "team totals", "grand total", "grand totals"}
+            if len(rows) == 2:
+                chosen_value_row = rows[1]
+            else:
+                for candidate in rows[1:]:
+                    if not candidate:
+                        continue
+                    first_cell = str(candidate[0] or "").strip().lower()
+                    if first_cell in totals_markers:
+                        chosen_value_row = candidate
+                        break
+            if chosen_value_row is not None and len(header) == len(chosen_value_row):
+                for label, value in zip(header, chosen_value_row):
                     canonical = _canonical_kpi_label(label)
                     if canonical and value:
+                        # Round 52 / partial-data-warning Phase 5: drop
+                        # non-numeric values for count-style canonicals
+                        # so a data-source label cell ("CSConsole")
+                        # cannot masquerade as a metric value.
+                        if (
+                            canonical not in _TEXT_VALUED_CANONICAL_KPIS
+                            and not _is_numeric_kpi_value(value)
+                        ):
+                            continue
                         values.setdefault(canonical, _normalize_kpi_value(value))
         for row in rows:
             if len(row) >= 2 and row[0] and row[1]:
                 canonical = _canonical_kpi_label(row[0])
                 if canonical:
+                    if (
+                        canonical not in _TEXT_VALUED_CANONICAL_KPIS
+                        and not _is_numeric_kpi_value(row[1])
+                    ):
+                        continue
                     values.setdefault(canonical, _normalize_kpi_value(row[1]))
-    return {"table_count": len(doc.tables), "values": values}
+
+    # Round 52 (Phase 2): some KPIs (e.g. renewal "Analysis Period: 90 days",
+    # leader "Team Size: 7 Direct Reports") only appear in paragraph prose.
+    paragraph_count = 0
+    for paragraph in doc.paragraphs:
+        text = (paragraph.text or "").strip()
+        if not text:
+            continue
+        paragraph_count += 1
+        _scan_paragraph_for_kpis(text, values)
+
+    return {
+        "table_count": table_count,
+        "paragraph_count": paragraph_count,
+        "values": values,
+    }
+
+
+_LABEL_VALUE_HEADER_PATTERNS = (
+    ("metric", "value"),
+    ("field", "value"),
+    ("key", "value"),
+    ("item", "value"),
+    ("status", "warning"),
+)
+
+
+def _extract_label_value_sheet(sheet: Any, values: dict[str, str]) -> None:
+    """Treat first column as KPI label, second column as value."""
+    for row in sheet.iter_rows(min_row=1, max_row=400, max_col=8, values_only=True):
+        cells = [cell for cell in row if cell not in (None, "")]
+        if len(cells) < 2:
+            continue
+        label = str(cells[0]).strip()
+        value = cells[1]
+        if not label:
+            continue
+        # Skip header rows.
+        norm = label.lower()
+        if norm in {"metric", "field", "key", "item", "status"}:
+            continue
+        canonical = _canonical_kpi_label(label)
+        if canonical:
+            values.setdefault(canonical, _normalize_kpi_value(value))
+
+
+def _extract_team_summary_sheet(sheet: Any, values: dict[str, str]) -> None:
+    """Sum numeric columns across rows for leader Team_Summary semantics.
+
+    Leader Team_Summary has one header row of KPI-like names and N data rows
+    (one per direct report). The portfolio total for `Num_TAC_Cases` etc. is
+    the sum across rows; the team-size KPI is the count of data rows.
+    """
+    rows = list(sheet.iter_rows(min_row=1, max_row=200, max_col=20, values_only=True))
+    if not rows:
+        return
+    # Round 52 / partial-data-warning Phase 5: the leader Team_Summary
+    # sheet is written with a TITLE row above the actual header row
+    # ("Team Summary - <Manager> Team Report" then
+    # "Team_Member | Num_Customers | ..."). Pre-Phase 5 we treated row
+    # 0 as the header; the column-name canonicals therefore never
+    # matched, the header-zero short-circuit was bypassed, and
+    # ``len(data_rows)`` counted rows 1..N inclusive of the real
+    # header -- producing a team-size that was off-by-one (12 vs the
+    # DOCX's 11). Detect the real header row by scanning for the
+    # known marker columns ("Team_Member" / "Num_Customers") and
+    # fall back to row 0 only when no marker is found.
+    header_idx = 0
+    _markers = {"team_member", "num_customers", "team member", "team_members"}
+    for _idx, _row in enumerate(rows[:5]):
+        if not _row:
+            continue
+        _row_norm = {
+            str(cell).strip().lower() for cell in _row if cell is not None
+        }
+        if _row_norm & _markers:
+            header_idx = _idx
+            break
+    header = rows[header_idx]
+    if not header:
+        return
+    headers_norm = [str(cell).strip() if cell is not None else "" for cell in header]
+
+    canonical_headers: list[Optional[str]] = []
+    for col_label in headers_norm:
+        canonical_headers.append(_canonical_kpi_label(col_label))
+
+    data_rows = [row for row in rows[header_idx + 1 :] if any(cell not in (None, "") for cell in row)]
+    if not data_rows:
+        return
+
+    # Round 52 (Phase 2): row count maps to total customers (team size).
+    if "total_customers" not in values:
+        team_size_canonical = _canonical_kpi_label("Team Members")
+        if team_size_canonical:
+            values.setdefault(team_size_canonical, str(len(data_rows)))
+
+    for col_idx, canonical in enumerate(canonical_headers):
+        if not canonical:
+            continue
+        if canonical in values:
+            continue
+        total = 0.0
+        any_numeric = False
+        for row in data_rows:
+            if col_idx >= len(row):
+                continue
+            cell = row[col_idx]
+            if cell in (None, ""):
+                continue
+            try:
+                total += float(str(cell).replace(",", ""))
+                any_numeric = True
+            except (TypeError, ValueError):
+                continue
+        if any_numeric:
+            normalized = total
+            if normalized.is_integer():
+                values[canonical] = str(int(normalized))
+            else:
+                values[canonical] = str(normalized)
+
+
+def _extract_renewal_summary_sheet(sheet: Any, values: dict[str, str]) -> None:
+    """Aggregate renewal Renewal_Summary one-row-per-customer payload."""
+    rows = list(sheet.iter_rows(min_row=1, max_row=2000, max_col=20, values_only=True))
+    if not rows:
+        return
+    header = rows[0]
+    if not header:
+        return
+    headers_norm = [str(cell).strip() if cell is not None else "" for cell in header]
+    risk_score_idx = None
+    for idx, col_label in enumerate(headers_norm):
+        canonical = _canonical_kpi_label(col_label)
+        if canonical == "risk_score":
+            risk_score_idx = idx
+            break
+
+    data_rows = [row for row in rows[1:] if any(cell not in (None, "") for cell in row)]
+    if not data_rows:
+        return
+
+    if "total_customers" not in values:
+        values["total_customers"] = str(len(data_rows))
+
+    if risk_score_idx is not None and "risk_score" not in values:
+        scores: list[float] = []
+        for row in data_rows:
+            if risk_score_idx >= len(row):
+                continue
+            cell = row[risk_score_idx]
+            if cell in (None, ""):
+                continue
+            try:
+                scores.append(float(str(cell).replace(",", "")))
+            except (TypeError, ValueError):
+                continue
+        if scores:
+            # Round 52 (Phase 2): aggregated risk score is informational only.
+            # We do NOT auto-fill a top-level KPI from a computed average
+            # because DOCX exports an authoritative single value while XLSX
+            # rows are per-customer. Cross-format parity for risk_score is
+            # only meaningful when both sides emit the same authoritative
+            # number; the rendered avg here is informational, persisted as a
+            # diagnostic key but not registered as the canonical KPI.
+            pass
+
+
+def _extract_horizontal_label_value_sheet(sheet: Any, values: dict[str, str]) -> None:
+    """Treat row 1 as KPI labels, row 2 as values (wide-table layout).
+
+    Used by renewal ``Key_Metrics`` whose dataframe has columns like
+    ``[Risk_Score, Risk_Category, Analysis_Period, ...]`` and one data row.
+    """
+    rows = list(sheet.iter_rows(min_row=1, max_row=2, max_col=20, values_only=True))
+    if len(rows) < 2:
+        return
+    header_row = rows[0]
+    value_row = rows[1]
+    if not header_row or not value_row:
+        return
+    for label, value in zip(header_row, value_row):
+        if label is None or value in (None, ""):
+            continue
+        canonical = _canonical_kpi_label(str(label))
+        if canonical:
+            values.setdefault(canonical, _normalize_kpi_value(value))
+
+
+_SCENARIO_SHEET_HANDLERS: dict[str, str] = {
+    "summary": "label_value",
+    "report_info": "label_value",
+    "executive_dashboard": "label_value",
+    "risk_summary": "renewal_summary",
+    "renewal_summary": "renewal_summary",
+    "key_metrics": "horizontal_label_value",
+    "team_summary": "team_summary",
+}
 
 
 def extract_xlsx_kpis(path: Path) -> dict[str, Any]:
-    """Extract KPI-like label/value pairs from Summary and Report_Info sheets."""
+    """Extract KPI-like label/value pairs from canonical KPI sheets."""
     workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
         values: dict[str, str] = {}
         scanned_sheets: list[str] = []
-        candidate_sheets = {
-            "summary",
-            "report_info",
-            "executive_dashboard",
-            "risk_summary",
-            "renewal_summary",
-            "key_metrics",
-            "team_summary",
-        }
         for sheet_name in workbook.sheetnames:
             normalized_sheet = sheet_name.lower()
-            if normalized_sheet not in candidate_sheets:
+            handler = _SCENARIO_SHEET_HANDLERS.get(normalized_sheet)
+            if not handler:
                 continue
             scanned_sheets.append(sheet_name)
             sheet = workbook[sheet_name]
-            for row in sheet.iter_rows(min_row=1, max_row=250, max_col=8, values_only=True):
-                cells = [cell for cell in row if cell not in (None, "")]
-                if len(cells) < 2:
-                    continue
-                label = str(cells[0]).strip()
-                value = cells[1]
-                if not label or label.lower() in {"metric", "field", "key"}:
-                    continue
-                canonical = _canonical_kpi_label(label)
-                if canonical:
-                    values.setdefault(canonical, _normalize_kpi_value(value))
+            if handler == "label_value":
+                _extract_label_value_sheet(sheet, values)
+            elif handler == "team_summary":
+                _extract_team_summary_sheet(sheet, values)
+            elif handler == "renewal_summary":
+                _extract_renewal_summary_sheet(sheet, values)
+            elif handler == "horizontal_label_value":
+                _extract_horizontal_label_value_sheet(sheet, values)
         return {"scanned_sheets": scanned_sheets, "values": values}
     finally:
         workbook.close()
 
 
-def compare_kpi_parity(docx_kpis: dict[str, Any], xlsx_kpis: dict[str, Any], *, strict: bool) -> GateResult:
+def compare_kpi_parity(
+    docx_kpis: dict[str, Any],
+    xlsx_kpis: dict[str, Any],
+    *,
+    strict: bool,
+    required_keys: Iterable[str] = (),
+) -> GateResult:
     docx_values = docx_kpis.get("values", {}) if isinstance(docx_kpis, dict) else {}
     xlsx_values = xlsx_kpis.get("values", {}) if isinstance(xlsx_kpis, dict) else {}
     common = sorted(set(docx_values) & set(xlsx_values))
@@ -629,6 +1125,11 @@ def compare_kpi_parity(docx_kpis: dict[str, Any], xlsx_kpis: dict[str, Any], *, 
         for key in common
         if _normalize_kpi_value(docx_values.get(key)) != _normalize_kpi_value(xlsx_values.get(key))
     }
+
+    required_set = tuple(sorted(set(required_keys)))
+    union_keys = set(docx_values) | set(xlsx_values)
+    missing_required = sorted(key for key in required_set if key not in union_keys)
+
     if common:
         passed = not mismatches
         reason = "compared_common_kpis"
@@ -638,11 +1139,21 @@ def compare_kpi_parity(docx_kpis: dict[str, Any], xlsx_kpis: dict[str, Any], *, 
         # strict run; real KPI mismatches above still fail.
         passed = True  # Round 52: no-common is extraction coverage, not report drift.
         reason = "no_common_kpis"
+
+    if strict and missing_required:
+        # Round 52 (Phase 2): scenario-specific required keys MUST be present
+        # in at least one format (DOCX or XLSX). Missing means extraction
+        # coverage is broken or the report stopped emitting that KPI.
+        passed = False
+        reason = "missing_required_kpis"
+
     return GateResult(
         passed=passed,
         details={
             "reason": reason,
             "strict": strict,
+            "required_keys": list(required_set),
+            "missing_required_keys": missing_required,
             "common_kpis": common,
             "mismatches": mismatches,
             "docx_kpi_count": len(docx_values),
@@ -653,11 +1164,28 @@ def compare_kpi_parity(docx_kpis: dict[str, Any], xlsx_kpis: dict[str, Any], *, 
     )
 
 
-def extract_and_write_kpis(docx_path: Path, xlsx_path: Path, sidecar_path: Path, *, strict: bool) -> tuple[dict[str, Any], GateResult]:
+def extract_and_write_kpis(
+    docx_path: Path,
+    xlsx_path: Path,
+    sidecar_path: Path,
+    *,
+    strict: bool,
+    required_keys: Iterable[str] = (),
+) -> tuple[dict[str, Any], GateResult]:
     docx_kpis = extract_docx_kpis(docx_path)
     xlsx_kpis = extract_xlsx_kpis(xlsx_path)
-    parity = compare_kpi_parity(docx_kpis, xlsx_kpis, strict=strict)
-    payload = {"docx": docx_kpis, "xlsx": xlsx_kpis, "parity": asdict(parity)}
+    parity = compare_kpi_parity(
+        docx_kpis,
+        xlsx_kpis,
+        strict=strict,
+        required_keys=required_keys,
+    )
+    payload = {
+        "docx": docx_kpis,
+        "xlsx": xlsx_kpis,
+        "parity": asdict(parity),
+        "required_keys": list(sorted(set(required_keys))),
+    }
     sidecar_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return payload, parity
 
@@ -710,6 +1238,215 @@ def select_latest_baseline(
         return None
     candidates.sort(key=lambda item: item.stat().st_mtime, reverse=True)
     return candidates[0]
+
+
+# ---------------------------------------------------------------------------
+# Round 52 (Phase 1): manifest-backed baselines.
+# ---------------------------------------------------------------------------
+# A manifest is a JSON document that pins each scenario to a specific DOCX/XLSX
+# baseline plus its SHA-256.  The harness will refuse to run when the manifest
+# is missing, malformed, or when a referenced baseline file does not match the
+# pinned digest, so a known-good "golden" baseline cannot drift silently.
+#
+# Format (version 1):
+# {
+#   "version": 1,
+#   "generated_at_utc": "2026-04-29T17:00:00Z",
+#   "git_sha": "<short>",
+#   "scenarios": {
+#     "comprehensive": {
+#       "docx": {
+#         "path": "comprehensive/AdoptIQ_Report_xxx.docx",
+#         "sha256": "...",
+#         "size_bytes": 12345,
+#         "captured_at_utc": "2026-04-29T16:00:00Z"
+#       },
+#       "xlsx": { ... }
+#     },
+#     "compact": {...}, "renewal": {...}, "leader": {...}
+#   }
+# }
+#
+# Paths in the manifest are resolved relative to the manifest file's parent
+# directory.  Absolute paths are honored as-is.
+MANIFEST_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class BaselineEntry:
+    """One pinned baseline file from a manifest."""
+
+    scenario_key: str
+    file_type: str
+    path: Path
+    sha256: str
+    size_bytes: int
+    captured_at_utc: Optional[str]
+
+
+def _resolve_manifest_relative(manifest_path: Path, raw_path: str) -> Path:
+    candidate = Path(raw_path).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    return (manifest_path.parent / candidate).resolve()
+
+
+def load_baseline_manifest(manifest_path: Path) -> dict[str, dict[str, BaselineEntry]]:
+    """Load a baseline manifest and return scenario → file_type → entry."""
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Baseline manifest not found: {manifest_path}")
+    try:
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Baseline manifest is not valid JSON: {manifest_path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"Baseline manifest must be a JSON object: {manifest_path}")
+    version = raw.get("version")
+    if version != MANIFEST_SCHEMA_VERSION:
+        raise ValueError(
+            f"Baseline manifest version {version!r} is unsupported; expected {MANIFEST_SCHEMA_VERSION}: {manifest_path}"
+        )
+    scenarios_raw = raw.get("scenarios")
+    if not isinstance(scenarios_raw, dict) or not scenarios_raw:
+        raise ValueError(f"Baseline manifest missing 'scenarios' object: {manifest_path}")
+    out: dict[str, dict[str, BaselineEntry]] = {}
+    for scenario_key, scenario_payload in scenarios_raw.items():
+        if not isinstance(scenario_payload, dict):
+            raise ValueError(f"Manifest scenario {scenario_key!r} is malformed: {manifest_path}")
+        per_type: dict[str, BaselineEntry] = {}
+        for file_type, entry in scenario_payload.items():
+            if file_type not in {"docx", "xlsx"}:
+                continue
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"Manifest entry {scenario_key}/{file_type} is not an object: {manifest_path}"
+                )
+            raw_path = entry.get("path")
+            sha256 = entry.get("sha256")
+            size_bytes = entry.get("size_bytes")
+            captured_at = entry.get("captured_at_utc")
+            if not isinstance(raw_path, str) or not raw_path:
+                raise ValueError(
+                    f"Manifest entry {scenario_key}/{file_type} missing 'path': {manifest_path}"
+                )
+            if not isinstance(sha256, str) or len(sha256) != 64:
+                raise ValueError(
+                    f"Manifest entry {scenario_key}/{file_type} requires 64-char sha256: {manifest_path}"
+                )
+            if not isinstance(size_bytes, int) or size_bytes <= 0:
+                raise ValueError(
+                    f"Manifest entry {scenario_key}/{file_type} requires positive size_bytes: {manifest_path}"
+                )
+            resolved = _resolve_manifest_relative(manifest_path, raw_path)
+            per_type[file_type] = BaselineEntry(
+                scenario_key=scenario_key,
+                file_type=file_type,
+                path=resolved,
+                sha256=sha256.lower(),
+                size_bytes=size_bytes,
+                captured_at_utc=captured_at if isinstance(captured_at, str) else None,
+            )
+        if per_type:
+            out[scenario_key] = per_type
+    if not out:
+        raise ValueError(f"Baseline manifest has no usable docx/xlsx entries: {manifest_path}")
+    return out
+
+
+def verify_baseline_entry(entry: BaselineEntry) -> GateResult:
+    """Confirm the on-disk baseline file matches the manifest digest/size."""
+    if not entry.path.exists():
+        return GateResult(
+            False,
+            {
+                "reason": "baseline_file_missing",
+                "expected_path": str(entry.path),
+            },
+        )
+    actual_size = entry.path.stat().st_size
+    if actual_size != entry.size_bytes:
+        return GateResult(
+            False,
+            {
+                "reason": "baseline_size_mismatch",
+                "expected_size_bytes": entry.size_bytes,
+                "actual_size_bytes": actual_size,
+                "expected_path": str(entry.path),
+            },
+        )
+    actual_sha = _file_sha256(entry.path)
+    if actual_sha.lower() != entry.sha256:
+        return GateResult(
+            False,
+            {
+                "reason": "baseline_sha256_mismatch",
+                "expected_sha256": entry.sha256,
+                "actual_sha256": actual_sha,
+                "expected_path": str(entry.path),
+            },
+        )
+    return GateResult(
+        True,
+        {
+            "reason": "verified",
+            "expected_sha256": entry.sha256,
+            "expected_size_bytes": entry.size_bytes,
+            "expected_path": str(entry.path),
+        },
+    )
+
+
+def write_baseline_manifest(
+    manifest_path: Path,
+    captured: dict[str, dict[str, Path]],
+    *,
+    label: Optional[str] = None,
+) -> dict[str, Any]:
+    """Write a manifest pinning each scenario/file_type to its captured file."""
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    base_dir = manifest_path.parent.resolve()
+    scenarios_payload: dict[str, dict[str, Any]] = {}
+    captured_at = _utc_now_str()
+    for scenario_key, per_type in captured.items():
+        per_type_payload: dict[str, Any] = {}
+        for file_type, file_path in per_type.items():
+            file_path = Path(file_path)
+            digest = _file_sha256(file_path)
+            try:
+                rel = str(file_path.resolve().relative_to(base_dir))
+            except ValueError:
+                rel = str(file_path.resolve())
+            per_type_payload[file_type] = {
+                "path": rel,
+                "sha256": digest,
+                "size_bytes": file_path.stat().st_size,
+                "captured_at_utc": captured_at,
+            }
+        if per_type_payload:
+            scenarios_payload[scenario_key] = per_type_payload
+    payload = {
+        "version": MANIFEST_SCHEMA_VERSION,
+        "generated_at_utc": captured_at,
+        "git_sha": _git_sha(),
+        "label": label,
+        "environment": build_environment_summary(),
+        "scenarios": scenarios_payload,
+    }
+    manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return payload
+
+
+def capture_baseline_artifact(
+    baseline_dir: Path,
+    scenario_key: str,
+    artifact_path: Path,
+) -> Path:
+    """Copy a freshly generated artifact into the baseline folder."""
+    target_dir = baseline_dir / scenario_key
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / artifact_path.name
+    target.write_bytes(artifact_path.read_bytes())
+    return target
 
 
 def collect_analysis_log_excerpt(analysis_id: str, max_lines: int = 200) -> dict[str, Any]:
@@ -791,6 +1528,14 @@ def thresholds_summary(config: RunnerConfig) -> dict[str, Any]:
         "max_xlsx_row_delta_abs": config.max_xlsx_row_delta_abs,
         "min_docx_chars": config.min_docx_chars,
         "baseline_mode": config.baseline_mode,
+        "baseline_manifest_path": (
+            str(config.baseline_manifest_path) if config.baseline_manifest_path else None
+        ),
+        "init_baseline": config.init_baseline,
+        "init_baseline_dir": (
+            str(config.init_baseline_dir) if config.init_baseline_dir else None
+        ),
+        "init_baseline_label": config.init_baseline_label,
     }
 
 
@@ -818,6 +1563,15 @@ class LiveReportRunner:
         self.session = requests.Session()
         self.csrf_token: Optional[str] = None
         self.session_cookie_value: str = ""
+        # Round 52 (Phase 1): manifest mode loads pinned baselines once so every
+        # iteration in the loop sees the exact same expected files, and captured
+        # baselines accumulate when --init-baseline is set.
+        self.manifest: dict[str, dict[str, BaselineEntry]] = {}
+        if self.config.baseline_mode == "manifest":
+            if self.config.baseline_manifest_path is None:
+                raise ValueError("baseline_mode=manifest requires --baseline-manifest")
+            self.manifest = load_baseline_manifest(self.config.baseline_manifest_path)
+        self._init_captured: dict[str, dict[str, Path]] = {}
 
     def bootstrap_session(self) -> None:
         url = f"{self.config.base_url.rstrip('/')}/"
@@ -984,9 +1738,48 @@ class LiveReportRunner:
                     else validate_xlsx_structure(debug_path, expected_sheets=scenario.expected_xlsx_sheets)
                 )
 
-                baseline = None
+                baseline: Optional[Path] = None
+                baseline_source = "none"
+                baseline_sha: Optional[str] = None
+                baseline_manifest_key: Optional[str] = None
+                baseline_mtime_utc: Optional[str] = None
+                baseline_size_bytes: Optional[int] = None
+                baseline_integrity = GateResult(True, {"reason": "not_applicable"})
                 baseline_gate = GateResult(False, {"reason": "baseline_not_checked"})
-                if self.config.baseline_mode == "latest":
+                if self.config.baseline_mode == "off":
+                    baseline_gate = GateResult(True, {"reason": "baseline_disabled"})
+                elif self.config.baseline_mode == "manifest":
+                    failure_phase = f"baseline_manifest_{file_type}"
+                    entry = self.manifest.get(scenario.key, {}).get(file_type)
+                    if entry is None:
+                        baseline_gate = GateResult(
+                            False,
+                            {
+                                "reason": "manifest_missing_entry",
+                                "scenario": scenario.key,
+                                "file_type": file_type,
+                            },
+                        )
+                    else:
+                        baseline_integrity = verify_baseline_entry(entry)
+                        if not baseline_integrity.passed:
+                            baseline_gate = GateResult(
+                                False,
+                                {
+                                    "reason": "manifest_integrity_failed",
+                                    **baseline_integrity.details,
+                                },
+                            )
+                        else:
+                            baseline = entry.path
+                            baseline_source = "manifest"
+                            baseline_sha = entry.sha256
+                            baseline_manifest_key = f"{scenario.key}/{file_type}"
+                            baseline_size_bytes = entry.size_bytes
+                            baseline_mtime_utc = datetime.fromtimestamp(
+                                entry.path.stat().st_mtime, tz=UTC
+                            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                elif self.config.baseline_mode == "latest":
                     failure_phase = f"baseline_select_{file_type}"
                     baseline = select_latest_baseline(
                         self.config.downloads_dir,
@@ -998,25 +1791,47 @@ class LiveReportRunner:
                     if baseline is None:
                         baseline_gate = GateResult(False, {"reason": "baseline_not_found"})
                     else:
-                        failure_phase = f"baseline_compare_{file_type}"
-                        if file_type == "docx":
-                            baseline_gate = compare_docx_against_baseline(
-                                debug_path,
-                                baseline,
-                                self.config.min_docx_similarity,
-                                strict=self.config.strict,
-                                min_numeric_similarity=self.config.min_docx_numeric_similarity,
-                            )
-                        else:
-                            baseline_gate = compare_xlsx_against_baseline(
-                                debug_path,
-                                baseline,
-                                self.config.min_sheet_overlap,
-                                self.config.min_header_similarity,
-                                strict=self.config.strict,
-                                max_row_delta_ratio=self.config.max_xlsx_row_delta_ratio,
-                                max_row_delta_abs=self.config.max_xlsx_row_delta_abs,
-                            )
+                        baseline_source = "latest"
+                        baseline_sha = _file_sha256(baseline)
+                        baseline_size_bytes = baseline.stat().st_size
+                        baseline_mtime_utc = datetime.fromtimestamp(
+                            baseline.stat().st_mtime, tz=UTC
+                        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                if baseline is not None and baseline_gate.details.get("reason") in {
+                    "baseline_not_checked",
+                    None,
+                }:
+                    failure_phase = f"baseline_compare_{file_type}"
+                    if file_type == "docx":
+                        # Round 52 / ship: comprehensive's AI-narrative
+                        # section regenerates run-to-run, so a single
+                        # global text-similarity floor cannot fairly
+                        # cover both templated reports (compact / renewal
+                        # / leader at 0.91-0.99 textual_sim) and
+                        # narrative-generated reports.  Resolve per-
+                        # scenario thresholds; the numeric gate stays
+                        # config-driven across all four.
+                        min_text, min_numeric = effective_docx_thresholds(
+                            self.config, scenario.key
+                        )
+                        baseline_gate = compare_docx_against_baseline(
+                            debug_path,
+                            baseline,
+                            min_text,
+                            strict=self.config.strict,
+                            min_numeric_similarity=min_numeric,
+                        )
+                    else:
+                        baseline_gate = compare_xlsx_against_baseline(
+                            debug_path,
+                            baseline,
+                            self.config.min_sheet_overlap,
+                            self.config.min_header_similarity,
+                            strict=self.config.strict,
+                            max_row_delta_ratio=self.config.max_xlsx_row_delta_ratio,
+                            max_row_delta_abs=self.config.max_xlsx_row_delta_abs,
+                        )
 
                 artifact_record = ArtifactRecord(
                     file_type=file_type,
@@ -1028,6 +1843,12 @@ class LiveReportRunner:
                     baseline_path=str(baseline) if baseline else None,
                     structural=structural_gate,
                     baseline_diff=baseline_gate,
+                    baseline_source=baseline_source,
+                    baseline_sha256=baseline_sha,
+                    baseline_manifest_key=baseline_manifest_key,
+                    baseline_mtime_utc=baseline_mtime_utc,
+                    baseline_size_bytes=baseline_size_bytes,
+                    baseline_integrity=baseline_integrity,
                 )
                 artifacts.append(artifact_record)
 
@@ -1042,6 +1863,7 @@ class LiveReportRunner:
                     artifact_paths["xlsx"],
                     kpi_sidecar,
                     strict=self.config.strict,
+                    required_keys=SCENARIO_REQUIRED_KPIS.get(scenario.key, ()),
                 )
             else:
                 kpi_sidecar = None
@@ -1049,6 +1871,26 @@ class LiveReportRunner:
             all_passed = operational_gate.passed and all(
                 artifact.structural.passed and artifact.baseline_diff.passed for artifact in artifacts
             ) and (parity_gate.passed if self.config.strict else True)
+
+            if (
+                self.config.init_baseline
+                and self.config.init_baseline_dir is not None
+                and operational_gate.passed
+                and all(artifact.structural.passed for artifact in artifacts)
+            ):
+                # Round 52 (Phase 1): only structural+operational success
+                # qualifies a run for capture; baseline diff failures are
+                # expected here because there is no baseline yet.
+                captured_per_type: dict[str, Path] = {}
+                for artifact in artifacts:
+                    captured_path = capture_baseline_artifact(
+                        self.config.init_baseline_dir,
+                        scenario.key,
+                        Path(artifact.debug_path),
+                    )
+                    captured_per_type[artifact.file_type] = captured_path
+                if captured_per_type:
+                    self._init_captured[scenario.key] = captured_per_type
             return self._build_scenario_result(
                 scenario=scenario,
                 analysis_id=analysis_id,
@@ -1153,6 +1995,24 @@ def build_runner_config(args: argparse.Namespace) -> RunnerConfig:
         min_docx_similarity = max(min_docx_similarity, 0.55)
         min_sheet_overlap = max(min_sheet_overlap, 0.85)
         min_header_similarity = max(min_header_similarity, 0.8)
+
+    baseline_mode = args.baseline_mode
+    baseline_manifest_path: Optional[Path] = None
+    raw_manifest = (getattr(args, "baseline_manifest", None) or "").strip()
+    if raw_manifest:
+        baseline_manifest_path = Path(raw_manifest).expanduser().resolve()
+    if baseline_mode == "manifest" and baseline_manifest_path is None:
+        raise ValueError("--baseline-mode manifest requires --baseline-manifest <path>")
+
+    init_baseline = bool(getattr(args, "init_baseline", False))
+    init_baseline_dir: Optional[Path] = None
+    raw_init_dir = (getattr(args, "init_baseline_dir", "") or "").strip()
+    if init_baseline:
+        if not raw_init_dir:
+            raise ValueError("--init-baseline requires --init-baseline-dir <path>")
+        init_baseline_dir = Path(raw_init_dir).expanduser().resolve()
+    init_baseline_label = (getattr(args, "init_baseline_label", "") or "").strip() or None
+
     return RunnerConfig(
         base_url=args.base_url.rstrip("/"),
         downloads_dir=Path(args.downloads_dir).expanduser().resolve(),
@@ -1162,7 +2022,7 @@ def build_runner_config(args: argparse.Namespace) -> RunnerConfig:
         run_id=args.run_id or _default_run_id(),
         stop_on_failure=bool(args.stop_on_failure),
         scenario_keys=keys,
-        baseline_mode=args.baseline_mode,
+        baseline_mode=baseline_mode,
         min_docx_similarity=min_docx_similarity,
         min_sheet_overlap=min_sheet_overlap,
         min_header_similarity=min_header_similarity,
@@ -1171,6 +2031,10 @@ def build_runner_config(args: argparse.Namespace) -> RunnerConfig:
         min_docx_numeric_similarity=float(args.min_docx_numeric_similarity),
         max_xlsx_row_delta_ratio=float(args.max_xlsx_row_delta_ratio),
         max_xlsx_row_delta_abs=max(int(args.max_xlsx_row_delta_abs), 0),
+        baseline_manifest_path=baseline_manifest_path,
+        init_baseline=init_baseline,
+        init_baseline_dir=init_baseline_dir,
+        init_baseline_label=init_baseline_label,
     )
 
 
@@ -1226,6 +2090,16 @@ def run_iterations(config: RunnerConfig) -> dict[str, Any]:
         },
         "results": [asdict(result) for result in all_results],
     }
+    if config.init_baseline and config.init_baseline_dir is not None and runner._init_captured:
+        manifest_path = config.init_baseline_dir / "baseline_manifest.json"
+        write_baseline_manifest(
+            manifest_path,
+            runner._init_captured,
+            label=config.init_baseline_label,
+        )
+        summary["baseline_manifest_path"] = str(manifest_path)
+        print(f"[manifest] wrote {manifest_path}")
+
     summary_name = (
         f"AdoptIQ_ReportIterationSummary__data-loop-{_slug(config.run_id)}__ts-{_utc_now().strftime('%Y%m%dT%H%M%SZ')}.json"
     )
@@ -1251,7 +2125,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=int, default=1800, help="Max seconds per scenario")
     parser.add_argument("--run-id", default="", help="Optional run identifier for artifact names")
     parser.add_argument("--stop-on-failure", action="store_true", help="Stop immediately when any scenario fails")
-    parser.add_argument("--baseline-mode", choices=["latest"], default="latest", help="Baseline lookup strategy")
+    parser.add_argument(
+        "--baseline-mode",
+        choices=["off", "latest", "manifest"],
+        default="latest",
+        help="Baseline lookup strategy: 'off' disables diff, 'latest' picks newest matching file in Downloads, 'manifest' pins exact files via JSON",
+    )
+    parser.add_argument(
+        "--baseline-manifest",
+        default="",
+        help="Path to baseline manifest JSON (required when --baseline-mode=manifest)",
+    )
+    parser.add_argument(
+        "--init-baseline",
+        action="store_true",
+        help="Capture this run's artifacts as a new baseline manifest (use with --init-baseline-dir)",
+    )
+    parser.add_argument(
+        "--init-baseline-dir",
+        default="",
+        help="Directory under which to capture baseline artifacts and write baseline_manifest.json",
+    )
+    parser.add_argument(
+        "--init-baseline-label",
+        default="",
+        help="Optional label persisted in the captured baseline manifest",
+    )
     parser.add_argument("--strict", action="store_true", help="Enable stricter semantic diff and KPI parity gates")
     parser.add_argument(
         "--min-docx-similarity",

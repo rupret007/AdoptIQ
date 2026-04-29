@@ -378,6 +378,13 @@ from data_normalization import (
     detect_bems_mask,
     extract_bems_ids_from_row,
     extract_bems_ids_from_text,
+    # Round 52 / accuracy-fix-loop: dtype-safe ACCOUNT_ID_C merge
+    # wired into the 6 AB / CSConsole-AB merge sites below
+    # (compact / renewal / comprehensive, raw + CSConsole each).
+    # Replaces direct ``.merge`` calls that fired schema_drift
+    # warnings when one side typed ACCOUNT_ID_C as int64 and the
+    # other as object.
+    merge_customer_join_keys_dtype_safe,
     normalize_customer_name,
     normalize_severity_label,
     normalize_status_label,
@@ -7251,7 +7258,11 @@ def run_compact_analysis(analysis_id):
                 
                 if not ab_raw.empty and "ACCOUNT_ID_C" in ab_raw.columns:
                     logger.info(f"[[DEBUG]] Merging adoption barriers with team data...")
-                    ab_raw = ab_raw.merge(team_subs_df[["ACCOUNT_ID_C","BU_NAME","CSSM_EMAIL"]].drop_duplicates(), on="ACCOUNT_ID_C", how="left")
+                    ab_raw = merge_customer_join_keys_dtype_safe(
+                        ab_raw,
+                        team_subs_df,
+                        right_columns=("ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"),
+                    )
                     logger.info(f"[[DEBUG]] Merge completed, now applying scope filter...")
                     # Round 49 / F-DV-CONTRACT-DRIFT-R49: re-annotate
                     # post-merge so any prior schema_drift stamp on the
@@ -7388,10 +7399,10 @@ def run_compact_analysis(analysis_id):
                                 not csconsole_adoption_barriers.empty
                                 and "ACCOUNT_ID_C" in csconsole_adoption_barriers.columns
                             ):
-                                csconsole_adoption_barriers = csconsole_adoption_barriers.merge(
-                                    team_subs_df[["ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"]].drop_duplicates(),
-                                    on="ACCOUNT_ID_C",
-                                    how="left",
+                                csconsole_adoption_barriers = merge_customer_join_keys_dtype_safe(
+                                    csconsole_adoption_barriers,
+                                    team_subs_df,
+                                    right_columns=("ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"),
                                 )
                                 try:
                                     from data_contracts import annotate_with_contract as _r50_annotate_csab_compact
@@ -11813,7 +11824,11 @@ def run_customer_renewal_analysis(analysis_id):
         
         ab_raw = fetch_adoption_barriers(ctx, account_ids, days)
         if not ab_raw.empty and "ACCOUNT_ID_C" in ab_raw.columns:
-            ab_raw = ab_raw.merge(team_subs_df[["ACCOUNT_ID_C","BU_NAME","CSSM_EMAIL"]].drop_duplicates(), on="ACCOUNT_ID_C", how="left")
+            ab_raw = merge_customer_join_keys_dtype_safe(
+                ab_raw,
+                team_subs_df,
+                right_columns=("ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"),
+            )
             # Round 49 / F-DV-CONTRACT-DRIFT-R49: re-annotate the
             # adoption_barriers contract now that the team_subs merge
             # has materialized BU_NAME.  ``snowflake_prefetch.py``
@@ -11837,9 +11852,10 @@ def run_customer_renewal_analysis(analysis_id):
         # Merge CSConsole adoption barriers so portfolio gets complete data (fix "not getting all the data")
         try:
             if not csconsole_adoption_barriers.empty and "ACCOUNT_ID_C" in csconsole_adoption_barriers.columns:
-                csab_merged = csconsole_adoption_barriers.merge(
-                    team_subs_df[["ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"]].drop_duplicates(),
-                    on="ACCOUNT_ID_C", how="left"
+                csab_merged = merge_customer_join_keys_dtype_safe(
+                    csconsole_adoption_barriers,
+                    team_subs_df,
+                    right_columns=("ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"),
                 )
                 # Round 49 / F-DV-CONTRACT-DRIFT-R49: same post-merge
                 # re-annotate pattern as the Snowflake AB merge -- the
@@ -13468,7 +13484,11 @@ def run_comprehensive_analysis(analysis_id):
         except Exception as _ab_err:
             logger.debug("AB fetch_error scan skipped: %s", _ab_err)
         if not ab_raw_empty and "ACCOUNT_ID_C" in ab_raw.columns:
-            ab_raw = ab_raw.merge(team_subs_df[["ACCOUNT_ID_C","BU_NAME","CSSM_EMAIL"]].drop_duplicates(), on="ACCOUNT_ID_C", how="left")
+            ab_raw = merge_customer_join_keys_dtype_safe(
+                ab_raw,
+                team_subs_df,
+                right_columns=("ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"),
+            )
             # Round 49 / F-DV-CONTRACT-DRIFT-R49: re-annotate so any
             # schema_drift stamp from the raw fetch (when BU_NAME was
             # not yet materialized) clears once the team_subs merge
@@ -13532,10 +13552,10 @@ def run_comprehensive_analysis(analysis_id):
                     not csconsole_adoption_barriers.empty
                     and "ACCOUNT_ID_C" in csconsole_adoption_barriers.columns
                 ):
-                    csconsole_adoption_barriers = csconsole_adoption_barriers.merge(
-                        team_subs_df[["ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"]].drop_duplicates(),
-                        on="ACCOUNT_ID_C",
-                        how="left",
+                    csconsole_adoption_barriers = merge_customer_join_keys_dtype_safe(
+                        csconsole_adoption_barriers,
+                        team_subs_df,
+                        right_columns=("ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"),
                     )
                     try:
                         from data_contracts import annotate_with_contract as _r50_annotate_csab_comp
