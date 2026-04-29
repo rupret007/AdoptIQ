@@ -124,6 +124,13 @@ def test_round48_renewal_pulse_cust_label_uses_strip_markdown_chrome():
     ``_strip_markdown_chrome`` so that customer-pulse, success-
     priorities, action-plans, AB-narrative, and TAC-narrative all
     consistently strip __italic__ chrome.
+
+    Round 49 / F-RP-COMPOSITE-KEY-BLEED extended the wrap into a
+    composition: ``_strip_markdown_chrome(_normalize_composite_customer_key(cn))``
+    so the renderer also collapses raw Snowflake composite-key
+    strings (``X__Y__US`` -> ``X``).  Both forms preserve the
+    Round-48 invariant (markdown chrome is stripped); count
+    occurrences across either form.
     """
 
     src = _APP_SIMPLE_PATH.read_text(encoding="utf-8")
@@ -133,12 +140,21 @@ def test_round48_renewal_pulse_cust_label_uses_strip_markdown_chrome():
         "Renewal renderer still has un-stripped Customer: {cn} sites; "
         "F-RP-MD-LEAK fix incomplete"
     )
-    # New pattern must appear at least 5 times (one per render site).
-    new_pattern = "_strip_markdown_chrome(cn)"
-    occurrences = src.count(new_pattern)
+    # The wrap may be the bare R48 form ``_strip_markdown_chrome(cn)``
+    # OR the R49 composite-key chained form
+    # ``_strip_markdown_chrome(_normalize_composite_customer_key(cn))``.
+    # Count both -- the renderer must have at least 5 wrapped sites
+    # in total.
+    bare = src.count("_strip_markdown_chrome(cn)")
+    chained = src.count(
+        "_strip_markdown_chrome(_normalize_composite_customer_key(cn))"
+    )
+    occurrences = bare + chained
     assert occurrences >= 5, (
-        f"Expected >=5 _strip_markdown_chrome(cn) sites in renewal "
-        f"renderer; found {occurrences}"
+        f"Expected >=5 _strip_markdown_chrome(cn) (bare) or "
+        f"_strip_markdown_chrome(_normalize_composite_customer_key(cn)) "
+        f"(chained) sites in renewal renderer; found bare={bare} "
+        f"chained={chained}"
     )
 
 
@@ -146,10 +162,19 @@ def test_round48_subscription_title_strips_markdown():
     """The Subscription Analysis title heading must call
     ``_strip_markdown_chrome`` on the customer name so the title
     page does not display ``__ALIAS__`` italics.
+
+    Round 49 extended the wrap to the composite-key normalizer
+    chain; either bare or chained form is acceptable.
     """
 
     src = _APP_SIMPLE_PATH.read_text(encoding="utf-8")
-    assert (
-        "_strip_markdown_chrome(sub_data.get(\"customer_name\")"
+    bare = "_strip_markdown_chrome(sub_data.get(\"customer_name\")" in src
+    chained = (
+        "_strip_markdown_chrome(_normalize_composite_customer_key(sub_data.get(\"customer_name\")"
         in src
-    ), "Subscription Analysis title heading not wired through _strip_markdown_chrome"
+    )
+    assert bare or chained, (
+        "Subscription Analysis title heading not wired through "
+        "_strip_markdown_chrome (or the R49 composite-key chained "
+        "variant)"
+    )

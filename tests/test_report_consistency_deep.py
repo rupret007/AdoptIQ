@@ -79,7 +79,23 @@ def test_priority_metrics_use_normalized_exact_p1_p2():
     assert result["metrics"]["high_p2"] == 1
 
 
-def test_customer_universe_override_aligns_total_customer_metric():
+def test_customer_universe_does_not_override_narrow_total_customers():
+    """Round 49 / F-COMP-CONSIST-WIDTH-MISMATCH: ``customer_universe``
+    is telemetry-only.  The validator's headline ``total_customers``
+    parity gate ALWAYS uses the narrow ``count_customers(ab, csone,
+    pulse)`` shape so it cannot disagree with the Word headline /
+    Excel Summary row, which both derive from the same narrow shape.
+
+    Pre-R49 contract: passing ``customer_universe={Acme, Beta, Gamma}``
+    overrode ``metrics['total_customers']`` to 3, which in the
+    comprehensive report path silently widened the parity check to
+    52 while Word + Excel reported 38, blocking Build25 with a
+    false-positive mismatch.
+
+    Post-R49 contract: ``customer_universe`` is surfaced as the
+    diagnostic ``metrics['customer_universe_total']`` while the
+    parity headline stays narrow.
+    """
     csone = add_case_lifecycle_fields(
         pd.DataFrame(
             [
@@ -96,14 +112,21 @@ def test_customer_universe_override_aligns_total_customer_metric():
             "total_barriers": 1,
             "total_cases": 1,
             "bems_count": 0,
-            "total_customers": 3,
+            "total_customers": 1,
             "critical_p1": 0,
             "high_p2": 1,
         },
         customer_universe=provided_universe,
     )
-    assert result["is_valid"] is True
-    assert result["metrics"]["total_customers"] == 3
+    assert result["is_valid"] is True, result["errors"]
+    assert result["metrics"]["total_customers"] == 1, (
+        "R49 contract: total_customers parity headline is the narrow "
+        "count_customers(ab, csone, pulse) shape, not customer_universe."
+    )
+    assert result["metrics"]["customer_universe_total"] == 3, (
+        "R49 contract: customer_universe is surfaced as a diagnostic "
+        "metric so callers can still see the wider iteration roster."
+    )
     assert not any("total_customers" in err for err in result["errors"])
 
 

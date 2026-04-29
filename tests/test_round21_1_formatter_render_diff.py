@@ -222,10 +222,10 @@ def test_compact_total_customers_matches_ab_cs_universe(compact_doc):
 
 
 def test_compact_support_cases_matches_expected(compact_doc):
-    """Compact's "Support Cases" tile is canonical ``count_total_tac``."""
-    value = _find_kpi_in_tile_table(compact_doc, "Support Cases")
+    """Compact's scope-explicit support-cases tile is canonical ``count_total_tac``."""
+    value = _find_kpi_in_tile_table(compact_doc, "Support Cases (90d, portfolio-wide)")
     assert value == str(EXPECTED_KPIS["total_cases"]), (
-        f"Compact 'Support Cases' tile emitted {value!r}; "
+        f"Compact 'Support Cases (90d, portfolio-wide)' tile emitted {value!r}; "
         f"expected {EXPECTED_KPIS['total_cases']}."
     )
 
