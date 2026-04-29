@@ -7705,6 +7705,39 @@ def run_compact_analysis(analysis_id):
             _r30_intel_truncated = {}
             _r30_intel_fetch_limit = None
 
+        # Round 42 / Phase 7: snowflake_prefetch and friends write
+        # ``partial_data_warnings`` directly to ``analysis_status.json``
+        # via ``save_analysis_status()`` BEFORE the local
+        # ``partial_data_warnings`` list (initialized far earlier in
+        # this function) was reset, so the comprehensive Word output
+        # missed the upstream warnings entirely.  Concretely: the
+        # 2026-04-28 audited build-18 comprehensive run had three
+        # persisted warnings (``schema_drift:customer_pulse``,
+        # ``schema_drift:adoption_barriers``,
+        # ``Snowflake table blocked by policy: ESA_C360_CS_TASK__C``)
+        # but the Word artifact had ZERO ``Partial Data Warning``
+        # banners because ``executive_intelligence_formatter.py:1518``
+        # checks ``if partial_data_warnings:`` against the in-memory
+        # list, which never saw them.  Harvest the persisted entries
+        # and merge them in idempotently right before the context
+        # dict is built so the banner logic actually fires.
+        try:
+            with analysis_status_lock:
+                _persisted_pdw = (
+                    analysis_status.get(analysis_id, {}).get('partial_data_warnings')
+                    or []
+                )
+            for _pdw_entry in _persisted_pdw:
+                if _pdw_entry not in partial_data_warnings:
+                    partial_data_warnings.append(_pdw_entry)
+        except Exception as _pdw_merge_err:  # noqa: BLE001
+            logger.debug(
+                "Round 42 / Phase 7: failed to merge persisted "
+                "partial_data_warnings into local list (continuing with "
+                "in-memory only): %s",
+                _pdw_merge_err,
+            )
+
         _r23_ctx = {  # Round 23 / R22-NEXT-001
             'team_subs_df_unfiltered': team_subs_df_unfiltered,
             'csconsole_action_plans': csconsole_action_plans,
@@ -12858,11 +12891,24 @@ def run_comprehensive_analysis(analysis_id):
 
         break_fix_count = cm.count_break_fix(_cs_norm)
         provisioning_count = cm.count_provisioning(_cs_norm)
+        # Round 43 / Phase 1: canonicalize the three keys that were
+        # hand-rolled (``len(_ab)``, ``len(_cs)``, ``canonical_bems_count``).
+        # Round 42 / Phase 1 hardened ``report_consistency.py`` to compare
+        # ``portfolio_metrics["total_barriers"]`` against
+        # ``canonical_metrics.count_total_barriers(ab_df)`` (distinct ID count),
+        # so the historical ``len(_ab)`` rowcount (which fans out per-assignee)
+        # produced ``Portfolio metric mismatch: total_barriers ...`` on every
+        # comprehensive run with a multi-assignee barrier (build-19 demo
+        # screenshot ``Brian_Frazier_All_Contact_Center_90d_1777428611``).  Use
+        # the SAME canonical helpers the validator uses, threading the SAME
+        # frames the validator will see (``_ab`` and ``_cs_norm``), so the two
+        # sides agree by construction.  Every other key in this dict is left
+        # byte-identical so comprehensive-specific behaviour is untouched.
         portfolio_metrics = {
             'total_customers': len(all_customers_comprehensive),
-            'total_barriers': len(_ab) if not _ab.empty else 0,
-            'total_cases': len(_cs) if not _cs.empty else 0,
-            'bems_count': canonical_bems_count,
+            'total_barriers': cm.count_total_barriers(_ab),
+            'total_cases': cm.count_total_tac(_cs_norm),
+            'bems_count': cm.count_bems(_cs_norm),
             'high_risk_customers': high_risk_customers,
             'medium_risk_customers': medium_risk_customers,
             'low_risk_customers': low_risk_customers,
@@ -20118,19 +20164,59 @@ def run_leader_report_generation(analysis_id):
                 _team_subs_unfiltered_for_pm = _scope_locals.get('team_subs_df_unfiltered')
                 if not isinstance(_team_subs_unfiltered_for_pm, pd.DataFrame):
                     _team_subs_unfiltered_for_pm = pd.DataFrame()
+                # Round 42 / Phase 3: dropped the invalid
+                # ``customer_subs=`` and ``customer_pulse_df=`` kwargs.
+                # ``canonical_metrics.build_portfolio_metrics`` (signature
+                # at ``canonical_metrics.py:1435-1444``) accepts neither;
+                # passing them ALWAYS raised ``TypeError: ... unexpected
+                # keyword argument 'customer_subs'``.  The except block
+                # below silently swallowed it as ``logger.debug`` and set
+                # ``_leader_portfolio_metrics = None``.  Result: the
+                # validator's ``if portfolio_metrics:`` block at
+                # ``report_consistency.py:280`` never fired on the leader
+                # path, so leader runs silently bypassed every PM parity
+                # check that compact / EI / renewal enforce.  The
+                # ``team_subs_df_unfiltered`` customer universe is still
+                # threaded into ``_leader_extra_frames`` upstream when
+                # needed, and the customer-pulse universe is wired into
+                # the validator separately via ``pulse_df=`` at
+                # ``report_consistency.py:71``.
+                # Round 43 / Phase 4: drop ``extra_customer_frames=`` and
+                # ``account_to_customer=`` from this call so the leader
+                # headline narrows to ``count_customers(ab_df=, csone_df=,
+                # pulse_df=)`` -- matching the Round 25 / Phase A contract that
+                # the Word headline must mirror the Excel Summary row.  Pre-fix
+                # the leader path passed both extras, which inflated
+                # ``_leader_portfolio_metrics["total_customers"]`` to 40
+                # (wider universe with team subs) while the validator at
+                # ``report_consistency.py:318`` computed 46 (narrow AB ∪
+                # CSOne ∪ Pulse) and raised
+                # ``[[CONSISTENCY]] Leader consistency check skipped:
+                # Portfolio metric mismatch: total_customers=40 (Word headline)
+                # != 46 (canonical AB ∪ CSOne ∪ Pulse universe).`` on the
+                # build-19 demo leader run (
+                # ``Leader_Brian_Frazier_90d_1777428669``).  The validator
+                # call below STILL receives ``extra_frames=_leader_extra_frames``
+                # / ``account_to_customer=_leader_a2c`` for per-section
+                # defect/customer linkage, so wider counts remain available
+                # downstream -- only the headline tile narrows.  This restores
+                # the Round 42 / Phase 3 PM parity check that was being
+                # silently skipped via the ``except`` warning at L20242.
                 _leader_portfolio_metrics = cm.build_portfolio_metrics(
-                    customer_subs=_team_subs_unfiltered_for_pm,
                     ab_df=agg_ab,
                     csone_df=agg_tac,
-                    customer_pulse_df=agg_pulse if not agg_pulse.empty else None,
                     risk_scale=cm.RISK_SCALE_0_TO_10,
-                    extra_customer_frames=_leader_extra_frames or None,
-                    account_to_customer=_leader_a2c or None,
                 )
             except Exception as _lpm_err:
-                logger.debug(
-                    "Leader portfolio_metrics build failed; falling back to validator's "
-                    "internal derivation: %s",
+                # Round 42 / Phase 3: promoted from logger.debug to
+                # logger.warning so future signature drift surfaces in
+                # ops logs rather than silently re-introducing the
+                # always-skip behaviour the Phase 3 fix just removed.
+                logger.warning(
+                    "Round 42: leader portfolio_metrics build failed; "
+                    "falling back to validator's internal derivation "
+                    "(this should not happen post-Phase-3 -- "
+                    "investigate signature drift): %s",
                     _lpm_err,
                 )
                 _leader_portfolio_metrics = None

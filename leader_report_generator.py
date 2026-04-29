@@ -192,6 +192,105 @@ def _sanitize_snowflake_error(raw: Any) -> str:
     return cleaned
 
 
+def _strip_markdown_chrome(text: Any) -> str:
+    """Round 42 / Phase 6: strip Markdown control characters from
+    user-supplied free-text fields before they reach python-docx.
+
+    CSOne titles and comments occasionally contain leftover Markdown
+    chrome (``**bold**``, ``__italic__``, runs of ``*``/``_``).  When
+    those strings flow through ``add_run(...)`` python-docx renders
+    the asterisks / underscores as literal characters rather than
+    applying formatting -- so the 2026-04-28 audited build-18 leader
+    artifact contained:
+
+        ``**Classic Calabrio***delete old report - Calabrio WFO# 00179474``
+
+    rendered with the asterisks intact.  This helper strips runs of
+    ``*`` and ``_`` that were clearly intended as Markdown emphasis
+    markers (two or more in a row, or a single trailing emphasis
+    marker hugging the end of a word).  It deliberately preserves
+    single ``_`` characters embedded inside identifiers (e.g.
+    ``snake_case``) and single ``*`` characters appearing in punctuation
+    contexts (so legitimate non-Markdown asterisks in subject text
+    survive).
+
+    Returns ``""`` for ``None`` / empty input so the caller's existing
+    ``... or 'No subject'`` fallback chains continue to fire.
+    """
+
+    import re as _re_local
+
+    if text is None:
+        return ""
+    try:
+        s = str(text)
+    except Exception:
+        return ""
+    if not s.strip():
+        return ""
+
+    # Strip runs of two or more ``*`` (any anchor) -- the Markdown bold
+    # / strong indicator.  This catches ``**X**`` -> ``X`` and the
+    # malformed ``**X***`` -> ``X``.
+    s = _re_local.sub(r"\*{2,}", "", s)
+    # Strip runs of two or more ``_`` only when adjacent to a word
+    # boundary and NOT inside a Salesforce-style ``__C`` identifier
+    # (which is legitimate column-name punctuation in the few places
+    # callers DO want to preserve it -- e.g. defect IDs that legitimately
+    # carry the suffix).  In customer-facing free text the runs of
+    # underscores are almost always Markdown italics, but we narrow the
+    # match so we don't accidentally collapse internal identifiers.
+    s = _re_local.sub(r"(?<!\w)_{2,}(?=\w)|(?<=\w)_{2,}(?!\w)", "", s)
+    # Collapse repeated whitespace introduced by stripping.
+    s = _re_local.sub(r"\s{2,}", " ", s).strip()
+    return s
+
+
+# Round 44 / Phase 4: friendly-label map for raw Snowflake table
+# identifiers so director-facing source-attribution paragraphs in the
+# leader report show business labels instead of ``DATABASE.SCHEMA.TABLE``.
+# Round 42 / Phase 5 friendlied the *Comprehensive Data Source Summary*
+# table headers but missed the per-CSSM Engagement Insights paragraphs
+# emitted from ``_add_enhanced_insights_summary`` (the
+# ``add_paragraph(f"  Source: {source['table']} ...")`` and
+# ``add_paragraph(f"    - {source['table']}: ... records")`` sites).
+# The 2026-04-28 audited Build-20 leader artifact rendered the raw
+# ``EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C`` 34 times -- once
+# per CSSM engagement bullet.  Anchor the map here as a small SSoT
+# so the ops team can extend it as new feeds come online.
+_FRIENDLY_SOURCE_TABLE_LABELS: Dict[str, str] = {
+    "EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C":
+        "CSConsole Customer Pulse",
+    "EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW":
+        "CSConsole Adoption Barriers / Action Plans",
+    "EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C":
+        "CSConsole Adoption Barriers / Action Plans",
+    "EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C":
+        "CSConsole Success Priorities",
+    "EDW_SALES_ETL_DB.SS.COLLAB_ACCOUNT_SUMMARY":
+        "Account Summary feed",
+    "EDW_SALES_ETL_DB.SS.COLLAB_ARR_CON_SKU":
+        "Contract & SKU feed",
+}
+
+
+def _friendly_source_label(table_id: Any) -> str:
+    """Map a raw Snowflake ``DATABASE.SCHEMA.TABLE`` to a director-friendly
+    business label.  Returns the input unchanged when no mapping exists
+    so a future feed name still surfaces (visibly raw) rather than
+    silently being dropped."""
+
+    if table_id is None:
+        return ""
+    try:
+        key = str(table_id).strip()
+    except Exception:
+        return ""
+    if not key:
+        return ""
+    return _FRIENDLY_SOURCE_TABLE_LABELS.get(key, key)
+
+
 class LeaderReportGenerator:
     """Generates comprehensive leader reports showing team member activities"""
     
@@ -4212,6 +4311,12 @@ class LeaderReportGenerator:
                         or cp.get('NAME')
                         or 'Customer Pulse'
                     )
+                    # Round 42 / Phase 6: strip Markdown chrome from
+                    # Customer Pulse subject text (third and final body-
+                    # bullet site that consumes user-supplied free text
+                    # from the CSOne extract).  ``or 'Customer Pulse'``
+                    # falls back when stripping leaves an empty string.
+                    subject = _strip_markdown_chrome(subject) or 'Customer Pulse'
                     score = cp.get('SCORE__C') if 'SCORE__C' in cp.index else cp.get('SCORE')
                     status = cp.get('STATUS_C') or cp.get('STATUS') or 'Active'
                     detail = f'(Score: {score})' if score not in (None, '', float('nan')) and pd.notna(score) else f'(Status: {status})'
@@ -6822,16 +6927,26 @@ class LeaderReportGenerator:
                 cell.paragraphs[0].runs[0].font.bold = True
                 cell.paragraphs[0].runs[0].font.color.rgb = CISCO_BLUE
         
-        # Add data rows
+        # Round 42 / Phase 5: replaced raw Snowflake table identifiers
+        # (e.g. ``ACCOUNT_ID_C in COLLAB_ACCOUNT_SUMMARY``,
+        # ``ESA_C360_CS_TASK__C``) with friendly business labels.  The
+        # leader Word audience is director-level CSSM leads, not data
+        # engineers; raw column names like ``ACCOUNT_ID_C`` and fully
+        # qualified table identifiers like
+        # ``EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C`` were leaking 33+
+        # times per CSSM (11 CSSMs = 363+ leaks per leader run on the
+        # 2026-04-28 audited build-18 artifact).  The Snowflake schema
+        # specifics are still documented in QUALITY_AUDIT.md and
+        # ``leader_report_generator._fetch_*`` helpers for ops users.
         insights_data = [
-            ('Account & Customer Data', '15 tables', 'Account status, expiration, tier ranking', 'Search by ACCOUNT_ID_C in COLLAB_ACCOUNT_SUMMARY'),
-            ('Contract Lifecycle Data', '12 tables', 'Renewal status, contract terms, expiration windows', 'Search by CONTRACT_NUMBER in COLLAB_ARR_CON_SKU'),
-            ('Booking & Transaction Data', '8 tables', 'Recent bookings, upsell opportunities', 'Search by SUBSCRIPTION_REFERENCE_ID in BOOKINGS_TABLE'),
-            ('Engagement & Activity Data', '25 tables', 'Action plans, barriers, customer pulse', 'Search by ID in ESA_C360_CS_TASK__C'),
-            ('User & Usage Data', '10 tables', 'User activity, login patterns, adoption', 'Search by USER_ID in USER_DATA'),
-            ('Support & TAC Data', '8 tables', 'Support cases, TAC interactions', 'Search by CASE_ID in SUPPORT_CASES'),
-            ('Risk & Renewal Data', '6 tables', 'Risk scores, renewal probability', 'Search by ACCOUNT_ID in RISK_ASSESSMENT'),
-            ('Product & Technology Data', '5 tables', 'Product usage, technology adoption', 'Search by PRODUCT_ID in PRODUCT_USAGE')
+            ('Account & Customer Data', '15 tables', 'Account status, expiration, tier ranking', 'Look up by Account ID in the Account Summary feed'),
+            ('Contract Lifecycle Data', '12 tables', 'Renewal status, contract terms, expiration windows', 'Look up by Contract Number in the Contract & SKU feed'),
+            ('Booking & Transaction Data', '8 tables', 'Recent bookings, upsell opportunities', 'Look up by Subscription Reference ID in the Bookings feed'),
+            ('Engagement & Activity Data', '25 tables', 'Action plans, barriers, customer pulse', 'Look up by Activity ID in the CSOne Tasks feed'),
+            ('User & Usage Data', '10 tables', 'User activity, login patterns, adoption', 'Look up by User ID in the User Activity feed'),
+            ('Support & TAC Data', '8 tables', 'Support cases, TAC interactions', 'Look up by Case ID in the Support Cases feed'),
+            ('Risk & Renewal Data', '6 tables', 'Risk scores, renewal probability', 'Look up by Account ID in the Risk Assessment feed'),
+            ('Product & Technology Data', '5 tables', 'Product usage, technology adoption', 'Look up by Product ID in the Product Usage feed'),
         ]
         
         for category, tables, insights, verification in insights_data:
@@ -6979,34 +7094,42 @@ class LeaderReportGenerator:
         
         # Add comprehensive data source summary
         self.doc.add_heading('Comprehensive Data Source Summary', level=3)
-        
-        self.doc.add_paragraph("This enhanced analysis leverages the following Snowflake data sources:")
-        
-        # Create data sources table
+
+        # Round 42 / Phase 5: friendlied the section copy + table headers
+        # so director-level readers see business-meaningful labels
+        # instead of raw Snowflake schema (e.g.
+        # ``EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C`` was rendered 11
+        # times -- once per CSSM -- in the 2026-04-28 audited build-18
+        # leader artifact, alongside column lists like
+        # ``ID, SUBJECT_C, STATUS_C, ACCOUNT_ID_C``).  Ops users can
+        # still find the underlying schema in QUALITY_AUDIT.md and the
+        # ``leader_report_generator._fetch_*`` helpers.
+        self.doc.add_paragraph("This enhanced analysis aggregates the following customer-data feeds:")
+
         sources_table = self.doc.add_table(rows=1, cols=3)
         sources_table.style = 'Table Grid'
         sources_table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        
-        # Header row
+
         header_cells = sources_table.rows[0].cells
-        header_cells[0].text = 'Database.Schema.Table'
+        header_cells[0].text = 'Data Feed'
         header_cells[1].text = 'Purpose'
         header_cells[2].text = 'Key Fields'
-        
-        # Style header
+
         for cell in header_cells:
             if cell.paragraphs and cell.paragraphs[0].runs:
                 cell.paragraphs[0].runs[0].font.bold = True
                 cell.paragraphs[0].runs[0].font.color.rgb = CISCO_BLUE
-        
-        # Add key data sources
+
+        # Round 42 / Phase 5: friendly business labels instead of raw
+        # ``DATABASE.SCHEMA.TABLE`` identifiers and ``_C``-suffixed
+        # column names.
         key_sources = [
-            ('CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY', 'Account information and risk categories', 'ACCOUNT_ID_C, BU_ACCOUNT_NAME, RENEWAL_RISK_CATEGORY'),
-            ('CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU', 'Contract lifecycle data', 'CONTRACT_NUMBER, SERVICE_END_DATE, CONTRACT_STATUS'),
-            ('CX_DB.CX_SWSSBST_BR.BOOKINGS_TABLE_FOR_ACCOUNT_CHECK', 'Booking and transaction data', 'SUBSCRIPTION_REFERENCE_ID, DATE_BOOKED, END_CUSTOMER_NAME'),
-            ('EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C', 'Action plans and adoption barriers', 'ID, SUBJECT_C, STATUS_C, ACCOUNT_ID_C'),
-            ('EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C', 'Customer pulse and sentiment', 'ID, SUBJECT_C, STATUS_C, ACCOUNT__C'),
-            ('EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C', 'Success priorities and goals', 'ID, SUBJECT_C, PRIORITY_C, RELATED_CUSTOMER__C')
+            ('Account Summary feed', 'Account information and risk categories', 'Account ID, Account Name, Renewal Risk Category'),
+            ('Contract & SKU feed', 'Contract lifecycle data', 'Contract Number, Service End Date, Contract Status'),
+            ('Bookings feed', 'Booking and transaction data', 'Subscription Reference ID, Date Booked, End Customer Name'),
+            ('CSOne Tasks feed', 'Action plans and adoption barriers', 'Activity ID, Subject, Status, Account ID'),
+            ('Customer Pulse feed', 'Customer pulse and sentiment', 'Pulse ID, Subject, Status, Account'),
+            ('Success Priority feed', 'Success priorities and goals', 'Priority ID, Subject, Priority Level, Related Customer'),
         ]
         
         for db_table, purpose, fields in key_sources:

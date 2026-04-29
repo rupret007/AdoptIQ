@@ -78,7 +78,27 @@ def validate_report_consistency(
     warnings = []
     metrics: Dict[str, Any] = {}
 
-    ab_count = _safe_count(ab_df)
+    # Round 42 / Phase 1: hoist the canonical_metrics import (was lazy at
+    # the body site below) so it is available for the ``ab_count``
+    # derivation directly below.  Round 3 originally introduced the lazy
+    # import to avoid a module-level cycle; the same lazy-inside-the-
+    # function pattern still holds, just earlier in the body.
+    import canonical_metrics as _cm  # local import to avoid cycle
+
+    # Round 42 / Phase 1: total_barriers must use
+    # ``canonical_metrics.count_total_barriers`` so the validator agrees
+    # with ``build_portfolio_metrics``.  Round 25 / Phase F.1 changed the
+    # canonical helper to dedupe by ``ID`` (Snowflake AB extract fans
+    # out per-assignee), but the validator was still using
+    # ``_safe_count`` (raw rowcount).  Result: every report path that
+    # built ``portfolio_metrics`` via ``build_portfolio_metrics``
+    # (compact / EI / leader / renewal) raised
+    # ``Portfolio metric mismatch: total_barriers ...`` whenever any
+    # barrier had multiple assignees.  Same class as R22-001 for
+    # ``total_customers``; this fix is the equivalent for
+    # ``total_barriers``.  ``total_cases`` and ``bems_count`` already
+    # agree with their canonical helpers so no change there.
+    ab_count = _cm.count_total_barriers(ab_df)
     cs_count = _safe_count(csone_df)
     bems_count = int(detect_bems_mask(csone_df).sum()) if cs_count else 0
 
@@ -96,7 +116,9 @@ def validate_report_consistency(
     # validator scanned only ("customer_name","BU_NAME","Customer Name")
     # and added ad-hoc "" / "UNKNOWN" buckets to unknown-priority,
     # producing spurious mismatches against the canonical helpers.
-    import canonical_metrics as _cm  # local import to avoid cycle
+    # Round 42 / Phase 1: ``_cm`` is already imported above; the duplicate
+    # import that used to live here was removed so the module-level cycle
+    # avoidance still holds via the single hoisted import.
 
     # Round 25 / Phase A: ``metrics["total_customers"]`` now derives
     # from the SAME narrow displayed-sheets universe used by the
