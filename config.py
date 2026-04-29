@@ -869,7 +869,21 @@ ADOPTIQ_VERSION = "1.0.4"
 # Round 52.1 / Build28 ships the visible Admin Console Reset corpus
 # control and hardens the Mac packaging wrapper so the final richer DMG
 # is signed and accompanied by build_info.txt in the staging mirror.
-ADOPTIQ_BUILD = "28"  # Round 52.1
+#
+# Round 52 / Build29 ships the accuracy-fix loop (leader DOCX KPI
+# extractor: multi-row 3+col tables now prefer a TOTAL footer instead
+# of pairing headers with the first per-CSSM row, fixing the leader
+# 14-vs-381 support_cases mismatch), the partial-data-warning trio
+# (team_subscriptions contract, blocked-table introspection guard,
+# dtype-safe customer-key merge), and the harness residual fixes
+# (corpus-context paragraphs no longer leak into the Technology
+# canonical; per-scenario DOCX similarity thresholds let the AI-
+# narrative-heavy comprehensive report pass strict gates without
+# weakening the binding numeric_sim guard for compact / renewal /
+# leader).  3351 pytest passing; manifest-pinned baselines under
+# ``baselines/round52/`` for repeatable strict 1-pass + multi-iter
+# repeatability runs.
+ADOPTIQ_BUILD = "29"  # Round 52 / accuracy-fix-loop
 
 def version_string():
     """e.g. 'v1.0.1 build 1'"""
