@@ -121,7 +121,412 @@ ADOPTIQ_VERSION = "1.0.4"
 # Seven new ``tests/test_round39_*`` files (88 new asserts) pin
 # each fix.  No boot order, corpus self-heal, or Round 38.x
 # changes ship in this build.
-ADOPTIQ_BUILD = "16"
+#
+# Round 40 / Build17 ships the per-customer TAC drilldown fix
+# triggered by the Brian Frazier 90d audit (1777421123).  Build16's
+# Phase B fix correctly attributed TAC cases to CSSMs at the
+# team-summary level via SUBSCRIPTION_ID, but the per-customer
+# drilldown (rendered by ``_add_customer_summary_with_sources``)
+# kept using an exact-normalized customer-name compare against the
+# CSOne ``Customer Name: Customer Name`` column.  Verified
+# production data shows the team roster (Snowflake ``BU_NAME``)
+# and CSOne consistently disagree on suffixes -- e.g.
+# ``FARMERS INSURANCE GROUP US`` (roster) vs
+# ``FARMERS INSURANCE GROUP`` (TAC),
+# ``WINTRUST FINANCIAL CORPORATION US`` vs ``WINTRUST FINANCIAL``,
+# ``NATIONAL GRID PLC US`` vs ``NATIONAL GRID``,
+# ``NYU MEDICAL CENTERS`` vs ``NYU MEDICAL CENTER``.  The compare
+# returned 0 rows for ~75% of customers (46 of 61 per-customer
+# tables in the audited docx) so the per-customer "TAC Cases" cell
+# collapsed to 0 even when the CSSM-level total was correct.
+# Build17 promotes the per-customer drilldown to the same
+# three-tier authoritative join Phase B uses at the team level:
+# (1) SUBSCRIPTION_ID lookup against the customer's subscriptions,
+# (2) ACCOUNT_ID_C fallback, (3) exact normalized customer name
+# (preserved so customers with matching names like
+# ``ZURICH NORTH AMERICA`` still resolve when the subscription
+# roster lacks coverage).  CSOne ``.0`` float-id suffixes are
+# stripped before SUBSCRIPTION_ID compare (mirrors Phase B
+# line ~1688).  ``tests/test_round40_per_customer_tac_subscription_join.py``
+# (6 asserts) pins the FARMERS suffix-drift case, sibling-sub
+# leak prevention, ACCOUNT_ID_C fallback, name-fallback, the
+# ``.0`` float strip, and the source-level Round 40 marker.
+# Also corrects the Phase B handoff in ``QUALITY_AUDIT.md``: the
+# original "team total drops 434 -> ~383" claim was a misread; the
+# prior fuzzy matcher mis-attributed individual cases but did NOT
+# duplicate them (sum-of-CSSM = 434 = unique TAC rows both pre-
+# and post-fix).  Phase B's effect is redistribution, not de-dup
+# (Angelica 63 -> 13, Samuel 132 -> 55, Jeffrey 57 -> 124).
+# No boot-order, corpus, validator, or admin-console changes
+# ship in Build17.
+#
+# Round 41 / Build18 ships four leader-report rendering accuracy
+# fixes triggered by the Brian Frazier 90d audit (1777423525).
+# The audit confirmed Round 39 / Phase B + Round 40 / Build17
+# fixes were live and working (per-customer TAC drilldown
+# populated, no raw SQL errors in body, Sheets_Written = 11),
+# but surfaced four NEW accuracy bugs that survived prior rounds:
+#   * ``Tier: None`` rendered for every account block (50/50
+#     occurrences).  Root cause: ``first_acct.get(key, 'N/A')``
+#     only substitutes the default when the key is absent --
+#     a present-but-NULL value (Snowflake NULL projected via
+#     Phase B's ``_resolve_columns``) renders as the literal
+#     string ``"None"``.  Build18 routes Tier and Renewal Risk
+#     through a ``pd.notna`` + ``or 'N/A'`` chain.
+#   * ``<Customer> - None (Status: ...)`` for AP/AB body
+#     bullets (344 occurrences).  Same antipattern in the
+#     High-Severity Barriers and All Action Plans rendering
+#     paths; SUBJECT_C / SEVERITY_C / STATUS_C now use the
+#     same NULL-safe form.  Customer Pulse rendering already
+#     used the correct ``or``-chain pattern (no change).
+#   * ``"requires immediate attention"`` boilerplate fired for
+#     all 9 of 9 CSSMs, including Angelica's 0.3 AB/customer,
+#     1.2 TAC/customer portfolio.  Round 39's tightened
+#     threshold ``(AB >= 10 AND rate > 1.0) OR (TAC >= 10 AND
+#     rate > 0.5)`` was still too permissive.  Build18
+#     tightens to ``(AB >= 15 AND rate >= 3.0) OR (TAC >= 30
+#     AND rate >= 5.0)`` AND inserts a NEW intermediate
+#     ``"elevated activity"`` tier between generally-healthy
+#     and immediate-attention so mid-volume CSSMs (Angelica,
+#     Samuel, Arpit on the audited dataset) get an honest
+#     "warrant close monitoring" framing.
+#   * ``__`` separators leak in body bullets (4 occurrences of
+#     ``TRIBUNAL...__GOBIERNO...__MX``).  Round 39 / Phase 4.4
+#     wired ``normalize_for_display`` into the customer-summary
+#     heading but missed the AB / AP / CP body bullets and the
+#     per-customer Snowflake-insights heading.  Build18 closes
+#     the gap.
+# ``tests/test_round41_leader_render_null_safe.py`` (6 asserts)
+# pins the four fixes; ``tests/test_round39_narrative_grounded.py
+# ::test_high_volume_only_when_absolute_floor_and_rate`` was
+# updated to use the new threshold (12 AB / 5 customers ->
+# 18 AB / 5 customers; rate 3.6 trips the new floor cleanly).
+# No SSoT module changes, no upstream Snowflake query changes,
+# no boot-order / corpus / validator / admin-console changes
+# ship in Build18.  Compact / executive formatters likely have
+# the same NULL-leak antipattern -- tracked as a follow-up
+# round.
+#
+# Round 42 / Build19 ships the compact-validator crash fix plus
+# six demo-polish items triggered by the user-reported
+# ``Portfolio metric mismatch: total_barriers does not match
+# normalized adoption barriers.`` ValueError on a build-18
+# Compact run for "All Managers / All Contact Center / 90d"
+# (2026-04-28).  Phase 1 root cause: ``report_consistency.py``
+# computed ``ab_count = _safe_count(ab_df)`` (raw rowcount, 71)
+# while ``canonical_metrics.build_portfolio_metrics`` set
+# ``portfolio_metrics["total_barriers"]`` via
+# ``count_total_barriers(ab_df)`` (Round 25 / Phase F.1
+# distinct-ID dedupe, 67) -- mismatch on every dataset where
+# barriers fan out per-assignee, which is essentially every
+# real run.  Six additional demo-polish items audited from the
+# four reports the user attached:
+#   * Phase 3: ``app_simple.run_leader_report_generation``
+#     called ``cm.build_portfolio_metrics`` with two kwargs
+#     (``customer_subs=``, ``customer_pulse_df=``) that don't
+#     exist on the canonical signature -- ALWAYS raised
+#     ``TypeError`` swallowed at ``logger.debug``, leaving
+#     ``_leader_portfolio_metrics = None`` and silently
+#     bypassing every PM parity gate compact / EI / renewal
+#     enforce.  The ``except`` is also promoted to
+#     ``logger.warning`` so future signature drift surfaces.
+#   * Phase 5: 77 raw ``ESA_C360_*`` Snowflake table identifiers
+#     and 33 raw ``ACCOUNT_ID_C`` / 11 raw
+#     ``RENEWAL_RISK_CATEGORY`` column names in the leader
+#     Word "Source Verification" tables (rendered per-CSSM,
+#     so 11 CSSMs ~= 363+ leaks per run) replaced with friendly
+#     business labels (CSOne Tasks feed, Customer Pulse feed,
+#     Support Cases feed, etc.).
+#   * Phase 6: tiny ``_strip_markdown_chrome(text)`` helper
+#     applied to the AP / AB / CP body-bullet ``add_run`` sites
+#     so leftover Markdown emphasis (``**Classic Calabrio***``)
+#     in CSOne titles renders as plain prose, not literal
+#     asterisks.  Preserves ``snake_case`` identifiers and
+#     legitimate single asterisks in punctuation.
+#   * Phase 7: comprehensive Word missed the ``Partial Data
+#     Warning`` banner (3 persisted entries on the audited
+#     run, ZERO banners) because ``snowflake_prefetch`` writes
+#     warnings directly to ``analysis_status.json`` BEFORE the
+#     local ``partial_data_warnings`` list is initialized.
+#     The ``_r23_ctx`` build now harvests the persisted entries
+#     and merges them in idempotently right before
+#     ``executive_intelligence_formatter`` evaluates the
+#     ``if partial_data_warnings:`` banner branch.
+# Phase 2 + Phase 4 add four new regression tests (validator
+# parity on the 71/67 reference shape; signature parity on the
+# leader path).  No SSoT module changes, no upstream Snowflake
+# query changes, no boot-order / corpus / admin-console changes
+# ship in Build19.  Compact / executive formatters' NULL-leak
+# antipattern from Build18 follow-up still tracked as deferred.
+#
+# Round 43 / Build20 ships the demo-stability bundle triggered by
+# the user-reported failures on three of four report types in the
+# Build19 demo dry-run (2026-04-28):
+#   * Comprehensive: STILL crashed with the SAME
+#     ``Portfolio metric mismatch: total_barriers does not match
+#     normalized adoption barriers.`` error -- Round 42 / Phase 1
+#     hardened the validator's ``ab_count`` to use
+#     ``count_total_barriers`` (distinct ID, 68) but the
+#     COMPREHENSIVE path at ``app_simple.py:12894-12897``
+#     hand-rolled ``portfolio_metrics`` with ``len(_ab)`` (raw
+#     rowcount, 72), so the post-Round-42-Phase-1 validator
+#     blocked every comprehensive run on a multi-assignee dataset.
+#     Phase 1 swaps the three offending values
+#     (``total_barriers``, ``total_cases``, ``bems_count``) to
+#     canonical helpers operating on the SAME frames the validator
+#     sees so the two sides agree by construction.
+#   * Compact: crashed at "Excel Report Generation" (90%) with
+#     ``Worksheet autofilter range 'A2:F53' overlaps previous
+#     Table autofilter range 'A2:F54'`` -- ``apply_excel_polish``
+#     adds a Table whose declared range carries an implicit
+#     autofilter, then the legacy ``worksheet.autofilter(...)``
+#     call at L9156 declares a SECOND autofilter (off by one
+#     because ``len(df_clean)`` excludes the header row).
+#     Phase 2 captures the polish return dict and skips the legacy
+#     call when ``table_added`` is True.
+#   * Customer Renewal: crashed at "Renewal Risk Analysis" (74%)
+#     with ``Portfolio metric mismatch: total_customers=188 (Word
+#     headline) != 70 (canonical AB ∪ CSOne ∪ Pulse universe).``
+#     The renewal call at L11719 was passing
+#     ``extra_customer_frames=_ren_extra_frames`` and
+#     ``account_to_customer=_ren_account_to_customer`` to
+#     ``cm.build_portfolio_metrics``, widening the headline to
+#     188 (subscriptions universe) while the validator's Round 25
+#     / Phase A enforcement keeps total_customers narrow at 70.
+#     Phase 3 drops both kwargs from the headline call site (the
+#     validator below still receives them for per-section linkage).
+#     Phase 4 applies the same fix to the leader path (which
+#     emitted an analogous warning at L4129 of the demo log).
+#   * Debug gap: every error in ``analysis_status.json`` carried
+#     only the message "Analysis failed.  Please check the Admin
+#     page for details." with NO traceback, NO exception class --
+#     the actual stack lived in ``~/.adoptiq/adoptiq.<pid>.log``
+#     and required a deep log archaeology to triage.  Phase 5
+#     auto-attaches ``traceback.format_exc()`` (truncated to 8 KB)
+#     under the ``error_traceback`` key whenever
+#     ``update_analysis_status`` is called inside an active
+#     ``except`` block with ``status='error'``.  Phase 6 emits a
+#     structured ``[CONSISTENCY] PM drift key=<key> portfolio=<v>
+#     canonical=<v>`` log line BEFORE every PM-mismatch
+#     ``errors.append`` so the next failure is one
+#     ``grep '[CONSISTENCY] PM drift'`` away from the failing key
+#     plus both sides of the comparison.
+# Phase 8 adds a meta-test that fails CI if any future PM
+# literal-dict assignment in ``app_simple.py`` reverts to a raw
+# ``len(...)`` source for the canonical-helper-sourced keys, or if
+# any ``cm.build_portfolio_metrics`` call outside the compact
+# allow-list passes ``extra_customer_frames=``.  Six new regression
+# tests pin the four crash fixes plus the two debugging additions
+# (~2961 total tests, +6 over Build19).  No SSoT module changes,
+# no upstream Snowflake query changes, no boot-order / corpus /
+# admin-console changes ship in Build20.  Compact / executive
+# formatters' NULL-leak antipattern follow-up still tracked.
+#
+# Round 44 / Build21 ships the demo-accuracy bundle triggered by the
+# user's Build-20 walkthrough of four reports + the admin console
+# (2026-04-28).  The walkthrough confirmed Round 43's four crash
+# fixes are live (all four reports completed successfully) but
+# surfaced one P0 numeric/rendering accuracy bug, four P1 director-
+# facing chrome leaks Round 42 missed, and one P2 admin-console
+# tile defect.  Concretely:
+#   * Phase 1: Compact "Days Open" column rendered literal "nan" in
+#     100% of the 20 sampled lifecycle rows -- even rows whose
+#     ``open_date`` and ``closed_date`` were both populated and
+#     parseable.  Root cause:
+#     ``executive_intelligence_formatter.py:913`` did
+#     ``str(row.get('open_age_days', 'N/A'))`` and
+#     ``str(float('nan')) == 'nan'``.  Phase 1 introduces a
+#     ``_format_open_age_days(row)`` helper that backfills from
+#     open/closed dates and never emits the literal string ``"nan"``
+#     (returns the em-dash ``"\u2014"`` when nothing parses).
+#   * Phase 4: Round 42 / Phase 5 friendlied the *Comprehensive
+#     Data Source Summary* table headers but missed two leader Word
+#     paragraph sites at ``leader_report_generator.py:7008/7018/7041``
+#     (``add_paragraph(f"  Source: {source['table']} ...")``).  The
+#     audited Build-20 leader artifact rendered the raw
+#     ``EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C`` 34 times --
+#     once per CSSM engagement bullet.  Phase 4 introduces a
+#     ``_friendly_source_label(table_id)`` map and applies it at
+#     all three sites.
+#   * Phase 5: Renewal Word source-citation italics at
+#     ``app_simple.py:9981`` and ``:10417`` rendered raw
+#     ``[Field(s): SEVERITY_C, AB_STATUS_C, ...]`` and
+#     ``[Field(s): PULSE_RATING__C, COMMENTS__C, ...]``.  Phase 5
+#     swaps to ``Severity, Status, Created/Closed dates`` and
+#     ``Pulse Rating, Comments, Created/Closed dates``.
+#   * Phase 6: Compact + EI source-citation paragraphs had the
+#     same ``_C``-suffixed leak (``BU_NAME, customer_name,
+#     ACCOUNT_ID_C`` for Total Customers; ``Severity,
+#     PULSE_RATING__C, CREATEDDATE`` for severity provenance).
+#     Phase 6 swaps to ``Customer Name, Account ID`` and ``Pulse
+#     Rating, Created Date``.
+#   * Phase 7: Round 42 / Phase 6 wired ``_strip_markdown_chrome``
+#     at the AB / AP / CP body-bullet sites only; the audited
+#     Build-20 leader artifact still rendered ``**Classic
+#     Calabrio***delete old report - Calabrio WFO# 00179474`` in
+#     two leader Word table cells (T73R20C2 + T75R36C2) and one
+#     renewal Word paragraph (per-customer TAC bullet).  Phase 7
+#     extends the strip to those three sites; the renewal site
+#     re-imports the helper from ``leader_report_generator`` under
+#     the local alias ``_r44_strip_markdown_chrome`` to keep the
+#     strip semantics identical across reports.
+#   * Phase 8: Admin Console "Currently Running Reports" tile
+#     rendered a red "n/a -- main app unreachable" banner even
+#     when the main app was up.  Root cause:
+#     ``enhanced_admin_dashboard_v2.py:125`` captures
+#     ``MAIN_APP_URL = os.environ.get('ADOPTIQ_MAIN_URL',
+#     'http://localhost:5151')`` at IMPORT time, but
+#     ``app_simple.py:157-161`` eagerly imports the admin module
+#     BEFORE ``app_simple.py:210`` writes
+#     ``os.environ['ADOPTIQ_MAIN_URL']`` -- so the constant
+#     captures the unset default and the two
+#     ``requests.get(f'{MAIN_APP_URL.rstrip("/")}...')`` sites at
+#     L2988/L3002 fetch the wrong port.  Round 37 / Phase 1 fixed
+#     the socket-probe path (``_main_app_host_port`` re-reads the
+#     env per call); Phase 8 introduces the analogous
+#     ``_live_main_url()`` helper and routes both HTTP fetches
+#     through it.
+# Phases 2 + 3 of the original plan (leader Word/Excel headline
+# off-by-1; comprehensive vs compact AB drift) were CANCELLED as
+# false positives -- the Build-20 audit miscounted Excel data
+# rows by treating ``max_row - 1`` as the data row count when the
+# leader sheets have BOTH a title row AND a header row (2 chrome
+# rows).  Re-validation against the actual Build-20 artifacts
+# confirmed Word headlines (AB=68, TAC=344, CP=87) match Excel
+# data-row counts exactly, and comprehensive ``AB_Detail_All``
+# (no title row, 73 raw rows = 1 header + 72 data) and compact
+# ``All_Adoption_Barriers`` (1 title + 1 header + 72 data) BOTH
+# contain 72 data rows for the same scope.
+# 30 new regression tests under ``tests/test_round44_*.py`` pin
+# the six implemented fixes (~2991 total tests, +30 over Build20).
+# No SSoT module changes, no upstream Snowflake query changes, no
+# boot-order / corpus / validator changes ship in Build21.
+#
+# Round 45 / Build22 ships the "demo accuracy bundle 2" triggered
+# by the user's Build-21 walkthrough on 2026-04-28.  Build-21 was
+# never installed on the user's machine when the walkthrough hit:
+# the live process was Build-20 from ``~/.Trash/AdoptIQ.app``, so
+# the chrome leaks audited that night were a 50/50 mix of
+# already-fixed (Round 44) and never-fixed (Round 45 below)
+# defects.  Phase 0 of Round 45 closed the meta-issue by killing
+# the Trash process and installing the Build-21 DMG before
+# scoping new code, then a code-level audit (no second user run)
+# confirmed which Build-20 leaks Round 44 actually covered vs
+# which still required new code.  Concretely:
+#   * Phase 3 (P0): Compact CSOne autodiscovery gap.  The compact
+#     path in ``start_compact_analysis`` was the ONLY report
+#     entrypoint that did not autodiscover the latest CSOne file
+#     from the configured OneDrive folder when the user did not
+#     attach one (the comprehensive path at L2480 and the leader
+#     path via Round 38 both did).  The compact worker also
+#     treated CSOne as strictly-required against an empty
+#     placeholder DataFrame, so even when autodiscovery later
+#     succeeded, the validator still aborted at "csone missing or
+#     empty".  Phase 3 mirrors the Round 38 leader fix: the
+#     endpoint splits ``csone_file_explicit`` (uploaded) vs
+#     ``csone_file_autopicked`` (autodiscovered) provenance and
+#     persists ``csone_file_was_uploaded`` on the status dict;
+#     the worker uses a two-pass validator that hard-fails only
+#     when the user explicitly uploaded a CSOne file that scoped
+#     to empty, and otherwise appends a partial-data warning and
+#     proceeds.
+#   * Phase 4 (P0): Validation failures rendered the generic
+#     "Data validation failed - see logs for details" banner with
+#     no indication WHICH source failed or WHAT to do.  Phase 4
+#     adds ``_r45_render_validation_remediation_message`` which
+#     names the missing source, the autodiscovery path that was
+#     attempted (or "not configured"), and a one-line remediation
+#     hint.  Surfaced in ``analysis_status['message']`` for the
+#     UI banner; ``analysis_status['error']`` keeps the Round 27
+#     H1 generic sanitized string so JSON consumers do not break.
+#   * Phase 5 (P1): Excel headers leaked raw Snowflake schema
+#     names (``BU_NAME``, ``ACCOUNT_ID_C``, ``SEVERITY_C``,
+#     ``OPEN_DATE_C``, ``CLOSED_DATE_C``, ``COMMENTS__C``,
+#     ``PULSE_RATING__C``, ...) across all three reports.  Phase 5
+#     introduces ``_FRIENDLY_HEADER_LABELS`` in
+#     ``report_export_schema.py`` and applies the rename as the
+#     LAST step of ``apply_export_schema`` so curated allowlists
+#     and internal sort/filter logic still key on the raw column
+#     names, but every visible workbook header text is friendlied.
+#   * Phase 6 (P1): The comprehensive narrative LLM prompt at
+#     ``adoptiq_backend.py:10682`` instructed the model to write
+#     "None detected" while the same prompt at L10657 instructed
+#     "data unavailable" -- the LLM picked both, producing 8 mixed
+#     leaks per report.  Phase 6 unifies the prompt to "data
+#     unavailable" and adds ``_r45_clean_llm_chrome`` as a
+#     belt-and-suspenders post-process that converts any residual
+#     "None detected" / "(SP-ID: None detected)" in the generated
+#     narrative.
+#   * Phase 7 (P1, conditional): Confirmed Round 44 / Phase 4 caught
+#     all three leader EDW emit sites (L7065/7077/7104).  The only
+#     remaining ``EDW_*`` reference is a Salesforce Lightning URL
+#     API name at L5152, not visible text.  No new code shipped
+#     in Phase 7; existing Round 44 regression tests still pin.
+#   * Phases 8 + 9 (P2): Excel body cells in the renewal
+#     ``Customer_Action_Plans`` / ``Customer_Adoption_Barriers``
+#     and leader ``Action_Plans`` sheets bled raw markdown
+#     ``**bold**`` chrome from CSOne meeting-notes / case-summary
+#     fields (4 cells across the audited workbooks) and literal
+#     "None" / "nan" / "<NA>" body cells (8 cells).  Phases 8 + 9
+#     extend the SSoT in ``report_export_schema.py`` with
+#     ``_r45_clean_excel_body_cell`` (strips ``**``/``__`` chrome
+#     and coerces None/NaN/literal-None to empty string) and
+#     ``_r45_clean_body_columns`` (applies it across the friendly
+#     body-text columns Comments, Description, Subject, ...) as
+#     the final pass in ``apply_export_schema``.
+# 47 new regression tests under ``tests/test_round45_*.py`` pin
+# all five code-level Phase changes (3057 passed total, +66 over
+# Build21).  Plus a ``__all__`` extension test in
+# ``test_round15_excel_columns.py`` to recognise the new public
+# helper ``friendly_header``.  ``make verify`` clean (lint,
+# bandit HIGH/MED, pip-audit, 3057 pytest pass, 2 skipped).  No
+# upstream Snowflake query changes, no boot-order / corpus /
+# admin-console changes, no Round 38 leader-report or Round 38.2
+# customer-health changes ship in Build22.
+#
+# Build23 (Round 46 — Report Accuracy Deep Reconciliation):
+# Closes the Round 45 Hot Spot #5 deferral.  The compact-report
+# fallback path ``app_simple._create_enhanced_compact_report``
+# silently dropped ``partial_data_warnings`` because the function
+# signature did not accept them and there was no banner-render
+# code -- confirmed against the user's
+# ``Brian_Frazier_All_Contact_Center_90d_1777438120`` run where
+# ``analysis_status.json`` recorded 3 warnings (column-introspection
+# block on EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C, and two
+# schema-drift entries on customer_pulse and adoption_barriers)
+# but the produced docx had zero "Partial Data Warning" text.
+# Round 46 / F-COMP-DQ-BANNER threads ``partial_data_warnings``
+# through the fallback signature and renders a
+# ``⚠ Partial Data Warning`` heading + one bullet per warning
+# (dataset / kind / human-readable error tail) before any number
+# is shown -- mirroring the banner emitted by the primary path
+# in ``compact_report_formatter.create_compact_executive_report``
+# and ``executive_intelligence_formatter``.  Both call sites of
+# the fallback in ``app_simple.py`` were updated to pass the
+# ``partial_data_warnings`` from the runtime context.
+#
+# Phase 2 of Round 46 also performed a deep reconciliation audit
+# of every numeric claim in the user's three Build22 reports
+# (renewal portfolio All_Managers, leader Brian_Frazier, compact
+# Brian_Frazier) against the matching xlsx data dumps.  Result:
+# zero P0 / zero false customer-level claims found -- the AI
+# grounding gates from Round 27 (R27-AI-GATE-CUSTOMER) are
+# correctly substituting placeholders for ungrounded narrative,
+# top-10 lists match xlsx universe, headline counts (total
+# customers / active barriers / support cases) match the
+# underlying frames.  Only finding above informational was the
+# F-COMP-DQ-BANNER P1 above.
+#
+# 3 new regression tests in
+# ``tests/test_round46_compact_fallback_renders_partial_data_banner.py``
+# pin: (a) the fallback signature accepts the new kw-arg with
+# ``None`` default, (b) the banner renders with one bullet per
+# warning when the kw-arg is non-empty, (c) no banner appears on
+# the happy path so existing reports stay clean.  ``make verify``
+# clean (3060 pytest pass / 2 skipped, +3 over Build22).  No
+# upstream Snowflake query changes, no boot-order / corpus /
+# admin-console changes ship in Build23.
+ADOPTIQ_BUILD = "23"
 
 def version_string():
     """e.g. 'v1.0.1 build 1'"""

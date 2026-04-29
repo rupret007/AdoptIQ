@@ -640,11 +640,23 @@ def filter_columns(
 
 
 def apply_export_schema(df, sheet_name: str | None = None):
-    """Apply renames, denylist, and curation to ``df``.
+    """Apply renames, denylist, curation, and friendly-label polish to ``df``.
 
     Returns a new DataFrame with the customer-facing column projection.
     Falls back to a best-effort no-op when ``df`` doesn't expose the
     pandas DataFrame interface (e.g. tests passing plain lists/dicts).
+
+    Order of operations:
+
+    1. Per-sheet ``SHEET_HEADER_RENAMES`` -- e.g. CSOne SOQL relationship
+       label collapse.
+    2. ``filter_columns`` -- denylist / prefix-list filter, plus
+       per-sheet curated allowlist when defined.
+    3. Round 45 / Phase 5: ``_FRIENDLY_HEADER_LABELS`` post-projection
+       rename so visible headers drop ``_C`` / ``__C`` / ``BU_NAME`` /
+       ``customer_name`` raw Snowflake names.  Applied LAST so the
+       curated allowlists (which use raw names matching the upstream
+       DataFrames) keep working unchanged.
     """
     try:
         import pandas as pd
@@ -716,4 +728,5 @@ __all__ = [
     "is_internal_column",
     "filter_columns",
     "apply_export_schema",
+    "friendly_header",
 ]
