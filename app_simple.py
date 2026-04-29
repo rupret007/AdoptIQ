@@ -5498,8 +5498,45 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         csconsole_success_priorities=csconsole_success_priorities if csconsole_success_priorities is not None else pd.DataFrame(),
         csconsole_adoption_barriers=csconsole_adoption_barriers if csconsole_adoption_barriers is not None else pd.DataFrame()
     )
+    # Round 47 / R47-COMP-CUSTCOUNT-PARITY (F-COMP-CUSTCOUNT-DELTA-14):
+    # ``all_customers_set`` is the *wide* universe (AB ∪ CSOne ∪ team
+    # subs ∪ every CSConsole frame).  The Excel ``Summary`` sheet uses
+    # the *narrow* canonical helper ``cm.count_customers(ab, csone,
+    # pulse)`` (see ``app_simple.py`` ~8682 and
+    # ``report_export_styling.build_summary_rows`` ~794-799).  Build23
+    # caught the resulting Word/Excel split for Brian Frazier as
+    # 52 (Word headline / dashboard tile) vs 38 (Excel
+    # ``Customers in portfolio``) -- a 14-customer delta that breaks
+    # the demo's 100% parity bar.  We compute a separate narrow value
+    # here and route it into the operator-facing Word artifact (the
+    # title-page tile and the Executive Summary overview line) while
+    # keeping ``total_customers`` as the wide universe for downstream
+    # iteration / per-customer enrichment so we don't accidentally
+    # truncate the customer list the storyboards walk.
+    try:
+        total_customers_canonical_narrow = cm.count_customers(
+            ab_df=ab_norm if ab_norm is not None else pd.DataFrame(),
+            csone_df=csone_df if csone_df is not None else pd.DataFrame(),
+            pulse_df=csconsole_customer_pulse if csconsole_customer_pulse is not None else pd.DataFrame(),
+        )
+    except Exception as _r47_cust_narrow_err:  # noqa: BLE001
+        # If the canonical helper trips, fall back to the wide value
+        # rather than render an empty count -- partial parity still
+        # beats a missing tile.
+        logger.debug(
+            "[CUSTOMER_COUNT] R47-COMP-CUSTCOUNT-PARITY narrow count failed: %s; "
+            "falling back to wide universe for the Word headline.",
+            _r47_cust_narrow_err,
+        )
+        total_customers_canonical_narrow = len(all_customers_set)
     total_customers = len(all_customers_set)
     logger.info(f"[[CUSTOMER_COUNT]] Total unique customers from all data sources: {total_customers}")
+    logger.info(
+        "[[CUSTOMER_COUNT]] R47-COMP-CUSTCOUNT-PARITY: narrow (Excel Summary) = %d; "
+        "wide (downstream universe) = %d",
+        total_customers_canonical_narrow,
+        total_customers,
+    )
     logger.info(f"[[CUSTOMER_COUNT]] Team subscriptions (PRIMARY): {len(team_subs_df['BU_NAME'].unique()) if not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns else 0} customers")
     
     # Extract software defects (BST/CSC IDs) and PSIRT vulnerabilities (do this even if CSOne is empty)
@@ -5566,7 +5603,10 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         
         # Values row - expanded to include software defects and vulnerabilities
-        values = [str(total_customers), str(total_cases), str(p1_count), str(p2_count), str(bems_count), str(defect_count), str(vuln_count)]
+        # Round 47 / R47-COMP-CUSTCOUNT-PARITY: this Word dashboard tile uses
+        # the canonical-narrow customer count so it matches the Excel
+        # ``Summary`` sheet's ``Customers in portfolio`` cell exactly.
+        values = [str(total_customers_canonical_narrow), str(total_cases), str(p1_count), str(p2_count), str(bems_count), str(defect_count), str(vuln_count)]
         colors = [
             None, 
             None, 
@@ -5716,7 +5756,10 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         # No need to recalculate - ensures consistency with dashboard
         total_cases = len(csone_df) if not csone_df.empty else 0
         
-        overview_para.add_run(f'• Total Customers: {total_customers}\n')
+        # Round 47 / R47-COMP-CUSTCOUNT-PARITY: render the canonical-
+        # narrow count in the Word Executive Summary so the Word
+        # headline equals Excel Summary's ``Customers in portfolio``.
+        overview_para.add_run(f'• Total Customers: {total_customers_canonical_narrow}\n')
         overview_para.add_run(f'• Total Support Cases: {total_cases}\n')
 
         # Round 3: derive P1/P2 directly from canonical helpers without
@@ -9719,6 +9762,67 @@ def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame
     incident_count = len(ext_incidents) if ext_incidents else 0
     high_impact_incidents = profile["components"]["incidents"]["details"].get("high_impact_count", 0)
 
+    # Round 47 / R47-RP-RISK-PARITY (F-RP-RISK-DUAL-TRUTH): expose the
+    # per-component scores produced by the deterministic weighted model
+    # so the renewal Excel ``Risk_Components`` sheet can render real
+    # numbers instead of the ``Data_Unavailable`` envelope it had been
+    # emitting for every run.  The Word body already cited the headline
+    # weighted score (e.g. 14.8/100 HEALTHY) plus the static methodology
+    # weights (Adoption Barriers 28%, Support Cases 27%, ...), so Word
+    # was implicitly claiming a multi-component analysis while Excel
+    # said the components were never produced -- a Word/Excel dual-truth
+    # the user flagged as a 100% parity blocker.
+    #
+    # Mapping rule: passthrough each ``profile['components']`` entry as
+    # ``{score, details, trend}``.  Score is the component's raw 0-100
+    # contribution (already clamped); details collapses the helper's
+    # nested details dict to a one-line operator-readable string; trend
+    # defaults to ``"current period"`` because the simple analyzer does
+    # not produce trend deltas (the deeper ``RenewalAnalyzer`` does and
+    # may overwrite this when wired in a later round).
+    _r47_components: Dict[str, Dict[str, Any]] = {}
+    try:
+        _profile_components = profile.get('components') or {}
+        # ``activity_volume`` is the alias for ``engagement`` per
+        # risk_scoring.py L862-863; emit only one of the two so the
+        # Excel sheet doesn't double-row the same signal.
+        _emitted_keys = (
+            'adoption_barriers', 'support_cases', 'customer_pulse',
+            'action_plans', 'incidents', 'contract', 'engagement',
+        )
+        for _comp_name in _emitted_keys:
+            _comp = _profile_components.get(_comp_name)
+            if not isinstance(_comp, dict):
+                continue
+            _comp_score = _comp.get('score')
+            if _comp_score is None:
+                # Component was inapplicable (e.g. no subscription data
+                # for ``contract``); skip rather than emit a zero that
+                # would misleadingly imply a healthy contract signal.
+                continue
+            _comp_details_dict = _comp.get('details') or {}
+            try:
+                _details_str = ', '.join(
+                    f"{k}={v}" for k, v in _comp_details_dict.items()
+                    if not isinstance(v, (list, dict))
+                )[:480]
+            except Exception:
+                _details_str = ''
+            _r47_components[_comp_name] = {
+                'score': round(float(_comp_score), 1),
+                'details': _details_str or 'see risk_scoring.compute_customer_risk_profile',
+                'trend': 'current period',
+            }
+    except Exception as _r47_components_err:  # noqa: BLE001
+        # Never break the renewal pipeline because of an Excel-only
+        # field: log at DEBUG and emit empty so the existing
+        # Data_Unavailable fallback re-engages cleanly.
+        logger.debug(
+            "[RENEWAL] R47-RP-RISK-PARITY: failed to project profile components -> risk_components: %s",
+            _r47_components_err,
+        )
+        _r47_components = {}
+
     return {
         'customer_name': customer_name,
         'renewal_risk_score': profile['risk_score_0_100'],
@@ -9728,6 +9832,8 @@ def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame
         'key_findings': profile['key_findings'],
         'risk_factors': profile['risk_factors'],
         'recommendations': profile['recommendations'],
+        # Round 47 / R47-RP-RISK-PARITY: see comment block above.
+        'risk_components': _r47_components,
         'adoption_barriers_count': len(customer_ab) if customer_ab is not None else 0,
         'support_cases_count': len(customer_csone) if customer_csone is not None else 0,
         'bems_escalations_count': profile['components']['support_cases']['details'].get('bems_count', 0),
@@ -10666,7 +10772,43 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                 p.add_run(cust_label).bold = True
             p.add_run(f'{subject} [Status: {status}, Opened: {_na(opened_dt)}, Closed: {_na(closed_dt)}]')
     
-    if customer_customer_pulse is not None and not customer_customer_pulse.empty:
+    # Round 47 / R47-RP-PULSE-PARITY (F-RP-PULSE-DUAL-TRUTH): when the
+    # pulse frame upstream is marked ``fetch_error`` (typically a
+    # ``schema_drift`` because the slot ``rating`` did not resolve to a
+    # source column), the Excel writer replaces ``Customer_Customer_Pulse``
+    # with a one-row Data Unavailable envelope (see ``app_simple.py``
+    # ~12464-12492).  Without this gate, the Word side happily cites
+    # ``Total Customer Pulse Records: 186`` and lists 10 rows -- creating
+    # a Word/Excel dual-truth that previously broke 100% parity for the
+    # demo.  Now we honor the same envelope semantics on the Word side
+    # so an operator reading both artifacts sees the same story.
+    _r47_pulse_fetch_error = None
+    _r47_pulse_fetch_kind = None
+    try:
+        _r47_pulse_attrs = getattr(customer_customer_pulse, 'attrs', None) or {}
+        _r47_pulse_fetch_error = _r47_pulse_attrs.get('fetch_error')
+        _r47_pulse_fetch_kind = _r47_pulse_attrs.get('fetch_error_kind')
+    except Exception:
+        _r47_pulse_fetch_error = None
+    if customer_customer_pulse is not None and _r47_pulse_fetch_error:
+        # Word/Excel parity: do NOT cite a count or render rows when the
+        # underlying data is contractually unavailable.  Match the Excel
+        # envelope wording so an auditor sees the same message in both.
+        doc.add_heading('CSConsole Customer Pulse', level=1)
+        _r47_pulse_para = doc.add_paragraph()
+        _r47_pulse_para.add_run(
+            'Customer Pulse data unavailable for this report. '
+        ).bold = True
+        _r47_pulse_para.add_run(
+            'Reason: '
+            + str(_r47_pulse_fetch_kind or 'fetch_error')
+            + '. Detail: '
+            + str(_r47_pulse_fetch_error)[:300]
+            + ' See Customer_Customer_Pulse sheet in the Excel data export '
+            'for the same envelope; row counts and pulse rating breakdowns '
+            'have been withheld so the Word and Excel artifacts remain in lockstep.'
+        )
+    elif customer_customer_pulse is not None and not customer_customer_pulse.empty:
         doc.add_heading('CSConsole Customer Pulse', level=1)
         cp_para = doc.add_paragraph()
         cp_para.add_run(f'Total Customer Pulse Records: {len(customer_customer_pulse)}\n').bold = True
@@ -12243,6 +12385,57 @@ def run_customer_renewal_analysis(analysis_id):
                         'Details': component_data.get('details', 'N/A'),
                         'Trend': component_data.get('trend', 'N/A')
                     })
+        # Round 47 / R47-RP-RISK-PARITY (F-RP-RISK-DUAL-TRUTH): when the
+        # top-level renewal_analysis is the portfolio container (no
+        # ``risk_components`` of its own) but the per-customer
+        # ``customer_analyses[*]['risk_components']`` dicts ARE
+        # populated (Round 47 plumbed those through
+        # ``_calculate_simple_renewal_risk``), aggregate them into a
+        # portfolio-wide weighted-mean view so the Excel
+        # ``Risk_Components`` sheet matches the multi-component story
+        # the Word document already tells.
+        if not risk_components_data and renewal_type == 'renewal_portfolio':
+            try:
+                _r47_per_comp_scores: Dict[str, list] = {}
+                _r47_per_comp_details: Dict[str, str] = {}
+                _r47_customer_analyses = renewal_analysis.get('customer_analyses', {}) or {}
+                for _ca in _r47_customer_analyses.values():
+                    if not isinstance(_ca, dict):
+                        continue
+                    _ca_components = _ca.get('risk_components')
+                    if not isinstance(_ca_components, dict):
+                        continue
+                    for _ck, _cv in _ca_components.items():
+                        if not isinstance(_cv, dict):
+                            continue
+                        _score = _cv.get('score')
+                        if _score is None:
+                            continue
+                        _r47_per_comp_scores.setdefault(_ck, []).append(float(_score))
+                        if _ck not in _r47_per_comp_details:
+                            # Capture an example details string from the
+                            # first contributing customer so an operator
+                            # can drill down via the simple analyzer.
+                            _r47_per_comp_details[_ck] = str(_cv.get('details', ''))[:480]
+                if _r47_per_comp_scores:
+                    for _ck, _scores in _r47_per_comp_scores.items():
+                        _avg = round(sum(_scores) / len(_scores), 1) if _scores else 0.0
+                        risk_components_data.append({
+                            'Risk_Component': _ck.replace('_', ' ').title(),
+                            'Score': _avg,
+                            'Details': (
+                                'Portfolio mean across '
+                                + str(len(_scores))
+                                + ' customers; example detail: '
+                                + (_r47_per_comp_details.get(_ck) or 'n/a')
+                            ),
+                            'Trend': 'current period',
+                        })
+            except Exception as _r47_agg_err:  # noqa: BLE001
+                logger.debug(
+                    "[RENEWAL] R47-RP-RISK-PARITY: portfolio component aggregation failed: %s",
+                    _r47_agg_err,
+                )
         # Round 4 / Phase 1.6: when ``risk_components`` is missing from
         # the renewal analyzer output, do NOT fabricate
         # ``Score=5 / Trend=Stable`` rows.  The previous code synthesized
@@ -13267,6 +13460,30 @@ def run_comprehensive_analysis(analysis_id):
 
         break_fix_count = cm.count_break_fix(_cs_norm)
         provisioning_count = cm.count_provisioning(_cs_norm)
+        # Round 47 / R47-COMP-CUSTCOUNT-PARITY (F-COMP-CUSTCOUNT-DELTA-14):
+        # compute the canonical-narrow customer count BEFORE the dict
+        # so the Word headline (which reads
+        # ``portfolio_metrics['total_customers']``) matches the Excel
+        # ``Summary`` sheet's ``Customers in portfolio`` cell, which uses
+        # ``cm.count_customers(ab, csone, pulse)``.  Build23 caught a
+        # 52 (Word) vs 38 (Excel) split for Brian Frazier; the wide
+        # universe is preserved as ``total_customers_with_extras`` for
+        # downstream iteration that legitimately needs it.  Computed
+        # outside the dict so the Round 43 / Phase 1 contract markers
+        # below remain adjacent to their canonical helper assignments.
+        try:
+            _r47_comp_total_narrow = cm.count_customers(
+                ab_df=_ab,
+                csone_df=_cs_norm,
+                pulse_df=csconsole_customer_pulse if csconsole_customer_pulse is not None else pd.DataFrame(),
+            )
+        except Exception as _r47_cust_narrow_err:  # noqa: BLE001
+            logger.debug(
+                "[[CUSTOMER_COUNT]] R47-COMP-CUSTCOUNT-PARITY (comprehensive) "
+                "narrow count failed: %s; falling back to wide universe.",
+                _r47_cust_narrow_err,
+            )
+            _r47_comp_total_narrow = len(all_customers_comprehensive)
         # Round 43 / Phase 1: canonicalize the three keys that were
         # hand-rolled (``len(_ab)``, ``len(_cs)``, ``canonical_bems_count``).
         # Round 42 / Phase 1 hardened ``report_consistency.py`` to compare
@@ -13281,7 +13498,8 @@ def run_comprehensive_analysis(analysis_id):
         # sides agree by construction.  Every other key in this dict is left
         # byte-identical so comprehensive-specific behaviour is untouched.
         portfolio_metrics = {
-            'total_customers': len(all_customers_comprehensive),
+            'total_customers': _r47_comp_total_narrow,
+            'total_customers_with_extras': len(all_customers_comprehensive),
             'total_barriers': cm.count_total_barriers(_ab),
             'total_cases': cm.count_total_tac(_cs_norm),
             'bems_count': cm.count_bems(_cs_norm),
