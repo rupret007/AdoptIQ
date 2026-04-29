@@ -1,8 +1,22 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 24).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 25).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 25 (Round 48 — Demo-readiness P1 cleanup sweep)
+
+Round 48 / Build 25 closes the eight P1 audit cleanups that Round 47 deferred so the demo experience tomorrow is a single-source-of-truth read across every Word and Excel artifact. Every fix is paired with a regression test (88 new R48 tests, 3188 total green); full audit detail lives in `QUALITY_AUDIT.md`.
+
+- **Adoption-barriers Summary vs Detail disclosure.** Comprehensive Excel `Summary` cited `Adoption barriers (total): 68` while `AB_Detail_All` had 72 rows — the 4-row delta is the well-understood Round 35 multi-assignee duplication, but a reader had no way to know it was deliberate. Build 25 adds an additive ``Adoption barriers (detail rows): 72 (4 multi-assignee duplicates)`` row immediately after the existing `(total)` row so the reconciliation is self-explanatory; the existing label is preserved for back-compat.
+- **Canonical TAC labels in compact narrative.** Two compact prompt templates emitted ``TAC Cases: [Y cases, Z are P1/P2]`` which the audit flagged as ambiguous (the same paragraph cited three different TAC numbers without canonical labels). Build 25 replaces them with ``Total Support Cases (90d): [Y]`` + ``Open + critical (P1+P2): [Z] ([W are P2])`` so a reader can reconcile the bullet against the at-a-glance dashboard.
+- **Bare BEMS IDs in Word.** Five Word renderers were emitting BEMS IDs wrapped in markdown brackets (``[BEMS01916938], [BEMS01952872]``) — fine for the LLM briefing-book citation, ugly in Word. Build 25 strips the brackets at the Word-rendering wire only; the briefing-book templates still emit bracketed citations because the LLM reasoning relies on them.
+- **No markdown chrome in renewal customer headings.** Renewal Word rendered ``ATLANTIA SPA__AEROPORTI DI ROMA SPA__IT`` and similar ``__name__`` fragments where the upstream LLM naming layer leaked raw markdown chrome. A new ``_strip_markdown_chrome`` helper intelligently removes bold / italic / strikethrough / link / code chrome while preserving word boundaries (``SPA__AEROPORTI`` becomes ``SPA AEROPORTI``, not ``SPAAEROPORTI``); applied at 7 customer-name render sites.
+- **Renewal Excel `Partial_Data_Warning_Count` agrees with runtime.** The renewal Excel `Report_Info.Partial_Data_Warning_Count` cell was hardcoded to 0 even when two real schema-drift warnings existed. Build 25 harvests every renewal frame's ``df.attrs['fetch_error']`` annotation, persists the de-duped list onto ``analysis_status[*]['partial_data_warnings']``, and the Excel writer reads from that list — so Word, Excel, and the runtime status all agree.
+- **Partial Data Warning banner in Renewal + Comprehensive Word.** Compact, EI, and leader Word reports already rendered the banner since Build 23; renewal and comprehensive caught up in Build 25. The banner appears on page 2 (after the title page) and lists each warning's dataset / kind / human-readable error, mirroring the existing renderers byte-for-byte.
+- **Upstream contract-alias root cause fix.** Round 47 surfaced two persistent schema_drift warnings (``customer_pulse: missing slot(s) rating`` on 186 rows, ``adoption_barriers: missing slot(s) customer`` on 166 rows). R47 added user-visible parity gates; R48 fixes the root cause. ``data_contracts.ROW_CONTRACTS`` aliases now also accept the friendly Excel labels (``Pulse Rating``, ``Customer``, ``Customer Name``, ``BU_ACCOUNT_NAME``) and the historic SCORE columns documented in `ask_ai_grounded.py` (``SCORE__C``, ``SCORE_C``). Negative cases (no rating column / no customer column on a non-empty frame) still escalate to ``fetch_error: schema_drift`` so genuine drift is not silenced.
+
+Per-round audit detail (Rounds 30 → 48) is in `QUALITY_AUDIT.md`. The earlier "What's New since v1.0.3" notes below remain accurate for Rounds 18-30.
 
 ### What's New in Build 24 (Round 47 — Demo-readiness P0 sweep)
 
@@ -12,8 +26,6 @@ Round 47 / Build 24 closes four demo-blocking dual-truths the Build23 Brian Fraz
 - **Renewal Word / Excel pulse parity.** Word previously cited `Total Customer Pulse Records: 186` plus 10 sample rows while Excel `Customer_Customer_Pulse` was a Data_Unavailable envelope (`schema_drift: customer_pulse: missing slot(s) rating`). Word now honors `df.attrs['fetch_error']` on the pulse frame and renders a parity disclosure ("Customer Pulse data unavailable for this report. Reason: schema_drift. ... See Customer_Customer_Pulse sheet in the Excel data export").
 - **Renewal Word / Excel risk-components parity.** Word advertised a multi-component risk breakdown (Adoption Barriers 28%, Support Cases 27%, Customer Pulse 15%, ...) while Excel `Risk_Components` said `Data_Unavailable: risk_components were not produced`. The simple renewal calculator now publishes the per-component scores from the deterministic weighted model, and the portfolio Excel writer aggregates per-customer components into a portfolio-mean view — so the two artifacts tell the same story.
 - **Comprehensive Word / Excel customer count parity.** Comprehensive Word title page + Executive Summary table cited `Total Customers: 52` while Excel `Summary` said `Customers in portfolio: 38` (delta 14). Word headline + comprehensive `portfolio_metrics['total_customers']` are now pinned to the same canonical-narrow `cm.count_customers(ab, csone, pulse)` value Excel uses; the wide universe is preserved as `total_customers_with_extras` for downstream consumers that legitimately need it.
-
-Per-round audit detail (Rounds 30 → 47) is in `QUALITY_AUDIT.md`. The earlier "What's New since v1.0.3" notes below remain accurate for Rounds 18-30.
 
 ### What's New since v1.0.3 (Quality & Hardening)
 

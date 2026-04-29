@@ -594,7 +594,111 @@ ADOPTIQ_VERSION = "1.0.4"
 # pass / 2 skipped, +43 over Build23).  No upstream Snowflake query
 # changes, no boot-order / corpus / admin-console changes ship in
 # Build24.
-ADOPTIQ_BUILD = "24"
+#
+# Round 48 / Build25 ships the eight P1 demo-readiness cleanups that
+# the Build24 audit flagged:
+#
+# 5. F-COMP-AB-SUMMARY-VS-DETAIL-4 (R48-AB-DELTA-DISCLOSURE): the
+#    comprehensive Excel ``Summary`` sheet showed
+#    ``Adoption barriers (total): 68`` while the ``AB_Detail_All``
+#    sheet had 72 rows.  The 4-row delta was the well-understood
+#    multi-assignee duplication (Round 35 / Phase D), but a reader
+#    seeing the two artifacts side-by-side had no way to know the
+#    delta was deliberate.  ``build_summary_rows`` now emits an
+#    additive ``Adoption barriers (detail rows): 72 (4 multi-
+#    assignee duplicates)`` row immediately after the existing
+#    ``(total)`` row so the reconciliation is self-explanatory.
+#    Existing tests pinning the (total) label still pass; the
+#    Round-19 golden-fixture label order was updated to add the
+#    new row.  9 new R48 tests pin the disclosure shape.
+#
+# 6. F-COMP-TAC-LABEL-AMBIGUITY (R48-COMP-TAC-LABELS): two compact
+#    LLM prompt templates emitted ``TAC Cases: [Y cases, Z are
+#    P1/P2]`` which the Round 47 audit flagged as ambiguous --
+#    "TAC Cases" appeared three times in the same paragraph with
+#    three different denominators.  Replaced with the canonical
+#    pair ``Total Support Cases (90d): [Y]`` + ``Open + critical
+#    (P1+P2): [Z] ([W are P2])`` and added inline guard comments
+#    referencing the round/defect ID so future template edits do
+#    not regress.  5 new R48 tests assert canonical labels are
+#    present and ambiguous labels are absent.
+#
+# 7. F-COMP-BEMS-MD-LEAK (R48-COMP-BEMS-BARE-IDS): five Word
+#    renderers (compact x2, executive intelligence, renewal,
+#    leader) were emitting BEMS IDs wrapped in markdown brackets
+#    (``[BEMS01916938], [BEMS01952872]``).  The brackets are
+#    appropriate inside an LLM briefing-book citation but render
+#    as literal characters in Word.  Stripped the brackets at the
+#    Word-rendering wire only, leaving the briefing-book template
+#    untouched (LLM citations still need them).  6 new R48 tests
+#    pin bare IDs in Word and bracketed IDs in briefing prompts.
+#
+# 8. F-RP-MD-LEAK (R48-RP-NO-MD-CHROME): the renewal Word report
+#    was rendering customer names with raw markdown chrome leaking
+#    in -- e.g. ``ATLANTIA SPA__AEROPORTI DI ROMA SPA__IT`` and
+#    other ``__name__`` fragments produced by the upstream LLM
+#    naming layer.  Added ``_strip_markdown_chrome`` helper that
+#    intelligently strips bold / italic / strikethrough / link /
+#    code chrome while preserving word boundaries (so
+#    ``SPA__AEROPORTI`` becomes ``SPA AEROPORTI``, not
+#    ``SPAAEROPORTI``).  Applied at 7 sites in ``app_simple.py``
+#    where customer names are rendered (renewal headers, single-
+#    customer summary, subscription analysis).  16 new R48 tests
+#    pin the helper and the wire sites.
+#
+# 9. F-RP-WARNING-COUNT-WRONG (R48-RP-PDW-EXCEL-PARITY): the
+#    renewal Excel ``Report_Info`` sheet was hardcoded to emit
+#    ``Partial_Data_Warning_Count: 0`` even when two real
+#    schema-drift warnings existed (audit baseline run
+#    1777445582).  Refactored renewal warning harvest into a
+#    local helper that walks every renewal data frame's
+#    ``df.attrs['fetch_error']`` annotation, persists the
+#    de-duped list onto ``analysis_status[*][
+#    'partial_data_warnings']``, and the Excel writer reads from
+#    that list.  11 new R48 tests pin the harvest scope, the
+#    persist + save_analysis_status() wire, and the Excel
+#    Partial_Data_Warning_Count match.
+#
+# 10. F-RP-PARTIAL-BANNER-MISSING (R48-RP-WORD-BANNER): the
+#     renewal Word report had no Partial Data Warning banner --
+#     compact / EI / leader reports already had one.  Added the
+#     banner to ``_create_simple_renewal_report`` (page 2, after
+#     title) and threaded the harvested warnings as a kw-arg.
+#     5 new R48 tests pin the banner including a real .docx
+#     render verification.
+#
+# 11. F-COMP-PARTIAL-BANNER-MISSING (R48-COMP-WORD-BANNER):
+#     comprehensive Word same gap.  Added
+#     ``ExecutiveReportBuilder.add_partial_data_warning_banner``
+#     and called it immediately after the title page.  5 new
+#     R48 tests pin the method existence + render order +
+#     real .docx contents.
+#
+# 12. F-DV-PULSE-CONTRACT-DRIFT (R48-CONTRACT-ALIASES): root-
+#     cause fix for the customer_pulse / adoption_barriers
+#     schema_drift escalations the Round 47 banner surfaced.
+#     Expanded ``data_contracts.ROW_CONTRACTS`` aliases:
+#       * customer_pulse rating slot now also accepts
+#         ``Pulse Rating`` (Excel friendly), ``SCORE__C`` /
+#         ``SCORE_C`` (historic, documented in ask_ai_grounded.py
+#         ~L723), and ``OVERALL_RATING__C`` / ``OVERALL_RATING``.
+#       * customer_pulse customer slot also accepts
+#         ``CUSTOMER_NAME__C`` (raw), ``Customer`` /
+#         ``Customer Name`` (friendly).
+#       * adoption_barriers + tac_cases customer slots also
+#         accept ``Customer`` / ``Customer Name`` /
+#         ``BU_ACCOUNT_NAME`` (post-fetch resolved variants).
+#     Negative cases (NO rating column / NO customer column)
+#     still escalate to ``fetch_error: schema_drift`` so genuine
+#     drift is not silenced.  31 new R48 tests pin every alias
+#     and the negative cases; the Round 32 contract-autoremap
+#     suite still passes.
+#
+# 75 new R48 regression tests across the 8 P1 fixes; ``make
+# verify`` clean (3178 pytest pass / 2 skipped, +75 over
+# Build24).  No upstream Snowflake query changes, no boot-order /
+# corpus / admin-console changes ship in Build25.
+ADOPTIQ_BUILD = "25"
 
 def version_string():
     """e.g. 'v1.0.1 build 1'"""
