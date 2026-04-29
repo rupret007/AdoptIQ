@@ -10679,7 +10679,7 @@ When analyzing the data for this customer, you MUST think through these lenses s
 12. **Growth Potential:** Opportunities for expanded {TECHNOLOGY} usage and business expansion
 
 ## **Output Format & Content**
-Generate a detailed, customer-specific report in Markdown. Do NOT omit any headers; state 'None detected' if a section is empty.
+Generate a detailed, customer-specific report in Markdown. Do NOT omit any headers; state 'data unavailable' if a section is empty (Round 45 / Phase 6: replaces the prior 'None detected' wording so it stops contradicting the NEGATIVE CONSTRAINT at the top of this prompt — see ``L10657`` which already mandates 'data unavailable').
 
 # AdoptIQ Executive Analysis: {CUSTOMER_NAME} - {TECHNOLOGY} Focus
 **Assigned CSSM:** {CSSM_NAME}
@@ -10814,6 +10814,52 @@ def _json_lite(df: pd.DataFrame, limit=60, keep=None) -> str:
         pass
     return use.head(limit).to_json(orient="records")
 
+# Round 45 / Phase 6: regex-based post-process pass that scrubs the
+# residual "None detected" / "(SP-ID: None detected)" wording the LLM
+# was emitting in the comprehensive narrative even though the prompt
+# (L10657) already mandates "data unavailable".  The 2026-04-28
+# build-20 comprehensive Word artifact contained 8 paragraphs with
+# this leak because the OUTPUT FORMAT instruction at L10682 used to
+# say `state 'None detected' if a section is empty`, contradicting
+# the NEGATIVE CONSTRAINT.  Phase 6 fixes the prompt, but the model
+# may still echo the old wording on cached or edge-case responses
+# (especially for the SP-ID parenthetical), so this regex pass acts
+# as a belt-and-suspenders post-fix that runs on every successful
+# LLM response.  Pure / deterministic / cheap (~6 regex passes on
+# strings that are already in memory).
+_R45_NONE_DETECTED_PATTERNS: tuple = (
+    # SP-ID parenthetical specifically.  Order matters -- fix the
+    # parenthetical before the bare phrase so the inner text is
+    # rewritten to a friendlier label, not just the literal phrase.
+    (re.compile(r"\(SP-ID:\s*None detected\)", re.IGNORECASE), "(SP-ID: not provided)"),
+    # Bare phrase.  Word boundary on both sides so we don't break
+    # accidental embedded substrings like "phenomenon detected".
+    (re.compile(r"\bNone detected\b", re.IGNORECASE), "data unavailable"),
+)
+
+
+def _r45_clean_llm_chrome(text: str) -> str:
+    """Round 45 / Phase 6: scrub residual 'None detected' chrome from
+    a successful LLM response so the comprehensive Word artifact
+    consistently shows 'data unavailable' (matching the NEGATIVE
+    CONSTRAINT at adoptiq_backend.py:10657).
+
+    Pure / safe -- never raises.  Returns ``text`` unchanged on any
+    error so a regex regression cannot block the report build.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    try:
+        out = text
+        for pat, repl in _R45_NONE_DETECTED_PATTERNS:
+            out = pat.sub(repl, out)
+        return out
+    except Exception:  # noqa: BLE001 -- never let the post-process
+        # break the report build; the worst case is the residual
+        # chrome stays in the narrative (same as pre-Round-45).
+        return text
+
+
 def generate_llm_response(system_prompt: str, briefing_book: str) -> str:
     """Generic function to call the CircuIT client with timeout and fallback."""
     import signal
@@ -10907,8 +10953,19 @@ def generate_llm_response(system_prompt: str, briefing_book: str) -> str:
                 )
                 return result
             if result and result.strip():
-                logger.info(f"[[OK]] CircuIT AI response received: {len(result)} characters")
-                return result
+                # Round 45 / Phase 6: scrub residual "None detected" /
+                # "(SP-ID: None detected)" chrome before returning.  The
+                # post-process is idempotent and pure -- the worst case
+                # is no-op when the model already followed the prompt.
+                _cleaned = _r45_clean_llm_chrome(result)
+                if _cleaned != result:
+                    logger.info(
+                        "[[AI]] Round 45 / Phase 6: scrubbed residual "
+                        "'None detected' chrome from LLM response (len_in=%d, len_out=%d)",
+                        len(result), len(_cleaned),
+                    )
+                logger.info(f"[[OK]] CircuIT AI response received: {len(_cleaned)} characters")
+                return _cleaned
             else:
                 logger.warning(f"[[WARNING]] CircuIT AI returned invalid response: {result}")
                 return "ERROR: llm.empty_response: CircuIT summarization failed - invalid response."

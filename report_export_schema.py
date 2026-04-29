@@ -157,6 +157,259 @@ SHEET_HEADER_RENAMES: Mapping[str, Mapping[str, str]] = {
     },
 }
 
+
+# ---------------------------------------------------------------------------
+# Round 45 / Phase 5 -- Friendly Snowflake column-name labels (cross-sheet)
+# ---------------------------------------------------------------------------
+
+#: Raw Snowflake / Salesforce ``_C`` / ``__C`` / BU_NAME / customer_name
+#: column names mapped to director-friendly labels.  Applied AFTER the
+#: per-sheet ``SHEET_HEADER_RENAMES`` and the curated-allowlist projection,
+#: so we never disturb the upstream pipeline (filtering, sorting, joining,
+#: cell-comment generation) -- only the visible Excel column header is
+#: changed.
+#:
+#: Round 44 friendlied the Word-side narrative source-citation italics
+#: but explicitly did NOT touch the Excel sidecars, which still leaked
+#: 9 raw headers in Comprehensive (``AB_Detail_All`` /
+#: ``CSConsole_Customer_Pulse``), 16 in Renewal
+#: (``Customer_Adoption_Barriers`` / ``Customer_Action_Plans``) and 21
+#: in Leader (``Action_Plans`` / ``Adoption_Barriers`` /
+#: ``Customer_Pulse`` / ``Subscriptions``) per the 2026-04-28 build-20
+#: artifact audit.  This map closes that gap with a single SSoT
+#: cross-sheet rename so future writers automatically inherit the
+#: friendly labels.
+#:
+#: Engineers who need the underlying Snowflake column for traceability
+#: can find the raw schema in ``QUALITY_AUDIT.md`` (Round 7 row-contract
+#: aliases section) and in the per-sheet curated tuples above.
+_FRIENDLY_HEADER_LABELS: Mapping[str, str] = {
+    # Customer / account identity
+    "BU_NAME": "Customer Name",
+    "customer_name": "Customer Name",
+    "ACCOUNT_ID_C": "Account ID",
+    "ACCOUNT__C": "Account ID",
+    # Status / severity / priority
+    "AB_STATUS_C": "Adoption Barrier Status",
+    "STATUS_C": "Status",
+    "status_norm": "Status (Normalized)",
+    "SEVERITY_C": "Severity",
+    "severity_norm": "Severity (Normalized)",
+    "PRIORITY_C": "Priority",
+    "case_priority_norm": "Priority (Normalized)",
+    "case_status_norm": "Case Status (Normalized)",
+    # Dates -- BUSINESS dates only.  SF audit timestamps
+    # (CREATED_DATE / LAST_MODIFIED_DATE) are already on the
+    # ``_SF_PLUMBING_EXACT`` denylist and never reach this stage.
+    "OPEN_DATE_C": "Open Date",
+    "DUE_DATE_C": "Due Date",
+    "ORIGINAL_DUE_DATE_C": "Original Due Date",
+    "CLOSED_DATE_C": "Closed Date",
+    "open_age_days": "Open Age (Days)",
+    "closed_age_days": "Closed Age (Days)",
+    "AGE_C": "Age (Days)",
+    "DAYS_IN_STAGE_C": "Days in Stage",
+    "HOLD_DAYS_C": "Hold Days",
+    # Free-form text / comments
+    "COMMENTS_C": "Comments",
+    "COMMENTS__C": "Comments",
+    "CURRENT_STATUS_AND_NOTES_C": "Current Status / Notes",
+    "CLOSURE_COMMENTS_C": "Closure Comments",
+    "FEEDBACK_COMMENTS_C": "Feedback Comments",
+    "DESCRIPTION_C": "Description",
+    "SUBJECT_C": "Subject",
+    # Pulse-specific (CSConsole)
+    "PULSE_RATING__C": "Pulse Rating",
+    "CUSTOMER_PULSE__C": "Customer Pulse",
+    "CUSTOMER_PULSE_COLOR_IMAGE__C": "Customer Pulse Color",
+    "PRODUCT__C": "Product",
+    # Ownership / assignment
+    "ACCOUNT_MANAGER_C": "Account Manager",
+    "ASSIGNEE_C": "Assignee",
+    "OWNERID": "Owner",
+    "OWNER_C": "Owner",
+    # Product / classification
+    "PRODUCT_C": "Product",
+    "PRODUCT_NAME_C": "Product Name",
+    "RELATED_PRODUCT_C": "Related Product",
+    "FEATURE_C": "Feature",
+    "ADOPTION_BARRIER_TYPE_C": "Barrier Type",
+    "ADOPTION_BARRIER_LEVEL_C": "Barrier Level",
+    "AB_CATEGORY_C": "Barrier Category",
+    "ab_category_final": "Barrier Category (Final)",
+    "BUSINESS_UNIT_C": "Business Unit",
+    "THEATER_C": "Theater",
+    "SALES_LEVEL_4_C": "Sales Level 4",
+    "SALES_LEVEL_5_C": "Sales Level 5",
+    # Reasons / classification
+    "REASON_C": "Reason",
+    "CLOSED_REASON_C": "Closed Reason",
+    "CLOSURE_REASON_C": "Closure Reason",
+    "AB_ESCALATE_C": "Escalated",
+    "AB_HOLD_REASON_C": "Hold Reason",
+    "AB_WAITING_FOR_C": "Waiting For",
+    "AB_WAITING_FOR_DETAIL_C": "Waiting For Detail",
+    "AB_PARTNER_ISSUE_C": "Partner Issue",
+    # ARR / health
+    "AOV_C": "Annual Order Value",
+    "PRODUCT_ARR_C": "Product ARR",
+    "SERVICE_ARR_C": "Service ARR",
+    "AOV_GROSS_RETENTION_RATE_C": "Gross Retention Rate",
+    "BU_HEALTH_SCORE_C": "BU Health Score",
+    "USE_CASE_HEALTH_SCORE_C": "Use Case Health Score",
+    "SOLUTION_DOMAIN_HEALTH_SCORE_C": "Solution Domain Health Score",
+    # Action plan / next step
+    "ACTION_PLAN_TITLE_C": "Action Plan Title",
+    "ACTION_C": "Action",
+    "ACTION_TYPE_C": "Action Type",
+    "ACTION_SUB_TYPE_C": "Action Sub-Type",
+    "NEXT_ACTION_C": "Next Action",
+    "NEXT_STEP_C": "Next Step",
+    "NEXT_ACTION_OWNER_C": "Next Action Owner",
+    "NEXT_ACTION_DUE_DATE_C": "Next Action Due Date",
+    # Linked TAC context
+    "TAC_CASE_NUMBER_LINK_C": "TAC Case Number",
+    "COUNT_OF_LINKED_CASES_C": "Linked Cases (Count)",
+    "LINKED_CASES_C": "Linked Cases",
+    "COUNT_OF_LINKED_CTAS_C": "Linked CTAs (Count)",
+    "COUNT_OF_LINKED_ACTIVITIES_C": "Linked Activities (Count)",
+}
+
+
+def friendly_header(name: object) -> str:
+    """Round 45 / Phase 5: return the director-friendly label for a raw
+    Snowflake / SF column name, or ``str(name)`` unchanged when the
+    column is not in the friendly-label SSoT.
+
+    Defensive against non-string inputs so a malformed header (None,
+    int, NaN) never breaks the writer.
+    """
+    if name is None:
+        return ""
+    key = str(name)
+    return _FRIENDLY_HEADER_LABELS.get(key, key)
+
+
+# ---------------------------------------------------------------------------
+# Round 45 / Phase 8 + 9 -- body-cell sanitization (Markdown chrome + None)
+# ---------------------------------------------------------------------------
+
+#: Columns whose values are FREE-FORM TEXT (operator-typed comments,
+#: meeting notes, descriptions) where leftover Markdown control chars
+#: and literal ``None`` strings consistently leak into the Excel
+#: artifact.  Names below are the FRIENDLY labels (post-Phase-5 rename)
+#: so the SSoT here matches what the workbook actually shows.  Values
+#: outside this set are NOT touched -- categorical columns that
+#: legitimately contain the literal string ``"None"`` (e.g.
+#: ``hold_reason="None"`` meaning "not on hold") keep their value.
+_BODY_TEXT_COLUMNS_FRIENDLY: frozenset[str] = frozenset(
+    {
+        "Comments",
+        "Closure Comments",
+        "Feedback Comments",
+        "Current Status / Notes",
+        "Description",
+        "Subject",
+        "Action Plan Title",
+        "Next Action",
+        "Next Step",
+        # CSOne_Detail_All free-text columns (already friendly via
+        # SHEET_HEADER_RENAMES).
+        "Title",
+        "Problem Description",
+        "Problem Details",
+        "Resolution Summary",
+        "Customer Activity",
+        "CSE Action Plan",
+        "Last Cisco Update",
+    }
+)
+
+
+def _r45_clean_excel_body_cell(value: object) -> object:
+    """Round 45 / Phase 8 + 9: scrub a single free-form Excel body cell.
+
+    * Markdown chrome: ``**bold**`` / ``__italic__`` runs collapse to
+      the inner text.  Pattern matches the leader-side helper at
+      ``leader_report_generator._strip_markdown_chrome`` so the SSoT
+      stays consistent across Word and Excel paths.
+    * Literal ``None`` and pandas NA / NaN: coerce to empty string.
+      We do NOT use an em-dash here because pandas' Excel writer
+      already renders bare empty cells correctly and customers
+      expressed a preference for blank cells over filler glyphs.
+
+    Pure / safe: returns ``value`` unchanged on any error so a regex
+    regression cannot break the report build.
+    """
+    # Round 45 / Phase 9: pandas NA / NaN handling.  These compare
+    # ``!= self`` (the standard NaN identity check) so we use a
+    # cheap try-except wrapper rather than importing pandas at
+    # module top-level (apply_export_schema already does that lazily).
+    try:
+        if value is None:
+            return ""
+        # NaN check without importing math at module top-level.
+        if isinstance(value, float) and value != value:  # noqa: PLR0124
+            return ""
+        # pandas NA / numpy NA -- detect via the ``isna`` interface.
+        try:
+            import pandas as _pd  # local import: this helper is hot
+            if _pd.isna(value):  # type: ignore[arg-type]
+                return ""
+        except Exception:  # noqa: BLE001
+            # If pandas is unavailable we already handled None and NaN
+            # above; categorical NA types degrade to their str repr.
+            pass
+        s = str(value)
+    except Exception:
+        return value
+
+    if not s:
+        return ""
+
+    # Round 45 / Phase 9: literal "None" string (case-sensitive --
+    # only the Python-stringified None, not the categorical value
+    # "none" which legitimately appears in some hold/reason columns).
+    if s == "None" or s == "nan" or s == "NaN" or s == "<NA>":
+        return ""
+
+    # Round 45 / Phase 8: Markdown chrome scrub (mirrors
+    # leader_report_generator._strip_markdown_chrome).  Local re
+    # import keeps the helper lean for cells that don't need cleaning.
+    try:
+        import re as _re_local
+        # Bold / strong indicator: runs of >=2 stars at any anchor.
+        s = _re_local.sub(r"\*{2,}", "", s)
+        # Italic indicator: runs of >=2 underscores at word boundary,
+        # narrow match so internal identifiers (snake_case, __C) are
+        # preserved.
+        s = _re_local.sub(r"(?<!\w)_{2,}(?=\w)|(?<=\w)_{2,}(?!\w)", "", s)
+        # Collapse runs of whitespace introduced by stripping.
+        s = _re_local.sub(r"\s{2,}", " ", s).strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return s
+
+
+def _r45_clean_body_columns(df, columns: frozenset[str]) -> None:
+    """Round 45 / Phase 8 + 9: in-place cell cleanup for the named
+    free-form text columns.  Rows are mutated only when the column is
+    present in ``df``.  Used by ``apply_export_schema`` after the
+    friendly-rename pass.
+
+    Mutates ``df`` in place AND also returns ``None`` so callers don't
+    accidentally rely on a chained return.
+    """
+    try:
+        for col in columns:
+            if col in df.columns:
+                df[col] = df[col].map(_r45_clean_excel_body_cell)
+    except Exception:  # noqa: BLE001 -- never let cleanup break the
+        # writer; the worst case is body cells with leftover chrome
+        # (same as pre-Round-45).
+        return None
+    return None
+
 # ---------------------------------------------------------------------------
 # Per-sheet curated allowlists -- applied last, in order
 # ---------------------------------------------------------------------------
@@ -416,7 +669,43 @@ def apply_export_schema(df, sheet_name: str | None = None):
     target = filter_columns(out.columns, sheet_name=sheet_name)
     if not target:
         return out.iloc[:, 0:0]
-    return out.loc[:, target]
+    out = out.loc[:, target]
+
+    # Round 45 / Phase 5: post-projection friendly-header rename.
+    # Cross-sheet SSoT in ``_FRIENDLY_HEADER_LABELS`` -- only renames
+    # columns whose source name is present, and skips any rename that
+    # would collide with an already-friendly column name in ``out``
+    # (so a workbook that already has both ``BU_NAME`` and
+    # ``Customer Name`` keeps the original ``Customer Name`` and only
+    # renames the raw side).
+    friendly_map: dict[str, str] = {}
+    existing = set(out.columns)
+    for raw, friendly in _FRIENDLY_HEADER_LABELS.items():
+        if raw in existing and friendly not in existing:
+            friendly_map[raw] = friendly
+    if friendly_map:
+        out = out.rename(columns=friendly_map)
+
+    # Round 45 / Phase 8 + 9: scrub Markdown chrome and literal None
+    # cells from the named free-form text columns.  Runs AFTER the
+    # friendly-header rename so the SSoT key set matches what's in the
+    # workbook.  ``_BODY_TEXT_COLUMNS_FRIENDLY`` is conservative -- it
+    # never touches categorical / numeric columns where the literal
+    # string "None" might be a real value.
+    try:
+        # ``out`` is a fresh projection (loc[:, target] returns a view
+        # when target is a Python list, which it always is here -- but
+        # pandas is moving toward .copy() returning a CoW frame).
+        # Defensive .copy() ensures the cleanup mutation never raises
+        # the SettingWithCopyWarning regardless of pandas version.
+        out = out.copy()
+        _r45_clean_body_columns(out, _BODY_TEXT_COLUMNS_FRIENDLY)
+    except Exception:  # noqa: BLE001
+        # Never let cleanup break the writer; pre-Round-45 behavior
+        # was to ship the chrome through unchanged.
+        pass
+
+    return out
 
 
 __all__ = [

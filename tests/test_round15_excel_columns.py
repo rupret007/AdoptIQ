@@ -339,7 +339,15 @@ def test_phase_1_gold_csone_renames_relationship_labels():
 
 
 def test_phase_1_public_api_surface_is_minimal():
-    """SSoT exports just what the writers need, no more."""
+    """SSoT exports just what the writers need, no more.
+
+    Round 45 / Phase 5 added ``friendly_header`` for callers that need
+    to map a single raw Snowflake column name to its director-friendly
+    label (e.g. cell-comment generators, chart legends).  The helper
+    is documented in ``report_export_schema._FRIENDLY_HEADER_LABELS``
+    and is the public counterpart to the cross-sheet rename that
+    ``apply_export_schema`` applies as its final step.
+    """
     import report_export_schema as schema
 
     expected = {
@@ -350,6 +358,8 @@ def test_phase_1_public_api_surface_is_minimal():
         "is_internal_column",
         "filter_columns",
         "apply_export_schema",
+        # Round 45 / Phase 5: cross-sheet friendly-label helper.
+        "friendly_header",
     }
     assert set(schema.__all__) == expected
 

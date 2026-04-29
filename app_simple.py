@@ -2256,6 +2256,104 @@ def get_latest_csone_from_folder() -> Optional[str]:
         return None
 
 
+# Round 45 / Phase 4: render a one-line, source-specific user-facing
+# remediation hint when ``DataSourceValidationError`` is raised.  The
+# pre-Round-45 message was just "Data validation failed - see logs for
+# details" which forced the operator to grep ``adoptiq.<pid>.log`` to
+# diagnose -- and the actual log line was equally opaque
+# (``[ERROR] DATA SOURCE VALIDATION FAILED for COMPACT report``).  This
+# helper concatenates: WHICH source failed + WHERE autodiscovery looked
+# (when CSOne is the missing source) + WHAT to do.  Surfaces verbatim
+# in the analysis_status ``message`` so the progress page red banner is
+# directly actionable.
+def _r45_render_validation_remediation_message(
+    *,
+    report_type: str,
+    missing_sources: Optional[List[str]] = None,
+    error_details: Optional[Dict[str, str]] = None,
+    csone_was_uploaded: bool = False,
+    csone_auto_path: str = '(unknown)',
+) -> str:
+    """Return a single-line operator-facing remediation hint for a
+    ``DataSourceValidationError`` from
+    :mod:`data_source_validator`.
+
+    Rendering rules:
+
+    * When ``missing_sources`` is empty / None we fall back to the
+      pre-Round-45 generic line so we never hide a real failure behind
+      a misleading hint.
+    * For each source we render a short noun-phrase + a one-sentence
+      remediation.  CSOne specifically includes ``csone_auto_path`` so
+      the operator learns whether autodiscovery was attempted, where it
+      looked, and whether the OneDrive folder env var is set at all.
+    * The output is intentionally a single line (newlines collapse to
+      spaces) so it fits the progress-page banner width.
+    """
+    sources = list(missing_sources or [])
+    if not sources:
+        return ' Data validation failed - see logs for details'
+
+    parts: List[str] = []
+    for src in sources:
+        src_lower = (src or '').strip().lower()
+        if src_lower == 'csone':
+            if csone_was_uploaded:
+                parts.append(
+                    "CSOne file uploaded but produced 0 in-scope rows after "
+                    "the manager + technology + days filters were applied. "
+                    "Verify the file is the latest CSOne export and that the "
+                    "selected manager / technology / day window matches the "
+                    "data."
+                )
+            else:
+                parts.append(
+                    "Compact report requires CSOne support-case data. None "
+                    f"uploaded; OneDrive autodiscovery searched {csone_auto_path} "
+                    "and produced 0 .xlsx files. Upload a CSOne export "
+                    "in the analyze form, or sync the "
+                    "'AI Projects/AdoptIQ_CSOne_Reports' folder to OneDrive "
+                    "and set CSONE_ONEDRIVE_FOLDER."
+                )
+        elif src_lower == 'snowflake':
+            parts.append(
+                "Snowflake database connection unavailable. Check VPN, "
+                "Keeper credentials, and that the warehouse is online; "
+                "re-run after connectivity is restored."
+            )
+        elif src_lower == 'team_subscriptions':
+            parts.append(
+                "No team subscription data found for the selected manager. "
+                "Verify the manager name matches team_config.json and that "
+                "the manager has assigned subscriptions."
+            )
+        elif src_lower == 'adoption_barriers':
+            parts.append(
+                "No adoption barriers found in scope. Verify the technology "
+                "filter matches a supported scope and the day window is wide "
+                "enough to capture barriers."
+            )
+        else:
+            # Round 45 / Phase 4: future-proof: any new validator
+            # source class falls back to the validator's per-source
+            # error_details string (single-line collapsed) so we never
+            # silently drop an unknown source kind.
+            detail = (error_details or {}).get(src) if error_details else None
+            detail = (detail or '').replace('\n', ' ').strip()
+            if detail:
+                parts.append(f"{src}: {detail}")
+            else:
+                parts.append(
+                    f"{src}: required data source missing; see logs for details"
+                )
+
+    # Single-line render -- newlines / runs of whitespace collapse to a
+    # single space so the progress-page banner doesn't truncate weirdly.
+    body = ' '.join(parts)
+    body = ' '.join(body.split())
+    return f' {report_type.title()} report cannot generate: {body}'
+
+
 @app.route('/')
 def index():
     """Main analysis page using template"""
@@ -7587,10 +7685,47 @@ def run_compact_analysis(analysis_id):
         # Validate data sources before report generation
         logger.info(f"[[VALIDATION]] Validating data sources for compact report...")
         try:
-            # Single-customer compact reports should still generate when scoped data is empty.
-            validation_required_sources = ['snowflake', 'team_subscriptions'] if single_customer_mode else None
-            if validation_required_sources:
-                logger.info("[[VALIDATION]] Compact single-customer mode: treating adoption barriers and CSOne as optional")
+            # Round 45 / Phase 3: relax the compact validator so it
+            # mirrors the comprehensive-without-CSOne behavior at
+            # ``run_comprehensive_analysis`` L12819-L12823 -- CSOne is
+            # OPTIONAL in portfolio mode unless the operator actually
+            # uploaded a file (Round 2 / Phase 4.3 contract: explicit
+            # upload that scopes to empty MUST fail loud).  Pre-Round-45
+            # compact passed ``required_sources=None`` in portfolio mode,
+            # which fell back to the validator's default
+            # ``['snowflake','team_subscriptions','adoption_barriers','csone']``
+            # and hard-failed every compact run that reached the
+            # worker without an uploaded CSOne file -- including all
+            # OneDrive-autodiscovery-only runs (the autopicked path
+            # silently scopes to empty when the folder is unconfigured
+            # or empty).  Phase 3 makes CSOne optional in the default
+            # path, then re-uses the validator's ``csone_file_provided``
+            # promotion to keep explicit uploads strict.
+            with analysis_status_lock:
+                _csone_was_uploaded = bool(
+                    analysis_status.get(analysis_id, {}).get('csone_file_was_uploaded')
+                )
+                _csone_auto_path = str(
+                    analysis_status.get(analysis_id, {}).get(
+                        'csone_autodiscovery_path', '(unknown)'
+                    )
+                )
+            if single_customer_mode:
+                validation_required_sources = ['snowflake', 'team_subscriptions']
+                logger.info(
+                    "[[VALIDATION]] Compact single-customer mode: treating "
+                    "adoption barriers and CSOne as optional"
+                )
+            else:
+                validation_required_sources = [
+                    'snowflake', 'team_subscriptions', 'adoption_barriers'
+                ]
+                logger.info(
+                    "[[VALIDATION]] Compact portfolio mode: CSOne is %s "
+                    "(was_uploaded=%s); validating required core sources only",
+                    "REQUIRED (explicit upload)" if _csone_was_uploaded else "optional",
+                    _csone_was_uploaded,
+                )
             # Round 20 / R20-001: drop the dead csconsole_* presence
             # guards.  The csconsole_* frames are bound by the L6372-6526
             # fetch block; reaching this validation call requires having
@@ -7605,9 +7740,45 @@ def run_compact_analysis(analysis_id):
                 csconsole_customer_pulse=csconsole_customer_pulse,
                 csconsole_success_priorities=csconsole_success_priorities,
                 arr_data=arr_data,
-                required_sources=validation_required_sources
+                required_sources=validation_required_sources,
+                # Round 45 / Phase 3: gates the Round 2 / Phase 4.3
+                # fail-loud-on-explicit-upload contract.
+                csone_file_provided=_csone_was_uploaded,
             )
             logger.info(f"[[VALIDATION]] All required data sources validated successfully")
+
+            # Round 45 / Phase 3: when CSOne was NOT uploaded and the
+            # scoped frame ended up empty (or autodiscovery returned
+            # nothing), surface a "Partial Data" warning so the writer's
+            # banner tells the reader why TAC sections look thin -- same
+            # contract leader uses for autodiscovered-empty-after-scope.
+            if not _csone_was_uploaded and (csone_df is None or csone_df.empty):
+                _autopath_label = _csone_auto_path or '(not configured)'
+                logger.warning(
+                    "[[VALIDATION]] Compact: no explicit CSOne upload and "
+                    "OneDrive autodiscovery at %s produced 0 in-scope rows; "
+                    "proceeding with reduced TAC detail",
+                    _autopath_label,
+                )
+                if not any(
+                    (w or {}).get('kind') == 'autodiscovered_empty_after_scope'
+                    for w in (partial_data_warnings or [])
+                ):
+                    partial_data_warnings.append({
+                        'dataset': 'csone',
+                        'error': (
+                            "No CSOne file was uploaded and OneDrive "
+                            f"autodiscovery searched {_autopath_label} and "
+                            "produced 0 in-scope rows."
+                        ),
+                        'kind': 'autodiscovered_empty_after_scope',
+                        'effect': (
+                            "TAC, BEMS, and support-case sections render "
+                            "with reduced detail; counts default to 0. "
+                            "Upload a CSOne export from CSOne Reports for "
+                            "complete analysis."
+                        ),
+                    })
 
             # Round 30 / M4: re-run validation in non-raising mode so we can
             # extract optional CSConsole fetch errors from ``error_details``
@@ -7656,10 +7827,30 @@ def run_compact_analysis(analysis_id):
                 )
         except DataSourceValidationError as e:
             logger.error(f"[[VALIDATION]] Data validation failed: {e}")
+            # Round 45 / Phase 4: render a one-line, source-specific
+            # remediation hint so the progress page red banner tells
+            # the operator WHICH source failed and WHAT to do, instead
+            # of "see logs for details".  Falls back gracefully if the
+            # exception did not carry structured ``missing_sources`` /
+            # ``details``.
+            #
+            # Round 27 H1 contract is preserved: ``status['error']`` stays
+            # the generic sanitized string ("Data validation failed.
+            # Please check your input and try again.") used by JSON
+            # status-API consumers; only ``status['message']`` (the
+            # human-facing progress banner) gets the actionable
+            # remediation hint.
+            _user_msg = _r45_render_validation_remediation_message(
+                report_type='compact',
+                missing_sources=getattr(e, 'missing_sources', None),
+                error_details=getattr(e, 'details', None),
+                csone_was_uploaded=_csone_was_uploaded,
+                csone_auto_path=_csone_auto_path,
+            )
             with analysis_status_lock:
                 status['status'] = 'error'
                 status['progress'] = 0
-                status['message'] = ' Data validation failed - see logs for details'
+                status['message'] = _user_msg
                 status['error'] = 'Data validation failed. Please check your input and try again.'
                 status['current_step'] = 'Validation Failed'
                 save_analysis_status()
@@ -11516,10 +11707,19 @@ def run_customer_renewal_analysis(analysis_id):
             logger.info(f"[[VALIDATION]] All required data sources validated successfully")
         except DataSourceValidationError as e:
             logger.error(f"[[VALIDATION]] Data validation failed: {e}")
+            # Round 45 / Phase 4: source-specific remediation hint in
+            # ``message`` (banner); Round 27 H1 generic string stays in
+            # ``error`` (JSON consumers).
+            _user_msg = _r45_render_validation_remediation_message(
+                report_type='renewal',
+                missing_sources=getattr(e, 'missing_sources', None),
+                error_details=getattr(e, 'details', None),
+                csone_was_uploaded=bool(_csone_file_provided),
+            )
             with analysis_status_lock:
                 status['status'] = 'error'
                 status['progress'] = 0
-                status['message'] = ' Data validation failed - see logs for details'
+                status['message'] = _user_msg
                 status['error'] = 'Data validation failed. Please check your input and try again.'
                 status['current_step'] = 'Validation Failed'
                 save_analysis_status()
@@ -12879,10 +13079,18 @@ def run_comprehensive_analysis(analysis_id):
                 )
         except DataSourceValidationError as e:
             logger.error(f"[[VALIDATION]] Data validation failed: {e}")
+            # Round 45 / Phase 4: source-specific remediation hint in
+            # ``message`` (banner); Round 27 H1 generic string stays in
+            # ``error`` (JSON consumers).
+            _user_msg = _r45_render_validation_remediation_message(
+                report_type='comprehensive',
+                missing_sources=getattr(e, 'missing_sources', None),
+                error_details=getattr(e, 'details', None),
+            )
             update_analysis_status(analysis_id, {
                 'status': 'error',
                 'progress': 0,
-                'message': ' Data validation failed - see logs for details',
+                'message': _user_msg,
                 'error': 'Data validation failed. Please check your input and try again.',
                 'current_step': 'Validation Failed'
             })
@@ -17948,9 +18156,18 @@ def start_compact_analysis():
             except Exception:
                 return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 400  # Round 13 / Phase 4.3
 
-        # Handle both form data and JSON data
+        # Handle both form data and JSON data.
+        # Round 45 / Phase 3: track whether the CSOne file was EXPLICITLY
+        # uploaded (or named in the JSON / form) by the operator vs.
+        # picked up via OneDrive autodiscovery.  This mirrors the Round
+        # 38 leader endpoint pattern at ``start_leader_report`` where
+        # ``csone_file_explicit`` gates the Round 2 / Phase 4.3 fail-loud
+        # contract in the worker -- explicit uploads that scope to empty
+        # MUST fail loud; autodiscovery hits that scope to empty MUST
+        # log a partial-data warning and proceed.
         subscription_id = ''
         customer_name = ''
+        csone_file_explicit: Optional[str] = None
         if request.is_json:
             data = request.get_json() or {}
             manager = data.get('manager', '').strip()
@@ -18020,7 +18237,16 @@ def start_compact_analysis():
             f"Compact_{_sanitize_analysis_id_part(manager)}_"
             f"{_sanitize_analysis_id_part(technology)}_{days}d_{int(time.time())}"
         )
-        
+
+        # Round 45 / Phase 3: capture the autodiscovery search context so
+        # the worker can include it in the user-facing failure message
+        # (Phase 4 logging contract).  When the OneDrive folder is not
+        # configured at all, surface "(not configured)" so the operator
+        # learns about the env-var without grepping logs.
+        _csone_auto_path = (
+            app.config.get('CSONE_ONEDRIVE_FOLDER') or '(not configured)'
+        )
+
         # Initialize status (subscription_id/customer_name allow single-customer filter)
         with analysis_status_lock:
             analysis_status[analysis_id] = {
@@ -18031,6 +18257,14 @@ def start_compact_analysis():
                 'technology': technology,
                 'days': days,
                 'csone_file': csone_file,
+                # Round 45 / Phase 3: explicit-upload provenance is what
+                # gates the Round 2 / Phase 4.3 fail-loud contract in the
+                # worker.  ``csone_file_was_uploaded`` mirrors the leader
+                # endpoint key set in ``start_leader_report`` (Round 38).
+                'csone_file_was_uploaded': bool(csone_file_explicit),
+                'csone_file_path': csone_file or '',
+                'csone_file_autopicked': csone_file_autopicked or '',
+                'csone_autodiscovery_path': str(_csone_auto_path),
                 'subscription_id': subscription_id,
                 'customer_name': customer_name,
                 'start_time': _now_utc_iso_z(),
