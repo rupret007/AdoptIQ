@@ -5408,8 +5408,18 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                                     csconsole_action_plans: pd.DataFrame = None,
                                     csconsole_customer_pulse: pd.DataFrame = None,
                                     csconsole_success_priorities: pd.DataFrame = None,
-                                    csconsole_adoption_barriers: pd.DataFrame = None) -> str:
-    """Create an enhanced compact report with real data, tables, and charts using ALL data sources"""
+                                    csconsole_adoption_barriers: pd.DataFrame = None,
+                                    partial_data_warnings: Optional[List[Dict[str, Any]]] = None) -> str:
+    """Create an enhanced compact report with real data, tables, and charts using ALL data sources.
+
+    Round 46 / F-COMP-DQ-BANNER: ``partial_data_warnings`` is forwarded by the
+    fallback executive-report path in ``run_compact_analysis`` so the Word
+    artifact surfaces schema-drift / fetch-error context to the reader the
+    same way the primary ``executive_intelligence_formatter`` and
+    ``compact_report_formatter`` paths do. Without this banner the reader
+    silently consumes a "successful" report built on partial data
+    (status had the warnings, the docx body had no warning text).
+    """
     from docx import Document
     from docx.shared import Inches, Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -5430,6 +5440,35 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         subtitle.runs[0].bold = True
     
     doc.add_paragraph()  # Spacing
+
+    # Round 46 / F-COMP-DQ-BANNER: surface partial-data warnings BEFORE any
+    # number is shown so the reader is warned that some sources failed to
+    # load (column-policy block, schema drift, etc.) and that downstream
+    # zeros / counts may reflect missing data rather than ground truth.
+    # Mirrors the banner emitted by ``compact_report_formatter.create_compact_executive_report``
+    # (~line 2922) and ``executive_intelligence_formatter`` (~line 1610).
+    if partial_data_warnings:
+        try:
+            doc.add_heading("\u26a0 Partial Data Warning", level=1)
+            doc.add_paragraph(
+                "One or more upstream data sources failed to load for this run. "
+                "Sections that depend on the affected sources are marked "
+                "\"unavailable\" rather than rendered as zero. Rerun once the "
+                "source is reachable for a complete picture."
+            )
+            for _w in partial_data_warnings:
+                _ds = str((_w or {}).get('dataset') or 'unknown')
+                _err = str((_w or {}).get('error') or 'unknown error')
+                _kind = str((_w or {}).get('kind') or 'runtime')
+                doc.add_paragraph(
+                    f"\u2022 {_ds} ({_kind}): {_err}", style='List Bullet'
+                )
+            doc.add_paragraph("")
+        except Exception as _banner_err:  # noqa: BLE001
+            logger.warning(
+                "Round 46: enhanced compact partial-data banner failed: %s",
+                _banner_err,
+            )
     
     # Initialize variables outside if block to avoid scope issues
     total_customers = 0
@@ -8212,7 +8251,12 @@ def run_compact_analysis(analysis_id):
                             csconsole_action_plans=_r23_ap if _r23_ap is not None else pd.DataFrame(),  # Round 23 / R22-NEXT-001
                             csconsole_customer_pulse=_r23_cp if _r23_cp is not None else pd.DataFrame(),  # Round 23 / R22-NEXT-001
                             csconsole_success_priorities=_r23_sp if _r23_sp is not None else pd.DataFrame(),  # Round 23 / R22-NEXT-001
-                            csconsole_adoption_barriers=_r23_cab if _r23_cab is not None else pd.DataFrame()  # Round 23 / R22-NEXT-001
+                            csconsole_adoption_barriers=_r23_cab if _r23_cab is not None else pd.DataFrame(),  # Round 23 / R22-NEXT-001
+                            # Round 46 / F-COMP-DQ-BANNER: pull partial-data
+                            # warnings from the captured ctx so the fallback
+                            # docx surfaces schema drift / fetch errors the
+                            # same way the primary path does.
+                            partial_data_warnings=_ctx.get('partial_data_warnings'),
                         )
                     
                     logger.info(f"[EXEC-REPORT] Report creation returned: {result}")
@@ -8257,6 +8301,14 @@ def run_compact_analysis(analysis_id):
                     csconsole_customer_pulse=csconsole_customer_pulse,  # Round 23 / R22-NEXT-001
                     csconsole_success_priorities=csconsole_success_priorities,  # Round 23 / R22-NEXT-001
                     csconsole_adoption_barriers=csconsole_adoption_barriers,  # Round 23 / R22-NEXT-001
+                    # Round 46 / F-COMP-DQ-BANNER: forward partial-data
+                    # warnings into the fallback executive-report path so
+                    # the docx renders the banner even when the primary
+                    # ``create_executive_intelligence_report`` path fails.
+                    # ``partial_data_warnings`` is unconditionally bound
+                    # at L6687 in this OUTER ``run_compact_analysis`` scope
+                    # (R20-001 simplification: no presence guard needed).
+                    partial_data_warnings=partial_data_warnings,
                 )
                 logger.info(f"[EXEC-REPORT] SUCCESS: Enhanced Compact Report created: {exec_report_path}")
         except Exception as e:
@@ -18176,7 +18228,9 @@ def start_compact_analysis():
                 days = int(data.get('days', 90))
             except (ValueError, TypeError):
                 days = 90
-            csone_file = data.get('csone_file', '')
+            _json_csone = (data.get('csone_file') or '').strip()
+            if _json_csone:
+                csone_file_explicit = _json_csone
             subscription_id = (data.get('subscription_id') or '').strip()
             customer_name = (data.get('customer_name') or '').strip()
         else:
@@ -18189,9 +18243,8 @@ def start_compact_analysis():
                 days = 90
             subscription_id = (request.form.get('subscription_id') or '').strip()
             customer_name = (request.form.get('customer_name') or '').strip()
-            
+
             # Handle CSOne file upload
-            csone_file = None
             if 'csone_file' in request.files:
                 file = request.files['csone_file']
                 if file and file.filename:
@@ -18199,23 +18252,33 @@ def start_compact_analysis():
                     is_valid, error_msg = validate_file_upload(file)
                     if not is_valid:
                         return jsonify({'success': False, 'error': error_msg})
-                    
+
                     import uuid as _uuid
                     raw_name = secure_filename(file.filename)
                     filename = _r13_unique_upload_filename(_uuid, raw_name, file)
                     filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                     file.save(filepath)
-                    csone_file = filename
+                    csone_file_explicit = filename
                     logger.info(f"[[OK]] CSOne file saved: {filepath}")
-            
-            if not csone_file:
-                csone_file = request.form.get('csone_file', '')
-        # When no file: use most recent from OneDrive folder (macro places reports daily)
-        if not csone_file:
+
+            if not csone_file_explicit:
+                _form_csone = (request.form.get('csone_file') or '').strip()
+                if _form_csone:
+                    csone_file_explicit = _form_csone
+
+        # When no explicit file: use most recent from OneDrive folder
+        # (macro places reports daily).  ``csone_file_autopicked`` stays
+        # None when autodiscovery returns nothing so Phase 4's failure
+        # message can name "(autodiscovery searched <path>, found 0)".
+        csone_file_autopicked: Optional[str] = None
+        if not csone_file_explicit:
             latest = get_latest_csone_from_folder()
             if latest:
-                csone_file = latest  # Store full path
-        
+                csone_file_autopicked = latest
+
+        # Effective csone_file = explicit upload or autodiscovered fallback (or empty).
+        csone_file = csone_file_explicit or csone_file_autopicked or ''
+
         # Validate inputs: manager required only when no subscription/customer (single-customer mode doesn't use manager)
         has_single = bool(subscription_id or customer_name)
         if not has_single:
