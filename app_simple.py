@@ -421,6 +421,12 @@ from adoptiq_backend import fetch_subscription_data, search_subscriptions_by_cus
 
 # Import leader report functionality
 from leader_report_generator import generate_leader_report, LeaderReportGenerator
+# Round 44 / Phase 7: re-use the Round 42 / Phase 6 Markdown-chrome
+# stripper from the leader generator so renewal/customer-TAC bullets in
+# this module render free of leftover ``**bold**`` / ``__italic__``
+# emphasis markers.  Sourced from the same helper to keep the strip
+# semantics identical across reports.
+from leader_report_generator import _strip_markdown_chrome as _r44_strip_markdown_chrome
 # Round 15 / Phase 1.3: customer-facing column SSoT.  All Excel-writing
 # code paths in this module project sheets through this filter so we
 # stop leaking Salesforce/ETL plumbing into customer deliverables.
@@ -9977,8 +9983,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     ab_para = doc.add_paragraph()
     ab_para.add_run(f'Total Adoption Barriers: {ab_count}\n').bold = True
     ab_para.add_run(
-        'Source: CSConsole / Snowflake C360_CS_TASK_C_VW '
-        '[Field(s): SEVERITY_C, AB_STATUS_C, CREATED_DATE/CLOSED_DATE; Verification: Query by Record ID].\n'
+        # Round 44 / Phase 5: friendly the source-citation italics so
+        # director-level readers see business field labels instead of
+        # raw Snowflake _C-suffixed columns.  Underlying schema is
+        # documented in QUALITY_AUDIT.md / SNOWFLAKE_USAGE.md.
+        'Source: CSConsole / Snowflake adoption-barrier feed '
+        '[Field(s): Severity, Status, Created/Closed dates; Verification: Query by Record ID].\n'
     ).italic = True
     if portfolio_mode and all_customers and not customer_ab.empty:
         cust_col_ab = 'customer_name' if 'customer_name' in customer_ab.columns else ('BU_NAME' if 'BU_NAME' in customer_ab.columns else None)
@@ -10077,7 +10087,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if cust_label:
                 p.add_run(cust_label).bold = True
             p.add_run(f'TAC {case_num}: ').bold = True
-            p.add_run(str(title_text))
+            # Round 44 / Phase 7: strip residual Markdown chrome
+            # (``**bold**``, ``__italic__``) before rendering the TAC
+            # title.  The 2026-04-28 audited Build-20 renewal artifact
+            # rendered ``**Classic Calabrio***delete old report -
+            # Calabrio WFO# 00179474`` with the asterisks intact.
+            p.add_run(_r44_strip_markdown_chrome(title_text) or str(title_text))
             p.add_run(f' [Severity: {severity}, Status: {status}, Type: {case_type}{age_str}]').font.size = Pt(9)
     else:
         doc.add_paragraph('No support cases in the analysis period - this is a positive indicator.')
@@ -10413,8 +10428,11 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         cp_para = doc.add_paragraph()
         cp_para.add_run(f'Total Customer Pulse Records: {len(customer_customer_pulse)}\n').bold = True
         cp_para.add_run(
+            # Round 44 / Phase 5: friendly the source-citation italics
+            # so director-level readers see business field labels
+            # instead of raw Snowflake _C-suffixed columns.
             'Source: CSConsole '
-            '[Field(s): PULSE_RATING__C, COMMENTS__C, CREATED_DATE/CLOSED_DATE; Verification: Query by customer and record ID].\n'
+            '[Field(s): Pulse Rating, Comments, Created/Closed dates; Verification: Query by customer and record ID].\n'
         ).italic = True
         
         # Show pulse ratings

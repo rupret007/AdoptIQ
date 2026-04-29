@@ -182,6 +182,32 @@ def _main_app_host_port():
     except Exception:
         return '127.0.0.1', 5151
 
+
+def _live_main_url() -> str:
+    """Return the live main-app base URL, re-reading ``ADOPTIQ_MAIN_URL`` per call.
+
+    Round 44 / Phase 8: the dashboard's running-reports + verbose-debug
+    HTTP fetches USED to use the module-level ``MAIN_APP_URL`` constant
+    captured at import time (line ~125).  Round 37 / Phase 1 fixed the
+    socket-probe path (``_main_app_host_port`` re-reads the env per
+    call), but the two ``requests.get(f'{MAIN_APP_URL.rstrip("/")}...')``
+    sites still trusted the stale constant.  ``app_simple.py`` eagerly
+    imports this module from L157-161 to pull the audit helpers BEFORE
+    L210 sets ``os.environ["ADOPTIQ_MAIN_URL"]`` -- so the captured
+    constant stamps the unset default into ``MAIN_APP_URL``.  Audited
+    Build-20 dashboards rendered "n/a -- main app unreachable" in red
+    even when the main app was up and reachable, because the fetch was
+    going to the wrong port.  Mirroring ``_main_app_host_port``'s
+    re-read pattern here makes the env-pin defense-in-depth cover HTTP
+    fetches too.  Returns the URL with no trailing slash so callers can
+    safely concatenate ``f"{_live_main_url()}/api/..."``.
+    """
+    try:
+        live = os.environ.get('ADOPTIQ_MAIN_URL') or MAIN_APP_URL
+    except Exception:
+        live = MAIN_APP_URL
+    return (live or 'http://localhost:5151').rstrip('/')
+
 # Create Flask app for enhanced admin dashboard
 admin_app = Flask(__name__)
 _admin_secret = os.environ.get('ADOPTIQ_ADMIN_SECRET_KEY')
@@ -2955,11 +2981,20 @@ def enhanced_admin_dashboard():
     # Round 2 / Phase 2.2: track failed-vs-zero state.  An unreachable
     # main app must render "n/a" in the tile, not "0 running" which is
     # also a valid steady-state.
+    # Round 44 / Phase 8: route through ``_live_main_url()`` so the
+    # fetch URL re-reads ``ADOPTIQ_MAIN_URL`` per request.  The
+    # module-level ``MAIN_APP_URL`` constant is captured at import
+    # time, but ``app_simple.py`` imports this module from L157-161
+    # to pull the audit helpers BEFORE L210 sets the env -- so the
+    # constant stamps the unset default and the fetch goes to the
+    # wrong port, painting the dashboard's "Currently Running
+    # Reports" tile red ("n/a -- main app unreachable") even when
+    # the main app is up.
     running_reports = []
     running_reports_failed = False
     try:
         import requests
-        response = requests.get(f'{MAIN_APP_URL.rstrip("/")}/api/status/all', timeout=2)
+        response = requests.get(f'{_live_main_url()}/api/status/all', timeout=2)
         if response.status_code == 200:
             all_reports = response.json()
             running_reports = [r for r in all_reports if r.get('status') in ['running', 'starting']]
@@ -2973,7 +3008,10 @@ def enhanced_admin_dashboard():
     snowflake_query_count = 0
     snowflake_query_count_failed = False
     try:
-        debug_resp = requests.get(f'{MAIN_APP_URL.rstrip("/")}/api/debug/verbose', timeout=2)
+        # Round 44 / Phase 8: same live-env re-read as the
+        # running-reports fetch above.  Both endpoints live on the
+        # main app; if one is reachable the other is too.
+        debug_resp = requests.get(f'{_live_main_url()}/api/debug/verbose', timeout=2)
         if debug_resp.status_code == 200:
             debug_data = debug_resp.json()
             verbose_debug = bool(debug_data.get('verbose_debug'))

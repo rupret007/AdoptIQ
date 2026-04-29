@@ -147,6 +147,87 @@ def _ensure_inline_source_claim(
     return f"{claim} {format_inline_source(metric_name, fields=fields or [])}"
 
 
+# Round 44 / Phase 1: NaN-safe Days Open renderer for the compact TAC
+# lifecycle table.  Pre-Round-44 the table did
+# ``str(row.get('open_age_days', 'N/A'))`` -- when ``open_age_days``
+# was missing/NaN the cell rendered as the literal string ``"nan"``
+# (because ``str(float('nan')) == 'nan'``).  Audited Build-20 compact
+# output had 100% of the 20 sampled lifecycle rows render ``nan``, even
+# for rows whose ``open_date`` and ``closed_date`` were both populated
+# and parseable -- which means the upstream ``open_age_days`` column is
+# unreliable on the compact path and the renderer must backfill from
+# the dates instead of trusting it.
+def _format_open_age_days(row: Any) -> str:
+    """Return a display-safe Days Open value for a TAC lifecycle row.
+
+    Resolution order:
+      1. If ``open_age_days`` parses to a non-negative integer, use it.
+      2. Else, if ``open_date`` and ``closed_date`` are both parseable
+         datetimes, render ``max(0, (closed - opened).days)``.
+      3. Else, if only ``open_date`` is parseable, render the count of
+         days from opened to today (UTC) -- still "open" at audit time.
+      4. Else, return ``"\u2014"`` (em-dash).  Never returns the literal
+         string ``"nan"``.
+    """
+    try:
+        raw = row.get('open_age_days', None)
+    except Exception:
+        raw = None
+    if raw is not None:
+        try:
+            if not (isinstance(raw, float) and pd.isna(raw)):
+                if pd.notna(raw):
+                    val = int(float(raw))
+                    if val >= 0:
+                        return str(val)
+        except (ValueError, TypeError):
+            pass
+
+    def _coerce_dt(value: Any):
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+        try:
+            ts = pd.to_datetime(value, errors='coerce', utc=False)
+        except Exception:
+            return None
+        if ts is None or pd.isna(ts):
+            return None
+        return ts
+
+    try:
+        opened = _coerce_dt(row.get('open_date', row.get('Date/Time Opened', None)))
+    except Exception:
+        opened = None
+    try:
+        closed = _coerce_dt(row.get('closed_date', None))
+    except Exception:
+        closed = None
+
+    if opened is not None and closed is not None:
+        try:
+            delta_days = (closed - opened).days
+            return str(max(0, int(delta_days)))
+        except Exception:
+            pass
+
+    if opened is not None:
+        try:
+            now_utc = pd.Timestamp.utcnow()
+            opened_naive = opened.tz_localize(None) if getattr(opened, 'tzinfo', None) is not None else opened
+            now_naive = now_utc.tz_localize(None) if getattr(now_utc, 'tzinfo', None) is not None else now_utc
+            delta_days = (now_naive - opened_naive).days
+            return str(max(0, int(delta_days)))
+        except Exception:
+            pass
+
+    return "\u2014"
+
+
 class ExecutiveIntelligenceFormatter:
     """
     Executive Intelligence Formatter for compact, insight-driven reports.
@@ -421,7 +502,11 @@ class ExecutiveIntelligenceFormatter:
                 "Total Customers",
                 total_customers,
                 "Derived Metric",
-                fields=["BU_NAME", "customer_name", "ACCOUNT_ID_C"],
+                # Round 44 / Phase 6: friendly field labels so the
+                # source-citation paragraph shows business names
+                # (Customer Name, Account ID) instead of raw
+                # Snowflake _C-suffixed columns.
+                fields=["Customer Name", "Account ID"],
                 source_override="Normalized customer set from team subscriptions + CSConsole + CSOne",
                 verification_override="Cross-check customer IDs/names in source exports",
             ),
@@ -566,7 +651,10 @@ class ExecutiveIntelligenceFormatter:
             "Customer Pulse uses CSConsole pulse ratings (Red/Amber/Green) and recency, not TAC severity."
         )
         provenance.add_run(
-            f" {format_inline_source('Derived Metric', fields=['Severity', 'PULSE_RATING__C', 'CREATEDDATE'])}"
+            # Round 44 / Phase 6: friendly field labels (Pulse Rating,
+            # Created Date) instead of raw Snowflake _C-suffixed
+            # columns.  Severity already uses the friendly form.
+            f" {format_inline_source('Derived Metric', fields=['Severity', 'Pulse Rating', 'Created Date'])}"
         )
     
     def _parse_and_add_content(self, text: str):
@@ -910,7 +998,11 @@ class ExecutiveIntelligenceFormatter:
                 lifecycle_table.rows[ridx].cells[2].text = str(row.get('case_status_norm', row.get('Status', 'N/A')))
                 lifecycle_table.rows[ridx].cells[3].text = str(row.get('open_date', row.get('Date/Time Opened', 'N/A')))
                 lifecycle_table.rows[ridx].cells[4].text = str(row.get('closed_date', 'N/A'))
-                lifecycle_table.rows[ridx].cells[5].text = str(row.get('open_age_days', 'N/A'))
+                # Round 44 / Phase 1: route Days Open through the
+                # NaN-safe helper so the cell never renders the
+                # literal string "nan" when ``open_age_days`` is
+                # missing/NaN.  Backfills from open/closed dates.
+                lifecycle_table.rows[ridx].cells[5].text = _format_open_age_days(row)
                 lifecycle_table.rows[ridx].cells[6].text = str(row.get('case_type_class', 'unknown'))
             # Truncation disclosure: tell the reader when only a sample is shown
             # so the table never silently under-reports lifecycle coverage.

@@ -585,7 +585,12 @@ class CompactReportFormatter:
                     "Total Customers",
                     total_customers,
                     "Derived Metric",
-                    fields=["BU_NAME", "customer_name", "ACCOUNT_ID_C"],
+                    # Round 44 / Phase 6: friendly field labels so the
+                    # source-citation paragraph shows business names
+                    # (Customer Name, Account ID) instead of raw
+                    # Snowflake _C-suffixed columns.  Underlying
+                    # schema is documented in QUALITY_AUDIT.md.
+                    fields=["Customer Name", "Account ID"],
                     source_override="Normalized customer set from team subscriptions + CSConsole + CSOne",
                     verification_override="Cross-check customer IDs/names in source exports",
                 ),
@@ -685,7 +690,10 @@ class CompactReportFormatter:
                 # FIXED: Show ALL concerns
                 for i, concern in enumerate(concerns, 1):
                     concerns_p.add_run(
-                        f"{i}. {_ensure_inline_source_claim(concern, 'Derived Metric', fields=['customer_name', 'ACCOUNT_ID_C'])}\n"
+                        # Round 44 / Phase 6: friendly field labels
+                        # (Customer Name / Account ID) instead of raw
+                        # Snowflake _C-suffixed columns.
+                        f"{i}. {_ensure_inline_source_claim(concern, 'Derived Metric', fields=['Customer Name', 'Account ID'])}\n"
                     )
             else:
                 concerns_p.add_run('✅ No critical concerns identified in this analysis period.\n')

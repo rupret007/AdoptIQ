@@ -5176,8 +5176,14 @@ class LeaderReportGenerator:
             subject = item.get('subject', 'N/A')
             if subject is None or subject == '':
                 subject = 'N/A'
-            # FIXED: No truncation - show full subject for verification
-            row_cells[2].text = str(subject)
+            # Round 44 / Phase 7: strip residual Markdown chrome
+            # (``**bold**``, ``__italic__``) before rendering.  Round
+            # 42 / Phase 6 wired the helper at the AB / AP / CP body-
+            # bullet sites but missed this per-engagement Subject/Title
+            # cell, so titles like ``**Classic Calabrio***delete old
+            # report`` rendered with the asterisks intact in the
+            # 2026-04-28 audited Build-20 leader artifact.
+            row_cells[2].text = _strip_markdown_chrome(subject) or 'N/A'
             if row_cells[2].paragraphs and row_cells[2].paragraphs[0].runs:
                 row_cells[2].paragraphs[0].runs[0].font.size = Pt(8)
             
@@ -6098,8 +6104,11 @@ class LeaderReportGenerator:
             subject = item.get('subject', item.get('title', 'N/A'))
             if subject is None or subject == '':
                 subject = 'N/A'
-            # FIXED: Show full subject for data verification
-            row_cells[1].text = str(subject)
+            # Round 44 / Phase 7: strip residual Markdown chrome before
+            # rendering (mirrors the per-engagement Subject/Title cell
+            # above; same root cause).  See _strip_markdown_chrome
+            # docstring for the patterns matched.
+            row_cells[1].text = _strip_markdown_chrome(subject) or 'N/A'
             if row_cells[1].paragraphs and row_cells[1].paragraphs[0].runs:
                 row_cells[1].paragraphs[0].runs[0].font.size = Pt(9)
             
@@ -7050,7 +7059,10 @@ class LeaderReportGenerator:
                         )
                         if insights['account'].get('sources'):
                             source = insights['account']['sources'][0]
-                            self.doc.add_paragraph(f"  Source: {source['table']} ({source['records_found']} records)")
+                            # Round 44 / Phase 4: friendly the raw Snowflake
+                            # table identifier so directors see a business
+                            # label instead of ``EDW_SALES_ETL_DB.SS.*``.
+                            self.doc.add_paragraph(f"  Source: {_friendly_source_label(source['table'])} ({source['records_found']} records)")
 
                     if insights.get('contract', {}).get('contract_data'):
                         contract_data = insights['contract']['contract_data']
@@ -7060,7 +7072,9 @@ class LeaderReportGenerator:
                         )
                         if insights['contract'].get('sources'):
                             source = insights['contract']['sources'][0]
-                            self.doc.add_paragraph(f"  Source: {source['table']} ({source['records_found']} records)")
+                            # Round 44 / Phase 4: friendly the raw Snowflake
+                            # table identifier (see Account Summary above).
+                            self.doc.add_paragraph(f"  Source: {_friendly_source_label(source['table'])} ({source['records_found']} records)")
 
                     engagement = insights.get('engagement', {})
                     if engagement.get('action_plans'):
@@ -7083,7 +7097,11 @@ class LeaderReportGenerator:
                     if engagement.get('sources'):
                         self.doc.add_paragraph("  Sources:")
                         for source in engagement['sources']:
-                            self.doc.add_paragraph(f"    - {source['table']}: {source['records_found']} records")
+                            # Round 44 / Phase 4: friendly the raw Snowflake
+                            # table identifier so the per-CSSM engagement
+                            # bullets show "CSConsole Customer Pulse"
+                            # instead of "EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C".
+                            self.doc.add_paragraph(f"    - {_friendly_source_label(source['table'])}: {source['records_found']} records")
                             self.doc.add_paragraph(f"      Verification: {source['verification_method']}")
                 
             except Exception as e:
