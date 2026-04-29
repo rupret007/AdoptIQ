@@ -865,10 +865,11 @@ ADOPTIQ_VERSION = "1.0.4"
 #     that the spans themselves are not deleted.
 #
 # 6 new R50 regression tests across the 2 fixes (1 P0 + 1 P1);
-# 3268 total green.  No upstream Snowflake query changes,
-# no boot-order / corpus / admin-console changes ship in
-# Build26.
-ADOPTIQ_BUILD = "26"  # Round 50
+# 3268 total green.
+# Round 52.1 / Build28 ships the visible Admin Console Reset corpus
+# control and hardens the Mac packaging wrapper so the final richer DMG
+# is signed and accompanied by build_info.txt in the staging mirror.
+ADOPTIQ_BUILD = "28"  # Round 52.1
 
 def version_string():
     """e.g. 'v1.0.1 build 1'"""

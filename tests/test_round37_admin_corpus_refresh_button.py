@@ -7,6 +7,11 @@ incremental + Rebuild).  Round 37 renames "Run incremental" -> "Re-
 index now" (matches the analyze-page panel labelling) and disables
 both buttons during an active index pass so the operator cannot
 stack refresh requests.
+
+Round 52.1 / Build28 adds the visible Reset corpus button to the same
+Admin Console tile.  The route already existed since Round 39; this
+file pins that the UI now exposes it with CSRF, confirmation, and the
+same busy-state disable contract.
 """
 
 # ruff: noqa: E501
@@ -166,6 +171,66 @@ def test_rebuild_button_also_disabled_when_in_progress(admin_client):
     assert "disabled" in btn_tag, (
         f"Rebuild button must also be disabled during an active "
         f"index pass; got: {btn_tag!r}"
+    )
+
+
+def test_reset_corpus_button_visible_and_confirm_gated(admin_client):
+    """Round 52.1 / Build28: the Admin Console must expose the existing
+    /corpus_reset proxy so operators can recover a broken encrypted
+    corpus without asking users to find the hidden analyze-page button."""
+    client = admin_client(_baseline_payload(in_progress=False))
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+
+    assert "Reset corpus" in body, (
+        "Admin Intelligence tile must render a visible Reset corpus button."
+    )
+    assert 'action="/corpus_reset"' in body, (
+        "Reset corpus button must POST to the existing /corpus_reset proxy."
+    )
+    assert 'name="_admin_csrf"' in body, (
+        "Reset corpus form must carry the admin CSRF input."
+    )
+    assert "Reset the local encrypted corpus cache" in body, (
+        "Reset corpus form must confirm before replacing the encrypted cache."
+    )
+
+
+def test_reset_corpus_button_disabled_when_in_progress(admin_client):
+    """Reset is destructive enough that it must not be available while
+    an index pass is already running."""
+    client = admin_client(_baseline_payload(in_progress=True))
+    resp = client.get("/")
+    body = resp.get_data(as_text=True)
+
+    btn_match = re.search(
+        r'<button[^>]*?>\s*Reset corpus\s*</button>',
+        body,
+        re.DOTALL,
+    )
+    assert btn_match, "Reset corpus button not found in rendered HTML"
+    btn_tag = btn_match.group(0)
+    assert "disabled" in btn_tag, (
+        f"Reset corpus button must be disabled during an active index pass; "
+        f"got: {btn_tag!r}"
+    )
+
+
+def test_reset_corpus_button_enabled_when_idle(admin_client):
+    client = admin_client(_baseline_payload(in_progress=False))
+    resp = client.get("/")
+    body = resp.get_data(as_text=True)
+
+    btn_match = re.search(
+        r'<button[^>]*?>\s*Reset corpus\s*</button>',
+        body,
+        re.DOTALL,
+    )
+    assert btn_match
+    btn_tag = btn_match.group(0)
+    assert "disabled" not in btn_tag, (
+        f"Reset corpus button is incorrectly disabled while idle: {btn_tag!r}"
     )
 
 

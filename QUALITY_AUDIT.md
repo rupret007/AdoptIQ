@@ -1783,6 +1783,141 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 
 **Trailer:** Made-with: Cursor
 
+## Round 52.1 — handoff 2026-04-29
+
+**What changed (plain English):**
+- Added a visible, confirm-gated **Reset corpus** button to the Admin Console **AdoptIQ Intelligence** tile. It posts to the existing CSRF-protected `/corpus_reset` admin proxy and is disabled while indexing is already in progress.
+- Hardened `build_mac_dmg.sh` so the final richer drag-to-Applications DMG is signed and verified after creation, before any mirror copy.
+- Restored the Mac `build_info.txt` payload by writing `OUTBOX/build_info.txt` with version/build/timestamp/artifact metadata before staging mirror sync.
+- Added a short OneDrive loose-app signing retry loop so the mirrored `AdoptIQ.app` strips OneDrive xattrs, re-signs, and verifies after a brief settle period.
+- Updated release metadata/docs for `v1.0.4 build 28` and built/staged the Build 28 Mac DMG to repo OUTBOX plus both OneDrive destinations.
+
+**Files touched:**
+- `enhanced_admin_dashboard_v2.py` — added the visible Reset corpus admin form in the Intelligence tile.
+- `build_mac_dmg.sh` — signs/verifies the final DMG, writes Mac build_info metadata, and retries OneDrive loose-app signing.
+- `README.md` — added Build 28 release notes and updated the build example.
+- `config.py` — advanced `ADOPTIQ_BUILD` to `28`.
+- `tests/test_round37_admin_corpus_refresh_button.py` — added Admin Console Reset corpus UI regression tests.
+- `tests/test_round52_build28_release.py` — added packaging/source-shape regression tests for final DMG signing, build_info, OneDrive app signing retry, and admin reset form source.
+- `QUALITY_AUDIT.md` — this handoff block.
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_round37_admin_corpus_refresh_button.py::test_reset_corpus_button_visible_and_confirm_gated` — pins visible admin reset button, `/corpus_reset` target, CSRF field, and confirmation copy.
+- `tests/test_round37_admin_corpus_refresh_button.py::test_reset_corpus_button_disabled_when_in_progress` — pins reset disabled state during active indexing.
+- `tests/test_round37_admin_corpus_refresh_button.py::test_reset_corpus_button_enabled_when_idle` — pins reset enabled state when idle.
+- `tests/test_round52_build28_release.py::test_build_mac_dmg_signs_final_richer_dmg_before_mirroring` — pins final DMG sign/verify before mirror copies.
+- `tests/test_round52_build28_release.py::test_build_mac_dmg_writes_build_info_before_staging_copy` — pins Mac `build_info.txt` creation before staging copy.
+- `tests/test_round52_build28_release.py::test_build_mac_dmg_retries_onedrive_app_signing` — pins retry/settle loop for OneDrive loose-app signing.
+- `tests/test_round52_build28_release.py::test_admin_intelligence_tile_has_visible_reset_corpus_form` — source-shape sanity for the admin reset affordance.
+
+**Verify status:**
+- `bash -n build_mac_dmg.sh` — pass
+- Focused tests: `python3 -m pytest tests/test_round37_admin_corpus_refresh_button.py tests/test_round39_reset_corpus_endpoint.py tests/test_round52_build28_release.py -v` — 25 passed
+- `make verify` — pass
+- pytest: 3288 passed / 2 skipped
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- Build command: `ADOPTIQ_VERSION=1.0.4 ADOPTIQ_BUILD=28 bash build_mac_dmg.sh` — pass
+- DMG SHA-256: `1d8c7de21da358ec3a92adf1e78f7fd773a455c85e855a47130b2b67a27bb783` in all three destinations
+- Signature checks: local `OUTBOX/AdoptIQ.app`, local DMG, OneDrive OUTBOX DMG, staging DMG, and OneDrive loose `AdoptIQ.app` all pass `codesign --verify`
+- Build metadata: `OUTBOX/build_info.txt` and staging `build_info.txt` both report `AdoptIQ v1.0.4 build 28`.
+
+**Hot spots Claude should audit first:**
+1. `build_mac_dmg.sh::ditto_or_die` — the OneDrive loose-app signing retry loop strips xattrs, re-signs, sleeps, strips again, then verifies. Confirm the retry/sleep balance is enough without making builds unnecessarily slow.
+2. `enhanced_admin_dashboard_v2.py` Intelligence tile — the new Reset corpus button is intentionally always visible, not only on crypto errors. Confirm that is the desired operator-support UX.
+3. `build_mac_dmg.sh` final DMG signing — now pinned by test, but still uses ad-hoc signing (`-`) like the rest of this local Mac build pipeline.
+
+**Known deferrals (intentional non-fixes):**
+- Built-app HTTP 200 smoke was not run after packaging to avoid launching another local Flask instance over the user's active app state. Metadata, image, checksum, and code-signature checks were run instead.
+- The reset button was added to the Admin Console only. The analyze-page hidden crypto-only button remains unchanged.
+- No Windows build was run in this Mac release pass.
+
+**Trailer:** Made-with: Cursor
+
+## Round 52 — handoff 2026-04-29
+
+**What changed (plain English):**
+- Strengthened the live report iteration harness from smoke-level artifact checks into a stricter semantic auditor: `--strict` now raises lexical/sheet/header thresholds, adds DOCX numeric-token drift diagnostics, compares XLSX row-count deltas, and records detailed diff deltas in metadata.
+- Added cross-artifact KPI extraction and per-run `.kpis.json` sidecars in `~/Downloads`; DOCX/XLSX KPI parity now flags real common-KPI mismatches while treating no-common extraction coverage as a diagnostic rather than a false product failure.
+- Added richer debug metadata: app version/build, Python/platform/git SHA, threshold settings, partial-data warning summaries, failure phase/exception type, and broader log lookup across `~/.adoptiq` plus macOS Application Support.
+- Ran strict live testing: one calibrated strict pass succeeded across all four scenarios, and a three-iteration strict repeatability run succeeded across 12 live report generations.
+
+**Files touched:**
+- `report_iteration_loop.py` — strict diff gates, scenario-specific expected sheets, KPI extraction/parity sidecars, environment/threshold metadata, failure diagnostics, broader log probing, and calibrated numeric fingerprinting.
+- `tests/test_round51_report_iteration_loop.py` — expanded from 5 to 11 tests covering strict numeric drift, XLSX row-count drift, missing expected sheets, KPI parity extraction, strict threshold preset, and local HTTP CSRF/session cookie handling.
+- `QUALITY_AUDIT.md` — this Round 52 handoff.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round51_report_iteration_loop.py::test_round51_strict_docx_numeric_drift_fails_even_when_words_match` — strict DOCX comparison catches changed business-scale numbers even when words match.
+- `tests/test_round51_report_iteration_loop.py::test_round51_strict_xlsx_row_count_drift_is_reported` — strict XLSX comparison reports/fails row-count drift on matching sheets/headers.
+- `tests/test_round51_report_iteration_loop.py::test_round51_xlsx_structure_requires_expected_sheets` — structural gate fails when required scenario sheets are absent.
+- `tests/test_round51_report_iteration_loop.py::test_round51_kpi_sidecar_extracts_and_compares_docx_xlsx_values` — KPI extraction maps DOCX/XLSX aliases to common canonical keys and passes parity when values agree.
+- `tests/test_round51_report_iteration_loop.py::test_round51_build_runner_config_strict_raises_thresholds` — strict preset raises fuzzy thresholds.
+- `tests/test_round51_report_iteration_loop.py::test_round51_local_http_headers_forward_secure_session_cookie` — pins the loopback HTTP CSRF/session cookie fix.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 3284 passed / 2 skipped
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `report_iteration_loop.py::_numeric_fingerprint` — Round 52 filters numeric strings with 5+ digits as volatile IDs. This prevents BEMS/case IDs from breaking repeatability, but future KPI fields with 5+ digit values (large ARR/customer totals) would need explicit KPI-sidecar coverage.
+2. `report_iteration_loop.py::extract_docx_kpis` / `extract_xlsx_kpis` — KPI parity is intentionally conservative and alias-driven. Compact gained better common coverage with `Total Customers Analyzed`, but renewal/leader still often report no common KPI keys because their XLSX layouts are row-detail heavy.
+3. `report_iteration_loop.py::compare_kpi_parity` — no-common KPI parity is diagnostic-pass, not strict-fail. This avoids false failures from extractor coverage gaps but should be revisited once scenario-specific extractors mature.
+
+**Known deferrals (intentional non-fixes):**
+- Product data warnings remain real and repeatable: comprehensive/compact both surface `adoption_barriers` `schema_drift` on missing customer slot; comprehensive also repeats the blocked `EDW_SALES_ETL_DB.SS.ESA_C360_CS_TASK__C` column introspection warning; renewal repeats `subscriptions` `schema_drift` on missing ARR slot.
+- No curated baseline manifest yet; baseline mode still uses latest matching Downloads artifacts.
+- No server auto-start/stop; runner still assumes the app is already listening on `http://127.0.0.1:5151`.
+
+**Trailer:** Made-with: Cursor
+
+## Round 51 — handoff 2026-04-29
+
+**What changed (plain English):**
+- Added a live regression harness that repeatedly runs the four canonical scenarios (comprehensive, compact, renewal portfolio, leader) through the real Flask endpoints, polls `/status/<analysis_id>`, downloads artifacts, and evaluates operational + structural + baseline-diff gates using files in `~/Downloads`.
+- Added debug-first artifact packaging for each scenario run: copied outputs keep the existing AdoptIQ filename stem and append a deterministic `__data-loop-...__scenario-...__ts-...` suffix, with per-scenario `.meta.json` and `.log` sidecars for troubleshooting.
+- Fixed local CSRF/session behavior for loopback HTTP by explicitly forwarding the Flask `session` cookie in runner headers (the app sets `session; Secure`, so default `requests` cookie handling would otherwise suppress it on `http://127.0.0.1` and cause `CSRF validation failed`).
+- Executed one full live cycle (`--run-id round51live`) against the running app on `:5151`; all four scenarios completed with pass=true and baseline matches selected from Downloads.
+
+**Files touched:**
+- `report_iteration_loop.py` — new Round 51 harness module (scenario map, live runner, status polling, artifact download, structural/baseline validation, metadata/log sidecars, CLI).
+- `scripts/run_report_iteration_loop.py` — new wrapper entrypoint so operators can run `python3 scripts/run_report_iteration_loop.py`.
+- `tests/test_round51_report_iteration_loop.py` — new regression tests for scenario mapping, CSRF token parsing, debug filename convention, baseline selection, and docx/xlsx structural + diff checks.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round51_report_iteration_loop.py::test_round51_scenario_map_matches_requested_matrix` — pins the four canonical live scenarios and payload defaults.
+- `tests/test_round51_report_iteration_loop.py::test_round51_extract_csrf_and_debug_filename` — pins CSRF meta extraction and debug-suffix filename convention.
+- `tests/test_round51_report_iteration_loop.py::test_round51_baseline_selection_uses_latest_matching_file` — pins Downloads baseline auto-pick behavior and filtering.
+- `tests/test_round51_report_iteration_loop.py::test_round51_docx_structural_and_baseline_diff` — pins docx structure gate and docx baseline similarity gate.
+- `tests/test_round51_report_iteration_loop.py::test_round51_xlsx_structural_and_baseline_diff` — pins xlsx structure gate and xlsx baseline comparison thresholds.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 3275 passed / 2 skipped
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `report_iteration_loop.py` (`bootstrap_session` + `_headers`) — verify the explicit `Cookie: session=...` forwarding is the safest/least-surprising way to support local HTTP while preserving CSRF checks.
+2. `report_iteration_loop.py` baseline matching (`_filename_matches_scenario` / `select_latest_baseline`) — confirm token heuristics are resilient if naming conventions evolve (especially comprehensive vs compact overlap).
+
+**Known deferrals (intentional non-fixes):**
+- Baseline mode currently supports `latest` only — no curated/fixed-snapshot mode yet.
+- Live runner assumes a running app on `:5151` and does not yet auto-start/stop the server process.
+
+**Trailer:** Made-with: Cursor
+
 ## Round 50.1 — handoff 2026-04-29
 
 **What changed (plain English):**
@@ -6205,6 +6340,52 @@ Round 47 / Build24 closed the four demo-blocking P0 dual-truths.  Round 48 / Bui
 - A consolidated `add_partial_data_warning_banner` helper across all five Word renderers (carried over from R49).
 
 **Pre-flight steps from Round 45 still apply:** before scoping any Round 51+ code change, confirm the user's running build via `defaults read /Applications/AdoptIQ.app/Contents/Info.plist CFBundleVersion`. The user's last reproducer was on the live `python app_simple.py` dev process (port 5151), not a packaged `.app` — so source matches the live process for this round. The next packaged build needs `bash build_mac_dmg.sh` to roll the Round 50 fix into the DMG.
+
+**Trailer:** Made-with: Cursor
+
+## Round 51.1 — handoff 2026-04-29
+
+**What changed (plain English):**
+- Packaged the Round 51 report-iteration harness into the next Mac release artifact as `v1.0.4 build 27`.
+- Updated the top-level README release notes so Build 27 documents the live four-scenario harness and the current AdoptIQ Intelligence reset-corpus support state.
+- Bumped the local build metadata from 26 to 27 before packaging; `build_mac_dmg.sh` then regenerated `version_info.txt` and the frozen app Info.plist with `CFBundleVersion=27`.
+- Built and staged `AdoptIQ-v1.0.4-build27.dmg` to the repo OUTBOX, OneDrive OUTBOX, and Mac staging OUTBOX. The final richer DMG was ad-hoc signed after creation and re-copied to both mirrors so all three DMGs have the same SHA-256.
+
+**Files touched:**
+- `README.md` — added Build 27 release notes and updated the footer example from build 26 to build 27.
+- `config.py` — advanced `ADOPTIQ_BUILD` to `27` with a Round 51 packaging note.
+- `version_info.txt` — regenerated by the build script as `1.0.4 / 27` (generated metadata; do not commit if ignored locally).
+- `OUTBOX/AdoptIQ-v1.0.4-build27.dmg` — generated Mac DMG artifact.
+- `OUTBOX/README.md` — generated README copy staged by the build script.
+- `OUTBOX/AdoptIQ.app` — generated signed app bundle staged by the build script.
+- OneDrive mirrors under `AI Projects/OUTBOX/AdoptIQ` and `AI Projects/Staging/AdoptIQ_MAC/OUTBOX` — refreshed release artifacts.
+- `QUALITY_AUDIT.md` — this handoff block.
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- none — this packaging pass reused the Round 51 tests already added in `tests/test_round51_report_iteration_loop.py`.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 3281 passed / 2 skipped
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- Focused tests: `python3 -m pytest tests/test_round51_report_iteration_loop.py tests/test_round39_reset_corpus_endpoint.py tests/test_round39_intel_status_panel_reset_button.py -v` — 29 passed
+- Build command: `ADOPTIQ_VERSION=1.0.4 ADOPTIQ_BUILD=27 bash build_mac_dmg.sh` — pass
+- DMG SHA-256: `1295c52330b6a39a7be9f81246146dea745b532a5a15c68b1c4fc4c23fd64a26` in all three destinations
+- Signature checks: local `OUTBOX/AdoptIQ.app`, local DMG, OneDrive OUTBOX DMG, staging DMG, and OneDrive loose `AdoptIQ.app` all pass `codesign --verify`
+
+**Hot spots Claude should audit first:**
+1. `build_mac_dmg.sh` final-DMG signing — the script signs the lean DMG from `build_mac.sh`, then recreates the richer DMG and does not sign it. This build manually signed the final DMG after the script completed and re-copied it to both mirrors; the script should be fixed so the manual step is not needed.
+2. `build_mac_dmg.sh` staging `build_info.txt` path — comments and echo output still claim the staging mirror receives `build_info.txt`, but the Mac script removes `OUTBOX/build_info.txt` and never recreates it, so no build-info file was present in the final Mac staging mirror.
+3. Admin Console corpus reset UX — backend/admin reset routes exist, but the Admin Console tile still lacks a visible Reset corpus button. Build 27 documents the current state only; it does not add the UI button.
+
+**Known deferrals (intentional non-fixes):**
+- Built-app HTTP 200 smoke was not run after packaging to avoid launching another local Flask instance over the user's active app state. Metadata, image, checksum, and code-signature checks were run instead.
+- The `build_mac_dmg.sh` signing/build-info drift is documented above but not fixed in this packaging pass.
+- The visible Admin Console Reset corpus button remains queued as the next UI follow-up.
 
 **Trailer:** Made-with: Cursor
 

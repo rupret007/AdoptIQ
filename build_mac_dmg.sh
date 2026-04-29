@@ -188,6 +188,26 @@ hdiutil create -volname "AdoptIQ" -srcfolder "$STAGING_DIR" -ov -format UDZO "$D
 
 echo "Created DMG: $DMG_PATH"
 
+# Round 52.1 / Build28: ``build_mac.sh`` signs its lean DMG, but this
+# wrapper replaces it with the richer drag-to-Applications DMG above.
+# Sign and verify the final artifact BEFORE any mirror copy so every
+# staged DMG is the release-ready signed file.
+echo "Signing final DMG: $DMG_PATH"
+codesign --force --sign - --timestamp=none "$DMG_PATH"
+codesign --verify --strict "$DMG_PATH"
+
+# Round 52.1 / Build28: the staging mirror contract has long advertised
+# build_info.txt, but the Mac path removed the file in build_mac.sh and
+# never recreated it.  Keep this small metadata file outside the DMG and
+# mirror it with the release payload for operators.
+BUILD_INFO_PATH="OUTBOX/build_info.txt"
+{
+  echo "AdoptIQ v${VERSION} build ${BUILD}"
+  echo "Built: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  echo "Artifact: $(basename "$DMG_PATH")"
+} > "$BUILD_INFO_PATH"
+echo "Wrote build info: $BUILD_INFO_PATH"
+
 # ---------------------------------------------------------------------------
 # Mirror release artifacts to OneDrive.
 #
@@ -274,13 +294,25 @@ ditto_or_die() {
     echo "       Then re-run ./build_mac_dmg.sh."
     exit 1
   fi
-  xattr -cr "$dest" 2>/dev/null || true
-  if ! codesign --force --deep --sign - --timestamp=none "$dest" >/dev/null 2>&1; then
-    echo "WARNING: Failed to re-codesign $dest. The .app may not launch from"
-    echo "         this OneDrive folder. Users should install via the DMG or"
-    echo "         drag the .app to /Applications first."
-  elif ! codesign --verify --deep --strict "$dest" >/dev/null 2>&1; then
-    echo "WARNING: codesign --verify failed on $dest after re-signing."
+  # Round 52.1 / Build28: OneDrive can inject xattrs shortly after the
+  # copy finishes.  Give it a few settle/retry passes so the loose app
+  # mirror is verifiable too, not just the canonical signed DMG.
+  local signed_ok=0
+  local i
+  for i in 1 2 3; do
+    xattr -cr "$dest" 2>/dev/null || true
+    if codesign --force --deep --sign - --timestamp=none "$dest" >/dev/null 2>&1; then
+      sleep "$i"
+      xattr -cr "$dest" 2>/dev/null || true
+      if codesign --verify --deep --strict "$dest" >/dev/null 2>&1; then
+        signed_ok=1
+        break
+      fi
+    fi
+    sleep "$i"
+  done
+  if [[ "$signed_ok" != "1" ]]; then
+    echo "WARNING: Failed to produce a verifiable signature on $dest."
     echo "         OneDrive may be re-injecting xattrs. Users should install"
     echo "         via the DMG or drag the .app to /Applications first."
   fi

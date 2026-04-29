@@ -2708,7 +2708,13 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                now" (matches the analyze-page corpus panel labelling)
                and disable both buttons while ``boot.in_progress`` is
                true so the operator cannot stack refresh requests on
-               an active index pass. #}
+               an active index pass.
+
+               Round 52.1 / Build28: expose the existing ``/corpus_reset``
+               admin proxy as a visible operator escape hatch.  It is
+               deliberately confirm-gated and disabled while indexing,
+               because it replaces the user's local encrypted corpus
+               cache from the bundled snapshot. #}
             {% set _corpus_busy = corpus_status.boot.in_progress %}
             <form method="POST" action="/corpus_refresh" style="display:inline;">
                 <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
@@ -2726,6 +2732,15 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                         {% if _corpus_busy %}disabled{% endif %}
                         title="{% if _corpus_busy %}Indexing already in progress{% else %}Discard the encrypted cache and rebuild from scratch{% endif %}">
                     Rebuild
+                </button>
+            </form>
+            <form method="POST" action="/corpus_reset" style="display:inline;"
+                  onsubmit="return confirm('Reset the local encrypted corpus cache from the bundled snapshot? This preserves a broken copy for troubleshooting and may start a refresh.');">
+                <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
+                <button type="submit" class="btn btn-danger"
+                        {% if _corpus_busy %}disabled{% endif %}
+                        title="{% if _corpus_busy %}Indexing already in progress{% else %}Replace the local encrypted corpus cache from the bundled snapshot{% endif %}">
+                    Reset corpus
                 </button>
             </form>
         </div>

@@ -1,8 +1,26 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 26).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 28).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 28 (Round 52.1 — Admin reset control + Mac packaging hardening)
+
+Build 28 closes the operator-support and packaging follow-ups discovered during the Build 27 release pass. It makes the corpus reset escape hatch visible in the Admin Console and fixes the Mac DMG script so the generated artifact is signed and accompanied by build metadata without manual post-build steps.
+
+- **Visible Admin Console Reset corpus button.** The **AdoptIQ Intelligence** tile now shows a confirm-gated **Reset corpus** button next to **Re-index now** and **Rebuild**. It posts to the existing CSRF-protected `/corpus_reset` admin proxy and is disabled while indexing is already in progress, giving operators a clear recovery path for encrypted-corpus crypto failures.
+- **Final DMG signed by the build script.** `build_mac_dmg.sh` now signs and verifies the richer drag-to-Applications DMG after it replaces the lean DMG from `build_mac.sh`, then mirrors that signed artifact to both OneDrive destinations.
+- **Mac `build_info.txt` restored.** The Mac build wrapper now writes `OUTBOX/build_info.txt` with version, build, timestamp, and artifact name before staging, so the Mac staging folder matches the documented payload contract.
+- **Regression coverage.** Build 28 adds tests for the admin reset UI and Mac packaging source contracts so these release-path fixes stay pinned.
+
+### What's New in Build 27 (Round 51 — Live report iteration harness + corpus reset guidance)
+
+Build 27 carries the Round 51 live regression harness used to repeatedly exercise the four canonical report flows against a running local app, download the generated Word/Excel artifacts, and compare them against the latest matching local baselines. It also documents the current AdoptIQ Intelligence reset behavior so support/debug conversations are aligned with the UI that shipped in Build 26.
+
+- **Live four-scenario report loop.** `report_iteration_loop.py` and `scripts/run_report_iteration_loop.py` can run comprehensive, compact, renewal portfolio, and leader reports through the real Flask endpoints, poll `/status/<analysis_id>`, download artifacts, and write deterministic debug copies plus `.meta.json` / `.log` sidecars into `~/Downloads`.
+- **Artifact structure and baseline gates.** The harness validates generated `.docx` / `.xlsx` files structurally, extracts key report metrics, and compares against the latest matching local baseline using scenario-aware filename heuristics. The Round 51 regression tests pin the scenario map, CSRF/session handling, debug filename convention, baseline selection, and document comparison gates.
+- **AdoptIQ Intelligence reset status.** The analyze page already includes a hidden **Reset corpus** escape hatch that appears only when the status payload reports a corpus crypto error. The backend reset contracts also exist (`/api/corpus/reset`, `/api/intel/reset`, and the admin proxy `/corpus_reset`). A permanently visible Admin Console reset button is not in Build 27 yet; it remains the next UI follow-up for operator support.
+- **Build 27 verification floor.** Round 51 previously ran `make verify` clean at 3275 passed / 2 skipped with ruff, bandit HIGH/MED, and pip-audit clean. The Build 27 packaging pass re-runs the focused Round 51 corpus/report-harness tests before producing the DMG.
 
 ### What's New in Build 26 (Round 49 + Round 50 — Post-Build25 P0/P1 sweep + Round 50 demo-blocker closure)
 
