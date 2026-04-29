@@ -4705,12 +4705,94 @@ class LeaderReportGenerator:
                 })
         
         # Collect TAC Cases
+        # Round 40 / Phase 1: replace the legacy customer-name TAC filter
+        # with the same three-tier authoritative join Phase B uses at the
+        # team level (``add_tac_cases_from_csone``).  Pre-Round-40 the
+        # per-customer drilldown matched ``Customer Name: Customer Name``
+        # (CSOne) against the team-roster ``BU_NAME`` (Snowflake), but
+        # the two sources consistently disagree on suffixes -- e.g.
+        # ``FARMERS INSURANCE GROUP US`` (roster) vs
+        # ``FARMERS INSURANCE GROUP`` (TAC),
+        # ``WINTRUST FINANCIAL CORPORATION US`` vs ``WINTRUST FINANCIAL``,
+        # ``NATIONAL GRID PLC US`` vs ``NATIONAL GRID``.  The exact-name
+        # compare therefore returned 0 rows for ~75% of customers, so
+        # the per-customer "TAC Cases" cell collapsed to 0 even when
+        # Phase B's CSSM-level join had attributed the cases correctly.
+        #
+        # New tiers (highest precedence first; identical semantics to
+        # ``add_tac_cases_from_csone``):
+        #   1. SUBSCRIPTION_ID  -- look up this customer's subs from
+        #                          ``data['subscriptions']``, then filter
+        #                          ``data['tac_cases']`` by SUBSCRIPTION_ID.
+        #   2. ACCOUNT_ID_C     -- same idea for account-level matches.
+        #   3. exact normalized customer name -- preserved as a third
+        #                          fallback so customers whose names DO
+        #                          match (e.g. ``ZURICH NORTH AMERICA``)
+        #                          still resolve when the subscription
+        #                          roster has no coverage for them.
+        #
+        # The ``.0`` strip on id strings mirrors Phase B line ~1688 --
+        # CSOne sometimes exports IDs as floats (``12345.0``) and the
+        # Snowflake side stores the integer-string form.
         _tac_df = data.get('tac_cases', pd.DataFrame())
         _tac_col = 'Customer Name: Customer Name'
-        if _tac_df is not None and not _tac_df.empty and _tac_col in _tac_df.columns:
-            customer_tacs = _tac_df[
-                _name_match(_tac_df[_tac_col])
-            ]
+        if _tac_df is not None and not _tac_df.empty:
+            _subs_df = data.get('subscriptions', pd.DataFrame())
+            _customer_subs: set = set()
+            _customer_accounts: set = set()
+            if isinstance(_subs_df, pd.DataFrame) and not _subs_df.empty and 'BU_NAME' in _subs_df.columns:
+                _subs_for_customer = _subs_df[
+                    _subs_df['BU_NAME'].fillna('').astype(str).apply(normalize_customer_name) == customer_norm
+                ]
+                if 'SUBSCRIPTION_ID' in _subs_for_customer.columns:
+                    for _sid in _subs_for_customer['SUBSCRIPTION_ID'].dropna().astype(str).str.strip():
+                        if _sid.endswith('.0'):
+                            _sid = _sid[:-2]
+                        if _sid and _sid.lower() not in ('nan', 'none'):
+                            _customer_subs.add(_sid)
+                if 'ACCOUNT_ID_C' in _subs_for_customer.columns:
+                    for _aid in _subs_for_customer['ACCOUNT_ID_C'].dropna().astype(str).str.strip():
+                        if _aid.endswith('.0'):
+                            _aid = _aid[:-2]
+                        if _aid and _aid.lower() not in ('nan', 'none'):
+                            _customer_accounts.add(_aid)
+
+            _sub_id_col = next(
+                (c for c in ('SUBSCRIPTION_ID', 'Subscription Reference Id', 'Subscription ID', 'subscription_id') if c in _tac_df.columns),
+                None,
+            )
+            _account_id_col = next(
+                (c for c in ('ACCOUNT_ID_C', 'Account ID', 'account_id_c', 'Account Id') if c in _tac_df.columns),
+                None,
+            )
+
+            _sub_mask = pd.Series(False, index=_tac_df.index)
+            if _sub_id_col and _customer_subs:
+                _sub_series = (
+                    _tac_df[_sub_id_col]
+                    .fillna('')
+                    .astype(str)
+                    .str.strip()
+                    .str.replace(r'\.0$', '', regex=True)
+                )
+                _sub_mask = _sub_series.isin(_customer_subs)
+
+            _account_mask = pd.Series(False, index=_tac_df.index)
+            if _account_id_col and _customer_accounts:
+                _account_series = (
+                    _tac_df[_account_id_col]
+                    .fillna('')
+                    .astype(str)
+                    .str.strip()
+                    .str.replace(r'\.0$', '', regex=True)
+                )
+                _account_mask = _account_series.isin(_customer_accounts)
+
+            _name_mask = pd.Series(False, index=_tac_df.index)
+            if _tac_col in _tac_df.columns:
+                _name_mask = _name_match(_tac_df[_tac_col])
+
+            customer_tacs = _tac_df[_sub_mask | _account_mask | _name_mask]
             for _, tac in customer_tacs.iterrows():
                 # Enhanced data extraction with fallbacks
                 subject = tac.get('Title') or tac.get('Subject') or tac.get('Problem') or 'TAC Case'
