@@ -440,16 +440,22 @@ def test_round52_corpus_context_value_class_stops_at_semicolon(tmp_path: Path):
 
 
 def test_round52_per_scenario_docx_threshold_overrides_lower_comprehensive():
-    """Round 52 / ship regression.
+    """Round 52 / ship regression -- updated for Round 52.1 contract.
 
     The comprehensive report embeds an AI-generated insights section
     that regenerates run-to-run (paragraph counts shift by ~200 and
     diff produces 1614+ narrative-only changes between two runs against
     the same scope).  A single global text-similarity floor cannot
     cover both narrative-templated and narrative-generated reports, so
-    comprehensive opts into a per-scenario lower text-floor while
-    keeping the numeric-similarity gate at the global floor (the
-    numeric gate is the binding signal for actual data drift)."""
+    comprehensive opts into a per-scenario lower text-floor.
+
+    Round 52.1 adjustment: ``effective_docx_thresholds`` now returns a
+    3-tuple including the table-only numeric drift gate.  Comprehensive
+    also relaxes its overall numeric gate to 0.55 (informational) and
+    relies on the table-only gate as the new binding signal for real
+    Snowflake data drift.  Compact / renewal / leader keep all three
+    floors at the config defaults.
+    """
     from report_iteration_loop import (
         SCENARIO_DOCX_THRESHOLD_OVERRIDES,
         RunnerConfig,
@@ -472,18 +478,30 @@ def test_round52_per_scenario_docx_threshold_overrides_lower_comprehensive():
         min_docx_chars=200,
         strict=True,
         min_docx_numeric_similarity=0.80,
+        min_docx_table_numeric_similarity=0.95,
         max_xlsx_row_delta_ratio=0.2,
         max_xlsx_row_delta_abs=25,
     )
 
-    text, numeric = effective_docx_thresholds(cfg, "comprehensive")
-    assert text == 0.40, f"comprehensive must use the override; got {text!r}"
-    assert numeric == 0.80, "numeric gate must remain at the config floor"
+    text, numeric, table_numeric = effective_docx_thresholds(cfg, "comprehensive")
+    assert text == 0.40, f"comprehensive must use the text override; got {text!r}"
+    # Round 52.1: comprehensive numeric is now overridden to 0.55
+    # (informational); the binding accuracy signal is the table-only gate.
+    assert numeric == 0.55, (
+        f"comprehensive numeric must use the Round 52.1 override; got {numeric!r}"
+    )
+    assert table_numeric == 0.95, (
+        "comprehensive table-only numeric must inherit the config default"
+        f"; got {table_numeric!r}"
+    )
 
     for s in ("compact", "renewal", "leader"):
-        text, numeric = effective_docx_thresholds(cfg, s)
-        assert text == 0.55, f"{s} must use the global floor; got {text!r}"
+        text, numeric, table_numeric = effective_docx_thresholds(cfg, s)
+        assert text == 0.55, f"{s} must use the global text floor; got {text!r}"
         assert numeric == 0.80, f"{s} numeric must remain at the config floor"
+        assert table_numeric == 0.95, (
+            f"{s} table-only numeric must remain at the config floor"
+        )
 
     assert "comprehensive" in SCENARIO_DOCX_THRESHOLD_OVERRIDES
     assert "compact" not in SCENARIO_DOCX_THRESHOLD_OVERRIDES

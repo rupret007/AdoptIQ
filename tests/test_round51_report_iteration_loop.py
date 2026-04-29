@@ -73,6 +73,9 @@ def _args(**overrides):
         "min_header_similarity": 0.3,
         "min_docx_chars": 200,
         "min_docx_numeric_similarity": 0.8,
+        # Round 52.1: noise-immune table-only numeric drift gate; defaults
+        # to 0.95 in the live CLI parser.
+        "min_docx_table_numeric_similarity": 0.95,
         "max_xlsx_row_delta_ratio": 0.2,
         "max_xlsx_row_delta_abs": 25,
     }
