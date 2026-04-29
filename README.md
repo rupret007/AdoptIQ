@@ -6,7 +6,7 @@ AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, su
 
 ### What's New in Build 25 (Round 48 — Demo-readiness P1 cleanup sweep)
 
-Round 48 / Build 25 closes the eight P1 audit cleanups that Round 47 deferred so the demo experience tomorrow is a single-source-of-truth read across every Word and Excel artifact. Every fix is paired with a regression test (88 new R48 tests, 3188 total green); full audit detail lives in `QUALITY_AUDIT.md`.
+Round 48 / Build 25 closes the eight P1 audit cleanups that Round 47 deferred so the demo experience is a single-source-of-truth read across every Word and Excel artifact. Every fix is paired with a regression test (88 new R48 tests, 3191 total green); full audit detail lives in `QUALITY_AUDIT.md`.
 
 - **Adoption-barriers Summary vs Detail disclosure.** Comprehensive Excel `Summary` cited `Adoption barriers (total): 68` while `AB_Detail_All` had 72 rows — the 4-row delta is the well-understood Round 35 multi-assignee duplication, but a reader had no way to know it was deliberate. Build 25 adds an additive ``Adoption barriers (detail rows): 72 (4 multi-assignee duplicates)`` row immediately after the existing `(total)` row so the reconciliation is self-explanatory; the existing label is preserved for back-compat.
 - **Canonical TAC labels in compact narrative.** Two compact prompt templates emitted ``TAC Cases: [Y cases, Z are P1/P2]`` which the audit flagged as ambiguous (the same paragraph cited three different TAC numbers without canonical labels). Build 25 replaces them with ``Total Support Cases (90d): [Y]`` + ``Open + critical (P1+P2): [Z] ([W are P2])`` so a reader can reconcile the bullet against the at-a-glance dashboard.
@@ -61,7 +61,7 @@ These improvements are now packaged as **v1.0.4 build 1**; v1.0.3 was the previo
 - **Test suite:** **2570 passed / 2 skipped** (up from 2106 after Round 17) — Rounds 18-30 added 464 new tests across report determinism, multi-currency arithmetic safety, AI grounding, AdoptIQ Intelligence indexing, admin CSRF & audit-mirror hardening, connectivity-diagnostics namespace cleanups, theme unification + branded error pages, the Round 29 token-polish + error-handler cleanup pass, and the Round 30 logic / accuracy / cross-report parity sweep.
 - **`make verify`:** end-to-end gate wraps `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt`. All gates clean and back-to-back idempotent.
 - **Pipeline-boundary logging.** All three formatters log entry/exit at INFO with manager-digest only — never raw PII. Round 17 logs corpus indexing at INFO with file-id / sha256-prefix only; customer names never appear above DEBUG.
-- **Audit log.** Running findings, fixes, and residual risks are tracked in `QUALITY_AUDIT.md` (Round 14 → Round 30 sections). Older `CODE_REVIEW_*.md` files are frozen point-in-time snapshots; consult `QUALITY_AUDIT.md` for current state.
+- **Audit log.** Running findings, fixes, and residual risks are tracked in `QUALITY_AUDIT.md` (Round 14 → Round 48 sections). Older `CODE_REVIEW_*.md` files are frozen point-in-time snapshots; consult `QUALITY_AUDIT.md` for current state.
 
 #### Quality & Hardening — Rounds 18-30
 
@@ -158,7 +158,7 @@ Use the packaged app for your platform. No Python or development tools are requi
 ### Install
 
 #### macOS
-1. Open the **AdoptIQ** DMG (e.g. `AdoptIQ-v1.0.4-build1.dmg`).
+1. Open the **AdoptIQ** DMG (e.g. `AdoptIQ-v1.0.4-build25.dmg`).
 2. Drag **AdoptIQ.app** onto the **Applications** shortcut in the DMG window.
 3. In the same DMG window, double-click **Unblock AdoptIQ.command**.
    - This clears macOS Gatekeeper's quarantine flag on the installed app and launches AdoptIQ.

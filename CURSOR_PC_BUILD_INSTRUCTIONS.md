@@ -151,7 +151,7 @@ make verify
 
 (`make verify` chains pytest + ruff + bandit + pip-audit. On Windows you can run the four tools individually; the Makefile targets are POSIX-only.)
 
-All tests should pass on both Mac and Windows. Current baseline (Round 28 close-out): **2445 passed / 2 skipped**. Live count: `pytest --collect-only -q | tail -3`.
+All tests should pass on both Mac and Windows. Current baseline (Round 48 / Build25 close-out): **3191 passed / 2 skipped**. Live count: `pytest --collect-only -q | tail -3`.
 
 ## 9) Paste-ready Cursor kickoff prompt (Windows)
 
