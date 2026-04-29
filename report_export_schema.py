@@ -421,7 +421,17 @@ _CURATED_AB_DETAIL_ALL: tuple[str, ...] = (
     # Identity / customer
     "ID",
     "NAME",
+    # Round 49 / F-RP-AB-RAW-HEADERS: include both raw customer-name
+    # columns the upstream pipeline may emit (``BU_NAME`` from
+    # team_subs merges, ``customer_name`` lowercase from normalized
+    # frames) so the renewal / compact AB sheets keep their
+    # customer-name column when projected through this allowlist.
+    # ``apply_export_schema`` always runs the friendly-rename pass
+    # AFTER projection, so whichever raw form is present collapses
+    # to the single customer-facing ``Customer Name`` header.
+    "BU_NAME",
     "customer_name",
+    "ACCOUNT_ID_C",
     "ACCOUNT_MANAGER_C",
     "ASSIGNEE_C",
     "assignee_cssm_email",
@@ -592,8 +602,29 @@ _CURATED_CSCONSOLE_CUSTOMER_PULSE: tuple[str, ...] = (
 
 #: Public per-sheet curated mapping. Sheets *not* in this dict fall
 #: through with denylist + prefix filtering only.
+#:
+#: Round 49 / F-RP-AB-RAW-HEADERS: register the three live AB sheet
+#: names that the writers actually emit -- ``Customer_Adoption_Barriers``
+#: (renewal portfolio), ``All_Adoption_Barriers`` (compact), and
+#: ``Adoption_Barriers`` (comprehensive / leader) -- against the same
+#: ``_CURATED_AB_DETAIL_ALL`` projection that ``AB_Detail_All`` already
+#: uses.  Pre-Round-49 only ``AB_Detail_All`` was in this mapping, so
+#: the live renewal / compact xlsx leaked raw Snowflake headers
+#: (``AB_COMPETITOR_C``, ``AB_SOLUTION_ATTEMPT_C``, ``CSDF_SYNC_ID_C``,
+#: ``CSS_COMMENTS_C``, ``GS_C_360_SUCCESS_PRIORITY_C`` etc.) because the
+#: friendly-label rename pass only touches columns present in
+#: ``_FRIENDLY_HEADER_LABELS``, and those raw names were not in that
+#: SSoT.  Routing the renewal / compact / leader AB sheets through the
+#: curated allowlist drops the 230+ ungoverned columns down to the
+#: ~60-column director-friendly set, AND because every ``_C`` column in
+#: the curated set IS already in ``_FRIENDLY_HEADER_LABELS``, the
+#: visible header row drops the raw ``_C`` suffix without any
+#: per-column work in the writers.
 CURATED_COLUMNS: Mapping[str, tuple[str, ...]] = {
     "AB_Detail_All": _CURATED_AB_DETAIL_ALL,
+    "Customer_Adoption_Barriers": _CURATED_AB_DETAIL_ALL,
+    "All_Adoption_Barriers": _CURATED_AB_DETAIL_ALL,
+    "Adoption_Barriers": _CURATED_AB_DETAIL_ALL,
     "CSOne_Detail_All": _CURATED_CSONE_DETAIL_ALL,
     "External_Bugs": _CURATED_EXTERNAL_BUGS,
     "External_Incidents": _CURATED_EXTERNAL_INCIDENTS,

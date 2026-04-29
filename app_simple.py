@@ -3435,6 +3435,96 @@ def _strip_markdown_chrome(value) -> str:
     return s
 
 
+# Round 49 / F-RP-COMPOSITE-KEY-BLEED: regexes precompiled for the
+# composite-key normalizer below.
+import re as _r49_ck_re
+
+# Recognized 2- to 3-letter ISO country codes that legitimately appear
+# at the tail of a Snowflake composite key (``ATLANTIA SPA__AEROPORTI
+# DI ROMA SPA__IT`` / ``ELEVANCE_ELEVANCE HEALTH_US``).  Restricting to
+# this allow-list prevents stripping legitimate name suffixes like
+# ``Acme Inc.`` or ``XYZ Corp``.
+_R49_COUNTRY_TAIL_RE = _r49_ck_re.compile(
+    r"_([A-Z]{2,3})\s*$"
+)
+
+
+def _normalize_composite_customer_key(name) -> str:
+    """Round 49 / F-RP-COMPOSITE-KEY-BLEED: collapse merged Snowflake
+    composite-key strings (``X__Y__US`` / ``X_Y_US``) to the first
+    segment so the rendered customer name reads naturally.
+
+    Build25 audit (run 1777464863 renewal docx + Renewal_Summary /
+    Risk_Summary xlsx) showed customer-name fields containing
+    ``MARUBENI CORPORATION__JAMAICA PUBLIC SERVICE CO__JM`` and
+    ``ELEVANCE_ELEVANCE HEALTH_US``.  These come from raw Snowflake
+    composite keys (account-id->name joins where two account aliases
+    share an ID, or post-fetch friendly-rename collapses) bleeding
+    into display surfaces.  ``_strip_markdown_chrome`` (R48-D8) only
+    treats ``__bold__`` as bold-marker chrome -- it does not split
+    composite keys.
+
+    Behaviour:
+
+      * ``X__Y__US``  -> ``X``  (split on double-underscore, keep first)
+      * ``X__Y``      -> ``X``  (also keeps first segment)
+      * ``X_Y_US``    -> ``X_Y``  (only strip the trailing 2-3 letter
+        country tail; preserve internal single underscores so we
+        don't damage names that legitimately contain ``_`` like
+        snake_case account IDs)
+      * ``Plain Customer Name``       -> unchanged
+      * ``Acme Inc.``                 -> unchanged (suffix isn't a
+        country tail; ``Inc.`` isn't 2-3 alpha + word boundary)
+      * idempotent on outputs of itself
+      * ``None`` / empty -> ``""``
+
+    The helper is **display-only** -- callers must not feed normalized
+    output back into queries, joins, or LLM prompts.
+    """
+    if name is None:
+        return ""
+    try:
+        s = str(name)
+    except Exception:
+        return ""
+    s = s.strip()
+    if not s:
+        return s
+    # Double-underscore: classic Snowflake multi-alias join key.
+    if "__" in s:
+        first = s.split("__", 1)[0].strip()
+        if first:
+            return first
+    # Single-underscore + trailing country tail: ``ELEVANCE_ELEVANCE HEALTH_US``.
+    # Strip only the trailing 2-3 letter country code.
+    if "_" in s:
+        m = _R49_COUNTRY_TAIL_RE.search(s)
+        if m:
+            stripped = s[: m.start()].strip()
+            if stripped:
+                # If after stripping the country tail, the remaining
+                # string still has the form ``X_Y`` where Y duplicates
+                # / is a near-duplicate of X (the ``ELEVANCE_ELEVANCE
+                # HEALTH`` case), prefer the longer human-readable
+                # second segment.  This is a soft heuristic: when the
+                # first segment is a strict prefix of the second
+                # (case-insensitive), keep the second.
+                if "_" in stripped:
+                    parts = stripped.split("_")
+                    if len(parts) == 2:
+                        a, b = parts[0].strip(), parts[1].strip()
+                        if a and b and (
+                            b.lower().startswith(a.lower())
+                            or a.lower().startswith(b.lower())
+                        ):
+                            return b if len(b) >= len(a) else a
+                    # Otherwise return the prefix-stripped form so we
+                    # don't damage names with multiple internal
+                    # underscores.
+                return stripped
+    return s
+
+
 # Round 6 / Phase 1.18: Excel cells have a hard 32767-character limit
 # (xlsxwriter raises silently or truncates).  When we clip a cell we
 # count it here so the workbook can append a footnote in
@@ -3801,6 +3891,27 @@ def _parse_markdown_for_fallback(doc, ai_text: str):
     # Remove instruction symbols
     ai_text = ai_text.replace('**YOUR MISSION:**', '').replace('**CRITICAL REQUIREMENTS:**', '')
     ai_text = ai_text.replace('**TECHNOLOGY FOCUS:**', '').replace('**DATA SOURCES:**', '')
+
+    # Round 49 / F-COMP-BEMS-MD-LEAK-R49: strip square brackets
+    # around real BEMS / CSC / CSCxx ID patterns from LLM-emitted
+    # narrative.  The compact / comprehensive prompt templates at
+    # adoptiq_backend.py ~L10486 / ~L12592 instruct the model to
+    # render IDs like ``[BEMS01916938]`` (citation-anchor style); the
+    # briefing book the LLM consumes ALSO uses bracketed IDs
+    # (adoptiq_backend.py ~L9325 / ~L9963).  Pre-R49 those brackets
+    # leaked verbatim into the docx via this fallback parser
+    # (~65 occurrences in compact docx, ~99 in renewal narrative
+    # for Build25 run 1777464851 / 1777464863), so the rendered text
+    # looked like an unfinished markdown link.  R49 strips brackets
+    # only around real ID patterns -- placeholder text like
+    # ``[BEMSxxxxxxxx]`` and citation chrome like ``[Source: ...]``
+    # stays untouched.
+    try:
+        from report_utils import strip_bems_brackets_from_llm_text as _r49_strip
+        ai_text = _r49_strip(ai_text)
+    except Exception:
+        # Defensive: never let the strip helper block the fallback.
+        pass
 
     def _r12_safe_run(paragraph, text, *, bold=False, max_len=5000):
         """Round 12 / Phase 9.6 inline ``_safe_add_run`` companion.
@@ -7142,6 +7253,19 @@ def run_compact_analysis(analysis_id):
                     logger.info(f"[[DEBUG]] Merging adoption barriers with team data...")
                     ab_raw = ab_raw.merge(team_subs_df[["ACCOUNT_ID_C","BU_NAME","CSSM_EMAIL"]].drop_duplicates(), on="ACCOUNT_ID_C", how="left")
                     logger.info(f"[[DEBUG]] Merge completed, now applying scope filter...")
+                    # Round 49 / F-DV-CONTRACT-DRIFT-R49: re-annotate
+                    # post-merge so any prior schema_drift stamp on the
+                    # raw C360_CS_TASK_C_VW frame (which only carries
+                    # ACCOUNT_ID_C) is cleared once BU_NAME materializes.
+                    try:
+                        from data_contracts import annotate_with_contract as _r49_annotate_ab
+                        _r49_annotate_ab(ab_raw, dataset="adoption_barriers")
+                    except Exception as _r49_ab_err:
+                        logger.debug(
+                            "Round 49 / F-DV-CONTRACT-DRIFT-R49: post-merge "
+                            "AB re-annotate (compact/EI path) skipped: %s",
+                            _r49_ab_err,
+                        )
                 
                 ab_scoped = _apply_scope_filter_ab(ab_raw, technology, days)
                 logger.info(f"[[DEBUG]] Scope filter applied, now preparing AB data...")
@@ -8675,7 +8799,13 @@ def run_compact_analysis(analysis_id):
                 if not _csone_norm_cust_series.empty else 0
             )
             risk_summary_data.append({
-                'Customer': customer,
+                # Round 49 / F-RP-COMPOSITE-KEY-BLEED: collapse merged
+                # Snowflake composite keys (``MARUBENI CORPORATION__
+                # JAMAICA PUBLIC SERVICE CO__JM`` / ``ELEVANCE_ELEVANCE
+                # HEALTH_US``) to the first segment so the Excel
+                # ``Risk_Summary`` sheet renders human-readable names
+                # instead of join-key strings.
+                'Customer': _normalize_composite_customer_key(customer),
                 'Risk_Score': round(score, 1),
                 'Risk_Level': risk_level,
                 'Risk_Band': band,
@@ -10176,7 +10306,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         # See _strip_markdown_chrome above for the full rationale
         # (audit baseline showed __AEROPORTI DI ROMA SPA__ italicized
         # in the renewal pulse heading).
-        exec_para.add_run(f'{_strip_markdown_chrome(customer_name)} has a renewal risk score of {risk_score:.1f}/100 ({risk_category}). ')
+        exec_para.add_run(f'{_strip_markdown_chrome(_normalize_composite_customer_key(customer_name))} has a renewal risk score of {risk_score:.1f}/100 ({risk_category}). ')
         exec_para.add_run(f'Key metrics: {format_number(ab_count)} adoption barriers, {format_number(case_count)} support cases, {format_number(bems_count)} BEMS escalations. ')
         exec_para.add_run('See Key Findings and Recommendations for actionable next steps.')
     doc.add_paragraph()
@@ -10468,7 +10598,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if portfolio_mode and all_customers:
                 cn = _na(row.get('customer_name', row.get('BU_NAME', row.get('CUSTOMER_BU_NAME__C', row.get('RELATED_CUSTOMER__C', '')))))
                 if cn and cn != 'N/A':
-                    cust_label = f'Customer: {_strip_markdown_chrome(cn)} — '
+                    cust_label = f'Customer: {_strip_markdown_chrome(_normalize_composite_customer_key(cn))} — '
             subject = _first_avail(row, ['NAME', 'SUBJECT_C', 'subject_c', 'title', 'TITLE_C', 'DESCRIPTION_C', 'description', 'Subject', 'Title'], 'N/A')
             if _is_empty(subject):
                 subject = _first_avail_by_hint(row, ['subject', 'title', 'name', 'desc', 'summary', 'issue', 'problem'])
@@ -10521,7 +10651,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if portfolio_mode and all_customers:
                 cn = _na(row.get('customer_name', row.get('Customer Name', row.get('BU_NAME', ''))))
                 if cn and cn != 'N/A':
-                    cust_label = f'Customer: {_strip_markdown_chrome(cn)} — '
+                    cust_label = f'Customer: {_strip_markdown_chrome(_normalize_composite_customer_key(cn))} — '
             case_num = _na(row.get('Case #', row.get('SR Number', row.get('Case Number', 'N/A'))))
             title_text = _na(row.get('Title', row.get('title', 'N/A')))
             severity = _na(row.get('severity_norm', row.get('Severity', row.get('Highest Priority', 'N/A'))))
@@ -10610,7 +10740,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                     case_type = row.get('case_type_class', 'unknown')
                     # FIXED: Don't truncate title - show full text
                     p.add_run(f'Case: {case_num} - {title_text} ')
-                    tid_run = p.add_run(f'[BEMS: {trans_id}]')
+                    # Round 49 / F-COMP-BEMS-MD-LEAK-R49: render BEMS
+                    # ID bare (no surrounding square brackets) so the
+                    # renewal docx matches the rest of the renderers.
+                    # Pre-R49 this emitted ``[BEMS: 01234567]`` which
+                    # tripped the same markdown-leak audit as R48-D7.
+                    tid_run = p.add_run(f'BEMS: {trans_id}')
                     tid_run.font.color.rgb = RGBColor(180, 0, 0)
                     tid_run.bold = True
                     p.add_run(f" (Type: {case_type})").italic = True
@@ -10745,14 +10880,26 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             else:
                 defect_para.add_run('See Troubled Accounts Deep Dive for customers with linked defects and recommended actions.\n\n')
             # Single-customer: show defect IDs; portfolio: show defects by customer name
+            # Round 49 / F-COMP-BEMS-MD-LEAK-R49: emit bare defect/
+            # BEMS/CSC IDs WITHOUT square brackets so the rendered
+            # renewal narrative does not look like an unfinished
+            # markdown link.  R48-D7 fixed the same defect in 5
+            # other renderers (compact_report_formatter ~L974/L1729,
+            # executive_intelligence_formatter ~L1019,
+            # leader_report_generator ~L2754, app_simple ~L10602);
+            # the renewal narrative defect-listing path was not
+            # covered by R48 and Build25 still leaked ~182 bracketed
+            # IDs into the renewal docx.  The briefing book that
+            # feeds the LLM keeps brackets for citation; this is the
+            # AdoptIQ-rendered surface seen by readers.
             if defect_by_customer and not portfolio_mode and customer_name in defect_by_customer:
                 defects = sorted(set(defect_by_customer[customer_name]))
-                defect_para.add_run(f'Defect IDs for this customer: {", ".join([f"[{d}]" for d in defects])}\n')
+                defect_para.add_run(f'Defect IDs for this customer: {", ".join(str(d) for d in defects)}\n')
             elif defect_by_customer and portfolio_mode and all_customers:
                 defect_para.add_run('Defects by customer (Source: CSOne / Adoption Barriers):\n')
                 for cust in sorted(defect_by_customer.keys()):
                     ids = sorted(set(defect_by_customer[cust]))
-                    defect_para.add_run(f'  • Customer: {cust} — Defect IDs: {", ".join([f"[{x}]" for x in ids])}\n')
+                    defect_para.add_run(f'  • Customer: {cust} — Defect IDs: {", ".join(str(x) for x in ids)}\n')
             if defect_by_customer:
                 doc.add_paragraph('Defect-to-Customer Linkage', style='Heading 3')
                 defect_table = doc.add_table(rows=len(defect_by_customer) + 1, cols=3)
@@ -10764,7 +10911,8 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                     ids = sorted(set(defect_by_customer.get(cust) or []))
                     defect_table.rows[idx].cells[0].text = str(cust)
                     defect_table.rows[idx].cells[1].text = str(len(ids))
-                    defect_table.rows[idx].cells[2].text = ", ".join([f"[{x}]" for x in ids])
+                    # Round 49 / F-COMP-BEMS-MD-LEAK-R49: bare IDs.
+                    defect_table.rows[idx].cells[2].text = ", ".join(str(x) for x in ids)
         
         # External bugs from help.webex.com
         if ext_bugs:
@@ -10874,7 +11022,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if portfolio_mode and all_customers:
                 cn = _na(row.get('BU_NAME', row.get('CUSTOMER_NAME', row.get('RELATED_CUSTOMER__C', ''))))
                 if cn and cn != 'N/A':
-                    cust_label = f'Customer: {_strip_markdown_chrome(cn)} — '
+                    cust_label = f'Customer: {_strip_markdown_chrome(_normalize_composite_customer_key(cn))} — '
             subject = _first_avail(row, ['ACTION_PLAN_TITLE_C', 'NAME', 'SUBJECT_C', 'TITLE_C', 'title', 'Subject', 'Title'], 'N/A')
             if _is_empty(subject):
                 subject = _first_avail_by_hint(row, ['subject', 'title', 'name', 'action', 'plan', 'task'])
@@ -10984,7 +11132,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if portfolio_mode and all_customers:
                 cn = _na(row.get('BU_NAME', row.get('CUSTOMER_NAME', row.get('RELATED_CUSTOMER__C', ''))))
                 if cn and cn != 'N/A':
-                    cust_label = f'Customer: {_strip_markdown_chrome(cn)} — '
+                    cust_label = f'Customer: {_strip_markdown_chrome(_normalize_composite_customer_key(cn))} — '
             rating = _first_avail(row, ['CUSTOMER_PULSE__C', 'PULSE_RATING__C', 'Pulse_Rating__c', 'RATING__C', 'rating'], 'N/A')
             if _is_empty(rating):
                 rating = _first_avail_by_hint(row, ['pulse', 'rating', 'score'])
@@ -11075,7 +11223,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if portfolio_mode and all_customers:
                 cn = _na(row.get('RELATED_CUSTOMER__C', row.get('BU_NAME', row.get('CUSTOMER_NAME', ''))))
                 if cn and cn != 'N/A':
-                    cust_label = f'Customer: {_strip_markdown_chrome(cn)} — '
+                    cust_label = f'Customer: {_strip_markdown_chrome(_normalize_composite_customer_key(cn))} — '
             subject = _na(_first_avail(row, ['SUCCESS_PRIORITY_TITLE__C', 'SUBJECT_C', 'title', 'NAME', 'TITLE_C'], 'N/A'))
             status = _na(_first_avail(row, ['STATUS__C', 'STATUS_C', 'status_c'], 'N/A'))
             opened_dt = _na(_first_avail(row, ['CREATED_DATE', 'CREATEDDATE', 'OPEN_DATE_C'], 'N/A'))
@@ -11285,7 +11433,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                     reasons.append(f'Linked defects: {", ".join(ids)} (Source: CSOne/Adoption Barriers)')
                     p = doc.add_paragraph(style='List Bullet')
                     p.add_run('Defect IDs: ').bold = True
-                    p.add_run(', '.join([f'[{x}]' for x in ids]))
+                    # Round 49 / F-COMP-BEMS-MD-LEAK-R49: bare IDs.
+                    # Renewal Troubled Accounts deep-dive was the
+                    # other half of the ~182-bracket leak in the
+                    # renewal docx narrative; same R48-D7 wire
+                    # pattern as the rest of the renderers.
+                    p.add_run(', '.join(str(x) for x in ids))
                 # BEMS escalations for this customer (engineering escalations often drive churn)
                 if not bems_cases.empty:
                     bc_col = next((c for c in ['customer_name', 'Customer Name', 'BU_NAME'] if c in bems_cases.columns), None)
@@ -11625,7 +11778,22 @@ def run_customer_renewal_analysis(analysis_id):
         ab_raw = fetch_adoption_barriers(ctx, account_ids, days)
         if not ab_raw.empty and "ACCOUNT_ID_C" in ab_raw.columns:
             ab_raw = ab_raw.merge(team_subs_df[["ACCOUNT_ID_C","BU_NAME","CSSM_EMAIL"]].drop_duplicates(), on="ACCOUNT_ID_C", how="left")
-        
+            # Round 49 / F-DV-CONTRACT-DRIFT-R49: re-annotate the
+            # adoption_barriers contract now that the team_subs merge
+            # has materialized BU_NAME.  ``snowflake_prefetch.py``
+            # ran the contract on the raw view (only ACCOUNT_ID_C, no
+            # name column) and stamped a ``schema_drift`` fetch_error
+            # that no longer reflects reality.  ``annotate_with_contract``
+            # auto-clears the stamp when the contract now passes.
+            try:
+                from data_contracts import annotate_with_contract as _r49_annotate_ab
+                _r49_annotate_ab(ab_raw, dataset="adoption_barriers")
+            except Exception as _r49_ab_err:
+                logger.debug(
+                    "Round 49 / F-DV-CONTRACT-DRIFT-R49: post-merge "
+                    "AB re-annotate skipped: %s", _r49_ab_err,
+                )
+
         ab_scoped = _apply_scope_filter_ab(ab_raw, technology, days)
         ab_norm = _prepare_ab(ab_scoped, team_subs_df)
         logger.info(f"[[RENEWAL]] After Snowflake + scope + prepare: {len(ab_norm)} adoption barriers")
@@ -11637,6 +11805,20 @@ def run_customer_renewal_analysis(analysis_id):
                     team_subs_df[["ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"]].drop_duplicates(),
                     on="ACCOUNT_ID_C", how="left"
                 )
+                # Round 49 / F-DV-CONTRACT-DRIFT-R49: same post-merge
+                # re-annotate pattern as the Snowflake AB merge -- the
+                # CSConsole adoption-barriers frame is also a raw view
+                # whose customer-bearing column is materialized via the
+                # team_subs join.
+                try:
+                    from data_contracts import annotate_with_contract as _r49_annotate_csab
+                    _r49_annotate_csab(csab_merged, dataset="adoption_barriers")
+                except Exception as _r49_csab_err:
+                    logger.debug(
+                        "Round 49 / F-DV-CONTRACT-DRIFT-R49: post-merge "
+                        "CSConsole AB re-annotate skipped: %s",
+                        _r49_csab_err,
+                    )
                 csab_scoped = _apply_scope_filter_ab(csab_merged, technology, days)
                 csab_norm = _prepare_ab(csab_scoped, team_subs_df)
                 if not csab_norm.empty:
@@ -12511,7 +12693,12 @@ def run_customer_renewal_analysis(analysis_id):
                     or 'UNKNOWN'
                 )
                 renewal_summary_data.append({
-                    'Customer': cust_name,
+                    # Round 49 / F-RP-COMPOSITE-KEY-BLEED: collapse
+                    # composite keys to the first human-readable
+                    # segment for the Excel ``Renewal_Summary`` sheet
+                    # (parity with the Risk_Summary fix at app_simple
+                    # ~L8801).
+                    'Customer': _normalize_composite_customer_key(cust_name),
                     'Overall_Risk_Score': cust_risk_score,
                     'Risk_Level': cust_risk_level,
                     'Analysis_Date': analysis_date,
@@ -12520,7 +12707,8 @@ def run_customer_renewal_analysis(analysis_id):
         else:
             # Single customer
             renewal_summary_data = [{
-                'Customer': customer_name,
+                # Round 49 / F-RP-COMPOSITE-KEY-BLEED.
+                'Customer': _normalize_composite_customer_key(customer_name),
                 'Overall_Risk_Score': overall_risk_score,
                 'Risk_Level': risk_level,
                 'Analysis_Date': analysis_date,
@@ -13245,7 +13433,20 @@ def run_comprehensive_analysis(analysis_id):
             logger.debug("AB fetch_error scan skipped: %s", _ab_err)
         if not ab_raw_empty and "ACCOUNT_ID_C" in ab_raw.columns:
             ab_raw = ab_raw.merge(team_subs_df[["ACCOUNT_ID_C","BU_NAME","CSSM_EMAIL"]].drop_duplicates(), on="ACCOUNT_ID_C", how="left")
-        
+            # Round 49 / F-DV-CONTRACT-DRIFT-R49: re-annotate so any
+            # schema_drift stamp from the raw fetch (when BU_NAME was
+            # not yet materialized) clears once the team_subs merge
+            # adds the customer name column.
+            try:
+                from data_contracts import annotate_with_contract as _r49_annotate_ab
+                _r49_annotate_ab(ab_raw, dataset="adoption_barriers")
+            except Exception as _r49_ab_err:
+                logger.debug(
+                    "Round 49 / F-DV-CONTRACT-DRIFT-R49: post-merge "
+                    "AB re-annotate (comprehensive path) skipped: %s",
+                    _r49_ab_err,
+                )
+
         # Fetch CSConsole data for comprehensive analysis
         # Get tech from status (thread-safe)
         with analysis_status_lock:
@@ -13742,6 +13943,28 @@ def run_comprehensive_analysis(analysis_id):
             in {"1", "true", "yes", "on"}
         ) or _legacy_strict_off
         strict_consistency = not _nonstrict_consistency
+        # Round 50 / F-COMP-CONSIST-PULSE-THREAD: the comprehensive Word
+        # headline narrow count at L13867-13871 is computed via
+        # ``cm.count_customers(ab, csone, pulse=csconsole_customer_pulse)``,
+        # but pre-Round-50 this validator call did not pass the pulse
+        # frame -- so the validator's narrow count fell back to
+        # ``count_customers(ab, csone, pulse=None)``.  When pulse
+        # contributed customers that AB / CSOne did not (a portfolio with
+        # pulse-only customers, e.g. the Brian Frazier / Dee Kindrick
+        # 90d demo runs), the two narrow shapes diverged by exactly the
+        # pulse-only customer count and the Round 49 strict-mode parity
+        # gate fired ``Portfolio metric mismatch: total_customers=38
+        # (Word headline) != 28 (canonical count_customers(ab_df,
+        # csone_df, pulse_df))`` -- blocking the comprehensive report
+        # at consistency-check time even though Word and Excel were
+        # already in lockstep.  Threading ``customer_pulse_df=`` here
+        # makes the validator's narrow count match the Word headline by
+        # construction.  The leader path at L21307-21316 has been doing
+        # this since Round 6 / Phase 5.8; this brings comprehensive
+        # into the same shape.  Renewal does not need this change
+        # because its ``cm.build_portfolio_metrics(...)`` call also
+        # excludes pulse, so PM and validator both agree at the
+        # narrow-without-pulse value.
         consistency = validate_report_consistency(
             _ab,
             _cs_norm,
@@ -13750,6 +13973,7 @@ def run_comprehensive_analysis(analysis_id):
             defects=software_defects,
             factual_claims=factual_claims,
             customer_universe=all_customers_comprehensive,
+            customer_pulse_df=csconsole_customer_pulse,  # Round 50
             max_other_unknown_ratio=consistency_unknown_threshold,
             strict_mode=False,  # we enforce below so we can produce a uniform error
         )
@@ -19348,7 +19572,7 @@ def run_subscription_analysis(analysis_id):
             # the customer name so __ALIAS__ separators in
             # multi-account customer names do not render as bold.
             title = doc.add_heading(
-                f'Subscription Analysis: {_strip_markdown_chrome(sub_data.get("customer_name") or "Unknown")}',
+                f'Subscription Analysis: {_strip_markdown_chrome(_normalize_composite_customer_key(sub_data.get("customer_name") or "Unknown"))}',
                 0,
             )
             subtitle = doc.add_heading(f'Subscription ID: {subscription_id}', level=1)
@@ -19367,7 +19591,7 @@ def run_subscription_analysis(analysis_id):
             # Executive Summary
             doc.add_heading('Executive Summary', level=1)
             summary_p = doc.add_paragraph()
-            summary_p.add_run(f'Customer: {_strip_markdown_chrome(sub_data["customer_name"])}\n')
+            summary_p.add_run(f'Customer: {_strip_markdown_chrome(_normalize_composite_customer_key(sub_data["customer_name"]))}\n')
             summary_p.add_run(f'Subscription: {subscription_id}\n')
             summary_p.add_run(f'Renewal Risk Level: {renewal_analysis.get("risk_level", "Unknown")} ({renewal_analysis.get("overall_risk_score", renewal_analysis.get("risk_score", 0))}/10)\n')
             

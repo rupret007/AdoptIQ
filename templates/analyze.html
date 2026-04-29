@@ -422,7 +422,8 @@
                                        placeholder="Type to search (min 2 characters) — then select from list" 
                                        aria-describedby="customer-help" autocomplete="off"
                                        aria-autocomplete="list" aria-controls="customer-name-list" aria-expanded="false">
-                                <span class="input-group-text bg-light">
+                                {# Round 50: same dark-theme contract as the days / CSOne adornments below -- drop `bg-light` so the shared `.input-group-text` rule paints this with the dark surface. #}
+                                <span class="input-group-text">
                                     <i class="fas fa-building text-muted" aria-hidden="true"></i>
                                 </span>
                                 <ul class="list-group position-absolute top-100 start-0 w-100 mt-1 shadow-sm border rounded overflow-auto d-none" 
@@ -444,7 +445,8 @@
                             </label>
                             <div class="input-group input-group-lg">
                                 {{ form.days(class="form-control", placeholder="90", min="1", max="365", **{"aria-describedby": "days-help days-error", "required": "required"}) }}
-                                <span class="input-group-text bg-light">
+                                {# Round 50: drop Bootstrap `bg-light` -- it has !important and overrode the dark `.input-group-text` rule in base.html, producing a bright-white box on the right edge of this dark-theme input group. The shared rule renders the correct dark surface. #}
+                                <span class="input-group-text">
                                     <i class="fas fa-clock text-muted" aria-hidden="true"></i>
                                     days
                                 </span>
@@ -475,7 +477,8 @@
                             {% endif %}
                             <div class="input-group input-group-lg">
                                 {{ form.csone_file(class="form-control", accept=".xlsx,.xls", **{"aria-describedby": "file-help"}) }}
-                                <span class="input-group-text bg-light">
+                                {# Round 50: same dark-theme contract as the days adornment above -- drop `bg-light` so the shared `.input-group-text` rule paints this with the dark surface. #}
+                                <span class="input-group-text">
                                     <i class="fas fa-upload text-muted" aria-hidden="true"></i>
                                 </span>
                             </div>

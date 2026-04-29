@@ -155,10 +155,19 @@ ROW_CONTRACTS: Dict[str, Dict[str, Sequence[str]]] = {
         # Round 48 / F-DV-PULSE-CONTRACT-DRIFT: parity with
         # adoption_barriers -- accept friendly and canonical
         # variants resolved post-fetch.
+        # Round 49 / F-DV-CONTRACT-DRIFT-R49: the live CSOne export
+        # delivers the customer column as the literal label
+        # ``Customer Name: Customer Name`` (Salesforce relationship
+        # path).  R48 added ``Customer Name`` (without the prefix)
+        # which does NOT match the live label after
+        # ``_normalize_column_name`` collapses both colons and
+        # whitespace.  Add the exact literal so the contract passes
+        # against real CSOne fixtures.
         "customer": (
             "customer_name", "BU_NAME", "Account Name", "ACCOUNT_NAME",
             "Customer", "Customer Name", "BU_ACCOUNT_NAME",
             "customer", "CUSTOMER",
+            "Customer Name: Customer Name",
         ),
         "severity": ("Severity", "SEVERITY_C", "PRIORITY", "Priority"),
         "status": ("Status", "STATUS_C", "STATUS", "Case Status"),
@@ -181,11 +190,24 @@ ROW_CONTRACTS: Dict[str, Dict[str, Sequence[str]]] = {
         # is ``Pulse Rating`` (see ``report_export_schema.py``
         # ~L222).  Accept all of them so the contract passes
         # whenever any of these arrive on the frame.
+        #
+        # Round 49 / F-DV-CONTRACT-DRIFT-R49: the live Snowflake
+        # ``ESA_C360_CUSTOMER_PULSE__C`` view delivers the rating
+        # value under the column literally named ``CUSTOMER_PULSE__C``
+        # (e.g. "Green" / "Yellow" / "Red").  R48's alias list missed
+        # this -- ``PULSE_RATING__C`` and ``CUSTOMER_PULSE__C``
+        # normalize to different forms (``pulse_rating`` vs
+        # ``customer_pulse``) so the existing aliases never matched
+        # the live column, leaving Build25 with a permanent
+        # ``schema_drift`` warning that surfaced in every report.
+        # Adding the exact CUSTOMER_PULSE__C / CUSTOMER_PULSE forms
+        # closes the gap without weakening the contract.
         "rating": (
             "PULSE_RATING__C", "PULSE_RATING", "Rating", "RATING",
             "SCORE__C", "SCORE_C", "Score", "SCORE",
             "Pulse Rating", "pulse_rating", "rating",
             "OVERALL_RATING__C", "OVERALL_RATING",
+            "CUSTOMER_PULSE__C", "CUSTOMER_PULSE",
         ),
     },
     "bems_rows": {
@@ -434,6 +456,30 @@ def annotate_with_contract(
             "[[CONTRACT]] Round 32 / Phase 1.A: escalated schema_drift to "
             "fetch_error on %s (%d row(s), missing slots: %s)",
             dataset, contract_blob['row_count'], missing,
+        )
+    elif (
+        result["is_valid"]
+        and df.attrs.get("fetch_error_kind") == "schema_drift"
+        and df.attrs.get("fetch_error_dataset") == dataset
+    ):
+        # Round 49 / F-DV-CONTRACT-DRIFT-R49: re-annotation MAY now
+        # succeed because a downstream merge materialized the missing
+        # column (e.g. ``BU_NAME`` from ``team_subs_df`` joining onto
+        # the raw ``C360_CS_TASK_C_VW`` frame whose only customer-bearing
+        # column was ``ACCOUNT_ID_C``).  In that case clear the prior
+        # schema_drift fetch_error stamp so the partial-data banner does
+        # not surface a contract violation that no longer exists.  We
+        # only clear stamps we own (``fetch_error_kind == schema_drift``
+        # AND ``fetch_error_dataset == dataset``) so genuine
+        # fetch-failure stamps stamped by the loader are preserved.
+        df.attrs.pop("fetch_error", None)
+        df.attrs.pop("fetch_error_kind", None)
+        df.attrs.pop("fetch_error_dataset", None)
+        logger.info(
+            "[[CONTRACT]] Round 49 / F-DV-CONTRACT-DRIFT-R49: cleared "
+            "schema_drift fetch_error on %s after re-annotation passed "
+            "(%d row(s), all slots resolved).",
+            dataset, contract_blob['row_count'],
         )
 
     return df

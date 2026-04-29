@@ -290,7 +290,18 @@ class ExecutiveReportBuilder:
         # the same rewrite inside ``append_to_word_report``; running
         # it here too ensures any future caller of this contract
         # method also gets the sanitized text.
-        return _sanitize_llm_grade_brackets(cleaned)
+        cleaned = _sanitize_llm_grade_brackets(cleaned)
+        # Round 49 / F-COMP-BEMS-MD-LEAK-R49: strip square brackets
+        # around real BEMS / CSC / CSCxx ID patterns from the LLM
+        # output before it reaches the comprehensive Word document.
+        # Same rationale as the compact path's R49 wire in
+        # app_simple._parse_markdown_for_fallback.
+        try:
+            from report_utils import strip_bems_brackets_from_llm_text as _r49_strip
+            cleaned = _r49_strip(cleaned)
+        except Exception:
+            pass
+        return cleaned
 
     def _add_customer_separator(self):
         """Add visual separator between customer sections (page break)."""

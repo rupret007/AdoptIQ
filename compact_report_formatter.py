@@ -26,7 +26,11 @@ from data_normalization import (
     normalize_customer_name,
 )
 from report_consistency import validate_report_consistency
-from report_utils import format_inline_source, format_metric_with_source
+from report_utils import (
+    format_inline_source,
+    format_metric_with_source,
+    strip_bems_brackets_from_llm_text,
+)
 import canonical_metrics as cm
 # Round 16 / Phase 5.2: pull the banded top-N table helper from the
 # Round-15 Word styling SSoT so the compact-formatter top-N tables get
@@ -538,7 +542,23 @@ class CompactReportFormatter:
             dashboard_table.style = 'Table Grid'
             
             # Header row
-            headers = ['Total Customers', 'Support Cases', 'Critical (P1)', 'High (P2)', 'BEMS Escalations']
+            #
+            # Round 49 / F-COMP-AAG-SCOPE-LABEL: scope-explicit
+            # Support Cases tile label.  Pre-Round-49 the tile read
+            # ``Support Cases: 294`` while the deep-dive renderer
+            # printed ``Total Support Cases (90d): 36`` for the same
+            # portfolio (per-customer scope).  Both lines were
+            # truthful but read as off-by-scope side-by-side; the
+            # tile is portfolio-wide and the deep-dive is
+            # per-customer.  Make the tile's scope explicit so the
+            # two lines are unambiguously consistent.
+            headers = [
+                'Total Customers',
+                'Support Cases (90d, portfolio-wide)',
+                'Critical (P1)',
+                'High (P2)',
+                'BEMS Escalations',
+            ]
             for i, header in enumerate(headers):
                 cell = dashboard_table.rows[0].cells[i]
                 cell.text = header
@@ -594,7 +614,16 @@ class CompactReportFormatter:
                     source_override="Normalized customer set from team subscriptions + CSConsole + CSOne",
                     verification_override="Cross-check customer IDs/names in source exports",
                 ),
-                format_metric_with_source("Support Cases", total_support_cases, "Support Cases (TAC)", fields=["Case #", "Status"]),
+                # Round 49 / F-COMP-AAG-SCOPE-LABEL: portfolio-wide
+                # Support Cases label disambiguated against the
+                # per-customer deep-dive line which prints
+                # ``Total Support Cases (90d): N`` for one customer.
+                format_metric_with_source(
+                    "Total Support Cases (90d, portfolio-wide)",
+                    total_support_cases,
+                    "Support Cases (TAC)",
+                    fields=["Case #", "Status"],
+                ),
                 format_metric_with_source("Critical (P1)", critical_p1, "Support Cases (TAC)", fields=["Severity"]),
                 format_metric_with_source("High (P2)", high_p2, "Support Cases (TAC)", fields=["Severity"]),
                 format_metric_with_source("BEMS Escalations", bems_count, "BEMS Escalations", fields=["Transaction ID", "bemscsc_refs"]),
@@ -763,10 +792,19 @@ class CompactReportFormatter:
                     ai_summary = self._generate_fallback_insights(risk_summary)
                 
                 # FIXED: Create a callout box for AI insights - show FULL summary
+                # Round 49 / F-COMP-BEMS-MD-LEAK-R49: strip square
+                # brackets around BEMS/CSC IDs from LLM-emitted
+                # narrative.  The compact prompt template at
+                # adoptiq_backend.py ~L12595 instructs the model to
+                # emit "**IDs:** [List BEMS IDs]" and the model
+                # naturally wraps each ID in brackets ("[BEMS01943186],
+                # [BEMS01946483], ..."); this leaks markdown chrome
+                # into the docx.  Strip happens AFTER the LLM call so
+                # citation anchors in the briefing book are preserved.
                 ai_callout = self.doc.add_paragraph()
                 ai_callout.style = 'CompactCallout'
                 ai_callout.add_run(
-                    f"\"{_ensure_inline_source_claim(ai_summary, 'Derived Metric', fields=['customer_name', 'risk_score'])}\""
+                    f"\"{_ensure_inline_source_claim(strip_bems_brackets_from_llm_text(ai_summary), 'Derived Metric', fields=['customer_name', 'risk_score'])}\""
                 )
             
             # Add visual separator
@@ -1630,7 +1668,12 @@ class CompactReportFormatter:
                     ai_p.add_run(fallback_insights)
                 else:
                     ai_p.add_run('🤖 AI-Powered Strategic Insights:\n').bold = True
-                    ai_p.add_run(ai_summary)
+                    # Round 49 / F-COMP-BEMS-MD-LEAK-R49: strip BEMS/
+                    # CSC bracket chrome from the renewal-recommendations
+                    # narrative (parity with add_executive_summary's
+                    # ai_callout above).  See compact_report_formatter
+                    # ~L770 for the canonical wire.
+                    ai_p.add_run(strip_bems_brackets_from_llm_text(ai_summary))
             
         except Exception as e:
             logger.error(f"Error adding renewal recommendations: {e}")

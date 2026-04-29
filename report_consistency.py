@@ -141,40 +141,66 @@ def validate_report_consistency(
     # no longer enters this headline count.  The wider count is
     # surfaced as ``metrics["total_customers_with_extras"]`` for
     # diagnostic parity with pre-Round 25 dashboards.
+    #
+    # Round 49 / F-COMP-CONSIST-WIDTH-MISMATCH: ``customer_universe``
+    # is now telemetry-only and no longer overrides the parity headline.
+    # Pre-R49 this branch routed ``customer_universe`` (typically the
+    # comprehensive path's wide ``_get_all_customers_from_all_sources``
+    # roster of 52) through a synthetic frame so
+    # ``metrics["total_customers"]`` became 52 -- but R47 / R47-B4 fixed
+    # the comprehensive Word headline to use the narrow
+    # ``count_customers(ab, csone, pulse)`` (38) so Excel + Word agreed.
+    # The validator was the third side of the triangle and stayed
+    # wide, so the parity gate fired ``total_customers=38 != 52`` and
+    # blocked the comprehensive report on Build25 even though Word and
+    # Excel were already in lockstep.  R49 makes the validator narrow
+    # too: ``metrics["total_customers"]`` is ALWAYS the narrow shape;
+    # ``customer_universe`` is preserved as
+    # ``metrics["customer_universe_total"]`` for callers that legitimately
+    # need the wider iteration roster (defect-customer coverage, per-
+    # customer narrative pass, etc.).
     _pulse_for_count = pulse_df if pulse_df is not None else customer_pulse_df
+    metrics["total_customers"] = _cm.count_customers(
+        ab_df=ab_df,
+        csone_df=csone_df,
+        pulse_df=_pulse_for_count,
+    )
+
     if customer_universe is not None:
+        # Round 49 / F-COMP-CONSIST-WIDTH-MISMATCH: surface the wider
+        # iteration roster as ``metrics["customer_universe_total"]``
+        # without letting it override the parity headline.  Same
+        # synthetic-frame routing the pre-R49 branch used so the
+        # ``cm.count_customers`` rule (NaN handling, "" vs "Unknown"
+        # treatment) is applied consistently.  Failures fall back to
+        # a simple normalize-and-dedupe count so the diagnostic
+        # surface is always populated.
         if isinstance(customer_universe, pd.DataFrame):
-            metrics["total_customers"] = _cm.count_customers(
-                ab_df=customer_universe,
-                csone_df=None,
-                pulse_df=_pulse_for_count,
-            )
+            try:
+                metrics["customer_universe_total"] = _cm.count_customers(
+                    ab_df=customer_universe,
+                    csone_df=None,
+                    pulse_df=_pulse_for_count,
+                )
+            except Exception as _univ_err:
+                warnings.append(
+                    f"customer_universe canonical count failed; using legacy fallback "
+                    f"({_univ_err.__class__.__name__})."
+                )
+                metrics["customer_universe_total"] = metrics["total_customers"]
         else:
-            # Round 6 / Phase 5.14: previously this branch did its own
-            # ad-hoc set construction (normalize -> drop "Unknown" ->
-            # len()) which silently disagreed with ``cm.count_customers``
-            # on edge cases (NaN handling, "" vs "Unknown" treatment,
-            # how account_to_customer overrides apply).  Build a
-            # one-column synthetic DataFrame and route through
-            # ``cm.count_customers`` so the validator's customer
-            # universe ALWAYS uses the same counting rule that the
-            # reports themselves use.
             try:
                 _iter_values = list(customer_universe) if not isinstance(customer_universe, str) else [customer_universe]
             except TypeError:
                 _iter_values = [customer_universe]
             try:
                 _synthetic_universe = pd.DataFrame({"customer_name": _iter_values})
-                metrics["total_customers"] = _cm.count_customers(
+                metrics["customer_universe_total"] = _cm.count_customers(
                     ab_df=_synthetic_universe,
                     csone_df=None,
                     pulse_df=_pulse_for_count,
                 )
             except Exception as _univ_err:
-                # Defensive fallback: if the synthetic universe path
-                # fails (e.g. unhashable values), fall back to the
-                # legacy normalize-set count and warn so ops can see
-                # which customer_universe shape caused it.
                 warnings.append(
                     f"customer_universe canonical count failed; using legacy fallback "
                     f"({_univ_err.__class__.__name__})."
@@ -183,13 +209,7 @@ def validate_report_consistency(
                 for value in _iter_values:
                     customer_set.add(normalize_customer_name(value))
                 customer_set = {c for c in customer_set if c and c != "Unknown"}
-                metrics["total_customers"] = len(customer_set)
-    else:
-        metrics["total_customers"] = _cm.count_customers(
-            ab_df=ab_df,
-            csone_df=csone_df,
-            pulse_df=_pulse_for_count,
-        )
+                metrics["customer_universe_total"] = len(customer_set)
 
     # Round 25 / Phase A: surface the wider universe (with extras +
     # account_to_customer backfill) as a diagnostic so existing
@@ -358,11 +378,12 @@ def validate_report_consistency(
                 errors.append(
                     "Portfolio metric mismatch: total_customers="
                     f"{pm_total} (Word headline) != "
-                    f"{canon_total} (canonical AB ∪ CSOne ∪ Pulse universe). "
+                    f"{canon_total} (canonical count_customers(ab_df, csone_df, pulse_df)). "
                     "The Word headline must mirror the Excel Summary row -- both "
                     "derive from count_customers(ab_df=, csone_df=, pulse_df=). "
                     "If the Word path is using extra_frames / account_to_customer "
-                    "to widen the count, drop those args from the headline call site."
+                    "or a wider customer_universe iteration roster to widen the "
+                    "count, drop those args from the headline call site."
                 )
         reported_p1 = portfolio_metrics.get("critical_p1", portfolio_metrics.get("p1_cases", None))
         if reported_p1 is not None and int(reported_p1) != metrics["critical_p1"]:

@@ -31,6 +31,61 @@ def _canonical_source_lookup() -> dict:
     return {metric.lower(): (metric, source, verification) for metric, source, verification in DATA_SOURCES_CANONICAL}
 
 
+# Round 49 / F-COMP-BEMS-MD-LEAK-R49: shared post-processor that
+# strips square brackets from BEMS / CSC / CSCxx IDs in LLM-emitted
+# narrative text BEFORE it is rendered into Word documents.
+#
+# R48-D7 fixed five direct AdoptIQ-rendered surfaces (compact,
+# executive intelligence, leader, renewal "All BEMS IDs", renewal
+# narrative summary) by emitting comma-separated bare IDs.  But the
+# LLM-generated narrative in the compact + comprehensive Word docs
+# is rendered through ``ai_p.add_run(ai_summary)`` style calls and
+# the LLM emits brackets per the prompt-template convention -- so
+# Build25 still leaked ~65 occurrences in compact docx and ~182 in
+# renewal docx.
+#
+# This helper is intentionally narrow: it ONLY strips brackets when
+# the bracket content matches an actual ID pattern (``BEMS\d+``,
+# ``CSC[A-Z]{2}\d+``, ``CSC\d+``).  Placeholder text like
+# ``[BEMSxxxxxxxx]`` (used in the user-facing "Verifiable IDs" note)
+# and citation chrome like ``[Source: ...]`` is preserved.  Briefing-
+# book templates that the LLM consumes are also preserved -- the
+# strip happens AFTER the LLM call, on output text only.
+_R49_BEMS_BRACKET_RE = re.compile(r"\[(BEMS\d{5,12})\]")
+_R49_CSC_LETTER_BRACKET_RE = re.compile(r"\[(CSC[A-Za-z]{2}\d{4,10})\]")
+_R49_CSC_DIGIT_BRACKET_RE = re.compile(r"\[(CSC\d{4,10})\]")
+
+
+def strip_bems_brackets_from_llm_text(text: Any) -> str:
+    """Strip square brackets around real BEMS/CSC ID patterns in
+    LLM-emitted narrative text.
+
+    Examples::
+
+        >>> strip_bems_brackets_from_llm_text("IDs: [BEMS01943186], [BEMS01946483]")
+        'IDs: BEMS01943186, BEMS01946483'
+        >>> strip_bems_brackets_from_llm_text("Defect [CSCwa55555] is open")
+        'Defect CSCwa55555 is open'
+        >>> strip_bems_brackets_from_llm_text("All [BEMSxxxxxxxx] are verifiable")
+        'All [BEMSxxxxxxxx] are verifiable'
+
+    Idempotent on already-bare IDs and a no-op on empty / non-string
+    inputs.  Round 49 / F-COMP-BEMS-MD-LEAK-R49.
+    """
+    if text is None:
+        return ""
+    try:
+        s = str(text)
+    except Exception:
+        return ""
+    if not s:
+        return s
+    s = _R49_BEMS_BRACKET_RE.sub(r"\1", s)
+    s = _R49_CSC_LETTER_BRACKET_RE.sub(r"\1", s)
+    s = _R49_CSC_DIGIT_BRACKET_RE.sub(r"\1", s)
+    return s
+
+
 def resolve_canonical_source(metric_name: str) -> Tuple[str, str, str]:
     """
     Resolve canonical source metadata for a metric-like label.
