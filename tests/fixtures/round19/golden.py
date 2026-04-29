@@ -410,12 +410,21 @@ EXPECTED_KPIS: Dict[str, Any] = {
     # Excel summary sheet labels (Round 15 / report_export_styling.build_summary_rows).
     # Order matters; the test asserts exact sequence after the optional
     # generated_at_utc_iso_z header (which we do not pass, so it is absent).
+    # Round 48 / F-COMP-AB-SUMMARY-VS-DETAIL-4: the additive
+    # "Adoption barriers (detail rows)" disclosure row sits directly
+    # under "Adoption barriers (total)" so a reader can reconcile the
+    # canonical distinct-IDs headline against the AB_Detail_All row
+    # count (which fans out one row per assignee).  Previously the
+    # 68-vs-72 gap had no in-workbook explanation; the disclosure row
+    # is pinned here so any future reordering or removal is caught
+    # by the existing label-order tests.
     "excel_summary_label_order": (
         "Manager scope",
         "Technology scope",
         "Window (days)",
         "Customers in portfolio",
         "Adoption barriers (total)",
+        "Adoption barriers (detail rows)",
         "Adoption barriers (critical)",
         "Adoption barriers (open)",
         "TAC cases (total)",

@@ -107,11 +107,28 @@ APP_SIMPLE = REPO_ROOT / "app_simple.py"
 # counts, document the addition here."  No new run-time guards in
 # Round 32.
 #
+# Round 48 / R48-D9 + R48-D10 raised the floor from 34 to 40 to
+# account for the new ``_r48_harvest_renewal_pdw()`` helper inside
+# ``run_customer_renewal_analysis``.  The helper iterates over six
+# renewal-relevant DataFrame names (``customer_ab``, ``customer_csone``,
+# ``customer_customer_pulse``, ``customer_action_plans``,
+# ``customer_success_priorities``, ``team_subs_df``) and harvests
+# ``df.attrs['fetch_error']`` from each one to populate the renewal
+# Word ``Partial Data Warning`` banner (R48-D10) and the renewal
+# Excel ``Report_Info.Partial_Data_Warning_Count`` cell (R48-D9).
+# These six DataFrames are conditionally bound -- a fetch path may
+# never reach the assignment if an upstream guard short-circuits --
+# so each access uses the legitimate-defensive ``X if 'X' in locals()
+# else None`` shape the docstring carves out.  The alternative
+# (``try: ... except NameError: ...`` per access) would be six
+# try/except blocks for the same effect.  No NEW dead-branch
+# antipattern sites; this is purely the legitimate-defensive case.
+#
 # Future rounds that simplify MORE sites should lower this floor in the
 # same change; rounds that intentionally introduce a new ``in locals()``
 # pattern (e.g. for legitimate ``'cur' in locals()`` cleanup-after-try
 # discipline) should raise the floor and document why in the audit row.
-_R20_IN_LOCALS_FLOOR = 34
+_R20_IN_LOCALS_FLOOR = 40
 
 
 def test_in_locals_count_is_at_or_below_post_r20_floor() -> None:
