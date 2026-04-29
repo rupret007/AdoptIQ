@@ -132,20 +132,61 @@ ROW_CONTRACTS: Dict[str, Dict[str, Sequence[str]]] = {
     },
     "adoption_barriers": {
         "id": ("ID", "RECORD_ID", "ADOPTION_BARRIER_ID"),
-        "customer": ("BU_NAME", "customer_name", "ACCOUNT_NAME"),
+        # Round 48 / F-DV-PULSE-CONTRACT-DRIFT: when the
+        # ``C360_CS_TASK_C_VW`` view is loaded without a JOIN to
+        # ``dsm_assignment_data``, the only customer-bearing column
+        # is ``ACCOUNT_ID_C``.  Annotators / loaders that resolve
+        # the customer name post-fetch stamp it as ``Customer`` /
+        # ``Customer Name`` (friendly) or ``customer`` (canonical
+        # already populated).  Accept all three variants so the
+        # contract passes once the customer name is materialized
+        # rather than escalating an unrelated schema_drift.
+        "customer": (
+            "BU_NAME", "customer_name", "ACCOUNT_NAME",
+            "Customer", "Customer Name", "BU_ACCOUNT_NAME",
+            "customer", "CUSTOMER",
+        ),
         "subject": ("SUBJECT_C", "subject", "TITLE"),
         "status": ("AB_STATUS_C", "STATUS_C", "STATUS"),
         "severity": ("SEVERITY_C", "severity_c", "Severity", "PRIORITY", "severity_norm"),
     },
     "tac_cases": {
         "case_id": ("Case #", "CASE_NUMBER", "CASE_ID", "Case Number", "SR Number"),
-        "customer": ("customer_name", "BU_NAME", "Account Name", "ACCOUNT_NAME"),
+        # Round 48 / F-DV-PULSE-CONTRACT-DRIFT: parity with
+        # adoption_barriers -- accept friendly and canonical
+        # variants resolved post-fetch.
+        "customer": (
+            "customer_name", "BU_NAME", "Account Name", "ACCOUNT_NAME",
+            "Customer", "Customer Name", "BU_ACCOUNT_NAME",
+            "customer", "CUSTOMER",
+        ),
         "severity": ("Severity", "SEVERITY_C", "PRIORITY", "Priority"),
         "status": ("Status", "STATUS_C", "STATUS", "Case Status"),
     },
     "customer_pulse": {
-        "customer": ("BU_NAME", "customer_name", "ACCOUNT_NAME"),
-        "rating": ("PULSE_RATING__C", "PULSE_RATING", "Rating", "RATING"),
+        # Round 48 / F-DV-PULSE-CONTRACT-DRIFT: ``ESA_C360_CUSTOMER_PULSE__C``
+        # joins to ``dsm_assignment_data`` to deliver ``BU_NAME``,
+        # but some upstream paths (``CUSTOMER_NAME__C``,
+        # legacy ad-hoc JOINs that drop the dsm side, or post-fetch
+        # canonical-slot remap) deliver the customer name under a
+        # different label.  Accept the documented friendly forms.
+        "customer": (
+            "BU_NAME", "customer_name", "ACCOUNT_NAME",
+            "CUSTOMER_NAME__C", "Customer", "Customer Name",
+            "customer", "CUSTOMER",
+        ),
+        # Round 48 / F-DV-PULSE-CONTRACT-DRIFT: ``ask_ai_grounded.py``
+        # documents ``SCORE__C``, ``SCORE_C``, and ``PULSE_RATING__C``
+        # as the historic rating columns.  The Excel friendly label
+        # is ``Pulse Rating`` (see ``report_export_schema.py``
+        # ~L222).  Accept all of them so the contract passes
+        # whenever any of these arrive on the frame.
+        "rating": (
+            "PULSE_RATING__C", "PULSE_RATING", "Rating", "RATING",
+            "SCORE__C", "SCORE_C", "Score", "SCORE",
+            "Pulse Rating", "pulse_rating", "rating",
+            "OVERALL_RATING__C", "OVERALL_RATING",
+        ),
     },
     "bems_rows": {
         # BEMS escalations live inside the TAC case data and are

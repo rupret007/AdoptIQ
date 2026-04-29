@@ -971,8 +971,14 @@ class CompactReportFormatter:
             barriers_p.add_run('- Barriers: ').bold = True
             barriers_text_parts = []
             if bems_count > 0 or bems_unique_id_count > 0:
-                # FIXED: Show all BEMS IDs for full verification
-                bems_id_examples = ', '.join([f'[{bid}]' for bid in sorted(list(bems_ids))])
+                # Round 48 / F-COMP-BEMS-MD-LEAK: comma-separated BEMS
+                # IDs WITHOUT square brackets so the rendered Word
+                # paragraph does not look like an unfinished markdown
+                # link.  The briefing-book builders in
+                # adoptiq_backend.py keep the brackets for LLM
+                # citation; this is the per-customer narrative
+                # rendered to the user.
+                bems_id_examples = ', '.join(str(bid) for bid in sorted(list(bems_ids)))
                 # Round 2 / Phase 3.4: headline = canonical row count;
                 # ``bems_unique_id_count`` is shown in the parenthetical
                 # so users can reconcile both numbers.
@@ -1720,9 +1726,14 @@ class CompactReportFormatter:
                     for _, row in customer_bems.iterrows():
                         bems_ids.update(extract_bems_ids_from_row(row))
 
-                    # Format ALL BEMS IDs with brackets for citation like [BEMS01916938]
+                    # Round 48 / F-COMP-BEMS-MD-LEAK: emit
+                    # comma-separated BEMS IDs WITHOUT square brackets.
+                    # See the executive_intelligence_formatter.py /
+                    # ~line 1018 fix for the same defect; both Word
+                    # renderers must agree because the audit script
+                    # diffs them character-for-character.
                     bems_id_list = sorted(list(bems_ids))
-                    bems_id_str = ', '.join([f'[{bid}]' for bid in bems_id_list])  # FIXED: Show all IDs
+                    bems_id_str = ', '.join(str(bid) for bid in bems_id_list)
 
                     summary_p.add_run(
                         f"• {display_name}: {len(customer_bems)} escalation(s) - {bems_id_str} "

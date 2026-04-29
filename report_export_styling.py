@@ -817,6 +817,35 @@ def build_summary_rows(
         except Exception:
             return None
 
+    # Round 48 / F-COMP-AB-SUMMARY-VS-DETAIL-4: keep the canonical
+    # "(total)" label that downstream golden-fixture tests pin (round
+    # 15 / 16 / 19 / 21 / 23) and add a follow-up "(detail rows)" row
+    # that explicitly exposes the AB_Detail_All row count plus the
+    # multi-assignee delta.  The disclosure row is computed here (not
+    # at render time) so the Excel ``Summary`` sheet, the Word leader
+    # and comprehensive headlines, and any downstream reader who
+    # parses the workbook all see the same string.  ``count_total_
+    # barriers`` already deduplicates by the ``ID`` column (Round 25 /
+    # Phase F), so the gap between ``total_barriers`` and
+    # ``len(ab_df)`` is exactly the number of duplicate assignee rows
+    # that fanned out from a single barrier.
+    ab_detail_rows = _len_or_none(ab_df)
+    ab_distinct = total_barriers if isinstance(total_barriers, int) else None
+    if (
+        isinstance(ab_distinct, int)
+        and isinstance(ab_detail_rows, int)
+        and ab_detail_rows > ab_distinct
+    ):
+        ab_delta = ab_detail_rows - ab_distinct
+        ab_detail_label = (
+            f"{ab_detail_rows:,} ({ab_delta:,} multi-assignee duplicate"
+            f"{'s' if ab_delta != 1 else ''})"
+        )
+    elif isinstance(ab_detail_rows, int):
+        ab_detail_label = f"{ab_detail_rows:,} (no multi-assignee duplicates)"
+    else:
+        ab_detail_label = "--"
+
     rows: list[tuple[str, str]] = []
     if generated_at_utc_iso_z:
         rows.append(("Report generated (UTC)", str(generated_at_utc_iso_z)))
@@ -827,6 +856,7 @@ def build_summary_rows(
             ("Window (days)", _format_kpi(days) if days is not None else "--"),
             ("Customers in portfolio", _format_kpi(customers)),
             ("Adoption barriers (total)", _format_kpi(total_barriers)),
+            ("Adoption barriers (detail rows)", ab_detail_label),
             ("Adoption barriers (critical)", _format_kpi(critical_barriers)),
             ("Adoption barriers (open)", _format_kpi(open_barriers)),
             ("TAC cases (total)", _format_kpi(total_tac)),

@@ -2751,9 +2751,13 @@ class LeaderReportGenerator:
                 row_cells[2].text = str(detail['customer']) if detail['customer'] else 'Unknown'  # FIXED: Full customer name
                 row_cells[3].text = str(detail['subject'])  # Already fixed - full text
                 row_cells[4].text = str(detail['id'])
-                # Format BEMS ID with brackets for citation like [BEMS01916938]
+                # Round 48 / F-COMP-BEMS-MD-LEAK: BEMS IDs render as
+                # bare strings in the rendered Word table.  The cell
+                # context (the column header is "BEMS ID") is enough
+                # to identify the value; the legacy [BEMS01916938]
+                # decoration creates a markdown-link chrome leak.
                 bems_id = detail.get('bems_id', 'N/A')
-                row_cells[5].text = f'[{bems_id}]' if bems_id and bems_id != 'N/A' else 'N/A'
+                row_cells[5].text = str(bems_id) if bems_id and bems_id != 'N/A' else 'N/A'
                 
                 # Center align some cells
                 for i in [1, 4, 5]:

@@ -55,6 +55,56 @@ class ExecutiveReportBuilder:
         """Add page break."""
         self.doc.add_page_break()
 
+    def add_partial_data_warning_banner(self, partial_data_warnings):
+        """Round 48 / F-COMP-PARTIAL-BANNER-MISSING: surface upstream
+        fetch failures (schema_drift, column-policy block, timeouts)
+        directly in the comprehensive Word report.
+
+        Mirrors the banner already emitted by:
+          * ``executive_intelligence_formatter.py`` ~L1610
+          * ``app_simple._create_simple_renewal_report`` (R48)
+          * ``compact_report_formatter`` ~L2922 (R46)
+
+        Without this banner the comprehensive Word document silently
+        consumed a "successful" report built on partial data while
+        ``analysis_status[*]['partial_data_warnings']`` correctly
+        carried the warnings -- the banner is the user-visible
+        contract that the two surfaces agree.
+
+        Defensive: any rendering failure logs at WARNING level and
+        is swallowed so the banner can never block the rest of the
+        report from being produced.
+        """
+
+        if not partial_data_warnings:
+            return
+        try:
+            self.doc.add_heading("\u26a0 Partial Data Warning", level=1)
+            self.doc.add_paragraph(
+                "One or more upstream data sources failed to load for "
+                "this comprehensive report run.  Sections that depend "
+                "on the affected sources are marked \"unavailable\" "
+                "rather than rendered as zero.  The Excel workbook "
+                "lists the same warnings in its Report_Info / "
+                "Partial_Data_Warning_Count cells.  Rerun once the "
+                "source is reachable for a complete picture."
+            )
+            for _r48_w in partial_data_warnings:
+                _r48_ds = str((_r48_w or {}).get('dataset') or 'unknown')
+                _r48_err = str((_r48_w or {}).get('error') or 'unknown error')
+                _r48_kind = str((_r48_w or {}).get('kind') or 'runtime')
+                self.doc.add_paragraph(
+                    f"\u2022 {_r48_ds} ({_r48_kind}): {_r48_err}",
+                    style='List Bullet',
+                )
+            self.doc.add_paragraph("")
+        except Exception as _r48_banner_err:  # noqa: BLE001
+            logger.warning(
+                "Round 48 / F-COMP-PARTIAL-BANNER-MISSING: "
+                "comprehensive Word banner failed: %s",
+                _r48_banner_err,
+            )
+
     def add_heading(self, text: str, level: int = 1):
         """Add heading."""
         self.doc.add_heading(text, level=level)

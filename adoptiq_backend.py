@@ -10528,7 +10528,12 @@ If the briefing's canonical risk-band section is missing or truncated, say so ex
 **1. [Customer Name] - Risk Level: [CRITICAL]**
 • **Problem Summary:** [What's really going wrong?]
 • **Adoption Barriers:** [X barriers] - **Key Issue:** [Main blocking issue with details]
-• **TAC Cases:** [Y cases, Z are P1/P2] - **Active Problems:** [Specific issues]
+• **Total Support Cases (90d):** [Y] - **Open + critical (P1+P2):** [Z] ([W are P2])
+  *Round 48 / F-COMP-TAC-LABEL-AMBIGUITY: do NOT emit a generic
+  "TAC Cases: N cases" line.  Use the canonical pair "Total Support
+  Cases (90d)" + "Open + critical (P1+P2)" so the reader can
+  reconcile the bullet against the at-a-glance dashboard.*
+• **Active Problems:** [Specific issues]
 • **BEMS Escalations:** [If any, with BEMS IDs like [BEMS01916938]]
 • **Defects Impacting:** [List any known defects affecting this customer with IDs like [CSCxx12345]]
 • **Business Impact:** [How is this affecting their business?]
@@ -12606,7 +12611,13 @@ PROMPT_COMPACT_EXECUTIVE_TEMPLATE = """
 **1. [Customer] - Risk: [HIGH/CRITICAL]**
 • **Problem:** [What's really wrong]
 • **Barriers:** [X barriers] - **Key Issue:** [Specific blocking issue]
-• **TAC Cases:** [Y cases, Z are P1/P2] - [Active problems]
+• **Total Support Cases (90d):** [Y] - **Open + critical (P1+P2):** [Z] ([W are P2])
+  *Round 48 / F-COMP-TAC-LABEL-AMBIGUITY: do NOT emit a generic
+  "TAC Cases: N cases" line.  The canonical labels are "Total
+  Support Cases (90d)" for the window total and "Open + critical
+  (P1+P2)" for the high-severity slice.  If a number is unavailable
+  in the briefing, write "(not in briefing)" rather than padding to
+  zero or omitting the label entirely.*
 • **BEMS:** [Count and IDs with brackets like [BEMS01916938]]
 • **Defects:** [Known bugs with IDs like [CSCxx12345]]
 • **Impact:** [Business effect]

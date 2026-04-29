@@ -1016,8 +1016,17 @@ class ExecutiveIntelligenceFormatter:
         
         if bems_ids:
             metrics_para.add_run(f'• BEMS IDs: ')
-            # Format with brackets for citation like [BEMS01916938] - show all IDs
-            ids_run = metrics_para.add_run(', '.join([f'[{bid}]' for bid in bems_ids]))
+            # Round 48 / F-COMP-BEMS-MD-LEAK: emit comma-separated BEMS
+            # IDs WITHOUT square brackets.  Pre-Round 48 the renderer
+            # emitted "[BEMS01916938], [BEMS01952872], ..." which Word
+            # readers (and downstream markdown tooling that some
+            # operators paste these into) interpret as the head of an
+            # unfinished markdown link `[text](url)`.  The brackets
+            # stay in the briefing book the LLM ingests (see
+            # adoptiq_backend.py briefing builders) because the LLM
+            # uses them as citation anchors -- but never in the final
+            # rendered Word output.
+            ids_run = metrics_para.add_run(', '.join(str(bid) for bid in bems_ids))
             ids_run.font.color.rgb = CISCO_GRAY
         
         # Customer breakdown

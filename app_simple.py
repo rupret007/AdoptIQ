@@ -3369,6 +3369,72 @@ def _safe_doc_text(value, max_len: int = 200) -> str:
     return s
 
 
+def _strip_markdown_chrome(value) -> str:
+    r"""Round 48 / F-RP-MD-LEAK: strip markdown bold/italic chrome
+    from a display string before it reaches Word.
+
+    The audit baseline (run 1777445582 -- renewal_doc.txt line 794)
+    showed a customer-pulse heading rendered as
+    ``ATLANTIA SPA__AEROPORTI DI ROMA SPA__IT`` -- the source data
+    happens to use double-underscore as a separator for
+    multi-account aliases, and CommonMark / GFM viewers (including
+    the Word reader plugin most operators paste into) interpret
+    ``__text__`` as bold and ``_text_`` as italic.  The legacy
+    renderer fed the customer name through ``_safe_doc_text`` (XML
+    sanitization only) without stripping these markers, so the
+    chrome leaked verbatim.
+
+    We strip:
+        ``**text**`` / ``__text__`` (bold)
+        ``*text*`` / ``_text_`` (italic)
+        backtick text backtick (inline code)
+        ``~~text~~`` (strikethrough)
+        ``[text](url)`` -> ``text`` (markdown link, bare anchor preserved)
+
+    Word-boundary preservation: when the bold/italic markers are
+    flanked by alphanumerics with no whitespace (the multi-alias
+    customer-name pattern from the audit baseline), a single space
+    is inserted in place of the markers so the resulting string
+    reads as ``ATLANTIA SPA AEROPORTI DI ROMA SPA IT`` instead of
+    ``ATLANTIA SPAAEROPORTI DI ROMA SPAIT``.  This is a
+    display-only sanitizer and must never be applied to data being
+    persisted, queried, or sent to the LLM.
+    """
+
+    if value is None:
+        return ""
+    try:
+        s = str(value)
+    except Exception:
+        return ""
+    if not s:
+        return s
+    import re as _re_local
+
+    s = _re_local.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", s)
+    # Bold pairs: when both delimiters are flanked by word chars
+    # (Atlantia SPA__alias__IT case), insert a space; otherwise
+    # just drop the delimiters.
+    def _bold_repl(match):
+        inner = match.group(1)
+        before = s[: match.start()]
+        after = s[match.end() :]
+        left = before[-1:] if before else ""
+        right = after[:1] if after else ""
+        if left.isalnum() and right.isalnum():
+            return f" {inner} "
+        return inner
+
+    s = _re_local.sub(r"\*\*([^*\n]+?)\*\*", _bold_repl, s)
+    s = _re_local.sub(r"__([^_\n]+?)__", _bold_repl, s)
+    s = _re_local.sub(r"~~([^~\n]+?)~~", r"\1", s)
+    s = _re_local.sub(r"(?<![*\w])\*([^*\n]+?)\*(?![*\w])", r"\1", s)
+    s = _re_local.sub(r"(?<![_\w])_([^_\n]+?)_(?![_\w])", r"\1", s)
+    s = _re_local.sub(r"`([^`\n]+?)`", r"\1", s)
+    s = _re_local.sub(r"\s+", " ", s).strip()
+    return s
+
+
 # Round 6 / Phase 1.18: Excel cells have a hard 32767-character limit
 # (xlsxwriter raises silently or truncates).  When we clip a cell we
 # count it here so the workbook can append a footnote in
@@ -9855,7 +9921,8 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                                   chart_paths: List[str] = None,
                                   customer_action_plans: pd.DataFrame = None,
                                   customer_customer_pulse: pd.DataFrame = None,
-                                  customer_success_priorities: pd.DataFrame = None) -> str:
+                                  customer_success_priorities: pd.DataFrame = None,
+                                  partial_data_warnings: Optional[List[Dict[str, Any]]] = None) -> str:
     """Create a comprehensive Word document for renewal analysis with ALL data sources.
     
     Args:
@@ -10013,6 +10080,45 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     _data_run.font.size = Pt(9)
     _data_run.font.color.rgb = RGBColor(150, 150, 150)
     doc.add_paragraph()
+
+    # Round 48 / F-RP-PARTIAL-BANNER-MISSING: render the same Partial
+    # Data Warning banner the compact and EI Word reports already
+    # surface (R46 / F-COMP-DQ-BANNER pattern at app_simple.py L5510
+    # and executive_intelligence_formatter.py L1610).  Without this,
+    # the renewal Word document silently consumes a "successful"
+    # report built on partial data while the Excel workbook's
+    # Report_Info sheet correctly shows the warnings -- the two
+    # artifacts disagreed about the run's data quality.  The
+    # ``partial_data_warnings`` kwarg is forwarded by
+    # ``run_customer_renewal_analysis`` after the R48 harvest at
+    # ~L12567 collects ``df.attrs['fetch_error']`` annotations.
+    if partial_data_warnings:
+        try:
+            doc.add_heading("\u26a0 Partial Data Warning", level=1)
+            doc.add_paragraph(
+                "One or more upstream data sources failed to load for this "
+                "renewal run. Sections that depend on the affected sources "
+                "are marked \"unavailable\" rather than rendered as zero. "
+                "The Excel workbook's Report_Info sheet lists the same "
+                "warnings; rerun once the source is reachable for a "
+                "complete picture."
+            )
+            for _r48_w in partial_data_warnings:
+                _r48_ds = str((_r48_w or {}).get('dataset') or 'unknown')
+                _r48_err = str((_r48_w or {}).get('error') or 'unknown error')
+                _r48_kind = str((_r48_w or {}).get('kind') or 'runtime')
+                doc.add_paragraph(
+                    f"\u2022 {_r48_ds} ({_r48_kind}): {_r48_err}",
+                    style='List Bullet',
+                )
+            doc.add_paragraph("")
+        except Exception as _r48_banner_err:  # noqa: BLE001
+            logger.warning(
+                "Round 48 / F-RP-PARTIAL-BANNER-MISSING: renewal partial-"
+                "data banner failed: %s",
+                _r48_banner_err,
+            )
+
     data_sources_line = doc.add_paragraph()
     data_sources_line.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = data_sources_line.add_run('Data sources: CSConsole, Snowflake C360_CS_TASK_C_VW, CSOne (TAC/BEMS), status.webex.com, help.webex.com. See Report Data Sources below.')
@@ -10065,7 +10171,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             exec_para.add_run(f'{len(high_risk)} customer(s) require immediate attention. ')
         exec_para.add_run(f'Key metrics: {format_number(ab_count)} adoption barriers, {format_number(case_count)} support cases, {format_number(bems_count)} BEMS escalations.')
     else:
-        exec_para.add_run(f'{customer_name} has a renewal risk score of {risk_score:.1f}/100 ({risk_category}). ')
+        # Round 48 / F-RP-MD-LEAK: strip markdown chrome from the
+        # customer name before it lands in the rendered Word doc.
+        # See _strip_markdown_chrome above for the full rationale
+        # (audit baseline showed __AEROPORTI DI ROMA SPA__ italicized
+        # in the renewal pulse heading).
+        exec_para.add_run(f'{_strip_markdown_chrome(customer_name)} has a renewal risk score of {risk_score:.1f}/100 ({risk_category}). ')
         exec_para.add_run(f'Key metrics: {format_number(ab_count)} adoption barriers, {format_number(case_count)} support cases, {format_number(bems_count)} BEMS escalations. ')
         exec_para.add_run('See Key Findings and Recommendations for actionable next steps.')
     doc.add_paragraph()
@@ -10357,7 +10468,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if portfolio_mode and all_customers:
                 cn = _na(row.get('customer_name', row.get('BU_NAME', row.get('CUSTOMER_BU_NAME__C', row.get('RELATED_CUSTOMER__C', '')))))
                 if cn and cn != 'N/A':
-                    cust_label = f'Customer: {cn} — '
+                    cust_label = f'Customer: {_strip_markdown_chrome(cn)} — '
             subject = _first_avail(row, ['NAME', 'SUBJECT_C', 'subject_c', 'title', 'TITLE_C', 'DESCRIPTION_C', 'description', 'Subject', 'Title'], 'N/A')
             if _is_empty(subject):
                 subject = _first_avail_by_hint(row, ['subject', 'title', 'name', 'desc', 'summary', 'issue', 'problem'])
@@ -10410,7 +10521,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if portfolio_mode and all_customers:
                 cn = _na(row.get('customer_name', row.get('Customer Name', row.get('BU_NAME', ''))))
                 if cn and cn != 'N/A':
-                    cust_label = f'Customer: {cn} — '
+                    cust_label = f'Customer: {_strip_markdown_chrome(cn)} — '
             case_num = _na(row.get('Case #', row.get('SR Number', row.get('Case Number', 'N/A'))))
             title_text = _na(row.get('Title', row.get('title', 'N/A')))
             severity = _na(row.get('severity_norm', row.get('Severity', row.get('Highest Priority', 'N/A'))))
@@ -10475,8 +10586,14 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             doc.add_paragraph()
             ids_para = doc.add_paragraph()
             ids_para.add_run('All BEMS IDs: ').bold = True
-            # FIXED: Show ALL BEMS IDs with brackets for citation
-            ids_para.add_run(', '.join([f'[{bid}]' for bid in bems_ids]))
+            # Round 48 / F-COMP-BEMS-MD-LEAK: comma-separated BEMS IDs
+            # WITHOUT square brackets so the renewal Word document
+            # matches the compact and EI Word documents (see
+            # executive_intelligence_formatter.py and
+            # compact_report_formatter.py for the parallel fixes).
+            # The brackets the LLM sees in the briefing book stay
+            # intact -- those are citation anchors, not user output.
+            ids_para.add_run(', '.join(str(bid) for bid in bems_ids))
         
         # Show BEMS cases from CSOne
         bems_cases, _ = detect_bems_escalations(customer_csone_display if customer_csone_display is not None else pd.DataFrame())
@@ -10757,7 +10874,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if portfolio_mode and all_customers:
                 cn = _na(row.get('BU_NAME', row.get('CUSTOMER_NAME', row.get('RELATED_CUSTOMER__C', ''))))
                 if cn and cn != 'N/A':
-                    cust_label = f'Customer: {cn} — '
+                    cust_label = f'Customer: {_strip_markdown_chrome(cn)} — '
             subject = _first_avail(row, ['ACTION_PLAN_TITLE_C', 'NAME', 'SUBJECT_C', 'TITLE_C', 'title', 'Subject', 'Title'], 'N/A')
             if _is_empty(subject):
                 subject = _first_avail_by_hint(row, ['subject', 'title', 'name', 'action', 'plan', 'task'])
@@ -10867,7 +10984,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if portfolio_mode and all_customers:
                 cn = _na(row.get('BU_NAME', row.get('CUSTOMER_NAME', row.get('RELATED_CUSTOMER__C', ''))))
                 if cn and cn != 'N/A':
-                    cust_label = f'Customer: {cn} — '
+                    cust_label = f'Customer: {_strip_markdown_chrome(cn)} — '
             rating = _first_avail(row, ['CUSTOMER_PULSE__C', 'PULSE_RATING__C', 'Pulse_Rating__c', 'RATING__C', 'rating'], 'N/A')
             if _is_empty(rating):
                 rating = _first_avail_by_hint(row, ['pulse', 'rating', 'score'])
@@ -10958,7 +11075,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if portfolio_mode and all_customers:
                 cn = _na(row.get('RELATED_CUSTOMER__C', row.get('BU_NAME', row.get('CUSTOMER_NAME', ''))))
                 if cn and cn != 'N/A':
-                    cust_label = f'Customer: {cn} — '
+                    cust_label = f'Customer: {_strip_markdown_chrome(cn)} — '
             subject = _na(_first_avail(row, ['SUCCESS_PRIORITY_TITLE__C', 'SUBJECT_C', 'title', 'NAME', 'TITLE_C'], 'N/A'))
             status = _na(_first_avail(row, ['STATUS__C', 'STATUS_C', 'status_c'], 'N/A'))
             opened_dt = _na(_first_avail(row, ['CREATED_DATE', 'CREATEDDATE', 'OPEN_DATE_C'], 'N/A'))
@@ -12292,12 +12409,48 @@ def run_customer_renewal_analysis(analysis_id):
         # the filter set every name with at least an empty DataFrame fallback,
         # so the presence guards were dead.
         
+        # Round 48 / F-RP-PARTIAL-BANNER-MISSING: harvest each renewal
+        # frame's ``df.attrs['fetch_error']`` annotation NOW so the
+        # Word banner can render warnings on the FIRST run (the same
+        # harvest is repeated and idempotently persisted in the Excel
+        # writer at ~L12567 so both artifacts cite the same set).
+        # This deduplicates the harvest into a small inline helper to
+        # keep the two call sites in lockstep.
+        def _r48_harvest_renewal_pdw():  # noqa: ANN202
+            _entries: list = []
+            for _ds_name, _ds_df in (
+                ("adoption_barriers", customer_ab if 'customer_ab' in locals() else None),
+                ("csone_tac_cases", customer_csone if 'customer_csone' in locals() else None),
+                ("customer_pulse", customer_customer_pulse if 'customer_customer_pulse' in locals() else None),
+                ("action_plans", customer_action_plans if 'customer_action_plans' in locals() else None),
+                ("success_priorities", customer_success_priorities if 'customer_success_priorities' in locals() else None),
+                ("team_subs", team_subs_df if 'team_subs_df' in locals() else None),
+            ):
+                try:
+                    _attrs = getattr(_ds_df, 'attrs', None) or {}
+                    _err = _attrs.get('fetch_error') if isinstance(_attrs, dict) else None
+                    if not _err:
+                        continue
+                    _entry = {
+                        'dataset': _attrs.get('fetch_error_dataset') or _ds_name,
+                        'error': _redact_partial_warning_error(_err),
+                        'kind': _attrs.get('fetch_error_kind') or 'runtime',
+                    }
+                    if _entry not in _entries:
+                        _entries.append(_entry)
+                except Exception:
+                    pass  # noqa: PIE790
+            return _entries
+
+        _r48_word_pdw = _r48_harvest_renewal_pdw() or None
+
         renewal_word_path = _create_simple_renewal_report(
             base_path=base,
             customer_name=customer_name_for_report,
             technology=technology,
             days=days,
             renewal_analysis=renewal_analysis,
+            partial_data_warnings=_r48_word_pdw or None,
             customer_ab=customer_ab,
             customer_csone=customer_csone,
             ext_bugs=ext_bugs,
@@ -12487,6 +12640,44 @@ def run_customer_renewal_analysis(analysis_id):
         # accrued during this run.  Without this, consumers of the
         # renewal Excel had no in-workbook way to see that (e.g.) AB
         # data fell back due to a fetch error.
+        # Round 48 / F-RP-WARNING-COUNT-WRONG: the renewal analysis
+        # function does NOT initialize a local ``partial_data_warnings``
+        # list (unlike compact / comprehensive at L6796 / L12957), and
+        # ``df.attrs['fetch_error']`` annotations from
+        # ``data_contracts.validate_against_contract`` (e.g.
+        # ``schema_drift:customer_pulse``) never made it into
+        # ``analysis_status[analysis_id]['partial_data_warnings']``.
+        # The Excel writer below then reads zero warnings and emits
+        # ``Partial_Data_Warning_Count = 0`` even though two real
+        # schema_drifts exist (audit baseline run 1777445582).  Reuse
+        # the same harvest helper the Word banner uses so the two
+        # artifacts cite a byte-identical warning list.
+        _r48_renewal_pdw: list = []
+        try:
+            _r48_renewal_pdw = _r48_harvest_renewal_pdw() or []
+        except Exception as _r48_pdw_harvest_err:  # noqa: BLE001
+            logger.debug(
+                "[RENEWAL] R48 partial-data-warning harvest failed: %s",
+                _r48_pdw_harvest_err,
+            )
+            _r48_renewal_pdw = []
+        if _r48_renewal_pdw:
+            try:
+                with analysis_status_lock:
+                    _persisted = analysis_status.setdefault(analysis_id, {})
+                    _persisted_pdw = _persisted.setdefault('partial_data_warnings', [])
+                    if isinstance(_persisted_pdw, list):
+                        for _entry in _r48_renewal_pdw:
+                            if _entry not in _persisted_pdw:
+                                _persisted_pdw.append(_entry)
+                    else:
+                        _persisted['partial_data_warnings'] = list(_r48_renewal_pdw)
+                    save_analysis_status()
+            except Exception as _r48_pdw_persist_err:  # noqa: BLE001
+                logger.debug(
+                    "[RENEWAL] R48 could not persist partial_data_warnings on status: %s",
+                    _r48_pdw_persist_err,
+                )
         try:
             _ren_status = analysis_status.get(analysis_id, {}) if isinstance(analysis_status, dict) else {}
         except Exception:
@@ -13606,7 +13797,26 @@ def run_comprehensive_analysis(analysis_id):
         
         # Add professional title page
         report_builder.add_title_page(status['manager'], status['tech'], status['days'], portfolio_metrics)
-        
+
+        # Round 48 / F-COMP-PARTIAL-BANNER-MISSING: render the same
+        # Partial Data Warning banner the renewal / compact / EI
+        # reports surface so the comprehensive Word artifact agrees
+        # with its own Report_Info / Partial_Data_Warning_Count
+        # cells.  ``partial_data_warnings`` is the local list this
+        # function builds across the data-fetch path (initialized at
+        # ~L12957).  R42/Phase 7 already merged any persisted
+        # ``analysis_status[*]['partial_data_warnings']`` entries
+        # into this list (~L8095) so the banner reflects both the
+        # in-memory and persisted warning streams.
+        try:
+            report_builder.add_partial_data_warning_banner(partial_data_warnings)
+        except Exception as _r48_comp_banner_err:  # noqa: BLE001
+            logger.warning(
+                "Round 48 / F-COMP-PARTIAL-BANNER-MISSING: failed to "
+                "render comprehensive Word banner: %s",
+                _r48_comp_banner_err,
+            )
+
         # Add visual dashboard after title page
         logger.info(f"[[VISUAL]] Adding executive visual dashboard...")
         add_executive_visual_dashboard(report_builder.doc, portfolio_metrics)
@@ -19134,7 +19344,13 @@ def run_subscription_analysis(analysis_id):
             doc = Document()
             
             # Title page
-            title = doc.add_heading(f'Subscription Analysis: {sub_data.get("customer_name") or "Unknown"}', 0)
+            # Round 48 / F-RP-MD-LEAK: strip markdown chrome from
+            # the customer name so __ALIAS__ separators in
+            # multi-account customer names do not render as bold.
+            title = doc.add_heading(
+                f'Subscription Analysis: {_strip_markdown_chrome(sub_data.get("customer_name") or "Unknown")}',
+                0,
+            )
             subtitle = doc.add_heading(f'Subscription ID: {subscription_id}', level=1)
             details = doc.add_paragraph()
             # Round 12 / Phase 10.6: anchor on UTC and tag the timezone so
@@ -19151,7 +19367,7 @@ def run_subscription_analysis(analysis_id):
             # Executive Summary
             doc.add_heading('Executive Summary', level=1)
             summary_p = doc.add_paragraph()
-            summary_p.add_run(f'Customer: {sub_data["customer_name"]}\n')
+            summary_p.add_run(f'Customer: {_strip_markdown_chrome(sub_data["customer_name"])}\n')
             summary_p.add_run(f'Subscription: {subscription_id}\n')
             summary_p.add_run(f'Renewal Risk Level: {renewal_analysis.get("risk_level", "Unknown")} ({renewal_analysis.get("overall_risk_score", renewal_analysis.get("risk_score", 0))}/10)\n')
             
