@@ -1,8 +1,19 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 1).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 24).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 24 (Round 47 — Demo-readiness P0 sweep)
+
+Round 47 / Build 24 closes four demo-blocking dual-truths the Build23 Brian Frazier audit caught. Every fix is paired with a regression test (43 new R47 tests, 3103 total green); full audit detail lives in `QUALITY_AUDIT.md`.
+
+- **AI grounding gate calibrated to executive language.** The comprehensive customer storyboards previously emitted up to 32 `AI insight could not be grounded` placeholders per run because the validator's common-reference number set jumped from 10 to 14 (so "the past 12 months" / "12-month outlook" was always rejected) and the entity allow-list compared candidates exact-equal to allowed names that carried a trailing 2-letter ISO country code (`Equitable Holdings LLC` mismatched `EQUITABLE HOLDINGS LLC US`). Build 24 widens the common-reference set to small ints 0-31, multiples of 5/10 through common day windows, and the common fractional percentages the model derives from briefing ratios (1/3, 1/4, 2/3, etc.). Entity matching strips a trailing 2-letter ISO country-code token and accepts substring containment with a 6-character floor. Safety property is preserved — arbitrary 5-digit numbers, ARR amounts, and truly-invented entities still trip the gate.
+- **Renewal Word / Excel pulse parity.** Word previously cited `Total Customer Pulse Records: 186` plus 10 sample rows while Excel `Customer_Customer_Pulse` was a Data_Unavailable envelope (`schema_drift: customer_pulse: missing slot(s) rating`). Word now honors `df.attrs['fetch_error']` on the pulse frame and renders a parity disclosure ("Customer Pulse data unavailable for this report. Reason: schema_drift. ... See Customer_Customer_Pulse sheet in the Excel data export").
+- **Renewal Word / Excel risk-components parity.** Word advertised a multi-component risk breakdown (Adoption Barriers 28%, Support Cases 27%, Customer Pulse 15%, ...) while Excel `Risk_Components` said `Data_Unavailable: risk_components were not produced`. The simple renewal calculator now publishes the per-component scores from the deterministic weighted model, and the portfolio Excel writer aggregates per-customer components into a portfolio-mean view — so the two artifacts tell the same story.
+- **Comprehensive Word / Excel customer count parity.** Comprehensive Word title page + Executive Summary table cited `Total Customers: 52` while Excel `Summary` said `Customers in portfolio: 38` (delta 14). Word headline + comprehensive `portfolio_metrics['total_customers']` are now pinned to the same canonical-narrow `cm.count_customers(ab, csone, pulse)` value Excel uses; the wide universe is preserved as `total_customers_with_extras` for downstream consumers that legitimately need it.
+
+Per-round audit detail (Rounds 30 → 47) is in `QUALITY_AUDIT.md`. The earlier "What's New since v1.0.3" notes below remain accurate for Rounds 18-30.
 
 ### What's New since v1.0.3 (Quality & Hardening)
 

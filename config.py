@@ -526,7 +526,75 @@ ADOPTIQ_VERSION = "1.0.4"
 # clean (3060 pytest pass / 2 skipped, +3 over Build22).  No
 # upstream Snowflake query changes, no boot-order / corpus /
 # admin-console changes ship in Build23.
-ADOPTIQ_BUILD = "23"
+#
+# Round 47 / Build24 ships four demo-blocking P0 fixes the Build23
+# Brian Frazier audit (run IDs 1777445562 / 1777445582 / 1777445600)
+# captured:
+#
+# 1. F-COMP-AI-WITHHOLD-EXPLOSION (R47-AI-GATE-COMMON +
+#    R47-AI-GATE-COUNTRY): the comprehensive customer storyboards
+#    were emitting 32 ``AI insight could not be grounded`` placeholders
+#    (vs the historical ~5 ceiling) because the validator's common-
+#    reference number set jumped from 10 to 14 (so "12 months" / "the
+#    past 12 months" were always rejected) and the entity allow-list
+#    compared candidates exact-equal to allowed names that carried a
+#    trailing 2-letter ISO country-code token (so
+#    ``"Equitable Holdings LLC"`` mismatched
+#    ``"EQUITABLE HOLDINGS LLC US"``).  Diagnosis was anchored on
+#    ``adoptiq.20569.log`` 2026-04-29 01:54-01:58 (21 of 32 rejections
+#    cited ``'12'``, 7 cited country-stripped invented_entity).  Fix
+#    expands ``_COMMON_REFERENCE_NUMBERS`` to cover small ints 0-31
+#    (calendar / months / quarters / day-of-month), common multiples
+#    of 5 / 10 through 365, plus the common fractional percentages
+#    1/3 1/4 2/3 etc., and adds country-code-tolerant entity matching
+#    via a curated 50-entry ISO suffix list + symmetric substring
+#    fallback (with a 6-character floor to prevent ``"Inc"`` matching
+#    every Inc-suffixed customer).  35 new regression tests pin the
+#    behavior; the safety property (arbitrary 5-digit numbers,
+#    truly-invented entities) still trips the validator.
+#
+# 2. F-RP-PULSE-DUAL-TRUTH (R47-RP-PULSE-PARITY): the renewal Word
+#    body was citing ``Total Customer Pulse Records: 186`` plus 10
+#    sample rows while the matching Excel ``Customer_Customer_Pulse``
+#    sheet was a Data_Unavailable envelope (``schema_drift:
+#    customer_pulse: missing slot(s) rating on a non-empty result
+#    (186 row(s))``).  Word now honors ``df.attrs['fetch_error']`` /
+#    ``fetch_error_kind`` on the pulse frame and renders the same
+#    "data unavailable - reason - see the matching Excel envelope"
+#    line instead of the row-count + sample.  2 new tests prove the
+#    gate engages when the attrs are set and stays out of the way
+#    when the frame is healthy.
+#
+# 3. F-RP-RISK-DUAL-TRUTH (R47-RP-RISK-PARITY): the renewal Word
+#    body advertised a multi-component risk breakdown (Adoption
+#    Barriers 28%, Support Cases 27%, Customer Pulse 15%, ...) while
+#    Excel ``Risk_Components`` was a single Data_Unavailable row
+#    saying ``risk_components were not produced by the renewal
+#    analyzer``.  ``_calculate_simple_renewal_risk`` now passes
+#    through ``profile['components']`` from the deterministic weighted
+#    scorer as ``renewal_analysis['risk_components']``, and the
+#    portfolio Excel writer averages per-customer components into a
+#    portfolio-mean view when the top-level dict is empty.  3 new
+#    tests prove the schema and the aggregator math.
+#
+# 4. F-COMP-CUSTCOUNT-DELTA-14 (R47-COMP-CUSTCOUNT-PARITY): the
+#    comprehensive Word title page + Executive Summary table cited
+#    ``Total Customers: 52`` while Excel ``Summary`` said
+#    ``Customers in portfolio: 38`` (delta = 14).  Word used the
+#    wide ``_get_all_customers_from_all_sources`` universe (AB ∪
+#    CSOne ∪ team_subs ∪ every CSConsole frame); Excel used the
+#    canonical-narrow ``cm.count_customers(ab, csone, pulse)``.  Word
+#    headline + comprehensive ``portfolio_metrics['total_customers']``
+#    are now pinned to the same canonical-narrow value Excel uses;
+#    the wide value is preserved as ``total_customers_with_extras``
+#    for downstream consumers that legitimately need it.  3 new tests
+#    pin the property + assert the wide universe is still accessible.
+#
+# 43 new R47 regression tests; ``make verify`` clean (3103 pytest
+# pass / 2 skipped, +43 over Build23).  No upstream Snowflake query
+# changes, no boot-order / corpus / admin-console changes ship in
+# Build24.
+ADOPTIQ_BUILD = "24"
 
 def version_string():
     """e.g. 'v1.0.1 build 1'"""
