@@ -115,8 +115,19 @@ def test_manageable_load_threshold(generator):
 
 
 def test_high_volume_only_when_absolute_floor_and_rate(generator):
-    """Genuine high-volume: 12 ABs / 5 customers (rate=2.4)."""
-    data = _data(customers=["A", "B", "C", "D", "E"], abs_count=12, tacs_count=0)
+    """Genuine high-volume: 18 ABs / 5 customers (rate=3.6).
+
+    Round 41 / Phase 3: floor tightened from
+    ``AB >= 10 AND rate > 1.0`` to ``AB >= 15 AND rate >= 3.0``
+    after Brian Frazier 90d Build17 audit showed the Round 39
+    floor still tripped on 9 of 9 CSSMs (Angelica's
+    0.3 AB/c, 1.2 TAC/c portfolio was rendered as 'requires
+    immediate attention').  The pre-Round-41 fixture (12 AB /
+    5 customers, rate 2.4) was reasonable under the old floor
+    but lands in the new ``elevated activity`` tier -- we bump
+    to 18 ABs (rate 3.6) so the immediate-attention rail still
+    has a positive-case pin."""
+    data = _data(customers=["A", "B", "C", "D", "E"], abs_count=18, tacs_count=0)
     generator._add_individual_summary_paragraph("Hot CSSM", data, days=90)
     text = _last_paragraph_text(generator).lower()
     assert "immediate attention" in text
@@ -124,7 +135,8 @@ def test_high_volume_only_when_absolute_floor_and_rate(generator):
 
 def test_high_absolute_but_low_rate_does_not_trigger(generator):
     """20 ABs / 50 customers (rate=0.4) MUST NOT trip the high-volume
-    branch -- the rate floor of 1.0/customer prevents it.  Pre-Round-39
+    branch -- the rate floor (Round 39: 1.0/customer; Round 41
+    tightened to 3.0/customer) prevents it.  Pre-Round-39
     the AB > customers comparator would also have spared this case
     (20 < 50), but the parallel TAC clause was the actual offender;
     we pin the new logic for both rails."""

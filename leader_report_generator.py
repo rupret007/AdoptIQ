@@ -2784,12 +2784,26 @@ class LeaderReportGenerator:
         # 11 times in the Brian Frazier 90d audit -- false alarms
         # eroded executive trust in the report.
         #
+        # Round 41 / Phase 3: Round 39's tightening was still too
+        # permissive on the "immediate attention" branch -- in
+        # ``Brian_Frazier_90d_1777423525.docx`` (Build17) it fired
+        # for all 9 CSSMs, including Angelica's 0.3 AB/c, 1.2 TAC/c,
+        # 12-customer portfolio.  Insert a NEW intermediate
+        # "elevated activity" tier between "generally healthy" and
+        # "immediate attention" so mid-volume CSSMs get an honest
+        # "warrants close monitoring" framing instead of an
+        # alarming "sustained pressure" boilerplate that erodes
+        # executive trust.
+        #
         # New thresholds:
         #   - Healthy:   AB == 0 AND TAC == 0
         #   - Manageable load: low absolute counts (AB+TAC <= 5) regardless of rate
         #   - Generally healthy: AB rate <= 0.5/customer AND TAC rate <= 0.3/customer
-        #   - High volume (immediate attention): EITHER (AB >= 10 AND AB rate > 1/customer)
-        #                                        OR (TAC >= 10 AND TAC rate > 0.5/customer)
+        #   - Immediate attention (TIGHTENED): EITHER (AB >= 15 AND AB rate >= 3.0/customer)
+        #                                       OR (TAC >= 30 AND TAC rate >= 5.0/customer)
+        #   - Elevated activity (NEW middle tier): EITHER (AB >= 5 AND AB rate > 0.5/customer)
+        #                                           OR (TAC >= 10 AND TAC rate > 0.5/customer)
+        #     (only reached when the immediate-attention branch did not match)
         #   - Mixed health: anything else (the catch-all describes signals honestly,
         #                   never claims "high volumes")
         ab_per_customer = (total_barriers / total_customers) if total_customers > 0 else 0.0
@@ -2827,14 +2841,43 @@ class LeaderReportGenerator:
                     "management despite some challenges. "
                 )
         elif (
-            (total_barriers >= 10 and ab_per_customer > 1.0)
-            or (total_tac_cases >= 10 and tac_per_customer > 0.5)
+            # Round 41 / Phase 3: tightened from Round 39's
+            # ``(AB >= 10 AND AB rate > 1.0) OR (TAC >= 10 AND TAC rate > 0.5)``.
+            # The old TAC floor (10 cases AND 0.5/customer) tripped on
+            # any CSSM with even modest TAC traffic spread across a
+            # small portfolio (e.g. Samuel: 58 TAC / 17 customers /
+            # 3.4 per-customer rate -- absolutely not "sustained
+            # pressure" territory).  The new floor (30 cases AND
+            # 5.0/customer) reserves the alarmist phrasing for
+            # genuinely overloaded portfolios -- against the
+            # 1777423525 dataset that's Jeffrey, Jose Nerio, Greg,
+            # Mario, William, but excludes Angelica, Samuel, Arpit
+            # who land in the new ``elevated activity`` tier.
+            (total_barriers >= 15 and ab_per_customer >= 3.0)
+            or (total_tac_cases >= 30 and tac_per_customer >= 5.0)
         ):
             summary_text += (
                 f"The portfolio requires immediate attention: {total_barriers} "
                 f"adoption barriers ({ab_per_customer:.1f}/customer) and "
                 f"{total_tac_cases} TAC cases ({tac_per_customer:.1f}/customer) "
                 f"across {total_customers} accounts indicate sustained pressure. "
+            )
+        elif (
+            # Round 41 / Phase 3: NEW "elevated activity" middle tier.
+            # Reached only when the (tightened) immediate-attention
+            # branch did NOT match.  Catches the in-between cases
+            # (Angelica, Samuel, Arpit on the 1777423525 dataset)
+            # where the portfolio is past "generally healthy" but
+            # not in crisis -- a calmer "warrant close monitoring"
+            # framing preserves executive trust.
+            (total_barriers >= 5 and ab_per_customer > 0.5)
+            or (total_tac_cases >= 10 and tac_per_customer > 0.5)
+        ):
+            summary_text += (
+                f"The portfolio shows elevated activity: {total_barriers} "
+                f"adoption barriers ({ab_per_customer:.1f}/customer) and "
+                f"{total_tac_cases} TAC cases ({tac_per_customer:.1f}/customer) "
+                f"across {total_customers} accounts warrant close monitoring. "
             )
         else:
             summary_text += (
@@ -4048,14 +4091,44 @@ class LeaderReportGenerator:
                             # displayed label so the bullets agree
                             # with the All Action Plans / dashboard
                             # views (Round 11 / Phase 3.5 fix).
+                            #
+                            # Round 41 / Phase 4: switched from
+                            # ``normalize_customer_name`` to
+                            # ``normalize_for_display`` so multi-
+                            # segment ``__``-separated names like
+                            # ``TRIBUNAL...__GOBIERNO...__MX`` render
+                            # as a comma-separated list.  The
+                            # customer-summary heading was already
+                            # converted in Round 39 / Phase 4.4 -- this
+                            # closes the gap for body bullets.
                             _raw_customer = barrier.get('BU_NAME', 'Unknown')
                             try:
-                                customer = normalize_customer_name(str(_raw_customer)) or str(_raw_customer)
+                                customer = normalize_for_display(_raw_customer) or str(_raw_customer)
                             except Exception:
                                 customer = str(_raw_customer)
-                            subject = barrier.get('SUBJECT_C', 'No subject')
-                            severity = barrier.get('SEVERITY_C', 'Unknown')
-                            
+                            # Round 41 / Phase 2: NULL-safe rendering
+                            # for SUBJECT_C / SEVERITY_C.  The pre-fix
+                            # ``.get('SUBJECT_C', 'No subject')`` only
+                            # caught missing keys; a present-but-NULL
+                            # value rendered as the literal string
+                            # ``"None"`` (verified live: 344
+                            # ``<Customer> - None (Status: ...)``
+                            # bullets in
+                            # ``Brian_Frazier_90d_1777423525.docx``).
+                            _subj_raw = barrier.get('SUBJECT_C')
+                            subject = (str(_subj_raw).strip() if pd.notna(_subj_raw) else '') or 'No subject'
+                            # Round 42 / Phase 6: strip Markdown chrome
+                            # (``**bold**`` / ``__italic__``) from CSOne
+                            # subject text BEFORE it reaches add_run --
+                            # python-docx renders the markers literally
+                            # (e.g. ``**Classic Calabrio***``) instead
+                            # of applying formatting.  Falls back to
+                            # ``'No subject'`` if stripping leaves the
+                            # string empty.
+                            subject = _strip_markdown_chrome(subject) or 'No subject'
+                            _sev_raw = barrier.get('SEVERITY_C')
+                            severity = (str(_sev_raw).strip() if pd.notna(_sev_raw) else '') or 'Unknown'
+
                             barrier_para.add_run(f'{customer} - {subject} ').font.italic = True
                             barrier_para.add_run(f'(Severity: {severity})')
                             note = self._format_external_note(barrier, cssm_name)
@@ -4075,13 +4148,37 @@ class LeaderReportGenerator:
                     # customer label so the leader report agrees
                     # with the dashboard / Word body normalization
                     # (CSSM pipeline already normalizes elsewhere).
+                    #
+                    # Round 41 / Phase 4: switched from
+                    # ``normalize_customer_name`` to
+                    # ``normalize_for_display`` so ``__``-separated
+                    # multi-segment names render as a human-readable
+                    # comma list (matches the heading + the All
+                    # High-Severity Barriers block above).
                     raw_customer = ap.get('BU_NAME', 'Unknown')
                     try:
-                        customer = normalize_customer_name(str(raw_customer)) or str(raw_customer)
+                        customer = normalize_for_display(raw_customer) or str(raw_customer)
                     except Exception:
                         customer = str(raw_customer)
-                    subject = ap.get('SUBJECT_C', 'No subject')
-                    status = ap.get('STATUS_C', 'Unknown')
+                    # Round 41 / Phase 2: NULL-safe rendering for the
+                    # All Action Plans bullets (same antipattern as
+                    # the High-Severity Barriers block above).  This
+                    # is the second of the two body-bullet sites that
+                    # leaked literal ``"None"`` for Snowflake-NULL
+                    # SUBJECT_C / STATUS_C values.  The Customer Pulse
+                    # bullets below already use the correct
+                    # ``or``-chain pattern -- leave that block alone.
+                    _subj_raw = ap.get('SUBJECT_C')
+                    subject = (str(_subj_raw).strip() if pd.notna(_subj_raw) else '') or 'No subject'
+                    # Round 42 / Phase 6: strip Markdown chrome (same
+                    # treatment as the High-Severity Barriers block
+                    # above; Action Plan SUBJECT_C is the second of the
+                    # two body-bullet sites that leaked literal Markdown
+                    # asterisks in the 2026-04-28 audited build-18
+                    # leader artifact).
+                    subject = _strip_markdown_chrome(subject) or 'No subject'
+                    _status_raw = ap.get('STATUS_C')
+                    status = (str(_status_raw).strip() if pd.notna(_status_raw) else '') or 'Unknown'
 
                     ap_para.add_run(f'{customer} - {subject} ').font.italic = True
                     ap_para.add_run(f'(Status: {status})')
@@ -4099,9 +4196,13 @@ class LeaderReportGenerator:
                     cp_para = self.doc.add_paragraph(style='List Bullet')
 
                     # Round 11 / Phase 3.5: normalize displayed BU_NAME.
+                    # Round 41 / Phase 4: switched to
+                    # ``normalize_for_display`` so ``__``-separated
+                    # multi-segment names render with comma
+                    # separators (matches AB / AP body bullets).
                     raw_customer = cp.get('BU_NAME', 'Unknown')
                     try:
-                        customer = normalize_customer_name(str(raw_customer)) or str(raw_customer)
+                        customer = normalize_for_display(raw_customer) or str(raw_customer)
                     except Exception:
                         customer = str(raw_customer)
                     subject = (
@@ -5722,8 +5823,30 @@ class LeaderReportGenerator:
                                 accounts = summary_data.get('accounts', [])
                                 if accounts:
                                     first_acct = accounts[0]
-                                    acct_para.add_run(f"Tier: {first_acct.get('CISCO_TIER_RANKING__C', 'N/A')}, ")
-                                    acct_para.add_run(f"Renewal Risk: {first_acct.get('RENEWAL_RISK_CATEGORY', 'N/A')}")
+                                    # Round 41 / Phase 1: NULL-safe rendering.
+                                    # ``dict.get(key, default)`` only returns
+                                    # the default when the KEY is absent --
+                                    # when the key is present but the VALUE
+                                    # is Python ``None`` / ``pd.NA``
+                                    # (Snowflake NULL projected through
+                                    # Round 39 / Phase 2.2's
+                                    # ``_resolve_columns`` substitution),
+                                    # the default is NOT used and we
+                                    # render the literal string ``"None"``.
+                                    # Verified live in
+                                    # ``Brian_Frazier_90d_1777423525.docx``:
+                                    # ``Tier: None`` rendered 50 times
+                                    # across 50 distinct accounts.  Use
+                                    # ``pd.notna`` + ``or`` so Python
+                                    # ``None``, ``pd.NA``, NaN, and empty
+                                    # strings all fall through to the
+                                    # ``"N/A"`` default.
+                                    _tier_raw = first_acct.get('CISCO_TIER_RANKING__C')
+                                    _tier = (str(_tier_raw).strip() if pd.notna(_tier_raw) else '') or 'N/A'
+                                    _risk_raw = first_acct.get('RENEWAL_RISK_CATEGORY')
+                                    _risk = (str(_risk_raw).strip() if pd.notna(_risk_raw) else '') or 'N/A'
+                                    acct_para.add_run(f"Tier: {_tier}, ")
+                                    acct_para.add_run(f"Renewal Risk: {_risk}")
                         
                         # Contract insights
                         contract_data = customer_insights.get('insights', {}).get('contract', {})
@@ -6736,7 +6859,19 @@ class LeaderReportGenerator:
 
         # FIXED: Include insights for ALL customers
         for customer in customers:
-            self.doc.add_paragraph(f"Customer: {customer}")
+            # Round 41 / Phase 4: route the per-customer
+            # Snowflake-insights heading through
+            # ``normalize_for_display`` so multi-segment ``__``-
+            # separated names like
+            # ``TRIBUNAL...__GOBIERNO...__MX`` render as a comma-
+            # separated list (matches the AB / AP / CP body bullets
+            # and the customer-summary heading from Round 39 /
+            # Phase 4.4).
+            try:
+                _customer_label = normalize_for_display(customer) or str(customer)
+            except Exception:
+                _customer_label = str(customer)
+            self.doc.add_paragraph(f"Customer: {_customer_label}")
 
             # Get enhanced insights for this customer
             try:
