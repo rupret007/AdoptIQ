@@ -15,6 +15,13 @@ from data_normalization import (
     normalize_priority_label,
 )
 
+# Round 43 / Phase 6: module-level logger for the structured PM-drift log
+# lines added inside ``validate_report_consistency``.  Pre-fix the validator
+# only ``errors.append(...)``-ed the opaque mismatch message; operators had
+# no way to see ``portfolio=72 canonical=68`` without running the full
+# debugger or scrolling through the per-PID adoptiq.<pid>.log.
+logger = logging.getLogger(__name__)
+
 
 def _safe_count(df: Optional[pd.DataFrame]) -> int:
     return 0 if df is None or df.empty else len(df)
@@ -300,11 +307,33 @@ def validate_report_consistency(
 
     # Portfolio metric mismatch
     if portfolio_metrics:
-        if int(portfolio_metrics.get("total_barriers", 0)) != ab_count:
+        # Round 43 / Phase 6: emit a structured drift log line BEFORE each
+        # ``errors.append(...)`` so the next failure is one
+        # ``grep '[CONSISTENCY] PM drift'`` away from the failing key +
+        # both sides of the comparison.  Pre-fix the operator only had the
+        # opaque ``errors.append("Portfolio metric mismatch: total_barriers
+        # does not match ...")`` (the build-19 demo error) and had to do
+        # log archaeology to discover ``portfolio=72 canonical=68``.
+        _pm_total_barriers = int(portfolio_metrics.get("total_barriers", 0))
+        if _pm_total_barriers != ab_count:
+            logger.error(
+                "[CONSISTENCY] PM drift key=%s portfolio=%s canonical=%s",
+                "total_barriers", _pm_total_barriers, ab_count,
+            )
             errors.append("Portfolio metric mismatch: total_barriers does not match normalized adoption barriers.")
-        if int(portfolio_metrics.get("total_cases", 0)) != cs_count:
+        _pm_total_cases = int(portfolio_metrics.get("total_cases", 0))
+        if _pm_total_cases != cs_count:
+            logger.error(
+                "[CONSISTENCY] PM drift key=%s portfolio=%s canonical=%s",
+                "total_cases", _pm_total_cases, cs_count,
+            )
             errors.append("Portfolio metric mismatch: total_cases does not match normalized TAC cases.")
-        if int(portfolio_metrics.get("bems_count", 0)) != bems_count:
+        _pm_bems_count = int(portfolio_metrics.get("bems_count", 0))
+        if _pm_bems_count != bems_count:
+            logger.error(
+                "[CONSISTENCY] PM drift key=%s portfolio=%s canonical=%s",
+                "bems_count", _pm_bems_count, bems_count,
+            )
             errors.append("Portfolio metric mismatch: bems_count does not match canonical BEMS detection.")
         # Round 25 / Phase A: cross-format parity gate.  After this
         # round, ``portfolio_metrics["total_customers"]`` (Word
@@ -319,6 +348,12 @@ def validate_report_consistency(
             pm_total = int(portfolio_metrics.get("total_customers", 0) or 0)
             canon_total = int(metrics["total_customers"])
             if pm_total != canon_total:
+                # Round 43 / Phase 6: structured drift log -- see the
+                # earlier total_barriers block for rationale.
+                logger.error(
+                    "[CONSISTENCY] PM drift key=%s portfolio=%s canonical=%s",
+                    "total_customers", pm_total, canon_total,
+                )
                 errors.append(
                     "Portfolio metric mismatch: total_customers="
                     f"{pm_total} (Word headline) != "
@@ -330,9 +365,19 @@ def validate_report_consistency(
                 )
         reported_p1 = portfolio_metrics.get("critical_p1", portfolio_metrics.get("p1_cases", None))
         if reported_p1 is not None and int(reported_p1) != metrics["critical_p1"]:
+            # Round 43 / Phase 6: structured drift log.
+            logger.error(
+                "[CONSISTENCY] PM drift key=%s portfolio=%s canonical=%s",
+                "critical_p1", int(reported_p1), metrics["critical_p1"],
+            )
             errors.append("Portfolio metric mismatch: critical_p1 does not match canonical severity counting.")
         reported_p2 = portfolio_metrics.get("high_p2", portfolio_metrics.get("p2_cases", None))
         if reported_p2 is not None and int(reported_p2) != metrics["high_p2"]:
+            # Round 43 / Phase 6: structured drift log.
+            logger.error(
+                "[CONSISTENCY] PM drift key=%s portfolio=%s canonical=%s",
+                "high_p2", int(reported_p2), metrics["high_p2"],
+            )
             errors.append("Portfolio metric mismatch: high_p2 does not match canonical severity counting.")
         # Extended priority parity (P3, P4, Unknown, escalated).
         for key, expected_metric in (
@@ -343,6 +388,11 @@ def validate_report_consistency(
         ):
             reported = portfolio_metrics.get(key)
             if reported is not None and int(reported) != int(expected_metric):
+                # Round 43 / Phase 6: structured drift log.
+                logger.error(
+                    "[CONSISTENCY] PM drift key=%s portfolio=%s canonical=%s",
+                    key, int(reported), int(expected_metric),
+                )
                 errors.append(
                     f"Portfolio metric mismatch: {key} ({int(reported)}) does not match canonical severity counting ({int(expected_metric)})."
                 )
@@ -357,6 +407,13 @@ def validate_report_consistency(
         ):
             reported = portfolio_metrics.get(key)
             if reported is not None and int(reported) != int(expected_metric):
+                # Round 43 / Phase 6: structured drift log (warning-class
+                # check; logged at INFO so it doesn't drown the operator
+                # while still being grep-able).
+                logger.info(
+                    "[CONSISTENCY] PM drift (warning-class) key=%s portfolio=%s canonical=%s",
+                    key, int(reported), int(expected_metric),
+                )
                 warnings.append(
                     f"Portfolio metric drift: {key} ({int(reported)}) differs from canonical normalized status counting ({int(expected_metric)})."
                 )
@@ -391,6 +448,11 @@ def validate_report_consistency(
         ):
             reported = portfolio_metrics.get(key)
             if reported is not None and int(reported) != int(expected_metric):
+                # Round 43 / Phase 6: structured drift log.
+                logger.error(
+                    "[CONSISTENCY] PM drift key=%s portfolio=%s canonical=%s",
+                    key, int(reported), int(expected_metric),
+                )
                 errors.append(
                     f"Portfolio metric mismatch: {key} ({int(reported)}) does not match canonical case-type counting ({int(expected_metric)})."
                 )

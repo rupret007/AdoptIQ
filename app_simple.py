@@ -2584,12 +2584,38 @@ def check_cancellation(analysis_id):
 def update_analysis_status(analysis_id: str, updates: Dict[str, Any], save: bool = True):
     """
     Thread-safe helper to update analysis status
-    
+
     Args:
         analysis_id: The analysis ID to update
         updates: Dictionary of status fields to update
         save: Whether to save status to file after update
+
+    Round 43 / Phase 5: when ``updates['status'] == 'error'`` and an
+    exception is currently being handled (``sys.exc_info()`` is populated),
+    auto-attach ``traceback.format_exc()`` (truncated to 8 KB) under the
+    ``error_traceback`` key so the admin console / a downstream tail of
+    ``analysis_status.json`` carries the actual stack.  Pre-fix every error
+    catch site set ``'error': 'Analysis failed. Please check the Admin page
+    for details.'`` and the only place to find the traceback was the
+    per-PID ``~/.adoptiq/adoptiq.<pid>.log`` -- which is why the build-19
+    demo failures took a deep log archaeology to triage.  The truncation
+    cap keeps the JSON small (and avoids leaking long internal frames into
+    a UI surface) while still preserving the most-recent-frame stack which
+    is where 99% of bugs surface.  Callers that already pre-populate
+    ``error_traceback`` keep their value; we only auto-attach when missing.
     """
+    if isinstance(updates, dict) and str(updates.get('status', '')).lower() == 'error':
+        if 'error_traceback' not in updates:
+            try:
+                import sys as _r43_sys
+                import traceback as _r43_tb
+                _exc_type, _exc_value, _exc_tb = _r43_sys.exc_info()
+                if _exc_type is not None:
+                    _formatted = _r43_tb.format_exc()
+                    if isinstance(_formatted, str) and _formatted.strip() and _formatted.strip() != "NoneType: None":
+                        updates['error_traceback'] = _formatted[:8000]
+            except Exception:
+                pass
     with analysis_status_lock:
         if analysis_id in analysis_status:
             analysis_status[analysis_id].update(updates)
@@ -9062,21 +9088,38 @@ def run_compact_analysis(analysis_id):
                         # workbook write -- but we still wrap it so a
                         # truly unexpected exception (e.g. xlsxwriter
                         # API drift) cannot crash the report pipeline.
+                        # Round 43 / Phase 2: capture the polish return value so
+                        # we can skip the legacy ``worksheet.autofilter(...)`` at
+                        # L9156 when a Table was added.  ``apply_excel_polish``
+                        # adds an Excel Table whose declared range INCLUDES an
+                        # implicit autofilter on ``A2:F<last_row+1>``; the
+                        # legacy autofilter at L9156 then declares ``A2:F<n>``
+                        # (off by one because ``len(df_clean)`` does not include
+                        # the header row).  xlsxwriter raises
+                        # ``Worksheet autofilter range 'A2:F53' overlaps
+                        # previous Table autofilter range 'A2:F54'``, which
+                        # killed the build-19 demo compact run
+                        # (``Compact_Brian_Frazier_All_Contact_Center_90d_1777428644``).
+                        # When polish returns ``table_added=True``, the Table's
+                        # built-in autofilter already covers the full range, so
+                        # the legacy call is BOTH redundant and conflict-prone.
+                        _r43_polish_result: dict = {}
                         try:
-                            _r16_apply_excel_polish(
+                            _r43_polish_result = _r16_apply_excel_polish(
                                 workbook,
                                 writer.sheets[sheet_name],
                                 df_clean,
                                 sheet_name,
                                 _r16_used_table_names,
                                 startrow=1,
-                            )
+                            ) or {}
                         except Exception as _r16_err:
                             logger.warning(
                                 "Round 16 / Phase 5.1: apply_excel_polish skipped on '%s': %s",
                                 sheet_name,
                                 _r16_err,
                             )
+                        _r43_polish_added_table = bool(_r43_polish_result.get("table_added"))
                     
                         # Enhanced sheet formatting
                         worksheet = writer.sheets[sheet_name]
@@ -9152,8 +9195,15 @@ def run_compact_analysis(analysis_id):
                                 max_length = max(content_max, col_name_len)
                                 worksheet.set_column(i, i, min(max_length + 2, 50))
                     
-                        # Add data validation and filtering
-                        worksheet.autofilter(1, 0, len(df_clean), len(df_clean.columns)-1)
+                        # Round 43 / Phase 2: only call the legacy autofilter
+                        # when ``apply_excel_polish`` did NOT add a Table.
+                        # Tables ship with their own autofilter that covers the
+                        # full ``header..last_row`` range; declaring a SECOND
+                        # autofilter on the same sheet (and worse, an off-by-one
+                        # range) makes xlsxwriter raise ``Worksheet autofilter
+                        # range overlaps previous Table autofilter range``.
+                        if not _r43_polish_added_table:
+                            worksheet.autofilter(1, 0, len(df_clean), len(df_clean.columns)-1)
                     
                         # Freeze header row
                         worksheet.freeze_panes(2, 0)
@@ -9341,12 +9391,32 @@ def run_compact_analysis(analysis_id):
         
     except Exception as e:
         logger.error(f"[[ERROR]] Error in compact analysis: {e}", exc_info=True)
+        # Round 43 / Phase 5: persist the actual traceback + the actual
+        # exception class/message into ``analysis_status.json`` so the admin
+        # console (and a downstream tail of the file) carries something
+        # actionable.  Pre-fix the user-visible error was only ``"Analysis
+        # failed. Please check the Admin page for details."`` -- the actual
+        # ``Worksheet autofilter range overlaps...`` cause was buried in
+        # ``~/.adoptiq/adoptiq.<pid>.log`` and the admin console showed
+        # nothing.  ``error_class`` + ``error_detail`` give the user the
+        # one-line cause, ``error_traceback`` gives the operator the full
+        # stack.  The 8 KB cap matches ``update_analysis_status``'s
+        # auto-attach path so JSON size stays bounded.
+        try:
+            import traceback as _r43_tb
+            _r43_traceback_text = _r43_tb.format_exc()[:8000]
+        except Exception:
+            _r43_traceback_text = ""
         with analysis_status_lock:
             if analysis_id not in analysis_status:
                 analysis_status[analysis_id] = {}
             analysis_status[analysis_id]['status'] = 'error'
             analysis_status[analysis_id]['message'] = 'Analysis failed. Please check the Admin page for details.'
             analysis_status[analysis_id]['error'] = 'Analysis failed. Please check the Admin page for details.'
+            analysis_status[analysis_id]['error_class'] = type(e).__name__
+            analysis_status[analysis_id]['error_detail'] = str(e)[:1000]
+            if _r43_traceback_text:
+                analysis_status[analysis_id]['error_traceback'] = _r43_traceback_text
             save_analysis_status()
     finally:
         if 'ctx' in locals() and ctx is not None:
@@ -11716,13 +11786,29 @@ def run_customer_renewal_analysis(analysis_id):
             )
             _ren_risk_profiles = None
 
+        # Round 43 / Phase 3: drop ``extra_customer_frames=`` and
+        # ``account_to_customer=`` from this call so the Word headline tile
+        # narrows to the canonical ``count_customers(ab_df=, csone_df=,
+        # pulse_df=)`` universe.  Round 25 / Phase A's contract pinned the
+        # validator's ``metrics["total_customers"]`` to the narrow universe so
+        # the headline tile matches what readers can manually count across the
+        # AB / CSOne / Pulse detail sheets.  Pre-fix the renewal call passed
+        # both extras, which inflated ``portfolio_metrics["total_customers"]``
+        # to 188 (subscription universe) while the validator computed 70 (AB
+        # ∪ CSOne ∪ Pulse) -- and the strict-mode validator at
+        # ``report_consistency.py:318-330`` raised
+        # ``Portfolio metric mismatch: total_customers=188 (Word headline) !=
+        # 70 (canonical AB ∪ CSOne ∪ Pulse universe)`` on the build-19 demo
+        # renewal run (``Renewal_Portfolio_All_Managers_..._1777428729``).
+        # The validator at L11770-11783 still receives ``extra_frames`` /
+        # ``account_to_customer`` for per-section defect/customer linkage, so
+        # those wider counts remain available downstream -- only the headline
+        # tile narrows.  The error message itself recommended this fix.
         renewal_portfolio_metrics = cm.build_portfolio_metrics(
             ab_df=customer_ab if customer_ab is not None else pd.DataFrame(),
             csone_df=_renewal_csone_norm,
             risk_profiles=_ren_risk_profiles,
             defects=software_defects if isinstance(software_defects, dict) else None,
-            extra_customer_frames=_ren_extra_frames if _ren_extra_frames else None,
-            account_to_customer=_ren_account_to_customer,
             risk_scale=cm.RISK_SCALE_0_TO_100,
         )
         # Round 6 / Phase 5.9: thread ``strict_mode`` through the
@@ -12269,12 +12355,24 @@ def run_customer_renewal_analysis(analysis_id):
         
     except Exception as e:
         logger.error(f"[[ERROR]] Error in customer renewal analysis: {e}", exc_info=True)
+        # Round 43 / Phase 5: see the matching block in run_compact_analysis
+        # for the rationale.  Persist the real traceback / exception class /
+        # one-line detail so the admin console has something to show.
+        try:
+            import traceback as _r43_tb
+            _r43_traceback_text = _r43_tb.format_exc()[:8000]
+        except Exception:
+            _r43_traceback_text = ""
         with analysis_status_lock:
             if analysis_id not in analysis_status:
                 analysis_status[analysis_id] = {}
             analysis_status[analysis_id]['status'] = 'error'
             analysis_status[analysis_id]['message'] = 'Customer renewal analysis failed. Please check the Admin page for details.'
             analysis_status[analysis_id]['error'] = 'Customer renewal analysis failed. Please check the Admin page for details.'
+            analysis_status[analysis_id]['error_class'] = type(e).__name__
+            analysis_status[analysis_id]['error_detail'] = str(e)[:1000]
+            if _r43_traceback_text:
+                analysis_status[analysis_id]['error_traceback'] = _r43_traceback_text
             save_analysis_status()
     finally:
         if 'ctx' in locals() and ctx is not None:
@@ -12978,11 +13076,34 @@ def run_comprehensive_analysis(analysis_id):
                 + "; ".join(consistency.get("errors", []) or ["unknown"])
             )
             logger.error(f"[[CONSISTENCY]] Blocking comprehensive report: {err_msg}")
+            # Round 43 / Phase 5: this is a graceful set (no exception in
+            # flight) so ``update_analysis_status`` won't auto-attach a
+            # traceback.  Pre-fix the admin console showed only ``"Report
+            # consistency check failed"`` and the user had to grep
+            # ``adoptiq.<pid>.log`` for the actual mismatch.  Persist the
+            # full validator error list as a structured ``error_traceback``
+            # field so the admin console / next debugging round can see
+            # exactly which PM key drifted (``total_barriers``, ``total_cases``,
+            # ``total_customers``, etc.) without the operator running
+            # archaeology on the per-PID log.
+            _r43_consistency_detail = {
+                'kind': 'consistency_check_failed',
+                'report_path': 'comprehensive',
+                'errors': consistency.get('errors', []),
+                'warnings': consistency.get('warnings', []),
+            }
+            try:
+                _r43_consistency_text = json.dumps(_r43_consistency_detail, default=str, indent=2)[:8000]
+            except Exception:
+                _r43_consistency_text = ''
             update_analysis_status(analysis_id, {
                 'status': 'error',
                 'progress': 0,
                 'message': 'Report consistency check failed',
                 'error': err_msg,
+                'error_class': 'ConsistencyCheckError',
+                'error_detail': err_msg[:1000],
+                'error_traceback': _r43_consistency_text,
                 'current_step': 'Consistency Check Failed',
             })
             return
