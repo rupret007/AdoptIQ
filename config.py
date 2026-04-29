@@ -698,7 +698,177 @@ ADOPTIQ_VERSION = "1.0.4"
 # verify`` clean (3178 pytest pass / 2 skipped, +75 over
 # Build24).  No upstream Snowflake query changes, no boot-order /
 # corpus / admin-console changes ship in Build25.
-ADOPTIQ_BUILD = "25"
+#
+# Round 49 / Build26 closes the two P0 demo-blockers + four P1
+# surface cleanups the Build25 re-audit caught.  The Build25
+# audit baseline was Comprehensive ``Brian_Frazier_90d``,
+# Compact ``All_Managers``, Renewal_Portfolio ``All_Managers``,
+# Leader ``All_Managers``.
+#
+# 13. F-COMP-CONSIST-WIDTH-MISMATCH (R49-A1): the comprehensive
+#     report failed at ``validate_report_consistency`` with
+#     ``total_customers=38 (Word headline) != 52 (canonical
+#     count_customers(ab, csone, pulse))``.  Root cause: the
+#     comprehensive call site passed ``customer_universe=
+#     all_customers_comprehensive`` (the wide
+#     ``_get_all_customers_from_all_sources`` roster of 52)
+#     and the validator built ``metrics["total_customers"]``
+#     from that wide arg via a synthetic frame -- so its
+#     "canonical" reading was 52 while R47-B4's correctly
+#     narrowed Word headline + Excel Summary stayed at 38.
+#     Round 49 narrows the validator: ``metrics["total_customers"]``
+#     is ALWAYS computed from ``count_customers(ab_df, csone_df,
+#     pulse_df)`` regardless of whether ``customer_universe`` is
+#     passed; the wider count is preserved as ``metrics[
+#     "customer_universe_total"]`` for telemetry callers (defect-
+#     customer coverage, per-customer narrative passes) that
+#     legitimately need the broader iteration roster.  The error
+#     string is updated so the displayed "(canonical)" label
+#     matches the actual computation.  3 new R49 tests pin the
+#     narrow parity + the diagnostic surface.
+#
+# 14. F-DV-CONTRACT-DRIFT-R49 (R49-A2): three persistent
+#     ``schema_drift`` warnings still escalated even after the
+#     R48-D12 alias expansion -- (a) ``customer_pulse.rating``
+#     because the live Snowflake CSConsole pulse view emits
+#     ``CUSTOMER_PULSE__C`` not ``PULSE_RATING__C``; (b)
+#     ``adoption_barriers.customer`` because the
+#     ``annotate_with_contract`` call ran in
+#     ``snowflake_prefetch.py`` on the raw ``C360_CS_TASK_C_VW``
+#     frame whose only customer-bearing column is
+#     ``ACCOUNT_ID_C`` -- the team_subs merge that materializes
+#     ``BU_NAME`` happens later in ``app_simple.py``; (c)
+#     ``tac_cases.customer`` because the CSOne export column
+#     literal is ``Customer Name: Customer Name`` (Salesforce
+#     SOQL self-join relationship label).  Round 49 fixes all
+#     three: added ``CUSTOMER_PULSE__C`` / ``CUSTOMER_PULSE`` to
+#     ``customer_pulse.rating`` aliases; added
+#     ``"Customer Name: Customer Name"`` to ``tac_cases.customer``
+#     aliases; extended ``annotate_with_contract`` to self-heal
+#     by clearing prior ``schema_drift`` ``fetch_error`` stamps
+#     when a re-annotation passes for the same dataset; and
+#     wired post-merge re-annotate calls at the four AB merge
+#     sites in ``app_simple.py`` (renewal raw / renewal
+#     CSConsole / compact / comprehensive) so the
+#     ``adoption_barriers`` contract re-evaluates after
+#     ``BU_NAME`` is materialized.  3 new R49 test files pin the
+#     aliases + the self-heal wire.
+#
+# 15. F-COMP-BEMS-MD-LEAK-R49 (R49-B1): the R48-D7 sweep cleaned
+#     5 Word renderers but missed two more high-traffic
+#     surfaces: the compact Critical Trouble Spots renderer
+#     was still emitting ``IDs: [BEMS01943186], [BEMS01946483]``
+#     (~65 sites in the Build25 reproducer) and the renewal
+#     narrative was still emitting ~182 bracketed BEMS
+#     references via direct rendering sites in ``app_simple.py``
+#     (Defect IDs, BEMS case header) and via LLM-generated
+#     narrative that bypassed the bare-ID helper.  Round 49 adds
+#     ``report_utils.strip_bems_brackets_from_llm_text`` (a small
+#     regex-based stripper for ``[BEMS\\d+]`` / ``[CSC<XX>\\d+]``
+#     / ``[CSC\\d+]`` patterns), wires it into the LLM-output
+#     contract enforcers in ``executive_report_builder.py``,
+#     ``compact_report_formatter.py``, and the renewal narrative
+#     fallback in ``app_simple._parse_markdown_for_fallback``,
+#     and updates the four direct render sites in renewal to
+#     emit bare IDs.  Briefing-book templates remain bracketed
+#     (those are explicitly preserved by R48).  4 new R49 tests
+#     pin the stripper behavior + the wires + the bare-ID
+#     direct sites.
+#
+# 16. F-RP-COMPOSITE-KEY-BLEED (R49-B2): renewal Excel
+#     ``Renewal_Summary`` / ``Risk_Summary`` cells showed
+#     ``MARUBENI CORPORATION__JAMAICA PUBLIC SERVICE CO__JM`` and
+#     the renewal narrative showed ``ELEVANCE_ELEVANCE HEALTH_US``
+#     -- raw Snowflake composite-key strings produced by an
+#     upstream merge that joined two name slots with a region
+#     suffix.  R48-D8's ``_strip_markdown_chrome`` handles
+#     ``__bold__`` markdown but not these structural keys.
+#     Round 49 adds ``_normalize_composite_customer_key`` (split
+#     on ``__`` -> first segment; or single ``_<REGION>$``
+#     pattern -> drop the suffix), wires it ahead of
+#     ``_strip_markdown_chrome`` at the 8 renewal-renderer
+#     customer-name sites, and applies it to the ``Customer``
+#     column of the ``Risk_Summary`` and ``Renewal_Summary``
+#     Excel sheet builders so the bleed never reaches the
+#     workbook either.  Idempotent and a no-op for normal
+#     ``Single Customer Name`` inputs.  10 new R49 tests pin
+#     edge cases + idempotency + the wires.
+#
+# 17. F-RP-AB-RAW-HEADERS (R49-B3): renewal portfolio
+#     ``Customer_Adoption_Barriers`` xlsx leaked raw Snowflake
+#     ``_C`` headers (``AB_COMPETITOR_C``,
+#     ``AB_SOLUTION_ATTEMPT_C``, ``CSDF_SYNC_ID_C``,
+#     ``CX_TASK_ID_C``, ``GS_C_360_SUCCESS_PRIORITY_C`` etc.) --
+#     259 columns total, most ungoverned -- because the writer
+#     routed through ``apply_export_schema`` but no curated
+#     allowlist was registered for the
+#     ``Customer_Adoption_Barriers`` sheet name (only the
+#     comprehensive ``AB_Detail_All`` sheet had one).  Same
+#     defect applied to the compact ``All_Adoption_Barriers``
+#     sheet.  Round 49 registers
+#     ``Customer_Adoption_Barriers``, ``All_Adoption_Barriers``,
+#     and ``Adoption_Barriers`` in ``CURATED_COLUMNS`` against
+#     the SSoT ``_CURATED_AB_DETAIL_ALL`` projection, and adds
+#     ``BU_NAME`` + ``ACCOUNT_ID_C`` to that curated set so the
+#     post-projection friendly-rename pass can collapse them to
+#     ``Customer Name`` / ``Account ID``.  10 new R49 tests pin
+#     curation registration + zero raw ``_C`` survivors + every
+#     audit-flagged raw name dropped.
+#
+# 18. F-COMP-AAG-SCOPE-LABEL (R49-B4): the compact docx
+#     At-a-Glance dashboard tile read ``Support Cases: 294``
+#     while the per-customer deep-dive used ``Total Support
+#     Cases (90d): 36 - Open + critical (P1+P2): 1 (P2)`` for
+#     the same portfolio.  Both lines were truthful but read as
+#     off-by-scope side-by-side; the tile is portfolio-wide
+#     and the deep-dive is per-customer.  Round 49 makes the
+#     dashboard tile's scope explicit: table header is now
+#     ``Support Cases (90d, portfolio-wide)`` and the metric-
+#     source bullet is ``Total Support Cases (90d, portfolio-
+#     wide): N``.  5 new R49 tests pin the labels in the source
+#     + the rendered docx.
+#
+# ~35 new R49 regression tests across the 6 fixes (2 P0 + 4 P1);
+# ``make verify`` clean.  No upstream Snowflake query changes,
+# no boot-order / corpus / admin-console changes ship in
+# Build26.
+#
+# 19. F-COMP-CONSIST-PULSE-THREAD (R50-A1): Round 49 narrowed the
+#     validator to ``count_customers(ab, csone, pulse)`` regardless
+#     of ``customer_universe``, but the comprehensive call site at
+#     ``app_simple.py:13946`` did not pass ``customer_pulse_df=`` so
+#     the validator's narrow count fell back to
+#     ``count_customers(ab, csone, None)`` and diverged from the
+#     Word headline by exactly the pulse-only customer count.
+#     Brian Frazier 90d demo (2026-04-29) reproduced as
+#     ``total_customers=38 (Word headline) != 28 (canonical
+#     count_customers(ab_df, csone_df, pulse_df))``; Dee Kindrick
+#     90d as ``30 != 21``.  Round 50 threads
+#     ``customer_pulse_df=csconsole_customer_pulse`` into the
+#     comprehensive ``validate_report_consistency(...)`` call so
+#     the validator's narrow count matches the Word headline by
+#     construction.  The leader path at L21307-21316 has done
+#     this since Round 6 / Phase 5.8; this brings comprehensive
+#     into the same shape.  4 new R50 tests pin source-shape +
+#     behavioural parity + regression reproducer.
+#
+# 20. F-ANALYZE-DARK-THEME-BG-LIGHT (R50-A2): three
+#     ``<span class="input-group-text bg-light">`` adornments on
+#     the analyze page (Customer Name, Analysis Time Range, CSOne
+#     Excel File) rendered as bright-white boxes in the dark theme
+#     because Bootstrap's ``.bg-light { background-color:
+#     #f8f9fa !important; }`` overrode the shared dark
+#     ``.input-group-text`` rule from ``base.html``.  Round 50
+#     drops ``bg-light`` from the three adornments so the dark
+#     surface (``var(--bg-surface-raised)``) paints correctly.
+#     2 new R50 tests pin the dark-theme contract + sanity guard
+#     that the spans themselves are not deleted.
+#
+# 6 new R50 regression tests across the 2 fixes (1 P0 + 1 P1);
+# 3268 total green.  No upstream Snowflake query changes,
+# no boot-order / corpus / admin-console changes ship in
+# Build26.
+ADOPTIQ_BUILD = "26"  # Round 50
 
 def version_string():
     """e.g. 'v1.0.1 build 1'"""

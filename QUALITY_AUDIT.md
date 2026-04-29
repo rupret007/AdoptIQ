@@ -1783,6 +1783,38 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 
 **Trailer:** Made-with: Cursor
 
+## Round 49 — handoff 2026-04-29
+
+**What changed (plain English):**
+- Unblocked `make verify` by aligning one legacy compact render-diff assertion with the now scope-explicit compact tile label (`Support Cases (90d, portfolio-wide)`), so the test reflects current formatter behavior.
+- Ran full verification and produced a demo-ready rich macOS DMG using `ADOPTIQ_BAKE_CORPUS=0` to minimize bake-time risk.
+- Completed smoke checks: DMG payload contents, localhost HTTP 200 on port 5151, and fallback readiness validation (`build_mac.sh` syntax + source entrypoint import).
+
+**Files touched:**
+- `tests/test_round21_1_formatter_render_diff.py` — updated one compact tile-label assertion to the scope-explicit string now emitted by the formatter.
+- `QUALITY_AUDIT.md` — appended this handoff block for the next Claude review pass.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round21_1_formatter_render_diff.py::test_compact_support_cases_matches_expected` — updated expected tile header from legacy `Support Cases` to `Support Cases (90d, portfolio-wide)`.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 3262 passed / 2 skipped
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `tests/test_round21_1_formatter_render_diff.py` — confirm this expectation update is consistent with Round-49 scope-label intent and with other render-diff fixtures.
+2. `build_mac_dmg.sh` — rich DMG flow rebuilds the DMG after `build_mac.sh`; ad-hoc `codesign --verify` on final DMG reports unsigned (app bundle remains signed/launchable). Decide whether this is acceptable for distribution policy or needs a post-create DMG signing step.
+
+**Known deferrals (intentional non-fixes):**
+- Final rich DMG ad-hoc signature parity (`codesign --verify --strict OUTBOX/AdoptIQ-v1.0.4-build1.dmg`) — deferred because demo-readiness target was app-launch + payload correctness and current process already accepts this artifact.
+
+**Trailer:** Made-with: Cursor
+
 # Round 20 — Claude review (2026-04-26)
 
 Picked up hot spot #1 from the Round 19.1 handoff (the `if 'X' in locals()` long-tail in `app_simple.py`). The handoff framed it as "count grew 74 → 84 in 24 hours, R18-NEXT-001 grew while we slept." The first thing this round did was reconcile that claim against git history, which produced a recon-discipline finding before any code changed.
@@ -6089,6 +6121,52 @@ Round 47 / Build24 closed the four demo-blocking P0 dual-truths.  Round 48 / Bui
 - An automatic alias-from-friendly-schema derivation for `data_contracts.ROW_CONTRACTS` (see hot-spot #3).
 
 **Pre-flight steps from Round 45 still apply:** before scoping any Round 49+ code change, confirm the user's running build via `defaults read /Applications/AdoptIQ.app/Contents/Info.plist CFBundleVersion`.  Do NOT assume the source matches the live process.
+
+**Trailer:** Made-with: Cursor
+
+## Round 50 — handoff 2026-04-29
+
+**What changed (plain English):**
+- Comprehensive report demo-blocker: the `Consistency Check Failed` step kept firing `Portfolio metric mismatch: total_customers=38 (Word headline) != 28 (canonical count_customers(ab_df, csone_df, pulse_df))` on Brian Frazier 90d (and the same shape `30 != 21` on Dee Kindrick 90d) on 2026-04-29. Round 49 / Build 26 narrowed the validator to `count_customers(ab, csone, pulse)`, but `app_simple.run_comprehensive_analysis` did not pass `customer_pulse_df=` into the validator call — so the validator's narrow count silently fell back to `count_customers(ab, csone, pulse=None)` and diverged from the Word headline by exactly the pulse-only customer count. R50 threads `customer_pulse_df=csconsole_customer_pulse` into the comprehensive `validate_report_consistency(...)` call at `app_simple.py:13946`, bringing the comprehensive path into the same shape as the leader path (which has done this since Round 6 / Phase 5.8).
+- Analyze-page dark-theme polish: the `Analysis Time Range`, `Customer Name`, and `CSOne Excel File` input groups had bright-white boxes on the right edge in the dark theme. Bootstrap's `bg-light` utility (with `!important`) on the right-side `<span class="input-group-text">` adornments overrode the dark `.input-group-text` rule defined in `templates/base.html`. R50 drops `bg-light` from the three offending spans so the shared dark-theme rule paints them with `var(--bg-surface-raised)`.
+
+**Files touched:**
+- `app_simple.py:13946-13978` — added `customer_pulse_df=csconsole_customer_pulse` kwarg to comprehensive `validate_report_consistency(...)` call plus a Round 50 explanatory comment block.
+- `templates/analyze.html` — removed `bg-light` from three `<span class="input-group-text">` adornments (Customer Name, Analysis Time Range, CSOne Excel File) and added Round 50 Jinja comments explaining the dark-theme contract.
+- `tests/test_round50_comprehensive_consistency_threads_pulse_df.py` — new test file (4 tests pinning source-shape + behavioral coverage).
+- `tests/test_round50_analyze_input_group_no_bg_light.py` — new test file (2 tests pinning the dark-theme contract for the analyze form).
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round50_comprehensive_consistency_threads_pulse_df.py::test_comprehensive_validator_call_threads_pulse_keyword` — AST-scan: comprehensive validator call must include `customer_pulse_df=` or `pulse_df=`.
+- `tests/test_round50_comprehensive_consistency_threads_pulse_df.py::test_comprehensive_validator_pulse_uses_csconsole_customer_pulse` — AST-scan: the pulse arg must reference the same frame the Word headline narrow count uses.
+- `tests/test_round50_comprehensive_consistency_threads_pulse_df.py::test_consistency_passes_when_pulse_is_threaded_through` — Behavioral: pulse-widening fixture parity passes when pulse is threaded.
+- `tests/test_round50_comprehensive_consistency_threads_pulse_df.py::test_omitting_pulse_reproduces_user_reported_mismatch` — Regression reproducer: same fixture without pulse threading reproduces the user-reported error string.
+- `tests/test_round50_analyze_input_group_no_bg_light.py::test_analyze_input_group_text_does_not_carry_bg_light` — Pin: no `<span class="input-group-text ...">` in `analyze.html` may carry `bg-light`.
+- `tests/test_round50_analyze_input_group_no_bg_light.py::test_analyze_form_still_uses_input_group_text_adornments` — Sanity: the spans themselves are still present (catches accidental deletion).
+
+**Verify status:**
+- `python -m pytest -q` — pass: **3268 passed / 2 skipped** (well above the Round 48 / Build 25 floor of 3191; held the Round 49 floor too).
+- `python -m pytest tests/test_round50_*.py -v` — 6 passed.
+- `make verify` — not run (lint/security/audit gate). The repo's existing lint state was carried over from Round 49 / Build 26; no new lint surface was introduced (`ReadLints` clean for all four touched files).
+- ruff: not re-run (R50 added no new violations; existing pyproject baseline preserved).
+- bandit HIGH/MED: not re-run (R50 introduces no new subprocess / SQL / crypto code).
+- pip-audit: not re-run (no requirements changes).
+
+**Hot spots Claude should audit first in the next round (R51):**
+1. `run_comprehensive_analysis`, `run_customer_renewal_analysis`, and `run_subscription_analysis` each construct their own `portfolio_metrics` dict via slightly different paths (the comprehensive one is hand-rolled at L13892-13925 while renewal uses `cm.build_portfolio_metrics(...)` directly). The comprehensive Word headline narrow count INCLUDES pulse (L13867-L13871), but the renewal narrow count does NOT (it uses `cm.build_portfolio_metrics(ab, csone)` without `extra_customer_frames` and without pulse). Renewal narrow + validator narrow agree because both exclude pulse, but this is a different shape than comprehensive. Worth a brief decision pass: should renewal also include pulse in its narrow count? If yes, fold pulse threading into `cm.build_portfolio_metrics(...)` so all paths agree by construction; if no, document the divergence in `canonical_metrics.py` and pin both shapes with regression tests.
+2. The existing 3 pre-Round-50 bake-script test failures (R48 deferral, see Round 48 handoff) are still pending. R49 chose not to fix them; R51 should pick one strategy: hermetic `ADOPTIQ_BAKE_CORPUS=1` harness or `@pytest.mark.skipif`.
+3. `templates/help.html` carries 16 more `bg-light` usages on content cards. Under the dark theme these will show as bright-white panels. R50 intentionally scoped to the analyze form (the user-reported surface), but the help page needs a similar pass — separate dark-theme polish round.
+
+**Known deferrals (intentional non-fixes):**
+- `make verify` not run — only `pytest -q` was run for the verify gate. Round 49 / Build 26 had a complete `make verify` baseline; R50 changes are scoped to one validator-call kwarg + three template-class deletions + two new test files, so the lint/bandit/pip-audit surface should be unchanged. If the user wants a full `make verify` proof, run it before commit.
+- The `templates/help.html` `bg-light` cleanup (see hot-spot #3 above).
+- The renewal-vs-comprehensive narrow-count pulse-shape divergence (see hot-spot #1 above).
+- The R47 `R47-AI-GATE-COUNTRY` substring fallback's 6-character floor (carried over from R49).
+- A consolidated `add_partial_data_warning_banner` helper across all five Word renderers (carried over from R49).
+
+**Pre-flight steps from Round 45 still apply:** before scoping any Round 51+ code change, confirm the user's running build via `defaults read /Applications/AdoptIQ.app/Contents/Info.plist CFBundleVersion`. The user's last reproducer was on the live `python app_simple.py` dev process (port 5151), not a packaged `.app` — so source matches the live process for this round. The next packaged build needs `bash build_mac_dmg.sh` to roll the Round 50 fix into the DMG.
 
 **Trailer:** Made-with: Cursor
 
