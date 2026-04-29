@@ -33,3 +33,9 @@ diff_full.txt
 build_info.txt
 build_output.txt
 uploads/
+# Round 52: dev-run report outputs (Word/Excel) accumulate here
+# during local pytest + harness iteration; they are NOT release
+# artifacts (those land in OUTBOX/).  baselines/ IS committed --
+# it carries the manifest-pinned baseline floor under
+# baselines/round<N>/baseline_manifest.json.
+outputs/

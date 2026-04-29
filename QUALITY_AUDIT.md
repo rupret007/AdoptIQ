@@ -6389,3 +6389,73 @@ Round 47 / Build24 closed the four demo-blocking P0 dual-truths.  Round 48 / Bui
 
 **Trailer:** Made-with: Cursor
 
+## Round 52 — handoff 2026-04-29
+
+**What changed (plain English):**
+- Leader DOCX KPI extractor bug (the user-facing 14-vs-381 `support_cases` mismatch): the `extract_docx_kpis` 3+column-table heuristic in [`report_iteration_loop.py`](report_iteration_loop.py) was unconditionally pairing row 0 (headers) with row 1, so the 13-row "Team Member Activity Breakdown" table fed Angelica Hernandez Becerra's per-CSSM counts (50/5/8/14) into the parity gate while the XLSX side correctly reported the team-portfolio totals (354/69/87/381). Fix: multi-row 3+col tables now prefer a row whose first cell normalizes to a totals marker (`TOTAL`, `TEAM TOTAL`, `GRAND TOTAL`); 2-row tables (header + single data row, e.g. comprehensive Title Page metrics) keep the existing pair-with-row-1 behavior.
+- Missing `Total Action Plans / Total TAC Cases / Total BEMS Escalations / Total Customer Pulse [records]` aliases — the leader executive-summary bullets render as `Total <KPI>: <count>`; without these aliases the paragraph extractor canonicalized nothing. Added six aliases.
+- Partial-data-warning trio (recurring across all four scenarios on live runs):
+  - `subscriptions.arr` schema_drift on the team roster — defined a new `team_subscriptions` row contract in [`data_contracts.py`](data_contracts.py) (without ARR fields) and wired `adoptiq_backend.get_subscriptions_for_team` to use it.
+  - `column_introspection_failure` for blocked Snowflake tables — added an early `is_table_blocked` short-circuit at the top of [`adoptiq_backend.py`](adoptiq_backend.py) `_get_table_columns` so blocked tables exit quietly without firing a warning.
+  - `adoption_barriers.customer` schema_drift after the `team_subs` merge — added `merge_customer_join_keys_dtype_safe` to [`data_normalization.py`](data_normalization.py) (coerces `ACCOUNT_ID_C` to a consistent string dtype on both sides + handles empty inputs) and wired it into the 6 AB / CSConsole-AB merge sites in [`app_simple.py`](app_simple.py) (compact / renewal / comprehensive, raw + CSConsole each).
+- Harness KPI extractor polish (multiple cosmetic-but-blocking parity false positives):
+  - Pipe-separator stop in `_PARAGRAPH_KPI_TEXT_RE` so renewal headers like `Technology: All Contact Center | Analysis Period: 90 days` do not bleed.
+  - Suffix stripping in `_normalize_kpi_value` for `0.7/10`, `90 days`, `7 direct reports` — purely presentational, normalizes to the underlying value.
+  - Header-row detection fix in `_extract_team_summary_sheet` — searches for marker columns instead of assuming row 1 is the header (fixed an off-by-one in leader `total_customers` 12-vs-11).
+  - Split `escalated_support_cases` from `support_cases` so the compact Executive Dashboard's "Escalated Support Cases" cell (a P1/P2 + BEMS subset) cannot collide with the portfolio-wide total.
+  - Numeric-required guard for count-style canonicals so a Data Sources cell value like `CSConsole / Snowflake C360_CS_TASK_C_VW` cannot canonicalize as `adoption_barriers="CSConsole"`.
+- Round 52 ship residual fixes (this final pass before Build29):
+  - **Comprehensive low textual_sim against fresh baseline**: diffed two consecutive comprehensive DOCX (5-min apart) — 1614 narrative-only diffs from the AI-generated insights section that regenerates run-to-run, paragraph counts shift by ~200. The numeric_sim gate (binding signal for actual data drift) is unchanged, but the global text-similarity floor cannot fairly cover both narrative-templated and narrative-generated reports. Added `SCENARIO_DOCX_THRESHOLD_OVERRIDES` so comprehensive uses a per-scenario lower text floor (0.40) while compact / renewal / leader keep the global 0.55. Pinned with `effective_docx_thresholds()` and a regression test asserting only comprehensive carries the override.
+  - **Leader DOCX `technology` field leak**: 6 paragraphs in a real leader DOCX matched `_PARAGRAPH_KPI_TEXT_RE` because they started with `Technology: <tech>; Observed: 2026-04-29T...; Prior occurrences: N`. Source: `report_corpus_context.py` per-customer narrative blocks. Fix: tightened the value class to also stop at `;` AND added a `_looks_like_corpus_context_line` post-match guard that rejects matches when the paragraph carries `Observed:` / `Prior occurrences:` / `Sentiment direction:` markers.
+- Manifest-pinned baseline floor — captured a fresh `baselines/round52/baseline_manifest.json` (4 scenarios x 2 file types = 8 sha-pinned entries) so future strict runs are repeatable independent of `~/Downloads` drift.
+- Bumped `ADOPTIQ_BUILD` 28 -> 29 with a Round 52 explanatory comment block.
+
+**Files touched:**
+- `report_iteration_loop.py` — multi-row 3+col TOTAL-footer heuristic, six new `Total *` aliases, pipe + semicolon value-class tightening, corpus-context guard, `SCENARIO_DOCX_THRESHOLD_OVERRIDES`, `effective_docx_thresholds()` helper, runner wiring + manifest baseline support already landed in working tree.
+- `data_contracts.py` — new `team_subscriptions` row contract.
+- `data_normalization.py` — new `merge_customer_join_keys_dtype_safe` helper.
+- `adoptiq_backend.py` — `is_table_blocked` early short-circuit in `_get_table_columns`; `team_subscriptions` contract used in `get_subscriptions_for_team`.
+- `app_simple.py` — six AB / CSConsole-AB merge sites swapped to `merge_customer_join_keys_dtype_safe`.
+- `config.py` — Build29 bump with Round 52 comment block.
+- `tests/test_round51_report_iteration_loop.py` — KPI extraction fixture updated to match the revised 3+col pairing logic.
+- `tests/test_round52_baseline_manifest.py` (new) — 13 tests for manifest CLI args, load/write, and integrity checks.
+- `tests/test_round52_kpi_coverage.py` (new) — 10 tests for expanded KPI extraction + required-key parity (compact / renewal / leader).
+- `tests/test_round52_fixture_file_parity.py` (new) — 5 end-to-end fixture-based parity tests across all four report types.
+- `tests/test_round52_partial_warning_fixes.py` (new) — 14 tests pinning the dtype-safe merge, `team_subscriptions` contract, and blocked-table guard.
+- `tests/test_round52_kpi_extractor_polish.py` (new) — 21 tests pinning pipe-stop, suffix strip, Team_Summary header detection, escalated-cases canonical split, numeric-required guard, multi-row TOTAL preference, corpus-context rejection, and per-scenario threshold overrides.
+- `baselines/round52/baseline_manifest.json` + `compact|comprehensive|leader|renewal/*.docx|*.xlsx` — manifest-pinned baseline floor.
+- `QUALITY_AUDIT.md` — this handoff block.
+
+**SSoT modules touched:** `data_contracts`, `data_normalization`, `config`
+
+**Tests added/updated:**
+- 63 new tests across the five `tests/test_round52_*.py` files (+ 1 fixture refresh in `test_round51_*`). Pinning targets: TOTAL-footer preference; `Total *` aliases canonicalize; corpus-context paragraphs do NOT leak into `technology`; per-scenario threshold override is registered for comprehensive only; `team_subscriptions` contract exists and lacks ARR; blocked-table introspection is a no-op; dtype-safe merge handles object/int64 mismatches and empties; manifest CLI parses + integrity-checks.
+
+**Verify status:**
+- `make verify` — pass (3351 passed / 2 skipped; ruff + bandit + pip-audit gates clean).
+- pytest: **3351 passed / 2 skipped** (Round 51.1 floor was 3281 + 2 skipped; +70 net).
+- ruff: 0 findings.
+- bandit HIGH/MED: 0.
+- pip-audit: clean.
+- Strict 1-pass live (`round52ship1`, manifest mode): **4/4 green, zero partial warnings**.
+  - comprehensive: textual_sim 0.6581 / 0.40, numeric_sim 0.87 / 0.80 — pass.
+  - compact: textual_sim 0.9266 / 0.55, numeric_sim 1.0 / 0.80 — pass.
+  - renewal: textual_sim 1.0 / 0.55, numeric_sim 0.9825 / 0.80 — pass.
+  - leader: textual_sim 0.9993 / 0.55, numeric_sim 1.0 / 0.80 — pass.
+- Strict 3-iter repeatability (`round52repeat`, manifest mode) — running in background at handoff time; result will be captured in the Round 52 ship commit message OR rolled into a Round 52.1 follow-on if any iter fails. The 1-pass result above is the binding gate for Build29.
+
+**Hot spots Claude should audit first:**
+1. The new `effective_docx_thresholds()` per-scenario override is the pattern future narrative-heavy reports must adopt — extending the override dict instead of lowering the global floor. Worth a short audit pass to confirm no future caller reads `config.min_docx_similarity` directly without going through the helper.
+2. The `_looks_like_corpus_context_line` guard rejects ANY paragraph containing `Observed:` / `Prior occurrences:` / `Sentiment direction:` markers. If a future report writer legitimately uses one of those tokens in a non-corpus context (e.g. an audit-trail line `Observed: 12 records modified`), the harness will silently drop the canonical extraction. The current scan is paragraph-anchored so the blast radius is small, but worth a heads-up.
+3. The 6 `merge_customer_join_keys_dtype_safe` call sites in `app_simple.py` follow the same shape; if a 7th merge site is added later (e.g. a new report path), the helper is the canonical entry point — direct `.merge` on `ACCOUNT_ID_C` is now the pattern to ban.
+4. The manifest baseline at `baselines/round52/` carries ~3.5 MB of report artifacts (8 files). Future rounds should bake their own manifest under `baselines/round53/` etc. — do NOT mutate the round52 manifest in-place; it is the binding floor for this Build29.
+
+**Known deferrals (intentional non-fixes):**
+- The 3-iteration repeatability run completion proof is captured in `/tmp/round52repeat.log` (background) at handoff time. The 1-pass result above is the binding gate for the Build29 ship; if the 3-iter shows any iter failing, a Round 52.1 follow-on will land before the next packaged build.
+- The report-accuracy release gate documentation (`release-gate` todo from the prior plan) is still queued — Round 52 ship deliberately keeps scope to the accuracy fixes themselves; the doc round is queued for Round 53.
+- `templates/help.html` `bg-light` cleanup carried over from Round 50 — out of scope for this round.
+- Renewal-vs-comprehensive narrow-count pulse-shape divergence carried over from Round 50 hot-spot #1 — still queued.
+- The pre-Round-50 bake-script test failures (R48 deferral) — still skipped, see Round 48 / Round 50 handoffs.
+
+**Trailer:** Made-with: Cursor
+

@@ -1,0 +1,71 @@
+{
+  "environment": {
+    "adoptiq_build": "28",
+    "adoptiq_version": "1.0.4",
+    "git_sha": "bfe57c1",
+    "platform": "macOS-26.4.1-arm64-arm-64bit",
+    "python": "3.11.9"
+  },
+  "generated_at_utc": "2026-04-29T20:50:35Z",
+  "git_sha": "bfe57c1",
+  "label": "round52-iter1-floor",
+  "scenarios": {
+    "compact": {
+      "docx": {
+        "captured_at_utc": "2026-04-29T20:50:35Z",
+        "path": "compact/AdoptIQ_Report_Compact_All_Managers_All_Contact_Center_90d_1777495656__data-loop-round52baseline__scenario-compact__ts-20260429T204821Z.docx",
+        "sha256": "8aada885cf307472e7bb79e2086fc62bfcf8a8803a0bd6c46ed77df30c712bc2",
+        "size_bytes": 640157
+      },
+      "xlsx": {
+        "captured_at_utc": "2026-04-29T20:50:35Z",
+        "path": "compact/AdoptIQ_Data_Compact_All_Managers_All_Contact_Center_90d_1777495656__data-loop-round52baseline__scenario-compact__ts-20260429T204821Z.xlsx",
+        "sha256": "562de183f214af6ca37e99c2f522705a649673828bd55c94e25b1e40631b741e",
+        "size_bytes": 710760
+      }
+    },
+    "comprehensive": {
+      "docx": {
+        "captured_at_utc": "2026-04-29T20:50:35Z",
+        "path": "comprehensive/AdoptIQ_Report_Brian_Frazier_All_Contact_Center_90d_1777495310__data-loop-round52baseline__scenario-comprehensive__ts-20260429T204735Z.docx",
+        "sha256": "8a1984917f5f48eb18445977592ffd05a4c66c643803b2b224e20bcaa29a5c53",
+        "size_bytes": 818961
+      },
+      "xlsx": {
+        "captured_at_utc": "2026-04-29T20:50:35Z",
+        "path": "comprehensive/AdoptIQ_Data_Brian_Frazier_All_Contact_Center_90d_1777495310__data-loop-round52baseline__scenario-comprehensive__ts-20260429T204736Z.xlsx",
+        "sha256": "5e28fa6930a11e5f229e71925585f91d730d28400760151be0abc2095b0e5341",
+        "size_bytes": 166248
+      }
+    },
+    "leader": {
+      "docx": {
+        "captured_at_utc": "2026-04-29T20:50:35Z",
+        "path": "leader/AdoptIQ_Report_Leader_Brian_Frazier_90d_1777495723__data-loop-round52baseline__scenario-leader__ts-20260429T205034Z.docx",
+        "sha256": "a23c8c52d72b7cfb0134ff30614281041c4bc29498a3b7b64554bedc5ccdb594",
+        "size_bytes": 177972
+      },
+      "xlsx": {
+        "captured_at_utc": "2026-04-29T20:50:35Z",
+        "path": "leader/AdoptIQ_Data_Leader_Brian_Frazier_90d_1777495723__data-loop-round52baseline__scenario-leader__ts-20260429T205034Z.xlsx",
+        "sha256": "a9d41fbb6182add9546ced120dfbbe5aba1b09f1f53bd2bab7c595314339813f",
+        "size_bytes": 485032
+      }
+    },
+    "renewal": {
+      "docx": {
+        "captured_at_utc": "2026-04-29T20:50:35Z",
+        "path": "renewal/AdoptIQ_Report_Renewal_Portfolio_All_Managers_All_Contact_Center_90d_1777495702__data-loop-round52baseline__scenario-renewal__ts-20260429T204842Z.docx",
+        "sha256": "d9072658f97c68b7ceae1102e024c2fabe32e4447253561fdb817ad5a9387879",
+        "size_bytes": 773673
+      },
+      "xlsx": {
+        "captured_at_utc": "2026-04-29T20:50:35Z",
+        "path": "renewal/AdoptIQ_Data_Renewal_Portfolio_All_Managers_All_Contact_Center_90d_1777495702__data-loop-round52baseline__scenario-renewal__ts-20260429T204842Z.xlsx",
+        "sha256": "4d0cec584b646678e702a2d6bca9faa7185fb0bae52a9a6619445e0e04cdf58a",
+        "size_bytes": 681789
+      }
+    }
+  },
+  "version": 1
+}
