@@ -1783,6 +1783,44 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 
 **Trailer:** Made-with: Cursor
 
+## Round 50.1 — handoff 2026-04-29
+
+**What changed (plain English):**
+- Compact production path now strips bracketed real BEMS/CSC IDs before rendering AI summary text to Word, so `[BEMS01943186]`-style leakage does not survive in shipped compact docs.
+- Compact and comprehensive CSConsole adoption-barrier flows now merge `team_subs_df` (`BU_NAME`) and re-annotate `adoption_barriers` before warning promotion, preventing stale prefetch-time `schema_drift: missing slot(s) customer` from being surfaced after the merge has already satisfied the contract.
+- Added regression coverage for both fixes: EI summary strip wire pin + CSConsole AB warning-suppression behavior pin.
+
+**Files touched:**
+- `executive_intelligence_formatter.py` — import/call `strip_bems_brackets_from_llm_text` in `add_executive_summary` (compact production path).
+- `app_simple.py` — add CSConsole adoption-barriers merge+re-annotate hooks in compact and comprehensive paths before partial-warning promotion.
+- `tests/test_round49_bems_no_md_brackets_residual.py` — add EI production-path wiring pin.
+- `tests/test_round49_ab_reannotate_clears_drift_after_merge.py` — add CSConsole warning-promotion suppression behavior test + wiring anchors for compact/comprehensive.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round49_bems_no_md_brackets_residual.py::test_executive_intelligence_formatter_calls_strip_helper_on_summary` — pins compact production EI path import+call wire.
+- `tests/test_round49_ab_reannotate_clears_drift_after_merge.py::test_csconsole_ab_post_merge_reannotate_suppresses_warning_promotion` — behavioral pin: post-merge re-annotate clears schema_drift so `collect_fetch_warnings` no longer promotes adoption_barriers warning.
+- `tests/test_round49_ab_reannotate_clears_drift_after_merge.py::test_renewal_app_simple_calls_reannotate_post_merge` — extended to assert new compact/comprehensive CSConsole markers.
+- `tests/test_round49_bems_no_md_brackets_residual.py` module header/docs updated to record the Round 50 production-path follow-up.
+
+**Verify status:**
+- `make verify` — not run
+- pytest: `87 passed` (20 targeted + 67 broader sweep)
+- ruff: not run
+- bandit HIGH/MED: not run
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py` compact/comprehensive CSConsole AB merge hooks — ensure no duplicate-column side effects from repeated merges when prefetch already carries `BU_NAME` in future schema revisions.
+2. `executive_intelligence_formatter.py` summary-strip wire — confirm no unintended interaction with citation preservation (placeholder `[BEMSxxxxxxxx]` text remains intentional).
+
+**Known deferrals (intentional non-fixes):**
+- End-to-end live regeneration of the exact Brian Frazier 1777479xxx run IDs from the web UI was not re-executed in-session; artifact closure was validated through (a) regression tests and (b) a direct production-path EI docx generation harness plus CSConsole warning-promotion harness.
+- `make verify`/ruff/bandit/pip-audit were not re-run because the change scope is confined to formatter text post-processing and warning suppression wiring with dedicated pytest coverage.
+
+**Trailer:** Made-with: Cursor
+
 ## Round 49 — handoff 2026-04-29
 
 **What changed (plain English):**

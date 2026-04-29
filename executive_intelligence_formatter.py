@@ -30,6 +30,7 @@ from report_utils import (
     format_number,
     format_ratio_percent,
     format_percent_points,
+    strip_bems_brackets_from_llm_text,
 )
 import canonical_metrics as cm
 # Round 16 / Phase 5.2: pull the banded top-N table helper from the
@@ -608,6 +609,13 @@ class ExecutiveIntelligenceFormatter:
         
         if summary_text:
             clean_text = self._clean_text(summary_text)
+            # Round 50 / F-COMP-BEMS-MD-LEAK-EI-PATH: compact production
+            # docx generation flows through ExecutiveIntelligenceFormatter
+            # (run_compact_analysis -> create_executive_intelligence_report),
+            # not the fallback markdown parser. Strip brackets around real
+            # BEMS/CSC IDs here so the LLM summary cannot leak
+            # "[BEMS01943186]" style tokens into shipped compact reports.
+            clean_text = strip_bems_brackets_from_llm_text(clean_text)
             self._parse_and_add_content(clean_text)
         else:
             # Round 3 / Phase 2.2: this branch fires AFTER a completed

@@ -48,6 +48,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from data_contracts import annotate_with_contract  # noqa: E402
+from snowflake_prefetch import collect_fetch_warnings  # noqa: E402
 
 
 def test_pre_merge_raw_ab_frame_escalates_schema_drift():
@@ -162,6 +163,50 @@ def test_cross_dataset_drift_stamp_preserved():
     assert df.attrs.get("fetch_error_kind") == "schema_drift"
 
 
+def test_csconsole_ab_post_merge_reannotate_suppresses_warning_promotion():
+    """Round 50 follow-up: when compact/comprehensive merge
+    csconsole_adoption_barriers with team_subs and re-annotate, the
+    stale adoption_barriers schema_drift must no longer be promoted by
+    collect_fetch_warnings.
+    """
+    raw = pd.DataFrame(
+        {
+            "ID": [f"AB-{i}" for i in range(3)],
+            "ACCOUNT_ID_C": [f"a-{i}" for i in range(3)],
+            "SUBJECT_C": ["fix"] * 3,
+            "AB_STATUS_C": ["Open"] * 3,
+            "SEVERITY_C": ["P2"] * 3,
+        }
+    )
+    annotate_with_contract(raw, dataset="adoption_barriers")
+    assert raw.attrs.get("fetch_error_kind") == "schema_drift"
+
+    team_subs = pd.DataFrame(
+        {
+            "ACCOUNT_ID_C": [f"a-{i}" for i in range(3)],
+            "BU_NAME": [f"Customer {i}" for i in range(3)],
+            "CSSM_EMAIL": [f"user{i}@example.com" for i in range(3)],
+        }
+    )
+    merged = raw.merge(
+        team_subs[["ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"]].drop_duplicates(),
+        on="ACCOUNT_ID_C",
+        how="left",
+    )
+    annotate_with_contract(merged, dataset="adoption_barriers")
+    warnings = collect_fetch_warnings({"csconsole_adoption_barriers": merged})
+    problematic = [
+        w for w in warnings
+        if (w.get("dataset") in {"adoption_barriers", "csconsole_adoption_barriers"})
+        and (w.get("kind") == "schema_drift" or "missing slot(s) customer" in str(w.get("error")))
+    ]
+    assert not problematic, (
+        "Round 50 follow-up: csconsole AB post-merge re-annotate should clear "
+        "schema_drift so collect_fetch_warnings no longer promotes it; "
+        f"got {problematic!r}"
+    )
+
+
 def test_renewal_app_simple_calls_reannotate_post_merge():
     """Pin the wiring: ``app_simple.py`` MUST re-call
     ``annotate_with_contract`` for adoption_barriers after each
@@ -177,7 +222,11 @@ def test_renewal_app_simple_calls_reannotate_post_merge():
     assert occurrences >= 4, (
         f"R49-A2: expected >=4 R49 post-merge re-annotate hooks in "
         f"app_simple.py (renewal raw AB, renewal CSConsole AB, "
-        f"compact/EI raw AB, comprehensive raw AB) -- got {occurrences}.  "
-        "If the renewal pipeline was restructured, find the new merge "
-        "site and add the same re-annotate hook."
+        f"compact/EI raw AB, comprehensive raw AB) -- got {occurrences}."
     )
+
+    # Round 50 / F-DV-CONTRACT-DRIFT-CSAB-COMPACT+COMPREHENSIVE:
+    # compact and comprehensive must also re-annotate CSConsole AB
+    # after team_subs merge BEFORE warning promotion runs.
+    assert "F-DV-CONTRACT-DRIFT-CSAB-COMPACT" in app_simple
+    assert "F-DV-CONTRACT-DRIFT-CSAB-COMPREHENSIVE" in app_simple

@@ -14,7 +14,7 @@ Build25 re-audit caught two surfaces R48-D7 missed:
     ~182 individual bracketed IDs in run 1777464863's renewal Word
     document.
 
-R49-B1 fix (two parts):
+R49-B1 / R50 follow-up fix (three parts):
 
   1. New shared helper ``report_utils.strip_bems_brackets_from_llm_text``
      that strips square brackets around real BEMS/CSC ID patterns
@@ -31,6 +31,13 @@ R49-B1 fix (two parts):
      (app_simple.py defect-by-customer block + Troubled Accounts
      deep dive) now emit bare IDs, mirroring the R48-D7 wire pattern
      used in the other 5 renderers.
+
+  3. Round 50 compact production-path follow-up: compact downloads
+     are generated through ``executive_intelligence_formatter``
+     (run_compact_analysis -> create_executive_intelligence_report),
+     not the markdown fallback parser.  The formatter now strips
+     bracket chrome before parsing the executive summary so
+     ``[BEMS01943186]`` does not leak into compact Word output.
 """
 
 from __future__ import annotations
@@ -164,6 +171,21 @@ def test_executive_report_builder_imports_and_calls_strip_helper() -> None:
     src = (PROJECT_ROOT / "executive_report_builder.py").read_text()
     assert "F-COMP-BEMS-MD-LEAK-R49" in src
     assert "strip_bems_brackets_from_llm_text" in src
+
+
+def test_executive_intelligence_formatter_calls_strip_helper_on_summary() -> None:
+    """Pin compact production path wire: EI formatter must route the
+    executive summary through strip_bems_brackets_from_llm_text.
+    """
+    src = (PROJECT_ROOT / "executive_intelligence_formatter.py").read_text()
+    assert "F-COMP-BEMS-MD-LEAK-EI-PATH" in src, (
+        "Round 50 follow-up marker missing: compact production path "
+        "must document the EI formatter bracket-strip hook."
+    )
+    assert src.count("strip_bems_brackets_from_llm_text") >= 2, (
+        "Expected EI formatter to import and call "
+        "strip_bems_brackets_from_llm_text in add_executive_summary."
+    )
 
 
 def test_renewal_narrative_emits_bare_defect_ids() -> None:

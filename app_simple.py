@@ -7375,6 +7375,42 @@ def run_compact_analysis(analysis_id):
                         csconsole_customer_pulse = csconsole_bundle.get("csconsole_customer_pulse", pd.DataFrame())
                         csconsole_success_priorities = csconsole_bundle.get("csconsole_success_priorities", pd.DataFrame())
                         csconsole_adoption_barriers = csconsole_bundle.get("csconsole_adoption_barriers", pd.DataFrame())
+                        # Round 50 / F-DV-CONTRACT-DRIFT-CSAB-COMPACT:
+                        # clear stale prefetch-time schema_drift on
+                        # csconsole_adoption_barriers. The raw CSConsole
+                        # frame often has ACCOUNT_ID_C but no BU_NAME, so
+                        # prefetch contract annotation can stamp
+                        # "missing slot(s) customer". Materialize BU_NAME
+                        # via team_subs merge and re-annotate BEFORE the
+                        # compact partial-data warning promotion scans attrs.
+                        try:
+                            if (
+                                not csconsole_adoption_barriers.empty
+                                and "ACCOUNT_ID_C" in csconsole_adoption_barriers.columns
+                            ):
+                                csconsole_adoption_barriers = csconsole_adoption_barriers.merge(
+                                    team_subs_df[["ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"]].drop_duplicates(),
+                                    on="ACCOUNT_ID_C",
+                                    how="left",
+                                )
+                                try:
+                                    from data_contracts import annotate_with_contract as _r50_annotate_csab_compact
+                                    _r50_annotate_csab_compact(
+                                        csconsole_adoption_barriers,
+                                        dataset="adoption_barriers",
+                                    )
+                                except Exception as _r50_csab_compact_err:
+                                    logger.debug(
+                                        "Round 50 / F-DV-CONTRACT-DRIFT-CSAB-COMPACT: "
+                                        "post-merge CSConsole AB re-annotate skipped: %s",
+                                        _r50_csab_compact_err,
+                                    )
+                        except Exception as _r50_csab_compact_merge_err:
+                            logger.debug(
+                                "Round 50 / F-DV-CONTRACT-DRIFT-CSAB-COMPACT: "
+                                "CSConsole AB merge skipped: %s",
+                                _r50_csab_compact_merge_err,
+                            )
                         logger.info(f"[[OK]] Retrieved CSConsole data")
                         return csconsole_action_plans, csconsole_customer_pulse, csconsole_success_priorities, csconsole_adoption_barriers
                     except Exception as e:
@@ -13486,6 +13522,40 @@ def run_comprehensive_analysis(analysis_id):
             csconsole_customer_pulse = csconsole_bundle.get("csconsole_customer_pulse", pd.DataFrame())
             csconsole_success_priorities = csconsole_bundle.get("csconsole_success_priorities", pd.DataFrame())
             csconsole_adoption_barriers = csconsole_bundle.get("csconsole_adoption_barriers", pd.DataFrame())
+            # Round 50 / F-DV-CONTRACT-DRIFT-CSAB-COMPREHENSIVE:
+            # same stale-schema_drift self-heal as compact path. Apply
+            # the team_subs merge + re-annotate before
+            # collect_fetch_warnings(csconsole_bundle) so comprehensive
+            # does not promote a now-stale adoption_barriers warning.
+            try:
+                if (
+                    not csconsole_adoption_barriers.empty
+                    and "ACCOUNT_ID_C" in csconsole_adoption_barriers.columns
+                ):
+                    csconsole_adoption_barriers = csconsole_adoption_barriers.merge(
+                        team_subs_df[["ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"]].drop_duplicates(),
+                        on="ACCOUNT_ID_C",
+                        how="left",
+                    )
+                    try:
+                        from data_contracts import annotate_with_contract as _r50_annotate_csab_comp
+                        _r50_annotate_csab_comp(
+                            csconsole_adoption_barriers,
+                            dataset="adoption_barriers",
+                        )
+                    except Exception as _r50_csab_comp_err:
+                        logger.debug(
+                            "Round 50 / F-DV-CONTRACT-DRIFT-CSAB-COMPREHENSIVE: "
+                            "post-merge CSConsole AB re-annotate skipped: %s",
+                            _r50_csab_comp_err,
+                        )
+                    csconsole_bundle["csconsole_adoption_barriers"] = csconsole_adoption_barriers
+            except Exception as _r50_csab_comp_merge_err:
+                logger.debug(
+                    "Round 50 / F-DV-CONTRACT-DRIFT-CSAB-COMPREHENSIVE: "
+                    "CSConsole AB merge skipped: %s",
+                    _r50_csab_comp_merge_err,
+                )
             # Phase 1.3b: pull any fetch_error markers out of the bundle so we
             # can render a "partial data" banner downstream and never let
             # silent zeros look like real zero-rows.
