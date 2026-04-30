@@ -349,8 +349,21 @@ def test_admin_corpus_reset_route_calls_require_admin_csrf():
     ).read_text(encoding="utf-8")
     idx = src.find("def corpus_reset_route(")
     assert idx > 0, "corpus_reset_route must be defined"
-    body = src[idx : idx + 800]
+    # Round 54 / F3 expanded the route docstring + added a blocked-
+    # state short-circuit before the proxy call.  Bump the slice so
+    # the assertion still finds the CSRF guard which is the FIRST
+    # executable statement after the docstring.
+    body = src[idx : idx + 2500]
     assert "_require_admin_csrf()" in body, (
         "Round 39: corpus_reset_route must call _require_admin_csrf() "
         "before mutating state."
+    )
+    # Defense in depth: pin the call ordering -- the CSRF guard MUST
+    # come before the F3 short-circuit so unauthenticated callers
+    # cannot probe corpus state via the gate's redirect message.
+    csrf_pos = body.find("_require_admin_csrf()")
+    blocked_pos = body.find("_r54_corpus_is_blocked_no_onedrive")
+    assert csrf_pos < blocked_pos or blocked_pos == -1, (
+        "Round 54 / F3: CSRF guard must come BEFORE the blocked-state "
+        "short-circuit so unauthenticated callers cannot probe state."
     )

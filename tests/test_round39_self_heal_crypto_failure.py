@@ -50,7 +50,17 @@ import corpus_bootstrap
 from corpus_crypto import CorpusCryptoError
 
 
+# Round 53 / Phase 53.3: the BAKE bundle ships 2 files (encrypted DB
+# + salt; the sentinel + lock are resolved at runtime against the
+# OneDrive sync).  The USER DIR may still carry the legacy 4-tuple
+# from a pre-Round-53 install -- that's the "upgrade-handoff" path
+# the Round 39 self-heal was designed for, and Round 53 keeps that
+# preserve-and-rotate logic intact via ``_LEGACY_BAKED_CORPUS_FILES``.
 _FAKE_BAKE_FILES = (
+    "corpus.db.enc",
+    "corpus.db.salt",
+)
+_FAKE_USER_FILES = (
     "corpus.db.enc",
     "sentinel.json",
     "corpus.db.salt",
@@ -59,10 +69,10 @@ _FAKE_BAKE_FILES = (
 
 
 def _seed_bake_dir(bake_dir: Path) -> None:
-    """Populate the bake_dir with the four expected artifacts.  We
-    only need cheap fake bytes -- the install path uses copyfile and
-    the probe is monkeypatched so the real crypto stack is not
-    exercised here."""
+    """Populate the bake_dir with the Round 53 ship-set (encrypted DB
+    + salt).  We only need cheap fake bytes -- the install path uses
+    copyfile and the probe is monkeypatched so the real crypto stack
+    is not exercised here."""
     bake_dir.mkdir(parents=True, exist_ok=True)
     for fname in _FAKE_BAKE_FILES:
         (bake_dir / fname).write_bytes(
@@ -71,11 +81,11 @@ def _seed_bake_dir(bake_dir: Path) -> None:
 
 
 def _seed_user_dir(user_dir: Path) -> None:
-    """Drop the four expected artifacts in the user dir so the install
-    path's ``user_db.exists()`` branch fires and probe-decrypt is
-    consulted."""
+    """Drop the legacy 4-tuple in the user dir so the install path's
+    ``user_db.exists()`` branch fires and probe-decrypt is consulted.
+    Mirrors a pre-Round-53 install being upgraded by a Round 53 build."""
     user_dir.mkdir(parents=True, exist_ok=True)
-    for fname in _FAKE_BAKE_FILES:
+    for fname in _FAKE_USER_FILES:
         (user_dir / fname).write_bytes(
             f"adoptiq-user-fixture-{fname}".encode("utf-8")
         )
@@ -153,20 +163,40 @@ def test_install_baked_self_heals_when_existing_corpus_invalid_tag(
     broken_files = sorted(
         p.name for p in user_dir.iterdir() if ".broken-" in p.name
     )
+    # Round 53: the preserve loop iterates _LEGACY_BAKED_CORPUS_FILES
+    # (the legacy 4-tuple) so all four pre-Round-53 user artifacts
+    # (db.enc + sentinel + salt + lock) are rotated together -- this
+    # is the upgrade-handoff path the self-heal was built for.
     assert len(broken_files) == 4, (
-        "all four user artifacts must be preserved as .broken-<ts>"
+        "all four legacy user artifacts must be preserved as .broken-<ts>"
     )
     suffix = broken_files[0].split(".broken-", 1)[1]
-    expected_brokens = {f"{f}.broken-{suffix}" for f in _FAKE_BAKE_FILES}
+    expected_brokens = {f"{f}.broken-{suffix}" for f in _FAKE_USER_FILES}
     assert set(broken_files) == expected_brokens, (
         "all four .broken-<ts> sidecars must share the same suffix"
     )
 
+    # The reinstall loop only copies the Round 53 ship-set
+    # (_BAKED_CORPUS_FILES = 2 files); the runtime re-mints
+    # sentinel.json / corpus.sentinel.lock.json against the user's
+    # OneDrive on the next open.
     for fname in _FAKE_BAKE_FILES:
         bake_bytes = (bake_dir / fname).read_bytes()
         user_bytes = (user_dir / fname).read_bytes()
         assert user_bytes == bake_bytes, (
             f"{fname} must reflect the bake bytes after self-heal"
+        )
+    # Defense: the legacy sidecars must NOT be re-installed from
+    # the bake (Round 53 contract -- they are not in the bundle).
+    for legacy in ("sentinel.json", "corpus.sentinel.lock.json"):
+        if (bake_dir / legacy).exists():
+            continue  # Round 39 fixture compatibility -- skip
+        # The user dir's legacy sidecars were rotated to .broken-*
+        # and not re-installed.  Their existence in user_dir would
+        # imply a contract drift.
+        assert not (user_dir / legacy).exists(), (
+            f"Round 53 contract violated: {legacy} reappeared in "
+            f"user_dir after self-heal -- the bake must not ship it."
         )
 
 
@@ -254,9 +284,24 @@ def test_install_baked_self_heal_caps_broken_backups_at_one(
     assert second_suffix != first_suffix, (
         "a second self-heal cycle must use a different timestamp"
     )
-    assert len(second_brokens) == 4, (
-        "only ONE rolling .broken-<ts> set must exist on disk; "
-        f"got {len(second_brokens)} files: {second_brokens}"
+    # Round 53: the SECOND self-heal cycle starts from a user_dir
+    # that has the bake's 2-file install (db.enc + salt) PLUS the
+    # runtime-minted sentinel.json + corpus.sentinel.lock.json that
+    # ``open_corpus_for_user`` writes after the first install -- so
+    # the legacy 4-tuple's worth of files exists when the second
+    # preserve runs.  In our fixture the runtime open never ran, so
+    # the second cycle preserves only the 2 bake files (no sentinel
+    # nor lock to rotate).  This is fine -- the cap=1 contract is
+    # about NOT accumulating multiple suffix sets, not the file count.
+    # ``second_brokens`` size is therefore 2 in the test fixture
+    # (real install would be 4 because the runtime mints the sidecars).
+    expected_second_count = 2
+    assert len(second_brokens) == expected_second_count, (
+        f"only ONE rolling .broken-<ts> set must exist on disk; "
+        f"expected {expected_second_count} files (Round 53 second-cycle "
+        f"shape -- the first cycle's preserve already rotated the "
+        f"legacy sidecars; the second cycle only sees the 2-file bake "
+        f"install), got {len(second_brokens)} files: {second_brokens}"
     )
     for fname in second_brokens:
         assert fname.endswith(f".broken-{second_suffix}"), (
@@ -390,9 +435,10 @@ def test_install_baked_self_heal_atomic_partial_failure(
     )
 
     # Wrap os.replace so the third call fails.  Renames within
-    # _preserve_broken_corpus iterate _BAKED_CORPUS_FILES; failing the
-    # third (corpus.db.salt) means corpus.db.enc and sentinel.json are
-    # already moved aside, lock has not yet been touched.
+    # _preserve_broken_corpus iterate _LEGACY_BAKED_CORPUS_FILES;
+    # failing the third (corpus.db.salt) means corpus.db.enc and
+    # sentinel.json are already moved aside, lock has not yet been
+    # touched.
     import os as _os
     real_replace = _os.replace
     counter = {"calls": 0}
@@ -414,9 +460,9 @@ def test_install_baked_self_heal_atomic_partial_failure(
         "overwriting a corpus that was not preserved aside"
     )
 
-    # Roll-back contract: the four original files must still be in
-    # their original positions (no half-renamed state).
-    for fname in _FAKE_BAKE_FILES:
+    # Roll-back contract: the four legacy original files must still
+    # be in their original positions (no half-renamed state).
+    for fname in _FAKE_USER_FILES:
         assert (user_dir / fname).exists(), (
             f"{fname} missing from user_dir after rollback -- preserve "
             "left a half-renamed state"
@@ -524,29 +570,47 @@ def test_install_baked_self_heal_handles_missing_lock(
 # ---------------------------------------------------------------------------
 
 
+def _seed_canonical_onedrive_sentinel(root: Path) -> None:
+    """Round 53 helper: drop the canonical sentinel into a tmp
+    OneDrive root so probe-decrypt can succeed under
+    ``allow_local_sentinel=False``."""
+    import secrets as _secrets
+    from corpus_crypto import DEFAULT_SENTINEL_NAME
+    root.mkdir(parents=True, exist_ok=True)
+    (root / DEFAULT_SENTINEL_NAME).write_bytes(_secrets.token_bytes(32))
+
+
 def test_probe_existing_corpus_decrypts_returns_true_for_healthy_corpus(
     tmp_path, monkeypatch,
 ):
     """End-to-end sanity check: against a real encrypted corpus that
     we just wrote with ``open_corpus_for_user``, the probe MUST
     return True.  A regression that returns False here would
-    silently self-heal every healthy install on every cold boot."""
+    silently self-heal every healthy install on every cold boot.
+
+    Round 53: the probe now passes ``allow_local_sentinel=False``,
+    so the corpus must be created against a real OneDrive sentinel
+    too -- otherwise the probe finds no matching candidate and
+    returns False, which would mask the contract.
+    """
     import config as _live_config
+    onedrive_root = tmp_path / "onedrive_root"
+    _seed_canonical_onedrive_sentinel(onedrive_root)
     monkeypatch.setattr(
-        corpus_bootstrap.Config, "CSONE_ONEDRIVE_FOLDER", None,
+        corpus_bootstrap.Config, "CSONE_ONEDRIVE_FOLDER", str(onedrive_root),
         raising=False,
     )
     monkeypatch.setattr(
-        _live_config.Config, "CSONE_ONEDRIVE_FOLDER", None,
+        _live_config.Config, "CSONE_ONEDRIVE_FOLDER", str(onedrive_root),
         raising=False,
     )
     enc = tmp_path / "knowledge" / "corpus.db.enc"
     from corpus_crypto import open_corpus_for_user as _open
     with _open(
-        onedrive_root=None,
+        onedrive_root=onedrive_root,
         encrypted_path=enc,
         create_if_missing=True,
-        allow_local_sentinel=True,
+        allow_local_sentinel=False,
     ) as handle:
         handle.conn.execute(
             'CREATE TABLE notes ("id" INTEGER PRIMARY KEY, "body" TEXT);'
@@ -568,21 +632,23 @@ def test_probe_existing_corpus_decrypts_returns_false_for_corrupt_blob(
     here would mask the canonical upgrade-handoff bug Round 39 was
     built to fix."""
     import config as _live_config
+    onedrive_root = tmp_path / "onedrive_root"
+    _seed_canonical_onedrive_sentinel(onedrive_root)
     monkeypatch.setattr(
-        corpus_bootstrap.Config, "CSONE_ONEDRIVE_FOLDER", None,
+        corpus_bootstrap.Config, "CSONE_ONEDRIVE_FOLDER", str(onedrive_root),
         raising=False,
     )
     monkeypatch.setattr(
-        _live_config.Config, "CSONE_ONEDRIVE_FOLDER", None,
+        _live_config.Config, "CSONE_ONEDRIVE_FOLDER", str(onedrive_root),
         raising=False,
     )
     enc = tmp_path / "knowledge" / "corpus.db.enc"
     from corpus_crypto import open_corpus_for_user as _open
     with _open(
-        onedrive_root=None,
+        onedrive_root=onedrive_root,
         encrypted_path=enc,
         create_if_missing=True,
-        allow_local_sentinel=True,
+        allow_local_sentinel=False,
     ) as handle:
         handle.conn.execute(
             'CREATE TABLE notes ("id" INTEGER PRIMARY KEY, "body" TEXT);'
@@ -594,6 +660,45 @@ def test_probe_existing_corpus_decrypts_returns_false_for_corrupt_blob(
     raw[-1] ^= 0xFF
     enc.write_bytes(bytes(raw))
 
+    assert corpus_bootstrap._probe_existing_corpus_decrypts(enc) is False
+
+
+def test_probe_returns_false_when_onedrive_sentinel_absent(
+    tmp_path, monkeypatch,
+):
+    """Round 53 / Phase 53.3: a corpus created under a OneDrive
+    sentinel and later probed with that OneDrive root NOT configured
+    must return False -- this is the canonical "user upgraded build
+    but their OneDrive is offline" path that the new
+    ``blocked_no_onedrive`` UI state surfaces."""
+    import config as _live_config
+    onedrive_root = tmp_path / "onedrive_root"
+    _seed_canonical_onedrive_sentinel(onedrive_root)
+    enc = tmp_path / "knowledge" / "corpus.db.enc"
+    from corpus_crypto import open_corpus_for_user as _open
+    with _open(
+        onedrive_root=onedrive_root,
+        encrypted_path=enc,
+        create_if_missing=True,
+        allow_local_sentinel=False,
+    ) as handle:
+        handle.conn.execute(
+            'CREATE TABLE notes ("id" INTEGER PRIMARY KEY, "body" TEXT);'
+        )
+        handle.conn.commit()
+    # Now wipe the OneDrive sentinel root from Config so the probe
+    # has no way to find the sentinel.
+    monkeypatch.setattr(
+        corpus_bootstrap.Config, "CSONE_ONEDRIVE_FOLDER", None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        _live_config.Config, "CSONE_ONEDRIVE_FOLDER", None,
+        raising=False,
+    )
+    # Round 53 contract: with no OneDrive sentinel reachable AND
+    # allow_local_sentinel=False, the probe MUST return False so
+    # the bootstrap surfaces blocked_no_onedrive.
     assert corpus_bootstrap._probe_existing_corpus_decrypts(enc) is False
 
 

@@ -1,13 +1,18 @@
-"""Round 35 / native-corpus: pin the boot-time baked-corpus install.
+"""Round 35 + Round 53 / native-corpus: pin the boot-time baked-corpus install.
 
-When AdoptIQ ships, the .app bundle carries an encrypted corpus +
-sentinel + salt + lock under ``Resources/baked_corpus/``.  On the
-first launch the ``corpus_bootstrap`` module must:
+When AdoptIQ ships, the .app bundle carries an encrypted corpus
+under ``Resources/baked_corpus/``.  Round 53 / Phase 53.3 shrunk
+the bundle from 4 artifacts to 2 (``corpus.db.enc`` +
+``corpus.db.salt``); the sentinel + lock are now resolved at
+runtime against the user's OneDrive sync of
+``AI Projects/AdoptIQ_CSOne_Reports``.
+
+On the first launch the ``corpus_bootstrap`` module must:
 
 * Detect the bundled snapshot via ``_baked_corpus_dir()`` (PyInstaller
   ``sys._MEIPASS`` path or the dev ``ADOPTIQ_BAKED_CORPUS_DIR``
   override the test suite uses to avoid monkey-patching ``_MEIPASS``).
-* Copy all four artifacts atomically into the user's writable
+* Copy both artifacts atomically into the user's writable
   knowledge dir with mode ``0600``.
 * Set ``CorpusBootState.source = "baked"`` and
   ``CorpusBootState.indexed_at`` to the bake mtime so the analyze-
@@ -15,7 +20,7 @@ first launch the ``corpus_bootstrap`` module must:
 * Be idempotent on subsequent launches (existing user_db is left
   alone -- the daily refresh worker keeps it current).
 * Roll back cleanly when the bake set is incomplete (missing any
-  of the four files), so a half-shipped snapshot cannot corrupt
+  of the bundled files), so a half-shipped snapshot cannot corrupt
   the install.
 
 These tests use ``ADOPTIQ_BAKED_CORPUS_DIR`` + a tmp ``CORPUS_DIR``
@@ -33,11 +38,11 @@ import pytest
 import corpus_bootstrap
 
 
+# Round 53 / Phase 53.3: shrunk from 4 to 2.  Pinned by
+# ``corpus_bootstrap._BAKED_CORPUS_FILES``.
 _FAKE_BAKE_FILES = (
     "corpus.db.enc",
-    "sentinel.json",
     "corpus.db.salt",
-    "corpus.sentinel.lock.json",
 )
 
 
@@ -105,7 +110,8 @@ def test_baked_corpus_dir_ignores_env_dir_without_corpus_db_enc(
 ):
     bake_dir = tmp_path / "incomplete"
     bake_dir.mkdir(parents=True)
-    (bake_dir / "sentinel.json").write_bytes(b"x")
+    # Round 53: stage only the salt -- corpus.db.enc still gates resolution.
+    (bake_dir / "corpus.db.salt").write_bytes(b"x")
     monkeypatch.setenv("ADOPTIQ_BAKED_CORPUS_DIR", str(bake_dir))
     # No corpus.db.enc -> resolution should fall through to None
     # (assuming no real meipass / repo bake on the test host).
@@ -117,7 +123,10 @@ def test_baked_corpus_dir_ignores_env_dir_without_corpus_db_enc(
     assert resolved != bake_dir
 
 
-def test_install_baked_corpus_copies_all_four_files(tmp_path, monkeypatch):
+def test_install_baked_corpus_copies_all_bundled_files(tmp_path, monkeypatch):
+    """Round 53: bundle shrunk from 4 to 2 files (encrypted DB +
+    salt); the sentinel + lock are resolved at runtime against the
+    user's OneDrive sync.  Both bundled files must land at 0o600."""
     bake_dir = tmp_path / "baked"
     _seed_bake_dir(bake_dir)
     monkeypatch.setenv("ADOPTIQ_BAKED_CORPUS_DIR", str(bake_dir))
@@ -137,6 +146,18 @@ def test_install_baked_corpus_copies_all_four_files(tmp_path, monkeypatch):
         assert mode == 0o600, (
             f"{fname} mode {oct(mode)} != 0o600 -- multi-user "
             "macOS hosts would leak corpus material to other accounts."
+        )
+
+    # Round 53 / Phase 53.3 contract: the legacy sentinel.json and
+    # corpus.sentinel.lock.json MUST NOT be copied from a bake dir
+    # (they should not be present in the bake dir at all post-Round-53,
+    # but if a stale dev bake leaves them behind they MUST stay there).
+    # The user dir's sentinel/lock are minted at runtime by
+    # ``open_corpus_for_user`` against the OneDrive sentinel.
+    for legacy in ("sentinel.json", "corpus.sentinel.lock.json"):
+        assert not (user_dir / legacy).exists(), (
+            f"Round 53 contract violated: legacy {legacy} appeared in "
+            f"user dir from baked install"
         )
 
 
@@ -182,21 +203,21 @@ def test_install_baked_corpus_is_idempotent(tmp_path, monkeypatch):
 def test_install_baked_corpus_rolls_back_on_incomplete_bake(
     tmp_path, monkeypatch,
 ):
-    """If any of the four artifacts is missing from the bake dir,
-    the install must abort and roll back any partially-copied files
-    so the legacy fresh-mint path can take over cleanly."""
+    """Round 53: bundle shrunk to 2 files.  If either is missing
+    from the bake dir the install must abort and roll back any
+    partially-copied artifacts so the bootstrap falls cleanly into
+    the ``blocked_no_onedrive`` / fresh-mint path instead of leaving
+    a half-installed corpus that the runtime cannot recover from."""
     bake_dir = tmp_path / "baked"
     bake_dir.mkdir()
-    # Only stage two of the four artifacts.
+    # Only stage one of the two artifacts (encrypted DB present, salt missing).
     (bake_dir / "corpus.db.enc").write_bytes(b"db")
-    (bake_dir / "sentinel.json").write_bytes(b"sent")
-    # salt.bin and lock are missing.
     monkeypatch.setenv("ADOPTIQ_BAKED_CORPUS_DIR", str(bake_dir))
 
     result = corpus_bootstrap._install_baked_corpus_if_present()
     assert result is None, (
         "incomplete bake must yield None so the bootstrap falls back "
-        "to fresh-mint"
+        "to fresh-mint / blocked_no_onedrive path"
     )
     user_dir = corpus_bootstrap._user_corpus_dir()
     # Roll-back: no artifact should remain in the user dir.

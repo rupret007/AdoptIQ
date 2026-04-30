@@ -90,6 +90,17 @@
         if (!payload) { return 'unknown'; }
         if (payload.enabled === false) { return 'disabled'; }
         if (payload.boot && payload.boot.in_progress) { return 'running'; }
+        // Round 53.3: ``blocked_no_onedrive`` is an actionable
+        // "sign in to OneDrive" state, not a hard failure -- the
+        // corpus panel already classifies it as a warning. The global
+        // navbar badge and analyze banner used to flash red ``Error``
+        // for the same payload because ``last_error`` was non-null,
+        // contradicting the corpus panel sitting just below it.
+        // Map the blocked source to a dedicated state so the badge,
+        // banner, and panel all agree.
+        if (payload.boot && payload.boot.source === 'blocked_no_onedrive') {
+            return 'blocked';
+        }
         if (payload.boot && payload.boot.last_error) { return 'error'; }
         if (payload.available === false) { return 'unavailable'; }
         if (payload.boot && payload.boot.last_finished_at) { return 'idle'; }
@@ -102,6 +113,7 @@
             case 'idle':        return 'bg-success';
             case 'error':       return 'bg-danger';
             case 'unavailable': return 'bg-warning text-dark';
+            case 'blocked':     return 'bg-warning text-dark';
             case 'disabled':    return 'bg-secondary';
             default:            return 'bg-secondary';
         }
@@ -113,6 +125,7 @@
             case 'idle':        return 'Idle';
             case 'error':       return 'Error';
             case 'unavailable': return 'Unavailable';
+            case 'blocked':     return 'Sign in to OneDrive';
             case 'disabled':    return 'Disabled';
             default:            return 'Intelligence';
         }
@@ -125,6 +138,14 @@
         }
         if (state === 'running') {
             return 'Indexing CSOne reports…';
+        }
+        if (state === 'blocked') {
+            // Round 53.3: surface the actionable remediation message
+            // produced by ``corpus_bootstrap`` (rather than a generic
+            // "Error") so the global banner matches the corpus panel.
+            var blockedMsg = (payload.boot && payload.boot.last_error)
+                || 'OneDrive sync of AI Projects/AdoptIQ_CSOne_Reports is required to unlock the corpus.';
+            return blockedMsg;
         }
         if (state === 'error') {
             var kind = (payload.boot && payload.boot.last_error_kind) || 'error';
@@ -159,6 +180,8 @@
             title += ' (started ' + payload.boot.last_started_at + ')';
         } else if (state === 'idle' && payload && payload.boot && payload.boot.last_finished_at) {
             title += ' (last finished ' + payload.boot.last_finished_at + ')';
+        } else if (state === 'blocked' && payload && payload.boot && payload.boot.last_error) {
+            title += ' — ' + payload.boot.last_error;
         } else if (state === 'error' && payload && payload.boot && payload.boot.last_error) {
             title += ' — ' + payload.boot.last_error;
         }
@@ -259,7 +282,12 @@
         if (!btn) { return; }
         btn.addEventListener('click', function (ev) {
             ev.preventDefault();
-            if (btn.disabled) { return; }
+            // Round 53 / Phase 53.4: ``data-disabled-when`` gating.
+            // ``btn.disabled`` covers both the ``disabled`` attribute
+            // (set by paintGatedButtons) AND the in-flight debounce
+            // below, so a single check guards both paths.
+            if (btn.disabled
+                || btn.getAttribute('aria-disabled') === 'true') { return; }
             btn.disabled = true;
             // Round 27: tell the user we received the click before
             // the server has a chance to respond.  Without this the
@@ -348,7 +376,12 @@
         if (!btn) { return; }
         btn.addEventListener('click', function (ev) {
             ev.preventDefault();
-            if (btn.disabled) { return; }
+            // Round 53 / Phase 53.4: same gating applies to Reset --
+            // a reset under blocked_no_onedrive would land the same
+            // .enc on disk and we'd be back to "needs OneDrive" so
+            // the click is intentionally a no-op while blocked.
+            if (btn.disabled
+                || btn.getAttribute('aria-disabled') === 'true') { return; }
             var ok = window.confirm(
                 'Reset the local corpus?  Your current encrypted '
                 + 'database will be preserved on disk as a .broken '
@@ -563,26 +596,37 @@
         el.textContent = String(message == null ? '' : message);
     }
 
-    // Computes one of seven panel states from the status payload.
+    // Computes one of eight panel states from the status payload.
     // Exposed (via window.__adoptiqCorpusPanelState) so the unit
     // tests can pin the rendering logic without touching the DOM.
     //
-    //   * baked_synced       -- Active. OneDrive synced (N files).
-    //                           Daily refresh enabled.
-    //   * baked_not_synced   -- Active (baked snapshot).  OneDrive
-    //                           folder not detected.
-    //   * fresh_indexing     -- Indexing OneDrive folder...
-    //   * fresh_not_synced   -- OneDrive sync required.
-    //   * refreshing         -- Daily refresh in progress.
-    //   * refresh_failed     -- Last refresh raised an error
-    //                           (baked snapshot still served).
-    //   * unknown            -- pre-poll / no payload yet.
+    //   * baked_synced         -- Active. OneDrive synced (N files).
+    //                             Daily refresh enabled.
+    //   * baked_not_synced     -- Active (baked snapshot).  OneDrive
+    //                             folder not detected.
+    //   * fresh_indexing       -- Indexing OneDrive folder...
+    //   * fresh_not_synced     -- OneDrive sync required.
+    //   * refreshing           -- Daily refresh in progress.
+    //   * refresh_failed       -- Last refresh raised an error
+    //                             (baked snapshot still served).
+    //   * blocked_no_onedrive  -- Round 53 / Phase 53.4: corpus
+    //                             unlock requires the canonical
+    //                             OneDrive sentinel which is not
+    //                             yet synced.  Buttons disabled;
+    //                             clickable deep-link offered.
+    //   * unknown              -- pre-poll / no payload yet.
     function classifyCorpusPanel(payload) {
         var boot = (payload && payload.boot) || null;
         if (!boot) { return 'unknown'; }
         if (boot.in_progress) { return 'refreshing'; }
         var source = (typeof boot.source === 'string') ? boot.source : '';
         var od = (typeof boot.onedrive_status === 'string') ? boot.onedrive_status : '';
+        // Round 53 / Phase 53.4: blocked_no_onedrive takes precedence
+        // over refresh_failed because a "no OneDrive sentinel" error
+        // is the *cause* of the open failure -- showing
+        // "refresh failed" instead would mislead users into clicking
+        // the (disabled) Re-index button.
+        if (source === 'blocked_no_onedrive') { return 'blocked_no_onedrive'; }
         if (boot.last_refresh_error) {
             return 'refresh_failed';
         }
@@ -595,25 +639,27 @@
 
     function corpusPanelLabel(state) {
         switch (state) {
-            case 'baked_synced':     return 'Active \u2022 OneDrive synced';
-            case 'baked_not_synced': return 'Active \u2022 baked snapshot';
-            case 'fresh_indexing':   return 'Indexing OneDrive\u2026';
-            case 'fresh_not_synced': return 'OneDrive sync required';
-            case 'refreshing':       return 'Refreshing\u2026';
-            case 'refresh_failed':   return 'Last refresh failed';
-            default:                 return 'checking\u2026';
+            case 'baked_synced':        return 'Active \u2022 OneDrive synced';
+            case 'baked_not_synced':    return 'Active \u2022 baked snapshot';
+            case 'fresh_indexing':      return 'Indexing OneDrive\u2026';
+            case 'fresh_not_synced':    return 'OneDrive sync required';
+            case 'refreshing':          return 'Refreshing\u2026';
+            case 'refresh_failed':      return 'Last refresh failed';
+            case 'blocked_no_onedrive': return 'Sign in to OneDrive';
+            default:                    return 'checking\u2026';
         }
     }
 
     function corpusPanelPillClass(state) {
         switch (state) {
-            case 'baked_synced':     return 'bg-success';
-            case 'baked_not_synced': return 'bg-info text-dark';
-            case 'fresh_indexing':   return 'bg-primary';
-            case 'fresh_not_synced': return 'bg-warning text-dark';
-            case 'refreshing':       return 'bg-primary';
-            case 'refresh_failed':   return 'bg-danger';
-            default:                 return 'bg-secondary';
+            case 'baked_synced':        return 'bg-success';
+            case 'baked_not_synced':    return 'bg-info text-dark';
+            case 'fresh_indexing':      return 'bg-primary';
+            case 'fresh_not_synced':    return 'bg-warning text-dark';
+            case 'refreshing':          return 'bg-primary';
+            case 'refresh_failed':      return 'bg-danger';
+            case 'blocked_no_onedrive': return 'bg-warning text-dark';
+            default:                    return 'bg-secondary';
         }
     }
 
@@ -648,15 +694,124 @@
                     ? String(boot.last_refresh_error) : 'unknown';
                 return 'Last refresh failed (' + detail
                     + ').  The baked snapshot is still being served.';
+            case 'blocked_no_onedrive':
+                return 'AdoptIQ needs you to sign in to OneDrive and '
+                    + 'sync \u201CAI Projects/AdoptIQ_CSOne_Reports\u201D '
+                    + 'to unlock the corpus.  The corpus is encrypted '
+                    + 'against a key that lives in that OneDrive '
+                    + 'folder, so until it is synced AdoptIQ cannot '
+                    + 'decrypt the bundled snapshot.';
             default:
                 return '';
         }
     }
 
+    // Round 53 / Phase 53.4.1: scheme allow-list mirroring the
+    // server-side ``_R53_ONEDRIVE_DEEP_LINK_SCHEMES`` in
+    // ``app_simple._r53_safe_onedrive_deep_link``.  Defense in depth:
+    // even if the server payload smuggles a hostile URL through (env
+    // override, supply-chain), the renderer refuses to use it for an
+    // ``href``.  No anchor click can result in JS execution this way.
+    var R53_DEEP_LINK_SCHEMES = ['http://', 'https://', 'odopen:', 'ms-onedrive:'];
+
+    // Round 54 / F2 -- length cap mirroring the server-side
+    // ``_R53_ONEDRIVE_DEEP_LINK_MAX_BYTES`` (2048).  A hostile env
+    // override could pass an oversized URL through the server cap on
+    // a stale build; the JS-side cap is defense in depth so a long
+    // string never lands in an anchor href the user could fat-finger
+    // a copy of.  Counts UTF-16 code units which is a conservative
+    // overestimate of the UTF-8 byte count -- if it passes here it is
+    // also under the server cap.
+    var R53_DEEP_LINK_MAX_LEN = 2048;
+
+    function r53SafeDeepLink(url) {
+        if (typeof url !== 'string') { return null; }
+        var trimmed = url.trim();
+        if (!trimmed) { return null; }
+        if (trimmed.length > R53_DEEP_LINK_MAX_LEN) { return null; }
+        var lower = trimmed.toLowerCase();
+        for (var i = 0; i < R53_DEEP_LINK_SCHEMES.length; i += 1) {
+            if (lower.indexOf(R53_DEEP_LINK_SCHEMES[i]) === 0) {
+                return trimmed;
+            }
+        }
+        return null;
+    }
+
+    // Round 53 / Phase 53.4: button gating.  Buttons annotated with
+    // ``data-disabled-when="<state>"`` are hard-disabled (and the
+    // corresponding listener short-circuits) while the panel sits in
+    // that state.  Used by the analyze-page Re-index / Reset buttons
+    // to prevent click-spam during ``blocked_no_onedrive`` (where the
+    // refresh would just immediately fail again with the same error).
+    function paintGatedButtons(state) {
+        var nodes = document.querySelectorAll('[data-disabled-when]');
+        for (var i = 0; i < nodes.length; i += 1) {
+            var node = nodes[i];
+            var blocking = String(node.getAttribute('data-disabled-when') || '');
+            // Comma-separated list lets a single button gate on
+            // multiple states (e.g. "blocked_no_onedrive,refreshing").
+            var parts = blocking.split(',');
+            var disabled = false;
+            for (var j = 0; j < parts.length; j += 1) {
+                if (parts[j].trim() === state) { disabled = true; break; }
+            }
+            if (disabled) {
+                node.setAttribute('disabled', 'disabled');
+                node.setAttribute('aria-disabled', 'true');
+                // Bootstrap pill-button styling: dim visually so the
+                // user sees the gate.  ``disabled`` alone is enough
+                // for accessibility / form behavior.
+                node.classList.add('disabled');
+            } else {
+                node.removeAttribute('disabled');
+                node.removeAttribute('aria-disabled');
+                node.classList.remove('disabled');
+            }
+        }
+    }
+
+    // Round 53 / Phase 53.4.1: render (or hide) the OneDrive deep-
+    // link anchor.  Looks for a ``[data-onedrive-deep-link]`` slot
+    // anywhere inside the panel and writes the href + visibility.
+    // The slot is hidden in every non-blocked state so it never
+    // confuses users who already have OneDrive synced.
+    function paintDeepLink(state, payload) {
+        var anchors = document.querySelectorAll('[data-onedrive-deep-link]');
+        if (!anchors || anchors.length === 0) { return; }
+        var rawUrl = (payload && payload.boot)
+            ? payload.boot.onedrive_deep_link : null;
+        var safe = r53SafeDeepLink(rawUrl);
+        var visible = (state === 'blocked_no_onedrive' && safe);
+        for (var i = 0; i < anchors.length; i += 1) {
+            var a = anchors[i];
+            if (visible) {
+                a.setAttribute('href', safe);
+                // codeguard-0-client-side-web-security: external link
+                // hardening.  Always set noopener+noreferrer so the
+                // OneDrive page cannot reach window.opener.
+                a.setAttribute('target', '_blank');
+                a.setAttribute('rel', 'noopener noreferrer');
+                a.hidden = false;
+                a.removeAttribute('hidden');
+            } else {
+                a.hidden = true;
+                a.setAttribute('hidden', '');
+                a.removeAttribute('href');
+            }
+        }
+    }
+
     function paintSharepointPanel(payload) {
         var panel = document.querySelector(SHAREPOINT_PANEL);
-        if (!panel) { return; }
         var state = classifyCorpusPanel(payload);
+        // Button gating + deep-link rendering work even when the
+        // SharePoint panel itself is absent (e.g. a future template
+        // moves the buttons elsewhere), so we run them BEFORE the
+        // early-return so they always paint per poll.
+        try { paintGatedButtons(state); } catch (_) { /* ignore */ }
+        try { paintDeepLink(state, payload); } catch (_) { /* ignore */ }
+        if (!panel) { return; }
         var label = corpusPanelLabel(state);
         var pillClass = corpusPanelPillClass(state);
         var detail = corpusPanelDetail(state, payload);
@@ -683,12 +838,16 @@
         }
 
         if (detail) {
-            setSharepointFeedback(
-                state === 'fresh_not_synced' || state === 'refresh_failed'
-                    ? 'error'
-                    : 'pending',
-                detail
-            );
+            // Round 53 / Phase 53.4: blocked_no_onedrive uses error
+            // styling so the WARN-orange pill + the red feedback
+            // text reinforce that this is an action required by the
+            // user, not a transient hiccup.
+            var feedbackKind = (
+                state === 'fresh_not_synced'
+                || state === 'refresh_failed'
+                || state === 'blocked_no_onedrive'
+            ) ? 'error' : 'pending';
+            setSharepointFeedback(feedbackKind, detail);
         } else {
             setSharepointFeedback(null, '');
         }
@@ -696,12 +855,16 @@
 
     // Exposed for unit tests (the panel rendering decisions are pure
     // functions of the payload; tests should not need to mount a DOM
-    // to verify the four-state matrix).
+    // to verify the eight-state matrix).
+    // Round 53 / Phase 53.4 -- adds ``safeDeepLink`` so the URL
+    // allow-list can be pinned by JS-level tests without spinning
+    // up a Flask client to hit ``_r53_safe_onedrive_deep_link``.
     window.__adoptiqCorpusPanelState = {
         classify: classifyCorpusPanel,
         label: corpusPanelLabel,
         pillClass: corpusPanelPillClass,
         detail: corpusPanelDetail,
+        safeDeepLink: r53SafeDeepLink,
     };
 
     // Re-paint the corpus panel on every status poll.

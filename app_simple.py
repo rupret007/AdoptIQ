@@ -278,7 +278,7 @@ def _start_admin_server_in_thread() -> None:
         "Round 32 / Phase 2.D: admin console launched in background thread on "
         "http://%s:%s/", host, port,
     )
-    
+
 def auto_audit_report(analysis_id: str):
     """Automatically trigger audit after report completion"""
     if not AUDIT_ENABLED:
@@ -318,18 +318,18 @@ def auto_audit_report(analysis_id: str):
 
 class AnalysisForm(FlaskForm):
     """Form for analysis configuration"""
-    report_type = RadioField('Report Type', 
-                             choices=[('comprehensive', 'Comprehensive'), 
-                                      ('compact', 'Compact'), 
+    report_type = RadioField('Report Type',
+                             choices=[('comprehensive', 'Comprehensive'),
+                                      ('compact', 'Compact'),
                                       ('renewal', 'Customer Renewal'),
                                       ('renewal_portfolio', 'Portfolio Renewal')],
                              default='comprehensive',
                              validators=[DataRequired()])
-    
-    manager = SelectField('Manager', 
+
+    manager = SelectField('Manager',
                           choices=[],  # Will be set dynamically from team_config.json
                           validators=[DataRequired()])
-    
+
     technology = SelectField('Technology',
                              choices=[('Webex Meetings & Messaging', 'Webex Meetings & Messaging'),
                                       ('Webex Calling', 'Webex Calling'),
@@ -340,15 +340,15 @@ class AnalysisForm(FlaskForm):
                                       ('All Contact Center', 'All Contact Center'),
                                       ('All', 'All')],
                              validators=[DataRequired()])
-    
+
     customer_name = StringField('Customer Name', validators=[OptionalValidator()])
-    
-    days = IntegerField('Analysis Period (days)', 
+
+    days = IntegerField('Analysis Period (days)',
                         default=90,
                         validators=[DataRequired(), NumberRange(min=1, max=365)])
-    
+
     csone_file = FileField('CSOne Excel File (Optional)', validators=[OptionalValidator()])
-    
+
     submit_btn = SubmitField('Generate Report')
 
 # Import the working backend logic
@@ -451,40 +451,40 @@ def validate_manager_input(manager: str) -> tuple[bool, str]:
     """Validate manager input"""
     if not manager or not isinstance(manager, str):
         return False, "Manager is required"
-    
+
     if len(manager) > 100:
         return False, "Manager name too long"
-    
+
     # Check for SQL injection attempts
     dangerous_chars = ["'", '"', ";", "--", "/*", "*/", "xp_", "sp_"]
     if any(char in manager.lower() for char in dangerous_chars):
         return False, "Invalid characters in manager name"
-    
+
     return True, "Valid"
 
 def validate_technology_input(technology: str) -> tuple[bool, str]:
     """Validate technology input"""
     if not technology or not isinstance(technology, str):
         return False, "Technology is required"
-    
+
     if len(technology) > 100:
         return False, "Technology name too long"
-    
+
     # Check for SQL injection attempts
     dangerous_chars = ["'", '"', ";", "--", "/*", "*/", "xp_", "sp_"]
     if any(char in technology.lower() for char in dangerous_chars):
         return False, "Invalid characters in technology name"
-    
+
     return True, "Valid"
 
 def validate_days_input(days: int) -> tuple[bool, str]:
     """Validate days input"""
     if not isinstance(days, int):
         return False, "Days must be a number"
-    
+
     if days < 1 or days > 365:
         return False, "Days must be between 1 and 365"
-    
+
     return True, "Valid"
 
 
@@ -1928,7 +1928,7 @@ def _hydrate_status_datetimes(raw_status: Any) -> Dict[str, Any]:
 
 def _update_progress(status, progress, message, step, save=True):
     """Update analysis status with progress, message, step tracking, and dynamic ETA.
-    
+
     Automatically manages completed_steps list and computes ETA using a blended
     recent-rate / overall-rate approach for adaptive accuracy.
     Must be called while holding analysis_status_lock.
@@ -2047,7 +2047,7 @@ def load_analysis_status():
         if os.path.exists(status_file_path):
             with open(status_file_path, 'r', encoding='utf-8') as f:
                 loaded_status = json.load(f)
-                
+
             cleaned_any = False
             with analysis_status_lock:
                 for analysis_id, status in loaded_status.items():
@@ -2139,35 +2139,35 @@ def validate_file_input(filename: str) -> tuple[bool, str]:
     """Validate file input"""
     if not filename:
         return True, "Valid"  # File is optional
-    
+
     if not isinstance(filename, str):
         return False, "Filename must be text"
-    
+
     # Check file extension
     allowed_extensions = ['.xlsx', '.xls']
     if not any(filename.lower().endswith(ext) for ext in allowed_extensions):
         return False, "Only Excel files (.xlsx, .xls) are allowed"
-    
+
     return True, "Valid"
 
 def validate_file_upload(file) -> tuple[bool, str]:
     """Enhanced file validation with security checks"""
     if not file or not file.filename:
         return False, "No file selected"
-    
+
     filename = file.filename
     if not filename.endswith(('.xlsx', '.xls')):
         return False, "Invalid file extension. Only Excel files (.xlsx, .xls) are allowed."
-    
+
     # File size validation
     file.seek(0, 2)  # Seek to end
     file_size = file.tell()
     file.seek(0)     # Reset to beginning
-    
+
     max_size = int(app.config.get('MAX_CONTENT_LENGTH', 50 * 1024 * 1024))
     if file_size > max_size:
         return False, f"File too large. Maximum size is {max_size // (1024*1024)}MB."
-    
+
     if file_size == 0:
         return False, "Empty file uploaded. Please select a valid Excel file."
 
@@ -2178,7 +2178,7 @@ def validate_file_upload(file) -> tuple[bool, str]:
         return False, "Invalid XLSX file signature."
     if filename.lower().endswith('.xls') and not signature.startswith(b'\xD0\xCF\x11\xE0'):
         return False, "Invalid XLS file signature."
-    
+
     return True, "File is valid"
 
 
@@ -2365,14 +2365,14 @@ def _r45_render_validation_remediation_message(
 def index():
     """Main analysis page using template"""
     import html as html_module
-    
+
     error_message = request.args.get('error', '')
     # Escape HTML to prevent XSS
     if error_message:
         error_message = html_module.escape(error_message)
     else:
         error_message = ''
-    
+
     form = AnalysisForm()
     # Set manager choices dynamically from team_config.json
     form.manager.choices = [(m, m) for m in MANAGERS]
@@ -2426,7 +2426,7 @@ def start_analysis():
     try:
         # For AJAX requests, validate CSRF token from header/body.
         is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
-        
+
         if is_ajax:
             # Check if JSON data is provided (for renewal reports) or use form data
             json_data = request.get_json(silent=True) or {}
@@ -2468,12 +2468,12 @@ def start_analysis():
                 customer_name = request.form.get('customer_name', '').strip()
                 days_str = request.form.get('days', '90').strip()
                 subscription_id = request.form.get('subscription_id', '').strip()
-            
+
             # For renewal reports, use renewal_type if provided, otherwise infer from report_type
             if report_type in ['renewal', 'renewal_portfolio']:
                 if not renewal_type:
                     renewal_type = 'renewal_single' if report_type == 'renewal' else 'renewal_portfolio'
-            
+
             # Validate inputs - Manager is optional for single customer renewal (renewal_type can be 'renewal' or 'renewal_single' from form)
             is_single_customer = report_type == 'renewal' and renewal_type in ('renewal_single', 'renewal')
             if is_single_customer:
@@ -2511,19 +2511,19 @@ def start_analysis():
                             'success': False,
                             'error': f'Invalid manager. Must be one of: {", ".join(MANAGERS)}'
                         }), 400
-            
+
             if not tech:
                 return jsonify({
                     'success': False,
                     'error': 'Technology is required'
                 }), 400
-            
+
             if report_type not in ['comprehensive', 'compact', 'renewal', 'renewal_portfolio']:
                 return jsonify({
                     'success': False,
                     'error': 'Invalid report type'
                 }), 400
-            
+
             try:
                 days = int(days_str)
                 if days < 1 or days > 365:
@@ -2563,7 +2563,7 @@ def start_analysis():
             if report_type in ['renewal', 'renewal_portfolio']:
                 if not renewal_type:
                     renewal_type = 'renewal_single' if report_type == 'renewal' else 'renewal_portfolio'
-        
+
         # File handling (same for both AJAX and regular)
         csone_file = None
         if 'csone_file' in request.files:
@@ -2584,7 +2584,7 @@ def start_analysis():
         # When no file uploaded: use most recent from OneDrive folder (macro places reports daily)
         if not csone_file:
             csone_file = get_latest_csone_from_folder()
-        
+
         # Generate unique analysis ID - handle case where manager might be empty for single customer renewal
         timestamp = int(time.time())
         safe_manager = _sanitize_analysis_id_part(manager)
@@ -2616,7 +2616,7 @@ def start_analysis():
             else:
                 safe_report_type = _sanitize_analysis_id_part(report_type)
                 analysis_id = f"{safe_report_type}_{safe_tech}_{days}d_{timestamp}"
-        
+
         # Initialize status with enhanced messaging and timing (thread-safe)
         with analysis_status_lock:
             analysis_status[analysis_id] = {
@@ -2646,7 +2646,7 @@ def start_analysis():
             }
             # Save status immediately to persist across Flask reloads
             save_analysis_status()
-        
+
         # Start appropriate analysis based on report type
         if report_type == 'compact':
             thread = threading.Thread(target=run_compact_analysis, args=(analysis_id,))
@@ -2654,10 +2654,10 @@ def start_analysis():
             thread = threading.Thread(target=run_customer_renewal_analysis, args=(analysis_id,))
         else:  # comprehensive
             thread = threading.Thread(target=run_comprehensive_analysis, args=(analysis_id,))
-        
+
         thread.daemon = True
         thread.start()
-        
+
         # Round 8 / Phase 1.4: previously this logged
         # ``list(analysis_status.keys())`` *outside* ``analysis_status_lock``
         # while worker threads concurrently mutate the dict, which can raise
@@ -2672,14 +2672,14 @@ def start_analysis():
             _status_keys_snapshot = list(analysis_status.keys())
         logger.info("[[START]] Started analysis aid_digest=%s in_flight=%d", _id_digest(analysis_id), _status_count)
         logger.debug("[[DEBUG]] Analysis status keys in memory: %s", _status_keys_snapshot)
-        
+
         # Always return JSON - the frontend handles the redirect
         return jsonify({
             'success': True,
             'analysis_id': analysis_id,
             'redirect_url': url_for('progress', analysis_id=analysis_id)
         })
-        
+
     except Exception as e:
         logger.error(f"Error in start_analysis: {e}", exc_info=True)
         return jsonify({
@@ -2744,26 +2744,26 @@ def update_analysis_status(analysis_id: str, updates: Dict[str, Any], save: bool
         else:
             logger.warning(f"Attempted to update status for non-existent analysis_id: {analysis_id}")
 
-def filter_subscriptions_by_criteria(team_subs_df: pd.DataFrame, customer_name: TypingOptional[str] = None, 
+def filter_subscriptions_by_criteria(team_subs_df: pd.DataFrame, customer_name: TypingOptional[str] = None,
                                      subscription_id: TypingOptional[str] = None) -> tuple[pd.DataFrame, TypingOptional[str]]:
     """
     Filter subscriptions by customer name or subscription ID
-    
+
     Args:
         team_subs_df: DataFrame containing team subscriptions
         customer_name: Optional customer name to filter by (case-insensitive partial match)
         subscription_id: Optional subscription ID to filter by (exact match)
-    
+
     Returns:
         Tuple of (filtered_dataframe, error_message)
         error_message is None if successful, otherwise contains error description
     """
     if team_subs_df.empty:
         return team_subs_df, "No subscriptions available to filter"
-    
+
     original_count = len(team_subs_df)
     filtered_df = team_subs_df.copy()
-    
+
     if customer_name and customer_name.strip():
         # Filter by customer name (case-insensitive partial match)
         customer_name_filter = customer_name.strip()
@@ -2784,18 +2784,18 @@ def filter_subscriptions_by_criteria(team_subs_df: pd.DataFrame, customer_name: 
         logger.debug(
             "[[FILTER]] (debug) customer name filter: %r", customer_name_filter
         )
-        
+
         if filtered_df.empty:
             return filtered_df, f"No subscriptions found for customer '{customer_name_filter}'"
-            
+
     elif subscription_id and subscription_id.strip():
         # Filter by subscription ID (exact match)
         subscription_id_filter = subscription_id.strip()
-        
+
         # Validate subscription ID format
         if not re.match(r'^[a-zA-Z0-9\-_]+$', subscription_id_filter):
             return pd.DataFrame(), f"Invalid subscription ID format: '{subscription_id_filter}'"
-        
+
         filtered_df = filtered_df[filtered_df['SUBSCRIPTION_ID'] == subscription_id_filter]
         # Round 13 / Phase 10.6: subscription IDs are not PII per se
         # but they are tenant identifiers; surface only a hash-like
@@ -2812,10 +2812,10 @@ def filter_subscriptions_by_criteria(team_subs_df: pd.DataFrame, customer_name: 
         logger.debug(
             "[[FILTER]] (debug) subscription id filter: %r", subscription_id_filter
         )
-        
+
         if filtered_df.empty:
             return filtered_df, f"No subscriptions found with ID '{subscription_id_filter}'"
-    
+
     return filtered_df, None
 
 def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None) -> Dict[str, Any]:
@@ -2823,11 +2823,11 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
     Extract software defects (BST/CSC IDs) and BEMS escalation IDs from CSOne
     and Adoption Barriers data.
     Checks Transaction ID, bemscsc_refs, Title, and Problem Description.
-    
+
     Args:
         csone_df: DataFrame containing CSOne/TAC case data
         ab_df: Optional DataFrame containing Adoption Barriers data
-        
+
     Returns:
         Dictionary with defect counts, lists, and customer breakdown
     """
@@ -2844,7 +2844,7 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
         'total_cases_with_defects': 0,
         'customers_with_defects': set()
     }
-    
+
     # Extract from CSOne data
     if csone_df is not None and not csone_df.empty:
         for _, row in csone_df.iterrows():
@@ -2855,17 +2855,17 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
                 if col in row.index and pd.notna(row.get(col, None)):
                     customer = normalize_customer_name(row[col])
                     break
-            
+
             # Check Transaction ID for CSC/BST references (BEMS handled by canonical helper below)
             if 'Transaction ID' in csone_df.columns and pd.notna(row.get('Transaction ID', None)):
                 tx_id = str(row['Transaction ID'])
                 csc_refs.extend(_CSC_RE.findall(tx_id))
-            
+
             # Check bemscsc_refs column for CSC references
             if 'bemscsc_refs' in csone_df.columns and pd.notna(row.get('bemscsc_refs', None)):
                 refs_str = str(row['bemscsc_refs'])
                 csc_refs.extend(_CSC_RE.findall(refs_str))
-            
+
             # Check Title and Problem Description for CSC
             title = str(row.get('Title', '')) if 'Title' in row.index else ''
             description = str(row.get('Problem Description', '')) if 'Problem Description' in row.index else ''
@@ -2882,9 +2882,9 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
             # on whether the canonical helper had additional
             # normalization that the local regex missed.
             bems_refs = list(extract_bems_ids_from_row(row))
-            
+
             all_refs = [(rid, 'CSC') for rid in csc_refs] + [(rid, 'BEMS') for rid in bems_refs]
-            
+
             for defect_id, ref_type in all_refs:
                 defect_id_norm = re.sub(r'[- ]', '', defect_id).upper()
                 if ref_type == 'CSC':
@@ -2892,12 +2892,12 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
                 else:
                     defects['bems_ids'].add(defect_id_norm)
                 defects['customers_with_defects'].add(customer)
-                
+
                 case_num = row.get('SR Number', 'N/A') if 'SR Number' in row.index else (
                     row.get('Case Number', 'N/A') if 'Case Number' in row.index else 'N/A'
                 )
                 tx_id_str = str(row.get('Transaction ID', '')) if 'Transaction ID' in row.index else ''
-                
+
                 defects['defect_cases'].append({
                     'defect_id': defect_id_norm,
                     'customer': customer,
@@ -2907,11 +2907,11 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
                     'transaction_id': tx_id_str,
                     'ref_type': ref_type
                 })
-                
+
                 if customer not in defects['defect_by_customer']:
                     defects['defect_by_customer'][customer] = []
                 defects['defect_by_customer'][customer].append(defect_id_norm)
-    
+
     # Extract from Adoption Barriers data
     if ab_df is not None and not ab_df.empty:
         for _, row in ab_df.iterrows():
@@ -2922,12 +2922,12 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
                 if col in row.index and pd.notna(row.get(col, None)):
                     customer = normalize_customer_name(row[col])
                     break
-            
+
             # Check bemscsc_refs column for CSC IDs
             if 'bemscsc_refs' in ab_df.columns and pd.notna(row.get('bemscsc_refs', None)):
                 refs_str = str(row['bemscsc_refs'])
                 csc_refs.extend(_CSC_RE.findall(refs_str))
-            
+
             # Check title and description for CSC IDs
             title = row.get('title', '') if 'title' in row.index else (
                 row.get('SUBJECT_C', '') if 'SUBJECT_C' in row.index else ''
@@ -2940,9 +2940,9 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
             # Round 6 / Phase 5.10: BEMS via canonical helper (see
             # CSOne branch above for rationale).
             bems_refs = list(extract_bems_ids_from_row(row))
-            
+
             all_refs = [(rid, 'CSC') for rid in csc_refs] + [(rid, 'BEMS') for rid in bems_refs]
-            
+
             for defect_id, ref_type in all_refs:
                 defect_id_norm = re.sub(r'[- ]', '', defect_id).upper()
                 if ref_type == 'CSC':
@@ -2950,9 +2950,9 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
                 else:
                     defects['bems_ids'].add(defect_id_norm)
                 defects['customers_with_defects'].add(customer)
-                
+
                 ab_id = row.get('ID', 'N/A') if 'ID' in row.index else 'N/A'
-                
+
                 defects['defect_cases'].append({
                     'defect_id': defect_id_norm,
                     'customer': customer,
@@ -2961,11 +2961,11 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
                     'source': 'AdoptionBarrier',
                     'ref_type': ref_type
                 })
-                
+
                 if customer not in defects['defect_by_customer']:
                     defects['defect_by_customer'][customer] = []
                 defects['defect_by_customer'][customer].append(defect_id_norm)
-    
+
     # Normalize customer keys and guarantee linkage for every extracted ID.
     normalized_linkage: Dict[str, set[str]] = {}
     for customer_name, defect_ids in defects['defect_by_customer'].items():
@@ -2994,21 +2994,21 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
     defects['bst_defects'] = sorted(list(all_ids))
     defects['total_cases_with_defects'] = len(defects['defect_cases'])
     defects['customers_with_defects'] = sorted(list(defects['customers_with_defects']))
-    
+
     logger.info(f"[[DEFECTS]] Found {len(defects['csc_ids'])} CSC IDs and {len(defects['bems_ids'])} BEMS IDs across {defects['total_cases_with_defects']} cases")
     if defects['total_defects'] > 0:
         logger.info(f"[[DEFECTS]] Sample defects: {defects['bst_defects'][:5]}")
-    
+
     return defects
 
 def extract_psirt_vulnerabilities(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None) -> Dict[str, Any]:
     """
     Extract PSIRT vulnerability references (CVE IDs, PSIRT advisory IDs) from data
-    
+
     Args:
         csone_df: DataFrame containing CSOne/TAC case data
         ab_df: Optional DataFrame containing Adoption Barriers data
-        
+
     Returns:
         Dictionary with PSIRT vulnerability counts and lists
     """
@@ -3021,11 +3021,11 @@ def extract_psirt_vulnerabilities(csone_df: pd.DataFrame, ab_df: pd.DataFrame = 
         'total_cases_with_vulns': 0,
         'customers_with_vulns': set()
     }
-    
+
     # PSIRT patterns
     cve_pattern = r'\bCVE-\d{4}-\d{4,7}\b'
     psirt_pattern = r'\bcisco-sa-\d{8}-[a-z0-9-]+\b'
-    
+
     # Extract from CSOne data
     if csone_df is not None and not csone_df.empty:
         for _, row in csone_df.iterrows():
@@ -3036,7 +3036,7 @@ def extract_psirt_vulnerabilities(csone_df: pd.DataFrame, ab_df: pd.DataFrame = 
                 if col in row.index and pd.notna(row.get(col, None)):
                     customer = normalize_customer_name(row[col])
                     break
-            
+
             # Check all text fields - use proper column checking
             text_fields = []
             if 'Transaction ID' in csone_df.columns:
@@ -3047,31 +3047,31 @@ def extract_psirt_vulnerabilities(csone_df: pd.DataFrame, ab_df: pd.DataFrame = 
                 text_fields.append(str(row.get('Title', '')))
             if 'Problem Description' in csone_df.columns:
                 text_fields.append(str(row.get('Problem Description', '')))
-            
+
             combined_text = ' '.join(text_fields)
-            
+
             # Extract CVE IDs
             cve_matches = re.findall(cve_pattern, combined_text, re.IGNORECASE)
             vuln_refs.extend([cve.upper() for cve in cve_matches])
-            
+
             # Extract PSIRT advisory IDs
             psirt_matches = re.findall(psirt_pattern, combined_text, re.IGNORECASE)
             vuln_refs.extend([psirt.lower() for psirt in psirt_matches])
-            
+
             # Add unique vulnerabilities
             for vuln_id in vuln_refs:
                 if vuln_id.startswith('CVE-'):
                     vulnerabilities['cve_ids'].add(vuln_id)
                 elif 'cisco-sa-' in vuln_id.lower():
                     vulnerabilities['psirt_advisories'].add(vuln_id)
-                
+
                 vulnerabilities['customers_with_vulns'].add(customer)
-                
+
                 case_num = row.get('SR Number', 'N/A') if 'SR Number' in row.index else (
                     row.get('Case Number', 'N/A') if 'Case Number' in row.index else 'N/A'
                 )
                 title = str(row.get('Title', '')) if 'Title' in row.index else ''  # FIXED: No truncation
-                
+
                 vulnerabilities['vulnerability_cases'].append({
                     'vulnerability_id': vuln_id,
                     'customer': customer,
@@ -3079,11 +3079,11 @@ def extract_psirt_vulnerabilities(csone_df: pd.DataFrame, ab_df: pd.DataFrame = 
                     'title': title,
                     'source': 'CSOne'
                 })
-                
+
                 if customer not in vulnerabilities['vulnerability_by_customer']:
                     vulnerabilities['vulnerability_by_customer'][customer] = []
                 vulnerabilities['vulnerability_by_customer'][customer].append(vuln_id)
-    
+
     # Extract from Adoption Barriers data
     if ab_df is not None and not ab_df.empty:
         for _, row in ab_df.iterrows():
@@ -3093,7 +3093,7 @@ def extract_psirt_vulnerabilities(csone_df: pd.DataFrame, ab_df: pd.DataFrame = 
                 if col in row.index and pd.notna(row.get(col, None)):
                     customer = normalize_customer_name(row[col])
                     break
-            
+
             # Check all text fields - use proper column checking
             text_fields = []
             if 'bemscsc_refs' in ab_df.columns:
@@ -3106,26 +3106,26 @@ def extract_psirt_vulnerabilities(csone_df: pd.DataFrame, ab_df: pd.DataFrame = 
                 text_fields.append(str(row.get('description', '')))
             elif 'DESCRIPTION__C' in ab_df.columns:
                 text_fields.append(str(row.get('DESCRIPTION__C', '')))
-            
+
             combined_text = ' '.join(text_fields)
-            
+
             cve_matches = re.findall(cve_pattern, combined_text, re.IGNORECASE)
             psirt_matches = re.findall(psirt_pattern, combined_text, re.IGNORECASE)
-            
+
             for cve in cve_matches:
                 vulnerabilities['cve_ids'].add(cve.upper())
                 vulnerabilities['customers_with_vulns'].add(customer)
                 if customer not in vulnerabilities['vulnerability_by_customer']:
                     vulnerabilities['vulnerability_by_customer'][customer] = []
                 vulnerabilities['vulnerability_by_customer'][customer].append(cve.upper())
-            
+
             for psirt in psirt_matches:
                 vulnerabilities['psirt_advisories'].add(psirt.lower())
                 vulnerabilities['customers_with_vulns'].add(customer)
                 if customer not in vulnerabilities['vulnerability_by_customer']:
                     vulnerabilities['vulnerability_by_customer'][customer] = []
                 vulnerabilities['vulnerability_by_customer'][customer].append(psirt.lower())
-    
+
     # Round 2 / Phase 5.3: a single security issue is often referenced
     # both by its CVE id (e.g. ``CVE-2024-12345``) and by a Cisco
     # PSIRT advisory id (e.g. ``cisco-sa-...``).  Summing the two id
@@ -3168,10 +3168,10 @@ def detect_bems_escalations(csone_df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     """
     Comprehensive BEMS detection from CSOne data
     Checks Transaction ID (PRIMARY), bemscsc_refs (SECONDARY), and other columns
-    
+
     Args:
         csone_df: DataFrame containing CSOne/TAC case data
-        
+
     Returns:
         Tuple of (bems_cases_dataframe, bems_count)
     """
@@ -3182,7 +3182,7 @@ def detect_bems_escalations(csone_df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     bems_mask = detect_bems_mask(normalized_csone)
     bems_cases = normalized_csone[bems_mask].copy() if bems_mask.any() else pd.DataFrame()
     bems_count = len(bems_cases)
-    
+
     if bems_count > 0:
         logger.info(f"[[BEMS]] Found {bems_count} BEMS escalations")
         if 'Transaction ID' in bems_cases.columns:
@@ -3200,7 +3200,7 @@ def detect_bems_escalations(csone_df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
             logger.info(f"[[BEMS]] Transaction ID column exists - checking sample values...")
             sample_tx_ids = csone_df['Transaction ID'].dropna().head(5).tolist()
             logger.info(f"[[BEMS]] Sample Transaction IDs: {sample_tx_ids}")
-    
+
     return bems_cases, bems_count
 
 def _clean_datetime_columns_for_excel(df):
@@ -3216,7 +3216,7 @@ def _clean_datetime_columns_for_excel(df):
     """
     if df is None or df.empty:
         return df if df is not None else pd.DataFrame()
-    
+
     try:
         df_clean = df.copy()
         for col in df_clean.columns:
@@ -3625,7 +3625,7 @@ def _validate_excel_output(excel_path) -> bool:
         logger.error(f"[[SEARCH]] DEBUGGING - Excel validation: FAILED - {e}")
         return False
 
-def _get_all_customers_from_all_sources(ab_norm: pd.DataFrame = None, csone_df: pd.DataFrame = None, 
+def _get_all_customers_from_all_sources(ab_norm: pd.DataFrame = None, csone_df: pd.DataFrame = None,
                                         team_subs_df: pd.DataFrame = None,
                                         csconsole_action_plans: pd.DataFrame = None,
                                         csconsole_customer_pulse: pd.DataFrame = None,
@@ -3634,7 +3634,7 @@ def _get_all_customers_from_all_sources(ab_norm: pd.DataFrame = None, csone_df: 
     """
     Get ALL unique customers from ALL available data sources.
     This ensures consistent customer counts across all report types.
-    
+
     Args:
         ab_norm: Adoption barriers DataFrame
         csone_df: CSOne cases DataFrame
@@ -3643,7 +3643,7 @@ def _get_all_customers_from_all_sources(ab_norm: pd.DataFrame = None, csone_df: 
         csconsole_customer_pulse: CSConsole customer pulse DataFrame
         csconsole_success_priorities: CSConsole success priorities DataFrame
         csconsole_adoption_barriers: CSConsole adoption barriers DataFrame
-    
+
     Returns:
         Set of unique customer names from all sources
     """
@@ -3728,7 +3728,7 @@ def _generate_comprehensive_fallback_insights(
     insights = []
     ab_norm = ab_norm if ab_norm is not None else pd.DataFrame()
     csone_df = csone_df if csone_df is not None else pd.DataFrame()
-    
+
     # Portfolio overview - Use comprehensive function to get ALL customers from ALL sources
     all_customers_set = _get_all_customers_from_all_sources(
         ab_norm=ab_norm,
@@ -3740,12 +3740,14 @@ def _generate_comprehensive_fallback_insights(
         csconsole_adoption_barriers=csconsole_adoption_barriers,
     )
     total_customers = len(all_customers_set)
-    ab_count = len(ab_norm)
+    # Round 53.1: executive insight summaries cite distinct AB records, not
+    # fan-out rows.
+    ab_count = cm.count_total_barriers(ab_norm)
     case_count = len(csone_df)
-    
+
     insights.append(f"Portfolio Analysis for {manager} - {technology} Technology Focus")
     insights.append(f"This comprehensive analysis covers {total_customers} customers with {ab_count} adoption barriers and {case_count} support cases identified over the analysis period.")
-    
+
     # Risk assessment (Round 3: route via canonical severity normalization
     # so that "Critical" and "High" counts agree with the leader/EI/compact
     # reports and the Critical Adoption Barriers section).
@@ -3782,13 +3784,13 @@ def _generate_comprehensive_fallback_insights(
             escalated_cases = int(cm.count_escalated(csone_df))
         except Exception:
             escalated_cases = 0
-        
+
         if p1_cases > 0:
             insights.append(f"URGENT: {p1_cases} P1 support cases require immediate executive attention and resource allocation.")
-        
+
         if escalated_cases > 0:
             insights.append(f"ESCALATION ALERT: {escalated_cases} cases have been escalated, indicating potential customer satisfaction risks.")
-    
+
     # Data-driven: top at-risk customers and BEMS count
     if not ab_norm.empty and 'customer_name' in ab_norm.columns:
         # Round 13 / Phase 3.11: route customer through
@@ -3840,7 +3842,7 @@ def _generate_comprehensive_fallback_insights(
             f"BEMS ENGINEERING ESCALATIONS: {int(bems_total)} cases require specialized engineering support—high renewal risk indicator. "
             f"[Source: CSOne (Transaction ID, bemscsc_refs); Field(s): Transaction ID, bemscsc_refs; Verification: BEMS IDs verifiable in CSOne]"
         )
-    
+
     # Strategic recommendations
     insights.append("STRATEGIC RECOMMENDATIONS:")
     insights.append("1. Implement weekly executive reviews for all critical and high-severity issues")
@@ -3848,7 +3850,7 @@ def _generate_comprehensive_fallback_insights(
     insights.append("3. Deploy proactive health monitoring and early warning systems")
     insights.append("4. Create customer-specific success plans with measurable outcomes")
     insights.append("5. Enhance technical enablement programs to reduce adoption barriers")
-    
+
     # Business impact
     insights.append("BUSINESS IMPACT: Addressing these issues proactively will improve customer satisfaction scores, reduce churn risk, and increase renewal rates. Executive engagement is critical for successful outcomes.")
 
@@ -4502,19 +4504,19 @@ def create_executive_charts(
     return chart_paths
 
 
-def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFrame, 
+def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFrame,
                           renewal_analysis: Dict, ext_incidents: List[Dict] = None,
                           days: int = 90) -> List[str]:
     """Create renewal-specific charts and visualizations"""
     chart_paths = []
-    
+
     try:
         import matplotlib
         matplotlib.use('Agg')  # Use non-interactive backend for server
         import matplotlib.pyplot as plt
         import numpy as np
         from datetime import datetime, timedelta
-        
+
         # Set style for executive reports
         try:
             plt.style.use('seaborn-v0_8-whitegrid')
@@ -4523,19 +4525,19 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                 plt.style.use('seaborn-whitegrid')
             except Exception as _e:
                 logger.debug("matplotlib seaborn style unavailable, using default: %s", _e)
-        
+
         plt.rcParams['figure.facecolor'] = 'white'
         plt.rcParams['axes.facecolor'] = 'white'
         plt.rcParams['font.size'] = 10
         plt.rcParams['axes.titlesize'] = 12
         plt.rcParams['axes.labelsize'] = 10
-        
+
         # Chart 1: Renewal Risk Score Visualization (Gauge/Donut Chart)
         risk_score = renewal_analysis.get('renewal_risk_score', 0)
         risk_category = renewal_analysis.get('renewal_risk_category', 'UNKNOWN')
-        
+
         fig, ax = plt.subplots(figsize=(10, 8))
-        
+
         # Create donut chart for risk score.
         # Wedge color uses the canonical thresholds from
         # ``risk_scoring.RISK_BAND_THRESHOLDS`` so the color and the
@@ -4578,8 +4580,8 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         else:
             _wedge_color = _R12_RBC.get("HEALTHY", _R12_RBC_DEFAULT)
         colors = [_wedge_color, '#f0f0f0']
-        
-        wedges, texts, autotexts = ax.pie(sizes, labels=['Risk Score', 'Remaining'], 
+
+        wedges, texts, autotexts = ax.pie(sizes, labels=['Risk Score', 'Remaining'],
                                           autopct='', colors=colors, startangle=90,
                                           pctdistance=0.85, labeldistance=1.1)
         # Round 13 / Phase 8.1: enforce 1:1 aspect on the renewal-risk
@@ -4588,7 +4590,7 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
             ax.set_aspect('equal')
         except Exception:
             pass
-        
+
         # Round 10 / Phase 1.5: render the renewal-risk score with 1 decimal
         # to match the DOCX renewal section which uses
         # ``round(float(risk_score_raw), 1)``. ``int()`` previously truncated
@@ -4597,18 +4599,18 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         ax.text(0, 0, f'{float(risk_score):.1f}/100\n{risk_category}',
                 ha='center', va='center', fontsize=24, fontweight='bold',
                 color=colors[0])
-        
+
         ax.set_title('Renewal Risk Score\n(Visual Indicator)', fontsize=16, fontweight='bold', pad=20)
         plt.tight_layout()
         chart_path = f"outputs/renewal_risk_score_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
         plt.savefig(chart_path, dpi=300, bbox_inches='tight')
         _r13_close_fig(fig)
         chart_paths.append(chart_path)
-        
+
         # Chart 2: Support Cases Trend Over Time (if CSOne data available)
         if not customer_csone.empty and 'Date/Time Opened' in customer_csone.columns:
             fig, ax = plt.subplots(figsize=(12, 6))
-            
+
             # Round 3 / Phase 1.2: do all parsing/filtering on a local
             # ``work`` copy so we never mutate the caller's
             # customer_csone. Previously the ``pd.to_datetime`` write
@@ -4640,11 +4642,11 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                 # untouched and downstream panels still see all rows).
                 work['Week'] = work['Date/Time Opened'].dt.to_period('W')
                 weekly_cases = work.groupby('Week').size()
-                
+
                 if len(weekly_cases) > 0:
                     weeks = [str(period) for period in weekly_cases.index]
                     case_counts = weekly_cases.values
-                    
+
                     # Round 13 / Phase 8.4: previously this weekly bar
                     # chart applied an arbitrary
                     # ``> 5 -> red, > 2 -> orange, else green``
@@ -4660,7 +4662,7 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                     # callers that genuinely need a risk overlay can
                     # add a separate axis or annotation.
                     colors = ['#1f77b4'] * len(case_counts)
-                    
+
                     bars = ax.bar(weeks, case_counts, color=colors)
                     _disclosure = (
                         f' • {_dropped_no_date} case(s) without a valid open date are excluded'
@@ -4672,24 +4674,24 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                     )
                     ax.set_ylabel('Number of Cases', fontsize=12, fontweight='bold')
                     ax.set_xlabel('Week', fontsize=12, fontweight='bold')
-                    
+
                     # Add value labels
                     for bar, value in zip(bars, case_counts):
                         height = bar.get_height()
                         ax.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
                                 f'{int(value)}', ha='center', va='bottom', fontweight='bold', fontsize=9)
-                    
+
                     plt.xticks(rotation=45, ha='right')
                     plt.tight_layout()
                     chart_path = f"outputs/renewal_support_trend_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
                     plt.savefig(chart_path, dpi=300, bbox_inches='tight')
                     _r13_close_fig(fig)
                     chart_paths.append(chart_path)
-        
+
         # Chart 3: Service Incidents Timeline (if incidents available)
         if ext_incidents and len(ext_incidents) > 0:
             fig, ax = plt.subplots(figsize=(12, 6))
-            
+
             # Parse incident dates
             incident_dates = []
             incident_statuses = []
@@ -4710,7 +4712,7 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                             incident_statuses.append(status)
                     except Exception as _e:
                         logger.debug("incident date parse skipped: %s", _e)
-            
+
             if incident_dates:
                 # Group by week
                 incident_df = pd.DataFrame({'date': incident_dates, 'status': incident_statuses})
@@ -4724,11 +4726,11 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                     _wseries = incident_df['date']
                 incident_df['week'] = _wseries.dt.to_period('W')
                 weekly_incidents = incident_df.groupby('week').size()
-                
+
                 if len(weekly_incidents) > 0:
                     weeks = [str(period) for period in weekly_incidents.index]
                     incident_counts = weekly_incidents.values
-                    
+
                     # Color based on high-impact incidents.
                     # Round 6 / Phase 1.5: route the per-week count
                     # through the shared definition (active investigation
@@ -4756,7 +4758,7 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                         except Exception:
                             high_impact = 0
                         colors.append('#d62728' if high_impact > 0 else '#ff7f0e' if len(week_incidents) > 2 else '#2ca02c')
-                    
+
                     bars = ax.bar(weeks, incident_counts, color=colors)
                     # Round 3: title now describes status-based coloring
                     # honestly. The previous "High Impact" label was
@@ -4771,25 +4773,25 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                     )
                     ax.set_ylabel('Number of Incidents', fontsize=12, fontweight='bold')
                     ax.set_xlabel('Week', fontsize=12, fontweight='bold')
-                    
+
                     # Add value labels
                     for bar, value in zip(bars, incident_counts):
                         height = bar.get_height()
                         ax.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
                                 f'{int(value)}', ha='center', va='bottom', fontweight='bold', fontsize=9)
-                    
+
                     plt.xticks(rotation=45, ha='right')
                     plt.tight_layout()
                     chart_path = f"outputs/renewal_incidents_timeline_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
                     plt.savefig(chart_path, dpi=300, bbox_inches='tight')
                     _r13_close_fig(fig)
                     chart_paths.append(chart_path)
-        
+
         # Chart 4: Renewal Health Dashboard (Multi-panel)
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
-        fig.suptitle('Renewal Health Dashboard - Comprehensive View', 
+        fig.suptitle('Renewal Health Dashboard - Comprehensive View',
                      fontsize=16, fontweight='bold', y=0.995)
-        
+
         # Panel 1: Key Metrics Summary.
         # Round 10 / Phase 8.1: drive the "Support Cases" and "Service
         # Incidents" headline counts from the *same* series the
@@ -4831,7 +4833,7 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
             'BEMS Escalations': renewal_analysis.get('bems_escalations_count', 0),
             'Service Incidents': _panel1_incidents,
         }
-        
+
         # Round 12 / Phase 8.3: previously these four bars (Support
         # Cases, Adoption Barriers, BEMS Escalations, Service
         # Incidents) were colored with the canonical risk ramp
@@ -4851,7 +4853,7 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         ax1.set_xlabel('Count', fontweight='bold')
         for i, (key, value) in enumerate(metrics.items()):
             ax1.text(value + 0.5, i, f'{int(value)}', va='center', fontweight='bold')
-        
+
         # Panel 2: Risk Score Gauge (out of 100)
         # Round 4: this pie historically rendered ``[risk_score, 100 - risk_score]``
         # under a "Risk Category" title which suggested a categorical
@@ -4890,7 +4892,7 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         except Exception:
             pass
         ax2.set_title('Renewal Risk Score (out of 100)', fontweight='bold')
-        
+
         # Panel 3: Case Severity Distribution (if CSOne data available).
         # Round 3 hardening: collapse all P1/1/Critical-style synonyms via
         # ``case_priority_norm`` so the pie matches the executive severity
@@ -4933,7 +4935,7 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
             ax3.text(0.5, 0.5, 'No Case Data Available', ha='center', va='center',
                      transform=ax3.transAxes, fontsize=12)
             ax3.set_title('Case Severity Distribution', fontweight='bold')
-        
+
         # Panel 4: Renewal Risk Score Gauge
         ax4.text(0.5, 0.7, 'RENEWAL RISK SCORE', ha='center', va='center',
                  transform=ax4.transAxes, fontsize=14, fontweight='bold')
@@ -4945,23 +4947,23 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                  transform=ax4.transAxes, fontsize=16, fontweight='bold',
                  color=risk_colors.get(risk_cat, _risk_default_color))
         ax4.axis('off')
-        
+
         plt.tight_layout()
         chart_path = f"outputs/renewal_health_dashboard_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
         plt.savefig(chart_path, dpi=300, bbox_inches='tight')
         _r13_close_fig(fig)
         chart_paths.append(chart_path)
-        
+
         logger.info(f"[[RENEWAL_CHARTS]] Generated {len(chart_paths)} renewal charts")
         return chart_paths
-    
+
     except ImportError:
         logger.warning("[[WARNING]] Matplotlib not available - renewal charts will be skipped")
     except Exception as e:
         logger.error(f"[[ERROR]] Renewal chart generation failed: {e}")
         import traceback
         logger.error(f"[[ERROR]] Traceback: {traceback.format_exc()}")
-    
+
     return chart_paths
 
 
@@ -4971,10 +4973,10 @@ def enrich_csone_with_arr(csone_df: pd.DataFrame, arr_data: pd.DataFrame) -> pd.
     """
     if csone_df is None or csone_df.empty:
         return csone_df if csone_df is not None else pd.DataFrame()
-    
+
     # Create a copy to avoid modifying original
     enriched_df = csone_df.copy()
-    
+
     try:
         # If we have real ARR data from Snowflake, merge it
         if arr_data is not None and not arr_data.empty:
@@ -4989,7 +4991,7 @@ def enrich_csone_with_arr(csone_df: pd.DataFrame, arr_data: pd.DataFrame) -> pd.
                     if customer and arr_value:
                         # Sum ARR if customer appears multiple times
                         arr_lookup[customer] = arr_lookup.get(customer, 0) + arr_value
-                
+
                 # Add ARR column to CSOne data.
                 # Round 6 / Phase 1.6: every Customer_ARR-bearing
                 # column MUST be accompanied by a per-row
@@ -5039,7 +5041,7 @@ def enrich_csone_with_arr(csone_df: pd.DataFrame, arr_data: pd.DataFrame) -> pd.
             # No ARR data available - create estimated ARR based on case severity/volume
             # This is a rough estimate: More P1/P2 cases = larger customer
             logger.info(f"[[INFO]] No ARR data available - creating estimated ARR based on support activity")
-            
+
             # Create estimated ARR tiers based on case characteristics.
             # Use canonical normalized priority so "1" / "Critical" / "P1" all
             # count toward the P1 tier consistently with dashboards.
@@ -5098,7 +5100,7 @@ def enrich_csone_with_arr(csone_df: pd.DataFrame, arr_data: pd.DataFrame) -> pd.
                 for customer in enriched_norm[cust_col].dropna().unique():
                     customer_cases = enriched_norm[enriched_norm[cust_col] == customer]
                     arr_estimates[customer] = estimate_arr(customer, customer_cases)
-                
+
                 enriched_df['Customer_ARR'] = enriched_df[cust_col].map(arr_estimates).fillna(50000)
                 enriched_df['ARR_Estimated'] = True  # Flag that this is estimated
                 # Round 12 / Phase 1.5: the estimator above produces
@@ -5117,7 +5119,7 @@ def enrich_csone_with_arr(csone_df: pd.DataFrame, arr_data: pd.DataFrame) -> pd.
                 # Round 12 / Phase 1.5: same rationale as the
                 # per-customer branch above.
                 enriched_df['ARR_Estimated_Currency'] = 'ASSUMED_USD'
-    
+
     except Exception as e:
         logger.error(f"[[ERROR]] Failed to enrich CSOne with ARR: {e}")
         enriched_df['Customer_ARR'] = 0
@@ -5125,7 +5127,7 @@ def enrich_csone_with_arr(csone_df: pd.DataFrame, arr_data: pd.DataFrame) -> pd.
         # Round 12 / Phase 1.5: include the currency column on the
         # error path too so downstream code can rely on the schema.
         enriched_df['ARR_Estimated_Currency'] = 'UNKNOWN'
-    
+
     return enriched_df
 
 def analyze_feature_requests(csone_df: pd.DataFrame, arr_data: pd.DataFrame = None) -> Dict[str, Any]:
@@ -5168,16 +5170,16 @@ def analyze_feature_requests(csone_df: pd.DataFrame, arr_data: pd.DataFrame = No
         'arr_impact_comparable': not _is_multi_currency,
         'arr_impact_currencies': _currencies_present,
     }
-    
+
     if csone_df is None or csone_df.empty:
         return feature_requests
-    
+
     try:
         # Keywords that indicate feature requests
-        feature_keywords = ['enhancement', 'feature request', 'rfr', 'new feature', 'add feature', 
+        feature_keywords = ['enhancement', 'feature request', 'rfr', 'new feature', 'add feature',
                             'request for', 'would like', 'need feature', 'missing feature',
                             'enhancement request', 'feature enhancement', 'roadmap', 'future enhancement']
-        
+
         # Find cases that are likely feature requests (use flexible column names for CSOne exports)
         from adoptiq_backend import LIKELY_TITLE_COLS, LIKELY_DESC_COLS
         title_col = next((c for c in LIKELY_TITLE_COLS if c in csone_df.columns), None)
@@ -5186,22 +5188,22 @@ def analyze_feature_requests(csone_df: pd.DataFrame, arr_data: pd.DataFrame = No
                                    else pd.Series([''] * len(csone_df), index=csone_df.index))
         csone_df['Desc_Lower'] = (csone_df[desc_col].astype(str).str.lower() if desc_col
                                   else pd.Series([''] * len(csone_df), index=csone_df.index))
-        
+
         # Create boolean mask for feature requests
         is_feature_request = pd.Series([False] * len(csone_df), index=csone_df.index)
         for keyword in feature_keywords:
             is_feature_request |= csone_df['Title_Lower'].str.contains(keyword, na=False)
             is_feature_request |= csone_df['Desc_Lower'].str.contains(keyword, na=False)
-        
+
         feature_request_cases = csone_df[is_feature_request].copy()
         feature_requests['total_requests'] = len(feature_request_cases)
-        
+
         if len(feature_request_cases) > 0:
             # Group by customer to find which customers are requesting features
             feat_cust_col = next((c for c in ['Customer Name', 'customer_name', 'BU_NAME', 'Customer'] if c in feature_request_cases.columns), None)
             if feat_cust_col:
                 customer_requests = feature_request_cases.groupby(feat_cust_col).size().sort_values(ascending=False)
-                
+
                 # FIXED: Get ALL requesting customers with ARR if available
                 for customer, count in customer_requests.items():
                     customer_info = {
@@ -5210,7 +5212,7 @@ def analyze_feature_requests(csone_df: pd.DataFrame, arr_data: pd.DataFrame = No
                         'arr': 0,
                         'sample_requests': []
                     }
-                    
+
                     # Get ARR for this customer if available
                     if arr_data is not None and not arr_data.empty and 'BU_NAME' in arr_data.columns:
                         customer_arr = arr_data[arr_data['BU_NAME'] == customer]
@@ -5245,19 +5247,19 @@ def analyze_feature_requests(csone_df: pd.DataFrame, arr_data: pd.DataFrame = No
                             # ``arr_impact_comparable`` to display "n/a".
                             if not _is_multi_currency:
                                 feature_requests['total_arr_impact'] += customer_info['arr']
-                    
+
                     # FIXED: Get ALL requests from this customer
                     customer_cases = feature_request_cases[feature_request_cases[feat_cust_col] == customer]
                     if 'Title' in customer_cases.columns:
                         sample_titles = customer_cases['Title'].dropna().tolist()
                         customer_info['sample_requests'] = sample_titles
-                    
+
                     feature_requests['customer_examples'].append(customer_info)
-            
+
             # Analyze most common feature themes (simple keyword frequency)
-            all_text = ' '.join(feature_request_cases['Title_Lower'].fillna('') + ' ' + 
+            all_text = ' '.join(feature_request_cases['Title_Lower'].fillna('') + ' ' +
                                 feature_request_cases['Desc_Lower'].fillna(''))
-            
+
             # Common feature themes to look for
             feature_themes = {
                 'integration': ['integration', 'integrate', 'api', 'sso', 'ldap', 'saml', 'oauth'],
@@ -5269,22 +5271,22 @@ def analyze_feature_requests(csone_df: pd.DataFrame, arr_data: pd.DataFrame = No
                 'customization': ['custom', 'customize', 'configuration', 'settings', 'branding'],
                 'collaboration': ['share', 'sharing', 'collaborate', 'team', 'group']
             }
-            
+
             theme_counts = {}
             for theme, keywords in feature_themes.items():
                 count = sum(all_text.count(keyword) for keyword in keywords)
                 if count > 0:
                     theme_counts[theme] = count
-            
+
             # FIXED: Show ALL themes sorted by frequency
             sorted_themes = sorted(theme_counts.items(), key=lambda x: x[1], reverse=True)
             feature_requests['top_features'] = [(theme, count) for theme, count in sorted_themes]
-        
+
     except Exception as e:
         logger.error(f"[[ERROR]] Feature request analysis failed: {e}")
         import traceback
         logger.error(f"[[ERROR]] Traceback: {traceback.format_exc()}")
-    
+
     return feature_requests
 
 def calculate_arr_impact_for_issues(ab_norm: pd.DataFrame, arr_data: pd.DataFrame) -> Dict[str, Any]:
@@ -5338,7 +5340,7 @@ def calculate_arr_impact_for_issues(ab_norm: pd.DataFrame, arr_data: pd.DataFram
     except Exception:
         _is_multi_currency = False
         _currencies_present = []
-    
+
     try:
         # Check which ARR columns actually exist in the data
         arr_cols_to_merge = ['ACCOUNT_ID_C']
@@ -5350,7 +5352,7 @@ def calculate_arr_impact_for_issues(ab_norm: pd.DataFrame, arr_data: pd.DataFram
             arr_cols_to_merge.append('TCV')
         if 'BU_NAME' in arr_data.columns:
             arr_cols_to_merge.append('BU_NAME')
-        
+
         # Round 6 / Phase 5.11: pre-deduplicate the ARR view on
         # ACCOUNT_ID_C and use ``validate='m:1'`` so the AB-level
         # metrics computed below cannot be silently inflated by
@@ -5417,18 +5419,18 @@ def calculate_arr_impact_for_issues(ab_norm: pd.DataFrame, arr_data: pd.DataFram
     except Exception as e:
         logger.error(f"[[ERROR]] Error merging ARR data: {e}")
         return {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}
-    
+
     # Fill missing ARR values with 0 (only if columns exist)
     if 'ANNUAL_CONTRACT_VALUE' in merged_data.columns:
         merged_data['ANNUAL_CONTRACT_VALUE'] = merged_data['ANNUAL_CONTRACT_VALUE'].fillna(0)
     else:
         merged_data['ANNUAL_CONTRACT_VALUE'] = 0
-    
+
     if 'MRR' in merged_data.columns:
         merged_data['MRR'] = merged_data['MRR'].fillna(0)
     else:
         merged_data['MRR'] = 0
-    
+
     if 'TCV' in merged_data.columns:
         merged_data['TCV'] = merged_data['TCV'].fillna(0)
     else:
@@ -5479,13 +5481,13 @@ def calculate_arr_impact_for_issues(ab_norm: pd.DataFrame, arr_data: pd.DataFram
                 'customer_count': int(category_data['ACCOUNT_ID_C'].nunique()),
                 'issue_count': int(len(category_data)),
             }
-    
+
     # FIXED: ALL issues by ARR impact
     top_issues = []
     if issue_breakdown:
         sorted_issues = sorted(issue_breakdown.items(), key=lambda x: x[1]['arr'], reverse=True)
         top_issues = sorted_issues  # All issues by ARR impact
-    
+
     # Round 12 / Phase 1.2: build per-currency rollup so consumers can
     # render a comparable breakdown even when the unsafe single
     # headline is suppressed.  We re-merge ``CURRENCY_CODE`` from the
@@ -5584,9 +5586,9 @@ def calculate_arr_impact_for_issues(ab_norm: pd.DataFrame, arr_data: pd.DataFram
         "concentration_note": _concentration_note,
     }
 
-def _create_enhanced_compact_report(base_path: str, manager: str, technology: str, days: int, 
+def _create_enhanced_compact_report(base_path: str, manager: str, technology: str, days: int,
                                     ai_insights: Dict, csone_df: pd.DataFrame, ab_norm: pd.DataFrame,
-                                    arr_data: pd.DataFrame, arr_impact: Dict, 
+                                    arr_data: pd.DataFrame, arr_impact: Dict,
                                     chart_paths: List[str], feature_requests: Dict,
                                     team_subs_df: pd.DataFrame = None,
                                     csconsole_action_plans: pd.DataFrame = None,
@@ -5609,20 +5611,20 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from datetime import datetime
     import os
-    
+
     doc = Document()
-    
+
     # Title
     # Round 6 / Phase 1.4: route through _safe_doc_text so a malformed
     # ``manager`` string can't produce illegal XML in the heading.
     title = doc.add_heading(_safe_doc_text(f'AdoptIQ Portfolio Analysis - {manager}'), 0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    
+
     subtitle = doc.add_paragraph(f'{technology} - {days} Day Analysis')
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
     if subtitle.runs:
         subtitle.runs[0].bold = True
-    
+
     doc.add_paragraph()  # Spacing
 
     # Round 46 / F-COMP-DQ-BANNER: surface partial-data warnings BEFORE any
@@ -5653,7 +5655,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                 "Round 46: enhanced compact partial-data banner failed: %s",
                 _banner_err,
             )
-    
+
     # Initialize variables outside if block to avoid scope issues
     total_customers = 0
     total_cases = 0
@@ -5667,7 +5669,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
     bems_cases = pd.DataFrame()
     software_defects = {'total_defects': 0, 'total_cases_with_defects': 0, 'defect_by_customer': {}}
     psirt_vulns = {'total_vulnerabilities': 0, 'cve_ids': set(), 'psirt_advisories': set(), 'vulnerability_by_customer': {}}
-    
+
     # CRITICAL FIX: Calculate customer count FIRST (before conditional check)
     # This ensures we show customer count even if CSOne is empty but we have customers from other sources
     # CRITICAL FIX: Use comprehensive function to get ALL customers from ALL available data sources
@@ -5722,30 +5724,30 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         total_customers,
     )
     logger.info(f"[[CUSTOMER_COUNT]] Team subscriptions (PRIMARY): {len(team_subs_df['BU_NAME'].unique()) if not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns else 0} customers")
-    
+
     # Extract software defects (BST/CSC IDs) and PSIRT vulnerabilities (do this even if CSOne is empty)
     software_defects = extract_software_defects(csone_df, ab_norm)
     psirt_vulns = extract_psirt_vulnerabilities(csone_df, ab_norm)
     defect_count = software_defects.get('total_defects', 0)
     vuln_count = psirt_vulns.get('total_vulnerabilities', 0)
-    
+
     # Add Executive Dashboard with Key Metrics (inspired by McKinsey/BCG reports)
     # FIXED: Show dashboard if we have ANY customers (not just if CSOne is not empty)
     # This ensures customer count is always displayed even if there are no cases
     if total_customers > 0 or not csone_df.empty or not ab_norm.empty:
         doc.add_heading('At-a-Glance Dashboard', level=1)
-        
+
         # Create metrics table (7 columns for comprehensive metrics including defects)
         metrics_table = doc.add_table(rows=2, cols=7)
         metrics_table.style = 'Light Grid Accent 1'
-        
+
         # Calculate metrics - Debug CSOne columns first
         if not csone_df.empty:
             logger.info(f"[[DEBUG]] CSOne DataFrame columns: {list(csone_df.columns)}")
             logger.info(f"[[DEBUG]] CSOne DataFrame shape: {csone_df.shape}")
             logger.info(f"[[DEBUG]] CSOne DataFrame sample (first 3 rows): {csone_df.head(3).to_dict('records') if not csone_df.empty else 'EMPTY'}")
         total_cases = len(csone_df) if not csone_df.empty else 0
-        
+
         # Try to detect a customer column for downstream BEMS-customer counting.
         # Round 3 hardening: do NOT gate P1/P2 counts on raw-severity-column
         # presence — ``cm.count_p1/p2`` already normalizes any of the known
@@ -5774,7 +5776,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         else:
             bems_count = 0
             bems_cases = pd.DataFrame()
-        
+
         # Header row - expanded to include software defects
         headers = ['Total Customers', 'Support Cases', 'Critical (P1)', 'High (P2)', 'BEMS Escalations', 'Software Defects', 'Security Vulnerabilities']
         for i, header in enumerate(headers):
@@ -5785,22 +5787,22 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                     run.bold = True
                     run.font.size = Pt(11)
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+
         # Values row - expanded to include software defects and vulnerabilities
         # Round 47 / R47-COMP-CUSTCOUNT-PARITY: this Word dashboard tile uses
         # the canonical-narrow customer count so it matches the Excel
         # ``Summary`` sheet's ``Customers in portfolio`` cell exactly.
         values = [str(total_customers_canonical_narrow), str(total_cases), str(p1_count), str(p2_count), str(bems_count), str(defect_count), str(vuln_count)]
         colors = [
-            None, 
-            None, 
-            RGBColor(192, 0, 0) if p1_count > 0 else None, 
-            RGBColor(255, 140, 0) if p2_count > 0 else None, 
+            None,
+            None,
+            RGBColor(192, 0, 0) if p1_count > 0 else None,
+            RGBColor(255, 140, 0) if p2_count > 0 else None,
             RGBColor(139, 0, 0) if bems_count > 0 else None,
             RGBColor(200, 100, 0) if defect_count > 0 else None,
             RGBColor(255, 0, 0) if vuln_count > 0 else None
         ]
-        
+
         for i, (value, color) in enumerate(zip(values, colors)):
             cell = metrics_table.rows[1].cells[i]
             cell.text = value
@@ -5811,7 +5813,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                     if color:
                         run.font.color.rgb = color
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+
         doc.add_paragraph()  # Spacing
     else:
         # Edge case: No customers and no data - show empty dashboard
@@ -5926,7 +5928,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         )
 
     doc.add_heading('Executive Summary', level=1)
-    
+
     # Add Data-Driven Executive Overview (before AI narrative)
     # FIXED: Show overview if we have ANY data (customers, cases, or barriers)
     # Use the customer count already calculated above (don't recalculate) - ensures consistency
@@ -5935,11 +5937,11 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         overview_para.add_run('Portfolio Overview\n').bold = True
         if overview_para.runs:
             overview_para.runs[0].font.size = Pt(13)
-        
+
         # Use the total_customers already calculated from unified function above (line 1846)
         # No need to recalculate - ensures consistency with dashboard
         total_cases = len(csone_df) if not csone_df.empty else 0
-        
+
         # Round 47 / R47-COMP-CUSTCOUNT-PARITY: render the canonical-
         # narrow count in the Word Executive Summary so the Word
         # headline equals Excel Summary's ``Customers in portfolio``.
@@ -5963,13 +5965,13 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             run.font.color.rgb = RGBColor(192, 0, 0)
             run.bold = True
         doc.add_paragraph()  # Spacing
-    
+
     # Financial ARR sections were intentionally disabled and the dead block
     # was removed in the data-accuracy round 2 hardening to prevent silent
     # re-activation of severity-string matching that bypassed canonical
     # priority normalization.
 
-    
+
     # Add AI-generated summary
     # Round 3 / Phase 2.4: also accept the nested
     # ``ai_insights["portfolio_summary"]["executive_summary"]`` shape
@@ -5990,17 +5992,17 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                 summary_text = ai_insights['raw_response']
     if summary_text:
         _parse_markdown_for_fallback(doc, summary_text)
-    
+
     # Add Key Insights & Recommendations Section (Professional Executive Format)
     if not csone_df.empty:
         doc.add_heading('Key Insights & Strategic Recommendations', level=1)
-        
+
         # Create insights based on actual data
         insights_para = doc.add_paragraph()
         insights_para.add_run('Critical Findings:\n').bold = True
         if insights_para.runs:
             insights_para.runs[0].font.size = Pt(13)
-        
+
         # Calculate risk indicators.  Round 4: rename the support-load
         # denominator to ``csone_distinct_customers`` so it cannot
         # silently shadow the canonical ``total_customers`` defined
@@ -6027,41 +6029,41 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                     f'• NORMAL SUPPORT LOAD: Average {avg_cases_per_customer:.1f} cases per customer with TAC cases '
                     f'(n={csone_distinct_customers}) indicates healthy adoption\n'
                 )
-        
+
         # Round 3: drop the raw-column gate; p1_count/p2_count are
         # already derived canonically and are safe to render regardless
         # of which raw severity column happens to be present.
         if total_cases > 0:
             p1_pct = (p1_count / total_cases * 100) if total_cases > 0 else 0
             p2_pct = (p2_count / total_cases * 100) if total_cases > 0 else 0
-            
+
             if p1_pct > 5:
                 insights_para.add_run(f'• CRITICAL RISK: {p1_pct:.1f}% of cases are P1 - immediate attention required\n')
             elif p1_pct > 2:
                 insights_para.add_run(f'• ELEVATED RISK: {p1_pct:.1f}% of cases are P1 - proactive intervention needed\n')
-            
+
             if p2_pct > 20:
                 insights_para.add_run(f'• HIGH PRIORITY VOLUME: {p2_pct:.1f}% of cases are P2 - resource allocation review needed\n')
-        
+
         if bems_count > 0:
             bems_pct = (bems_count / total_cases * 100) if total_cases > 0 else 0
             insights_para.add_run(f'• ENGINEERING ESCALATIONS: {bems_pct:.1f}% of cases require engineering intervention - product stability concerns\n')
-        
+
         if defect_count > 0:
             cases_with_defects = software_defects.get("total_cases_with_defects", 0)
             insights_para.add_run(f'• SOFTWARE DEFECTS: {defect_count} unique BST/CSC defects identified across {cases_with_defects} cases - product quality impact\n')
-        
+
         if vuln_count > 0:
             insights_para.add_run(f'• SECURITY VULNERABILITIES: {vuln_count} security vulnerabilities (CVEs/PSIRT) identified - security risk assessment needed\n')
-        
+
         doc.add_paragraph()
-        
+
         # Strategic Recommendations
         recommendations_para = doc.add_paragraph()
         recommendations_para.add_run('Strategic Recommendations:\n').bold = True
         if recommendations_para.runs:
             recommendations_para.runs[0].font.size = Pt(13)
-        
+
         if bems_count > 0:
             recommendations_para.add_run('• IMMEDIATE: Address engineering escalations to prevent customer churn\n')
         if defect_count > 0:
@@ -6074,21 +6076,21 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             high_volume_customers = csone_df[customer_col].value_counts()
             if len(high_volume_customers[high_volume_customers > 5]) > 0:
                 recommendations_para.add_run('• STRATEGIC: Deploy dedicated success managers for high-volume customers\n')
-        
+
         recommendations_para.add_run('• PROACTIVE: Implement predictive analytics to identify at-risk customers early\n')
         recommendations_para.add_run('• SYSTEMATIC: Establish regular executive reviews of customer health metrics\n')
-        
+
         doc.add_paragraph()
-    
+
     doc.add_page_break()
-    
+
     # === REAL DATA TABLES ===
     doc.add_heading('Portfolio Data & Analysis', level=1)
-    
+
     # FIXED: Show ALL customers by case volume
     if not csone_df.empty and customer_col:
         doc.add_heading('All Customers by Support Cases', level=2)
-        
+
         customer_cases = csone_df[customer_col].value_counts()  # Show ALL customers
         # Round 6 / Phase 1.21: drive ``has_arr`` from data presence
         # instead of hardcoding ``False`` (which permanently disabled
@@ -6105,7 +6107,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         # Create table
         table = doc.add_table(rows=len(customer_cases) + 1, cols=4 if has_arr else 3)
         table.style = 'Light Grid Accent 1'
-        
+
         # Headers
         hdr_cells = table.rows[0].cells
         hdr_cells[0].text = 'Customer Name'
@@ -6115,12 +6117,12 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             hdr_cells[3].text = (
                 'Estimated ARR (synthetic)' if _arr_is_estimated else 'Customer ARR'
             )
-        
+
         for cell in hdr_cells:
             for paragraph in cell.paragraphs:
                 for run in paragraph.runs:
                     run.font.bold = True
-        
+
         # Data rows
         # Round 13 / Phase 9.1: previously customer / case_count / ARR
         # cells were assigned via raw f-strings (``row_cells[0].text =
@@ -6147,16 +6149,16 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             row_cells = table.rows[i].cells
             row_cells[0].text = _safe_doc_text(customer, max_len=200)
             row_cells[1].text = _safe_doc_text(case_count, max_len=20)
-            
+
             # Count BEMS references for this customer - use comprehensive detection
             customer_data = csone_df[csone_df[customer_col] == customer]
             customer_bems_cases, customer_bems_count = detect_bems_escalations(customer_data)
-            
+
             if customer_bems_count > 0:
                 bems_refs_list = []
                 for _, row in customer_bems_cases.iterrows():
                     bems_refs_list.extend(extract_bems_ids_from_row(row))
-                
+
                 if bems_refs_list:
                     # Round 13 / Phase 11.2: previously this used
                     # ``', '.join(set(bems_refs_list))`` which dedupes
@@ -6176,7 +6178,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                     row_cells[2].text = '-'
             else:
                 row_cells[2].text = '-'
-            
+
             # Add ARR
             if has_arr:
                 avg_arr = customer_data['Customer_ARR'].mean()
@@ -6197,9 +6199,9 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                         f"${_r13_format_number(float(avg_arr), 0)}",
                         max_len=40,
                     )
-        
+
         doc.add_paragraph()
-    
+
     # Table 2: Case Severity Breakdown
     # Round 3 hardening: build the table from canonical
     # ``case_priority_norm`` so that it reconciles row-for-row with the
@@ -6243,7 +6245,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                 row_cells[1].text = str(count)
 
             doc.add_paragraph()
-    
+
     # === BEMS ESCALATIONS TABLE ===
     # Use comprehensive BEMS detection that checks Transaction ID column
     bems_cases, bems_count = detect_bems_escalations(csone_df)
@@ -6253,16 +6255,16 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         def extract_bems_refs(row):
             refs = extract_bems_ids_from_row(row)
             return ', '.join(refs)
-        
+
         bems_cases['bems_extracted'] = bems_cases.apply(extract_bems_refs, axis=1)
-        
+
         # Find customer column name
         customer_col_bems = None
         for col in ['Customer Name', 'customer_name', 'Customer', 'BU_NAME', 'Account Name']:
             if col in bems_cases.columns:
                 customer_col_bems = col
                 break
-        
+
         if customer_col_bems:
             # Find case number column
             case_col = None
@@ -6270,7 +6272,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                 if col in bems_cases.columns:
                     case_col = col
                     break
-            
+
             # Round 4 / Phase 3.6: dedupe BEMS/CSC reference IDs
             # across rows for the same customer.  Previously the
             # aggregator joined per-row strings without splitting,
@@ -6307,20 +6309,20 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         if not bems_by_customer.empty:
             # FIXED: Show ALL customers with BEMS escalations
             bems_by_customer = bems_by_customer.sort_values('Case Count', ascending=False)
-            
+
             table = doc.add_table(rows=len(bems_by_customer) + 1, cols=3)
             table.style = 'Light Grid Accent 1'
-            
+
             hdr_cells = table.rows[0].cells
             hdr_cells[0].text = 'Customer Name'
             hdr_cells[1].text = 'BEMS/CSC References'
             hdr_cells[2].text = 'Cases with Escalations'
-            
+
             for cell in hdr_cells:
                 for paragraph in cell.paragraphs:
                     for run in paragraph.runs:
                         run.font.bold = True
-            
+
             # Use iterrows() for safer column name access (avoids positional issues)
             for i, (idx, row) in enumerate(bems_by_customer.iterrows(), 1):
                 row_cells = table.rows[i].cells
@@ -6328,7 +6330,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                 customer_name = row.get(customer_col_bems, 'Unknown') if customer_col_bems else 'Unknown'
                 bems_refs = row.get('BEMS/CSC References', '')
                 case_count = row.get('Case Count', 0)
-                
+
                 row_cells[0].text = str(customer_name)
                 # FIXED: Show all BEMS references without truncation
                 row_cells[1].text = str(bems_refs)
@@ -6339,13 +6341,13 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
     else:
         doc.add_paragraph("No BEMS escalations identified in current data.")
     doc.add_paragraph()
-    
+
     # === SOFTWARE DEFECTS TABLE ===
     if defect_count > 0:
         doc.add_heading('Software Defects (BST/CSC IDs)', level=2)
         cases_with_defects = software_defects.get("total_cases_with_defects", 0)
         doc.add_paragraph(f'Total unique software defects identified: {defect_count} across {cases_with_defects} cases')
-        
+
         # Create defects by customer table
         defect_by_customer = software_defects.get('defect_by_customer', {})
         if defect_by_customer:
@@ -6357,24 +6359,24 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                     'defect_count': len(unique_defects),
                     'defects': ', '.join([f'[{d}]' for d in unique_defects])  # FIXED: Show all defects with brackets
                 })
-            
+
             # FIXED: Show ALL customers with defects
             defect_customer_df = pd.DataFrame(defect_customer_data).sort_values('defect_count', ascending=False)
-            
+
             if not defect_customer_df.empty:
                 table = doc.add_table(rows=len(defect_customer_df) + 1, cols=3)
                 table.style = 'Light Grid Accent 1'
-                
+
                 hdr_cells = table.rows[0].cells
                 hdr_cells[0].text = 'Customer Name'
                 hdr_cells[1].text = 'Defect Count'
                 hdr_cells[2].text = 'All Defect IDs'
-                
+
                 for cell in hdr_cells:
                     for paragraph in cell.paragraphs:
                         for run in paragraph.runs:
                             run.font.bold = True
-                
+
                 # Use iterrows() for safer column name access
                 for i, (idx, row) in enumerate(defect_customer_df.iterrows(), 1):
                     row_cells = table.rows[i].cells
@@ -6383,16 +6385,16 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                     row_cells[2].text = str(row.get('defects', ''))  # FIXED: No truncation - show all defects
             else:
                 doc.add_paragraph("No defect data available for grouping.")
-            
+
             doc.add_paragraph()
-    
+
     # === PSIRT VULNERABILITIES TABLE ===
     if vuln_count > 0:
         doc.add_heading('Security Vulnerabilities (CVEs & PSIRT Advisories)', level=2)
         cve_count = len(psirt_vulns.get("cve_ids", set()))
         psirt_count = len(psirt_vulns.get("psirt_advisories", set()))
         doc.add_paragraph(f'Total vulnerabilities identified: {vuln_count} ({cve_count} CVEs, {psirt_count} PSIRT advisories)')
-        
+
         # Create vulnerabilities by customer table
         vulnerability_by_customer = psirt_vulns.get('vulnerability_by_customer', {})
         if vulnerability_by_customer:
@@ -6404,24 +6406,24 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                     'vuln_count': len(unique_vulns),
                     'vulns': ', '.join([f'[{v}]' for v in unique_vulns])  # FIXED: Show all vulns with brackets
                 })
-            
+
             # FIXED: Show ALL customers with vulnerabilities
             vuln_customer_df = pd.DataFrame(vuln_customer_data).sort_values('vuln_count', ascending=False)
-            
+
             if not vuln_customer_df.empty:
                 table = doc.add_table(rows=len(vuln_customer_df) + 1, cols=3)
                 table.style = 'Light Grid Accent 1'
-                
+
                 hdr_cells = table.rows[0].cells
                 hdr_cells[0].text = 'Customer Name'
                 hdr_cells[1].text = 'Vulnerability Count'
                 hdr_cells[2].text = 'All Vulnerability IDs'
-                
+
                 for cell in hdr_cells:
                     for paragraph in cell.paragraphs:
                         for run in paragraph.runs:
                             run.font.bold = True
-                
+
                 # Use iterrows() for safer column name access
                 for i, (idx, row) in enumerate(vuln_customer_df.iterrows(), 1):
                     row_cells = table.rows[i].cells
@@ -6430,15 +6432,15 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                     row_cells[2].text = str(row.get('vulns', ''))  # FIXED: No truncation - show all vulns
             else:
                 doc.add_paragraph("No vulnerability data available for grouping.")
-            
+
             doc.add_paragraph()
-    
+
     doc.add_page_break()
-    
+
     # === CHARTS ===
     if chart_paths and len(chart_paths) > 0:
         doc.add_heading('Visual Analysis & Trends', level=1)
-        
+
         logger.info(f"[[CHART]] Adding {len(chart_paths)} charts to report")
         charts_added = 0
         for chart_path in chart_paths:
@@ -6480,34 +6482,34 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                     logger.info(f"[[OK]] Chart added: {chart_path}")
                 except Exception as e:
                     logger.error(f"[[ERROR]] Failed to add chart {chart_path}: {e}")
-        
+
         logger.info(f"[[OK]] Total charts added to report: {charts_added}")
-        
+
         if charts_added == 0:
             doc.add_paragraph("Charts are being generated but not available yet.")
     else:
         logger.warning(f"[[WARNING]] No charts available to add. chart_paths: {chart_paths}")
-    
+
     doc.add_page_break()
-    
+
     # === FEATURE REQUESTS ===
     if feature_requests and feature_requests.get('total_requests', 0) > 0:
         doc.add_heading('Feature Requests from Customers', level=1)
-        
+
         para = doc.add_paragraph()
         para.add_run(f"Total Feature Requests: ").bold = True
         para.add_run(f"{feature_requests['total_requests']}")
-        
+
         if False and feature_requests.get('total_arr_impact', 0) > 0:
             arr_para = doc.add_paragraph()
             arr_para.add_run(f"Combined ARR Impact: ").bold = True
             arr_para.add_run(f"${feature_requests['total_arr_impact']:,.0f}")
-        
+
         if feature_requests.get('top_features'):
             doc.add_heading('Most Requested Features', level=2)
             for theme, count in feature_requests['top_features']:
                 doc.add_paragraph(f"{theme.title()}: {count} mentions", style='List Bullet')
-        
+
         # FIXED: Show ALL requesting customers
         if feature_requests.get('customer_examples'):
             doc.add_heading('All Requesting Customers', level=2)
@@ -6534,7 +6536,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                 para.add_run(f" - {_r13_req_count} requests")
                 if False and customer_info.get('arr', 0) > 0:
                     para.add_run(f" (ARR: ${customer_info['arr']:,.0f})")
-    
+
     # Footer
     doc.add_paragraph()
     # Round 12 / Phase 10.6: anchor the Word footer "Report generated on"
@@ -6616,37 +6618,37 @@ def _create_simple_fallback_report(base_path: str, manager: str, technology: str
     try:
         from docx import Document
         from docx.shared import Inches
-        
+
         logger.info(f"[[WRITE]] Creating simple fallback report with markdown parsing...")
-        
+
         doc = Document()
-        
+
         # Title
         # Round 6 / Phase 1.4: sanitize manager string before heading.
         title = doc.add_heading(_safe_doc_text(f'AdoptIQ Portfolio Analysis - {manager}'), 0)
         title.alignment = 1  # Center alignment
-        
+
         # Subtitle
         subtitle = doc.add_heading(f'{technology} - {days} Day Analysis', level=1)
         subtitle.alignment = 1
-        
+
         # Executive Summary - PARSE MARKDOWN!
         doc.add_heading('Executive Summary', level=1)
         summary_text = ai_insights.get('executive_summary', 'Analysis completed with AI-generated insights.')
         _parse_markdown_for_fallback(doc, summary_text)
-        
+
         # Key Findings
         doc.add_heading('Key Findings', level=1)
         doc.add_paragraph("• Portfolio analysis completed successfully")
         doc.add_paragraph("• AI insights generated for strategic recommendations")
         doc.add_paragraph("• Report generated with fallback formatting due to timeout")
-        
+
         # Recommendations
         doc.add_heading('Recommendations', level=1)
         doc.add_paragraph("• Review AI-generated insights for strategic guidance")
         doc.add_paragraph("• Schedule follow-up analysis if detailed formatting is required")
         doc.add_paragraph("• Consider running analysis during off-peak hours for full formatting")
-        
+
         # Footer
         doc.add_paragraph("\n" + "="*50)
         # Round 12 / Phase 10.6: anchor on UTC for cross-host reproducibility.
@@ -6654,14 +6656,14 @@ def _create_simple_fallback_report(base_path: str, manager: str, technology: str
             f"Report generated on: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
         )
         doc.add_paragraph("AdoptIQ Portfolio Analysis System")
-        
+
         # Save the document
         output_path = f"{base_path}_fallback.docx"
         doc.save(output_path)
-        
+
         logger.info(f"[[OK]] Fallback report created: {output_path}")
         return output_path
-        
+
     except Exception as e:
         logger.error(f"[[ERROR]] Failed to create fallback report: {e}")
         # Return a simple text file as last resort
@@ -6689,15 +6691,15 @@ def _get_customer_specific_technology(customer: str, data: Dict) -> str:
         subscriptions = data.get('subscriptions', pd.DataFrame())
         if subscriptions.empty or 'PRODUCT_NAME' not in subscriptions.columns:
             return None
-        
+
         # Get subscriptions for this customer
         customer_subscriptions = subscriptions[
             subscriptions.get('BU_NAME', pd.Series()) == customer
         ]
-        
+
         if customer_subscriptions.empty:
             return None
-        
+
         # Find the most specific contact center technology
         technologies_found = set()
         for _, sub in customer_subscriptions.iterrows():
@@ -6706,7 +6708,7 @@ def _get_customer_specific_technology(customer: str, data: Dict) -> str:
                 tech = _categorize_technology(str(product_name))
                 if tech in ['Webex Contact Center', 'Webex Contact Center Enterprise', 'Cisco UCCE', 'Cisco UCCX']:
                     technologies_found.add(tech)
-        
+
         # Return the most specific technology found
         if 'Webex Contact Center Enterprise' in technologies_found:
             return 'Webex Contact Center Enterprise'
@@ -6718,9 +6720,9 @@ def _get_customer_specific_technology(customer: str, data: Dict) -> str:
             return 'Cisco UCCX'
         elif technologies_found:
             return next(iter(technologies_found), None)
-        
+
         return None
-        
+
     except Exception as e:
         logger.warning(f"Error determining technology for customer {customer}: {e}")
         return None
@@ -6728,7 +6730,7 @@ def _get_customer_specific_technology(customer: str, data: Dict) -> str:
 def _categorize_technology(product_name: str) -> str:
     """Categorize product name into technology groups"""
     product_lower = product_name.lower()
-    
+
     if any(keyword in product_lower for keyword in ['webex meetings', 'meetings', 'meeting']):
         return 'Webex Meetings'
     elif any(keyword in product_lower for keyword in ['webex calling', 'calling', 'ucm']):
@@ -6755,13 +6757,13 @@ def _categorize_technology(product_name: str) -> str:
 
 def _generate_fallback_data_for_technology(technology, manager="Test Manager", customer_count=5):
     """Generate technology-specific fallback data"""
-    
+
     # Technology-specific issues and scenarios
     tech_scenarios = {
         'Cisco UCCE': {
             'ab_issues': [
                 'Call routing configuration complexity',
-                'Agent desktop integration challenges', 
+                'Agent desktop integration challenges',
                 'Reporting dashboard customization needs',
                 'IVR script optimization requirements',
                 'Workforce management integration gaps'
@@ -6845,13 +6847,13 @@ def _generate_fallback_data_for_technology(technology, manager="Test Manager", c
             ]
         }
     }
-    
+
     # Get technology-specific scenarios or use generic ones
     scenarios = tech_scenarios.get(technology, tech_scenarios['Cisco UCCE'])
-    
+
     # Generate customer names
     customer_names = [f'Customer_{i+1}_{technology.replace(" ", "_")}' for i in range(customer_count)]
-    
+
     # Generate AB data
     ab_data = pd.DataFrame({
         'ID': [f'AB_{1000 + i}' for i in range(customer_count)],
@@ -6867,7 +6869,7 @@ def _generate_fallback_data_for_technology(technology, manager="Test Manager", c
         'ASSIGNEE_C': [f'CSM_{i+1}' for i in range(customer_count)],
         'CREATED_DATE': pd.date_range('2024-09-01', periods=customer_count, freq='7D')
     })
-    
+
     # Generate CSOne data
     csone_data = pd.DataFrame({
         'ID': [f'CS_{2000 + i}' for i in range(customer_count)],
@@ -6881,7 +6883,7 @@ def _generate_fallback_data_for_technology(technology, manager="Test Manager", c
         'Status': ['Open', 'In Progress', 'Resolved', 'Open', 'Escalated'][:customer_count],
         'Date/Time Opened': pd.date_range('2024-09-01', periods=customer_count, freq='5D')
     })
-    
+
     return ab_data, csone_data
 
 def run_compact_analysis(analysis_id):
@@ -6902,7 +6904,7 @@ def run_compact_analysis(analysis_id):
         # at DEBUG.  The value embeds manager / technology fragments.
         logger.info("[[START]] Starting compact analysis aid_digest=%s (PID: %s)", _id_digest(analysis_id), os.getpid())
         logger.debug("[[START]] Starting compact analysis verbatim id=%s", analysis_id)
-        
+
         # Initialize variables that might not be set (prevents UnboundLocalError)
         arr_data = pd.DataFrame()
         arr_impact = {'total_arr': 0, 'at_risk_arr': 0, 'customers_analyzed': 0}
@@ -6912,7 +6914,7 @@ def run_compact_analysis(analysis_id):
         # compact analysis path too so the History page and Admin
         # tile see the same caveats the report banner uses.
         partial_data_warnings: list = []
-        
+
         # Get analysis parameters
         with analysis_status_lock:
             status = analysis_status[analysis_id]
@@ -6920,7 +6922,7 @@ def run_compact_analysis(analysis_id):
             technology = status['technology']
             days = status['days']
             csone_file = status['csone_file']
-            
+
             # Round 8 / Phase 1.7 / 1.8: csone_file path embeds the OneDrive
             # username / sync layout; status keys are payload field names
             # that include the manager / customer fragments.  Surface only
@@ -6932,26 +6934,26 @@ def run_compact_analysis(analysis_id):
             logger.debug("[[SEARCH]] DEBUGGING - CSOne file verbatim path=%s", csone_file)
             logger.info("[[SEARCH]] DEBUGGING - Analysis status field count=%d", len(status))
             logger.debug("[[SEARCH]] DEBUGGING - Analysis status keys verbatim=%s", list(status.keys()))
-        
+
         with analysis_status_lock:
             status['status'] = 'running'
             status['completed_steps'] = []
             _update_progress(status, 5, 'Analysis started - initializing...', 'Initialization')
-        
+
         logger.info(f"[[OK]] Analysis status updated to running")
-        
+
         with analysis_status_lock:
             _update_progress(status, 10, 'Connecting to Snowflake...', 'Database Connection')
-        
+
         # Connect to Snowflake with timeout and fallback
         ctx = None
         snowflake_timeout = False
-        
+
         try:
             logger.info(f"[[LINK]] Attempting to connect to Snowflake with 30s timeout...")
             # Use ThreadPoolExecutor to implement timeout
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-            
+
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = _submit_with_context(executor, _connect_with_keeper)
                 try:
@@ -6964,11 +6966,11 @@ def run_compact_analysis(analysis_id):
                 except Exception as e:
                     logger.warning(f"[[ERROR]] Failed to connect to Snowflake: {e}")
                     ctx = None
-                    
+
         except Exception as e:
             logger.warning(f"[[ERROR]] Snowflake connection error: {e}")
             ctx = None
-        
+
         if ctx is None:
             error_msg = (
                 "❌ CRITICAL: Snowflake database connection failed.\n\n"
@@ -6992,19 +6994,19 @@ def run_compact_analysis(analysis_id):
                 status['current_step'] = 'Connection Failed'
                 save_analysis_status()
             return
-        
+
         with analysis_status_lock:
             _update_progress(status, 20, 'Fetching team data...', 'Team Data Retrieval')
-        
+
         # CRITICAL FIX: Initialize unfiltered team_subs_df variable outside try block for scope
         # This ensures it's accessible throughout the function for customer counting
         team_subs_df_unfiltered = pd.DataFrame()
-        
+
         # Get team subscriptions (only if we have a database connection)
         subscription_id_val = (status.get('subscription_id') or '').strip()
         customer_name_val = (status.get('customer_name') or '').strip()
         single_customer_mode = bool(subscription_id_val or customer_name_val)
-        
+
         if ctx is not None:
             try:
                 if single_customer_mode:
@@ -7141,7 +7143,7 @@ def run_compact_analysis(analysis_id):
                 status['current_step'] = 'Data Retrieval Failed'
                 save_analysis_status()
             return
-        
+
         if team_subs_df.empty:
             error_msg = (
                 f"❌ CRITICAL: No team subscription data found for manager '{manager}'.\n\n"
@@ -7167,7 +7169,7 @@ def run_compact_analysis(analysis_id):
         else:
             account_ids = team_subs_df['ACCOUNT_ID_C'].dropna().unique().tolist()
             sub_ids = team_subs_df['SUBSCRIPTION_ID'].dropna().unique().tolist()
-        
+
         # Only fetch real data if we have team subscriptions AND database connection
         if not team_subs_df.empty and ctx is not None:
             with analysis_status_lock:
@@ -7180,7 +7182,7 @@ def run_compact_analysis(analysis_id):
                 logger.info(f"[[DEBUG]] About to fetch adoption barriers for {len(account_ids)} accounts...")
                 logger.info(f"[[DEBUG]] Account IDs sample: {account_ids[:5] if len(account_ids) > 5 else account_ids}")
                 logger.info(f"[[DEBUG]] Days parameter: {days}")
-                
+
                 # Use timeout for adoption barriers query (longer timeout since this query can be slow)
                 # Round 4 / Phase 4.3: when the query times out or
                 # raises, stamp the resulting empty DataFrame with
@@ -7255,7 +7257,7 @@ def run_compact_analysis(analysis_id):
                         except Exception:
                             # Round 4: non-fatal; suppressed silently in original code
                             pass  # noqa: PIE790
-                
+
                 if not ab_raw.empty and "ACCOUNT_ID_C" in ab_raw.columns:
                     logger.info(f"[[DEBUG]] Merging adoption barriers with team data...")
                     ab_raw = merge_customer_join_keys_dtype_safe(
@@ -7277,7 +7279,7 @@ def run_compact_analysis(analysis_id):
                             "AB re-annotate (compact/EI path) skipped: %s",
                             _r49_ab_err,
                         )
-                
+
                 ab_scoped = _apply_scope_filter_ab(ab_raw, technology, days)
                 logger.info(f"[[DEBUG]] Scope filter applied, now preparing AB data...")
                 # Round 4 / Phase 4.6: if the tech filter widened
@@ -7301,7 +7303,7 @@ def run_compact_analysis(analysis_id):
                     pass  # noqa: PIE790
                 ab_norm = _prepare_ab(ab_scoped, team_subs_df)
                 logger.info(f"[[OK]] Retrieved {len(ab_norm)} adoption barriers")
-                
+
                 arr_impact = {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}
             except Exception as e:
                 logger.warning(f"[[WARNING]] Adoption barriers fetch skipped: {e}")
@@ -7312,19 +7314,19 @@ def run_compact_analysis(analysis_id):
             ab_norm = pd.DataFrame()
             arr_impact = {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}
             arr_data = pd.DataFrame()
-        
+
         # CRITICAL FIX: Initialize csone_df BEFORE trying to use it
         # This ensures it's always defined, even if CSOne file wasn't provided
         # NOTE: CSOne file processing happens later (after CSConsole data fetching)
         # We'll do enrichment/analysis AFTER CSOne file processing, not before
         csone_df = pd.DataFrame()  # Initialize as empty DataFrame - will be populated after CSOne file processing
-        
+
         # NOTE: CSOne enrichment, feature request analysis, and chart generation
         # will be done AFTER CSOne file processing (see lines ~3482-3508)
-        
+
         with analysis_status_lock:
             _update_progress(status, 35, 'Fetching CSConsole data...', 'CSConsole Data Integration')
-            
+
             # Fetch CSConsole data for compact analysis with timeout protection
         if not team_subs_df.empty and ctx is not None:
             try:
@@ -7444,9 +7446,9 @@ def run_compact_analysis(analysis_id):
                             except Exception:
                                 # Round 4: non-fatal; suppressed silently in original code
                                 pass  # noqa: PIE790
-                
+
                 logger.info(f"[[TIME]] Starting CSConsole fetching with 90-second timeout...")
-                
+
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     future = _submit_with_context(executor, fetch_csconsole_data)
                     csconsole_action_plans, csconsole_customer_pulse, csconsole_success_priorities, csconsole_adoption_barriers = future.result(timeout=90)  # 90-second timeout for CSConsole
@@ -7532,16 +7534,16 @@ def run_compact_analysis(analysis_id):
                 status['current_step'] = 'Data Fetch Failed'
                 save_analysis_status()
             return
-        
+
         with analysis_status_lock:
             _update_progress(status, 40, 'Processing CSOne data...', 'CSOne Data Processing')
-        
+
         # Process CSOne data with timeout protection
         # NOTE: csone_df is already initialized above as empty DataFrame
         # This is just to ensure we have a fresh reference for processing
         try:
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-            
+
             def process_csone_data(csone_file_path):
                 """Process CSOne data in a separate thread"""
                 try:
@@ -7549,14 +7551,14 @@ def run_compact_analysis(analysis_id):
                     logger.info(f"[[SEARCH]] DEBUGGING - CSOne file path: '{csone_file_path}'")
                     logger.info(f"[[SEARCH]] DEBUGGING - CSOne file exists: {os.path.exists(csone_file_path) if csone_file_path else False}")
                     logger.info(f"[[SEARCH]] DEBUGGING - CSOne file type: {type(csone_file_path)}")
-                    
+
                     # Handle None or empty file path - try OneDrive folder (macro places reports daily)
                     if not csone_file_path or csone_file_path.strip() == '':
                         csone_file_path = get_latest_csone_from_folder()
                     if not csone_file_path or csone_file_path.strip() == '':
                         logger.info(f"[[LIST]] No CSOne file provided, using empty DataFrame")
                         return pd.DataFrame()
-                    
+
                     # Check if we need to add the uploads directory path
                     if csone_file_path and not os.path.exists(csone_file_path):
                         # Try with uploads directory path (sanitize to prevent path traversal)
@@ -7605,7 +7607,7 @@ def run_compact_analysis(analysis_id):
                                     logger.error(f"[[ERROR]] Uploads directory does not exist: {uploads_dir}")
                             except Exception as e:
                                 logger.error(f"[[ERROR]] Error listing uploads directory: {e}")
-                    
+
                     if csone_file_path and os.path.exists(csone_file_path):
                         resolved = _resolve_csone_path_safe(csone_file_path)
                         if not resolved:
@@ -7614,13 +7616,13 @@ def run_compact_analysis(analysis_id):
                         logger.info(f"[[FILE]] Loading CSOne file: {resolved}")
                         csone_df_raw = load_csone_excel(resolved)
                         csone_df_prepared = _prepare_csone(csone_df_raw, team_subs_df)
-                        
+
                         # CRITICAL FIX: Use UNFILTERED team_subs_df for extracting customer names for CSOne filtering
                         # This ensures we get ALL customers for filtering, not just the filtered subset
                         # But still use filtered team_subs_df for merging/preparation
                         team_subs_for_names = team_subs_df_unfiltered if not team_subs_df_unfiltered.empty else team_subs_df
                         logger.info(f"[[FILTER]] Using {len(team_subs_for_names)} subscriptions (UNFILTERED: {not team_subs_df_unfiltered.empty}) for extracting customer names")
-                        
+
                         # Safely get team customer names - handle empty team_subs_df
                         if not team_subs_for_names.empty and 'BU_NAME' in team_subs_for_names.columns:
                             team_customer_names = team_subs_for_names["BU_NAME"].dropna().unique().tolist()
@@ -7628,11 +7630,11 @@ def run_compact_analysis(analysis_id):
                         else:
                             team_customer_names = []
                             logger.info(f"[[INFO]] No team data available, using inclusive filtering for CSOne")
-                        
+
                         # For compact analysis, be more inclusive with CSOne filtering
                         # Try strict filtering first, then fall back to more inclusive approach
                         csone_df = _apply_scope_filter_csone(csone_df_prepared, technology, days, sub_ids, team_customer_names)
-                        
+
                         # If no cases found with strict filtering, try more inclusive approach for executive insights
                         if len(csone_df) == 0:
                             logger.info(f"[[REFRESH]] No cases found with strict filtering, trying inclusive approach for executive insights")
@@ -7651,28 +7653,28 @@ def run_compact_analysis(analysis_id):
                 except Exception as e:
                     logger.error(f"[[ERROR]] CSOne data processing failed: {e}")
                     return pd.DataFrame()
-            
+
             logger.info(f"[[TIME]] Starting CSOne processing with 60-second timeout...")
-            
+
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = _submit_with_context(executor, process_csone_data, csone_file)
                 csone_df = future.result(timeout=60)  # 60-second timeout for CSOne processing
-                
+
                 if csone_df is None:
                     csone_df = pd.DataFrame()
                     logger.warning(f"[[WARNING]] CSOne processing returned None, using empty DataFrame")
-                    
+
         except FutureTimeoutError:
             logger.error(f"⏰ CSOne data processing timed out after 60 seconds")
             csone_df = pd.DataFrame()
         except Exception as e:
             logger.error(f"[[ERROR]] CSOne data processing failed: {e}")
             csone_df = pd.DataFrame()
-        
+
         # ARR is intentionally excluded from report data pipelines.
         if csone_df is None:
             csone_df = pd.DataFrame()
-        
+
         # Analyze feature requests (only if csone_df exists and is not empty)
         try:
             if csone_df is not None and not csone_df.empty:
@@ -7685,7 +7687,7 @@ def run_compact_analysis(analysis_id):
         except Exception as e:
             logger.error(f"[[ERROR]] Feature request analysis failed: {e}")
             feature_requests = {'total_requests': 0, 'top_features': [], 'customer_examples': [], 'total_arr_impact': 0}
-        
+
         # Generate executive charts (always try, even if csone_df is empty)
         try:
             logger.info(f"[[DEBUG]] Generating executive charts...")
@@ -7704,10 +7706,10 @@ def run_compact_analysis(analysis_id):
         except Exception as e:
             logger.warning(f"[[WARNING]] Chart generation skipped: {e}")
             chart_paths = []
-        
+
         with analysis_status_lock:
             _update_progress(status, 55, 'Gathering external intelligence (defects, incidents)...', 'External Intelligence')
-        
+
         logger.info(f"[[WEB]] Gathering external intelligence...")
         # Round 4 / Phase 4.4: separate the help.webex (bugs) and the
         # status.webex (incidents) try/except so that a failure on one
@@ -7748,7 +7750,7 @@ def run_compact_analysis(analysis_id):
             f"[[OK]] External intelligence gathered: {len(ext_bugs)} bugs, "
             f"{len(ext_incidents)} incidents"
         )
-        
+
         with analysis_status_lock:
             _update_progress(status, 58, 'Extracting software defects and PSIRT vulnerabilities...', 'Defect Analysis')
         logger.info(f"[[DEFECTS]] Extracting software defects and PSIRT vulnerabilities...")
@@ -7760,10 +7762,10 @@ def run_compact_analysis(analysis_id):
             logger.warning(f"[[WARNING]] Defect/vulnerability extraction failed: {e}")
             software_defects = {'total_defects': 0, 'total_cases_with_defects': 0, 'defect_by_customer': {}}
             psirt_vulns = {'total_vulnerabilities': 0, 'cve_ids': set(), 'psirt_advisories': set(), 'vulnerability_by_customer': {}}
-        
+
         with analysis_status_lock:
             _update_progress(status, 60, 'Preparing AI briefing book...', 'AI Analysis')
-        
+
         # For compact analysis, create a more focused briefing book with available data
         if not ab_norm.empty:
             logger.info(f"[[DATA]] Creating executive summary from {len(ab_norm)} adoption barriers and {len(csone_df)} CSOne cases")
@@ -7797,7 +7799,7 @@ def run_compact_analysis(analysis_id):
             # Create minimal briefing book from whatever data we have
             logger.info(f"[[DATA]] Limited data available - creating minimal briefing book")
             briefing_book = _create_minimal_briefing_book(manager, ab_norm, team_subs_df, technology)
-        
+
         # Round 6 / Phase 3.11: the compact executive template no longer
         # accepts ``{data}``; the briefing book is now passed as the
         # *user* message so the system prompt contains rules only.
@@ -7817,17 +7819,17 @@ def run_compact_analysis(analysis_id):
 
         logger.info(f"[[AI]] DEBUGGING - About to call AI with prompt length: {len(ai_prompt)} chars")
         logger.info(f"[[AI]] DEBUGGING - Briefing book length: {len(briefing_book)} chars")
-        
+
         # Generate AI insights with timeout and cancellation support
         try:
             # Check for cancellation before starting AI analysis
             if check_cancellation(analysis_id):
                 update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
                 return
-            
+
             with analysis_status_lock:
                 _update_progress(status, 63, '[AI] Sending to CircuIT (this may take up to 60 seconds)...', 'AI Analysis - CircuIT')
-            
+
             logger.info(f"[[AI]] Starting AI analysis with timeout protection...")
             # Round 6 / Phase 3.11: pass the briefing book as the user
             # message; the system prompt now contains rules only.
@@ -7840,12 +7842,12 @@ def run_compact_analysis(analysis_id):
             # phrases) into the default-INFO log file that ships off
             # box.  Operators who need it can flip to DEBUG.
             logger.debug(f"[[AI]] AI insights content: {str(ai_insights_raw)[:500]}...")
-            
+
             # Check for cancellation after AI call
             if check_cancellation(analysis_id):
                 update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
                 return
-            
+
             # Convert string response to expected format for compact report formatter
             if isinstance(ai_insights_raw, str) and ai_insights_raw and not ai_insights_raw.startswith("ERROR:") and len(ai_insights_raw.strip()) > 50:
                 logger.info(f"[[OK]] AI insights successfully generated: {len(ai_insights_raw)} characters")
@@ -7923,7 +7925,7 @@ def run_compact_analysis(analysis_id):
                     llm_error=str(ai_insights_raw)[:500] if ai_insights_raw else "LLM returned empty/short response",
                 )
                 logger.info(f"[[REFRESH]] Generated fallback insights: {len(fallback_insights)} characters")
-                
+
                 ai_insights = {
                     'portfolio_summary': {
                         'executive_summary': fallback_insights
@@ -7933,12 +7935,12 @@ def run_compact_analysis(analysis_id):
                 }
         except Exception as ai_error:
             logger.error(f"[[ERROR]] AI analysis failed: {ai_error}")
-            
+
             # Check for cancellation after error
             if check_cancellation(analysis_id):
                 update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
                 return
-            
+
             # Phase 1.6: Generate non-AI fallback insights using the same
             # multi-source customer frames the AI path used so the
             # customer count agrees with the headline.
@@ -7960,7 +7962,7 @@ def run_compact_analysis(analysis_id):
                 llm_error=str(ai_error),
             )
             logger.info(f"[[REFRESH]] Generated fallback insights: {len(fallback_insights)} characters")
-            
+
             ai_insights = {
                 'portfolio_summary': {
                     'executive_summary': fallback_insights
@@ -7968,24 +7970,24 @@ def run_compact_analysis(analysis_id):
                 'executive_summary': fallback_insights,
                 'raw_response': f'AI analysis failed: {str(ai_error)}'
             }
-            
+
         with analysis_status_lock:
             _update_progress(status, 70, '[AI] Processing AI response...', 'AI Analysis - Processing')
-        
+
         logger.info(f"AI insights processing completed")
-        
+
         with analysis_status_lock:
             _update_progress(status, 75, 'Building compact Word report...', 'Compact Report Generation')
-        
+
         # Create compact report with timeout protection
         ts = time.strftime("%Y%m%d_%H%M%S")
         tag = f"{manager.replace(' ','_')}_{technology.replace(' ','_').replace('&','and')}_{days}d_{ts}"
         out_dir = _ensure_outputs()
         base = str(out_dir / f"AdoptIQ_Report_Compact_{tag}")
-        
+
         logger.info(f"[[WRITE]] Creating Word report: {base}.docx")
         logger.info(f"[[DATA]] Data summary - AB: {len(ab_norm)} rows, CSOne: {len(csone_df)} rows")
-        
+
         # COMPREHENSIVE DEBUGGING - Log actual data content
         logger.info(f"[[SEARCH]] DEBUGGING - AB Data Sample:")
         if not ab_norm.empty:
@@ -7993,14 +7995,14 @@ def run_compact_analysis(analysis_id):
             logger.info(f"   - AB Sample (first 3 rows): {ab_norm.head(3).to_dict('records')}")
         else:
             logger.warning(f"   - AB Data is EMPTY - This will cause validation to fail")
-            
+
         logger.info(f"[[SEARCH]] DEBUGGING - CSOne Data Sample:")
         if not csone_df.empty:
             logger.info(f"   - CSOne Columns: {list(csone_df.columns)}")
             logger.info(f"   - CSOne Sample (first 3 rows): {csone_df.head(3).to_dict('records')}")
         else:
             logger.warning(f"   - CSOne Data is EMPTY - This will cause validation to fail")
-        
+
         # Validate data sources before report generation
         logger.info(f"[[VALIDATION]] Validating data sources for compact report...")
         try:
@@ -8174,18 +8176,18 @@ def run_compact_analysis(analysis_id):
                 status['current_step'] = 'Validation Failed'
                 save_analysis_status()
             return
-        
+
         # Check for cancellation before report generation
         if check_cancellation(analysis_id):
             update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
             return
-        
+
         # CRITICAL FIX: Calculate customer count BEFORE nested function to ensure we use UNFILTERED data
         # This ensures the customer count is calculated correctly regardless of nested function scope issues
         logger.info(f"[CUSTOMER_COUNT] Pre-calculating customer count using UNFILTERED team_subs_df...")
         logger.info(f"[CUSTOMER_COUNT] team_subs_df_unfiltered has {len(team_subs_df_unfiltered)} rows")
         logger.info(f"[CUSTOMER_COUNT] team_subs_df (filtered) has {len(team_subs_df)} rows")
-        
+
         # Calculate the correct customer count using unfiltered data BEFORE the nested function
         # This ensures we have the right count even if nested function scope has issues
         team_subs_for_customer_counting = team_subs_df_unfiltered if not team_subs_df_unfiltered.empty else team_subs_df
@@ -8379,7 +8381,7 @@ def run_compact_analysis(analysis_id):
                         # Round 4: non-fatal; suppressed silently in original code
                         pass  # noqa: PIE790
                     logger.info(f"[EXEC-REPORT] Risk scores calculated: {len(risk_scores)} customers")
-                    
+
                     logger.info(f"[EXEC-REPORT] Step 2/5: Building risk summary...")
                     # Create risk summary.  Round 4: split the band-based
                     # MEDIUM bucket from the score-range "Watch" bucket so
@@ -8432,7 +8434,7 @@ def run_compact_analysis(analysis_id):
 
                     overall_risk_score = np.mean(scores) if scores else 0
                     logger.info(f"[EXEC-REPORT] High-risk customers: {len(high_risk_customers)}, Overall score: {overall_risk_score:.1f}")
-                    
+
                     logger.info(f"[EXEC-REPORT] Step 3/5: Creating risk summary structure...")
                     # NOTE: risk_summary['total_customers'] is NOT used for dashboard - dashboard calculates its own count
                     # Round 4: expose both the legacy ``moderate_risk_customers``
@@ -8454,22 +8456,22 @@ def run_compact_analysis(analysis_id):
                     }
                     logger.info(f"[EXEC-REPORT] Risk summary: {risk_summary}")
                     logger.info(f"[EXEC-REPORT] WARNING: risk_summary['total_customers']={risk_summary['total_customers']} is NOT used for dashboard - dashboard calculates its own count")
-                    
+
                     logger.info(f"[EXEC-REPORT] Step 4/5: Validating data columns...")
                     logger.info(f"[EXEC-REPORT] AB columns: {list(ab_norm.columns) if not ab_norm.empty else 'EMPTY'}")
                     logger.info(f"[EXEC-REPORT] CSOne columns: {list(csone_df.columns) if not csone_df.empty else 'EMPTY'}")
-                    
+
                     logger.info(f"[EXEC-REPORT] Step 5/5: Calling create_executive_intelligence_report...")
                     logger.info(f"[EXEC-REPORT] Output path: {base}.docx")
                     logger.info(f"[EXEC-REPORT] CRITICAL: About to pass team_subs_for_customer_counting with {len(team_subs_for_customer_counting)} rows")
-                    
+
                     # Generate Executive Intelligence Report with ARR analysis
                     if EXECUTIVE_FORMATTER_AVAILABLE and create_executive_intelligence_report:
                         # CRITICAL FIX: Use pre-calculated team_subs_for_customer_counting (UNFILTERED)
                         # This variable is calculated in outer scope before nested function, ensuring correct data
                         logger.info(f"[EXEC-REPORT] Using team_subs_for_customer_counting: {len(team_subs_for_customer_counting)} subscriptions (UNFILTERED: {not team_subs_df_unfiltered.empty})")
                         team_subs_for_counting = team_subs_for_customer_counting
-                        
+
                         # Round 23 / R22-NEXT-001: pull csconsole_* /
                         # software_defects / psirt_vulns /
                         # partial_data_warnings / data_retrieved_at from
@@ -8484,9 +8486,9 @@ def run_compact_analysis(analysis_id):
                         _r23_cab = _ctx.get('csconsole_adoption_barriers')  # Round 23 / R22-NEXT-001
                         result = create_executive_intelligence_report(
                             analysis_id, manager, technology, days,
-                            ab_norm, csone_df, ai_insights, 
+                            ab_norm, csone_df, ai_insights,
                             ext_bugs, ext_incidents,
-                            risk_scores, risk_summary, 
+                            risk_scores, risk_summary,
                             f"{base}.docx",
                             arr_data=None,
                             arr_impact=None,
@@ -8538,7 +8540,7 @@ def run_compact_analysis(analysis_id):
                             # same way the primary path does.
                             partial_data_warnings=_ctx.get('partial_data_warnings'),
                         )
-                    
+
                     logger.info(f"[EXEC-REPORT] Report creation returned: {result}")
                     logger.info(f"[EXEC-REPORT] === EXECUTIVE INTELLIGENCE REPORT COMPLETE ===")
                     return result
@@ -8596,7 +8598,7 @@ def run_compact_analysis(analysis_id):
             logger.error(f"[EXEC-REPORT] EXCEPTION CAUGHT: {type(e).__name__}: {str(e)}")
             logger.error(f"[EXEC-REPORT] Exception traceback:\n{traceback.format_exc()}")
             logger.error(f"[EXEC-REPORT] Report generation failed - NOT creating fallback report")
-            
+
             with analysis_status_lock:
                 status['status'] = 'error'
                 status['progress'] = 0
@@ -8605,25 +8607,25 @@ def run_compact_analysis(analysis_id):
                 status['current_step'] = 'Report Generation Failed'
                 save_analysis_status()
             return
-        
+
         logger.info(f"[[OK]] Executive Intelligence Report created: {exec_report_path}")
-        
+
         with analysis_status_lock:
             _update_progress(status, 82, 'Word report saved. Preparing Excel workbook...', 'Excel Report Generation')
-        
+
         # Create Excel summary with timeout protection
         excel_path = f"{base}.xlsx"
         logger.info(f"[[DATA]] Creating Excel file: {excel_path}")
-        
+
         # Check for cancellation before Excel generation
         if check_cancellation(analysis_id):
             update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
             return
-        
+
         # Generate Excel with timeout protection
         try:
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-            
+
             def generate_excel(_ctx=_r23_ctx):  # Round 23 / R22-NEXT-001
                 """Generate the Excel report in a separate thread"""
                 try:
@@ -8704,7 +8706,7 @@ def run_compact_analysis(analysis_id):
                 except Exception as e:
                     logger.error(f"[[ERROR]] Risk score calculation failed: {e}")
                     return {}
-            
+
             logger.info(f"[[TIME]] Starting Excel generation with 60-second timeout...")
             # Round 4 / Phase 1.4: track WHY risk_scores ended up empty
             # so the Excel dashboard can render n/a (instead of 0) and
@@ -8718,7 +8720,7 @@ def run_compact_analysis(analysis_id):
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = _submit_with_context(executor, generate_excel)
                 risk_scores = future.result(timeout=60)  # 60-second timeout for Excel generation
-                
+
                 if not risk_scores:
                     logger.warning(f"[[WARNING]] Risk scores calculation failed, using empty dict")
                     risk_scores = {}
@@ -8726,7 +8728,7 @@ def run_compact_analysis(analysis_id):
                         risk_scores_unavailable_reason
                         or 'risk_scoring returned no profiles'
                     )
-                    
+
         except FutureTimeoutError:
             logger.error(f"⏰ Excel generation timed out after 60 seconds")
             risk_scores = {}
@@ -8735,7 +8737,7 @@ def run_compact_analysis(analysis_id):
             logger.error(f"[[ERROR]] Excel generation failed: {e}")
             risk_scores = {}
             risk_scores_unavailable_reason = f'risk_scoring exception: {e}'
-        
+
         with analysis_status_lock:
             _update_progress(status, 85, 'Building risk summary for Excel...', 'Excel Report Generation')
         logger.info(f"[[LIST]] Creating risk summary DataFrame...")
@@ -8859,7 +8861,7 @@ def run_compact_analysis(analysis_id):
                 'Adoption_Barriers': ab_count,
                 'Support_Cases': cs_count,
             })
-        
+
         risk_summary_df = pd.DataFrame(
             risk_summary_data,
             columns=['Customer', 'Risk_Score', 'Risk_Level', 'Risk_Band', 'Adoption_Barriers', 'Support_Cases']
@@ -8929,11 +8931,11 @@ def run_compact_analysis(analysis_id):
                 kind='stable',
             )
         logger.info(f"[[WARNING]] High-risk customers identified: {len(high_risk_customers)}")
-        
+
         with analysis_status_lock:
             _update_progress(status, 90, 'Writing Excel workbook sheets...', 'Excel Report Generation')
         logger.info(f"[[LIST]] Preparing enhanced Excel sheets...")
-        
+
         # Calculate risk summary metrics.  Round 4: route the Excel
         # ``total_customers`` denominator through cm.count_customers
         # (with the same multi-source frames + account_to_customer map
@@ -8991,7 +8993,7 @@ def run_compact_analysis(analysis_id):
                 f"total_customers cell omitted: {_tc_err}"
             )
         high_risk_count = len(high_risk_customers)
-        
+
         critical_abs = cm.count_critical_barriers(
             ab_norm, mode=cm.CRITICAL_AB_MODE_CRITICAL_OR_HIGH
         )
@@ -9070,7 +9072,7 @@ def run_compact_analysis(analysis_id):
                 _RBT_0_100 = get_default_risk_band_thresholds()
             except ImportError:
                 _RBT_0_100 = {"CRITICAL": 75, "HIGH": 55, "MEDIUM": 35, "LOW": 15}
-        
+
         # Create executive dashboard sheet
         dashboard_data = {
             'Metric': [
@@ -9140,18 +9142,18 @@ def run_compact_analysis(analysis_id):
             ]
         }
         dashboard_df = pd.DataFrame(dashboard_data)
-        
+
         # Debug data availability
         logger.info(f"[[DATA]] Data availability check:")
         logger.info(f"   - AB data: {len(ab_norm)} rows, columns: {list(ab_norm.columns) if not ab_norm.empty else 'empty'}")
         logger.info(f"   - CSOne data: {len(csone_df)} rows, columns: {list(csone_df.columns) if not csone_df.empty else 'empty'}")
         logger.info(f"   - Action Plans: {len(csconsole_action_plans)} rows")
         logger.info(f"   - Customer Pulse: {len(csconsole_customer_pulse)} rows")
-        
+
         # CSConsole data is optional - log if empty but don't generate fallback
         if csconsole_action_plans.empty:
             logger.warning(f"[[WARNING]] CSConsole Action Plans data is empty (optional data source)")
-            
+
         if csconsole_customer_pulse.empty:
             logger.warning(f"[[WARNING]] CSConsole Customer Pulse data is empty (optional data source)")
 
@@ -9192,7 +9194,7 @@ def run_compact_analysis(analysis_id):
             except Exception as _critical_ab_err:
                 logger.debug(f"   - Critical AB normalization failed: {_critical_ab_err}")
                 critical_abs = pd.DataFrame(columns=ab_norm.columns)
-        
+
         escalated_cases = pd.DataFrame()
         if not csone_df.empty:
             # Use canonical normalized priority instead of substring matching on the
@@ -9208,7 +9210,7 @@ def run_compact_analysis(analysis_id):
             else:
                 escalated_cases = pd.DataFrame(columns=csone_df.columns)
                 logger.info(f"   - case_priority_norm unavailable, escalated case count set to 0")
-        
+
         # Round 2 / Phase 1.5: drive the High_Risk_Customers sheet from
         # the canonical ``cm.is_high_risk_profile`` predicate so this
         # sheet's row count matches the executive_dashboard
@@ -9310,7 +9312,7 @@ def run_compact_analysis(analysis_id):
         except Exception as _hrc_err:
             logger.debug(f"[EXCEL] High_Risk_Customers canonical build failed: {_hrc_err}")
             high_risk_customers = pd.DataFrame()
-        
+
         sheets = {
             # Round 5 / Phase 1.15: drop the leading-space typo in the
             # sheet key so callers can refer to the dashboard by its
@@ -9328,14 +9330,14 @@ def run_compact_analysis(analysis_id):
             "Customer_Pulse": csconsole_customer_pulse,
             "Success_Priorities": csconsole_success_priorities
         }
-        
+
         # Log sheet information
         logger.info(f"[[SEARCH]] DEBUGGING - Total sheets to create: {len(sheets)}")
         for sheet_name, df in sheets.items():
             logger.info(f"[[DOC]] Sheet '{sheet_name}': {len(df)} rows, columns: {list(df.columns) if not df.empty else 'empty'}")
             if not df.empty:
                 logger.info(f"   - Sample data: {df.head(1).to_dict('records')}")
-        
+
         # Check if all sheets are empty
         non_empty_sheets = [name for name, df in sheets.items() if not df.empty]
         logger.info(f"[[SEARCH]] DEBUGGING - Non-empty sheets: {non_empty_sheets}")
@@ -9367,14 +9369,14 @@ def run_compact_analysis(analysis_id):
             # space) vs `'Analysis_Summary'`.
             sheets['Analysis_Summary'] = summary_data
             logger.info(f"[[REFRESH]] Created fallback summary sheet with {len(summary_data)} rows")
-        
+
         # Create Excel file directly for compact analysis
         try:
             logger.info(f"[[DATA]] Creating Excel file: {excel_path}")
             logger.info(f"[[SEARCH]] DEBUGGING - Sheets dictionary contents:")
             for sheet_name, df in sheets.items():
                 logger.info(f"   - Sheet '{sheet_name}': {len(df)} rows, columns: {list(df.columns) if not df.empty else 'empty'}")
-            
+
             with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
                 workbook = writer.book
                 # Round 16 / Phase 5.1: shared Table-name registry so
@@ -9392,7 +9394,7 @@ def run_compact_analysis(analysis_id):
                     'border': 1,
                     'font_size': 11
                 })
-            
+
                 title_format = workbook.add_format({
                     'bold': True,
                     'font_size': 16,
@@ -9402,7 +9404,7 @@ def run_compact_analysis(analysis_id):
                     'align': 'center',
                     'valign': 'vcenter'
                 })
-            
+
                 # Round 13 / Phase 5.6: previously the Excel band fills
                 # were hand-mixed (``#FF6B6B`` / ``#FFE66D`` / ``#4ECDC4``)
                 # and drifted from ``canonical_metrics.RISK_BAND_COLORS``
@@ -9446,21 +9448,21 @@ def run_compact_analysis(analysis_id):
                     'bold': True,
                     'border': 1
                 })
-            
+
                 # Data formatting
                 data_format = workbook.add_format({
                     'border': 1,
                     'valign': 'top',
                     'text_wrap': True
                 })
-            
+
                 # Number formatting
                 number_format = workbook.add_format({
                     'num_format': '#,##0',
                     'border': 1,
                     'align': 'right'
                 })
-            
+
                 # Date formatting
                 # Round 6 / Phase 1.8: standardize on ISO ``yyyy-mm-dd``
                 # for cross-locale unambiguity.  The previous US-locale
@@ -9473,11 +9475,11 @@ def run_compact_analysis(analysis_id):
                     'border': 1,
                     'align': 'center'
                 })
-            
+
                 # Write each sheet - ensure dashboard is always written first
                 logger.info(f"[[SEARCH]] DEBUGGING - About to process {len(sheets)} sheets")
                 logger.info(f"[[SEARCH]] DEBUGGING - Sheet names: {list(sheets.keys())}")
-            
+
                 # CRITICAL FIX: Always write dashboard first, even if empty
                 dashboard_sheet_name = None
                 dashboard_df_data = None
@@ -9486,7 +9488,7 @@ def run_compact_analysis(analysis_id):
                         dashboard_sheet_name = sheet_name
                         dashboard_df_data = df
                         break
-            
+
                 # Write dashboard first if found - ALWAYS write it, even if empty
                 if dashboard_sheet_name and dashboard_df_data is not None:
                     logger.info(f"[[WRITE]] Writing dashboard sheet '{dashboard_sheet_name}' first with {len(dashboard_df_data)} rows...")
@@ -9501,7 +9503,7 @@ def run_compact_analysis(analysis_id):
                                 'Value': ['Dashboard data not available'],
                                 'Status': ['Data source issue']
                             })
-                    
+
                         df_clean.to_excel(writer, sheet_name=dashboard_sheet_name, index=False, startrow=1)
                         worksheet = writer.sheets[dashboard_sheet_name]
                         title_text = f" {dashboard_sheet_name.replace('_', ' ')} - {manager} Portfolio Analysis"
@@ -9550,13 +9552,13 @@ def run_compact_analysis(analysis_id):
                             'Status': ['Error']
                         })
                         fallback_df.to_excel(writer, sheet_name=dashboard_sheet_name, index=False)
-            
+
                 # Write other sheets
                 for sheet_name, df in sheets.items():
                     # Skip dashboard if already written
                     if dashboard_sheet_name and sheet_name == dashboard_sheet_name:
                         continue
-                
+
                     logger.info(f"[[WRITE]] Writing sheet '{sheet_name}' with {len(df)} rows...")
                     logger.info(f"[[SEARCH]] DEBUGGING - Sheet '{sheet_name}' empty: {df.empty}")
                     logger.info(f"[[SEARCH]] DEBUGGING - Sheet '{sheet_name}' columns: {list(df.columns) if not df.empty else 'N/A'}")
@@ -9655,21 +9657,21 @@ def run_compact_analysis(analysis_id):
                                 _r16_err,
                             )
                         _r43_polish_added_table = bool(_r43_polish_result.get("table_added"))
-                    
+
                         # Enhanced sheet formatting
                         worksheet = writer.sheets[sheet_name]
-                    
+
                         # Write enhanced title with analysis info
                         title_text = f" {sheet_name.replace('_', ' ')} - {manager} Portfolio Analysis"
                         if len(df_clean.columns) > 1:
                             worksheet.merge_range(0, 0, 0, len(df_clean.columns)-1, title_text, title_format)
                         else:
                             worksheet.write(0, 0, title_text, title_format)
-                    
+
                         # Format headers with enhanced styling
                         for col_num, value in enumerate(df_clean.columns.values):
                             worksheet.write(1, col_num, value, header_format)
-                    
+
                         # Apply conditional formatting based on sheet type
                         if 'Risk' in sheet_name or 'High_Risk' in sheet_name:
                             # Round 2 / Phase 1.6: derive cond-format
@@ -9711,7 +9713,7 @@ def run_compact_analysis(analysis_id):
                                         worksheet.write(row_idx, col_idx, cell_value, high_risk_format)
                                     else:
                                         worksheet.write(row_idx, col_idx, cell_value, data_format)
-                    
+
                         # Enhanced column width calculation
                         for i, col in enumerate(df_clean.columns):
                             # Calculate optimal width based on content type (guard against NaN from empty/mixed columns)
@@ -9729,7 +9731,7 @@ def run_compact_analysis(analysis_id):
                             else:
                                 max_length = max(content_max, col_name_len)
                                 worksheet.set_column(i, i, min(max_length + 2, 50))
-                    
+
                         # Round 43 / Phase 2: only call the legacy autofilter
                         # when ``apply_excel_polish`` did NOT add a Table.
                         # Tables ship with their own autofilter that covers the
@@ -9739,10 +9741,10 @@ def run_compact_analysis(analysis_id):
                         # range overlaps previous Table autofilter range``.
                         if not _r43_polish_added_table:
                             worksheet.autofilter(1, 0, len(df_clean), len(df_clean.columns)-1)
-                    
+
                         # Freeze header row
                         worksheet.freeze_panes(2, 0)
-                    
+
                         logger.info(f"[[OK]] Sheet '{sheet_name}' formatted with enhanced styling")
                     else:
                         # Round 6 / Phase 1.9: route empty-success
@@ -9772,7 +9774,7 @@ def run_compact_analysis(analysis_id):
                         worksheet = writer.sheets[sheet_name]
                         worksheet.write(0, 0, f"{sheet_name.replace('_', ' ')} - {manager} Portfolio Analysis", title_format)
                         logger.info(f"[[OK]] Empty sheet '{sheet_name}' created (state={_state})")
-            
+
                 # Round 4 / Phase 1.4: surface the workbook-level
                 # partial warnings (risk_scores unavailable,
                 # total_customers omitted, etc.) as a dedicated
@@ -9829,7 +9831,7 @@ def run_compact_analysis(analysis_id):
                 logger.info(f"[[SEARCH]] DEBUGGING - Total sheets written: {len(writer.sheets)}")
                 for sheet_name in writer.sheets.keys():
                     logger.info(f"   - Written sheet: {sheet_name}")
-            
+
                 logger.info(f"[[OK]] Excel file created successfully: {excel_path}")
 
             # Round 2 / Phase 2.5: honor _validate_excel_output's
@@ -9847,14 +9849,14 @@ def run_compact_analysis(analysis_id):
                 raise RuntimeError(
                     f"Excel validation failed for {excel_path}; refusing to advertise broken artifact"
                 )
-            
+
         except Exception as excel_error:
             logger.error(f"[[ERROR]] Error creating Excel file: {excel_error}")
             raise excel_error
-        
+
         with analysis_status_lock:
             _update_progress(status, 97, 'Finalizing results...', 'Finalization')
-        
+
         with analysis_status_lock:
             _update_progress(status, 100, 'Compact analysis completed successfully!', 'Completed')
             status['status'] = 'completed'
@@ -9919,11 +9921,11 @@ def run_compact_analysis(analysis_id):
             )
         except Exception as _si_err:
             logger.warning(f"store_report_insights failed: {_si_err}")
-        
+
         logger.info(f"[[OK]] Executive Intelligence Report analysis completed: {analysis_id}")
         logger.info(f"[[FILE]] Word report: {exec_report_path} (exists: {os.path.exists(exec_report_path)})")
         logger.info(f"[[DATA]] Excel report: {excel_path} (exists: {os.path.exists(excel_path)})")
-        
+
     except Exception as e:
         logger.error(f"[[ERROR]] Error in compact analysis: {e}", exc_info=True)
         # Round 43 / Phase 5: persist the actual traceback + the actual
@@ -9964,13 +9966,65 @@ def run_compact_analysis(analysis_id):
             cancellation_flags.pop(analysis_id, None)
 
 
-def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame, 
+# Round 53.2: source-backed helper that pins the "X customer(s) have
+# 3+ open adoption barriers" prose claim used by the renewal Word body
+# to the canonical Open-status filter. Pre-Round-53.2 the renderer
+# computed the threshold over ALL barriers (Open + Resolved + Cancelled)
+# while still labelling them "open", which produced inflated counts
+# (e.g. 20 when the source-backed Open count was 16) for portfolios
+# with many resolved/cancelled barriers per customer. The dedupe-by-ID
+# logic mirrors the canonical metric's record-count contract.
+_R532_CLOSED_AB_STATUSES: frozenset[str] = frozenset(
+    {
+        'closed', 'resolved', 'cancelled', 'canceled',
+        'done', 'complete', 'completed', 'archived',
+    }
+)
+
+
+def _r532_count_customers_with_min_open_barriers(
+    customer_ab: 'pd.DataFrame',
+    cust_col: str,
+    threshold: int = 3,
+) -> int:
+    """Return the # of customers whose distinct OPEN adoption barriers >= threshold.
+
+    Mirrors ``cm.count_total_barriers`` / ``cm.count_open_barriers``:
+    barriers are deduped by ``ID`` (rows without an ID are kept as
+    individual records); status is normalized via lower-cased strip,
+    and any value not in :data:`_R532_CLOSED_AB_STATUSES` is treated
+    as Open. Returns 0 when the frame is empty or lacks the
+    customer column.
+    """
+    if customer_ab is None or customer_ab.empty:
+        return 0
+    if cust_col not in customer_ab.columns:
+        return 0
+    work = customer_ab.copy()
+    if 'ID' in work.columns:
+        with_id = work[work['ID'].notna()].drop_duplicates(subset=['ID'])
+        without_id = work[work['ID'].isna()]
+        work = pd.concat([with_id, without_id], ignore_index=True)
+    status_col = next(
+        (c for c in ('STATUS_C', 'Status', 'status') if c in work.columns),
+        None,
+    )
+    if status_col is not None:
+        norm = work[status_col].astype(str).str.strip().str.lower()
+        work = work[~norm.isin(_R532_CLOSED_AB_STATUSES)]
+    if work.empty:
+        return 0
+    by_cust = work[cust_col].value_counts()
+    return int((by_cust >= threshold).sum())
+
+
+def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame,
                                    customer_csone: pd.DataFrame, team_subs_df: pd.DataFrame,
                                    days: int, ext_incidents: List[Dict] = None) -> Dict:
     """
     Calculate renewal risk score from available data (adoption barriers + CSOne cases + service incidents).
     This avoids the Snowflake schema issues in the AdvancedRenewalAnalyzer.
-    
+
     Args:
         ext_incidents: List of service incidents from status.webex.com (optional)
     """
@@ -10077,7 +10131,9 @@ def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame
         'recommendations': profile['recommendations'],
         # Round 47 / R47-RP-RISK-PARITY: see comment block above.
         'risk_components': _r47_components,
-        'adoption_barriers_count': len(customer_ab) if customer_ab is not None else 0,
+        # Round 53.1: user-facing renewal totals are logical barrier records,
+        # not Snowflake fan-out rows.
+        'adoption_barriers_count': cm.count_total_barriers(customer_ab),
         'support_cases_count': len(customer_csone) if customer_csone is not None else 0,
         'bems_escalations_count': profile['components']['support_cases']['details'].get('bems_count', 0),
         'bems_ids': bems_ids,
@@ -10101,7 +10157,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                                   customer_success_priorities: pd.DataFrame = None,
                                   partial_data_warnings: Optional[List[Dict[str, Any]]] = None) -> str:
     """Create a comprehensive Word document for renewal analysis with ALL data sources.
-    
+
     Args:
         portfolio_mode: If True, generates portfolio-level report for multiple customers
         all_customers: List of customer names (required if portfolio_mode=True)
@@ -10110,7 +10166,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     from docx.shared import Inches, Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from datetime import datetime, timedelta
-    
+
     if portfolio_mode:
         # CRITICAL FIX: Ensure all_customers is defined and not None before using len()
         if all_customers is not None and isinstance(all_customers, (list, tuple)):
@@ -10121,9 +10177,9 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         logger.info(f"[RENEWAL] Creating portfolio renewal report for {customer_count} customers")
     else:
         logger.info(f"[RENEWAL] Creating simple renewal report for {customer_name}")
-    
+
     doc = Document()
-    
+
     def _na(v):
         """Normalize None/empty/'none'/nan to 'N/A' so report never shows literal 'None [Severity: None, Status: None]'."""
         if v is None or v == '': return 'N/A'
@@ -10156,7 +10212,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             s = v.strip().lower()
             return s in ('', 'none', 'nan', 'n/a')
         return False
-    
+
     def _first_avail(row, keys, default='N/A'):
         """Use first non-empty value from row using any of the given column names (EDW/CSConsole/View naming)."""
         idx = getattr(row, 'index', ())
@@ -10211,14 +10267,14 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             _safe_doc_text(f'Customer Renewal Analysis: {customer_name}'), 0
         )
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    
+
     # Subtitle
     subtitle = doc.add_paragraph()
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = subtitle.add_run(f'Technology: {technology} | Analysis Period: {days} days')
     run.font.size = Pt(12)
     run.font.color.rgb = RGBColor(100, 100, 100)
-    
+
     # Round 10 / Phase 9.5: switch the simple renewal cover to the
     # same UTC ``Generated`` + optional ``Data as of`` pattern used
     # by the compact / executive intelligence title pages.  The old
@@ -10301,7 +10357,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     run = data_sources_line.add_run('Data sources: CSConsole, Snowflake C360_CS_TASK_C_VW, CSOne (TAC/BEMS), status.webex.com, help.webex.com. See Report Data Sources below.')
     run.font.size = Pt(9)
     run.font.color.rgb = RGBColor(120, 120, 120)
-    
+
     # Report Data Sources – canonical sources (shared across all AdoptIQ reports)
     doc.add_paragraph()
     doc.add_heading('Report Data Sources', level=2)
@@ -10322,7 +10378,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     scope_note.add_run('This renewal report focuses on renewal risk and analyzes all renewal-relevant data: adoption barriers, support cases (CSOne or Snowflake when available), BEMS (from CSOne), service incidents, and software defects. It runs faster than the Comprehensive report because it does not include the full Enhanced Snowflake insights suite or the longer narrative—all key renewal metrics above are still included.')
     scope_note.paragraph_format.space_before = Pt(6)
     doc.add_paragraph()
-    
+
     # Executive Summary at Top (2-3 sentence overview)
     try:
         from report_utils import format_date, get_risk_scoring_explanation, get_report_metadata_footer, format_number
@@ -10331,12 +10387,15 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         format_number = lambda v, d=0, p=False: (f"{v:,.{d}f}" if d else f"{int(v):,}") if v is not None else "N/A"
         get_risk_scoring_explanation = lambda: "Risk score based on adoption barriers, support cases, BEMS escalations, and engagement."
         get_report_metadata_footer = lambda **kw: "AdoptIQ Report"
-    
+
     exec_summary = doc.add_heading('Executive Summary', level=1)
     risk_score_raw = renewal_analysis.get('renewal_risk_score', 0)
     risk_score = round(float(risk_score_raw), 1) if risk_score_raw is not None else 0
     risk_category = renewal_analysis.get('renewal_risk_category', 'UNKNOWN')
     ab_count = renewal_analysis.get('adoption_barriers_count', 0)
+    # Round 53: the dashboard row is explicitly "Active", so use the shared
+    # open-barrier count rather than the total barrier count.
+    active_ab_count = cm.count_open_barriers(customer_ab if isinstance(customer_ab, pd.DataFrame) else pd.DataFrame())
     case_count = renewal_analysis.get('support_cases_count', 0)
     bems_count = renewal_analysis.get('bems_escalations_count', 0)
     exec_para = doc.add_paragraph()
@@ -10357,22 +10416,22 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         exec_para.add_run(f'Key metrics: {format_number(ab_count)} adoption barriers, {format_number(case_count)} support cases, {format_number(bems_count)} BEMS escalations. ')
         exec_para.add_run('See Key Findings and Recommendations for actionable next steps.')
     doc.add_paragraph()
-    
+
     # Customer Health Dashboard (NEW - matches example renewal report format)
     doc.add_heading('Customer Health Dashboard', level=1)
-    
+
     risk_score_raw = renewal_analysis.get('renewal_risk_score', 0)
     risk_score = round(float(risk_score_raw), 1) if risk_score_raw is not None else 0
     risk_category = renewal_analysis.get('renewal_risk_category', 'UNKNOWN')
     ab_count = renewal_analysis.get('adoption_barriers_count', 0)
     case_count = renewal_analysis.get('support_cases_count', 0)
     bems_count = renewal_analysis.get('bems_escalations_count', 0)
-    
+
     # Calculate incident metrics
     incident_count = len(ext_incidents) if ext_incidents else 0
     high_impact_incidents = 0
     correlated_incidents = 0
-    
+
     if ext_incidents:
         # Round 6 / Phase 1.5: previously this Word table classified
         # ``resolved`` as a "high-impact" status while the matplotlib
@@ -10383,7 +10442,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         # incidents while the chart shows zero red bars.  Use the
         # shared helper so both surfaces agree.
         high_impact_incidents = _count_high_impact_incidents(ext_incidents)
-        
+
         # Count incidents that might correlate with support cases (based on timing and keywords)
         if not customer_csone.empty:
             # Round 10 / Phase 1.6: anchor the correlation window in UTC so it
@@ -10398,12 +10457,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                 if inc.get('published') and
                 pd.to_datetime(inc.get('published', ''), errors='coerce', utc=True) >= analysis_start
             )
-    
+
     # Create dashboard table (matches example format)
     from docx.enum.table import WD_TABLE_ALIGNMENT
     dashboard_table = doc.add_table(rows=8, cols=2)
     dashboard_table.style = 'Table Grid'
-    
+
     # Populate table — Round 3: label uses ``days`` so the dashboard
     # row matches the subtitle's analysis period (was hardcoded "Last
     # 90 Days" regardless of the user's selected window).
@@ -10415,7 +10474,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     # page.  Use the shared helper for parity.
     dashboard_data = [
         (_support_cases_label, format_number(case_count)),
-        ('Active Adoption Barriers', format_number(ab_count)),
+        ('Active Adoption Barriers', format_number(active_ab_count)),
         ('BEMS Escalations', format_number(bems_count)),
         ('Service Incidents (status.webex.com)', format_number(incident_count)),
         ('High-Impact Incidents', format_number(high_impact_incidents)),
@@ -10423,7 +10482,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         ('Overall Risk Score', f'{risk_score:.1f}/100'),
         ('Risk Category', risk_category)
     ]
-    
+
     for i, (label, value) in enumerate(dashboard_data):
         row = dashboard_table.rows[i]
         row.cells[0].text = label
@@ -10467,16 +10526,16 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                         run.font.color.rgb = RGBColor(255, 140, 0)
                     elif risk_category == 'LOW':
                         run.font.color.rgb = RGBColor(34, 139, 34)
-    
+
     doc.add_paragraph()
-    
+
     # Risk Assessment & Key Findings (detailed section)
     doc.add_heading('Risk Assessment & Key Findings', level=1)
-    
+
     # Risk Score Box
     summary = doc.add_paragraph()
     summary.add_run('Renewal Risk Score: ').bold = True
-    
+
     if risk_category == 'CRITICAL':
         color = RGBColor(220, 20, 60)
     elif risk_category == 'HIGH':
@@ -10485,12 +10544,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         color = RGBColor(255, 215, 0)
     else:
         color = RGBColor(34, 139, 34)
-    
+
     score_run = summary.add_run(f'{risk_score:.1f}/100 ({risk_category})')
     score_run.bold = True
     score_run.font.color.rgb = color
     score_run.font.size = Pt(14)
-    
+
     # Key Findings – expanded for portfolio: barriers per customer, at-risk counts, source
     doc.add_heading('Key Findings', level=2)
     for finding in renewal_analysis.get('key_findings', []):
@@ -10499,15 +10558,26 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     # Portfolio: add interpretation and by-customer summary
     if portfolio_mode and all_customers and not customer_ab.empty:
         n_cust = len(all_customers)
-        ab_count = renewal_analysis.get('adoption_barriers_count', 0) or len(customer_ab)
+        ab_count = renewal_analysis.get('adoption_barriers_count', 0) or cm.count_total_barriers(customer_ab)
         cust_col = 'customer_name' if 'customer_name' in customer_ab.columns else ('BU_NAME' if 'BU_NAME' in customer_ab.columns else None)
         if cust_col and n_cust > 0:
             ab_per_cust = ab_count / n_cust
             p = doc.add_paragraph()
             p.add_run(f'Adoption barriers: {ab_count} total across {n_cust} customers (~{ab_per_cust:.1f} per customer). ').bold = False
             p.add_run('Source: CSConsole / Snowflake C360_CS_TASK_C_VW.\n')
-            by_cust = customer_ab[cust_col].value_counts()
-            high_barrier = (by_cust >= 3).sum()
+            _ab_for_counts = customer_ab.copy()
+            if 'ID' in _ab_for_counts.columns:
+                _with_id = _ab_for_counts[_ab_for_counts['ID'].notna()].drop_duplicates(subset=['ID'])
+                _without_id = _ab_for_counts[_ab_for_counts['ID'].isna()]
+                _ab_for_counts = pd.concat([_with_id, _without_id], ignore_index=True)
+            by_cust = _ab_for_counts[cust_col].value_counts()
+            # Round 53.2: this prose claims "3+ OPEN adoption barriers"
+            # but pre-fix it counted ABs of any status. Delegate to
+            # ``_r532_count_customers_with_min_open_barriers`` so the
+            # label and the number share a single source of truth.
+            high_barrier = _r532_count_customers_with_min_open_barriers(
+                customer_ab, cust_col, threshold=3
+            )
             if high_barrier > 0:
                 p2 = doc.add_paragraph(style='List Bullet')
                 p2.add_run(f'{high_barrier} customer(s) have 3+ open adoption barriers and warrant focused attention. ')
@@ -10547,7 +10617,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             p = doc.add_paragraph(style='List Bullet')
             run = p.add_run(factor)
             run.font.color.rgb = RGBColor(180, 0, 0)
-    
+
     # Top 10 by Risk / Focus Accounts (portfolio mode)
     if portfolio_mode and renewal_analysis.get('customer_analyses'):
         doc.add_page_break()
@@ -10601,7 +10671,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             _foot_run.italic = True
             _foot_run.font.size = Pt(9)
         doc.add_paragraph()
-    
+
     # Risk Scoring Methodology (transparent explanation)
     try:
         from report_utils import get_risk_scoring_explanation
@@ -10613,10 +10683,10 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         if line.strip():
             method_para.add_run(line.strip() + '\n').font.size = Pt(9)
     doc.add_paragraph()
-    
+
     # Adoption Barriers Summary – always show customer name in portfolio; cite source
     doc.add_heading('Adoption Barriers Analysis', level=1)
-    ab_count = renewal_analysis.get('adoption_barriers_count', 0) or (len(customer_ab) if not customer_ab.empty else 0)
+    ab_count = renewal_analysis.get('adoption_barriers_count', 0) or cm.count_total_barriers(customer_ab)
     ab_para = doc.add_paragraph()
     ab_para.add_run(f'Total Adoption Barriers: {ab_count}\n').bold = True
     ab_para.add_run(
@@ -10635,7 +10705,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             p_sum.add_run('Summary by customer (Source: CSConsole/Snowflake): ').bold = True
             p_sum.add_run(f'{len(by_cust)} customers have at least one barrier. ')
             p_sum.add_run('Full list below includes subject, severity, and status per barrier.\n')
-    
+
     if not customer_ab.empty:
         # Show ALL barriers with real data; in portfolio mode prefix customer name
         doc.add_paragraph('All Adoption Barriers (by customer where applicable):', style='Heading 3')
@@ -10664,7 +10734,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             p.add_run(f' [Severity: {severity}, Status: {status}]').font.size = Pt(9)
     else:
         doc.add_paragraph('No adoption barriers identified - this is a positive indicator.')
-    
+
     doc.add_page_break()
     # Support Cases Summary – customer name in portfolio; cite source
     doc.add_heading('Support Cases Analysis', level=1)
@@ -10687,7 +10757,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     split_table.rows[1].cells[1].text = str(break_fix_total)
     split_table.rows[2].cells[0].text = 'Provisioning Request'
     split_table.rows[2].cells[1].text = str(provisioning_total)
-    
+
     customer_csone_display = add_case_lifecycle_fields(customer_csone) if customer_csone is not None and not customer_csone.empty else customer_csone
     if customer_csone_display is not None and not customer_csone_display.empty:
         # FIXED: Show ALL support cases with customer name (portfolio), TAC case numbers, age
@@ -10733,12 +10803,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             p.add_run(f' [Severity: {severity}, Status: {status}, Type: {case_type}{age_str}]').font.size = Pt(9)
     else:
         doc.add_paragraph('No support cases in the analysis period - this is a positive indicator.')
-    
+
     doc.add_page_break()
     # BEMS Escalation Analysis (CRITICAL section) – impact on churn called out
     bems_count = renewal_analysis.get('bems_escalations_count', 0)
     bems_ids = renewal_analysis.get('bems_ids', [])
-    
+
     if bems_count > 0:
         doc.add_heading('🚨 BEMS Escalation Analysis (CRITICAL)', level=1)
         bems_warning = doc.add_paragraph()
@@ -10746,7 +10816,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         warning_run.bold = True
         warning_run.font.color.rgb = RGBColor(220, 20, 60)
         warning_run.font.size = Pt(12)
-        
+
         doc.add_paragraph()
         bems_info = doc.add_paragraph()
         bems_info.add_run('BEMS (Back-End Engineering Management System) escalations indicate complex technical issues that TAC could not resolve independently. These represent high-severity, high-complexity problems requiring specialized engineering expertise. ')
@@ -10758,7 +10828,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             f"Case mix: break-fix/technical={renewal_analysis.get('break_fix_cases_count', 0)}, "
             f"provisioning requests={renewal_analysis.get('provisioning_cases_count', 0)}"
         ).bold = True
-        
+
         if bems_ids:
             doc.add_paragraph()
             ids_para = doc.add_paragraph()
@@ -10771,7 +10841,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             # The brackets the LLM sees in the briefing book stay
             # intact -- those are citation anchors, not user output.
             ids_para.add_run(', '.join(str(bid) for bid in bems_ids))
-        
+
         # Show BEMS cases from CSOne
         bems_cases, _ = detect_bems_escalations(customer_csone_display if customer_csone_display is not None else pd.DataFrame())
         if not bems_cases.empty:
@@ -10814,7 +10884,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             else:
                 no_bems.add_run('The absence of BEMS in the provided CSOne data is a positive indicator. ')
             no_bems.add_run('Source: CSOne (Transaction ID, bemscsc_refs).')
-    
+
     doc.add_page_break()
     # IMMEDIATE ACTIONS section (matches example format)
     doc.add_heading('Immediate Actions', level=1)
@@ -10828,7 +10898,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     for action in immediate_actions:
         p = doc.add_paragraph(style='List Bullet')
         p.add_run(action)
-    
+
     # RENEWAL STRATEGY section (matches example format)
     doc.add_heading('Renewal Strategy', level=1)
     strategy_para = doc.add_paragraph()
@@ -10842,7 +10912,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         strategy_para.add_run('with focus on proactive success planning and demonstrating ROI. ')
         strategy_para.add_run('Maintain regular executive touchpoints and QBRs to reinforce partnership value. ')
         strategy_para.add_run('Leverage positive indicators to position for upsell and expansion opportunities during renewal discussions.')
-    
+
     # TALKING POINTS section (matches example format)
     doc.add_heading('Talking Points', level=1)
     talking_points = [
@@ -10855,12 +10925,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     for point in talking_points:
         p = doc.add_paragraph(style='List Bullet')
         p.add_run(point)
-    
+
     # === CHARTS & VISUALIZATIONS ===
     if chart_paths and len(chart_paths) > 0:
         doc.add_page_break()
         doc.add_heading('Visual Analysis & Trends', level=1)
-        
+
         logger.info(f"[[RENEWAL_CHARTS]] Adding {len(chart_paths)} charts to renewal report")
         charts_added = 0
         for chart_path in chart_paths:
@@ -10896,18 +10966,18 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                     logger.info(f"[[OK]] Chart added to renewal report: {chart_path}")
                 except Exception as e:
                     logger.error(f"[[ERROR]] Failed to add chart {chart_path}: {e}")
-        
+
         logger.info(f"[[OK]] Total charts added to renewal report: {charts_added}")
         if charts_added == 0:
             doc.add_paragraph("Charts are being generated but not available yet.")
     else:
         logger.warning(f"[[WARNING]] No charts available for renewal report")
-    
+
     # FIXED: Add External Intelligence Sections (BST defects, status.webex.com incidents) + Impact + Source
     if ext_bugs or (software_defects and software_defects.get('total_defects', 0) > 0):
         doc.add_heading('Software Defects & Known Issues', level=1)
         defect_para = doc.add_paragraph()
-        
+
         # Software defects from customer data
         if software_defects and software_defects.get('total_defects', 0) > 0:
             defect_count = software_defects.get('total_defects', 0)
@@ -10960,7 +11030,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                     defect_table.rows[idx].cells[1].text = str(len(ids))
                     # Round 49 / F-COMP-BEMS-MD-LEAK-R49: bare IDs.
                     defect_table.rows[idx].cells[2].text = ", ".join(str(x) for x in ids)
-        
+
         # External bugs from help.webex.com
         if ext_bugs:
             defect_para.add_run(f'Known Issues from help.webex.com: ').bold = True
@@ -10968,10 +11038,10 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             defect_para.add_run('Source: help.webex.com.\n')
             defect_para.add_run('Impact on renewal: ').bold = True
             defect_para.add_run('Publicly known defects may align with adoption barrier or support themes; cross-reference with barrier descriptions and Troubled Accounts where relevant.\n\n')
-        
+
         if not ext_bugs and (not software_defects or software_defects.get('total_defects', 0) == 0):
             defect_para.add_run('No software defects identified in customer data or external sources.')
-    
+
     # FIXED: Add PSIRT Vulnerabilities Section
     if psirt_vulns and psirt_vulns.get('total_vulnerabilities', 0) > 0:
         doc.add_heading('Security Vulnerabilities (PSIRT)', level=1)
@@ -10979,10 +11049,10 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         vuln_count = psirt_vulns.get('total_vulnerabilities', 0)
         cve_count = len(psirt_vulns.get('cve_ids', set()))
         psirt_count = len(psirt_vulns.get('psirt_advisories', set()))
-        
+
         vuln_para.add_run(f'Security Vulnerabilities Identified: ').bold = True
         vuln_para.add_run(f'{vuln_count} total ({cve_count} CVEs, {psirt_count} PSIRT advisories).\n')
-        
+
         # Show vulnerabilities by customer.
         # Round 11 / Phase 9.8: previous logic only printed per-customer
         # vulnerability IDs when ``customer_name`` was a literal key in
@@ -11013,21 +11083,21 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             elif customer_name in vuln_by_customer:
                 vulns = sorted(set(vuln_by_customer[customer_name]))
                 vuln_para.add_run(f'Vulnerability IDs: {", ".join([f"[{v}]" for v in vulns])}\n')
-    
+
     # FIXED: Add CSConsole Data Sections (Action Plans, Customer Pulse, Success Priorities) – customer name + source
     if customer_action_plans is not None and not customer_action_plans.empty:
         doc.add_heading('CSConsole Action Plans', level=1)
         ap_para = doc.add_paragraph()
         ap_para.add_run(f'Total Action Plans: {len(customer_action_plans)}\n').bold = True
         ap_para.add_run('Source: CSConsole.\n').italic = True
-        
+
         # Show action plans by status
         if 'STATUS_C' in customer_action_plans.columns:
             status_counts = customer_action_plans['STATUS_C'].value_counts()
             ap_para.add_run('Status Breakdown:\n')
             for status, count in status_counts.items():
                 ap_para.add_run(f'  • {_na(status)}: {count}\n')
-        
+
         # Show top action plans; in portfolio mode prefix customer name (BU_NAME)
         doc.add_paragraph('Recent Action Plans (by customer where applicable):', style='Heading 3')
         _ap_total = len(customer_action_plans)
@@ -11083,7 +11153,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if cust_label:
                 p.add_run(cust_label).bold = True
             p.add_run(f'{subject} [Status: {status}, Opened: {_na(opened_dt)}, Closed: {_na(closed_dt)}]')
-    
+
     # Round 47 / R47-RP-PULSE-PARITY (F-RP-PULSE-DUAL-TRUTH): when the
     # pulse frame upstream is marked ``fetch_error`` (typically a
     # ``schema_drift`` because the slot ``rating`` did not resolve to a
@@ -11131,14 +11201,14 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             'Source: CSConsole '
             '[Field(s): Pulse Rating, Comments, Created/Closed dates; Verification: Query by customer and record ID].\n'
         ).italic = True
-        
+
         # Show pulse ratings
         if 'PULSE_RATING__C' in customer_customer_pulse.columns:
             rating_counts = customer_customer_pulse['PULSE_RATING__C'].value_counts()
             cp_para.add_run('Pulse Rating Breakdown:\n')
             for rating, count in rating_counts.items():
                 cp_para.add_run(f'  • {_na(rating)}: {count}\n')
-        
+
         # Show recent pulse records; in portfolio mode prefix customer name (BU_NAME)
         doc.add_paragraph('Recent Customer Pulse Records (by customer where applicable):', style='Heading 3')
         _cp_total = len(customer_customer_pulse)
@@ -11193,20 +11263,20 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if cust_label:
                 p.add_run(cust_label).bold = True
             p.add_run(f'Rating: {rating} - {comments} [Opened: {_na(opened_dt)}, Closed: {_na(closed_dt)}]')
-    
+
     if customer_success_priorities is not None and not customer_success_priorities.empty:
         doc.add_heading('CSConsole Success Priorities', level=1)
         sp_para = doc.add_paragraph()
         sp_para.add_run(f'Total Success Priorities: {len(customer_success_priorities)}\n').bold = True
         sp_para.add_run('Source: CSConsole.\n').italic = True
-        
+
         # Show priorities by status (normalize so "None" never appears)
         if 'STATUS__C' in customer_success_priorities.columns:
             status_counts = customer_success_priorities['STATUS__C'].value_counts()
             sp_para.add_run('Status Breakdown:\n')
             for st, count in status_counts.items():
                 sp_para.add_run(f'  • {_na(st)}: {count}\n')
-        
+
         # Show top success priorities; in portfolio mode prefix customer name (RELATED_CUSTOMER__C)
         doc.add_paragraph('Recent Success Priorities (by customer where applicable):', style='Heading 3')
         # Round 3: surface "10 of N" disclosure to match the pattern
@@ -11278,7 +11348,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if cust_label:
                 p.add_run(cust_label).bold = True
             p.add_run(f'{subject} [Status: {status}, Opened: {opened_dt}, Closed: {closed_dt}]')
-    
+
     # FIXED: Add Status.webex.com Incidents Section with Renewal Risk + Impact + Source
     if ext_incidents:
         doc.add_heading('Service Incidents (status.webex.com) - Renewal Risk Analysis', level=1)
@@ -11286,7 +11356,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         incident_para.add_run(f'Service Incidents Identified: ').bold = True
         incident_para.add_run(f'{len(ext_incidents)} service incidents from status.webex.com during the analysis period. ')
         incident_para.add_run('Source: status.webex.com.\n\n').italic = True
-        
+
         # Impact on portfolio: which products/regions were affected (extract from titles)
         product_mentions = set()
         for inc in (ext_incidents or []):
@@ -11302,7 +11372,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         else:
             incident_para.add_run('Impact on portfolio: ').bold = True
             incident_para.add_run(f'Service incidents during the period may have affected customers using Webex/Cisco products. Service-impacting incidents can increase support volume, adoption barriers, and renewal risk. See Troubled Accounts Deep Dive for at-risk customers and recommended actions. Source: status.webex.com.\n\n')
-        
+
         # Renewal Risk Correlation Analysis
         incident_para.add_run('Renewal Risk Correlation: ').bold = True
         if len(ext_incidents) > 0:
@@ -11314,16 +11384,16 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             # ``_count_high_impact_incidents`` so the count cannot
             # drift from the chart / Customer Health Dashboard table.
             high_impact_count = _count_high_impact_incidents(ext_incidents)
-            
+
             if high_impact_count > 5:
                 incident_para.add_run(f'⚠️ HIGH RISK: {high_impact_count} high-impact incidents detected. Multiple service-impacting incidents can significantly impact customer satisfaction and renewal probability. ')
             elif high_impact_count > 2:
                 incident_para.add_run(f'⚠️ MODERATE RISK: {high_impact_count} high-impact incidents detected. Service incidents may correlate with increased support case volume and adoption barriers. ')
             else:
                 incident_para.add_run(f'✅ LOW RISK: {high_impact_count} high-impact incidents detected. Service stability appears good. ')
-            
+
             incident_para.add_run(f'Service incidents that impact customer operations can directly correlate with renewal risk, as customers experiencing frequent service disruptions may question the value of their subscription.\n\n')
-        
+
         # Show ALL incidents (not just top 5) sorted by date
         all_incidents = sorted(ext_incidents, key=lambda x: x.get('published', ''), reverse=True)
         if all_incidents:
@@ -11334,7 +11404,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                 published = incident.get('published', 'N/A')[:10] if incident.get('published') else 'N/A'
                 status = incident.get('status', 'N/A')
                 link = incident.get('link', '')
-                
+
                 # Highlight high-impact incidents.
                 # Round 11 / Phase 2.3: use the shared helper so the
                 # per-row 🚨 decoration / [HIGH IMPACT] label agrees
@@ -11343,7 +11413,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                 is_high_impact = _is_high_impact_incident(incident)
                 if is_high_impact:
                     p.add_run('🚨 ').bold = True
-                
+
                 incident_text = f'{title} (Published: {published}, Status: {status})'
                 if link:
                     # Add hyperlink if available
@@ -11351,13 +11421,13 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                     # Note: Word hyperlinks require special handling, this is simplified
                 else:
                     p.add_run(incident_text)
-                
+
                 # Add impact indicator
                 if is_high_impact:
                     impact_run = p.add_run(' [HIGH IMPACT]')
                     impact_run.font.color.rgb = RGBColor(220, 20, 60)
                     impact_run.bold = True
-    
+
     # Troubled Accounts Deep Dive – portfolio only: at-risk customers with barriers, pulse, defects, BEMS, incidents, actionable steps
     if portfolio_mode and all_customers and len(all_customers) > 0:
         troubled = set()
@@ -11528,7 +11598,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         elif portfolio_mode and all_customers:
             p = doc.add_paragraph()
             p.add_run('No troubled accounts were automatically flagged. Continue monitoring adoption barriers, customer pulse, defect linkage, and BEMS escalations; rerun this report as new data is available.')
-    
+
     # Recommendations (action-oriented with account names where applicable)
     doc.add_heading('Recommendations', level=1)
     recs = renewal_analysis.get('recommendations', [])
@@ -11539,7 +11609,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     else:
         fallback = doc.add_paragraph()
         fallback.add_run('No specific recommendations at this time. Continue monitoring adoption barriers, customer pulse, and support case trends.').italic = True
-    
+
     # Report Metadata Footer
     doc.add_page_break()
     doc.add_heading('Report Metadata', level=2)
@@ -11555,12 +11625,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     )
     footer_para = doc.add_paragraph()
     footer_para.add_run(footer_text).font.size = Pt(8)
-    
+
     # Save
     word_path = f"{base_path}_Renewal_Report.docx"
     doc.save(word_path)
     logger.info(f"[RENEWAL] Report saved to: {word_path}")
-    
+
     return word_path
 
 
@@ -11576,7 +11646,7 @@ def run_customer_renewal_analysis(analysis_id):
     from datetime import datetime, timedelta
     try:
         logger.info(f"[[START]] Starting renewal analysis: {analysis_id}")
-        
+
         # Get analysis parameters
         with analysis_status_lock:
             status = analysis_status[analysis_id]
@@ -11589,7 +11659,7 @@ def run_customer_renewal_analysis(analysis_id):
             if renewal_type == 'renewal':
                 renewal_type = 'renewal_single'  # Form sends 'renewal' for single-customer
             csone_file = status['csone_file']
-            
+
         # Round 6 / Phase 6.8: keep INFO logs free of identifying
         # parameters (manager, customer name, csone file path).  Log
         # only non-identifying metadata at INFO; expose the verbatim
@@ -11614,14 +11684,14 @@ def run_customer_renewal_analysis(analysis_id):
             renewal_type, manager, technology, subscription_id,
             customer_name, days, csone_file,
         )
-        
+
         with analysis_status_lock:
             status['status'] = 'running'
             status['completed_steps'] = []
             _update_progress(status, 10, 'Connecting to Snowflake...', 'Database Connection')
-        
+
         ctx = _connect_with_keeper()
-        
+
         if ctx is None:
             error_msg = (
                 "CRITICAL: Snowflake database connection failed.\n\n"
@@ -11636,15 +11706,15 @@ def run_customer_renewal_analysis(analysis_id):
                 status['current_step'] = 'Connection Failed'
                 save_analysis_status()
             return
-        
+
         with analysis_status_lock:
             _update_progress(status, 20, 'Connected. Fetching team data...', 'Team Data Retrieval')
-        
+
         # Get team subscriptions - handle single customer renewal without manager
         if renewal_type == 'renewal_single' and (not manager or manager == ''):
             # Single customer renewal without manager: look up customer directly
             logger.info(f"[[SEARCH]] Single customer renewal without manager - looking up customer directly")
-            
+
             if subscription_id:
                 # Look up by subscription ID
                 logger.info(f"[[SEARCH]] Looking up customer by subscription ID: {subscription_id}")
@@ -11656,7 +11726,7 @@ def run_customer_renewal_analysis(analysis_id):
                         account_ids_list = [account_id]
                     else:
                         account_ids_list = []
-                    
+
                     # Create minimal team_subs_df from subscription data
                     team_subs_df = pd.DataFrame({
                         'BU_NAME': [customer_name] if customer_name else [],
@@ -11736,7 +11806,7 @@ def run_customer_renewal_analysis(analysis_id):
                                 manager = mgr
                                 logger.info(f"[[OK]] Found manager '{manager}' from subscription CSSM")
                                 break
-                
+
                 if not manager:
                     error_msg = "❌ CRITICAL: Manager is required for portfolio renewal or when customer lookup fails."
                     logger.error(f"[[ERROR]] {error_msg}")
@@ -11751,7 +11821,7 @@ def run_customer_renewal_analysis(analysis_id):
             # Portfolio or single with manager: fetch manager's team (do not overwrite team_subs_df from single-customer path above)
             cssm_emails = [email for mgr, name, email in TEAM_ROSTER if mgr == manager or manager == "All Managers"]
             team_subs_df = get_subscriptions_for_team(ctx, cssm_emails)
-            
+
             if team_subs_df.empty:
                 error_msg = (
                     f"❌ CRITICAL: No team subscription data found for manager '{manager}'.\n\n"
@@ -11766,7 +11836,7 @@ def run_customer_renewal_analysis(analysis_id):
                     status['current_step'] = 'No Team Data'
                     save_analysis_status()
                 return
-        
+
         # If subscription_id provided, look up customer name from team subscriptions
         if subscription_id and not customer_name:
             logger.info(f"[[SEARCH]] Looking up customer name for subscription: {subscription_id}")
@@ -11780,14 +11850,14 @@ def run_customer_renewal_analysis(analysis_id):
                         status['customer_name'] = customer_name
                 else:
                     logger.warning(f"[[WARNING]] Subscription {subscription_id} not found in team data")
-        
+
         # If still no customer name, use subscription_id as fallback identifier
         if not customer_name and subscription_id:
             customer_name = f"Subscription_{subscription_id}"
             logger.info(f"[[INFO]] Using subscription ID as customer identifier: {customer_name}")
             with analysis_status_lock:
                 status['customer_name'] = customer_name
-        
+
         account_ids = team_subs_df['ACCOUNT_ID_C'].dropna().unique().tolist()
         customer_names = (
             team_subs_df['BU_NAME'].dropna().unique().tolist()
@@ -11818,10 +11888,10 @@ def run_customer_renewal_analysis(analysis_id):
             csconsole_customer_pulse = pd.DataFrame()
             csconsole_success_priorities = pd.DataFrame()
             csconsole_adoption_barriers = pd.DataFrame()
-        
+
         with analysis_status_lock:
             _update_progress(status, 35, 'Fetching adoption barriers...', 'Customer Data Analysis')
-        
+
         ab_raw = fetch_adoption_barriers(ctx, account_ids, days)
         if not ab_raw.empty and "ACCOUNT_ID_C" in ab_raw.columns:
             ab_raw = merge_customer_join_keys_dtype_safe(
@@ -11848,7 +11918,7 @@ def run_customer_renewal_analysis(analysis_id):
         ab_scoped = _apply_scope_filter_ab(ab_raw, technology, days)
         ab_norm = _prepare_ab(ab_scoped, team_subs_df)
         logger.info(f"[[RENEWAL]] After Snowflake + scope + prepare: {len(ab_norm)} adoption barriers")
-        
+
         # Merge CSConsole adoption barriers so portfolio gets complete data (fix "not getting all the data")
         try:
             if not csconsole_adoption_barriers.empty and "ACCOUNT_ID_C" in csconsole_adoption_barriers.columns:
@@ -11888,7 +11958,7 @@ def run_customer_renewal_analysis(analysis_id):
                     logger.info(f"[[RENEWAL]] Merged CSConsole adoption barriers: {before_merge} + {len(csab_norm)} -> {len(ab_norm)} total barriers (dedup by ID/date)")
         except Exception as e:
             logger.warning(f"[[WARNING]] Could not merge CSConsole adoption barriers: {e}")
-        
+
         # Filter adoption barriers based on renewal type
         if renewal_type == 'renewal_portfolio':
             # Portfolio: use all adoption barriers (no customer filter)
@@ -11896,7 +11966,7 @@ def run_customer_renewal_analysis(analysis_id):
         else:
             # Single customer: filter for specific customer
             customer_ab = ab_norm[ab_norm['customer_name'] == customer_name] if not ab_norm.empty and customer_name else pd.DataFrame()
-        
+
         # Fetch CSConsole data for renewal analysis (all data sources)
         logger.info(f"[[CSConsole]] Fetching CSConsole data for renewal analysis...")
         logger.info(
@@ -11905,7 +11975,7 @@ def run_customer_renewal_analysis(analysis_id):
             f"{len(csconsole_success_priorities)} success priorities, "
             f"{len(csconsole_adoption_barriers)} adoption barriers"
         )
-        
+
         # Filter CSConsole data for customer(s)
         if renewal_type == 'renewal_portfolio':
             # Portfolio: get all customers from ALL sources so the renewal
@@ -11997,7 +12067,7 @@ def run_customer_renewal_analysis(analysis_id):
                         if still_missing.any():
                             customer_ab = customer_ab.copy()
                             customer_ab.loc[still_missing, 'customer_name'] = customer_ab.loc[still_missing, 'BU_NAME']
-            
+
             # Portfolio: filter by all customers
             norm_customers = {normalize_customer_name(c) for c in (all_customers or [])}
             if not csconsole_action_plans.empty and 'BU_NAME' in csconsole_action_plans.columns and all_customers:
@@ -12220,7 +12290,7 @@ def run_customer_renewal_analysis(analysis_id):
                         pass  # noqa: PIE790
             except Exception as e:
                 logger.warning(f"[[WARNING]] Snowflake support cases fetch failed: {e}")
-        
+
         # Validate data sources before generating renewal report
         # For renewal reports, CSOne and adoption barriers are optional
         logger.info(f"[[VALIDATION]] Validating data sources for renewal report (type: {renewal_type})...")
@@ -12269,13 +12339,13 @@ def run_customer_renewal_analysis(analysis_id):
                 status['current_step'] = 'Validation Failed'
                 save_analysis_status()
             return
-        
+
         with analysis_status_lock:
             _update_progress(status, 50, 'Loading and scoping CSOne support cases...', 'CSOne Processing')
-        
+
         with analysis_status_lock:
             _update_progress(status, 55, 'Gathering external intelligence (defects, incidents)...', 'External Intelligence')
-        
+
         logger.info(f"[[WEB]] Gathering external intelligence for renewal report...")
         try:
             ext_bugs = fetch_help_webex_bugs()
@@ -12286,16 +12356,16 @@ def run_customer_renewal_analysis(analysis_id):
             logger.warning(f"[[WARNING]] External intelligence gathering failed: {e}")
             ext_bugs = []
             ext_incidents = []
-        
+
         # Extract software defects and PSIRT vulnerabilities from customer data
         logger.info(f"[[DEFECTS]] Extracting software defects and PSIRT vulnerabilities...")
         software_defects = extract_software_defects(customer_csone, customer_ab)
         psirt_vulns = extract_psirt_vulnerabilities(customer_csone, customer_ab)
         logger.info(f"[[DEFECTS]] Found {software_defects.get('total_defects', 0)} defects and {psirt_vulns.get('total_vulnerabilities', 0)} vulnerabilities")
-        
+
         with analysis_status_lock:
             _update_progress(status, 60, 'Analyzing renewal risk...', 'Renewal Risk Analysis')
-        
+
         # Calculate renewal risk based on type
         if renewal_type == 'renewal_portfolio':
             # Portfolio renewal: calculate risk for each customer
@@ -12307,19 +12377,19 @@ def run_customer_renewal_analysis(analysis_id):
             if not all_customers:
                 all_customers = team_subs_df['BU_NAME'].dropna().unique().tolist() if not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns else []
                 logger.info(f"[[CUSTOMER_COUNT]] Portfolio renewal - re-initialized all_customers: {len(all_customers)} customers")
-            
+
             logger.info(f"[[PORTFOLIO]] Calculating renewal risk for {len(all_customers)} customers")
             portfolio_renewal_analyses = {}
-            
+
             for idx, cust_name in enumerate(all_customers):
                 with analysis_status_lock:
                     status['progress'] = 60 + int((idx / len(all_customers)) * 15)  # 60-75%
                     status['message'] = f' Analyzing renewal risk for {cust_name} ({idx+1}/{len(all_customers)})...'
-                
+
                 # Filter data for this customer
                 cust_ab = customer_ab[customer_ab['customer_name'] == cust_name] if not customer_ab.empty else pd.DataFrame()
                 cust_csone = customer_csone[customer_csone['customer_name'] == cust_name] if not customer_csone.empty else pd.DataFrame()
-                
+
                 # Calculate risk for this customer (include incidents for portfolio analysis)
                 cust_risk = _calculate_simple_renewal_risk(
                     customer_name=cust_name,
@@ -12330,7 +12400,7 @@ def run_customer_renewal_analysis(analysis_id):
                     ext_incidents=ext_incidents  # Pass incidents for risk calculation
                 )
                 portfolio_renewal_analyses[cust_name] = cust_risk
-            
+
             # Create portfolio-level summary with TOP-LEVEL METRICS for report dashboard
             # Use renewal_risk_score (0-100) from each customer; _calculate_simple_renewal_risk returns that, not overall_risk_score
             cust_scores = [a.get('renewal_risk_score', a.get('overall_risk_score', 0)) for a in portfolio_renewal_analyses.values()]
@@ -12353,7 +12423,8 @@ def run_customer_renewal_analysis(analysis_id):
             elif avg_risk_score >= _RBT['LOW']:      port_category = 'LOW'
             else:                                    port_category = 'HEALTHY'
             # Aggregate counts and key findings so report shows real data (fix "not getting all the data")
-            tot_ab = len(customer_ab)
+            # Round 53.1: portfolio renewal headline uses distinct barrier IDs.
+            tot_ab = cm.count_total_barriers(customer_ab)
             tot_cases = len(customer_csone)
             tot_bems = sum(a.get('bems_escalations_count', 0) for a in portfolio_renewal_analyses.values())
             key_findings_list = []
@@ -12376,7 +12447,12 @@ def run_customer_renewal_analysis(analysis_id):
             # At-risk detail: customers with 3+ barriers, or "Customer Considering Competitor"/"Intent to Opt Out"
             cust_col = 'customer_name' if not customer_ab.empty and 'customer_name' in customer_ab.columns else ('BU_NAME' if not customer_ab.empty and 'BU_NAME' in customer_ab.columns else None)
             if cust_col and not customer_ab.empty:
-                by_cust = customer_ab[cust_col].value_counts()
+                _ab_for_counts = customer_ab.copy()
+                if 'ID' in _ab_for_counts.columns:
+                    _with_id = _ab_for_counts[_ab_for_counts['ID'].notna()].drop_duplicates(subset=['ID'])
+                    _without_id = _ab_for_counts[_ab_for_counts['ID'].isna()]
+                    _ab_for_counts = pd.concat([_with_id, _without_id], ignore_index=True)
+                by_cust = _ab_for_counts[cust_col].value_counts()
                 high_barrier_cust = (by_cust >= 3).sum()
                 if high_barrier_cust > 0:
                     key_findings_list.append(
@@ -12468,13 +12544,13 @@ def run_customer_renewal_analysis(analysis_id):
             )
             renewal_analysis['support_cases_from_snowflake'] = support_cases_from_snowflake
             customer_name_for_report = customer_name
-        
+
         # Add external intelligence to renewal analysis
         renewal_analysis['external_bugs'] = ext_bugs
         renewal_analysis['external_incidents'] = ext_incidents
         renewal_analysis['software_defects'] = software_defects
         renewal_analysis['psirt_vulnerabilities'] = psirt_vulns
-        
+
         factual_claims = list(renewal_analysis.get("key_findings", [])) + list(renewal_analysis.get("risk_factors", []))
         # Build canonical portfolio metrics so the renewal path enforces the
         # same parity contract as the comprehensive / compact / EI paths.
@@ -12606,7 +12682,7 @@ def run_customer_renewal_analysis(analysis_id):
             raise ValueError(f"Renewal consistency checks failed: {'; '.join(consistency_check['errors'])}")
         if consistency_check["warnings"]:
             logger.warning(f"[[CONSISTENCY]] Renewal warnings: {consistency_check['warnings']}")
-        
+
         # Generate renewal charts
         logger.info(f"[[RENEWAL_CHARTS]] Generating renewal charts...")
         try:
@@ -12621,10 +12697,10 @@ def run_customer_renewal_analysis(analysis_id):
         except Exception as e:
             logger.warning(f"[[WARNING]] Renewal chart generation failed: {e}")
             renewal_chart_paths = []
-        
+
         with analysis_status_lock:
             _update_progress(status, 80, 'Building renewal Word report...', 'Report Generation')
-        
+
         # Create renewal report
         ts = time.strftime("%Y%m%d_%H%M%S")
         if renewal_type == 'renewal_portfolio':
@@ -12633,7 +12709,7 @@ def run_customer_renewal_analysis(analysis_id):
             tag = f"{customer_name.replace(' ','_')}_{technology.replace(' ','_').replace('&','and')}_{days}d_{ts}"
         out_dir = _ensure_outputs()
         base = str(out_dir / f"AdoptIQ_Report_Renewal_{tag}")
-        
+
         # Generate renewal report (handles both single and portfolio)
         # Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL: ``customer_action_plans``,
         # ``customer_customer_pulse``, and ``customer_success_priorities``
@@ -12642,7 +12718,7 @@ def run_customer_renewal_analysis(analysis_id):
         # else / L10538/10544/10554 single-customer else).  All paths through
         # the filter set every name with at least an empty DataFrame fallback,
         # so the presence guards were dead.
-        
+
         # Round 48 / F-RP-PARTIAL-BANNER-MISSING: harvest each renewal
         # frame's ``df.attrs['fetch_error']`` annotation NOW so the
         # Word banner can render warnings on the FIRST run (the same
@@ -12698,19 +12774,19 @@ def run_customer_renewal_analysis(analysis_id):
             customer_customer_pulse=customer_customer_pulse,
             customer_success_priorities=customer_success_priorities
         )
-        
+
         if renewal_type == 'renewal_portfolio':
             success_msg = f"Portfolio renewal report generated for {len(all_customers)} customers"
         else:
             success_msg = f"Renewal report generated for {customer_name}"
-        
+
         with analysis_status_lock:
             _update_progress(status, 88, 'Word report saved. Generating Excel workbook...', 'Excel Report Generation')
             status['word_report'] = renewal_word_path
-        
+
         # Create Excel summary for renewal analysis
         excel_path = f"{base}.xlsx"
-        
+
         # Map analyzer keys to expected keys (handle key name differences)
         overall_risk_score = renewal_analysis.get('overall_risk_score') or renewal_analysis.get('renewal_risk_score', 0)
         risk_level = renewal_analysis.get('risk_level') or renewal_analysis.get('renewal_risk_category', 'UNKNOWN')
@@ -12719,7 +12795,7 @@ def run_customer_renewal_analysis(analysis_id):
         # matches the storage convention used by the rest of the analysis chain
         # (``_now_utc_iso_z``).  Local-clock fallback drifted by the host TZ.
         next_review_date = renewal_analysis.get('next_review_date', (datetime.now(timezone.utc) + timedelta(days=30)).isoformat())
-        
+
         # Create renewal analysis summary DataFrame
         if renewal_type == 'renewal_portfolio':
             # Portfolio: create summary for all customers
@@ -12841,7 +12917,7 @@ def run_customer_renewal_analysis(analysis_id):
         # ``Data_Unavailable`` row instead of silently advertising
         # placeholder data as a component score.
         # (intentionally no synthetic rows added)
-        
+
         # Create recommendations DataFrame
         # Round 5 / Phase 1.2: do NOT fabricate a default
         # "Review customer engagement and schedule account review" row
@@ -12862,7 +12938,7 @@ def run_customer_renewal_analysis(analysis_id):
                 'Priority': 'n/a',
                 'Recommendation': 'Data_Unavailable: renewal analyzer returned no recommendations for this customer.'
             })
-        
+
         # Build key metrics from available data
         key_metrics = renewal_analysis.get('key_metrics', {})
         if not key_metrics:
@@ -12873,7 +12949,7 @@ def run_customer_renewal_analysis(analysis_id):
                 'Key_Findings': len(renewal_analysis.get('key_findings', [])),
                 'Recommendations': len(recommendations)
             }
-        
+
         # Round 5 / Phase 1.6: emit a Report_Info ledger sheet so the
         # renewal customer Excel mirrors the leader / compact pattern of
         # disclosing report metadata + any partial_data_warnings that
@@ -12983,7 +13059,7 @@ def run_customer_renewal_analysis(analysis_id):
             "Customer_Success_Priorities": customer_success_priorities if not customer_success_priorities.empty else pd.DataFrame(),
             "Key_Metrics": pd.DataFrame([key_metrics])
         }
-        
+
         # Create Excel file directly for renewal analysis
         try:
             with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
@@ -12991,7 +13067,7 @@ def run_customer_renewal_analysis(analysis_id):
                 # Round 16 / Phase 5.1: shared Table-name registry for
                 # the Round-15 polish helper across this writer's sheets.
                 _r16_used_table_names: set = set()
-            
+
                 # Create enhanced formats
                 header_format = workbook.add_format({
                     'bold': True,
@@ -13002,7 +13078,7 @@ def run_customer_renewal_analysis(analysis_id):
                     'border': 1,
                     'font_size': 11
                 })
-            
+
                 title_format = workbook.add_format({
                     'bold': True,
                     'font_size': 16,
@@ -13012,7 +13088,7 @@ def run_customer_renewal_analysis(analysis_id):
                     'align': 'center',
                     'valign': 'vcenter'
                 })
-            
+
                 # Round 13 / Phase 5.6: previously the Excel band fills
                 # were hand-mixed (``#FF6B6B`` / ``#FFE66D`` / ``#4ECDC4``)
                 # and drifted from ``canonical_metrics.RISK_BAND_COLORS``
@@ -13056,21 +13132,21 @@ def run_customer_renewal_analysis(analysis_id):
                     'bold': True,
                     'border': 1
                 })
-            
+
                 # Data formatting
                 data_format = workbook.add_format({
                     'border': 1,
                     'valign': 'top',
                     'text_wrap': True
                 })
-            
+
                 # Number formatting
                 number_format = workbook.add_format({
                     'num_format': '#,##0',
                     'border': 1,
                     'align': 'right'
                 })
-            
+
                 # Date formatting
                 # Round 6 / Phase 1.8: standardize on ISO ``yyyy-mm-dd``
                 # for cross-locale unambiguity.  The previous US-locale
@@ -13083,7 +13159,7 @@ def run_customer_renewal_analysis(analysis_id):
                     'border': 1,
                     'align': 'center'
                 })
-            
+
                 # Write each sheet
                 for sheet_name, df in sheets.items():
                     # Round 2 / Phase 2.1: surface fetch_error tristate
@@ -13127,7 +13203,7 @@ def run_customer_renewal_analysis(analysis_id):
                                 _schema_err,
                             )
                         df_clean.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
-                    
+
                         # Format the sheet
                         worksheet = writer.sheets[sheet_name]
 
@@ -13163,11 +13239,11 @@ def run_customer_renewal_analysis(analysis_id):
                             worksheet.merge_range(0, 0, 0, _renewal_n_cols - 1, _renewal_title_text, title_format)
                         else:
                             worksheet.write(0, 0, _renewal_title_text, title_format)
-                    
+
                         # Format headers
                         for col_num, value in enumerate(df_clean.columns.values):
                             worksheet.write(1, col_num, value, header_format)
-                    
+
                         # Auto-adjust column widths (guard against NaN from empty columns)
                         for i, col in enumerate(df_clean.columns):
                             try:
@@ -13192,7 +13268,7 @@ def run_customer_renewal_analysis(analysis_id):
         except Exception as excel_error:
             logger.error(f"[[ERROR]] Renewal Excel generation failed: {excel_error}", exc_info=True)
             raise excel_error
-        
+
         with analysis_status_lock:
             _update_progress(status, 100, 'Customer renewal analysis completed successfully!', 'Completed')
             status['status'] = 'completed'
@@ -13244,9 +13320,9 @@ def run_customer_renewal_analysis(analysis_id):
             )
         except Exception as _si_err:
             logger.warning(f"store_report_insights failed: {_si_err}")
-        
+
         logger.info(f"[[OK]] Customer renewal analysis completed: {analysis_id}")
-        
+
     except Exception as e:
         logger.error(f"[[ERROR]] Error in customer renewal analysis: {e}", exc_info=True)
         # Round 43 / Phase 5: see the matching block in run_compact_analysis
@@ -13290,15 +13366,15 @@ def run_comprehensive_analysis(analysis_id):
     try:
         # Enhanced error handling and logging
         logger.info(f"Starting comprehensive analysis for {analysis_id}")
-        
+
         with analysis_status_lock:
             status = analysis_status[analysis_id]
             manager = status['manager']
             tech = status['tech']
             days = status['days']
-            
+
         logger.info(f"DEBUGGING - Comprehensive Analysis starting for {manager} with {tech} technology, {days} days")
-        
+
         with analysis_status_lock:
             status['status'] = 'running'
             status['completed_steps'] = []
@@ -13318,12 +13394,12 @@ def run_comprehensive_analysis(analysis_id):
             manager_name = status['manager']
             customer_name_filter = status.get('customer_name')
             subscription_id_filter = status.get('subscription_id')
-        
+
         team_roster_df = pd.DataFrame(TEAM_ROSTER, columns=["manager_name","cssm_name","cssm_email"])
         if manager_name != "All Managers":
             team_roster_df = team_roster_df[team_roster_df["manager_name"] == manager_name]
         cssm_emails = team_roster_df["cssm_email"].dropna().unique().tolist()
-        
+
         # Round 8 / Phase 1.5: every ``estimated_completion`` builder in this
         # file used the naive local-clock ``datetime.now()`` while the rest
         # of the status payload (``step_start_time`` etc.) is already UTC
@@ -13339,10 +13415,10 @@ def run_comprehensive_analysis(analysis_id):
             'step_start_time': _now_utc_iso_z(),
             'estimated_completion': (datetime.now(timezone.utc) + timedelta(minutes=12)).isoformat()
         })
-        
+
         # Connect to Snowflake and get subscriptions
         ctx = _connect_with_keeper()
-        
+
         if ctx is None:
             error_msg = (
                 "❌ CRITICAL: Snowflake database connection failed.\n\n"
@@ -13357,12 +13433,12 @@ def run_comprehensive_analysis(analysis_id):
                 'current_step': 'Connection Failed'
             })
             return
-        
+
         # Single customer/subscription: fetch directly from Snowflake (manager not used)
         subscription_id_val = (subscription_id_filter or '').strip()
         customer_name_val = (customer_name_filter or '').strip()
         single_customer_mode = bool(subscription_id_val or customer_name_val)
-        
+
         if single_customer_mode:
             if subscription_id_val:
                 sub_data = fetch_subscription_data(subscription_id_val, days)
@@ -13418,7 +13494,7 @@ def run_comprehensive_analysis(analysis_id):
                     'current_step': 'No Team Data'
                 })
                 return
-            
+
             logger.info(f"[[CUSTOMER_COUNT]] Comprehensive report - Retrieved {len(team_subs_df_unfiltered)} UNFILTERED team subscriptions")
             team_subs_df_unfiltered = team_subs_df_unfiltered.merge(team_roster_df, left_on="CSSM_EMAIL", right_on="cssm_email", how="left")
             has_customer_filter = customer_name_filter and customer_name_filter.strip()
@@ -13438,25 +13514,25 @@ def run_comprehensive_analysis(analysis_id):
                 logger.info(f"[[FILTER]] Comprehensive report - No filter - using all {len(team_subs_df)} subscriptions")
             if team_subs_df.empty:
                 raise Exception(f"No subscriptions found for team '{manager_name}'")
-        
+
         # cssm_name can be NaN after left merge when CSSM not in roster; avoid NaN in dict
         cssm_col = team_subs_df.get('cssm_name', pd.Series(dtype=object))
         cssm_lookup = pd.Series(cssm_col.fillna('').values, index=team_subs_df.BU_NAME).to_dict()
         sub_ids = team_subs_df["SUBSCRIPTION_ID"].dropna().unique().tolist()
         account_ids = team_subs_df["ACCOUNT_ID_C"].dropna().unique().tolist()
         team_customer_names = team_subs_df["BU_NAME"].dropna().unique().tolist()
-        
+
         # Get days from status (thread-safe)
         with analysis_status_lock:
             days = analysis_status[analysis_id]['days']
-        
+
         # Update status (thread-safe)
         update_analysis_status(analysis_id, {
             'progress': 35,
             'message': ' Analyzing adoption barriers and customer challenges...',
             'current_step': 'Adoption Barrier Analysis'
         })
-        
+
         # Fetch adoption barriers
         ab_raw = fetch_adoption_barriers(ctx, account_ids, days)
         ab_raw_empty = ab_raw is None or (hasattr(ab_raw, 'empty') and ab_raw.empty)
@@ -13507,14 +13583,14 @@ def run_comprehensive_analysis(analysis_id):
         # Get tech from status (thread-safe)
         with analysis_status_lock:
             tech = analysis_status[analysis_id]['tech']
-        
+
         # Update status (thread-safe)
         update_analysis_status(analysis_id, {
             'progress': 40,
             'message': ' Fetching CSConsole data (Action Plans, Customer Pulse, Success Priorities)...',
             'current_step': 'CSConsole Data Integration'
         })
-        
+
         try:
             customer_names = (
                 team_subs_df['BU_NAME'].dropna().unique().tolist()
@@ -13602,10 +13678,10 @@ def run_comprehensive_analysis(analysis_id):
                 'error': _redact_partial_warning_error(e) or 'prefetch_failed',
                 'kind': 'runtime',
             })
-        
+
         logger.info(f" Found {len(csconsole_action_plans)} action plans, {len(csconsole_customer_pulse)} customer pulse records, "
                     f"{len(csconsole_success_priorities)} success priorities, and {len(csconsole_adoption_barriers)} adoption barriers from CSConsole.")
-        
+
         ab_scoped = _apply_scope_filter_ab(ab_raw, tech, days)
         # Round 4 / Phase 4.6: comprehensive path -- propagate the AB
         # tech-filter widening warning so the workbook documents that
@@ -13633,11 +13709,11 @@ def run_comprehensive_analysis(analysis_id):
             'message': ' Processing CSOne cases and technical escalations...',
             'current_step': 'CSOne Case Processing'
         })
-        
+
         # Get csone_file from status (thread-safe)
         with analysis_status_lock:
             csone_file_path = analysis_status[analysis_id].get('csone_file')
-        
+
         # Process CSOne data with enhanced status reporting
         if csone_file_path:
             # Resolve path safely (prevents path traversal)
@@ -13655,7 +13731,7 @@ def run_comprehensive_analysis(analysis_id):
                 is_output_file = False
                 if 'AdoptIQ_' in csone_filename and ('_Portfolio_' in csone_filename or '_Compact_' in csone_filename or '_Renewal_' in csone_filename):
                     is_output_file = True
-                
+
                 if is_output_file:
                     logger.warning(f"[[WARNING]] CSOne file appears to be an output file, not input data: {csone_filename}")
                     update_analysis_status(analysis_id, {
@@ -13687,7 +13763,7 @@ def run_comprehensive_analysis(analysis_id):
             team_customer_names,
             include_all_cases=True,
         )
-        
+
         # Update CSOne import status with results (thread-safe)
         if not csone_df.empty:
             update_analysis_status(analysis_id, {
@@ -13706,17 +13782,17 @@ def run_comprehensive_analysis(analysis_id):
                 )
             })
             logger.warning(f"[[WARNING]] CSOne data processed but no cases found in scope")
-        
+
         # Update status (thread-safe)
         update_analysis_status(analysis_id, {
             'progress': 65,
             'message': ' Gathering external intelligence and bug correlations...',
             'current_step': 'External Intelligence Gathering'
         })
-        
+
         # ARR is intentionally excluded from report generation.
         arr_data = pd.DataFrame()
-        
+
         # External intelligence
         try:
             ext_bugs = fetch_help_webex_bugs()
@@ -13726,7 +13802,7 @@ def run_comprehensive_analysis(analysis_id):
             logger.warning(f"[[WARNING]] External intelligence gathering failed: {e}")
             ext_bugs = []
             ext_incidents = []
-        
+
         # Extract software defects (BST/CSC IDs) and PSIRT vulnerabilities from data
         logger.info(f"[[DEFECTS]] Extracting software defects and PSIRT vulnerabilities for comprehensive report...")
         try:
@@ -13737,7 +13813,7 @@ def run_comprehensive_analysis(analysis_id):
             logger.warning(f"[[WARNING]] Defect/vulnerability extraction failed: {e}")
             software_defects = {'total_defects': 0, 'total_cases_with_defects': 0, 'defect_by_customer': {}}
             psirt_vulns = {'total_vulnerabilities': 0, 'cve_ids': set(), 'psirt_advisories': set(), 'vulnerability_by_customer': {}}
-        
+
         # Validate data sources before report generation
         logger.info(f"[[VALIDATION]] Validating data sources for comprehensive report...")
         try:
@@ -13822,7 +13898,7 @@ def run_comprehensive_analysis(analysis_id):
                 'current_step': 'Validation Failed'
             })
             return
-        
+
         # Integrity checks (additional validation)
         reason = _integrity_checks(ab_norm, csone_df)
         if reason:
@@ -13841,32 +13917,32 @@ def run_comprehensive_analysis(analysis_id):
                     'current_step': 'Integrity Check Failed'
                 })
                 return
-        
+
         # Generate reports
         ts = time.strftime("%Y%m%d_%H%M%S")
         tag = f"{status['manager'].replace(' ','_')}_{status['tech'].replace(' ','_').replace('&','and')}_{status['days']}d_{ts}"
         out_dir = _ensure_outputs()
         base = str(out_dir / f"AdoptIQ_Report_{tag}")
-        
+
         with analysis_status_lock:
             status['progress'] = 70
             status['message'] = '[AI] Generating AI-powered portfolio analysis with CircuIT...'
             status['current_step'] = 'AI Portfolio Analysis'
-        
+
         # === USE CLEAN EXECUTIVE REPORT BUILDER (NO MARKDOWN ISSUES) ===
         from executive_report_builder import ExecutiveReportBuilder
         from adoptiq_backend import add_executive_visual_dashboard
-        
+
         # Create report builder
         report_builder = ExecutiveReportBuilder()
-        
+
         # CRITICAL FIX: Use unified customer counting function for comprehensive report
         # Use UNFILTERED team_subs_df for customer counting (we want ALL customers)
         # Filtered data is for report sections, but customer count should be comprehensive
         # team_subs_df_unfiltered is preserved above and should be used here
         team_subs_for_customer_counting = team_subs_df_unfiltered if not team_subs_df_unfiltered.empty else team_subs_df
         logger.info(f"[[CUSTOMER_COUNT]] Comprehensive report - Using {len(team_subs_for_customer_counting)} UNFILTERED subscriptions for customer counting (vs {len(team_subs_df)} filtered)")
-        
+
         all_customers_comprehensive = _get_all_customers_from_all_sources(
             ab_norm=ab_norm,
             csone_df=csone_df,
@@ -13877,7 +13953,7 @@ def run_comprehensive_analysis(analysis_id):
             csconsole_adoption_barriers=csconsole_adoption_barriers  # Use UNFILTERED
         )
         logger.info(f"[[CUSTOMER_COUNT]] Comprehensive report - Total unique customers from all sources: {len(all_customers_comprehensive)}")
-        
+
         # Calculate portfolio metrics (defensive: ab_norm/csone_df are never None in this flow, but guard for safety)
         _ab = ab_norm if ab_norm is not None and hasattr(ab_norm, 'empty') else pd.DataFrame()
         _cs = csone_df if csone_df is not None and hasattr(csone_df, 'empty') else pd.DataFrame()
@@ -14108,7 +14184,7 @@ def run_comprehensive_analysis(analysis_id):
                 'current_step': 'Consistency Check Failed',
             })
             return
-        
+
         # Add professional title page
         report_builder.add_title_page(status['manager'], status['tech'], status['days'], portfolio_metrics)
 
@@ -14134,7 +14210,7 @@ def run_comprehensive_analysis(analysis_id):
         # Add visual dashboard after title page
         logger.info(f"[[VISUAL]] Adding executive visual dashboard...")
         add_executive_visual_dashboard(report_builder.doc, portfolio_metrics)
-        
+
         # Generate additional charts for comprehensive report (trends, distributions, etc.)
         logger.info(f"[[CHARTS]] Generating additional charts for comprehensive report...")
         arr_impact = {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0}
@@ -14145,7 +14221,7 @@ def run_comprehensive_analysis(analysis_id):
                 feature_requests = analyze_feature_requests(csone_df, pd.DataFrame())
             else:
                 feature_requests = {'total_requests': 0, 'top_features': [], 'customer_examples': [], 'total_arr_impact': 0}
-            
+
             comprehensive_chart_paths = create_executive_charts(
                 ab_norm=ab_norm,
                 arr_data=arr_data,
@@ -14154,12 +14230,12 @@ def run_comprehensive_analysis(analysis_id):
                 feature_requests=feature_requests
             )
             logger.info(f"[[CHARTS]] Generated {len(comprehensive_chart_paths)} additional charts for comprehensive report")
-            
+
             # Add charts section to comprehensive report
             if comprehensive_chart_paths and len(comprehensive_chart_paths) > 0:
                 report_builder.add_page_break()
                 report_builder.add_heading('Visual Analysis & Trends', level=1)
-                
+
                 charts_added = 0
                 for chart_path in comprehensive_chart_paths:
                     if os.path.exists(chart_path):
@@ -14196,11 +14272,11 @@ def run_comprehensive_analysis(analysis_id):
                             logger.info(f"[[OK]] Chart added to comprehensive report: {chart_path}")
                         except Exception as e:
                             logger.error(f"[[ERROR]] Failed to add chart {chart_path}: {e}")
-                
+
                 logger.info(f"[[OK]] Total charts added to comprehensive report: {charts_added}")
         except Exception as e:
             logger.warning(f"[[WARNING]] Chart generation for comprehensive report failed: {e}")
-        
+
         # === 1. Generate Portfolio-Level Summary ===
         # Check for cancellation before AI analysis
         if check_cancellation(analysis_id):
@@ -14209,9 +14285,9 @@ def run_comprehensive_analysis(analysis_id):
                 'message': ' Analysis cancelled by user'
             })
             return
-        
+
         logger.info(f"[[AI]] Calling CircuIT AI for Portfolio Summary...")
-        
+
         # CRITICAL FIX: Filter CSConsole data by technology and team customers OUTSIDE try block
         # This ensures these variables are always available for customer deep dives below
         # These filtered datasets are used both in portfolio analysis AND customer-specific analysis
@@ -14221,17 +14297,17 @@ def run_comprehensive_analysis(analysis_id):
         filtered_success_priorities = _filter_csconsole_data_by_technology(csconsole_success_priorities, status['tech'], team_customer_names, account_ids=account_ids)
         filtered_adoption_barriers = _filter_csconsole_data_by_technology(csconsole_adoption_barriers, status['tech'], team_customer_names, account_ids=account_ids)
         _log_customer_pulse_parity(team_subs_df, filtered_customer_pulse, f"{status['manager']}::{status['tech']}")
-        
+
         logger.info(f"[[FILTER]] CSConsole data after filtering - Action Plans: {len(filtered_action_plans)}, "
                     f"Customer Pulse: {len(filtered_customer_pulse)}, "
                     f"Success Priorities: {len(filtered_success_priorities)}, "
                     f"Adoption Barriers: {len(filtered_adoption_barriers)}")
-        
+
         # CRITICAL FIX: Update portfolio_metrics customer count AFTER filtering
         # Customer count should still use UNFILTERED data (already calculated above)
         # But we log here for consistency
         logger.info(f"[[CUSTOMER_COUNT]] Portfolio metrics using {portfolio_metrics['total_customers']} customers (unfiltered)")
-        
+
         try:
             # Round 13 / Phase 3.10: canonicalize ``customer_name`` on
             # both sides of the engagement merge so cosmetic spelling
@@ -14363,7 +14439,7 @@ def run_comprehensive_analysis(analysis_id):
                 BEMS_ESCALATIONS=_r25b_bems,
             )
             portfolio_summary = generate_llm_response(portfolio_prompt, portfolio_briefing)
-            
+
             # Check if AI response is valid
             if portfolio_summary and not portfolio_summary.startswith("ERROR:"):
                 # Round 25 / Phase B: post-render numeric drift validator.
@@ -14541,9 +14617,9 @@ def run_comprehensive_analysis(analysis_id):
                 report_builder.add_paragraph(f"Technology Focus: {status['tech']}")
                 report_builder.add_paragraph(f"Analysis Period: {status['days']} days")
                 report_builder.add_paragraph(f"Total Customers: {len(engagement) if not engagement.empty else 0}")
-                report_builder.add_paragraph(f"Total Adoption Barriers: {len(ab_norm) if not ab_norm.empty else 0}")
+                report_builder.add_paragraph(f"Total Adoption Barriers: {cm.count_total_barriers(ab_norm)}")
                 report_builder.add_paragraph(f"Total TAC Cases: {len(csone_df) if not csone_df.empty else 0}")
-                
+
         except Exception as portfolio_error:
             logger.error(f"[[ERROR]] Portfolio AI analysis failed: {portfolio_error}")
             # Add a fallback portfolio summary with clean formatting
@@ -14561,7 +14637,7 @@ def run_comprehensive_analysis(analysis_id):
         status['current_step'] = 'AI Customer Analysis'
         status['step_start_time'] = _now_utc_iso_z()
         status['estimated_completion'] = (datetime.now(timezone.utc) + timedelta(minutes=8)).isoformat()
-        
+
         # FIXED: Use comprehensive function to get ALL customers from ALL available data sources
         # Use UNFILTERED team_subs_df for customer counting (we want ALL customers, not just filtered ones)
         # The filtered data is used for report sections, but deep dives should cover all customers
@@ -14577,7 +14653,7 @@ def run_comprehensive_analysis(analysis_id):
         )
         all_customers = list(all_customers_set)
         logger.info(f"[[CUSTOMER_COUNT]] Deep dives will cover {len(all_customers)} customers from all sources")
-        
+
         if not all_customers:
             logger.info("No customer activity found in any data sources. No deep dives to generate.")
         else:
@@ -14602,11 +14678,11 @@ def run_comprehensive_analysis(analysis_id):
             logger.debug("[[DATA]] Customer names: %s", all_customers)
 
         logger.info(f"[[BULLSEYE]] Found {len(all_customers)} customers with activity. Generating AI-powered deep dives...")
-        
+
         # Update progress for customer deep dives
         status['progress'] = 75
         status['message'] = f" Found {len(all_customers)} customers with activity. Generating AI-powered deep dives..."
-        
+
         # Calculate ETA based on customers remaining.
         # Round 6 / Phase 6.2: clamp ``remaining_time`` to >= 0 and use a
         # tz-aware UTC clock for both ``elapsed_time`` and the
@@ -14635,14 +14711,14 @@ def run_comprehensive_analysis(analysis_id):
         status['estimated_completion'] = (
             datetime.now(timezone.utc) + timedelta(seconds=remaining_time)
         ).isoformat()
-        
+
         # Add customer processing progress
         status['customer_progress'] = {
             'total': len(all_customers),
             'completed': 0,
             'current': None
         }
-        
+
         # Track actually analyzed customers (not skipped)
         customers_actually_analyzed = 0
 
@@ -14662,7 +14738,7 @@ def run_comprehensive_analysis(analysis_id):
             except Exception:
                 _disp_current = str(customer_name)
             status['customer_progress']['current'] = _disp_current
-            
+
             # Check for cancellation before each customer analysis
             if check_cancellation(analysis_id):
                 update_analysis_status(analysis_id, {
@@ -14670,14 +14746,14 @@ def run_comprehensive_analysis(analysis_id):
                     'message': ' Analysis cancelled by user'
                 })
                 return
-            
+
             status['message'] = f' ({i}/{len(all_customers)}) Generating AI StoryBoard for: {customer_name}...'
             status['current_step'] = f'AI Customer Analysis ({i}/{len(all_customers)})'
             status['step_start_time'] = _now_utc_iso_z()
             remaining_customers = len(all_customers) - i
             estimated_minutes = remaining_customers * 0.5  # Estimate 30 seconds per customer
             status['estimated_completion'] = (datetime.now(timezone.utc) + timedelta(minutes=estimated_minutes)).isoformat()
-            
+
             logger.info(f"  [[LIST]] ({i}/{len(all_customers)}) Generating AI StoryBoard for: {customer_name}...")
             ab_norm_safe_check = ab_norm is not None and (hasattr(ab_norm, 'columns') and 'customer_name' in ab_norm.columns)
             cust_ab = ab_norm[ab_norm['customer_name'] == customer_name] if ab_norm_safe_check else pd.DataFrame()
@@ -14739,7 +14815,7 @@ def run_comprehensive_analysis(analysis_id):
 
             cssm_name = cssm_lookup.get(customer_name, "N/A")
             matches, matched_df = cross_reference_refs(cust_ab, cust_csone, ext_bugs)
-            
+
             logger.info(f"  [[AI]] Calling CircuIT AI for {customer_name} analysis...")
             try:
                 customer_csconsole_data = {
@@ -14748,7 +14824,7 @@ def run_comprehensive_analysis(analysis_id):
                     'success_priorities': cust_success_priorities,
                     'adoption_barriers': cust_csconsole_adoption_barriers
                 }
-                
+
                 # Extract software defects and PSIRT for this customer (enriches AI briefing)
                 cust_sw_defects = None
                 cust_psirt = None
@@ -14762,13 +14838,13 @@ def run_comprehensive_analysis(analysis_id):
                             cust_psirt = None
                 except Exception as e:
                     logger.debug(f"Defect/vuln extraction for {customer_name}: {e}")
-                
+
                 customer_briefing = _create_briefing_book(
                     customer_name, cust_ab, cust_csone, ext_bugs, ext_incidents, matches, matched_df,
                     None, None, customer_csconsole_data,
                     software_defects=cust_sw_defects, psirt_vulns=cust_psirt
                 )
-                
+
                 # Determine specific technology for this customer if "All Contact Center" is selected
                 specific_technology = status['tech']
                 if status['tech'] == 'All Contact Center':
@@ -14779,7 +14855,7 @@ def run_comprehensive_analysis(analysis_id):
                     })
                     if not specific_technology:
                         specific_technology = 'Contact Center'  # Fallback
-                
+
                 customer_prompt = PROMPT_CUSTOMER_TEMPLATE.format(CUSTOMER_NAME=customer_name, CSSM_NAME=cssm_name, TECHNOLOGY=specific_technology, MANAGER=status['manager'])
                 customer_storyboard = generate_llm_response(customer_prompt, customer_briefing)
 
@@ -14876,7 +14952,7 @@ def run_comprehensive_analysis(analysis_id):
                     report_builder.add_paragraph(f"Adoption Barriers: {len(cust_ab) if not cust_ab.empty else 0}", bold_sections=["Adoption Barriers:"])
                     report_builder.add_paragraph(f"TAC Cases: {len(cust_csone) if not cust_csone.empty else 0}", bold_sections=["TAC Cases:"])
                     customers_actually_analyzed += 1  # Count fallback as analyzed
-                    
+
             except Exception as ai_error:
                 logger.error("  [[ERROR]] AI analysis failed for %s: %s", customer_name, ai_error, exc_info=True)
                 # Add customer separator before each customer section (except the first)
@@ -14901,7 +14977,7 @@ def run_comprehensive_analysis(analysis_id):
         status['current_step'] = 'Report Generation'
         status['step_start_time'] = _now_utc_iso_z()
         status['estimated_completion'] = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
-        
+
         # Round 17 / Phase D.2: append a Historical Context section
         # sourced from the CSOne knowledge corpus (or a banner when
         # the corpus is unavailable).  Never raises -- always returns
@@ -14946,7 +15022,7 @@ def run_comprehensive_analysis(analysis_id):
             report_subject=_r25e_subject,
         )
         logger.info(f"[[OK]] Clean executive report saved (NO ## symbols): {docx_path}")
-        
+
         # === 4. Create Enhanced Reports ===
         try:
             status['progress'] = 92
@@ -14954,12 +15030,12 @@ def run_comprehensive_analysis(analysis_id):
             status['current_step'] = 'Enhanced Report Generation'
             status['step_start_time'] = _now_utc_iso_z()
             status['estimated_completion'] = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
-            
+
             logger.info(f"[[ENHANCED]] Generating enhanced Word report with technology focus...")
             # Create enhanced Word report
             from adoptiq_backend import create_enhanced_word_report
             enhanced_docx_path = create_enhanced_word_report(
-                status['manager'], status['tech'], status['days'], ab_norm, csone_df, 
+                status['manager'], status['tech'], status['days'], ab_norm, csone_df,
                 {"portfolio_summary": {"portfolio_health_score": "B", "executive_summary": "Portfolio analysis completed successfully"}},
                 ext_bugs, ext_incidents
             )
@@ -14971,7 +15047,7 @@ def run_comprehensive_analysis(analysis_id):
             enhanced_docx_path = None
             status['progress'] = 94
             status['message'] = '️ Enhanced Word report skipped, continuing with Excel generation...'
-        
+
         # Write Excel file with all data
         try:
             status['progress'] = 95
@@ -14979,9 +15055,9 @@ def run_comprehensive_analysis(analysis_id):
             status['current_step'] = 'Excel Report Generation'
             status['step_start_time'] = _now_utc_iso_z()
             status['estimated_completion'] = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
-            
+
             logger.info(f"[[DATA]] Writing comprehensive Excel workbook...")
-            
+
             # Prepare CSConsole data for Excel export
             csconsole_sheets = {}
             if 'filtered_action_plans' in locals() and not filtered_action_plans.empty:
@@ -14992,7 +15068,7 @@ def run_comprehensive_analysis(analysis_id):
                 csconsole_sheets["CSConsole_Success_Priorities"] = filtered_success_priorities
             if 'filtered_adoption_barriers' in locals() and not filtered_adoption_barriers.empty:
                 csconsole_sheets["CSConsole_Adoption_Barriers"] = filtered_adoption_barriers
-            
+
             # Combine all sheets (excluding CSConsole data to avoid duplicates with enhanced formatter)
             all_sheets = {
                 "AB_Detail_All": ab_norm,
@@ -15000,7 +15076,7 @@ def run_comprehensive_analysis(analysis_id):
                 "External_Bugs": pd.DataFrame(ext_bugs),
                 "External_Incidents": pd.DataFrame(ext_incidents)
             }
-            
+
             xlsx_path = write_excel_workbook(base, all_sheets, {
                 'action_plans': filtered_action_plans,
                 'customer_pulse': filtered_customer_pulse,
@@ -15013,10 +15089,10 @@ def run_comprehensive_analysis(analysis_id):
         except Exception as excel_error:
             logger.error(f"[[ERROR]] Excel writing failed: {excel_error}")
             raise excel_error
-        
+
         # Calculate final metrics - use actually analyzed customers, not total
         customers_analyzed = customers_actually_analyzed
-        
+
         # Update status with results
         try:
             status['progress'] = 98
@@ -15024,13 +15100,13 @@ def run_comprehensive_analysis(analysis_id):
             status['current_step'] = 'Final Status Update'
             status['step_start_time'] = _now_utc_iso_z()
             status['estimated_completion'] = (datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()
-            
+
             logger.info(f"[[SUCCESS]] Updating final status with comprehensive results...")
-            
+
             # Update customer progress to final state
             status['customer_progress']['completed'] = customers_analyzed
             status['customer_progress']['current'] = None  # No current customer
-            
+
             # Only set to completed if all customers were actually processed
             if customers_analyzed == len(all_customers):
                 status['status'] = 'completed'
@@ -15050,20 +15126,20 @@ def run_comprehensive_analysis(analysis_id):
             technology = status.get('technology', status.get('tech', ''))
             customer_name = status.get('customer_name', '')
             start_time = status.get('start_time', '')
-            
+
             # Safe DataFrame length calculations
             ab_len = 0
             csone_len = 0
             try:
                 if ab_norm is not None and hasattr(ab_norm, '__len__'):
-                    ab_len = len(ab_norm)
+                    ab_len = cm.count_total_barriers(ab_norm)
                 if csone_df is not None and hasattr(csone_df, '__len__'):
                     csone_len = len(csone_df)
             except Exception as len_error:
                 logger.error(f"Length calculation failed: {len_error}")
                 ab_len = 0
                 csone_len = 0
-            
+
             status['results'] = {
                 'docx_path': docx_path,
                 'xlsx_path': xlsx_path,
@@ -15140,7 +15216,7 @@ def run_comprehensive_analysis(analysis_id):
         except Exception as status_error:
             logger.error(f"[[ERROR]] Status update failed: {status_error}")
             raise status_error
-        
+
         # Round 9 / Phase 1.1: previously logged the full ``docx_path`` --
         # an absolute filesystem path that on shipped desktop installs
         # embeds the operator's home directory, the OneDrive sync root,
@@ -15175,7 +15251,7 @@ def run_comprehensive_analysis(analysis_id):
             _kind_for_log = type(e).__name__
         logger.error(f"[[ERROR]] Analysis failed (kind={_kind_for_log}): {type(e).__name__}")
         logger.debug("[[LIST]] Full traceback for analysis failure", exc_info=True)
-        
+
         # Get status safely
         try:
             with analysis_status_lock:
@@ -15183,7 +15259,7 @@ def run_comprehensive_analysis(analysis_id):
         except Exception as status_error:
             logger.error(f"[[ERROR]] Failed to get status: {status_error}")
             status = {}
-        
+
         # Round 5 hotfix: typed error classifier replaces the substring cascade
         # that always blamed "VPN not connected" for any message mentioning
         # keeper.cisco.com. The new helper distinguishes DNS / TLS cert /
@@ -15219,10 +15295,10 @@ def run_comprehensive_analysis(analysis_id):
                 # so we can never leak raw secrets even if the scrubber
                 # itself can't be imported.
                 status['error_detail'] = f"{type(e).__name__}: <classifier-and-scrubber-unavailable>"[:240]
-        
+
         status['status'] = 'error'
         status['progress'] = 0
-        
+
         try:
             with analysis_status_lock:
                 analysis_status[analysis_id] = status
@@ -15383,7 +15459,7 @@ def progress(analysis_id):
     if not _is_valid_analysis_id(analysis_id):
         return "<h1>Invalid analysis ID</h1><a href='/'>Start New Analysis</a>", 400
 
-    
+
     with analysis_status_lock:
         _in_memory = analysis_id in analysis_status
 
@@ -15560,12 +15636,12 @@ _EXCLUDE_FROM_STATUS_API = {'word_report', 'excel_report', 'csone_file', '_threa
 @app.route('/status/<analysis_id>')
 def get_status(analysis_id):
     from urllib.parse import unquote
-    
+
     # URL decode the analysis_id in case it was encoded
     analysis_id = unquote(analysis_id)
     if not _is_valid_analysis_id(analysis_id):
         return jsonify({'error': 'Invalid analysis ID'}), 400
-    
+
     # Check in-memory status first (under lock to avoid TOCTOU race)
     with analysis_status_lock:
         in_memory = analysis_id in analysis_status
@@ -15632,7 +15708,7 @@ def get_status(analysis_id):
         except Exception as e:
             logger.error(f"Error loading analysis status: {e}", exc_info=True)
             return jsonify({'error': 'Analysis not found'}), 404
-    
+
     with analysis_status_lock:
         status = analysis_status.get(analysis_id)
         if not status:
@@ -15818,7 +15894,7 @@ def get_all_status():
             for analysis_id in _r13_slice:
                 status = analysis_status.get(analysis_id) or {}
                 status_copy = {}
-                
+
                 # Copy fields safely, converting datetime to string
                 for key, value in status.items():
                     if key.startswith('_'):
@@ -15829,7 +15905,7 @@ def get_all_status():
                         status_copy[key] = value
                     else:
                         status_copy[key] = str(value)
-                
+
                 status_copy['analysis_id'] = analysis_id
 
                 # Add IP address if available
@@ -16080,12 +16156,12 @@ def previous_reports():
         import glob
         from datetime import datetime, timedelta
         import re
-        
+
         # Get all Word and Excel files from outputs directory (canonical when frozen)
         outputs_dir = str(_APP_SUPPORT / "outputs") if _frozen else "outputs"
         if not os.path.exists(outputs_dir):
             os.makedirs(outputs_dir)
-        
+
         # Find all report files (including leader reports - both old and new naming)
         word_files = glob.glob(os.path.join(outputs_dir, "AdoptIQ_*.docx")) + glob.glob(os.path.join(outputs_dir, "Leader_Report_*.docx"))
         excel_files = glob.glob(os.path.join(outputs_dir, "AdoptIQ_*.xlsx")) + glob.glob(os.path.join(outputs_dir, "AdoptIQ_Data_*.xlsx"))
@@ -16113,16 +16189,16 @@ def previous_reports():
             excel_files = sorted(excel_files, key=_r13_mtime_key)
         except Exception:
             pass
-        
+
         # Group files by report (remove file extension and timestamp to group them)
         report_groups = {}
-        
+
         # Process Word files
         for file_path in word_files:
             try:
                 stat = os.stat(file_path)
                 filename = os.path.basename(file_path)
-                
+
                 # Extract report identifier (remove .docx and timestamp)
                 # Pattern: AdoptIQ_Report_Manager_Technology_Days_YYYYMMDD_HHMMSS.docx
                 # Pattern: AdoptIQ_Report_Compact_Manager_Technology_Days_YYYYMMDD_HHMMSS.docx
@@ -16131,7 +16207,7 @@ def previous_reports():
                 # Pattern: Leader_Report_Manager_Days_YYYYMMDD_HHMMSS.docx (legacy)
                 report_id = re.sub(r'_\d{8}_\d{6}\.docx$', '', filename)
                 report_id = report_id.replace('AdoptIQ_Report_', '').replace('AdoptIQ_', '').replace('Leader_Report_', 'Leader_')
-                
+
                 if report_id not in report_groups:
                     report_groups[report_id] = {
                         'word_file': None,
@@ -16139,7 +16215,7 @@ def previous_reports():
                         'modified': None,
                         'total_size': 0
                     }
-                
+
                 report_groups[report_id]['word_file'] = {
                     'name': filename,
                     'path': file_path,
@@ -16147,26 +16223,26 @@ def previous_reports():
                     'modified': datetime.fromtimestamp(stat.st_mtime)
                 }
                 report_groups[report_id]['total_size'] += stat.st_size
-                
+
                 # Keep track of the most recent modification time
                 if report_groups[report_id]['modified'] is None or stat.st_mtime > report_groups[report_id]['modified'].timestamp():
                     report_groups[report_id]['modified'] = datetime.fromtimestamp(stat.st_mtime)
-                    
+
             except Exception as e:
                 logger.warning(f"Could not get file info for {file_path}: {e}")
-        
+
         # Process Excel files
         for file_path in excel_files:
             try:
                 stat = os.stat(file_path)
                 filename = os.path.basename(file_path)
-                
+
                 # Extract report identifier (remove .xlsx and timestamp)
                 # Pattern: AdoptIQ_Report_Manager_Technology_Days_YYYYMMDD_HHMMSS.xlsx
                 # Pattern: AdoptIQ_Data_Manager_Technology_Days_YYYYMMDD_HHMMSS.xlsx
                 report_id = re.sub(r'_\d{8}_\d{6}\.xlsx$', '', filename)
                 report_id = report_id.replace('AdoptIQ_Report_', '').replace('AdoptIQ_Data_', '').replace('AdoptIQ_', '')
-                
+
                 if report_id not in report_groups:
                     report_groups[report_id] = {
                         'word_file': None,
@@ -16174,7 +16250,7 @@ def previous_reports():
                         'modified': None,
                         'total_size': 0
                     }
-                
+
                 report_groups[report_id]['excel_file'] = {
                     'name': filename,
                     'path': file_path,
@@ -16182,14 +16258,14 @@ def previous_reports():
                     'modified': datetime.fromtimestamp(stat.st_mtime)
                 }
                 report_groups[report_id]['total_size'] += stat.st_size
-                
+
                 # Keep track of the most recent modification time
                 if report_groups[report_id]['modified'] is None or stat.st_mtime > report_groups[report_id]['modified'].timestamp():
                     report_groups[report_id]['modified'] = datetime.fromtimestamp(stat.st_mtime)
-                    
+
             except Exception as e:
                 logger.warning(f"Could not get file info for {file_path}: {e}")
-        
+
         # Sort reports by modification time (newest first)
         # Round 11 / Phase 11.1: secondary tie-break on the
         # report_id key so two reports written within the same
@@ -16209,7 +16285,7 @@ def previous_reports():
                 str(x[0] or ''),
             ),
         )
-        
+
         # Round 28 / Phase 2: hand off to templates/previous_reports.html
         # which extends base.html (dark-default + sun/moon toggle inherited
         # from the site-wide theme system).  The previous inline f-string
@@ -16704,6 +16780,65 @@ def playbook_page():
 # console does not block.
 
 
+# Round 53 / Phase 53.4.1: scheme allow-list for the OneDrive deep-
+# link surfaced in the corpus status payload.  Restricting to these
+# four schemes ensures an env-driven override (or a typo in
+# ``config.py``) cannot inject ``javascript:`` / ``data:`` /
+# ``file:`` into the rendered anchor; anything outside the list
+# collapses to ``None`` and the UI falls back to text-only
+# remediation guidance.  ``http``/``https`` cover the SharePoint
+# share-URL hop (which itself surfaces a "Sync" button to OneDrive);
+# ``odopen`` and ``ms-onedrive`` are the OS-level deep-link schemes
+# the macOS / Windows OneDrive clients register.
+_R53_ONEDRIVE_DEEP_LINK_SCHEMES: tuple = (
+    "http://", "https://", "odopen:", "ms-onedrive:",
+)
+
+# Round 54 / F2 -- defense-in-depth length cap.  The deep link is
+# rendered into the status payload (which lands in the analyze panel
+# AND the rotating file log), so an oversized hostile value would
+# bloat both surfaces without buying the attacker anything they could
+# not already do via the scheme allow-list.  2 KB comfortably exceeds
+# every legitimate OneDrive / SharePoint share URL we've seen in
+# practice (the longest in the wild is ~600 chars including tenant
+# GUID and resource path).  Mirrored by the JS validator in
+# ``static/js/intel_status.js`` so server and client agree on the
+# rejection boundary.  Pinned by
+# ``tests/test_round54_f2_deeplink_length_cap.py``.
+_R53_ONEDRIVE_DEEP_LINK_MAX_BYTES: int = 2048
+
+
+def _r53_safe_onedrive_deep_link() -> Optional[str]:
+    """Return the configured OneDrive deep-link URL when its scheme
+    passes the allow-list AND the value is under the size cap;
+    ``None`` otherwise.  Never raises -- a malformed config should
+    NOT prevent the rest of the status payload from rendering.
+    """
+    try:
+        from config import Config as _Config
+    except Exception:  # noqa: BLE001 - import path may be partial in tests
+        return None
+    raw = getattr(_Config, "ADOPTIQ_CORPUS_ONEDRIVE_DEEP_LINK", None)
+    if not raw:
+        return None
+    candidate = str(raw).strip()
+    if not candidate:
+        return None
+    # Round 54 / F2 -- length cap (UTF-8 bytes, not chars; multi-byte
+    # codepoints in a hostile URL must not bypass the cap).
+    try:
+        size_bytes = len(candidate.encode("utf-8"))
+    except (UnicodeEncodeError, UnicodeDecodeError):  # pragma: no cover - defensive
+        return None
+    if size_bytes > _R53_ONEDRIVE_DEEP_LINK_MAX_BYTES:
+        return None
+    lower = candidate.lower()
+    for scheme in _R53_ONEDRIVE_DEEP_LINK_SCHEMES:
+        if lower.startswith(scheme):
+            return candidate
+    return None
+
+
 def _r17_corpus_status_payload() -> Dict[str, Any]:
     """Round 17 / Phase D.5 -- assemble the corpus tile payload.
 
@@ -16757,6 +16892,16 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             # :func:`corpus_bootstrap._check_onedrive_sync_status`.
             "onedrive_status": None,
             "onedrive_file_count": None,
+            # Round 53 / Phase 53.4.1: clickable "Open OneDrive folder"
+            # link surfaced on the analyze-page panel when the corpus
+            # is in the ``blocked_no_onedrive`` state.  Defaults to
+            # ``Config.ADOPTIQ_CORPUS_ONEDRIVE_DEEP_LINK``; the
+            # serializer below validates the scheme and replaces an
+            # untrusted value with ``None`` so a hostile env override
+            # cannot inject ``javascript:`` into the rendered anchor.
+            # Sourced from config (not boot_state) because it is a
+            # static deployment setting rather than per-run state.
+            "onedrive_deep_link": None,
         },
         "corpus": {
             "files_total": 0,
@@ -16818,6 +16963,13 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             "onedrive_file_count": getattr(
                 boot_state, "onedrive_file_count", None,
             ),
+            # Round 53 / Phase 53.4.1: surface the configured
+            # OneDrive deep-link only if the scheme passes the
+            # allow-list below.  Done inside the serializer (not at
+            # config-import time) so a runtime env-var override can be
+            # picked up without restarting and so a malicious value is
+            # defanged on the way OUT to the JSON response.
+            "onedrive_deep_link": _r53_safe_onedrive_deep_link(),
         }
         # Round 17.1: also surface per-source counts under
         # ``corpus.sources`` so the admin Corpus tile can render the
@@ -18838,22 +18990,22 @@ def download_file(filename):
             return "Invalid filename", 400
         if '\x00' in filename:
             return "Invalid filename", 400
-        
+
         # Check for path traversal attempts
         if '..' in filename or '/' in filename or '\\' in filename:
             return "Invalid filename", 400
-        
+
         # Only allow specific file extensions
         allowed_extensions = {'.docx', '.xlsx', '.pdf'}
         file_ext = os.path.splitext(filename)[1].lower()
         if file_ext not in allowed_extensions:
             return "Invalid file type", 400
-        
+
         # Secure the filename
         safe_filename = secure_filename(filename)
         if not safe_filename:
             return "Invalid filename", 400
-        
+
         # Round 8 / Phase 1.10: previously, when ``secure_filename(filename)``
         # rewrote the input (e.g. dropped Unicode chars), the route fell back
         # to ``os.path.join(outputs_dir, filename)`` -- the *original*
@@ -18880,7 +19032,7 @@ def download_file(filename):
             return send_file(resolved_path, as_attachment=True, download_name=dl_name)
         except (FileNotFoundError, OSError):
             return "File no longer available. It may have been cleaned up.", 404
-        
+
     except Exception as e:
         logger.error(f"Error downloading file {filename}: {e}")
         return "Error downloading file. Please try again.", 500
@@ -18920,7 +19072,7 @@ def cancel_analysis(analysis_id):
     # Set cancellation flag (thread-safe)
     with cancellation_flags_lock:
         cancellation_flags[analysis_id] = True
-    
+
     # Update status (thread-safe) — re-fetch to avoid stale reference
     with analysis_status_lock:
         live = analysis_status.get(analysis_id)
@@ -18929,7 +19081,7 @@ def cancel_analysis(analysis_id):
             live['message'] = ' Cancellation requested...'
             live['progress'] = 0
     save_analysis_status()
-    
+
     return jsonify({'success': True, 'message': 'Cancellation requested'})
 
 
@@ -19032,11 +19184,11 @@ def start_compact_analysis():
 
         if not technology:
             return jsonify({'error': 'Technology is required'}), 400
-        
+
         is_valid, error_msg = validate_days_input(days)
         if not is_valid:
             return jsonify({'error': error_msg}), 400
-        
+
         # Generate analysis ID
         analysis_id = (
             f"Compact_{_sanitize_analysis_id_part(manager)}_"
@@ -19078,20 +19230,20 @@ def start_compact_analysis():
                 'estimated_completion': (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
                 'report_type': 'compact'
             }
-        
+
         # Start analysis in background thread with timeout protection
         def run_analysis_with_timeout():
             try:
                 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-                
+
                 def run_analysis():
                     run_compact_analysis(analysis_id)
-                
+
                 # Use ThreadPoolExecutor with timeout to prevent hanging
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     future = _submit_with_context(executor, run_analysis)
                     future.result(timeout=300)  # 5-minute timeout for entire analysis
-                    
+
             except FutureTimeoutError:
                 logger.error(f"Analysis timed out after 5 minutes")
                 with analysis_status_lock:
@@ -19108,11 +19260,11 @@ def start_compact_analysis():
                     analysis_status[analysis_id]['status'] = 'error'
                     analysis_status[analysis_id]['message'] = 'Analysis failed. Please check the Admin page for details.'
                     save_analysis_status()
-        
+
         thread = threading.Thread(target=run_analysis_with_timeout)
         thread.daemon = True
         thread.start()
-        
+
         logger.info(f"[[START]] Started compact analysis: {analysis_id}")
         return jsonify({
             'success': True,
@@ -19120,7 +19272,7 @@ def start_compact_analysis():
             'message': 'Compact analysis started successfully',
             'redirect_url': url_for('progress', analysis_id=analysis_id)
         })
-        
+
     except Exception as e:
         logger.error(f"[[ERROR]] Error starting compact analysis: {e}", exc_info=True)
         return jsonify({'error': 'Failed to start analysis'}), 500
@@ -19176,15 +19328,15 @@ def start_customer_renewal_analysis():
             "[[DEBUG]] Renewal analysis verbatim: manager=%r tech=%r days=%s sub_id=%r customer=%r",
             manager, technology, days, subscription_id, customer_name,
         )
-        
+
         if not technology:
             logger.warning(f"[[VALIDATION]] Technology is empty")
             return jsonify({'error': 'Technology is required'}), 400
-        
+
         is_valid, error_msg = validate_days_input(days)
         if not is_valid:
             return jsonify({'error': error_msg}), 400
-        
+
         # Validate based on renewal type
         if renewal_type == 'renewal':
             # Single customer renewal: require customer_name or subscription_id, manager optional
@@ -19204,7 +19356,7 @@ def start_customer_renewal_analysis():
                 return jsonify({'error': f'Manager is required for portfolio renewal analysis. {error_msg}'}), 400
         else:
             return jsonify({'error': f'Invalid renewal type: {renewal_type}. Must be "renewal" or "renewal_portfolio"'}), 400
-        
+
         # Generate analysis ID based on renewal type
         if renewal_type == 'renewal_portfolio':
             analysis_id = (
@@ -19241,12 +19393,12 @@ def start_customer_renewal_analysis():
                 'report_type': 'customer_renewal'
             }
             save_analysis_status()
-        
+
         # Start analysis in background thread
         thread = threading.Thread(target=run_customer_renewal_analysis, args=(analysis_id,))
         thread.daemon = True
         thread.start()
-        
+
         logger.info(f"[[START]] Started {renewal_type} analysis: {analysis_id}")
         return jsonify({
             'success': True,
@@ -19254,7 +19406,7 @@ def start_customer_renewal_analysis():
             'message': 'Portfolio renewal analysis started successfully' if renewal_type == 'renewal_portfolio' else 'Customer renewal analysis started successfully',
             'redirect_url': url_for('progress', analysis_id=analysis_id)
         })
-        
+
     except Exception as e:
         logger.error(f"[[ERROR]] Error starting renewal analysis: {e}", exc_info=True)
         return jsonify({'error': 'Failed to start analysis'}), 500
@@ -19276,17 +19428,17 @@ def search_subscriptions():
             limit = max(1, min(limit, 100))  # Clamp to 1-100
         except (ValueError, TypeError):
             limit = 10
-        
+
         if not customer_name:
             return jsonify({'error': 'Customer name is required'}), 400
-        
+
         if len(customer_name) < 2:
             return jsonify({'error': 'Customer name must be at least 2 characters'}), 400
-        
+
         is_valid, err_msg = validate_customer_name_input(customer_name)
         if not is_valid:
             return jsonify({'error': err_msg}), 400
-        
+
         # Search for subscriptions (Snowflake DSM)
         subscriptions = search_subscriptions_by_customer(customer_name, limit)
         # Round 5 / Phase 4.13: branch on the search-error sentinel so
@@ -19367,23 +19519,23 @@ def subscription_analysis(subscription_id):
         # Validate subscription ID format
         if not re.match(r'^[a-zA-Z0-9\-_]+$', subscription_id):
             return jsonify({'error': 'Invalid subscription ID format'}), 400
-        
+
         days = request.args.get('days', 90, type=int)
         is_valid, error_msg = validate_days_input(days)
         if not is_valid:
             return jsonify({'error': error_msg}), 400
-        
+
         # Get subscription data
         sub_data = fetch_subscription_data(subscription_id, days)
-        
+
         if not sub_data['found']:
             return jsonify({'error': sub_data.get('error', 'Subscription not found')}), 404
-        
+
         return jsonify({
             'success': True,
             'subscription_data': sub_data
         })
-        
+
     except Exception as e:
         logger.error(f"Error getting subscription analysis: {e}")
         return jsonify({'error': 'Failed to retrieve subscription analysis'}), 500
@@ -19396,12 +19548,12 @@ def subscription_renewal_risk(subscription_id):
         # Validate subscription ID format
         if not re.match(r'^[a-zA-Z0-9\-_]+$', subscription_id):
             return jsonify({'error': 'Invalid subscription ID format'}), 400
-        
+
         days = request.args.get('days', 90, type=int)
         is_valid, error_msg = validate_days_input(days)
         if not is_valid:
             return jsonify({'error': error_msg}), 400
-        
+
         # Get renewal risk analysis
         risk_analysis = get_subscription_renewal_risk(subscription_id, days)
 
@@ -19421,7 +19573,7 @@ def subscription_renewal_risk(subscription_id):
             'success': True,
             'renewal_analysis': risk_analysis
         })
-        
+
     except Exception as e:
         logger.error(f"Error getting subscription renewal risk: {e}")
         return jsonify({'error': 'Failed to retrieve renewal risk analysis'}), 500
@@ -19443,22 +19595,22 @@ def start_subscription_analysis():
         except (ValueError, TypeError):
             days = 90
         report_type = data.get('report_type', 'comprehensive')
-        
+
         if not subscription_id:
             return jsonify({'error': 'Subscription ID is required'}), 400
-        
+
         # Validate subscription ID format (alphanumeric and hyphens only)
         if not re.match(r'^[a-zA-Z0-9\-_]+$', subscription_id):
             return jsonify({'error': 'Invalid subscription ID format'}), 400
-        
+
         is_valid, error_msg = validate_days_input(days)
         if not is_valid:
             return jsonify({'error': error_msg}), 400
-        
+
         # Generate unique analysis ID (sanitized)
         safe_subscription_id = re.sub(r'[^a-zA-Z0-9\-_]', '', subscription_id)
         analysis_id = f"sub_{safe_subscription_id}_{int(time.time())}"
-        
+
         # Initialize analysis status
         with analysis_status_lock:
             analysis_status[analysis_id] = {
@@ -19472,7 +19624,7 @@ def start_subscription_analysis():
                 'current_step': 'Initialization',
                 'step_start_time': _now_utc_iso_z()
             }
-        
+
         # Start analysis in background thread
         thread = threading.Thread(
             target=run_subscription_analysis,
@@ -19480,13 +19632,13 @@ def start_subscription_analysis():
             daemon=True
         )
         thread.start()
-        
+
         return jsonify({
             'success': True,
             'analysis_id': analysis_id,
             'message': 'Subscription analysis started'
         })
-        
+
     except Exception as e:
         logger.error(f"Error starting subscription analysis: {e}")
         return jsonify({'error': 'Failed to start subscription analysis'}), 500
@@ -19502,31 +19654,31 @@ def run_subscription_analysis(analysis_id):
         pass  # noqa: PIE790
     try:
         logger.info(f"[[START]] Starting subscription analysis: {analysis_id}")
-        
+
         # Get analysis parameters
         with analysis_status_lock:
             status = analysis_status[analysis_id]
             subscription_id = status['subscription_id']
             days = status['days']
             report_type = status['report_type']
-        
+
         with analysis_status_lock:
             status['status'] = 'running'
             status['completed_steps'] = []
             _update_progress(status, 10, 'Querying subscription details...', 'Data Retrieval')
-        
+
         sub_data = fetch_subscription_data(subscription_id, days)
-        
+
         if not sub_data['found']:
             with analysis_status_lock:
                 status['status'] = 'error'
                 status['message'] = f"Subscription not found: {sub_data.get('error', 'Unknown error')}"
             save_analysis_status()
             return
-        
+
         with analysis_status_lock:
             _update_progress(status, 20, f'Loading customer context for {sub_data.get("customer_name", "")}...', 'Data Retrieval')
-        
+
         ab_df = pd.DataFrame(sub_data['adoption_barriers']) if sub_data['adoption_barriers'] else pd.DataFrame()
         # Phase 1.1: validate the data sources required to author a
         # subscription analysis. We require the subscription record to
@@ -19562,18 +19714,18 @@ def run_subscription_analysis(analysis_id):
         ap_df = pd.DataFrame(sub_data['action_plans']) if sub_data['action_plans'] else pd.DataFrame()
         cp_df = pd.DataFrame(sub_data['customer_pulse']) if sub_data['customer_pulse'] else pd.DataFrame()
         sp_df = pd.DataFrame(sub_data['success_priorities']) if sub_data['success_priorities'] else pd.DataFrame()
-        
+
         with analysis_status_lock:
             _update_progress(status, 30, 'Analyzing adoption barriers and support cases...', 'Data Analysis')
-        
+
         with analysis_status_lock:
             _update_progress(status, 40, 'Calculating renewal risk scores...', 'Risk Analysis')
-        
+
         renewal_analysis = get_subscription_renewal_risk(subscription_id, days)
-        
+
         with analysis_status_lock:
             _update_progress(status, 50, 'Preparing AI briefing book...', 'AI Analysis')
-        
+
         try:
             briefing_parts = [f"## Subscription Briefing: {sub_data.get('customer_name', subscription_id)}"]
             briefing_parts.append(f"Subscription ID: {subscription_id}")
@@ -19618,10 +19770,10 @@ def run_subscription_analysis(analysis_id):
                         else:
                             briefing_parts.append(f"- {_cap_field(item)}")
             briefing_book = "\n".join(briefing_parts)
-            
+
             with analysis_status_lock:
                 _update_progress(status, 55, '[AI] Sending to CircuIT (this may take up to 60 seconds)...', 'AI Analysis - CircuIT')
-            
+
             sub_prompt = PROMPT_CUSTOMER_TEMPLATE.format(
                 CUSTOMER_NAME=sub_data.get('customer_name', subscription_id),
                 CSSM_NAME='',
@@ -19629,34 +19781,34 @@ def run_subscription_analysis(analysis_id):
                 MANAGER=''
             )
             ai_response = generate_llm_response(sub_prompt, briefing_book)
-            
+
             with analysis_status_lock:
                 _update_progress(status, 70, '[AI] Processing AI response...', 'AI Analysis - Processing')
         except Exception as e:
             logger.warning(f"AI analysis failed, using fallback: {e}")
             ai_response = f"Analysis completed for {sub_data['customer_name']} (Subscription: {subscription_id})"
-        
+
         with analysis_status_lock:
             _update_progress(status, 75, 'Building Word report...', 'Report Generation')
-        
+
         # Generate reports (canonical outputs when frozen)
         output_dir = _APP_SUPPORT / "outputs" if _frozen else Path("outputs")
         output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Round 12 / Phase 10.6: anchor artifact filename suffix on UTC and
         # tag with ``Z`` so subscription analysis filenames are deterministic
         # across host timezones.
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
         safe_customer_name = "".join(c for c in (sub_data.get('customer_name') or 'Unknown') if c.isalnum() or c in (' ', '-', '_')).rstrip()
         safe_subscription_id = subscription_id.replace(':', '_').replace('/', '_')
-        
+
         # Generate Word report
         word_filename = f"Subscription_Analysis_{safe_customer_name}_{safe_subscription_id}_{timestamp}.docx"
         word_path = output_dir / word_filename
-        
+
         try:
             doc = Document()
-            
+
             # Title page
             # Round 48 / F-RP-MD-LEAK: strip markdown chrome from
             # the customer name so __ALIAS__ separators in
@@ -19675,22 +19827,22 @@ def run_subscription_analysis(analysis_id):
             details.add_run(f'Analysis Period: {days} days\n').bold = True
             details.add_run(f'Technology: {sub_data.get("technology", "N/A")} | Sub-Technology: {sub_data.get("sub_technology", "N/A")}\n').bold = True
             details.add_run(f'Status: {sub_data.get("status", "N/A")}\n').bold = True
-            
+
             doc.add_page_break()
-            
+
             # Executive Summary
             doc.add_heading('Executive Summary', level=1)
             summary_p = doc.add_paragraph()
             summary_p.add_run(f'Customer: {_strip_markdown_chrome(_normalize_composite_customer_key(sub_data["customer_name"]))}\n')
             summary_p.add_run(f'Subscription: {subscription_id}\n')
             summary_p.add_run(f'Renewal Risk Level: {renewal_analysis.get("risk_level", "Unknown")} ({renewal_analysis.get("overall_risk_score", renewal_analysis.get("risk_score", 0))}/10)\n')
-            
+
             # Risk Analysis
             doc.add_heading('Renewal Risk Analysis', level=1)
             risk_p = doc.add_paragraph()
             risk_p.add_run(f'Overall Risk Score: {renewal_analysis.get("overall_risk_score", renewal_analysis.get("risk_score", 0))}/10\n').bold = True
             risk_p.add_run(f'Risk Level: {renewal_analysis.get("risk_level", "Unknown")}\n').bold = True
-            
+
             # Risk Components
             doc.add_heading('Risk Components', level=2)
             risk_components = renewal_analysis.get('risk_components', {})
@@ -19713,38 +19865,38 @@ def run_subscription_analysis(analysis_id):
                 comp_p = doc.add_paragraph()
                 comp_p.add_run(f'{component.replace("_", " ").title()}: ').bold = True
                 comp_p.add_run(f'{score_value:.1f}/10 - Count: {count_value}')
-            
+
             # Recommendations
             doc.add_heading('Recommendations', level=1)
             for i, rec in enumerate(renewal_analysis.get('recommendations', []), 1):
                 rec_p = doc.add_paragraph()
                 rec_p.add_run(f'{i}. {rec}')
-            
+
             # Data Summary
             doc.add_heading('Data Summary', level=1)
             summary_table = doc.add_table(rows=1, cols=2)
             summary_table.style = 'Table Grid'
-            
+
             # Header
             header_cells = summary_table.rows[0].cells
             header_cells[0].text = 'Data Type'
             header_cells[1].text = 'Count'
-            
+
             # Add data
             for data_type, count in sub_data['summary'].items():
                 row_cells = summary_table.add_row().cells
                 row_cells[0].text = data_type.replace('_', ' ').title()
                 row_cells[1].text = str(count)
-            
+
             # Detailed Data Sections
             doc.add_heading('Detailed Data Analysis', level=1)
-            
+
             # Adoption Barriers Section
             if not ab_df.empty:
                 doc.add_heading('Adoption Barriers', level=2)
                 ab_p = doc.add_paragraph()
                 ab_p.add_run(f'Found {len(ab_df)} adoption barriers:')
-                
+
                 # Show critical/high severity barriers.  Round 4: route
                 # severity classification through the canonical
                 # ``normalize_severity_label`` so labels like
@@ -19760,7 +19912,7 @@ def run_subscription_analysis(analysis_id):
                     critical_ab = ab_df.iloc[0:0]
                 if not critical_ab.empty:
                     ab_p.add_run(f' {len(critical_ab)} critical/high severity barriers requiring immediate attention.')
-                
+
                 # Show recent barriers — Round 3: use the run's analysis
                 # window (``days``) so this sentence matches the report's
                 # subtitle. The previous hardcoded 30 silently disagreed
@@ -19811,13 +19963,13 @@ def run_subscription_analysis(analysis_id):
                 doc.add_heading('Adoption Barriers', level=2)
                 ab_p = doc.add_paragraph()
                 ab_p.add_run('No adoption barriers found for this subscription.')
-            
+
             # Action Plans Section
             if not ap_df.empty:
                 doc.add_heading('Action Plans', level=2)
                 ap_p = doc.add_paragraph()
                 ap_p.add_run(f'Found {len(ap_df)} action plans:')
-                
+
                 # Show unresolved/completed plans.  Round 4: route status
                 # classification through ``normalize_status_label`` so
                 # variations ("In-Progress", "Completed - Cancelled",
@@ -19838,13 +19990,13 @@ def run_subscription_analysis(analysis_id):
                 doc.add_heading('Action Plans', level=2)
                 ap_p = doc.add_paragraph()
                 ap_p.add_run('No action plans found for this subscription.')
-            
+
             # Customer Pulse Section
             if not cp_df.empty:
                 doc.add_heading('Customer Pulse', level=2)
                 cp_p = doc.add_paragraph()
                 cp_p.add_run(f'Found {len(cp_df)} customer pulse records:')
-                
+
                 # Show pulse ratings
                 if 'PULSE_RATING__C' in cp_df.columns:
                     pulse_counts = cp_df['PULSE_RATING__C'].value_counts()
@@ -19854,13 +20006,13 @@ def run_subscription_analysis(analysis_id):
                 doc.add_heading('Customer Pulse', level=2)
                 cp_p = doc.add_paragraph()
                 cp_p.add_run('No customer pulse records found for this subscription.')
-            
+
             # Success Priorities Section
             if not sp_df.empty:
                 doc.add_heading('Success Priorities', level=2)
                 sp_p = doc.add_paragraph()
                 sp_p.add_run(f'Found {len(sp_df)} success priorities:')
-                
+
                 # Show priority status
                 if 'STATUS__C' in sp_df.columns:
                     status_counts = sp_df['STATUS__C'].value_counts()
@@ -19870,13 +20022,13 @@ def run_subscription_analysis(analysis_id):
                 doc.add_heading('Success Priorities', level=2)
                 sp_p = doc.add_paragraph()
                 sp_p.add_run('No success priorities found for this subscription.')
-            
+
             # AI Analysis
             if ai_response:
                 doc.add_heading('AI Analysis', level=1)
                 ai_p = doc.add_paragraph()
                 ai_p.add_run(ai_response)
-            
+
             with analysis_status_lock:
                 _update_progress(status, 85, 'Saving Word document...', 'Report Generation')
 
@@ -19918,18 +20070,18 @@ def run_subscription_analysis(analysis_id):
                 logger.warning(f"[[CONSISTENCY]] Subscription consistency check skipped: {_scerr}")
 
             doc.save(word_path)
-            
+
         except Exception as e:
             logger.error(f"Error creating Word report: {e}")
             word_path = None
-        
+
         with analysis_status_lock:
             _update_progress(status, 88, 'Generating Excel workbook...', 'Excel Report Generation')
-        
+
         # Generate Excel report
         excel_filename = f"Subscription_Analysis_{safe_customer_name}_{safe_subscription_id}_{timestamp}.xlsx"
         excel_path = output_dir / excel_filename
-        
+
         try:
             def _excel_safe_df(df: pd.DataFrame) -> pd.DataFrame:
                 if df is None or df.empty:
@@ -19969,7 +20121,7 @@ def run_subscription_analysis(analysis_id):
 
             with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
                 workbook = writer.book
-                
+
                 # Create formats
                 header_format = workbook.add_format({
                     'bold': True,
@@ -19978,7 +20130,7 @@ def run_subscription_analysis(analysis_id):
                     'fg_color': '#D7E4BC',
                     'border': 1
                 })
-                
+
                 title_format = workbook.add_format({
                     'bold': True,
                     'font_size': 14,
@@ -19986,7 +20138,7 @@ def run_subscription_analysis(analysis_id):
                     'font_color': 'white',
                     'border': 1
                 })
-                
+
                 # Summary sheet
                 # Round 5 / Phase 1.12: normalize the Customer Name so the
                 # subscription Summary sheet matches the canonical name used
@@ -19998,15 +20150,15 @@ def run_subscription_analysis(analysis_id):
                 except Exception:
                     _norm_cust_name_summary = _raw_cust_name_summary
                 summary_data = {
-                    'Metric': ['Customer Name', 'Subscription ID', 'Technology', 'Sub-Technology', 'Status', 
+                    'Metric': ['Customer Name', 'Subscription ID', 'Technology', 'Sub-Technology', 'Status',
                                'Analysis Period (Days)', 'Renewal Risk Score', 'Risk Level'],
-                    'Value': [_norm_cust_name_summary, subscription_id, sub_data.get('technology', 'N/A'), 
+                    'Value': [_norm_cust_name_summary, subscription_id, sub_data.get('technology', 'N/A'),
                               sub_data.get('sub_technology', 'N/A'), sub_data.get('status', 'N/A'), days,
                               renewal_analysis.get('overall_risk_score', renewal_analysis.get('risk_score', 0)), renewal_analysis.get('risk_level', 'Unknown')]
                 }
                 summary_df = pd.DataFrame(summary_data)
                 summary_df.to_excel(writer, sheet_name='Summary', index=False)
-                
+
                 # Risk Components sheet
                 risk_data = []
                 risk_components = renewal_analysis.get('risk_components', {})
@@ -20045,7 +20197,7 @@ def run_subscription_analysis(analysis_id):
                         'Reason': 'Risk components not returned by scoring pipeline (see Report_Info / partial_data_warnings).',
                     }])
                 risk_df.to_excel(writer, sheet_name='Risk_Components', index=False)
-                
+
                 # Round 2 / Phase 2.6: derive empty-tab placeholder
                 # columns from the live schema (the same df we would
                 # have written if it had rows) so a "no data" tab and
@@ -20158,12 +20310,12 @@ def run_subscription_analysis(analysis_id):
                         sp_df, 'Success_Priorities',
                         ['ID', 'SUCCESS_PRIORITY_TITLE__C', 'STATUS__C', 'CREATEDDATE', 'RELATED_CUSTOMER__C'],
                     )
-                
+
                 # Format sheets
                 for sheet_name in writer.sheets:
                     worksheet = writer.sheets[sheet_name]
                     worksheet.set_column('A:Z', 20)
-                    
+
                     # Format headers for each sheet based on its actual data
                     if sheet_name == 'Summary':
                         # Format summary sheet headers
@@ -20313,14 +20465,14 @@ def run_subscription_analysis(analysis_id):
                                     empty_df = pd.DataFrame(columns=['ID', 'PULSE_RATING__C', 'COMMENTS__C', 'CREATEDDATE', 'ACCOUNT__C'])
                                 elif sheet_name == 'Success_Priorities':
                                     empty_df = pd.DataFrame(columns=['ID', 'SUCCESS_PRIORITY_TITLE__C', 'STATUS__C', 'CREATEDDATE', 'RELATED_CUSTOMER__C'])
-                                
+
                                 for col_num, value in enumerate(empty_df.columns.values):
                                     worksheet.write(0, col_num, value, header_format)
-            
+
         except Exception as e:
             logger.error(f"Error creating Excel report: {e}", exc_info=True)
             raise e
-        
+
         with analysis_status_lock:
             _update_progress(status, 100, 'Subscription analysis completed successfully!', 'Completed')
             status['status'] = 'completed'
@@ -20356,9 +20508,9 @@ def run_subscription_analysis(analysis_id):
             )
         except Exception as _si_err:
             logger.warning(f"store_report_insights failed: {_si_err}")
-        
+
         logger.info(f"[[OK]] Subscription analysis completed: {analysis_id}")
-        
+
     except Exception as e:
         logger.error(f"[[ERROR]] Error in subscription analysis: {e}", exc_info=True)
         with analysis_status_lock:
@@ -20400,7 +20552,7 @@ def download_result(analysis_id, file_type):
         return jsonify({'error': 'Invalid file type. Use docx or xlsx.', 'available_files': ['docx', 'xlsx']}), 404
     if not _is_valid_analysis_id(analysis_id):
         return jsonify({'error': 'Invalid analysis ID'}), 400
-    
+
     with analysis_status_lock:
         status = analysis_status.get(analysis_id)
     if status is None:
@@ -20429,7 +20581,7 @@ def download_result(analysis_id, file_type):
     # Round 6 / Phase 6.7: keep state label only at INFO.  Do not
     # log the entire status dict or analysis id verbatim alongside.
     logger.info("[[DATA]] Analysis status: %s", status.get('status', 'unknown'))
-    
+
     # Check if analysis is completed
     if status.get('status') != 'completed':
         logger.error(f"[[ERROR]] Analysis not completed: {status.get('status', 'unknown')}")
@@ -20439,18 +20591,18 @@ def download_result(analysis_id, file_type):
             'analysis_id_digest': _aid_digest,
             'current_status': status.get('status', 'unknown')
         }), 400
-    
+
     # Check if results exist - handle both formats (direct and nested in 'results')
     word_report = status.get('word_report')
     excel_report = status.get('excel_report')
-    
+
     # For leader reports and some other report types, results are nested
     if not word_report and not excel_report:
         results = status.get('results', {})
         if isinstance(results, dict):
             word_report = results.get('word_report')
             excel_report = results.get('excel_report')
-    
+
     if not word_report and not excel_report:
         logger.error(f"[[ERROR]] No reports available for analysis (digest=%s)", _aid_digest)
         # Round 13 / Phase 4.4: previously the client-visible JSON
@@ -20470,7 +20622,7 @@ def download_result(analysis_id, file_type):
             'error': 'No results available for this analysis',
             'analysis_id_digest': _aid_digest,
         }), 400
-    
+
     # Round 6 / Phase 6.7: paths reveal customer / report names.
     # Keep them at DEBUG; surface a presence-only summary at INFO.
     logger.info(
@@ -20481,7 +20633,7 @@ def download_result(analysis_id, file_type):
         "[[FILE]] Available reports (verbose) - Word: %s, Excel: %s",
         word_report, excel_report,
     )
-    
+
     # Canonical outputs dir (Application Support when frozen) so download works even if status stored wrong path
     _out_dir = _APP_SUPPORT / "outputs" if _frozen else Path(os.path.abspath("outputs"))
 
@@ -20520,7 +20672,7 @@ def download_result(analysis_id, file_type):
                 return send_file(file_path, as_attachment=True, download_name=f"AdoptIQ_Data_{safe_name}.xlsx")
             except (FileNotFoundError, OSError):
                 return jsonify({'error': 'Excel file no longer available'}), 404
-            
+
         else:
             available = []
             if word_report:
@@ -20538,7 +20690,7 @@ def download_result(analysis_id, file_type):
                 'error': f'Invalid file type or file not found: {file_type}',
                 'available_files': available
             }), 404
-            
+
     except Exception as e:
         logger.error(f"[[ERROR]] Download error: {e}")
         return jsonify({'error': 'Download failed due to an internal error'}), 500
@@ -20611,7 +20763,7 @@ def test_generate_report():
         # Round 8 / Phase 1.7: digest at INFO; verbatim id only at DEBUG.
         logger.info("[[LIST]] Created analysis aid_digest=%s", _id_digest(analysis_id))
         logger.debug("[[LIST]] Created analysis verbatim id=%s", analysis_id)
-        
+
         # Set up minimal status
         with analysis_status_lock:
             analysis_status[analysis_id] = {
@@ -20626,18 +20778,18 @@ def test_generate_report():
                 'report_type': 'compact'
             }
             save_analysis_status()
-        
+
         # Round 8 / Phase 1.7: digest at INFO; verbatim id only at DEBUG.
         logger.info("[[OK]] Test analysis completed aid_digest=%s", _id_digest(analysis_id))
         logger.debug("[[OK]] Test analysis completed verbatim id=%s", analysis_id)
-        
+
         return jsonify({
             'success': True,
             'analysis_id': analysis_id,
             'message': 'Test analysis completed successfully',
             'redirect_url': f'/progress/{analysis_id}'
         })
-        
+
     except Exception as e:
         logger.error(f"[[ERROR]] Test analysis failed: {e}")
         return jsonify({'success': False, 'error': 'Test analysis failed'}), 500
@@ -20700,14 +20852,14 @@ def clear_stuck_analyses():
                         status['status'] = 'cancelled'
                         status['message'] = 'Analysis cancelled - was stuck'
                         cleared_count += 1
-            
+
             if cleared_count > 0:
                 save_analysis_status()
                 logger.info(f"[[CLEAN]] Cleared {cleared_count} stuck analyses")
                 return jsonify({'success': True, 'message': f'Cleared {cleared_count} stuck analyses'})
             else:
                 return jsonify({'success': True, 'message': 'No stuck analyses found'})
-                
+
     except Exception as e:
         logger.error(f"[[ERROR]] Error clearing stuck analyses: {e}")
         return jsonify({'success': False, 'error': 'Failed to clear stuck analyses'}), 500
@@ -20731,16 +20883,16 @@ def start_leader_report():
             days = int(request.form.get('days', 90))
         except (ValueError, TypeError):
             days = 90
-        
+
         # Validate inputs
         is_valid_mgr, error_msg = validate_manager_input(manager)
         if not is_valid_mgr:
             return jsonify({'success': False, 'error': error_msg}), 400
-        
+
         is_valid_days, error_msg = validate_days_input(days)
         if not is_valid_days:
             return jsonify({'success': False, 'error': error_msg}), 400
-        
+
         # Handle optional CSOne file upload.
         #
         # Round 38 / Phase 1: split the explicit-upload path from the
@@ -20817,18 +20969,18 @@ def start_leader_report():
                 'error': None
             }
             save_analysis_status()
-        
+
         # Start leader report generation in background thread
         thread = threading.Thread(target=run_leader_report_generation, args=(analysis_id,))
         thread.daemon = True
         thread.start()
-        
+
         return jsonify({
             'success': True,
             'analysis_id': analysis_id,
             'redirect_url': url_for('progress', analysis_id=analysis_id)
         })
-        
+
     except Exception as e:
         logger.error(f"[[ERROR]] Error starting leader report: {e}")
         return jsonify({'success': False, 'error': 'Failed to start leader report'}), 500
@@ -20849,26 +21001,26 @@ def run_leader_report_generation(analysis_id):
             status['status'] = 'running'
             status['completed_steps'] = []
             _update_progress(status, 2, 'Connecting to Snowflake (CSConsole data)...', 'Database Connection')
-        
+
         manager = status['manager']
         days = status['days']
         csone_file = status.get('csone_file')
-        
+
         # Callback closure for leader_report_generator to push sub-step updates
         def leader_progress_cb(pct, msg, step):
             with analysis_status_lock:
                 _update_progress(status, pct, msg, step)
-        
+
         logger.info(f"Connecting to Snowflake for leader report...")
         try:
             ctx = _connect_with_keeper()
             logger.info(f"SUCCESS: Connected to Snowflake")
         except Exception as conn_error:
             error_msg = str(conn_error)
-            
+
             if any(keyword in error_msg.lower() for keyword in ['not allowed to access', 'failed to connect', 'network', 'timeout']):
                 logger.error(f"ERROR: Snowflake connection failed - VPN may not be connected")
-                
+
                 with analysis_status_lock:
                     status['status'] = 'error'
                     status['error'] = 'VPN Connection Required'
@@ -20886,18 +21038,18 @@ def run_leader_report_generation(analysis_id):
                     )
                     status['completion_time'] = _now_utc_iso_z()
                     save_analysis_status()
-                
+
                 return
             else:
                 raise
-        
+
         if check_cancellation(analysis_id):
             update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
             return
-        
+
         with analysis_status_lock:
             _update_progress(status, 5, 'Connected to Snowflake. Fetching team subscriptions...', 'Team Data Retrieval')
-        
+
         # Fetch team subscriptions first (needed to scope CSOne to manager's portfolio)
         team_subs_df = pd.DataFrame()
         try:
@@ -21100,7 +21252,7 @@ def run_leader_report_generation(analysis_id):
                     "Leader-report TAC sections render with reduced detail."
                 ),
             })
-        
+
         with analysis_status_lock:
             _update_progress(status, 13, 'Gathering external intelligence (defects, incidents)...', 'External Intelligence')
         logger.info(f"[[WEB]] Gathering external intelligence for leader report...")
@@ -21113,7 +21265,7 @@ def run_leader_report_generation(analysis_id):
             logger.warning(f"[[WARNING]] External intelligence gathering failed: {e}")
             ext_bugs = []
             ext_incidents = []
-        
+
         with analysis_status_lock:
             _update_progress(status, 15, 'Extracting software defects and PSIRT vulnerabilities...', 'Defect Analysis')
         logger.info(f"[[DEFECTS]] Extracting software defects and PSIRT vulnerabilities...")
@@ -21123,19 +21275,19 @@ def run_leader_report_generation(analysis_id):
             logger.info(f"[[DEFECTS]] Found {software_defects.get('total_defects', 0)} defects")
         if psirt_vulns:
             logger.info(f"[[PSIRT]] Found {psirt_vulns.get('total_vulnerabilities', 0)} vulnerabilities")
-        
+
         if check_cancellation(analysis_id):
             update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
             return
-        
+
         with analysis_status_lock:
             _update_progress(status, 17, 'Preparing to generate Word document...', 'Data Collection')
-        
+
         logger.info(f"[[WRITE]] Generating leader report for {manager}...")
-        
+
         if ctx is None:
             raise Exception("Database connection failed. Please check your VPN connection and try again.")
-        
+
         # Round 30 / H1b: forward the optional ``arr_impact`` so the
         # leader title-page can render the multi-currency advisory.
         # ``arr_impact`` is populated by ``calculate_arr_impact_for_issues``
@@ -21208,11 +21360,11 @@ def run_leader_report_generation(analysis_id):
                 else None
             ),
         )
-        
+
         if check_cancellation(analysis_id):
             update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
             return
-        
+
         with analysis_status_lock:
             _update_progress(status, 82, 'Generating Excel workbook...', 'Excel Report Generation')
 
@@ -21438,11 +21590,11 @@ def run_leader_report_generation(analysis_id):
         excel_path = None
         try:
             logger.info(f"[[DATA]] Generating Excel file for leader report (reusing team_data from Word generation)...")
-            
+
             # Prepare Excel file path
             base_path = str(Path(filepath).with_suffix(''))
             excel_path = f"{base_path}.xlsx"
-            
+
             # Collect all team data into DataFrames for Excel
             all_action_plans = []
             all_adoption_barriers = []
@@ -21450,47 +21602,47 @@ def run_leader_report_generation(analysis_id):
             all_success_priorities = []
             all_tac_cases = []
             all_subscriptions = []
-            
+
             for cssm_name, data in team_data.items():
                 # Action Plans
                 if not data.get('action_plans', pd.DataFrame()).empty:
                     ap_df = data['action_plans'].copy()
                     ap_df['CSSM'] = cssm_name
                     all_action_plans.append(ap_df)
-                
+
                 # Adoption Barriers
                 if not data.get('adoption_barriers', pd.DataFrame()).empty:
                     ab_df = data['adoption_barriers'].copy()
                     ab_df['CSSM'] = cssm_name
                     all_adoption_barriers.append(ab_df)
-                
+
                 # Customer Pulse
                 if not data.get('customer_pulse', pd.DataFrame()).empty:
                     cp_df = data['customer_pulse'].copy()
                     cp_df['CSSM'] = cssm_name
                     all_customer_pulse.append(cp_df)
-                
+
                 # Success Priorities
                 if not data.get('success_priorities', pd.DataFrame()).empty:
                     sp_df = data['success_priorities'].copy()
                     sp_df['CSSM'] = cssm_name
                     all_success_priorities.append(sp_df)
-                
+
                 # TAC Cases
                 if not data.get('tac_cases', pd.DataFrame()).empty:
                     tac_df = data['tac_cases'].copy()
                     tac_df['CSSM'] = cssm_name
                     all_tac_cases.append(tac_df)
-                
+
                 # Subscriptions
                 if not data.get('subscriptions', pd.DataFrame()).empty:
                     sub_df = data['subscriptions'].copy()
                     sub_df['CSSM'] = cssm_name
                     all_subscriptions.append(sub_df)
-            
+
             # Combine all DataFrames
             sheets = {}
-            
+
             # Always build a Team_Summary sheet so the Excel file is never empty
             summary_rows = []
             for cssm_name, data in team_data.items():
@@ -21517,7 +21669,7 @@ def run_leader_report_generation(analysis_id):
                 })
             if summary_rows:
                 sheets['Team_Summary'] = pd.DataFrame(summary_rows)
-            
+
             if all_action_plans:
                 sheets['Action_Plans'] = pd.concat(all_action_plans, ignore_index=True)
             if all_adoption_barriers:
@@ -21530,7 +21682,7 @@ def run_leader_report_generation(analysis_id):
                 sheets['TAC_Cases'] = pd.concat(all_tac_cases, ignore_index=True)
             if all_subscriptions:
                 sheets['Subscriptions'] = pd.concat(all_subscriptions, ignore_index=True)
-            
+
             # Add external data if available (all data sources for Leader report)
             if ext_bugs:
                 sheets['External_Bugs'] = pd.DataFrame(ext_bugs)
@@ -21570,7 +21722,7 @@ def run_leader_report_generation(analysis_id):
                     vuln_rows.append({'Customer': '', 'Vulnerability_ID': vid, 'Type': 'PSIRT'})
                 if vuln_rows:
                     sheets['PSIRT_Vulnerabilities'] = pd.DataFrame(vuln_rows)
-            
+
             # Create Excel file (Team_Summary provides a fallback when team_data is non-empty)
             if sheets:
                 logger.info(f"[[WRITE]] Writing Excel file with {len(sheets)} sheets: {list(sheets.keys())}")
@@ -21591,7 +21743,7 @@ def run_leader_report_generation(analysis_id):
                     # Round 16 / Phase 5.1: shared Table-name registry for
                     # the Round-15 polish helper.
                     _r16_used_table_names: set = set()
-                    
+
                     # Create formats
                     header_format = workbook.add_format({
                         'bold': True,
@@ -21602,7 +21754,7 @@ def run_leader_report_generation(analysis_id):
                         'border': 1,
                         'font_size': 11
                     })
-                    
+
                     title_format = workbook.add_format({
                         'bold': True,
                         'font_size': 16,
@@ -21612,7 +21764,7 @@ def run_leader_report_generation(analysis_id):
                         'align': 'center',
                         'valign': 'vcenter'
                     })
-                    
+
                     for sheet_name, df in sheets.items():
                         # Round 2 / Phase 2.1: surface fetch_error
                         # tristate so a failed fetch is rendered as
@@ -21662,7 +21814,7 @@ def run_leader_report_generation(analysis_id):
 
                                 # Write data
                                 df_clean.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
-                                
+
                                 # Format worksheet
                                 worksheet = writer.sheets[sheet_name]
 
@@ -21696,11 +21848,11 @@ def run_leader_report_generation(analysis_id):
                                     worksheet.merge_range(0, 0, 0, n_cols - 1, title_text, title_format)
                                 else:
                                     worksheet.write(0, 0, title_text, title_format)
-                                
+
                                 # Format headers
                                 for col_num, value in enumerate(df_clean.columns.values):
                                     worksheet.write(1, col_num, value, header_format)
-                                
+
                                 # Auto-adjust column widths (guard against NaN from empty columns)
                                 for i, col in enumerate(df_clean.columns):
                                     try:
@@ -21710,7 +21862,7 @@ def run_leader_report_generation(analysis_id):
                                         content_max = 0
                                     max_length = max(content_max, len(str(col)))
                                     worksheet.set_column(i, i, min(max_length + 2, 50))
-                                
+
                                 sheets_written += 1
                             except Exception as sheet_error:
                                 # Round 2 / Phase 2.7: track per-sheet
@@ -21809,11 +21961,11 @@ def run_leader_report_generation(analysis_id):
             else:
                 logger.warning(f"[[WARNING]] No team data available for Excel (team_data keys: {list(team_data.keys())})")
                 excel_path = None
-                
+
         except Exception as excel_error:
             logger.error(f"[[ERROR]] Error creating Excel file: {excel_error}", exc_info=True)
             excel_path = None
-        
+
         with analysis_status_lock:
             _update_progress(status, 100, 'Leader report generated successfully!', 'Complete')
             status['status'] = 'completed'
@@ -21852,15 +22004,15 @@ def run_leader_report_generation(analysis_id):
             )
         except Exception as _si_err:
             logger.warning(f"store_report_insights failed: {_si_err}")
-        
+
         logger.info(f"[[OK]] Leader report completed: {analysis_id}")
-        
+
     except Exception as e:
         import traceback
         error_traceback = traceback.format_exc()
         logger.error(f" Leader report generation failed: {e}", exc_info=True)
         logger.error(f"[[SEARCH]] DEBUG: Full traceback:\n{error_traceback}")
-        
+
         with analysis_status_lock:
             if analysis_id not in analysis_status:
                 analysis_status[analysis_id] = {}
@@ -21913,27 +22065,27 @@ def search_bst_defect():
     try:
         data = request.get_json() or {}
         defect_id = data.get('defect_id', '').strip()
-        
+
         if not defect_id:
             return jsonify({'error': 'Please provide a defect ID'}), 400
-        
+
         import re as _re
         if len(defect_id) > 64 or not _re.match(r'^[A-Za-z0-9_\-]+$', defect_id):
             return jsonify({'error': 'Invalid defect ID format'}), 400
-        
+
         # Import and initialize integrations
         from cisco_internal_integrations import CiscoInternalIntegrations
         import os
-        
+
         integrations = CiscoInternalIntegrations(
             bst_api_key=os.environ.get('BST_API_KEY'),
             psirt_api_key=os.environ.get('PSIRT_API_KEY'),
             psirt_client_secret=os.environ.get('PSIRT_CLIENT_SECRET')
         )
-        
+
         # Search and summarize
         result = integrations.search_and_summarize_defect(defect_id)
-        
+
         if result['success']:
             return jsonify({
                 'success': True,
@@ -21955,7 +22107,7 @@ def search_bst_defect():
                 'defect_id': defect_id,
                 'direct_link': result['direct_link']
             })
-            
+
     except Exception as e:
         logger.error(f"Error in search_bst_defect: {e}", exc_info=True)
         return jsonify({'error': 'An internal error occurred during defect search'}), 500
@@ -21972,27 +22124,27 @@ def search_psirt_advisory():
     try:
         data = request.get_json() or {}
         advisory_id = data.get('advisory_id', '').strip()
-        
+
         if not advisory_id:
             return jsonify({'error': 'Please provide an advisory ID'}), 400
-        
+
         import re as _re
         if len(advisory_id) > 64 or not _re.match(r'^[A-Za-z0-9_\-:]+$', advisory_id):
             return jsonify({'error': 'Invalid advisory ID format'}), 400
-        
+
         # Import and initialize integrations
         from cisco_internal_integrations import CiscoInternalIntegrations
         import os
-        
+
         integrations = CiscoInternalIntegrations(
             bst_api_key=os.environ.get('BST_API_KEY'),
             psirt_api_key=os.environ.get('PSIRT_API_KEY'),
             psirt_client_secret=os.environ.get('PSIRT_CLIENT_SECRET')
         )
-        
+
         # Search and summarize
         result = integrations.search_and_summarize_vulnerability(advisory_id)
-        
+
         if result['success']:
             return jsonify({
                 'success': True,
@@ -22015,7 +22167,7 @@ def search_psirt_advisory():
                 'advisory_id': advisory_id,
                 'direct_link': result['direct_link']
             })
-            
+
     except Exception as e:
         logger.error(f"Error in search_psirt_advisory: {e}", exc_info=True)
         return jsonify({'error': 'An internal error occurred during advisory search'}), 500
@@ -22040,27 +22192,27 @@ def search_related_defects():
             days_back = max(1, min(days_back, 365))
         except (ValueError, TypeError):
             days_back = 90
-        
+
         if not search_terms:
             return jsonify({'error': 'Please provide search terms'}), 400
-        
+
         # Import and initialize integrations
         from cisco_internal_integrations import CiscoInternalIntegrations
         import os
-        
+
         integrations = CiscoInternalIntegrations(
             bst_api_key=os.environ.get('BST_API_KEY'),
             psirt_api_key=os.environ.get('PSIRT_API_KEY'),
             psirt_client_secret=os.environ.get('PSIRT_CLIENT_SECRET')
         )
-        
+
         # Search for defects
         defects = integrations.search_defects_bst(
             search_terms=search_terms,
             product_filter=product_filter,
             days_back=days_back
         )
-        
+
         # FIXED: Convert ALL results to serializable format
         defect_list = []
         for defect in defects:
@@ -22074,13 +22226,13 @@ def search_related_defects():
                 'classification': defect.classification.value,
                 'direct_link': f"https://bst.cisco.com/bugsearch/bug/{defect.defect_id}"
             })
-        
+
         return jsonify({
             'success': True,
             'count': len(defect_list),
             'defects': defect_list
         })
-            
+
     except Exception as e:
         logger.error(f"Error in search_related_defects: {e}", exc_info=True)
         return jsonify({'error': 'An internal error occurred during defect search'}), 500
@@ -22105,27 +22257,27 @@ def search_related_vulnerabilities():
             days_back = max(1, min(days_back, 365))
         except (ValueError, TypeError):
             days_back = 90
-        
+
         if not search_terms:
             return jsonify({'error': 'Please provide search terms'}), 400
-        
+
         # Import and initialize integrations
         from cisco_internal_integrations import CiscoInternalIntegrations
         import os
-        
+
         integrations = CiscoInternalIntegrations(
             bst_api_key=os.environ.get('BST_API_KEY'),
             psirt_api_key=os.environ.get('PSIRT_API_KEY'),
             psirt_client_secret=os.environ.get('PSIRT_CLIENT_SECRET')
         )
-        
+
         # Search for vulnerabilities
         vulnerabilities = integrations.search_psirt_vulnerabilities(
             search_terms=search_terms,
             product_filter=product_filter,
             days_back=days_back
         )
-        
+
         # FIXED: Convert ALL results to serializable format
         vuln_list = []
         for vuln in vulnerabilities:
@@ -22140,13 +22292,13 @@ def search_related_vulnerabilities():
                 'classification': vuln.classification.value,
                 'direct_link': f"https://tools.cisco.com/security/center/content/CiscoSecurityAdvisory/{vuln.advisory_id}"
             })
-        
+
         return jsonify({
             'success': True,
             'count': len(vuln_list),
             'vulnerabilities': vuln_list
         })
-            
+
     except Exception as e:
         logger.error(f"Error in search_related_vulnerabilities: {e}", exc_info=True)
         return jsonify({'error': 'An internal error occurred during vulnerability search'}), 500

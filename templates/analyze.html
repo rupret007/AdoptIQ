@@ -14,7 +14,7 @@
 
 {% block content %}
 <!-- Skip to main content link for screen readers -->
-<a class="visually-hidden-focusable btn btn-primary position-absolute top-0 start-0 m-2" 
+<a class="visually-hidden-focusable btn btn-primary position-absolute top-0 start-0 m-2"
    href="#main-content" style="z-index: 10000;">
     Skip to main content
 </a>
@@ -75,7 +75,18 @@
             <section id="adoptiq-intel-banner"
                      class="card shadow-cisco fade-in mb-4"
                      data-intel-banner
-                     data-state="{{ intel_status.boot.state if intel_status and intel_status.boot else 'idle' }}"
+                     {# Round 53.3: ``intel_status.boot`` does not carry a
+                        derived ``state`` field -- ``classifyState`` in
+                        intel_status.js computes it client-side from
+                        ``boot.in_progress`` / ``boot.source`` /
+                        ``boot.last_error`` / etc. The previous template
+                        chain therefore resolved to an empty
+                        ``data-state=""`` until the first poll landed,
+                        contradicting the surrounding comment about a
+                        neutral 'idle' default. Hard-code the neutral
+                        default so the SSR markup is consistent for users
+                        with JS disabled. #}
+                     data-state="idle"
                      style="animation-delay: 0.27s;"
                      aria-live="polite"
                      aria-atomic="true">
@@ -127,6 +138,7 @@
                             <button type="button"
                                     class="btn btn-sm btn-outline-primary"
                                     data-intel-run-now
+                                    data-disabled-when="blocked_no_onedrive"
                                     title="Trigger an incremental indexing pass">
                                 <i class="fas fa-sync-alt me-1" aria-hidden="true"></i>
                                 Run now
@@ -137,10 +149,17 @@
                                when ``boot.last_error_kind === 'crypto'``
                                so a healthy install never sees a
                                destructive control.  Confirms via a
-                               native confirm() prompt before POSTing. #}
+                               native confirm() prompt before POSTing.
+                               Round 53 / Phase 53.4: also disabled
+                               while the panel sits in
+                               ``blocked_no_onedrive`` -- a reset
+                               under that state would just put the
+                               same .enc on disk and the corpus would
+                               still be unopenable. #}
                             <button type="button"
                                     class="btn btn-sm btn-outline-warning"
                                     data-intel-reset
+                                    data-disabled-when="blocked_no_onedrive"
                                     hidden
                                     title="Replace the local encrypted corpus from the bundled snapshot">
                                 <i class="fas fa-undo me-1" aria-hidden="true"></i>
@@ -190,6 +209,23 @@
                         <div class="small text-muted"
                              data-sharepoint-feedback
                              aria-live="polite"></div>
+                        {# Round 53 / Phase 53.4.1: clickable "Open
+                           OneDrive folder" deep link.  Hidden by
+                           default; intel_status.js unhides it only
+                           when the panel sits in
+                           ``blocked_no_onedrive`` AND the server-
+                           side payload supplies a scheme-allow-listed
+                           URL.  rel/target are also set by JS so a
+                           future template tweak that strips them
+                           cannot reintroduce window.opener leakage. #}
+                        <a class="btn btn-sm btn-outline-warning mt-2"
+                           data-onedrive-deep-link
+                           hidden
+                           target="_blank"
+                           rel="noopener noreferrer">
+                            <i class="fas fa-cloud me-1" aria-hidden="true"></i>
+                            Open OneDrive folder to sync
+                        </a>
                     </div>
                     {# Round 26 / Phase D: optional drop-zone for
                        user-uploaded CSOne reports.  Only rendered
@@ -321,7 +357,7 @@
                            explicit input mirrors leader_report_form.html
                            and makes the JS-off path resilient. #}
                         <input type="hidden" name="csrf_token" id="csrfToken" value="{{ csrf_token() }}">
-                        
+
                         <!-- Manager Selection -->
                         <div class="mb-4" id="manager-section">
                             <label for="{{ form.manager.id }}" class="form-label">
@@ -354,7 +390,7 @@
 
                         <!-- Hidden field for subscription ID -->
                         <input type="hidden" id="subscription_id" name="subscription_id" value="">
-                        
+
                         <!-- Subscription ID or Customer Name: optional filter for single-customer reports (Comprehensive, Compact, Customer Renewal) -->
                         <div class="mb-4" id="subscription-search-section">
                             <label class="form-label fw-semibold">
@@ -363,14 +399,14 @@
                             <div class="row g-3">
                                 <div class="col-md-8">
                                     <div class="input-group position-relative">
-                                        <input type="text" class="form-control" id="subscription-search" 
-                                               placeholder="e.g. Sub12345 or type customer name to filter to one customer" 
+                                        <input type="text" class="form-control" id="subscription-search"
+                                               placeholder="e.g. Sub12345 or type customer name to filter to one customer"
                                                aria-label="Subscription ID or customer name"
                                                autocomplete="off" aria-autocomplete="list" aria-controls="subscription-search-list" aria-expanded="false">
                                         <button class="btn btn-outline-primary" type="button" id="search-subscriptions-btn">
                                             <i class="fas fa-search me-1" aria-hidden="true"></i>Search
                                         </button>
-                                        <ul class="list-group position-absolute top-100 start-0 w-100 mt-1 shadow-sm border rounded overflow-auto d-none" 
+                                        <ul class="list-group position-absolute top-100 start-0 w-100 mt-1 shadow-sm border rounded overflow-auto d-none"
                                             id="subscription-search-list" role="listbox" style="max-height: 220px; z-index: 1050;"></ul>
                                     </div>
                                 </div>
@@ -384,7 +420,7 @@
                                 <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
                                 Subscription IDs start with <kbd>Sub</kbd> then numbers. Otherwise type a customer name and select from the list for an exact match.
                             </div>
-                            
+
                             <!-- Search Results -->
                             <div id="subscription-results" class="mt-3" style="display: none;">
                                 <div class="card">
@@ -398,7 +434,7 @@
                                     </div>
                                 </div>
                             </div>
-                            
+
                             <!-- Selected Subscription Info -->
                             <div id="selected-subscription" class="mt-3" style="display: none;">
                                 <div class="alert alert-info">
@@ -418,15 +454,15 @@
                                 <i class="fas fa-building me-2 text-danger" aria-hidden="true"></i>Customer Name
                             </label>
                             <div class="input-group input-group-lg position-relative" id="customer-name-wrap">
-                                <input type="text" class="form-control" id="customer_name" name="customer_name" 
-                                       placeholder="Type to search (min 2 characters) — then select from list" 
+                                <input type="text" class="form-control" id="customer_name" name="customer_name"
+                                       placeholder="Type to search (min 2 characters) — then select from list"
                                        aria-describedby="customer-help" autocomplete="off"
                                        aria-autocomplete="list" aria-controls="customer-name-list" aria-expanded="false">
                                 {# Round 50: same dark-theme contract as the days / CSOne adornments below -- drop `bg-light` so the shared `.input-group-text` rule paints this with the dark surface. #}
                                 <span class="input-group-text">
                                     <i class="fas fa-building text-muted" aria-hidden="true"></i>
                                 </span>
-                                <ul class="list-group position-absolute top-100 start-0 w-100 mt-1 shadow-sm border rounded overflow-auto d-none" 
+                                <ul class="list-group position-absolute top-100 start-0 w-100 mt-1 shadow-sm border rounded overflow-auto d-none"
                                     id="customer-name-list" role="listbox" style="max-height: 220px; z-index: 1050;"></ul>
                             </div>
                             <div id="customer-help" class="form-text">
@@ -468,7 +504,7 @@
                             {% if csone_shared_folder_url %}
                             <div class="alert alert-light border mb-3 py-2">
                                 <strong class="text-primary">Get your report:</strong>
-                                <a href="{{ csone_shared_folder_url }}" target="_blank" rel="noopener noreferrer" 
+                                <a href="{{ csone_shared_folder_url }}" target="_blank" rel="noopener noreferrer"
                                    class="btn btn-outline-primary btn-sm fw-semibold ms-2">
                                     <i class="fas fa-external-link-alt me-1" aria-hidden="true"></i>Access latest AdoptIQ Export from CSOne
                                 </a>
@@ -510,7 +546,7 @@
                                 Analysis typically takes 2-5 minutes to complete
                             </div>
                         </div>
-                        
+
                         <!-- Test Button for Debugging -->
                         <div class="text-center mt-3">
                             {# Round 6 / Phase 2.14: removed inline ``onclick=`` for CSP. #}
@@ -548,7 +584,7 @@
                                 <div class="flex-grow-1">
                                     <h6 class="fw-bold mb-2">Data Collection</h6>
                                     <p class="text-muted small mb-0">
-                                        Connect to Snowflake and fetch team subscription data, 
+                                        Connect to Snowflake and fetch team subscription data,
                                         adoption barriers, and customer information.
                                     </p>
                                 </div>
@@ -564,7 +600,7 @@
                                 <div class="flex-grow-1">
                                     <h6 class="fw-bold mb-2">AI Analysis</h6>
                                     <p class="text-muted small mb-0">
-                                        CircuIT AI processes the data to identify patterns, 
+                                        CircuIT AI processes the data to identify patterns,
                                         trends, and generate actionable insights.
                                     </p>
                                 </div>
@@ -580,7 +616,7 @@
                                 <div class="flex-grow-1">
                                     <h6 class="fw-bold mb-2">Pattern Recognition</h6>
                                     <p class="text-muted small mb-0">
-                                        Identify recurring issues, customer sentiment trends, 
+                                        Identify recurring issues, customer sentiment trends,
                                         and adoption barrier patterns across your portfolio.
                                     </p>
                                 </div>
@@ -596,7 +632,7 @@
                                 <div class="flex-grow-1">
                                     <h6 class="fw-bold mb-2">Report Generation</h6>
                                     <p class="text-muted small mb-0">
-                                        Create professional Word documents and detailed 
+                                        Create professional Word documents and detailed
                                         Excel spreadsheets with all findings and recommendations.
                                     </p>
                                 </div>
@@ -739,7 +775,7 @@
  */
 const AnalysisFormManager = (() => {
     'use strict';
-    
+
     // Private variables - cached DOM elements
     let elements = {
         form: null,
@@ -749,10 +785,10 @@ const AnalysisFormManager = (() => {
         filePreview: null,
         notificationArea: null
     };
-    
+
     // Store reference to checkFields function for external access
     let checkSubscriptionFieldsFunc = null;
-    
+
     // Configuration
     const CONFIG = {
         maxFileSize: 50 * 1024 * 1024, // 50MB
@@ -760,7 +796,7 @@ const AnalysisFormManager = (() => {
         notificationTimeout: 5000,
         apiEndpoint: '/start_analysis'
     };
-    
+
     /**
      * Secure notification system with XSS protection
      * @param {string} message - The message to display
@@ -768,17 +804,17 @@ const AnalysisFormManager = (() => {
      */
     const showNotification = (message, type = 'info') => {
     console.log('Showing notification:', message, type);
-    
+
         // Create notification element with XSS protection
     const notification = document.createElement('div');
     notification.className = `alert alert-${type === 'error' ? 'danger' : type} alert-dismissible fade show position-fixed`;
     notification.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
-        
+
         // Secure message insertion - prevents XSS
         const messageSpan = document.createElement('span');
         messageSpan.textContent = message;
         notification.appendChild(messageSpan);
-        
+
         // Add close button
         const closeBtn = document.createElement('button');
         closeBtn.type = 'button';
@@ -786,15 +822,15 @@ const AnalysisFormManager = (() => {
         closeBtn.setAttribute('data-bs-dismiss', 'alert');
         closeBtn.setAttribute('aria-label', 'Close notification');
         notification.appendChild(closeBtn);
-    
+
     // Add to page
     document.body.appendChild(notification);
-    
+
         // Announce to screen readers
         if (elements.notificationArea) {
             elements.notificationArea.textContent = message;
         }
-        
+
         // Auto-remove after timeout
     setTimeout(() => {
         if (notification.parentNode) {
@@ -813,17 +849,17 @@ const AnalysisFormManager = (() => {
             elements.fileInput = document.querySelector('input[type="file"]');
             elements.filePreview = document.querySelector('.file-upload-preview');
             elements.notificationArea = document.getElementById('notification-area');
-            
+
             if (!elements.form) {
                 throw new Error('Analysis form not found!');
             }
-            
+
             if (!elements.submitBtn) {
                 throw new Error('Submit button not found!');
             }
-            
+
             elements.formControls = elements.form.querySelectorAll('.form-control, .form-select');
-            
+
             console.log('DOM elements initialized successfully');
             return true;
         } catch (error) {
@@ -832,7 +868,7 @@ const AnalysisFormManager = (() => {
             return false;
         }
     };
-    
+
     // Stores the latest validation failures for user feedback.
     let lastValidationIssues = [];
 
@@ -903,9 +939,9 @@ const AnalysisFormManager = (() => {
      */
     const validateField = (field) => {
         if (!field) return false;
-        
+
         const isValid = field.checkValidity();
-        
+
         // Update visual state
         if (isValid) {
             field.classList.add('is-valid');
@@ -916,21 +952,21 @@ const AnalysisFormManager = (() => {
             field.classList.remove('is-valid');
             field.setAttribute('aria-invalid', 'true');
         }
-        
+
         return isValid;
     };
-    
+
     /**
      * Comprehensive form validation
      * @returns {boolean} - Whether the entire form is valid
      */
     const validateForm = () => {
         if (!elements.formControls) return false;
-        
+
         let isValid = true;
         let firstInvalidField = null;
         lastValidationIssues = [];
-        
+
         const activeControls = Array.from(elements.formControls).filter(isFieldActiveForValidation);
 
         activeControls.forEach(control => {
@@ -942,30 +978,30 @@ const AnalysisFormManager = (() => {
                 }
             }
         });
-        
+
         // Focus first invalid field for accessibility
         if (!isValid && firstInvalidField) {
             firstInvalidField.focus();
             firstInvalidField.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
-        
+
         return isValid;
     };
-    
+
     /**
      * File upload handling with validation
      */
     const handleFileUpload = () => {
         if (!elements.fileInput) return;
-        
+
         elements.fileInput.addEventListener('change', function() {
             const file = this.files[0];
-            
+
             if (!file) {
                 hideFilePreview();
                 return;
             }
-            
+
             // File size validation
             if (file.size > CONFIG.maxFileSize) {
                 const maxSizeMB = (CONFIG.maxFileSize / (1024*1024)).toFixed(0);
@@ -975,32 +1011,32 @@ const AnalysisFormManager = (() => {
                 hideFilePreview();
                 return;
             }
-    
+
             // Enhanced file validation (extension + MIME type)
             const fileExtension = '.' + file.name.split('.').pop().toLowerCase();
             const allowedMimeTypes = [
                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                 'application/vnd.ms-excel'
             ];
-            
+
             if (!CONFIG.allowedFileTypes.includes(fileExtension)) {
                 showNotification(`Invalid file type "${fileExtension}". Please upload an Excel file with one of these extensions: ${CONFIG.allowedFileTypes.join(', ')}`, 'error');
                 this.value = '';
                 hideFilePreview();
                 return;
             }
-    
+
             if (!allowedMimeTypes.includes(file.type)) {
                 showNotification('Invalid file type. Please upload a valid Excel file.', 'error');
                 this.value = '';
                 hideFilePreview();
                 return;
             }
-            
+
             showFilePreview(file.name, file.size);
         });
     };
-    
+
     /**
      * Show file preview with enhanced information
      * @param {string} fileName - Name of the selected file
@@ -1008,20 +1044,20 @@ const AnalysisFormManager = (() => {
      */
     const showFilePreview = (fileName, fileSize) => {
         if (!elements.filePreview) return;
-        
+
         const fileNameSpan = elements.filePreview.querySelector('.file-name');
         if (!fileNameSpan) return;
-        
+
         const sizeInMB = (fileSize / (1024 * 1024)).toFixed(2);
         fileNameSpan.textContent = `${fileName} (${sizeInMB} MB)`;
         elements.filePreview.style.display = 'block';
-        
+
         // Announce to screen readers
         if (elements.notificationArea) {
             elements.notificationArea.textContent = `File selected: ${fileName}`;
         }
     };
-    
+
     /**
      * Hide file preview
      */
@@ -1032,25 +1068,25 @@ const AnalysisFormManager = (() => {
             elements.fileInput.value = '';
         }
     };
-    
+
     /**
      * Setup real-time validation feedback with memory leak prevention
      */
     const setupValidation = () => {
         if (!elements.formControls) return;
-        
+
         elements.formControls.forEach(control => {
             // Store handlers for cleanup
             const blurHandler = function() {
                 validateField(this);
             };
-            
+
             const inputHandler = function() {
                 if (this.classList.contains('is-invalid')) {
                     validateField(this);
                 }
             };
-            
+
             // Enhanced keyboard navigation
             const keyHandler = function(e) {
                 // Allow Escape key to clear validation state
@@ -1058,7 +1094,7 @@ const AnalysisFormManager = (() => {
                     this.classList.remove('is-invalid', 'is-valid');
                     this.removeAttribute('aria-invalid');
                 }
-                
+
                 // Enhanced Tab navigation with validation feedback
                 if (e.key === 'Tab' && this.classList.contains('is-invalid')) {
                     // Announce validation error when tabbing away from invalid field
@@ -1070,21 +1106,21 @@ const AnalysisFormManager = (() => {
                     }
                 }
             };
-            
+
             // Store handlers on element for cleanup
             control._blurHandler = blurHandler;
             control._inputHandler = inputHandler;
             control._keyHandler = keyHandler;
-            
+
             control.addEventListener('blur', blurHandler);
             control.addEventListener('input', inputHandler);
             control.addEventListener('keydown', keyHandler);
         });
     };
-    
+
     // Double submission prevention
     let isSubmitting = false;
-    
+
     /**
      * Enhanced form submission with error handling and accessibility
      * @param {Event} e - The form submission event
@@ -1092,13 +1128,13 @@ const AnalysisFormManager = (() => {
     const handleFormSubmission = async (e) => {
         console.log('Form submission event triggered');
         e.preventDefault();
-        
+
         // Prevent double submission
         if (isSubmitting) {
             console.log('Submission already in progress, ignoring duplicate request');
             return;
         }
-        
+
         // Validate form
         syncReportTypeRequirements();
         checkSubscriptionFieldStates();
@@ -1110,29 +1146,29 @@ const AnalysisFormManager = (() => {
             showNotification(`Please fix the errors above before submitting${details}.`, 'error');
             return;
         }
-        
+
         isSubmitting = true;
-        
+
         // Show loading state
         const originalButtonText = elements.submitBtn.innerHTML;
         elements.submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2" aria-hidden="true"></i>Starting Analysis...';
         elements.submitBtn.disabled = true;
         elements.submitBtn.setAttribute('aria-busy', 'true');
-        
+
         try {
             // Get report type
             const reportType = document.querySelector('input[name="report_type"]:checked').value;
             // Normalize Subscription ID vs Customer Name from search field into form fields (for all report types)
             normalizeSubscriptionAndCustomerFields();
-            
+
             // Create FormData object
             const formData = new FormData(elements.form);
-            
+
             // Determine endpoint and data format based on report type
             let endpoint = '/start_analysis';
             let requestBody;
             let contentType = 'multipart/form-data';
-            
+
             if (reportType === 'compact') {
                 endpoint = '/start_compact_analysis';
                 // Check if file is uploaded - if so, use FormData, otherwise use JSON
@@ -1166,15 +1202,15 @@ const AnalysisFormManager = (() => {
             } else if (reportType === 'renewal' || reportType === 'renewal_portfolio') {
                 // Use start_analysis with FormData so CSOne file is included (renewal report needs case data)
                 endpoint = '/start_analysis';
-                
+
                 const managerSelect = document.querySelector('select[name="manager"]');
                 const technologySelect = document.querySelector('select[name="technology"]');
                 const managerValue = managerSelect?.value || formData.get('manager') || '';
                 const technologyValue = technologySelect?.value || formData.get('technology') || '';
-                
+
                 let subscriptionId = '';
                 let customerName = '';
-                
+
                 if (reportType === 'renewal') {
                     // Use normalized values only (subscription_id vs customer_name set by normalizeSubscriptionAndCustomerFields)
                     subscriptionId = formData.get('subscription_id') || '';
@@ -1195,7 +1231,7 @@ const AnalysisFormManager = (() => {
                         return;
                     }
                 }
-                
+
                 // Build FormData so CSOne file is included (fix: renewal report was always getting 0 cases)
                 const renewalFormData = new FormData();
                 renewalFormData.append('report_type', reportType);
@@ -1217,30 +1253,30 @@ const AnalysisFormManager = (() => {
                 requestBody.set('subscription_id', formData.get('subscription_id') || '');
                 requestBody.set('customer_name', formData.get('customer_name') || '');
             }
-            
+
             // Enhanced fetch with timeout and better error handling
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout for analysis startup
-            
+
             const fetchOptions = {
                 method: 'POST',
                 body: requestBody,
                 signal: controller.signal,
                 redirect: 'follow'  // Follow redirects normally
             };
-            
+
             // Set headers
             var csrfMeta = document.querySelector('meta[name="csrf-token"]');
             fetchOptions.headers = {
                 'X-Requested-With': 'XMLHttpRequest',
                 'X-CSRFToken': csrfMeta ? csrfMeta.content : ''
             };
-            
+
             // Only set Content-Type header for JSON requests (FormData sets it automatically)
             if (contentType === 'application/json') {
                 fetchOptions.headers['Content-Type'] = 'application/json';
             }
-            
+
             // Round 12 / Phase 4.2: previously these console.log /
             // console.error lines emitted endpoint URLs, raw request
             // bodies, response headers, and the first 500 chars of
@@ -1265,7 +1301,7 @@ const AnalysisFormManager = (() => {
             if (_r12_dbg) {
                 console.log(`Response status: ${response.status}`);
             }
-            
+
             // Check if response is OK
             if (!response.ok && response.status !== 200) {
                 // Round 12 / Phase 4.2: error-path body may include
@@ -1305,20 +1341,20 @@ const AnalysisFormManager = (() => {
                 }
                 throw new Error(`Server returned non-JSON response. Expected JSON but got: ${response.headers.get('content-type') || 'unknown'}. Error: ${e.message}`);
             }
-            
+
             // Validate the response data
             if (!data || typeof data !== 'object') {
                 throw new Error('Invalid response format');
             }
-            
+
             if (!data.success) {
                 throw new Error(data.error || 'Analysis failed to start');
             }
-            
+
             if (!data.analysis_id && !data.redirect_url) {
                 throw new Error('Response missing analysis_id and redirect_url');
             }
-            
+
             // Ensure we have a valid redirect_url
             if (!data.redirect_url && data.analysis_id) {
                 data.redirect_url = `/progress/${data.analysis_id}`;
@@ -1329,30 +1365,30 @@ const AnalysisFormManager = (() => {
                     data.analysis_id = match[1];
                 }
             }
-            
+
             // Final validation
             if (!data.redirect_url || !data.redirect_url.startsWith('/progress/')) {
                 throw new Error(`Invalid redirect_url: ${data.redirect_url}`);
             }
-            
+
             // Extract and validate analysis_id from redirect_url
             const finalMatch = data.redirect_url.match(/\/progress\/([^\/\?#]+)/);
             if (!finalMatch || !finalMatch[1]) {
                 throw new Error(`Could not extract valid analysis_id from redirect_url: ${data.redirect_url}`);
             }
-            
+
             const finalAnalysisId = finalMatch[1];
-            
+
             // Safety check - reject if it looks like code
-            if (finalAnalysisId.includes('split') || finalAnalysisId.includes('(') || finalAnalysisId.includes(')') || 
+            if (finalAnalysisId.includes('split') || finalAnalysisId.includes('(') || finalAnalysisId.includes(')') ||
                 finalAnalysisId.includes('redirectUrl') || finalAnalysisId.length < 5) {
                 throw new Error(`Invalid analysis_id detected: ${finalAnalysisId}`);
             }
-            
+
             // Use the validated values
             data.analysis_id = finalAnalysisId;
             const finalRedirectUrl = `/progress/${finalAnalysisId}`;
-            
+
             // Round 4 / Phase 2.1: align this client-side validation
             // with the server's _ANALYSIS_ID_RE
             // (^[A-Za-z0-9._-]{1,200}$). The previous regex only
@@ -1366,10 +1402,10 @@ const AnalysisFormManager = (() => {
             if (!/^\/progress\/[A-Za-z0-9._-]{1,200}$/.test(finalRedirectUrl)) {
                 throw new Error(`Final validation failed for redirect URL: ${finalRedirectUrl}`);
             }
-            
+
             console.log(`✅ Final validated redirect URL: ${finalRedirectUrl}`);
             console.log(`✅ Final validated analysis ID: ${finalAnalysisId}`);
-            
+
             if (data.success) {
                 showNotification('Analysis started successfully! Redirecting to progress page...', 'success');
                 // Round 7 / Phase 4.1: keep ``isSubmitting = true`` and
@@ -1441,14 +1477,14 @@ const AnalysisFormManager = (() => {
             } else {
                 throw new Error(data.error || 'Unknown error occurred');
             }
-            
+
         } catch (error) {
             console.error('Form submission error:', error);
-            
+
             // Enhanced error messages with user-friendly suggestions
             let errorMessage = 'Error submitting form: ';
             let suggestion = '';
-            
+
             if (error.name === 'AbortError') {
                 errorMessage += 'Request timed out.';
                 suggestion = 'Please check your internet connection and try again.';
@@ -1468,9 +1504,9 @@ const AnalysisFormManager = (() => {
                 errorMessage += error.message;
                 suggestion = 'Please verify your input and try again.';
             }
-            
+
             showNotification(`${errorMessage} ${suggestion}`, 'error');
-            
+
             // Reset button state
             elements.submitBtn.innerHTML = originalButtonText;
             elements.submitBtn.disabled = false;
@@ -1483,18 +1519,18 @@ const AnalysisFormManager = (() => {
             isSubmitting = false;
         }
     };
-    
+
     /**
      * Setup enhanced UI interactions with performance optimization
      */
     const setupUIEnhancements = () => {
         // Use more efficient batch DOM operations
         const cards = document.querySelectorAll('.card');
-        
+
         // Apply classes in batches to reduce reflows
         requestAnimationFrame(() => {
             cards.forEach(card => card.classList.add('hover-lift'));
-            
+
             // Add focus effects to form controls
             if (elements.formControls) {
                 elements.formControls.forEach(control => {
@@ -1504,14 +1540,14 @@ const AnalysisFormManager = (() => {
                     }
                 });
             }
-            
+
             // Add interactive button effects
             if (elements.submitBtn) {
                 elements.submitBtn.classList.add('btn-interactive');
             }
         });
     };
-    
+
     /**
      * Cleanup function to prevent memory leaks
      */
@@ -1522,7 +1558,7 @@ const AnalysisFormManager = (() => {
                 const blurHandler = control._blurHandler;
                 const inputHandler = control._inputHandler;
                 const keyHandler = control._keyHandler;
-                
+
                 if (blurHandler) {
                     control.removeEventListener('blur', blurHandler);
                 }
@@ -1532,20 +1568,20 @@ const AnalysisFormManager = (() => {
                 if (keyHandler) {
                     control.removeEventListener('keydown', keyHandler);
                 }
-                
+
                 // Clean up handler references
                 delete control._blurHandler;
                 delete control._inputHandler;
                 delete control._keyHandler;
             });
         }
-        
+
         // Clear element references
         for (const key in elements) {
             elements[key] = null;
         }
     };
-    
+
     /**
      * Debug/testing function - accessible globally for onclick
      * @returns {void}
@@ -1553,21 +1589,21 @@ const AnalysisFormManager = (() => {
     const testJavaScript = () => {
         console.log('Test button clicked!');
         alert('JavaScript is working! This is a basic test.');
-        
+
         console.log('Form element:', elements.form);
         console.log('Submit button element:', elements.submitBtn);
-        
+
         if (elements.form) {
             console.log('Form action:', elements.form.action);
             console.log('Form method:', elements.form.method);
         }
-        
+
         if (elements.submitBtn) {
             console.log('Submit button type:', elements.submitBtn.type);
             console.log('Submit button disabled:', elements.submitBtn.disabled);
         }
     };
-    
+
     /**
      * Remove uploaded file - accessible globally for onclick
      * @returns {void}
@@ -1578,24 +1614,24 @@ const AnalysisFormManager = (() => {
             elements.notificationArea.textContent = 'File removed';
         }
     };
-    
+
     /**
      * Handle report type selection changes
      * @returns {void}
      */
     const setupReportTypeHandling = () => {
         const reportTypeRadios = document.querySelectorAll('input[name="report_type"]');
-        
+
         reportTypeRadios.forEach(radio => {
             radio.addEventListener('change', function() {
                 syncReportTypeRequirements();
             });
         });
-        
+
         // Initialize on page load
         syncReportTypeRequirements();
     };
-    
+
     /**
      * Check if manager/technology fields should be disabled based on subscription/customer name
      * @returns {void}
@@ -1608,13 +1644,13 @@ const AnalysisFormManager = (() => {
         const managerSelect = document.querySelector('select[name="manager"]');
         const technologySection = document.querySelector('div.mb-4:has(label[for*="technology"])');
         const technologySelect = document.querySelector('select[name="technology"]');
-        
+
         // Single customer/subscription: manager is not used (report is for that customer only). Technology still applies.
         const hasSubscriptionId = subscriptionIdField && subscriptionIdField.value.trim().length > 0;
         const hasCustomerName = customerNameInput && customerNameInput.value.trim().length > 0;
         const hasSearchValue = subscriptionSearchInput && subscriptionSearchInput.value.trim().length > 0;
         const singleCustomerOrSub = hasSubscriptionId || hasCustomerName || hasSearchValue;
-        
+
         // Disable manager when filtering to one customer/subscription (manager not used)
         if (managerSelect) {
             managerSelect.disabled = singleCustomerOrSub;
@@ -1626,7 +1662,7 @@ const AnalysisFormManager = (() => {
                 managerSection.style.pointerEvents = 'auto';
             }
         }
-        
+
         // Technology always stays enabled (user said technology makes sense for single-customer reports)
         if (technologySelect && technologySection) {
             technologySelect.disabled = false;
@@ -1634,7 +1670,7 @@ const AnalysisFormManager = (() => {
             technologySection.style.pointerEvents = 'auto';
         }
     };
-    
+
     /**
      * Handle field interaction when subscription/customer is selected
      * Disables manager and technology fields when a specific subscription is being used
@@ -1643,16 +1679,16 @@ const AnalysisFormManager = (() => {
     const setupSubscriptionFieldInteraction = () => {
         const subscriptionIdField = document.getElementById('subscription_id');
         const customerNameInput = document.getElementById('customer_name');
-        
+
         // Check on input changes - monitor both hidden subscription_id and customer_name fields
         if (subscriptionIdField) {
             subscriptionIdField.addEventListener('change', checkSubscriptionFieldStates);
         }
-        
+
         if (customerNameInput) {
             customerNameInput.addEventListener('input', checkSubscriptionFieldStates);
         }
-        
+
         // Also use MutationObserver to detect programmatic value changes to hidden field
         if (subscriptionIdField) {
             const observer = new MutationObserver(() => {
@@ -1660,10 +1696,10 @@ const AnalysisFormManager = (() => {
             });
             observer.observe(subscriptionIdField, { attributes: true, attributeFilter: ['value'] });
         }
-        
+
         // Initial check
         checkSubscriptionFieldStates();
-        
+
         // Store reference for external access
         checkSubscriptionFieldsFunc = checkSubscriptionFieldStates;
     };
@@ -1944,11 +1980,11 @@ const AnalysisFormManager = (() => {
      */
     const init = () => {
         console.log('Initializing AdoptIQ Analysis Form...');
-        
+
         if (!initializeElements()) {
             return; // Initialization failed
         }
-        
+
         // Setup all functionality
         setupValidation();
         handleFileUpload();
@@ -1957,19 +1993,19 @@ const AnalysisFormManager = (() => {
         setupSubscriptionFieldInteraction();
         setupCustomerNameTypeahead();
         setupSubscriptionSearchTypeahead();
-        
+
         // Add form submission handler
         elements.form.addEventListener('submit', handleFormSubmission);
-        
+
         // Add cleanup on page unload
         window.addEventListener('beforeunload', cleanup);
-        
+
         // Ensure submit button starts enabled
         elements.submitBtn.disabled = false;
-        
+
         console.log('AdoptIQ Analysis Form initialized successfully!');
     };
-    
+
     // Public API
     return {
         init,

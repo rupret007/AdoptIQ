@@ -64,6 +64,19 @@ _DAILY_REFRESH_TICK_S = 3600.0
 _DAILY_REFRESH_RETRY_S = 3600.0
 _DAILY_REFRESH_THREAD_NAME = "adoptiq-corpus-daily-refresh"
 
+# Round 53 / Phase 53.4.2 -- accelerated tick while the corpus is in
+# the ``blocked_no_onedrive`` state.  We poll every 30 s so the
+# moment the user signs in to OneDrive (and the OneDrive desktop
+# client mirrors the sentinel into the synced folder) the panel
+# transitions out of "Sign in to OneDrive" into "Active" without
+# the user having to wait up to an hour for the next standard tick.
+# Bounded by ``_DAILY_REFRESH_BLOCKED_MAX_TICKS`` so a user who
+# never signs in does not get a 30-second polling loop that runs
+# forever -- after the cap we fall back to the hourly tick (the
+# loop still re-probes; it just sleeps longer between checks).
+_DAILY_REFRESH_TICK_BLOCKED_S = 30.0
+_DAILY_REFRESH_BLOCKED_MAX_TICKS = 240  # 240 * 30 s = 2 h before fallback
+
 
 @dataclass
 class CorpusBootState:
@@ -259,13 +272,35 @@ def _check_onedrive_sync_status() -> tuple[str, int, Optional[str]]:
 # ---------------------------------------------------------------------------
 
 
-# Names mirror the four artifacts ``scripts/bake_corpus.py`` writes
+# Names mirror the artifacts ``scripts/bake_corpus.py`` writes
 # (and ``adoptiq_mac.spec`` ships under ``Resources/baked_corpus/``).
 # ``corpus.db.salt`` follows ``corpus_crypto._salt_path_for`` which
 # derives ``<encrypted_path>.with_suffix(".salt")`` -- changing this
 # tuple without updating both the bake script and the spec would
 # silently break the install path.
+#
+# Round 53 / Phase 53.3 -- shrunk from 4 to 2 entries.  The
+# Round 33/Build8 ``sentinel.json`` (local-mint AES key material)
+# and the Round 34/A1 ``corpus.sentinel.lock.json`` (digest pin)
+# are NO LONGER bundled, because shipping them with the .app made
+# the corpus offline-decryptable (QUALITY_AUDIT.md Round 52.2 --
+# HIGH severity).  At runtime we resolve the sentinel against the
+# user's own OneDrive sync of ``AI Projects/AdoptIQ_CSOne_Reports``
+# and re-mint the lock locally on first successful open; both
+# ``sentinel.json`` and ``corpus.sentinel.lock.json`` may still
+# exist in ``user_dir`` because ``open_corpus_for_user`` writes
+# the lock sidecar after a successful open -- but they originate
+# at runtime, not from the .app bundle.
+#
+# ``_LEGACY_BAKED_CORPUS_FILES`` retains the pre-Round-53 4-tuple
+# so the Round 39 self-heal preserve / restore loops can still
+# rotate broken legacy artifacts on upgrade.  Do NOT use it for
+# install-time copying.
 _BAKED_CORPUS_FILES: tuple = (
+    "corpus.db.enc",
+    "corpus.db.salt",
+)
+_LEGACY_BAKED_CORPUS_FILES: tuple = (
     "corpus.db.enc",
     "sentinel.json",
     "corpus.db.salt",
@@ -347,6 +382,13 @@ def _probe_existing_corpus_decrypts(user_db: Path) -> bool:
             onedrive_root=onedrive_root,
             encrypted_path=user_db,
             create_if_missing=False,
+            # Round 53 / Phase 53.3 -- fail-closed.  The probe must
+            # exercise the same hardening contract the runtime open
+            # uses; otherwise an upgrade from a pre-Round-53 install
+            # whose user_dir still has a local sentinel on disk would
+            # decrypt cleanly via the legacy path and the self-heal
+            # branch would never run.
+            allow_local_sentinel=False,
         )
     except CorpusCryptoError:
         return False
@@ -403,11 +445,17 @@ def _preserve_broken_corpus(user_dir: Path) -> Optional[str]:
 
     # First, prune any prior .broken-* sidecars (cap=1).  Done before
     # the rename so a crash here cannot leave us with two backup sets.
+    # Scan against the LEGACY 4-tuple so a prior Round 39 rotation
+    # of the old ``sentinel.json`` / ``corpus.sentinel.lock.json``
+    # sidecars also gets cleaned up.
     try:
         for child in user_dir.iterdir():
             try:
                 name = child.name
-                if any(name.startswith(f + ".broken-") for f in _BAKED_CORPUS_FILES):
+                if any(
+                    name.startswith(f + ".broken-")
+                    for f in _LEGACY_BAKED_CORPUS_FILES
+                ):
                     child.unlink(missing_ok=True)
             except OSError:
                 continue
@@ -418,11 +466,15 @@ def _preserve_broken_corpus(user_dir: Path) -> Optional[str]:
             type(prune_err).__name__,
         )
 
-    # Compute the suffix once so the four files share one timestamp
-    # (makes correlating them in support trivial).
+    # Compute the suffix once so the files share one timestamp
+    # (makes correlating them in support trivial).  We rotate the
+    # LEGACY 4-tuple here -- pre-Round-53 installs may still have
+    # the local sentinel + lock on disk, and rotating them too
+    # ensures the broken-corpus sidecar is internally consistent
+    # (no orphan sentinel pointing at a renamed .enc).
     suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     renamed: list[Path] = []
-    for fname in _BAKED_CORPUS_FILES:
+    for fname in _LEGACY_BAKED_CORPUS_FILES:
         src = user_dir / fname
         if not src.exists():
             # Some artifacts may be missing already (e.g., legacy
@@ -471,9 +523,19 @@ def _install_baked_corpus_if_present() -> Optional[str]:
     where a previous build's sentinel does not match the current
     build's bundled crypto material.
 
+    Round 53 / Phase 53.3: the bake now ships only TWO artifacts
+    (``corpus.db.enc`` + ``corpus.db.salt``).  The encrypted
+    snapshot is keyed against the canonical OneDrive sentinel
+    living in ``Config.CSONE_ONEDRIVE_FOLDER`` -- so the install
+    is harmless even when OneDrive is not yet synced (the .enc is
+    encrypted at rest), but the open path will fail-closed until
+    the user's OneDrive client mirrors the sentinel.  Surfacing
+    that "blocked" state is the responsibility of ``_run_index_pass``
+    via ``_STATE.source = "blocked_no_onedrive"``.
+
     Each copy is atomic (sibling tmp + ``os.replace``) and the
     destination files are chmod 0600 so a multi-user host cannot read
-    another account's encrypted DB or sentinel material.
+    another account's encrypted DB.
     """
     bake_dir = _baked_corpus_dir()
     if bake_dir is None:
@@ -533,13 +595,17 @@ def _install_baked_corpus_if_present() -> Optional[str]:
     for fname in _BAKED_CORPUS_FILES:
         src = bake_dir / fname
         if not src.exists():
-            # The four artifacts ship together; missing any one means
-            # the bake is incomplete and the bake-source is unsafe to
-            # trust.  Roll back and let the legacy path mint a fresh
-            # local sentinel.
+            # The artifacts ship together; missing any one means the
+            # bake is incomplete and the bake-source is unsafe to
+            # trust.  Round 53: roll back so we never leave a
+            # half-installed bundle on disk -- the runtime then
+            # surfaces ``_STATE.source = "blocked_no_onedrive"``
+            # (or "fresh" when OneDrive is also missing) so the
+            # panel guides the user toward the OneDrive sync flow
+            # instead of silently degrading.
             logger.warning(
                 "Round 35 / corpus_bootstrap: baked corpus incomplete "
-                "(missing %s); falling back to fresh-mint path",
+                "(missing %s); rolling back partial install",
                 fname,
             )
             for cleanup in _BAKED_CORPUS_FILES:
@@ -570,8 +636,8 @@ def _install_baked_corpus_if_present() -> Optional[str]:
             return None
         # Capture the build-time timestamp from the bake mtime so the
         # UI can show "Last bake YYYY-MM-DD".  Use the earliest mtime
-        # across the four files (they are all written within seconds
-        # of one another at bake time).
+        # across the bundled files (they are all written within
+        # seconds of one another at bake time).
         try:
             file_iso = datetime.fromtimestamp(
                 src.stat().st_mtime, tz=timezone.utc
@@ -632,11 +698,40 @@ def _should_refresh(
     return (now - float(last_refresh_ts)) >= float(interval_s)
 
 
+def _next_refresh_tick_s(blocked_streak: int) -> float:
+    """Round 53 / Phase 53.4.2: compute how long the daily-refresh
+    loop should sleep before its next iteration.
+
+    * When the corpus is in the ``blocked_no_onedrive`` state AND we
+      have not yet hit the bounded retry cap, return the accelerated
+      30-second tick so we transition out of the blocked state
+      promptly once the user syncs OneDrive.
+    * Otherwise return the standard hourly tick.
+
+    ``blocked_streak`` is the number of consecutive ticks the loop
+    has spent observing the blocked state.  Resets to 0 the moment
+    the state clears.  Pinned by
+    ``tests/test_round53_ux_helpers.py``.
+    """
+    with _BOOT_LOCK:
+        source = _STATE.source
+    if source == "blocked_no_onedrive" and blocked_streak < _DAILY_REFRESH_BLOCKED_MAX_TICKS:
+        return _DAILY_REFRESH_TICK_BLOCKED_S
+    return _DAILY_REFRESH_TICK_S
+
+
 def _daily_refresh_loop() -> None:
     """Body of the daily-refresh daemon.
 
-    Wakes once per ``_DAILY_REFRESH_TICK_S`` (1h) and triggers an
-    incremental refresh when:
+    Wakes once per ``_DAILY_REFRESH_TICK_S`` (1h) by default; while
+    the corpus is in the ``blocked_no_onedrive`` state the tick
+    accelerates to ``_DAILY_REFRESH_TICK_BLOCKED_S`` (30 s) so the
+    panel transitions out of "Sign in to OneDrive" promptly once the
+    user signs in.  After ``_DAILY_REFRESH_BLOCKED_MAX_TICKS`` (240
+    ticks = 2 h) the tick reverts to hourly so an unsynced user does
+    not get a perpetual 30-second polling loop.
+
+    Triggers an incremental refresh on each tick when:
 
       * the feature flag is on,
       * a baked corpus install or prior refresh has populated
@@ -644,6 +739,11 @@ def _daily_refresh_loop() -> None:
       * ``_should_refresh()`` says we're past the 24h window, AND
       * the OneDrive desktop client has the canonical AdoptIQ folder
         synced to disk (``_check_onedrive_sync_status() == "synced"``).
+
+    Round 53 also kicks an immediate refresh whenever the loop
+    observes a blocked-to-synced transition -- without this the user
+    who just signed in would have to wait the full 24 h window
+    before the corpus actually unlocks.
 
     Round 36 / onedrive-sync-auth: the legacy MSAL refresh-token gate
     has been removed -- we trust the OneDrive desktop client to keep
@@ -656,45 +756,70 @@ def _daily_refresh_loop() -> None:
     leaves the prior corpus intact (Phase 4c atomic-swap semantics).
     """
     logger.info(
-        "Round 36 / corpus_bootstrap: daily refresh worker started "
-        "(interval=%.0fs tick=%.0fs)",
-        _DAILY_REFRESH_INTERVAL_S, _DAILY_REFRESH_TICK_S,
+        "Round 53 / corpus_bootstrap: daily refresh worker started "
+        "(interval=%.0fs tick=%.0fs blocked_tick=%.0fs blocked_cap=%d)",
+        _DAILY_REFRESH_INTERVAL_S,
+        _DAILY_REFRESH_TICK_S,
+        _DAILY_REFRESH_TICK_BLOCKED_S,
+        _DAILY_REFRESH_BLOCKED_MAX_TICKS,
     )
+    blocked_streak = 0
     while not _DAILY_REFRESH_STOP.is_set():
         # Sleep with .wait() so stop() can interrupt the worker
-        # quickly during process shutdown.
-        if _DAILY_REFRESH_STOP.wait(_DAILY_REFRESH_TICK_S):
+        # quickly during process shutdown.  Round 53: tick interval
+        # depends on the current blocked state.
+        tick = _next_refresh_tick_s(blocked_streak)
+        if _DAILY_REFRESH_STOP.wait(tick):
             break
         try:
             if not is_enabled():
+                blocked_streak = 0
                 continue
             with _BOOT_LOCK:
                 last_ts = _STATE.last_successful_refresh_ts
                 in_progress = _STATE.in_progress
+                source_at_tick_start = _STATE.source
             if in_progress:
                 continue
-            if not _should_refresh(last_refresh_ts=last_ts):
-                continue
-            # Round 36: probe the OneDrive sync mirror.  If the user
-            # has not signed into OneDrive (or the folder was deleted
-            # locally) we skip silently; the panel surfaces
-            # ``onedrive_status="not_synced"`` so the user knows
-            # daily refresh is paused.
+            # Round 53 / Phase 53.4.2: re-probe OneDrive on every
+            # tick so a blocked-to-synced transition is detected
+            # within the accelerated window.
             od_status, od_count, _ = _check_onedrive_sync_status()
             with _BOOT_LOCK:
                 _STATE.onedrive_status = od_status
                 _STATE.onedrive_file_count = od_count
-            if od_status != "synced":
-                logger.debug(
-                    "Round 36 / corpus_bootstrap: daily refresh skipped "
-                    "(onedrive_status=%s)",
-                    od_status,
-                )
+            blocked_now = (source_at_tick_start == "blocked_no_onedrive")
+            # Round 53: blocked-to-synced transition detection.  When
+            # the loop sees the user just synced, kick an immediate
+            # refresh regardless of the 24h window so the corpus
+            # unlocks promptly.  ``_should_refresh()`` would otherwise
+            # gate this for fresh installs whose
+            # ``last_successful_refresh_ts`` is still None.
+            transition_unblocked = blocked_now and od_status == "synced"
+            if blocked_now and not transition_unblocked:
+                blocked_streak += 1
+                # While still blocked we only need to keep ticking;
+                # there is nothing the indexer can do until the user
+                # finishes the OneDrive sync.
                 continue
+            if not transition_unblocked:
+                if not _should_refresh(last_refresh_ts=last_ts):
+                    blocked_streak = 0
+                    continue
+                if od_status != "synced":
+                    logger.debug(
+                        "Round 36 / corpus_bootstrap: daily refresh skipped "
+                        "(onedrive_status=%s)",
+                        od_status,
+                    )
+                    blocked_streak = 0
+                    continue
+            blocked_streak = 0
             logger.info(
-                "Round 36 / corpus_bootstrap: triggering daily refresh "
-                "(last_successful=%s onedrive_files=%s)",
-                last_ts, od_count,
+                "Round 53 / corpus_bootstrap: triggering refresh "
+                "(last_successful=%s onedrive_files=%s "
+                "transition_unblocked=%s)",
+                last_ts, od_count, transition_unblocked,
             )
             with _BOOT_LOCK:
                 _STATE.last_refresh_attempt_ts = time.time()
@@ -709,6 +834,7 @@ def _daily_refresh_loop() -> None:
                     type(refresh_err).__name__,
                 )
         except Exception as loop_err:  # noqa: BLE001 - never bubble
+            blocked_streak = 0
             logger.warning(
                 "Round 36 / corpus_bootstrap: daily refresh loop iteration "
                 "failed: %s",
@@ -972,12 +1098,54 @@ def _run_index_pass(*, rebuild: bool) -> None:
 
     sources = _resolve_index_sources()
 
+    # Round 53 / Phase 53.3 -- fail-closed pre-flight gate.  If the
+    # OneDrive desktop client has not synced the canonical AdoptIQ
+    # folder OR the canonical sentinel is not present inside that
+    # folder, we cannot derive the AES key (allow_local_sentinel=False
+    # at runtime).  Surface a dedicated ``blocked_no_onedrive`` source
+    # so the analyze panel can render a clear "Sign in to OneDrive"
+    # CTA instead of a generic crypto error.
+    sentinel_present = False
+    if onedrive_root:
+        try:
+            from corpus_crypto import resolve_sentinel_path
+            sentinel_path = resolve_sentinel_path(onedrive_root)
+            sentinel_present = bool(
+                sentinel_path is not None
+                and sentinel_path.exists()
+                and sentinel_path.is_file()
+            )
+        except CorpusCryptoError:
+            sentinel_present = False
+        except Exception:  # noqa: BLE001 - defensive; fail-closed
+            sentinel_present = False
+    if od_status != "synced" or not sentinel_present:
+        with _BOOT_LOCK:
+            _STATE.source = "blocked_no_onedrive"
+            _STATE.last_error = (
+                "OneDrive sync of AI Projects/AdoptIQ_CSOne_Reports "
+                "is required to unlock the corpus.  Open the OneDrive "
+                "desktop client, sign in with your Cisco account, and "
+                "sync the folder."
+            )
+            _STATE.last_error_kind = "no_onedrive_sentinel"
+            _STATE.in_progress = False
+            _STATE.last_finished_at = _utc_now_iso()
+            _STATE.completed = False
+        logger.info(
+            "Round 53 / corpus_bootstrap: corpus open blocked "
+            "(onedrive_status=%s sentinel_present=%s)",
+            od_status, sentinel_present,
+        )
+        configure_connection(None)
+        return
+
     # Round 36 / onedrive-sync-auth: ``sharepoint_root`` is no longer
     # passed to ``open_corpus_for_user`` -- the SharePoint cache dir
-    # has been retired.  ``open_corpus_for_user`` falls through to
-    # ``CSONE_ONEDRIVE_FOLDER`` first and then the auto-minted local
-    # sentinel under ``~/Library/Application Support/AdoptIQ/knowledge/sentinel.json``,
-    # so OneDrive-less installs still encrypt cleanly.
+    # has been retired.  Round 53: ``allow_local_sentinel=False`` so
+    # we fail-closed when the OneDrive sentinel is unavailable
+    # (defense in depth on top of the gate above; covers the race
+    # where the sentinel disappears between the gate and the open).
     handle: Optional[EncryptedCorpusHandle] = None
     try:
         try:
@@ -985,8 +1153,63 @@ def _run_index_pass(*, rebuild: bool) -> None:
                 onedrive_root=onedrive_root,
                 encrypted_path=encrypted_path,
                 create_if_missing=True,
+                allow_local_sentinel=False,
             )
         except CorpusCryptoError as crypto_err:
+            # Round 54 / F1 -- TOCTOU race UX fix.  If the OneDrive
+            # sentinel disappeared between the Round 53 pre-flight
+            # gate above and this open (the OneDrive desktop client
+            # evicted the file, the user signed out, the share was
+            # un-shared, etc.), the open fails-closed with a generic
+            # CorpusCryptoError.  Pre-Round-54 the user-facing UI
+            # then surfaced the legacy ``crypto`` path (Reset Corpus
+            # button, no actionable remediation), even though the
+            # actual root cause is "OneDrive is no longer providing
+            # the sentinel".  Re-probe the gate; if it now fails,
+            # re-emit as ``blocked_no_onedrive`` so the user sees
+            # the same Sign-in CTA + clickable deep link they would
+            # have seen if the gate had caught it on the first pass.
+            # Security is unaffected (open already fails-closed); this
+            # is purely UX clarity.
+            post_status, post_count, _ = _check_onedrive_sync_status()
+            post_sentinel_present = False
+            if onedrive_root:
+                try:
+                    from corpus_crypto import resolve_sentinel_path
+                    post_sentinel_path = resolve_sentinel_path(onedrive_root)
+                    post_sentinel_present = bool(
+                        post_sentinel_path is not None
+                        and post_sentinel_path.exists()
+                        and post_sentinel_path.is_file()
+                    )
+                except CorpusCryptoError:
+                    post_sentinel_present = False
+                except Exception:  # noqa: BLE001 - defensive; fail-closed
+                    post_sentinel_present = False
+            if post_status != "synced" or not post_sentinel_present:
+                with _BOOT_LOCK:
+                    _STATE.source = "blocked_no_onedrive"
+                    _STATE.last_error = (
+                        "OneDrive sync of AI Projects/AdoptIQ_CSOne_Reports "
+                        "is required to unlock the corpus.  Open the OneDrive "
+                        "desktop client, sign in with your Cisco account, and "
+                        "sync the folder."
+                    )
+                    _STATE.last_error_kind = "no_onedrive_sentinel"
+                    _STATE.onedrive_status = post_status
+                    _STATE.onedrive_file_count = post_count
+                    _STATE.in_progress = False
+                    _STATE.last_finished_at = _utc_now_iso()
+                    _STATE.completed = False
+                logger.info(
+                    "Round 54 / F1 corpus_bootstrap: TOCTOU race -- "
+                    "open raised CorpusCryptoError and re-probe shows "
+                    "(onedrive_status=%s sentinel_present=%s); "
+                    "surfacing blocked_no_onedrive instead of generic crypto",
+                    post_status, post_sentinel_present,
+                )
+                configure_connection(None)
+                return
             with _BOOT_LOCK:
                 _STATE.last_error = str(crypto_err)
                 _STATE.last_error_kind = "crypto"

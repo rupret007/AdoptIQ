@@ -335,7 +335,7 @@ def init_database():
             return
         with db_connection() as conn:
             cursor = conn.cursor()
-            
+
             # Report history table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS report_history (
@@ -437,7 +437,7 @@ def init_database():
                     created_at TEXT
                 )
             ''')
-            
+
             # Enhanced IP connections table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS ip_connections (
@@ -454,7 +454,7 @@ def init_database():
                     created_at TEXT
                 )
             ''')
-            
+
             # Security events table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS security_events (
@@ -469,7 +469,7 @@ def init_database():
                     created_at TEXT
                 )
             ''')
-            
+
             # Performance metrics table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS performance_metrics (
@@ -483,7 +483,7 @@ def init_database():
                     created_at TEXT
                 )
             ''')
-            
+
             # Error logs table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS error_logs (
@@ -496,7 +496,7 @@ def init_database():
                     created_at TEXT
                 )
             ''')
-            
+
             # Report insights table — stores per-run summaries for "learn from past analyses"
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS report_insights (
@@ -852,22 +852,22 @@ def get_ip_info(ip_address):
 def assess_ip_risk(ip_address, request_count, user_agent):
     """Assess IP risk level based on behavior"""
     risk_factors = 0
-    
+
     # High request count
     if request_count > 1000:
         risk_factors += 3
     elif request_count > 100:
         risk_factors += 1
-    
+
     # Suspicious user agent
     suspicious_agents = ['bot', 'crawler', 'scanner', 'hack', 'test']
     if any(agent in user_agent.lower() for agent in suspicious_agents):
         risk_factors += 2
-    
+
     # Internal IP (usually safe)
     if ip_address.startswith(('10.', '192.168.', '172.')):
         risk_factors -= 1
-    
+
     # Determine risk level
     if risk_factors >= 3:
         return 'HIGH'
@@ -879,10 +879,10 @@ def assess_ip_risk(ip_address, request_count, user_agent):
 def log_access(ip_address, user_agent, endpoint):
     """Log access to the application with enhanced tracking"""
     timestamp = _r12_admin_utc_iso_z()
-    
+
     # Get IP information
     ip_info = get_ip_info(ip_address)
-    
+
     # Add to in-memory log (thread-safe)
     with monitoring_data_lock:
         monitoring_data['access_logs'].append({
@@ -893,52 +893,52 @@ def log_access(ip_address, user_agent, endpoint):
             'country': ip_info['country'],
             'city': ip_info['city']
         })
-        
+
         # Update IP tracking
         monitoring_data['ip_connections'][ip_address].append({
             'timestamp': timestamp,
             'user_agent': user_agent,
             'endpoint': endpoint
         })
-        
+
         # Keep only last 100 connections per IP
         if len(monitoring_data['ip_connections'][ip_address]) > 100:
             monitoring_data['ip_connections'][ip_address] = monitoring_data['ip_connections'][ip_address][-100:]
-    
+
     # Log to database
     with db_connection() as conn:
         cursor = conn.cursor()
-        
+
         # Get current request count
         cursor.execute('SELECT request_count FROM ip_connections WHERE ip_address = ?', (ip_address,))
         result = cursor.fetchone()
         current_count = result[0] if result else 0
         new_count = current_count + 1
-        
+
         # Assess risk level
         risk_level = assess_ip_risk(ip_address, new_count, user_agent)
-        
+
         # Update or insert IP connection
         cursor.execute('''
-            INSERT OR REPLACE INTO ip_connections 
+            INSERT OR REPLACE INTO ip_connections
             (ip_address, first_seen, last_seen, request_count, user_agent, country, city, isp, risk_level, created_at)
-            VALUES (?, 
+            VALUES (?,
                     COALESCE((SELECT first_seen FROM ip_connections WHERE ip_address = ?), ?),
-                    ?, 
+                    ?,
                     ?,
                     ?, ?, ?, ?, ?, ?)
-        ''', (ip_address, ip_address, timestamp, timestamp, new_count, user_agent, 
+        ''', (ip_address, ip_address, timestamp, timestamp, new_count, user_agent,
               ip_info['country'], ip_info['city'], ip_info['isp'], risk_level, timestamp))
-    
+
     # Log security event if high risk
     if risk_level == 'HIGH':
-        log_security_event('HIGH_RISK_IP', ip_address, user_agent, endpoint, 
+        log_security_event('HIGH_RISK_IP', ip_address, user_agent, endpoint,
                           f'High risk IP detected: {new_count} requests')
-    
+
 def log_security_event(event_type, ip_address, user_agent, endpoint, description):
     """Log security events"""
     timestamp = _r12_admin_utc_iso_z()
-    
+
     # Add to in-memory log (thread-safe)
     with monitoring_data_lock:
         monitoring_data['security_events'].append({
@@ -949,7 +949,7 @@ def log_security_event(event_type, ip_address, user_agent, endpoint, description
             'endpoint': endpoint,
             'description': description
         })
-    
+
     # Log to database
     with db_connection() as conn:
         cursor = conn.cursor()
@@ -957,13 +957,13 @@ def log_security_event(event_type, ip_address, user_agent, endpoint, description
             INSERT INTO security_events (timestamp, event_type, ip_address, user_agent, endpoint, severity, description, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (timestamp, event_type, ip_address, user_agent, endpoint, 'HIGH', description, timestamp))
-    
+
     logger.warning(f"Security event: {event_type} from {ip_address} - {description}")
 
 def log_error(level, message, source, ip_address=None):
     """Log error with comprehensive details"""
     timestamp = _r12_admin_utc_iso_z()
-    
+
     # Add to in-memory log (thread-safe)
     with monitoring_data_lock:
         monitoring_data['error_logs'].append({
@@ -973,7 +973,7 @@ def log_error(level, message, source, ip_address=None):
             'source': source,
             'ip_address': ip_address
         })
-    
+
     # Log to database
     with db_connection() as conn:
         cursor = conn.cursor()
@@ -981,7 +981,7 @@ def log_error(level, message, source, ip_address=None):
             INSERT INTO error_logs (timestamp, level, message, source, ip_address, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
         ''', (timestamp, level, message, source, ip_address, timestamp))
-    
+
     # Also log to file
     logger.error(f"[{source}] {message} (IP: {ip_address})")
 
@@ -1155,25 +1155,25 @@ def get_system_info():
         # CPU information
         cpu_percent = psutil.cpu_percent(interval=1)
         cpu_count = psutil.cpu_count()
-        
+
         # Memory information
         memory = psutil.virtual_memory()
         memory_percent = memory.percent
         memory_total = memory.total / (1024**3)  # GB
         memory_available = memory.available / (1024**3)  # GB
-        
+
         # Disk information
         disk = psutil.disk_usage('/')
         disk_percent = (disk.used / disk.total) * 100
         disk_total = disk.total / (1024**3)  # GB
         disk_free = disk.free / (1024**3)  # GB
-        
+
         # Network information
         network = psutil.net_io_counters()
-        
+
         # Process information
         processes = len(psutil.pids())
-        
+
         system_info = {
             'cpu_percent': cpu_percent,
             'cpu_count': cpu_count,
@@ -1188,12 +1188,12 @@ def get_system_info():
             'processes': processes,
             'timestamp': _r12_admin_utc_iso_z()
         }
-        
+
         # Log performance metrics
         log_performance_metrics(cpu_percent, memory_percent, disk_percent)
-        
+
         return system_info
-        
+
     except Exception as e:
         # Round 2 / Phase 2.2: surface failed-vs-zero state so the admin
         # tile template can render "n/a" / a failure chip instead of
@@ -1223,7 +1223,7 @@ def log_performance_metrics(cpu_usage, memory_usage, disk_usage):
                 INSERT INTO performance_metrics (timestamp, cpu_usage, memory_usage, disk_usage, response_time, active_connections, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (timestamp, cpu_usage, memory_usage, disk_usage, 0.0, active_connections, timestamp))
-        
+
     except Exception as e:
         log_error('ERROR', f'Performance metrics logging failed: {e}', 'log_performance_metrics')
 
@@ -1468,7 +1468,7 @@ def get_report_history():
                     '_total_managers_failed': total_managers_failed,
                 })
         return reports
-        
+
     except Exception as e:
         log_error('ERROR', f'Report history retrieval failed: {e}', 'get_report_history')
         return []
@@ -1478,7 +1478,7 @@ def get_ip_connections():
     try:
         with db_connection() as conn:
             cursor = conn.cursor()
-            
+
             # Get IP connection stats
             # Round 13 / Phase 7.2: previously the ORDER BY only
             # used ``last_seen DESC`` which is non-deterministic when
@@ -1492,11 +1492,11 @@ def get_ip_connections():
             # flicker between two equally valid orderings.
             cursor.execute('''
                 SELECT ip_address, first_seen, last_seen, request_count, user_agent, country, city, risk_level
-                FROM ip_connections 
+                FROM ip_connections
                 ORDER BY last_seen DESC, id DESC
                 LIMIT 50
             ''')
-            
+
             connections = []
             for row in cursor.fetchall():
                 connections.append({
@@ -1510,7 +1510,7 @@ def get_ip_connections():
                     'risk_level': row[7]
                 })
         return connections
-        
+
     except Exception as e:
         log_error('ERROR', f'IP connections retrieval failed: {e}', 'get_ip_connections')
         return []
@@ -1520,18 +1520,18 @@ def get_security_events():
     try:
         with db_connection() as conn:
             cursor = conn.cursor()
-            
+
             # Round 13 / Phase 7.3: same ``id DESC`` tie-break as the
             # ip_connections page above; ``timestamp`` alone is not a
             # stable sort key when bulk-import or replay events share
             # the same second.
             cursor.execute('''
                 SELECT timestamp, event_type, ip_address, user_agent, endpoint, severity, description
-                FROM security_events 
+                FROM security_events
                 ORDER BY timestamp DESC, id DESC
                 LIMIT 50
             ''')
-            
+
             events = []
             for row in cursor.fetchall():
                 events.append({
@@ -1544,7 +1544,7 @@ def get_security_events():
                     'description': row[6]
                 })
         return events
-        
+
     except Exception as e:
         log_error('ERROR', f'Security events retrieval failed: {e}', 'get_security_events')
         return []
@@ -1554,16 +1554,16 @@ def get_error_logs():
     try:
         with db_connection() as conn:
             cursor = conn.cursor()
-            
+
             # Round 13 / Phase 7.4: same ``id DESC`` tie-break as the
             # security_events / ip_connections pages above.
             cursor.execute('''
                 SELECT timestamp, level, message, source, ip_address
-                FROM error_logs 
+                FROM error_logs
                 ORDER BY timestamp DESC, id DESC
                 LIMIT 50
             ''')
-            
+
             errors = []
             for row in cursor.fetchall():
                 errors.append({
@@ -1574,7 +1574,7 @@ def get_error_logs():
                     'ip_address': row[4]
                 })
         return errors
-        
+
     except Exception as e:
         log_error('ERROR', f'Error logs retrieval failed: {e}', 'get_error_logs')
         return []
@@ -1584,33 +1584,33 @@ def get_analytics():
     try:
         with db_connection() as conn:
             cursor = conn.cursor()
-            
+
             # Report type distribution
             cursor.execute('''
                 SELECT report_type, COUNT(*) as count
-                FROM report_history 
+                FROM report_history
                 GROUP BY report_type
                 ORDER BY count DESC
             ''')
             report_types = dict(cursor.fetchall())
-            
+
             # Manager distribution
             cursor.execute('''
                 SELECT manager, COUNT(*) as count
-                FROM report_history 
+                FROM report_history
                 GROUP BY manager
                 ORDER BY count DESC
             ''')
             managers = dict(cursor.fetchall())
-            
+
             # IP risk distribution
             cursor.execute('''
                 SELECT risk_level, COUNT(*) as count
-                FROM ip_connections 
+                FROM ip_connections
                 GROUP BY risk_level
             ''')
             risk_levels = dict(cursor.fetchall())
-            
+
             # Daily report count (last 7 days)
             cursor.execute('''
                 SELECT DATE(created_at) as date, COUNT(*) as count
@@ -1620,14 +1620,14 @@ def get_analytics():
                 ORDER BY date DESC
             ''', (_utc_iso_z(datetime.now(_tz.utc) - timedelta(days=7)),))
             daily_reports = dict(cursor.fetchall())
-        
+
         return {
             'report_types': report_types,
             'managers': managers,
             'risk_levels': risk_levels,
             'daily_reports': daily_reports
         }
-        
+
     except Exception as e:
         log_error('ERROR', f'Analytics retrieval failed: {e}', 'get_analytics')
         return {}
@@ -1811,7 +1811,7 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
         .theme-toggle .theme-icon-light { display: inline; }
         [data-bs-theme="dark"] .theme-toggle .theme-icon-dark { display: inline; }
         [data-bs-theme="dark"] .theme-toggle .theme-icon-light { display: none; }
-        
+
         .dashboard-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -1874,7 +1874,7 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
         [data-bs-theme="dark"] .status-stopped {
             color: #ff7e7e;
         }
-        
+
         /* Round 12 / Phase 5.3: previously the admin traffic-light
            classes were hard-coded with the flat-UI palette
            (#e74c3c / #f39c12 / #27ae60), which drifted from the
@@ -1892,17 +1892,17 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
             color: {{ admin_risk_color_high|default('#d62728') }};
             font-weight: bold;
         }
-        
+
         .risk-medium {
             color: {{ admin_risk_color_medium|default('#ffd700') }};
             font-weight: bold;
         }
-        
+
         .risk-low {
             color: {{ admin_risk_color_low|default('#2ca02c') }};
             font-weight: bold;
         }
-        
+
         .table-container {
             background: var(--bg-surface);
             color: var(--text-primary);
@@ -2109,14 +2109,14 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
             <p style="margin-top: 12px;"><a href="{{ main_app_url }}" target="_blank" rel="noopener noreferrer">← Back to AdoptIQ</a></p>
             {% endif %}
         </div>
-        
+
         {% if request.args.get('message') %}
         {% set _mt = request.args.get('message_type', 'info') %}
         <div class="alert alert-{{ _mt if _mt in ('info', 'success', 'warning', 'danger') else 'info' }}">
             {{ request.args.get('message') }}
         </div>
         {% endif %}
-        
+
         <!-- Analytics Overview (counts come from SELECT COUNT(*); the lists
              below show the most recent 50 rows only, so headline numbers
              must NEVER be derived from list lengths.) -->
@@ -2141,7 +2141,7 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 <div class="analytics-label">Recent Errors{% if totals.error_logs is none %} <small style="color:#dc3545;">source unavailable</small>{% endif %}</div>
             </div>
         </div>
-        
+
         <!-- Server Control -->
         <div class="dashboard-grid">
             <div class="dashboard-card">
@@ -2185,7 +2185,7 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                     <span class="status-label">Last Check:</span>
                     <span class="status-value">{{ server_status.last_check or 'Never' }}</span>
                 </div>
-                
+
                 <div style="margin-top: 15px;">
                     {# Round 5 / Phase 2.3: destructive server controls
                        are POST + CSRF protected, rendered as inline
@@ -2203,7 +2203,7 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                     {% endif %}
                 </div>
             </div>
-            
+
             <div class="dashboard-card">
                 <h3>📊 System Metrics</h3>
                 {% if system_info.state == 'failed' %}
@@ -2230,7 +2230,7 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 </div>
                 {% endif %}
             </div>
-            
+
             <div class="dashboard-card">
                 <h3>🔍 Audit Summary</h3>
                 <div class="status-item">
@@ -2253,7 +2253,7 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 </div>
             </div>
         </div>
-        
+
         <!-- Currently Running Reports -->
         {% if running_reports_failed %}
         <div class="table-container">
@@ -2293,7 +2293,7 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
             </table>
         </div>
         {% endif %}
-        
+
         <!-- IP Connections Table -->
         <div class="table-container">
             <h3>🌐 IP Connections & Security</h3>
@@ -2326,7 +2326,7 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 </tbody>
             </table>
         </div>
-        
+
         <!-- Report History Table -->
         <div class="table-container">
             <h3>📋 Report History</h3>
@@ -2357,7 +2357,7 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 </tbody>
             </table>
         </div>
-        
+
         <!-- Error Logs Table -->
         <div class="table-container">
             <h3>⚠️ Recent Errors</h3>
@@ -2384,7 +2384,7 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 </tbody>
             </table>
         </div>
-        
+
         <!-- Audit History Table -->
         <div class="table-container">
             <h3>✅ Audit History</h3>
@@ -2433,7 +2433,7 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 </tbody>
             </table>
         </div>
-        
+
         <!-- Action Buttons -->
         <div style="text-align: center; margin: 20px 0;">
             {# Round 5 / Phase 2.3: destructive log controls are POST + CSRF
@@ -2572,6 +2572,34 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                         to enable daily refresh
                     </span>
                     {% endif %}
+                </p>
+                {% endif %}
+
+                {# Round 53 / Phase 53.4: dedicated banner for the
+                   ``blocked_no_onedrive`` state.  Surfaces the same
+                   remediation guidance the analyze-page panel shows
+                   so the admin operator can see why the corpus is
+                   unavailable without bouncing back to the user UI.
+                   The Re-index / Rebuild / Reset buttons below also
+                   honor this state via the ``_corpus_blocked`` flag
+                   so the operator does not retry into the same
+                   error.  Source-shape pinned by
+                   ``tests/test_round53_admin_tile_blocked_state.py``. #}
+                {% if corpus_status.boot.source == 'blocked_no_onedrive' %}
+                <p style="margin-top: 0.6em; color: #856404; background: #fff3cd; border: 1px solid #ffeeba; padding: 0.6em 0.8em; border-radius: 4px;">
+                    <strong>Sign in to OneDrive required (Round 53):</strong>
+                    AdoptIQ cannot decrypt the bundled corpus snapshot
+                    until the canonical sentinel under
+                    <code>AI Projects/AdoptIQ_CSOne_Reports</code> is
+                    synced to disk by the OneDrive desktop client.
+                    The corpus is encrypted-at-rest against a key that
+                    lives in that share -- without the OneDrive sync,
+                    the bundled snapshot is intentionally unopenable
+                    (this is the security boundary added in
+                    QUALITY_AUDIT.md Round 52.2 / Round 53).  The
+                    Re-index / Rebuild / Reset buttons below are
+                    disabled while blocked because they would all
+                    immediately fail with the same error.
                 </p>
                 {% endif %}
 
@@ -2716,11 +2744,20 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                because it replaces the user's local encrypted corpus
                cache from the bundled snapshot. #}
             {% set _corpus_busy = corpus_status.boot.in_progress %}
+            {# Round 53 / Phase 53.4: gate the Re-index / Rebuild /
+               Reset buttons on ``blocked_no_onedrive`` too -- not
+               just on ``in_progress``.  Without this the admin tile
+               looks like a ready operator action ("click Re-index!")
+               but the request would just hit the same fail-closed
+               gate in ``corpus_bootstrap._run_index_pass`` and 0
+               files would land. #}
+            {% set _corpus_blocked = (corpus_status.boot.source == 'blocked_no_onedrive') %}
+            {% set _corpus_disabled = _corpus_busy or _corpus_blocked %}
             <form method="POST" action="/corpus_refresh" style="display:inline;">
                 <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
                 <button type="submit" class="btn btn-primary"
-                        {% if _corpus_busy %}disabled{% endif %}
-                        title="{% if _corpus_busy %}Indexing already in progress{% else %}Re-index from OneDrive sync (incremental){% endif %}">
+                        {% if _corpus_disabled %}disabled{% endif %}
+                        title="{% if _corpus_busy %}Indexing already in progress{% elif _corpus_blocked %}Sign in to OneDrive to unlock the corpus before re-indexing{% else %}Re-index from OneDrive sync (incremental){% endif %}">
                     Re-index now
                 </button>
             </form>
@@ -2729,8 +2766,8 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
                 <input type="hidden" name="rebuild" value="1">
                 <button type="submit" class="btn btn-warning"
-                        {% if _corpus_busy %}disabled{% endif %}
-                        title="{% if _corpus_busy %}Indexing already in progress{% else %}Discard the encrypted cache and rebuild from scratch{% endif %}">
+                        {% if _corpus_disabled %}disabled{% endif %}
+                        title="{% if _corpus_busy %}Indexing already in progress{% elif _corpus_blocked %}Sign in to OneDrive to unlock the corpus before rebuilding{% else %}Discard the encrypted cache and rebuild from scratch{% endif %}">
                     Rebuild
                 </button>
             </form>
@@ -2738,8 +2775,8 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                   onsubmit="return confirm('Reset the local encrypted corpus cache from the bundled snapshot? This preserves a broken copy for troubleshooting and may start a refresh.');">
                 <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
                 <button type="submit" class="btn btn-danger"
-                        {% if _corpus_busy %}disabled{% endif %}
-                        title="{% if _corpus_busy %}Indexing already in progress{% else %}Replace the local encrypted corpus cache from the bundled snapshot{% endif %}">
+                        {% if _corpus_disabled %}disabled{% endif %}
+                        title="{% if _corpus_busy %}Indexing already in progress{% elif _corpus_blocked %}Sign in to OneDrive to unlock the corpus before resetting{% else %}Replace the local encrypted corpus cache from the bundled snapshot{% endif %}">
                     Reset corpus
                 </button>
             </form>
@@ -2757,9 +2794,9 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
             </button>
         </div>
     </div>
-    
+
     <button class="refresh-btn" onclick="location.reload()">🔄</button>
-    
+
     <script>
         const verboseDebugEnabled = {{ 'true' if verbose_debug else 'false' }};
 
@@ -2767,7 +2804,7 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
         setTimeout(function() {
             location.reload();
         }, 30000);
-        
+
         // Add click handlers for better UX
         document.querySelectorAll('.btn').forEach(btn => {
             btn.addEventListener('click', function(e) {
@@ -2936,7 +2973,7 @@ def log_request():
         ip_address = _peer_ip
     user_agent = request.headers.get('User-Agent', 'unknown')
     endpoint = request.endpoint or 'unknown'
-    
+
     if ip_address not in ('127.0.0.1', '::1', 'localhost'):
         return Response('Forbidden: admin is local access only', status=403)
 
@@ -2988,10 +3025,10 @@ def enhanced_admin_dashboard():
         'security_events': get_total_count('security_events'),
         'total_requests': get_total_request_count(),
     }
-    
+
     # Extract the audits list from the dictionary
     audit_history = audit_data.get('audits', [])
-    
+
     # Get currently running reports from main app (MAIN_APP_URL for container)
     # Round 2 / Phase 2.2: track failed-vs-zero state.  An unreachable
     # main app must render "n/a" in the tile, not "0 running" which is
@@ -3035,7 +3072,7 @@ def enhanced_admin_dashboard():
             snowflake_query_count_failed = True
     except Exception as _debug_err:
         logger.debug("Could not fetch verbose debug state from main app: %s", _debug_err)
-    
+
     # Round 12 / Phase 5.3: project the canonical risk-band palette
     # into the admin template so the inline ``.risk-high``,
     # ``.risk-medium`` and ``.risk-low`` traffic-light classes share
@@ -3128,7 +3165,7 @@ def enhanced_admin_dashboard():
     except Exception as _r17_err:  # noqa: BLE001 - tile must always render
         logger.debug("Round 17 / corpus tile fetch failed: %s", _r17_err)
 
-    return render_template_string(ENHANCED_ADMIN_TEMPLATE_V2, 
+    return render_template_string(ENHANCED_ADMIN_TEMPLATE_V2,
                                 server_status=server_status,
                                 system_info=system_info,
                                 report_history=report_history,
@@ -3149,6 +3186,38 @@ def enhanced_admin_dashboard():
                                 corpus_status=corpus_status,
                                 corpus_status_failed=corpus_status_failed)
 
+# Round 54 / F3 -- shared blocked-state probe used by the corpus
+# refresh + reset proxies.  Re-fetches ``/api/corpus/status`` (the
+# same endpoint the dashboard tile uses) and returns True when
+# ``boot.source == "blocked_no_onedrive"`` -- meaning the corpus is
+# fail-closed waiting for OneDrive sync and any refresh / reset
+# request would just immediately re-block on the same gate inside
+# ``corpus_bootstrap._run_index_pass``.  Defense in depth on top of
+# the template-level ``{% if _corpus_disabled %}disabled{% endif %}``
+# gating: a curl / devtools bypass also gets the same short-circuit.
+# Pinned by ``tests/test_round54_f3_admin_reset_gate.py``.
+def _r54_corpus_is_blocked_no_onedrive() -> bool:
+    try:
+        resp = requests.get(
+            f'{MAIN_APP_URL.rstrip("/")}/api/corpus/status',
+            timeout=2,
+        )
+    except Exception:  # noqa: BLE001 - probe must never bubble
+        return False
+    if resp.status_code != 200:
+        return False
+    try:
+        data = resp.json() or {}
+    except Exception:  # noqa: BLE001 - malformed JSON: don't gate
+        return False
+    if not isinstance(data, dict):
+        return False
+    boot = data.get('boot')
+    if not isinstance(boot, dict):
+        return False
+    return boot.get('source') == 'blocked_no_onedrive'
+
+
 @admin_app.route('/corpus_refresh', methods=['POST'])
 def corpus_refresh_route():
     """Round 17 / Phase D.5 -- proxy a CSRF-protected refresh request
@@ -3159,8 +3228,26 @@ def corpus_refresh_route():
     server-to-server HTTP call to the main app.  We pass ``rebuild``
     only when the form field is set so the default action is the
     cheaper incremental refresh.
+
+    Round 54 / F3: short-circuit BEFORE the proxy call when the corpus
+    is in ``blocked_no_onedrive`` -- the refresh would just trip the
+    same Round 53 fail-closed gate inside
+    ``corpus_bootstrap._run_index_pass`` and the operator would see no
+    progress.  Surface a clear "Sign in to OneDrive first" status
+    instead.  Defense in depth on top of the template's disabled
+    state for the case where an operator hits this URL via curl or
+    devtools rather than the dashboard button.
     """
     _require_admin_csrf()
+    if _r54_corpus_is_blocked_no_onedrive():
+        return redirect(url_for(
+            'enhanced_admin_dashboard',
+            message=(
+                'Corpus refresh: blocked -- sign in to OneDrive and '
+                'sync AI Projects/AdoptIQ_CSOne_Reports first.'
+            ),
+            message_type='warning',
+        ))
     rebuild = '1' if (request.form.get('rebuild') == '1') else ''
     refresh_status = 'unknown'
     try:
@@ -3232,8 +3319,25 @@ def corpus_reset_route():
     Strategy: validate the admin CSRF token first, then make a
     server-to-server HTTP call with the ``X-AdoptIQ-Internal`` header
     so the main app can authorize without us holding its CSRF token.
+
+    Round 54 / F3: short-circuit BEFORE the proxy call when the corpus
+    is in ``blocked_no_onedrive`` -- the reset would preserve the
+    bundled snapshot and trigger a refresh that would IMMEDIATELY
+    re-block on the same Round 53 fail-closed gate, wasting the
+    operator's click and producing a confusing "started" banner over
+    a corpus that is still blocked.  Surface a clear "Sign in to
+    OneDrive first" status instead.
     """
     _require_admin_csrf()
+    if _r54_corpus_is_blocked_no_onedrive():
+        return redirect(url_for(
+            'enhanced_admin_dashboard',
+            message=(
+                'Corpus reset: blocked -- sign in to OneDrive and '
+                'sync AI Projects/AdoptIQ_CSOne_Reports first.'
+            ),
+            message_type='warning',
+        ))
     reset_status = 'unknown'
     try:
         import requests as _r39_req
@@ -3279,7 +3383,7 @@ def start_server_route():
     # Round 5 / Phase 2.3: require POST + admin CSRF token.
     _require_admin_csrf()
     result = start_server()
-    
+
     if result['success']:
         return redirect(url_for('enhanced_admin_dashboard', message='Server started successfully!', message_type='success'))
     else:
@@ -3292,7 +3396,7 @@ def stop_server_route():
     # Round 5 / Phase 2.3: require POST + admin CSRF token.
     _require_admin_csrf()
     result = stop_server()
-    
+
     if result['success']:
         return redirect(url_for('enhanced_admin_dashboard', message='Server stopped successfully!', message_type='success'))
     else:
@@ -3332,9 +3436,9 @@ def export_logs():
         )
         with open(export_file, 'w', encoding='utf-8') as f:
             json.dump(logs_data, f, indent=2)
-        
+
         return redirect(url_for('enhanced_admin_dashboard', message=f'Logs exported to {export_file}', message_type='success'))
-        
+
     except Exception as e:
         log_error('ERROR', f'Log export failed: {e}', 'export_logs')
         return redirect(url_for('enhanced_admin_dashboard', message='Export failed. Check logs for details.', message_type='danger'))
@@ -3347,14 +3451,14 @@ def clear_logs():
     try:
         with db_connection() as conn:
             cursor = conn.cursor()
-            
+
             # Clear all tables
             cursor.execute('DELETE FROM report_history')
             cursor.execute('DELETE FROM ip_connections')
             cursor.execute('DELETE FROM security_events')
             cursor.execute('DELETE FROM performance_metrics')
             cursor.execute('DELETE FROM error_logs')
-        
+
         # Clear in-memory data
         monitoring_data['active_reports'].clear()
         monitoring_data['completed_reports'].clear()
@@ -3364,11 +3468,11 @@ def clear_logs():
         monitoring_data['access_logs'].clear()
         monitoring_data['security_events'].clear()
         monitoring_data['performance_metrics'].clear()
-        
+
         log_error('INFO', 'All logs cleared', 'clear_logs')
-        
+
         return redirect(url_for('enhanced_admin_dashboard', message='All logs cleared successfully!', message_type='success'))
-        
+
     except Exception as e:
         log_error('ERROR', f'Log clear failed: {e}', 'clear_logs')
         return redirect(url_for('enhanced_admin_dashboard', message='Clear failed. Check logs for details.', message_type='danger'))
@@ -3539,7 +3643,7 @@ def audit_report(analysis_id):
     - Facts match source data
     """
     logger.info(f"Starting audit for analysis: {analysis_id}")
-    
+
     audit_result = {
         'analysis_id': analysis_id,
         'audit_timestamp': _r12_admin_utc_iso_z(),
@@ -3548,7 +3652,7 @@ def audit_report(analysis_id):
         'score': 0,
         'max_score': 100
     }
-    
+
     try:
         if not _is_valid_analysis_id(analysis_id):
             audit_result['status'] = 'error'
@@ -3557,7 +3661,7 @@ def audit_report(analysis_id):
 
         # Ensure database and tables exist (report_history may not exist when app_simple runs standalone)
         init_database()
-        
+
         # Get report details from database (if populated)
         report_data = None
         try:
@@ -3599,7 +3703,7 @@ def audit_report(analysis_id):
                 })
             except Exception:
                 pass
-        
+
         # Check 1: Verify report file exists (search outputs/ and Reports/)
         output_dirs = [Path('outputs'), Path('Reports')]
         if os.environ.get('APPDATA'):
@@ -3610,7 +3714,7 @@ def audit_report(analysis_id):
                 report_files.extend(list(d.glob(f"*{analysis_id}*")))
         # Avoid duplicate files when multiple directories point to same location
         report_files = list({str(p.resolve()): p for p in report_files}.values())
-        
+
         if report_files:
             audit_result['checks'].append({
                 'check': 'file_exists',
@@ -3626,7 +3730,7 @@ def audit_report(analysis_id):
                 'score': 0,
                 'message': 'No report files found'
             })
-        
+
         # Check 2: Verify report completion (from DB or inferred from file existence)
         if report_data and report_data[4] == 'completed':
             audit_result['checks'].append({
@@ -3651,7 +3755,7 @@ def audit_report(analysis_id):
                 'score': 0,
                 'message': f'Report status: {report_data[4] if report_data else "unknown"}'
             })
-        
+
         # Check 3: Verify generation time is reasonable (only when report_history has data)
         if report_data and report_data[5] and report_data[6]:
             try:
@@ -3660,7 +3764,7 @@ def audit_report(analysis_id):
                 start = datetime.fromisoformat(start_str)
                 end = datetime.fromisoformat(end_str)
                 duration = (end - start).total_seconds()
-                
+
                 if 10 < duration < 600:  # Between 10 seconds and 10 minutes
                     audit_result['checks'].append({
                         'check': 'generation_time',
@@ -3692,7 +3796,7 @@ def audit_report(analysis_id):
                 'message': 'Generation time not tracked (report_history not populated)'
             })
             audit_result['score'] += 5
-        
+
         # Check 4: Verify data sources accessed
         # This would check logs to confirm Snowflake, CSConsole, and CSOne were queried
         audit_result['checks'].append({
@@ -3702,7 +3806,7 @@ def audit_report(analysis_id):
             'message': 'All required data sources accessed (Snowflake, CSConsole, CSOne)'
         })
         audit_result['score'] += 20
-        
+
         # Check 5: Verify BEMS detection ran
         audit_result['checks'].append({
             'check': 'bems_detection',
@@ -3711,7 +3815,7 @@ def audit_report(analysis_id):
             'message': 'BEMS escalation detection completed'
         })
         audit_result['score'] += 10
-        
+
         # Check 6: Verify report formatting
         if report_files:
             file_size = report_files[0].stat().st_size
@@ -3731,7 +3835,7 @@ def audit_report(analysis_id):
                     'message': f'Report may be incomplete: {file_size / 1024:.1f} KB'
                 })
                 audit_result['score'] += 5
-        
+
         # Check 7: Verify references and citations
         # This would parse the report to check for proper citations
         audit_result['checks'].append({
@@ -3741,7 +3845,7 @@ def audit_report(analysis_id):
             'message': 'All data sources properly cited'
         })
         audit_result['score'] += 10
-        
+
         # Check 8: IP address security check
         if report_data and report_data[7]:
             ip_risk = assess_ip_risk(report_data[7], 1, '')
@@ -3761,7 +3865,7 @@ def audit_report(analysis_id):
                     'message': f'IP risk level: {ip_risk}'
                 })
                 audit_result['score'] += 5
-        
+
         # Determine overall status
         if audit_result['score'] >= 90:
             audit_result['status'] = 'excellent'
@@ -3771,16 +3875,16 @@ def audit_report(analysis_id):
             audit_result['status'] = 'acceptable'
         else:
             audit_result['status'] = 'needs_improvement'
-        
+
         # Log audit event
         log_security_event('audit_completed', report_data[7] if report_data else 'unknown',
                          '', analysis_id, f"Audit score: {audit_result['score']}/100")
-        
+
         # Save audit results to database
         with db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO audit_results 
+                INSERT INTO audit_results
                 (analysis_id, audit_timestamp, status, score, max_score, checks_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (
@@ -3792,14 +3896,14 @@ def audit_report(analysis_id):
                 json.dumps(audit_result['checks']),
                 _r12_admin_utc_iso_z()
             ))
-        
+
         logger.info(f"Audit completed for {analysis_id}: {audit_result['status']} ({audit_result['score']}/100)")
-        
+
     except Exception as e:
         logger.error(f"Error auditing report {analysis_id}: {e}")
         audit_result['status'] = 'error'
         audit_result['error'] = 'An error occurred during report audit. See logs for details.'
-    
+
     return audit_result
 
 def get_audit_history(limit=50):
@@ -3813,9 +3917,9 @@ def get_audit_history(limit=50):
                 ORDER BY created_at DESC
                 LIMIT ?
             ''', (limit,))
-            
+
             rows = cursor.fetchall()
-        
+
         audits = []
         total_score = 0
         for row in rows:
@@ -3829,7 +3933,7 @@ def get_audit_history(limit=50):
                 'report_type': 'Report'  # Default value
             })
             total_score += row[3] if row[3] else 0
-        
+
         return {
             'total_audits': len(audits),
             'audits': audits,
@@ -3851,14 +3955,14 @@ def get_audit_summary():
     try:
         with db_connection() as conn:
             cursor = conn.cursor()
-            
+
             # Get total audits and average score
             cursor.execute('SELECT COUNT(*), AVG(score) FROM audit_results')
             total, avg_score = cursor.fetchone()
-            
+
             # Get score distribution
             cursor.execute('''
-                SELECT 
+                SELECT
                     SUM(CASE WHEN score >= 90 THEN 1 ELSE 0 END) as excellent,
                     SUM(CASE WHEN score >= 75 AND score < 90 THEN 1 ELSE 0 END) as good,
                     SUM(CASE WHEN score >= 60 AND score < 75 THEN 1 ELSE 0 END) as acceptable,
@@ -3868,11 +3972,11 @@ def get_audit_summary():
                 FROM audit_results
             ''')
             stats = cursor.fetchone()
-            
+
             # Get last audit date
             cursor.execute('SELECT MAX(audit_timestamp) FROM audit_results')
             last_audit = cursor.fetchone()[0]
-        
+
         return {
             'total_audits_completed': total or 0,
             'average_audit_score': round(avg_score, 1) if avg_score else 0,
@@ -3906,11 +4010,11 @@ def get_audit_summary():
 def start_server():
     """Start the AdoptIQ server"""
     global server_process
-    
+
     try:
         if server_process and server_process.poll() is None:
             return {'success': False, 'error': 'Server is already running'}
-        
+
         # Round 9 / Phase 4.1: previously ``Popen([sys.executable,
         # 'app_simple.py'])`` resolved ``app_simple.py`` against the
         # *caller's* CWD.  An admin dashboard launched via systemd /
@@ -3935,16 +4039,16 @@ def start_server():
             stderr=subprocess.PIPE,
             cwd=str(_app_simple_path.parent),
         )
-        
+
         # Wait a moment to check if it started successfully
         time.sleep(2)
-        
+
         if server_process.poll() is None:
             log_error('INFO', f'AdoptIQ server started with PID {server_process.pid}', 'start_server')
             return {'success': True, 'pid': server_process.pid}
         else:
             return {'success': False, 'error': 'Server failed to start'}
-            
+
     except Exception as e:
         log_error('ERROR', f'Failed to start server: {e}', 'start_server')
         return {'success': False, 'error': 'Failed to start server. See logs for details.'}
@@ -3952,7 +4056,7 @@ def start_server():
 def stop_server():
     """Stop the AdoptIQ server"""
     global server_process
-    
+
     try:
         if server_process and server_process.poll() is None:
             server_process.terminate()
@@ -3961,7 +4065,7 @@ def stop_server():
             return {'success': True}
         else:
             return {'success': False, 'error': 'Server is not running'}
-            
+
     except Exception as e:
         log_error('ERROR', f'Failed to stop server: {e}', 'stop_server')
         return {'success': False, 'error': 'Failed to stop server. See logs for details.'}
