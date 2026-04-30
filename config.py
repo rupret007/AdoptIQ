@@ -905,7 +905,7 @@ ADOPTIQ_VERSION = "1.0.4"
 # ``table_numeric_similarity == 1.0``; strict 3-iter repeatability
 # 12/12 green.  No upstream Snowflake query, formatter, boot-order,
 # corpus, or admin-console changes ship in this build.
-ADOPTIQ_BUILD = "31"  # Round 53 / corpus-fail-closed-onedrive-sentinel
+ADOPTIQ_BUILD = "32"  # Round 59 / cut Build32 to package R57 source-citation injector + R55/R56 harness changes (R57 source landed in commit 6a42a99 but never made it into a packaged artifact)
 
 def version_string():
     """e.g. 'v1.0.1 build 1'"""

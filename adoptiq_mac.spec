@@ -80,6 +80,18 @@ hidden_imports = [
     '_bundled_secrets',
     'error_classifier', 'connectivity_diagnostics',
     'ai_narrative_validator',
+    # Round 59 / Build32: pin Round 57 modules so the post-render Word
+    # source-citation injector ships in the frozen build.
+    # ``report_source_injector`` is statically imported by
+    # ``app_simple.py`` so PyInstaller's analyzer would normally find it;
+    # we still pin it explicitly because ``report_iteration_loop`` is only
+    # *lazy*-imported inside ``report_source_injector._gate_kpi_aliases``
+    # (PyInstaller does not follow lazy imports inside function bodies).
+    # Without this pin the injector silently degrades to a no-op in the
+    # frozen build (canonical KPI filter returns False for every match,
+    # so zero citations are injected) even though the source is correct.
+    'report_source_injector',
+    'report_iteration_loop',
     'knowledge_schema',
     'corpus_crypto',
     'corpus_indexer',
