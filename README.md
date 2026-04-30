@@ -1,8 +1,18 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 33).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 34).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 34 (Round 61 — Three small fixes + harness hardening)
+
+Build 34 ships three small fixes carried over from the Round 58 + Round 59 deferral list — none of them user-visible by themselves, but together they close the longest-standing tech-debt items in the audit log and make future build cuts safer.
+
+- **`update_version_pc.py` no longer silently downgrades the build label.** Pre-Build 34, running `bash build_mac_dmg.sh` (or `python update_version_pc.py`) without explicitly exporting `ADOPTIQ_VERSION=...` and `ADOPTIQ_BUILD=...` would reset `config.py` to `1.0.3` / `1`. That's the footgun that produced the Round 59 mis-labeled `AdoptIQ-v1.0.4-build1.dmg` even though `config.py` already said build "32". Build 34's `update_version_pc.py` now resolves defaults in this order: env var → existing value in `config.py` → hard-coded floor (only when `config.py` is corrupted). Operator-explicit overrides via env vars still work unchanged for the build scripts that already use them.
+- **Supervisor harness regex no longer false-positives on case / TAC / BEMS IDs.** The Round 58 + Round 59 audits flagged `~51` per-renewal-report false positives where 9-digit case identifiers like `Case: 700356476` matched the harness's `Label: number` regex and inflated the per-segment paragraph gate's count. Build 34 adds a `(?!\d{6})` negative lookahead to `_PARAGRAPH_KPI_NUMERIC_RE` so any value with 7+ contiguous digits without a comma is rejected. Real KPIs (max ~2,205 leader citation count, always ≤ 4 digits portfolio-wide) still match cleanly. Comma-separated values like `1,234,567` are unaffected because the comma breaks the contiguity check.
+- **Comprehensive `action_plans` extraction now survives LLM phrasing variation.** The Round 58 soak proved the comprehensive scenario's `action_plans` KPI was extracted in iter1 + iter3 ("Total Action Plans: 0") and missing in iter2 ("there are 0 Action Plans and 0 Success Priorities") — same underlying data, just different LLM phrasing. Build 34 adds a tightly-scoped `_PARAGRAPH_KPI_PREFIX_NUMERIC_RE` for the `<number> Label` idiom restricted to a small allow-list (Action Plans, Adoption Barriers, Customer Pulse, Direct Reports). Unrelated phrases like "90 days" or "100 customers" stay rejected.
+- **Corpus daily-refresh logger no longer leaks "I/O operation on closed file" tracebacks at pytest teardown.** Cosmetic only (real users never trigger this — it's a daemon-vs-pytest race), but the noise was muddying the test output and the original simple `try/except` wrap was insufficient because Python's `logging` module catches `StreamHandler.emit()` failures internally and reports them via `Handler.handleError()` to stderr regardless. Build 34's `_exit_log_streams_open()` walks the logger's handler chain and skips the emission entirely when any reachable stream is closed.
+- **Pinned by 26 new tests (3626 floor, R60 was 3608).** 13 harness-hardening tests, 7 update-version no-footgun tests, and 6 corpus shutdown logger tests. The R60 Quit button + SIGTERM shutdown machinery from Build 33 carries forward unchanged; the `report_source_injector` + `report_iteration_loop` `hiddenimports` pin from Build 32 still applies (and Build 34 is the second consecutive build to ship that injector with the citations the supervisor harness is gating against).
 
 ### What's New in Build 33 (Round 60 — Quit AdoptIQ button + clean SIGTERM-based shutdown)
 

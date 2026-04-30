@@ -905,7 +905,7 @@ ADOPTIQ_VERSION = "1.0.4"
 # ``table_numeric_similarity == 1.0``; strict 3-iter repeatability
 # 12/12 green.  No upstream Snowflake query, formatter, boot-order,
 # corpus, or admin-console changes ship in this build.
-ADOPTIQ_BUILD = "33"  # Round 60 / cut Build33 to package the user-facing Quit / shutdown button (POST /api/shutdown + admin proxy + navbar control). Pre-Build33 the .app had no native window so closing the browser tab left the Flask server running on port 5151 + admin daemon on 5152 until reboot; Build33 gives the user a single click to release both ports cleanly.
+ADOPTIQ_BUILD = "34"  # Round 61 / cut Build34 to ship three small fixes carried over from R58 + R59: (1) corpus_bootstrap daemon lifecycle logs gated on _exit_log_streams_open() so closed-stream pytest teardown noise stops surfacing "I/O operation on closed file" tracebacks; (2) update_version_pc.py reads existing config.py value as default when env vars unset, closing the R59 footgun that would silently reset the shipped build label; (3) report_iteration_loop harness regex tightened to reject 7+ digit case/TAC/BEMS IDs plus a new prefix regex for the "<number> Label" idiom, closing the R58 soak comprehensive.action_plans drift event. R60 Quit button + SIGTERM shutdown carry forward.
 
 def version_string():
     """e.g. 'v1.0.1 build 1'"""
