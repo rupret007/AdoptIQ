@@ -7516,3 +7516,69 @@ The packaged binary was spawned with `ADOPTIQ_PORT=15151 ADOPTIQ_BIND_HOST=127.0
 
 **Trailer:** Made-with: Cursor
 
+
+## Round 61 — handoff 2026-04-30
+
+**What changed (plain English):**
+- Closed three small deferrals carried forward from Round 58 / Round 59 in one round-and-ship cycle: (1) corpus daily-refresh logger now skips its lifecycle log emissions when the underlying `StreamHandler` stream is closed (silences the cosmetic `"I/O operation on closed file"` traceback at pytest teardown); (2) `update_version_pc.py` now reads the existing `ADOPTIQ_VERSION`/`ADOPTIQ_BUILD` from `config.py` as the default when env vars are unset (closes the Round 59 footgun that would silently reset the shipped build label to `"1"`); (3) the supervisor harness's narrative-KPI extractor now rejects 7+ digit purely-numeric values from `_PARAGRAPH_KPI_NUMERIC_RE` (case IDs / TAC numbers / BEMS refs no longer enter the per-segment paragraph gate's `matches` list and misalign segment boundaries) and ALSO extracts canonical KPIs from the `<number> Label` idiom via a new tightly-scoped `_PARAGRAPH_KPI_PREFIX_NUMERIC_RE` (closes the R58 soak `comprehensive.action_plans` drift event where iter2's LLM phrased the value as `"there are 0 Action Plans and 0 Success Priorities"` and the canonical regex missed it).
+
+**Files touched:**
+- `corpus_bootstrap.py` — gated the daemon's start AND exit log emissions on a new `_exit_log_streams_open()` helper that walks the logger's handler chain and returns False if any reachable `StreamHandler` is wired to a closed stream. Replaces the original simple `try/except` wrap, which was insufficient because Python's logging module catches `StreamHandler.emit()` failures internally and reports them via `Handler.handleError()` to stderr regardless of any outer exception handler.
+- `update_version_pc.py` — refactored module body into a `main(config_path, version_info_path)` callable so unit tests can drive against fixture paths; introduced env-var → existing-config-value → hard-coded floor resolution order.
+- `report_iteration_loop.py` — extended `_PARAGRAPH_KPI_NUMERIC_RE`'s value group with a `(?!\d{6})` negative lookahead after the leading `\d` so any value with 7+ contiguous digits without a comma separator is rejected; added new `_PARAGRAPH_KPI_PREFIX_NUMERIC_RE` for the `<number> Label` idiom (allow-list of labels: Action Plans, Adoption Barriers, Customer Pulse, Direct Reports); wired prefix scan into `_scan_paragraph_for_kpis` to run BEFORE the canonical scan so `setdefault` semantics preserve correct precedence.
+- `tests/test_round61_corpus_shutdown_logger_quiet.py` — 6 new tests (closed stream silences the noise via `capsys` assertion, open stream still emits exactly once, helper returns True/False/no-handlers/walks propagation chain).
+- `tests/test_round61_update_version_no_footgun.py` — 7 new tests (no-env preserves existing, env override still works, partial env, empty env treated as unset, malformed config falls through to floor, version_info.txt mirrors resolved values, module imports without side effects).
+- `tests/test_round61_harness_hardening.py` — 13 new tests (case-ID rejected, BEMS-ref rejected, real KPI shapes still match, comma-separated thousands still match, full canonical extraction unchanged for known metrics, case-ID does not drown real KPI in mixed paragraph, prefix regex extracts `0 Action Plans` and `354 Action Plans`, prefix regex tightly scoped to allow-list, prefix regex extracts adoption barriers idiom, prefix regex does not overwrite canonical match, smoke test for other-scenario extractions unchanged).
+
+**SSoT modules touched:** report_iteration_loop, structured_logging (indirectly — corpus_bootstrap uses the module-level `logger`), config (read-only via `update_version_pc.py`).
+- Note: the `report_iteration_loop._PARAGRAPH_KPI_NUMERIC_RE` change is the binding signal for what counts as a "metric claim" in the supervisor harness; tightening this regex narrows the false-positive surface but cannot widen the false-negative surface (the rejected values are all known-non-KPI identifiers per the R58 + Build 33 audits).
+
+**Tests added/updated:**
+- `tests/test_round61_corpus_shutdown_logger_quiet.py::test_exit_log_skipped_when_stream_closed` — pins that closed stream produces NO `Logging error` / `ValueError` traceback on stderr.
+- `tests/test_round61_corpus_shutdown_logger_quiet.py::test_exit_log_emits_once_when_stream_is_open` — pins real-run behavior unchanged.
+- `tests/test_round61_corpus_shutdown_logger_quiet.py::test_exit_log_streams_open_returns_true_for_open_stream` — direct contract pin for the helper.
+- `tests/test_round61_corpus_shutdown_logger_quiet.py::test_exit_log_streams_open_returns_false_for_closed_stream` — direct contract pin for the helper.
+- `tests/test_round61_corpus_shutdown_logger_quiet.py::test_exit_log_streams_open_returns_true_when_no_handlers` — empty-handlers path.
+- `tests/test_round61_corpus_shutdown_logger_quiet.py::test_exit_log_streams_open_walks_propagation_chain` — closed parent handler via propagation also blocks emission.
+- `tests/test_round61_update_version_no_footgun.py::test_no_env_preserves_existing_build` — the actual fix: no env vars → existing config.py value preserved.
+- `tests/test_round61_update_version_no_footgun.py::test_env_override_still_works` — back-compat: build scripts that DO export env vars unaffected.
+- `tests/test_round61_update_version_no_footgun.py::test_partial_env_only_overrides_set_vars` — operator who exports only ADOPTIQ_BUILD does not silently downgrade ADOPTIQ_VERSION.
+- `tests/test_round61_update_version_no_footgun.py::test_empty_string_env_treated_as_unset` — empty env string does not override.
+- `tests/test_round61_update_version_no_footgun.py::test_unparseable_config_falls_back_to_floor` — safety floor still fires when config.py is corrupted.
+- `tests/test_round61_update_version_no_footgun.py::test_version_info_txt_matches_resolved_values` — Windows installer contract preserved.
+- `tests/test_round61_update_version_no_footgun.py::test_module_imports_without_side_effects` — refactor pin: module-level body no longer performs file I/O.
+- `tests/test_round61_harness_hardening.py::test_paragraph_kpi_re_skips_9_digit_case_id` — `Case: 700356476` produces zero matches.
+- `tests/test_round61_harness_hardening.py::test_paragraph_kpi_re_skips_8_digit_bems_ref` — `Reference: 12345678` rejected.
+- `tests/test_round61_harness_hardening.py::test_paragraph_kpi_re_keeps_short_numeric_metrics` — 10 real KPI shapes from R58 soak matrix all still match (1-6 digit values).
+- `tests/test_round61_harness_hardening.py::test_paragraph_kpi_re_keeps_comma_separated_thousands_above_threshold` — `1,234,567` still matches (comma breaks the contiguity check).
+- `tests/test_round61_harness_hardening.py::test_canonical_extraction_unchanged_for_known_metrics` — end-to-end canonical extraction unchanged for 6 metrics.
+- `tests/test_round61_harness_hardening.py::test_case_id_in_same_paragraph_does_not_drown_real_kpi` — pre-fix this would surface 2 matches and misalign the per-segment gate; post-fix only 1.
+- `tests/test_round61_harness_hardening.py::test_prefix_regex_extracts_zero_action_plans` — closes R58 `comprehensive.action_plans` drift event.
+- `tests/test_round61_harness_hardening.py::test_prefix_regex_extracts_nonzero_action_plans` — `354 Action Plans` extracts correctly.
+- `tests/test_round61_harness_hardening.py::test_prefix_regex_handles_total_action_plans_idiom` — `12 Total Action Plans` works.
+- `tests/test_round61_harness_hardening.py::test_prefix_regex_does_not_match_unrelated_phrases` — `90 days` / `100 customers` / `5 minutes` / `47 cases` all rejected (allow-list scoping).
+- `tests/test_round61_harness_hardening.py::test_prefix_regex_extracts_adoption_barriers_idiom` — `12 Adoption Barriers` works.
+- `tests/test_round61_harness_hardening.py::test_prefix_regex_does_not_overwrite_canonical_match` — `setdefault` precedence pinned for paragraphs with both shapes.
+- `tests/test_round61_harness_hardening.py::test_other_scenarios_extraction_unchanged_smoke` — sanity gate against accidental regressions in renewal/leader/compact extraction.
+
+**Verify status:**
+- `make verify` — **pass** (lint + security + audit + tests).
+- pytest: **3626 passed / 2 skipped** (Round 0 floor 2570 → Round 60 floor 3608 → Round 61 floor 3626; +18 from R61 net of pre-existing skipped).
+- ruff: 0 findings.
+- bandit HIGH/MED: 0.
+- pip-audit: clean.
+
+**Hot spots Claude should audit first:**
+1. `report_iteration_loop._PARAGRAPH_KPI_PREFIX_NUMERIC_RE` allow-list — currently restricted to Action Plans / Adoption Barriers / Customer Pulse / Direct Reports. If a future LLM revision ever phrases a different KPI in the `<number> Label` idiom (e.g. `"the team handled 47 TAC Cases"`), the canonical extraction will silently drop the value. Mitigated by the R58 soak which only saw this pattern for action_plans + customer_pulse, but the allow-list is the failure mode for a future R62.
+2. `corpus_bootstrap._exit_log_streams_open()` is currently called in two places (start log + exit log). If Round 62 adds a third lifecycle log call, the gate must be applied there too -- otherwise pytest-teardown noise can re-emerge.
+3. `update_version_pc.py` regex extraction from `config.py` is fragile if anyone reformats that file (e.g. wraps the line, uses single quotes, or splits across lines). Mitigated by the `_unparseable_config_falls_back_to_floor` test pinning the safety floor; if someone DOES reformat config.py and the regex misses, builds will still produce valid (if wrong) version artifacts.
+
+**Known deferrals (intentional non-fixes):**
+- The `comprehensive.action_plans` table-cell fallback (originally proposed in the plan) was investigated and found unnecessary — the comprehensive scenario's deterministic data carriers (Title Page metrics table + XLSX Summary sheet) don't have an action_plans cell at all. The KPI is genuinely absent from the comprehensive scenario's structured data; the R58 drift event came from LLM narrative phrasing alone. The new prefix regex closes the actual root cause without needing a scenario-specific table fallback. Documented here so a future round doesn't try to re-add the table cell.
+- Other `corpus_bootstrap` log call sites (e.g. `_run_index_pass` at line ~1360+) can also leak the same closed-stream noise during pytest teardown. The Round 58 deferral was specifically about the daemon's lifecycle log; that's what Round 61 closes. Broadening the silence to the entire module would require either (a) a custom `Handler.handleError()` override on the module's logger, or (b) gating every `logger.info()` call in the module on `_exit_log_streams_open()`. Both are higher-impact than the Round 58 deferral required and are tracked as a follow-on cleanup.
+- The renewal UTC-day-boundary baseline drift (Round 58 deferral 2) — intrinsic to the sliding-window analytic, not addressable without freezing the cutoff or widening the threshold; both have downsides.
+- The R18-NEXT-001 / R18-NEXT-002 `if X in locals()` site triage — separate round of its own.
+- Aligning CI to `make verify` — separate round.
+- Round 60 / Build 33 deferrals carry forward (no `cancel_analysis()` call on `force=1`; no `window.close()` after 202 ack — both intentional UX choices).
+
+**Trailer:** Made-with: Cursor
