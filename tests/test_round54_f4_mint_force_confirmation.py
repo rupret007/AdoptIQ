@@ -372,3 +372,50 @@ def test_confirm_helper_logs_warn_not_raw_payload(caplog):
         f"prompt contains a long base64-like string -- possible raw "
         f"sentinel leak: {suspect_b64!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 54.1 regression -- the security smoke must use --yes with --force
+# ---------------------------------------------------------------------------
+
+
+def test_security_smoke_passes_yes_with_force():
+    """``scripts/round53_security_smoke.sh`` Scenario 3 calls
+    ``mint_corpus_sentinel.py --force`` to rotate the canonical
+    sentinel and prove a pre-rotation install fails-closed.
+
+    Round 54 / F4 added the typed-confirmation gate to ``--force``;
+    a non-interactive caller (the smoke script qualifies -- it
+    redirects stdout/stderr to a log file) MUST pair ``--force``
+    with ``--yes`` or the gate refuses (exit 5) and the entire
+    smoke aborts before reaching Scenario 4.
+
+    Regression: the Round 53.3 handoff claimed the smoke passes,
+    but Round 54 / F4 was authored without updating the smoke and
+    Scenario 3 silently broke until Round 54.1 added ``--yes``.
+    Pin the source-text contract here so a future ``--force``
+    invocation in the smoke can never silently regress again.
+    """
+    smoke_path = Path(__file__).resolve().parents[1] / "scripts" / "round53_security_smoke.sh"
+    body = smoke_path.read_text(encoding="utf-8")
+
+    # Find every line that invokes mint_corpus_sentinel.py --force.
+    # Each one must pair --force with --yes within the same logical
+    # command (allow line continuations).  Strip line continuations
+    # to get a flat command list.
+    flat = body.replace("\\\n", " ")
+    forced_lines = [
+        line for line in flat.splitlines()
+        if "mint_corpus_sentinel.py" in line and "--force" in line
+    ]
+    assert forced_lines, (
+        "smoke script must contain at least one --force rotation to "
+        "exercise Scenario 3; refactor must keep this contract"
+    )
+    for line in forced_lines:
+        assert "--yes" in line, (
+            f"smoke script invokes --force without --yes; the Round 54 "
+            f"F4 confirmation gate will refuse and the smoke will exit "
+            f"5 mid-run.  Pair --force with --yes for unattended "
+            f"rotation tests.  Offending line: {line.strip()!r}"
+        )

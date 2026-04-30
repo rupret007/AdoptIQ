@@ -183,9 +183,12 @@ S3="$SCRATCH/scenario_3_rotation"
 mkdir -p "$S3"
 
 # Use the Scenario 1 bake (sealed under the original sentinel).
-# Now rotate the sentinel.
+# Now rotate the sentinel.  Round 54 / F4: --force requires a typed
+# ROTATE confirmation by default; --yes bypasses for unattended
+# pipelines (the smoke script qualifies -- this is non-interactive
+# regression testing, not an operator-driven rotation).
 "$PYTHON" scripts/mint_corpus_sentinel.py \
-    --onedrive-root "$S1/onedrive" --force \
+    --onedrive-root "$S1/onedrive" --force --yes \
     > "$S3/rotate.log" 2>&1
 
 # Try to open the Scenario 1 bake under the NEW sentinel.  Expected
