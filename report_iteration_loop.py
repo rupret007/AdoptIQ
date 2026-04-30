@@ -906,7 +906,42 @@ def _normalize_kpi_value(value: Any) -> str:
 
 
 _PARAGRAPH_KPI_NUMERIC_RE = re.compile(
-    r"\b(?P<label>[A-Za-z][A-Za-z /()\-]{2,80}?)\s*[:\-]\s*(?P<value>-?\$?\d[\d,]*(?:\.\d+)?\s*%?)",
+    # Round 61 / Phase 2.D: the value group used to be
+    # ``-?\$?\d[\d,]*(?:\.\d+)?\s*%?`` which happily matched 9-digit
+    # case IDs like ``Case: 700356476`` (the `\d[\d,]*` token consumed
+    # the entire ID).  This produced false-positive entries in the
+    # per-segment paragraph gate (Round 59 cat-D, ~51 false hits per
+    # renewal report) which then misaligned segment boundaries when a
+    # canonical KPI match appeared in the same paragraph.  The
+    # negative lookahead ``(?!\d{6})`` after the leading ``\d``
+    # rejects any value where the first digit is followed by 6+ more
+    # digits without a separator (i.e. 7+ contiguous digits) -- ID
+    # tokens.  Real KPI metrics are at most 4 digits portfolio-wide
+    # (max observed ~2,205 leader citation count) so the gate keeps
+    # 100% of legitimate matches; comma-separated values like
+    # ``1,234`` still match because the comma breaks the contiguity
+    # check.
+    r"\b(?P<label>[A-Za-z][A-Za-z /()\-]{2,80}?)\s*[:\-]\s*(?P<value>-?\$?\d(?!\d{6})[\d,]*(?:\.\d+)?\s*%?)",
+)
+# Round 61 / Phase 2.D: secondary regex for the "<number> Label"
+# idiom that the comprehensive scenario's LLM narrative occasionally
+# uses (e.g. ``"Per the briefing book, there are 0 Action Plans and 0
+# Success Priorities"``).  Pre-Round-61 the harness only matched the
+# canonical ``Label: number`` shape (with colon or hyphen separator),
+# so these idiomatic phrasings silently dropped the KPI from the
+# extractor's output -- causing the R58 soak's ``comprehensive.action_plans``
+# drift event (extracted in iter1+iter3, missing in iter2).  Restrict
+# the match to a small allow-list of labels so we don't accidentally
+# pick up non-KPI phrases like ``"90 days"`` or ``"100 customers
+# spent"``; expand the list only when a new false-negative is observed.
+_PARAGRAPH_KPI_PREFIX_NUMERIC_RE = re.compile(
+    r"\b(?P<value>\d{1,5})\s+(?P<label>"
+    r"(?:Open\s+|Active\s+|Total\s+)?Action\s+Plans?"
+    r"|(?:Total\s+)?Adoption\s+Barriers?"
+    r"|(?:Total\s+)?Customer\s+Pulse(?:\s+records?)?"
+    r"|Direct\s+Reports?"
+    r")\b",
+    re.IGNORECASE,
 )
 # Round 52 (Phase 2): a separate text-valued pass picks out short metadata
 # lines like "Manager: Brian Frazier" or "Technology: All Contact Center"
@@ -974,6 +1009,17 @@ def _scan_paragraph_for_kpis(text: str, values: dict[str, str]) -> None:
     """Pick out 'Label: 12' style phrases from a paragraph string."""
     if not text:
         return
+    # Round 61 / Phase 2.D: the canonical "Label: 12" shape requires a
+    # ``:`` or ``-`` separator; the secondary "12 Label" shape does
+    # not.  Run the prefix scan unconditionally (cheap regex, only
+    # fires when the paragraph actually contains digits adjacent to a
+    # short allow-listed label).
+    for prefix_match in _PARAGRAPH_KPI_PREFIX_NUMERIC_RE.finditer(text):
+        label = prefix_match.group("label").strip()
+        raw_value = prefix_match.group("value").strip()
+        canonical = _canonical_kpi_label(label)
+        if canonical and raw_value:
+            values.setdefault(canonical, _normalize_kpi_value(raw_value))
     if ":" not in text and "-" not in text:
         return
     for match in _PARAGRAPH_KPI_NUMERIC_RE.finditer(text):

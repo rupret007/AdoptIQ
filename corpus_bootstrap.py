@@ -755,14 +755,23 @@ def _daily_refresh_loop() -> None:
     ``EncryptedCorpusHandle.commit_to_disk``) so a mid-refresh crash
     leaves the prior corpus intact (Phase 4c atomic-swap semantics).
     """
-    logger.info(
-        "Round 53 / corpus_bootstrap: daily refresh worker started "
-        "(interval=%.0fs tick=%.0fs blocked_tick=%.0fs blocked_cap=%d)",
-        _DAILY_REFRESH_INTERVAL_S,
-        _DAILY_REFRESH_TICK_S,
-        _DAILY_REFRESH_TICK_BLOCKED_S,
-        _DAILY_REFRESH_BLOCKED_MAX_TICKS,
-    )
+    # Round 61 / Phase 2.E: gate the start log on the same closed-stream
+    # check as the exit log below.  Both fire at lifecycle boundaries
+    # which can coincide with pytest teardown; both must skip the
+    # logger call when reachable streams are closed to avoid the
+    # ``Handler.handleError()`` -> stderr traceback path.
+    if _exit_log_streams_open():
+        try:
+            logger.info(
+                "Round 53 / corpus_bootstrap: daily refresh worker started "
+                "(interval=%.0fs tick=%.0fs blocked_tick=%.0fs blocked_cap=%d)",
+                _DAILY_REFRESH_INTERVAL_S,
+                _DAILY_REFRESH_TICK_S,
+                _DAILY_REFRESH_TICK_BLOCKED_S,
+                _DAILY_REFRESH_BLOCKED_MAX_TICKS,
+            )
+        except (ValueError, OSError):
+            pass
     blocked_streak = 0
     while not _DAILY_REFRESH_STOP.is_set():
         # Sleep with .wait() so stop() can interrupt the worker
@@ -840,16 +849,50 @@ def _daily_refresh_loop() -> None:
                 "failed: %s",
                 type(loop_err).__name__,
             )
-    try:
-        # Round 61 / Phase 2.E: pytest teardown closes the logging stream
-        # before this daemon thread wakes from .wait() and falls through
-        # to the exit log; the resulting "I/O operation on closed file"
-        # ValueError is raised by the StreamHandler (not by our code) and
-        # produces only cosmetic noise in test output.  Swallow narrowly so
-        # we keep the log line in real runs but don't spam pytest output.
-        logger.info("Round 36 / corpus_bootstrap: daily refresh worker exiting")
-    except (ValueError, OSError):
-        pass
+    # Round 61 / Phase 2.E: pytest teardown closes the logging stream
+    # (sys.stderr / sys.stdout) BEFORE this daemon thread wakes from
+    # .wait() and falls through to the exit log.  The resulting
+    # "I/O operation on closed file." ValueError is caught INSIDE
+    # ``logging.StreamHandler.emit()`` (logging/__init__.py:1113) and
+    # then surfaced via ``Handler.handleError()`` which prints the
+    # traceback to stderr regardless of any try/except wrapped around
+    # the ``logger.info()`` call.  The ONLY way to suppress the noise
+    # is to detect the closed-stream condition BEFORE calling
+    # ``logger.info()``.  Walk our logger AND its propagation chain;
+    # if any reachable StreamHandler is wired to a closed stream,
+    # skip the exit log entirely.  Real runs (where streams are
+    # alive) still emit the log line exactly once.
+    if _exit_log_streams_open():
+        try:
+            logger.info("Round 36 / corpus_bootstrap: daily refresh worker exiting")
+        except (ValueError, OSError):
+            pass
+
+
+def _exit_log_streams_open() -> bool:
+    """Round 61 / Phase 2.E: True when every StreamHandler reachable
+    from this module's logger has an open underlying stream.  Returns
+    False when ANY reachable handler is closed (signal to skip the
+    exit log so we do not trigger ``Handler.handleError()`` -> stderr
+    traceback).  Pinned by ``tests/test_round61_corpus_shutdown_logger_quiet.py``.
+    """
+    target_logger = logger
+    seen: set[int] = set()
+    while target_logger is not None and id(target_logger) not in seen:
+        seen.add(id(target_logger))
+        for h in getattr(target_logger, "handlers", []):
+            stream = getattr(h, "stream", None)
+            if stream is None:
+                continue
+            try:
+                if getattr(stream, "closed", False):
+                    return False
+            except Exception:  # noqa: BLE001 - defensive
+                return False
+        if not getattr(target_logger, "propagate", False):
+            break
+        target_logger = getattr(target_logger, "parent", None)
+    return True
 
 
 def start_daily_refresh_worker() -> bool:
