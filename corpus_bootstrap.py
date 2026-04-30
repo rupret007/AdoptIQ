@@ -840,7 +840,16 @@ def _daily_refresh_loop() -> None:
                 "failed: %s",
                 type(loop_err).__name__,
             )
-    logger.info("Round 36 / corpus_bootstrap: daily refresh worker exiting")
+    try:
+        # Round 61 / Phase 2.E: pytest teardown closes the logging stream
+        # before this daemon thread wakes from .wait() and falls through
+        # to the exit log; the resulting "I/O operation on closed file"
+        # ValueError is raised by the StreamHandler (not by our code) and
+        # produces only cosmetic noise in test output.  Swallow narrowly so
+        # we keep the log line in real runs but don't spam pytest output.
+        logger.info("Round 36 / corpus_bootstrap: daily refresh worker exiting")
+    except (ValueError, OSError):
+        pass
 
 
 def start_daily_refresh_worker() -> bool:
