@@ -7619,3 +7619,70 @@ free.
 3. The Round 61 / Phase 2.D prefix regex allow-list is currently restricted to Action Plans / Adoption Barriers / Customer Pulse / Direct Reports. If a future LLM revision phrases a different KPI in the `<number> Label` idiom, that KPI will silently drop. Mitigated by the R58 soak which only saw this pattern for action_plans + customer_pulse, but the allow-list is the failure mode for a future round.
 
 **Trailer:** Made-with: Cursor
+
+### Round 61 — Build 34 manual acceptance results
+
+User installed `OUTBOX/AdoptIQ-v1.0.4-build34.dmg`, launched the packaged `.app` (PID 69716, started ~16:08 PM local), generated the four canonical 90d report scenarios through the running app (timestamps 1777585018-1777585065 = 16:44-16:45 PM local, all four scenarios within 47 seconds), and dropped the 8 files (4 DOCX + 4 XLSX) in `~/Downloads/`.  After the verification snapshot was captured, the user exercised the Quit button — by 17:00 PM local both ports 5151 and 5152 were free and PID 69716 was gone, confirming the Round 60 SIGTERM path released both the main Flask listener and the in-process admin daemon cleanly.
+
+#### Per-scenario verification matrix (versus R57 + Build 32 baselines)
+
+| scenario      | docx_kb | paragraphs | tables | citations | metric_claims | unbacked claims | KPI common (match/total) | DOCX-only KPIs | XLSX-only KPIs | verdict |
+|---|---:|---:|---:|---:|---:|---:|---|---|---|---|
+| compact       | 625 | 467  | 4   | **500**  | 12  | **0** | **8/8 match** | (none) | action_plans, critical_barriers, customer_pulse, escalated_support_cases, manager, open_adoption_barriers, technology, window_days | **GREEN** |
+| comprehensive | 741 | 400  | 1   | **203**  | 94  | **0** | **9/9 match** | high_risk_customers | critical_barriers, open_adoption_barriers | **GREEN** |
+| renewal       | 769 | 1009 | 4   | **577**  | 11  | **0** | **8/8 match** | risk_category, risk_score | critical_barriers, critical_cases, high_cases, manager, total_customers | **GREEN** |
+| leader        | 176 | 2404 | 165 | **2,223**| 412 | **0** | **7/7 match** | (none) | critical_barriers, critical_cases, high_cases, manager, open_adoption_barriers, window_days | **GREEN** |
+
+**Headline numbers:** **3,503** `[Source: ...]` citations rendered across the four reports (Build 32 baseline: 3,478, +25), **529** metric claims (Build 32: 522, +7), **0** unbacked claims, **32/32** common-KPI parity match.  The DOCX-only / XLSX-only deltas are KPIs that legitimately only appear on one side of each scenario (e.g. `action_plans` appears in the compact XLSX `Executive_Dashboard` tile but the compact narrative doesn't mention an action-plan count; `risk_category` / `risk_score` appear in the renewal narrative because they are derived metrics that don't need a dedicated XLSX cell).  No new mismatches versus the R57 baselines.
+
+#### Round 61 / Phase 2.D harness-hardening per-scenario impact
+
+| scenario      | PRE-R61 regex matches | POST-R61 regex matches | rejected by R61/D | what was rejected |
+|---|---:|---:|---:|---|
+| compact       | 38   | 36  | **2**   | 2 case-IDs in narrative |
+| comprehensive | 143  | 143 | 0       | (no case-ID idiom in this run) |
+| renewal       | **261**| **161**| **100** | 100 case IDs (label="Case", value="700XXXXXXX " — 9-digit Cisco TAC numbers) |
+| leader        | 595  | 594 | 1       | 1 case-ID in narrative |
+
+**Total: 103 case-ID false positives eliminated portfolio-wide.**  The plan predicted ~50 on renewal alone; actual is ~2× better.  None of the rejected matches are real KPIs (every single one is a `Case`-labeled 9-digit Cisco TAC number).  The R61/D `(?!\d{6})` negative lookahead is doing exactly what it was designed for — and the supervisor's primary table-claim gate, which already reported 0 unbacked, is now structurally cleaner because the per-segment paragraph gate's segment boundaries are no longer being misaligned by case-ID matches.
+
+#### Round 61 / Phase 2.D prefix regex (`_PARAGRAPH_KPI_PREFIX_NUMERIC_RE`) per-scenario hits
+
+| scenario      | prefix regex hits | notes |
+|---|---:|---|
+| compact       | 0   | no `<number> Label` idiom in this run |
+| comprehensive | 0   | the LLM did NOT use the iter2-style `"X Action Plans"` phrasing this run; only paragraph mentioning "action plan" was a corpus-context citation (`- Firewall Baseline Action Plan [src: ...]`).  The R61/D prefix regex correctly stayed silent — no extraction needed |
+| renewal       | 28  | extracts canonical KPIs from `<number> Adoption Barriers / Action Plans / Customer Pulse` narrative paragraphs |
+| leader        | 34  | same shape as renewal |
+
+The prefix regex did NOT change parity outcomes (still 32/32 match — the values it extracts agree with what the canonical regex extracts when both shapes appear).  The R58 soak's `comprehensive.action_plans` drift event would now be caught IF the LLM used that phrasing; in this Build 34 run the LLM didn't, so the code path is dormant by design.
+
+#### Quit button click-through verification
+
+| navbar | URL | expected | observed | verdict |
+|---|---|---|---|---|
+| Main app | `127.0.0.1:5151` | Confirm modal → 202 ack → overlay rendered → port 5151 released → process gone | At 16:47 PM PID 69716 was running and held both 5151 + 5152.  After report generation the user exercised the Quit button (no manual `kill` was issued).  By 17:00 PM both ports were free and PID 69716 was gone | **PASS** |
+| Admin app | `127.0.0.1:5152` | Same flow (admin is in-process, releases the same Flask process) | Released alongside main per the in-process admin contract.  Source-shape pinned by `tests/test_round60_quit_button_template.py` and `tests/test_round60_shutdown_endpoint.py` | **PASS** |
+
+**Note on observability**: PyInstaller `.app` stdout / stderr does not surface in macOS unified log unless explicitly redirected, so the Round 60 `SIGTERM scheduled in 0.50s` log line is not in `log show --predicate 'process == "AdoptIQ"'`.  The behavioral evidence (port released, process gone, no `kill` issued) is the binding signal — and it matches the packaged-smoke matrix's check 5 from the same Build 34 binary, which DID capture the SIGTERM marker on stdout when the binary was launched from a terminal.
+
+#### Application-log scan
+
+`log show --predicate 'process == "AdoptIQ"' --last 2h --style compact | grep -iE "ImportError|ModuleNotFoundError|KeyError|Traceback|R38\.2|round 38"` returned **zero matches**.  Confirms (a) the Round 39 self-heal crypto path did not fire (no upgrade handoff this round — the user installed Build 34 over Build 33's user_dir which had matching crypto provenance), (b) no R38.2-class `KeyError: '_bu_disp'` regression in `leader_report_generator._compute_customer_health` (the Build 34 leader generated 165 tables / 2,404 paragraphs / 2,223 citations cleanly), (c) no R57 source-citation injector ImportError (`report_source_injector` and `report_iteration_loop` both loaded inside the frozen binary, as the 3,503 inline citations attest).
+
+#### Verify status (post-acceptance)
+
+- 8 user reports verified: **all GREEN** across {citation count, metric claims, unbacked claims, KPI parity}.
+- R61/D harness hardening: **measurably effective** — 103 case-ID false positives eliminated portfolio-wide.
+- R61/D prefix regex: **dormant in comprehensive (no LLM trigger this run), active in renewal/leader (28+34 = 62 prefix matches feeding the KPI extractor)**.
+- Quit button: **confirmed working** end-to-end through behavioral evidence (process gone, both ports released).
+- Application log: **zero new errors**.
+- Pre-existing pytest floor (`3626 passed / 2 skipped`) unchanged by this acceptance step.
+
+#### Hot spots Claude should audit first (post-Round-61 acceptance)
+
+1. The `comprehensive.action_plans` extraction is still data-dependent: the underlying scenario doesn't carry it as a deterministic KPI in either the DOCX Title Page table or the XLSX Summary sheet.  The R61/D prefix regex catches it WHEN the LLM happens to phrase it as `<number> Action Plans`, which it didn't this run.  This is documented as the intentional Round 61 deferral — the proposed table-cell fallback was investigated and found unnecessary because the comprehensive scenario simply doesn't have such a table cell.  A future round wanting to FORCE comprehensive `action_plans` parity would need to add an XLSX-side derived metric (count rows in `AB_Detail_All` where `Action Plan Title` is non-empty), not another harness regex.
+2. The R61/D regex hardening rejected 100 case-IDs on a single renewal report.  If a future scenario starts emitting a legitimate metric in the format `Label: 1234567` (no comma separator on a 7+ digit value), the regex will reject it.  Real KPIs portfolio-wide are at most 4 digits (max observed 2,205 leader citations) so this risk is theoretical, but the failure mode should be documented in any audit that proposes adding such a metric.
+3. The Quit button click-through worked behaviorally but produced no app-log evidence (PyInstaller `.app` redirects stdout/stderr away from unified log).  A future round could wire `_trigger_shutdown_sigterm()` to also emit a syslog message via `log` so manual acceptance can pin it from `Console.app`.  Tracked as a low-priority cleanup.
+
+**Trailer:** Made-with: Cursor
