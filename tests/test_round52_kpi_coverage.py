@@ -105,8 +105,9 @@ def _write_leader_docx(path: Path) -> None:
     doc = Document()
     doc.add_paragraph("Manager: Brian Frazier")
     doc.add_paragraph("Analysis Period: 90 days")
-    table = doc.add_table(rows=6, cols=2)
+    table = doc.add_table(rows=7, cols=2)
     rows = (
+        ("Customers", "15"),
         ("Team Members", "3"),
         ("Action Plans", "12"),
         ("Adoption Barriers", "8"),
@@ -209,7 +210,7 @@ def test_round52_renewal_docx_extracts_health_dashboard(tmp_path: Path):
     kpis = extract_docx_kpis(docx_path)
     values = kpis["values"]
     assert values["support_cases"] == "176"
-    assert values["adoption_barriers"] == "3"
+    assert values["open_adoption_barriers"] == "3"
     assert values["bems"] == "5"
     assert values["risk_score"] == "14.8"
     assert values["technology"] == "All Contact Center"
@@ -255,7 +256,8 @@ def test_round52_leader_team_summary_sheet_sums_columns(tmp_path: Path):
     _write_leader_xlsx(xlsx_path)
     kpis = extract_xlsx_kpis(xlsx_path)
     values = kpis["values"]
-    assert values["total_customers"] == "3"
+    assert values["team_members"] == "3"
+    assert values["total_customers"] == "15"
     assert values["action_plans"] == "12"
     assert values["adoption_barriers"] == "8"
     assert values["customer_pulse"] == "5"

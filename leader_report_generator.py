@@ -293,7 +293,7 @@ def _friendly_source_label(table_id: Any) -> str:
 
 class LeaderReportGenerator:
     """Generates comprehensive leader reports showing team member activities"""
-    
+
     def safe_len(self, obj):
         """Safely calculate length of an object, handling None values"""
         if obj is None:
@@ -302,7 +302,7 @@ class LeaderReportGenerator:
             return len(obj)
         except (TypeError, AttributeError):
             return 0
-    
+
     def safe_df_check(self, df, col_name):
         """Safely check if DataFrame is not None, not empty, and contains column"""
         if df is None:
@@ -315,7 +315,7 @@ class LeaderReportGenerator:
             return True
         except (AttributeError, TypeError):
             return False
-    
+
     def safe_set(self, obj):
         """Safely convert an iterable to a set.
 
@@ -457,14 +457,14 @@ class LeaderReportGenerator:
         if external:
             note_parts.append("external account")
         return f"[{'; '.join(note_parts)}]" if note_parts else ""
-    
+
     def __init__(self, ctx, team_roster: List[Tuple[str, str, str]],
                  data_retrieved_at: Optional[datetime] = None,
                  strict_mode: bool = False,
                  arr_impact: Optional[Dict] = None):
         """
         Initialize the leader report generator
-        
+
         Args:
             ctx: Snowflake connection context
             team_roster: List of (manager_name, cssm_name, cssm_email) tuples
@@ -495,7 +495,7 @@ class LeaderReportGenerator:
         """
         if ctx is None:
             raise ValueError("Snowflake connection context (ctx) cannot be None. Please ensure database connection is established.")
-        
+
         self.ctx = ctx
         self.team_roster = team_roster
         self.doc = Document()
@@ -554,7 +554,7 @@ class LeaderReportGenerator:
         self._section_error_count: int = 0
         self._section_error_kinds: set = set()
         self._setup_document_settings()
-    
+
     def _setup_document_settings(self):
         """Configure document-wide settings"""
         sections = self.doc.sections
@@ -563,7 +563,7 @@ class LeaderReportGenerator:
             section.bottom_margin = Inches(1.0)
             section.left_margin = Inches(1.0)
             section.right_margin = Inches(1.0)
-    
+
     def _add_section_separator(self):
         """Add a visual separator line between major sections for better readability"""
         self.doc.add_paragraph()  # Spacing before
@@ -589,7 +589,7 @@ class LeaderReportGenerator:
             return pd.Series(False, index=ab_df.index if ab_df is not None else None)
         normalized = ab_df['SEVERITY_C'].apply(normalize_severity_label)
         return normalized.isin(['Critical', 'High'])
-    
+
     def generate_leader_report(
         self,
         manager_name: str,
@@ -605,7 +605,7 @@ class LeaderReportGenerator:
     ) -> Tuple[Document, str, Dict, List]:
         """
         Generate comprehensive leader report for a manager
-        
+
         Args:
             manager_name: Name of the manager
             days: Time frame in days
@@ -614,7 +614,7 @@ class LeaderReportGenerator:
             software_defects: Software defects extracted from CSOne/AB (optional)
             psirt_vulns: PSIRT vulnerabilities extracted from CSOne/AB (optional)
             progress_callback: Optional callable(progress, message, step) for status updates
-            
+
         Returns:
             Tuple of (Document object, file path, team_data dict, direct_reports list)
         """
@@ -632,16 +632,16 @@ class LeaderReportGenerator:
 
         _cb(18, f'Finding direct reports for {manager_name}...', 'Document Generation')
         direct_reports = self._get_direct_reports(manager_name)
-        
+
         if not direct_reports:
             raise ValueError(f"No direct reports found for manager: {manager_name}")
-        
+
         n_reports = self.safe_len(direct_reports)
         logger.info(f"Found {n_reports} direct reports for {manager_name}")
-        
+
         _cb(19, f'Collecting data for {n_reports} team members...', 'Team Data Collection')
         team_data = self._collect_team_data(direct_reports, days, progress_callback=progress_callback)
-        
+
         _cb(70, 'Building title page...', 'Document Generation')
         self._create_title_page(manager_name, days, direct_reports)
 
@@ -689,31 +689,31 @@ class LeaderReportGenerator:
 
         _cb(73, 'Writing per-person AdoptIQ summaries...', 'Document Generation')
         self._create_adoptiq_summaries_per_person(team_data, days)
-        
+
         self._add_section_separator()
-        
+
         _cb(75, 'Compiling adoption barriers detail...', 'Document Generation')
         self._create_detailed_ab_list(team_data)
-        
+
         self._add_section_separator()
-        
+
         _cb(76, 'Adding BEMS escalation summary...', 'Document Generation')
         self._add_bems_escalation_section(team_data)
-        
+
         self._add_section_separator()
-        
+
         _cb(77, 'Adding external intelligence section...', 'Document Generation')
         self._add_external_intelligence_section(
             ext_bugs, ext_incidents, software_defects, psirt_vulns,
             intel_truncated=intel_truncated,
             intel_fetch_limit=intel_fetch_limit,
         )
-        
+
         self._add_section_separator()
-        
+
         _cb(78, 'Writing individual team member summaries...', 'Document Generation')
         self._add_overall_individual_summary(team_data, manager_name, days)
-        
+
         _cb(80, 'Saving Word document...', 'Document Generation')
         output_dir = _ensure_outputs()
         # Round 7 / Phase 6.7: stamp the filename in UTC so two leader
@@ -730,73 +730,73 @@ class LeaderReportGenerator:
         self.doc.save(str(filepath))
         logger.info(f"Leader report saved to: {filepath}")
         return self.doc, str(filepath), team_data, direct_reports
-    
+
     def add_hyperlink(self, paragraph, url, text, font_size=9):
         """
         Add a hyperlink to a paragraph.
-        
+
         Args:
             paragraph: The paragraph to add the hyperlink to
             url: The URL for the hyperlink
             text: The display text for the hyperlink
             font_size: Font size in points (default 9)
-        
+
         Returns:
             The hyperlink element
         """
         # This gets access to the xml element
         part = paragraph.part
         r_id = part.relate_to(url, 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink', is_external=True)
-        
+
         # Create the w:hyperlink tag and add needed values
         hyperlink = OxmlElement('w:hyperlink')
         hyperlink.set(qn('r:id'), r_id)
-        
+
         # Create a new run
         new_run = OxmlElement('w:r')
         rPr = OxmlElement('w:rPr')
-        
+
         # Set the font size
         sz = OxmlElement('w:sz')
         sz.set(qn('w:val'), str(font_size * 2))  # Word uses half-points
         rPr.append(sz)
-        
+
         # Set color to blue for hyperlink
         color = OxmlElement('w:color')
         color.set(qn('w:val'), '0563C1')  # Blue color
         rPr.append(color)
-        
+
         # Set underline
         u = OxmlElement('w:u')
         u.set(qn('w:val'), 'single')
         rPr.append(u)
-        
+
         new_run.append(rPr)
         new_run.text = text
         hyperlink.append(new_run)
-        
+
         # Add the hyperlink to the paragraph
         paragraph._p.append(hyperlink)
-        
+
         return hyperlink
-    
+
     def _get_direct_reports(self, manager_name: str) -> List[Dict[str, str]]:
         """Get list of direct reports for a manager"""
         direct_reports = []
-        
+
         for mgr, cssm_name, cssm_email in self.team_roster:
             if mgr == manager_name:
                 direct_reports.append({
                     'name': cssm_name,
                     'email': cssm_email
                 })
-        
+
         return direct_reports
-    
+
     def _collect_team_data(self, direct_reports: List[Dict[str, str]], days: int, progress_callback=None) -> Dict[str, Dict]:
         """
         Collect all data for each direct report
-        
+
         Returns:
             Dict mapping CSSM name to their data (APs, ABs, CPs, TAC cases)
         """
@@ -1109,14 +1109,14 @@ class LeaderReportGenerator:
             logger.info(f"  {cssm_name}: {self.safe_len(action_plans_df)} APs, {self.safe_len(adoption_barriers_df)} ABs, {self.safe_len(customer_pulse_df)} CPs, {self.safe_len(success_priorities_df)} SPs")
 
         return team_data
-    
+
     def _get_subscriptions_for_cssm(self, cssm_emails: List[str]) -> pd.DataFrame:
         """Get subscriptions for specific CSSM emails"""
         logger.debug(f"_get_subscriptions_for_cssm called. cssm_emails: {cssm_emails}")
         if not cssm_emails:
             logger.debug(f"No cssm_emails provided, returning empty DataFrame")
             return pd.DataFrame()
-        
+
         cur = None
         try:
             from adoptiq_backend import (
@@ -1125,7 +1125,7 @@ class LeaderReportGenerator:
                 _column_or_default_expr,
             )
             logger.debug(f"Creating cursor from ctx. ctx type: {type(self.ctx)}, ctx is None: {self.ctx is None}")
-            
+
             cur = self.ctx.cursor()
             logger.debug(f"Cursor created successfully")
 
@@ -1210,7 +1210,7 @@ class LeaderReportGenerator:
             if cur:
                 cur.close()
                 logger.debug(f"Cursor closed")
-    
+
     def _build_task_owner_clause(self, owner_emails: List[str], alias: Optional[str] = None):
         """Build a parameterized owner-match clause for C360_CS_TASK_C_VW.
 
@@ -1506,7 +1506,7 @@ class LeaderReportGenerator:
         finally:
             if cur:
                 cur.close()
-    
+
     def _fetch_success_priorities(self, customer_names: List[str], days: int) -> pd.DataFrame:
         """Fetch Success Priorities for customer names (uses RELATED_CUSTOMER__C, not account IDs)"""
         if not customer_names:
@@ -1514,7 +1514,7 @@ class LeaderReportGenerator:
         if is_table_blocked("EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C"):
             logger.info("Policy: Skipping ESA_C360_SUCCESS_PRIORITY__C in leader report success priorities.")
             return pd.DataFrame()
-        
+
         cur = None
         try:
             cur = self.ctx.cursor()
@@ -1551,11 +1551,11 @@ class LeaderReportGenerator:
         finally:
             if cur:
                 cur.close()
-    
+
     def add_tac_cases_from_csone(self, team_data: Dict[str, Dict], csone_df: pd.DataFrame, days: int = 90):
         """
         Add TAC case data from CSOne Excel to team data
-        
+
         Args:
             team_data: Dict mapping CSSM names to their data
             csone_df: CSOne DataFrame with TAC cases
@@ -1570,7 +1570,7 @@ class LeaderReportGenerator:
         logger.info(f"\n{'='*60}")
         logger.info(f"TAC CASE MATCHING VALIDATION")
         logger.info(f"{'='*60}")
-        
+
         # Round 7 / Phase 6.7: cutoff_date drives ``CREATE_DATE >=`` /
         # ``CLOSE_DATE >=`` filtering downstream; using local-tz
         # ``datetime.now()`` shifted the window by up to 24h depending
@@ -1579,14 +1579,14 @@ class LeaderReportGenerator:
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         logger.info(f"Cutoff date for filtering: {cutoff_date.strftime('%Y-%m-%d')}")
         logger.info(f"Total TAC cases in CSOne file: {len(csone_df)}")
-        
+
         # Find date column
         date_col = None
         for col in csone_df.columns:
             if 'date' in col.lower() and 'opened' in col.lower():
                 date_col = col
                 break
-        
+
         # Filter by date if date column exists
         if date_col and date_col in csone_df.columns:
             try:
@@ -1611,21 +1611,21 @@ class LeaderReportGenerator:
                 # Apply filter
                 csone_filtered = csone_df[csone_df[date_col] >= cutoff_date].copy()
                 logger.info(f"OK: Filtered TAC cases from {len(csone_df)} to {len(csone_filtered)} (last {days} days)")
-                
+
                 # Validation: Check if we have cases in the time period
                 if csone_filtered.empty:
                     logger.warning(f"VALIDATION WARNING: No TAC cases found in the last {days} days!")
                 elif len(csone_df) > 0 and len(csone_filtered) < len(csone_df) * 0.1:
                     pct = (len(csone_filtered) / len(csone_df) * 100) if len(csone_df) > 0 else 0
                     logger.warning(f"VALIDATION WARNING: Only {len(csone_filtered)} cases in last {days} days ({pct:.1f}% of total)")
-                
+
             except Exception as e:
                 logger.error(f"ERROR filtering TAC cases by date: {e}")
                 csone_filtered = csone_df.copy()
         else:
             logger.warning(f"VALIDATION WARNING: No date column found for filtering. Using all {len(csone_df)} TAC cases.")
             csone_filtered = csone_df.copy()
-        
+
         # Find customer column once (outside loop)
         customer_col = None
         for col in csone_filtered.columns:
@@ -1633,13 +1633,13 @@ class LeaderReportGenerator:
             if any(term in col_lower for term in ['customer name', 'account name', 'customer:', 'account:', 'bu_name']):
                 customer_col = col
                 break
-        
+
         if not customer_col:
             logger.warning(f"No customer column found in CSOne data")
             for cssm_name in team_data.keys():
                 team_data[cssm_name]['tac_cases'] = pd.DataFrame()
             return
-        
+
         # Get unique CSOne customers for debugging
         csone_customers_unique = csone_filtered[customer_col].dropna().unique()
         # Round 7 / Phase 6.3: customer-name samples are PII-adjacent
@@ -1656,7 +1656,7 @@ class LeaderReportGenerator:
             all_team_customers.update(data['customers'])
         logger.info(f"  - Total unique team customers from Snowflake: {len(all_team_customers)}")
         logger.debug(f"  - Sample team customers: {list(all_team_customers)[:5]}")
-        
+
         # Round 39 / Phase 1.1: replace the fuzzy 2-word-overlap matcher
         # with an authoritative SUBSCRIPTION_ID join.  The pre-Round-39
         # ``matches_customer`` closure returned True whenever a CSSM
@@ -1907,7 +1907,7 @@ class LeaderReportGenerator:
             'account_id_col': account_id_col,
             'customer_col': customer_col,
         }
-    
+
     def _create_title_page(self, manager_name: str, days: int, direct_reports: List[Dict]):
         """Create title page for the leader report"""
         # Title
@@ -1918,7 +1918,7 @@ class LeaderReportGenerator:
             title_run.font.size = Pt(28)
             title_run.font.color.rgb = CISCO_BLUE
             title_run.font.bold = True
-        
+
         # Manager name
         manager_para = self.doc.add_paragraph()
         manager_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1926,7 +1926,7 @@ class LeaderReportGenerator:
         manager_run.font.size = Pt(20)
         manager_run.font.color.rgb = CISCO_GRAY
         manager_run.font.bold = True
-        
+
         # Date range
         # Round 3 / Phase 4.4: the underlying Snowflake queries use
         # ``CURRENT_DATE()`` which is the UTC calendar date. Using
@@ -1980,7 +1980,7 @@ class LeaderReportGenerator:
             data_run = data_para.add_run(f'Data as of: {_data_str}')
             data_run.font.size = Pt(9)
             data_run.font.color.rgb = CISCO_GRAY
-        
+
         # Team overview
         team_para = self.doc.add_paragraph()
         team_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -2050,10 +2050,10 @@ class LeaderReportGenerator:
             )
 
         self.doc.add_page_break()
-        
+
         # Report Data Sources – canonical sources used by all AdoptIQ reports
         self._add_report_data_sources()
-    
+
     def _add_report_data_sources(self):
         """Add Report Data Sources section – same canonical sources as all AdoptIQ reports."""
         try:
@@ -2088,18 +2088,18 @@ class LeaderReportGenerator:
             row[1].text = source
             row[2].text = verification
         self.doc.add_paragraph()
-    
+
     def _add_css_to_customer_ratio_chart(self, team_data: Dict[str, Dict]):
         """Add CSS to Customer Ratio chart at the top of summary"""
         ratio_heading = self.doc.add_heading('CSS to Customer Ratio', level=2)
         if ratio_heading.runs:
             ratio_heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         # Calculate ratios
         table = self.doc.add_table(rows=self.safe_len(team_data) + 2, cols=4)
         table.style = 'Light Grid Accent 1'
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        
+
         # Header
         header_cells = table.rows[0].cells
         headers = ['Team Member', 'Customers', 'CSS Count', 'Customer:CSS Ratio']
@@ -2116,22 +2116,22 @@ class LeaderReportGenerator:
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '007BC7')
             cell._element.get_or_add_tcPr().append(shading_elm)
-        
+
         # Data rows
         row_idx = 1
         total_customers = 0
         total_css = 0
-        
+
         for cssm_name in sorted(team_data.keys()):
             data = team_data[cssm_name]
             num_customers = self.safe_len(data.get('customers', []))
             num_css = 1  # Each row is one CSS
-            
+
             total_customers += num_customers
             total_css += num_css
-            
+
             ratio = f"{num_customers}:1" if num_customers > 0 else "0:1"
-            
+
             row_cells = table.rows[row_idx].cells
             # Round 13 / Phase 9.7: previously CSSM rows wrote raw
             # ``cssm_name`` straight into ``row_cells[0].text`` with
@@ -2146,13 +2146,13 @@ class LeaderReportGenerator:
             row_cells[1].text = _r13_safe_doc_text(num_customers, max_len=20)
             row_cells[2].text = _r13_safe_doc_text(num_css, max_len=20)
             row_cells[3].text = _r13_safe_doc_text(ratio, max_len=20)
-            
+
             for i in range(1, 4):
                 if row_cells[i].paragraphs:
                     row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
             row_idx += 1
-        
+
         # Totals row
         totals_cells = table.rows[row_idx].cells
         totals_cells[0].text = 'TEAM TOTAL'
@@ -2164,22 +2164,22 @@ class LeaderReportGenerator:
         totals_cells[2].text = str(total_css)
         if totals_cells[2].paragraphs and totals_cells[2].paragraphs[0].runs:
             totals_cells[2].paragraphs[0].runs[0].font.bold = True
-        
+
         # Calculate average ratio
         avg_ratio = f"{total_customers/total_css:.1f}:1" if total_css > 0 else "0:1"
         totals_cells[3].text = avg_ratio
         if totals_cells[3].paragraphs and totals_cells[3].paragraphs[0].runs:
             totals_cells[3].paragraphs[0].runs[0].font.bold = True
-        
+
         for i in range(1, 4):
             if totals_cells[i].paragraphs:
                 totals_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), 'E8E8E8')
             totals_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-        
+
         self.doc.add_paragraph()
-    
+
     def _count_bems_escalations(self, data: Dict) -> int:
         """Count BEMS escalations using canonical centralized detection.
 
@@ -2208,7 +2208,7 @@ class LeaderReportGenerator:
     def _count_bems_canonical_tac(self, data: Dict) -> int:
         """Canonical TAC-only BEMS count (matches Compact / EI dashboards)."""
         return cm.count_bems(data.get('tac_cases', pd.DataFrame()))
-    
+
     def _add_technology_breakdown(self, team_data: Dict[str, Dict]):
         """Add technology breakdown by team member.
 
@@ -2220,11 +2220,11 @@ class LeaderReportGenerator:
         """
         # Collect technology data from subscriptions
         tech_breakdown = {}
-        
+
         for cssm_name in sorted(team_data.keys()):
             data = team_data[cssm_name]
             tech_breakdown[cssm_name] = {}
-            
+
             # Get subscriptions and count by product/technology
             # Round 3 / Phase 3.4: dedupe by SUBSCRIPTION_ID first.
             # The DSM table emits multiple rows per subscription (line
@@ -2252,10 +2252,10 @@ class LeaderReportGenerator:
                         # Simplify product names to technology categories
                         tech = self._categorize_technology(str(product))
                         tech_breakdown[cssm_name][tech] = tech_breakdown[cssm_name].get(tech, 0) + 1
-        
+
         # Create table
         all_techs = sorted(set(tech for member_techs in tech_breakdown.values() for tech in member_techs.keys()))
-        
+
         if all_techs:
             # Round 39 / Phase 4.2: render the heading INSIDE the
             # data-present branch so we never produce an orphan
@@ -2268,7 +2268,7 @@ class LeaderReportGenerator:
             table = self.doc.add_table(rows=len(team_data) + 2, cols=num_cols)
             table.style = 'Light Grid Accent 1'
             table.alignment = WD_TABLE_ALIGNMENT.CENTER
-            
+
             # Header
             header_cells = table.rows[0].cells
             header_cells[0].text = 'Team Member'
@@ -2276,7 +2276,7 @@ class LeaderReportGenerator:
                 header_cells[0].paragraphs[0].runs[0].font.bold = True
             if header_cells[0].paragraphs:
                 header_cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
             for idx, tech in enumerate(all_techs, 1):
                 header_cells[idx].text = tech
                 if header_cells[idx].paragraphs and header_cells[idx].paragraphs[0].runs:
@@ -2289,13 +2289,13 @@ class LeaderReportGenerator:
                 shading_elm = OxmlElement('w:shd')
                 shading_elm.set(qn('w:fill'), '007BC7')
                 header_cells[idx]._element.get_or_add_tcPr().append(shading_elm)
-            
+
             header_cells[num_cols-1].text = 'Total'
             if header_cells[num_cols-1].paragraphs and header_cells[num_cols-1].paragraphs[0].runs:
                 header_cells[num_cols-1].paragraphs[0].runs[0].font.bold = True
             if header_cells[num_cols-1].paragraphs:
                 header_cells[num_cols-1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
             # Background color for header
             for i in [0, num_cols-1]:
                 shading_elm = OxmlElement('w:shd')
@@ -2303,15 +2303,15 @@ class LeaderReportGenerator:
                 header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
                 if header_cells[i].paragraphs and header_cells[i].paragraphs[0].runs:
                     header_cells[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
-            
+
             # Data rows
             row_idx = 1
             tech_totals = {tech: 0 for tech in all_techs}
-            
+
             for cssm_name in sorted(team_data.keys()):
                 row_cells = table.rows[row_idx].cells
                 row_cells[0].text = cssm_name
-                
+
                 row_total = 0
                 for idx, tech in enumerate(all_techs, 1):
                     count = tech_breakdown[cssm_name].get(tech, 0)
@@ -2320,21 +2320,21 @@ class LeaderReportGenerator:
                         row_cells[idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                     tech_totals[tech] += count
                     row_total += count
-                
+
                 row_cells[num_cols-1].text = str(row_total)
                 if row_cells[num_cols-1].paragraphs:
                     row_cells[num_cols-1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                 if row_cells[num_cols-1].paragraphs and row_cells[num_cols-1].paragraphs[0].runs:
                     row_cells[num_cols-1].paragraphs[0].runs[0].font.bold = True
-                
+
                 row_idx += 1
-            
+
             # Totals row
             totals_cells = table.rows[row_idx].cells
             totals_cells[0].text = 'TOTAL'
             if totals_cells[0].paragraphs and totals_cells[0].paragraphs[0].runs:
                 totals_cells[0].paragraphs[0].runs[0].font.bold = True
-            
+
             grand_total = 0
             for idx, tech in enumerate(all_techs, 1):
                 count = tech_totals[tech]
@@ -2347,24 +2347,24 @@ class LeaderReportGenerator:
                 shading_elm = OxmlElement('w:shd')
                 shading_elm.set(qn('w:fill'), 'E8E8E8')
                 totals_cells[idx]._element.get_or_add_tcPr().append(shading_elm)
-            
+
             totals_cells[num_cols-1].text = str(grand_total)
             if totals_cells[num_cols-1].paragraphs and totals_cells[num_cols-1].paragraphs[0].runs:
                 totals_cells[num_cols-1].paragraphs[0].runs[0].font.bold = True
             totals_cells[num_cols-1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
             # Background for first and last cells
             for i in [0, num_cols-1]:
                 shading_elm = OxmlElement('w:shd')
                 shading_elm.set(qn('w:fill'), 'E8E8E8')
                 totals_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-        
+
         self.doc.add_paragraph()
-    
+
     def _categorize_technology(self, product_name: str) -> str:
         """Categorize product name into technology groups"""
         product_lower = product_name.lower()
-        
+
         if any(keyword in product_lower for keyword in ['webex meetings', 'meetings', 'meeting']):
             return 'Webex Meetings'
         elif any(keyword in product_lower for keyword in ['webex calling', 'calling', 'ucm']):
@@ -2388,22 +2388,22 @@ class LeaderReportGenerator:
             return 'Video'
         else:
             return 'Other'
-    
+
     def _get_customer_specific_technology(self, customer: str, data: Dict) -> str:
         """Determine the specific technology for a customer based on their subscription data"""
         try:
             subscriptions = data.get('subscriptions', pd.DataFrame())
             if subscriptions.empty or 'PRODUCT_NAME' not in subscriptions.columns:
                 return None
-            
+
             # Get subscriptions for this customer
             customer_subscriptions = subscriptions[
                 subscriptions.get('BU_NAME', pd.Series()) == customer
             ]
-            
+
             if customer_subscriptions.empty:
                 return None
-            
+
             # Find the most specific contact center technology
             technologies_found = set()
             for _, sub in customer_subscriptions.iterrows():
@@ -2412,7 +2412,7 @@ class LeaderReportGenerator:
                     tech = self._categorize_technology(str(product_name))
                     if tech in ['Webex Contact Center', 'Webex Contact Center Enterprise', 'Cisco UCCE', 'Cisco UCCX']:
                         technologies_found.add(tech)
-            
+
             # Return the most specific technology found
             if 'Webex Contact Center Enterprise' in technologies_found:
                 return 'Webex Contact Center Enterprise'
@@ -2424,13 +2424,13 @@ class LeaderReportGenerator:
                 return 'Cisco UCCX'
             elif technologies_found:
                 return list(technologies_found)[0]  # Return any contact center tech found
-            
+
             return None
-            
+
         except Exception as e:
             logger.warning(f"Error determining technology for customer {customer}: {e}")
             return None
-    
+
     def _add_bems_escalation_section(self, team_data: Dict[str, Dict]):
         """Add dedicated BEMS Escalation section (relocated from summary for better TAC context)"""
         total_bems = sum(
@@ -2440,10 +2440,10 @@ class LeaderReportGenerator:
 
         if total_bems == 0:
             return  # No BEMS escalations to report
-        
+
         # Add page break before BEMS section
         self.doc.add_page_break()
-        
+
         # Add section heading
         section_heading = self.doc.add_heading('Warning: BEMS Escalation Analysis', level=1)
         if section_heading.runs:
@@ -2452,7 +2452,7 @@ class LeaderReportGenerator:
             # critical-risk indicator in the document instead of the
             # ad-hoc pure red (255,0,0).
             section_heading.runs[0].font.color.rgb = CANONICAL_RISK_HIGH_RGB
-        
+
         # Add context paragraph
         context_para = self.doc.add_paragraph()
         context_para.add_run(
@@ -2460,7 +2460,7 @@ class LeaderReportGenerator:
             'identified across team activities and TAC cases. BEMS escalations indicate critical technical issues '
             'requiring immediate attention from backend engineering teams.\n\n'
         ).font.italic = True
-        
+
         # USE the bems_analyzer for advanced insights (was initialized but never used!)
         try:
             if not self.bems_analyzer:
@@ -2468,10 +2468,10 @@ class LeaderReportGenerator:
             # Combine all adoption barriers and TAC cases from team data
             all_ab = pd.concat([data.get('adoption_barriers', pd.DataFrame()) for data in team_data.values()], ignore_index=True) if team_data else pd.DataFrame()
             all_tac = pd.concat([data.get('tac_cases', pd.DataFrame()) for data in team_data.values()], ignore_index=True) if team_data else pd.DataFrame()
-            
+
             if not all_ab.empty or not all_tac.empty:
                 bems_analysis = self.bems_analyzer.analyze_bems_escalations(all_ab, all_tac)
-                
+
                 # Add risk assessment from advanced analyzer
                 if bems_analysis.get('risk_assessment'):
                     risk = bems_analysis['risk_assessment']
@@ -2494,7 +2494,7 @@ class LeaderReportGenerator:
                     else:
                         risk_run.font.color.rgb = CANONICAL_RISK_LOW_RGB
                     self.doc.add_paragraph()
-                
+
                 # Add strategic recommendations from analyzer - FIXED: Show ALL recommendations
                 if bems_analysis.get('strategic_recommendations'):
                     rec_para = self.doc.add_paragraph()
@@ -2556,7 +2556,7 @@ class LeaderReportGenerator:
 
         # Call the existing detailed BEMS summary method
         self._add_bems_summary(team_data)
-    
+
     def _add_external_intelligence_section(
         self,
         ext_bugs: List[Dict] = None,
@@ -2586,7 +2586,7 @@ class LeaderReportGenerator:
         has_psirt = psirt_vulns and psirt_vulns.get('total_vulnerabilities', 0) > 0
         has_bugs = ext_bugs and len(ext_bugs) > 0
         has_incidents = ext_incidents and len(ext_incidents) > 0
-        
+
         if not (has_defects or has_psirt or has_bugs or has_incidents):
             return
 
@@ -2613,14 +2613,14 @@ class LeaderReportGenerator:
             )
 
         self.doc.add_heading('External Intelligence & Known Issues', level=1)
-        
+
         # Software defects from customer data
         if has_defects:
             para = self.doc.add_paragraph()
             para.add_run('Software Defects: ').bold = True
             para.add_run(f'{software_defects.get("total_defects", 0)} unique BST/CSC defects in {software_defects.get("total_cases_with_defects", 0)} cases. ')
             para.add_run('Source: CSOne, Adoption Barriers.\n').italic = True
-        
+
         # External bugs from help.webex.com
         if has_bugs:
             para = self.doc.add_paragraph()
@@ -2631,7 +2631,7 @@ class LeaderReportGenerator:
             if _bug_suffix:
                 _disc = self.doc.add_paragraph()
                 _disc.add_run(_bug_suffix.lstrip(' (').rstrip(').')).italic = True
-        
+
         # PSIRT vulnerabilities
         if has_psirt:
             para = self.doc.add_paragraph()
@@ -2641,7 +2641,7 @@ class LeaderReportGenerator:
             para.add_run('Security Vulnerabilities: ').bold = True
             para.add_run(f'{vuln_count} total ({cve_count} CVEs, {psirt_count} PSIRT advisories). ')
             para.add_run('Source: CSOne, Adoption Barriers.\n').italic = True
-        
+
         # Service incidents
         if has_incidents:
             para = self.doc.add_paragraph()
@@ -2652,7 +2652,7 @@ class LeaderReportGenerator:
             if _inc_suffix:
                 _disc = self.doc.add_paragraph()
                 _disc.add_run(_inc_suffix.lstrip(' (').rstrip(').')).italic = True
-    
+
     def _add_bems_summary(self, team_data: Dict[str, Dict]):
         """Add BEMS escalation summary with details"""
         bems_heading = self.doc.add_heading('BEMS Escalation Details', level=2)
@@ -2679,15 +2679,15 @@ class LeaderReportGenerator:
         # so the BEMS warning paragraph and the BEMS heading share
         # the exact same red as every CRITICAL bar in the chart pages.
         warning_run.font.color.rgb = CANONICAL_RISK_HIGH_RGB
-        
+
         warning_para.add_run('These escalations require immediate attention from backend engineering teams.\n\n')
-        
+
         # Collect all BEMS details
         bems_details = []
-        
+
         for cssm_name in sorted(team_data.keys()):
             data = team_data[cssm_name]
-            
+
             # Check adoption barriers - enhanced with BEMS ID extraction
             abs_df = data.get('adoption_barriers', pd.DataFrame())
             if not abs_df.empty:
@@ -2723,12 +2723,12 @@ class LeaderReportGenerator:
                         'id': row.get('Case #', row.get('SR Number', 'N/A')),
                         'bems_id': bems_id
                     })
-        
+
         # Create BEMS details table with enhanced columns
         if bems_details:
             table = self.doc.add_table(rows=len(bems_details) + 1, cols=6)
             table.style = 'Light Grid Accent 1'
-            
+
             # Header - includes BEMS ID column
             header_cells = table.rows[0].cells
             headers = ['CSS', 'Type', 'Customer', 'Subject', 'Case ID', 'BEMS ID']
@@ -2742,7 +2742,7 @@ class LeaderReportGenerator:
                 shading_elm = OxmlElement('w:shd')
                 shading_elm.set(qn('w:fill'), 'FF6B6B')  # Red background
                 cell._element.get_or_add_tcPr().append(shading_elm)
-            
+
             # Data rows with BEMS ID
             for idx, detail in enumerate(bems_details, 1):
                 row_cells = table.rows[idx].cells
@@ -2758,13 +2758,13 @@ class LeaderReportGenerator:
                 # decoration creates a markdown-link chrome leak.
                 bems_id = detail.get('bems_id', 'N/A')
                 row_cells[5].text = str(bems_id) if bems_id and bems_id != 'N/A' else 'N/A'
-                
+
                 # Center align some cells
                 for i in [1, 4, 5]:
                     row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+
         self.doc.add_paragraph()
-    
+
     def _add_individual_team_member_summaries(self, team_data: Dict[str, Dict], days: int):
         """Deprecated: per-team-member rendering is handled by
         ``_create_adoptiq_summaries_per_person``. Retained only as a
@@ -2785,7 +2785,7 @@ class LeaderReportGenerator:
         """
         logger.debug(f"Starting _add_individual_summary_paragraph for {cssm_name}")
         logger.debug(f"Data keys available: {list(data.keys())}")
-        
+
         # FIXED: Use PRIMARY customer list from subscriptions (same as CSS to Customer Ratio table)
         # This ensures consistency between the table and individual summaries
         customers = data.get('customers', [])
@@ -2793,15 +2793,15 @@ class LeaderReportGenerator:
             customers = list(customers) if customers else []
         customers = [c for c in customers if c and str(c).strip()]
         total_customers = len(customers)
-        
+
         logger.debug(f"Using PRIMARY customer list from subscriptions: {total_customers} customers")
-        
+
         # Collect activity data for analysis
         adoption_barriers = data.get('adoption_barriers', pd.DataFrame())
         action_plans = data.get('action_plans', pd.DataFrame())
         customer_pulse = data.get('customer_pulse', pd.DataFrame())
         tac_cases = data.get('tac_cases', pd.DataFrame())
-        
+
         logger.debug(f"Data sizes - ABs: {len(adoption_barriers)}, APs: {len(action_plans)}, CPs: {len(customer_pulse)}, TACs: {len(tac_cases)}")
 
         # Round 2 / Phase 3.1: scan ``customer_pulse.attrs['fetch_error']``
@@ -2825,13 +2825,14 @@ class LeaderReportGenerator:
             summary_para = self.doc.add_paragraph()
             summary_para.add_run(f'{cssm_name} currently has no assigned customer accounts or data available for the selected {days}-day period. This may indicate a new team member assignment or a data synchronization issue that requires verification with the customer success management system.').font.italic = True
             return
-        
+
         # Calculate key metrics
-        total_barriers = len(adoption_barriers) if not adoption_barriers.empty else 0
+        # Round 53.1: report logical barrier records, not Snowflake fan-out rows.
+        total_barriers = cm.count_total_barriers(adoption_barriers) if not adoption_barriers.empty else 0
         total_action_plans = len(action_plans) if not action_plans.empty else 0
         total_pulse_responses = len(customer_pulse) if not customer_pulse.empty else 0
         total_tac_cases = len(tac_cases) if not tac_cases.empty else 0
-        
+
         # Calculate health metrics
         # Round 3 hardening: derive high-priority barriers from canonical
         # ``cm.count_critical_barriers`` so the count agrees with the
@@ -2849,7 +2850,7 @@ class LeaderReportGenerator:
                 ))
             except Exception:
                 high_priority_barriers = 0
-        
+
         avg_pulse_score = None
         if not customer_pulse.empty:
             score_col = next(
@@ -2860,22 +2861,22 @@ class LeaderReportGenerator:
                 scores = pd.to_numeric(customer_pulse[score_col], errors='coerce').dropna()
                 if not scores.empty:
                     avg_pulse_score = scores.mean()
-        
+
         # Identify top issues
         top_barrier_categories = []
         if not adoption_barriers.empty and 'CATEGORY' in adoption_barriers.columns:
             # FIXED: Get ALL barrier categories
             top_barrier_categories = adoption_barriers['CATEGORY'].value_counts().index.tolist()
-        
+
         # Create comprehensive summary paragraph
         summary_para = self.doc.add_paragraph()
-        
+
         # Start with portfolio overview and sentiment context
         sentiment_context = f" with {sentiment_summary.lower()} customer sentiment"
 
         summary_text = f"{cssm_name} manages {total_customers} customer accounts{sentiment_context}. "
         summary_text += f"Portfolio shows {total_barriers} adoption barriers, {total_action_plans} action plans, and {total_tac_cases} TAC cases recorded over the last {days} days. "
-        
+
         # Round 39 / Phase 1.3: re-ground the health assessment with
         # per-customer rates AND absolute-volume floors so portfolios
         # like William Phillips's (0 ABs, 5 TAC, 2 customers) no longer
@@ -2993,16 +2994,16 @@ class LeaderReportGenerator:
                     "Negative sentiment trends suggest proactive engagement is "
                     "needed to prevent further deterioration. "
                 )
-        
+
         # Add specific insights
         if high_priority_barriers > 0:
             summary_text += f"Critical attention is needed for {high_priority_barriers} high-priority adoption barriers that may impact customer satisfaction and retention. "
-        
+
         if top_barrier_categories:
             # FIXED: Show ALL barrier categories
             categories_str = ', '.join(top_barrier_categories)
             summary_text += f"The barrier categories are: {categories_str}, suggesting systemic issues that may benefit from standardized solutions or training programs. "
-        
+
         # Round 2 / Phase 1.9: standardize on the canonical 0-10 pulse
         # scale (Salesforce Customer Pulse SCORE__C is 0-10 in
         # production).  Earlier this call site used PULSE_SCALE_0_TO_5
@@ -3076,26 +3077,26 @@ class LeaderReportGenerator:
                         f"Customer pulse feedback shows moderate satisfaction with an "
                         f"{mean_label}, with room for improvement. "
                     )
-        
+
         # Add actionable recommendations
         summary_text += "\n\nActionable Recommendations: "
-        
+
         # Barrier resolution recommendations
         if total_barriers > total_customers * 0.8:
             summary_text += "Schedule dedicated time with this team member to review barrier resolution strategies and identify common patterns that could be addressed through training or process improvements. "
         elif total_tac_cases > total_customers * 0.4:
             summary_text += "Focus on technical issue prevention through proactive customer education and implementation best practices to reduce TAC case volume. "
-        
+
         # Action plan recommendations
         if total_action_plans < total_barriers * 0.7:
             summary_text += "Ensure all identified adoption barriers have corresponding action plans with clear timelines and success metrics. "
-        
+
         # Sentiment-based recommendations
         if sentiment_summary == "Negative":
             summary_text += "Implement proactive customer engagement strategy to address negative sentiment indicators. "
         elif sentiment_summary == "Positive":
             summary_text += "Leverage positive sentiment to amplify adoption and customer advocacy outcomes. "
-        
+
         # Pulse score recommendations — Round 3: gate on the same
         # canonical sentiment label used by the paragraph above so we
         # never tell a leader to "prioritize outreach" while the
@@ -3104,21 +3105,21 @@ class LeaderReportGenerator:
         # negative sentiment on the 0-5 scale is <= 2.5.)
         if sentiment_summary == "Negative":
             summary_text += "Prioritize direct customer outreach to understand satisfaction concerns and develop improvement plans for affected accounts. "
-        
+
         # Workload recommendations
         if total_customers > 20:
             summary_text += f"Consider workload distribution review as managing {total_customers} accounts may impact service quality and customer satisfaction. "
-        
+
         summary_text += "Regular one-on-one meetings should focus on account health reviews, barrier resolution progress, and customer success strategy alignment."
-        
+
         # Add the summary text
         summary_para.add_run(summary_text)
-        
+
         # Add spacing after summary
         self.doc.add_paragraph()
-        
+
         logger.debug(f"Completed _add_individual_summary_paragraph for {cssm_name}")
-    
+
     def _create_summary_table(self, team_data: Dict[str, Dict], days: int):
         """Create Page 1: Summary table with counts of APs, ABs, and CPs per person"""
         # Page heading
@@ -3126,7 +3127,7 @@ class LeaderReportGenerator:
         if heading.runs:
             heading_run = heading.runs[0]
             heading_run.font.color.rgb = CISCO_BLUE
-        
+
         # Description
         # Round 39 / Phase 1.2: the per-CSSM TAC column is now part of
         # the summary so the "Total Activities" column visibly reconciles
@@ -3162,7 +3163,7 @@ class LeaderReportGenerator:
         )
         header_cells = table.rows[0].cells
         headers = ['Team Member', 'Action Plans', 'Adoption Barriers', 'Customer Pulse', 'TAC Cases', 'BEMS', _sentiment_label, 'Total Activities']
-        
+
         for i, header_text in enumerate(headers):
             cell = header_cells[i]
             cell.text = header_text
@@ -3176,7 +3177,7 @@ class LeaderReportGenerator:
             cell._element.get_or_add_tcPr().append(shading_elm)
             if cell.paragraphs:
                 cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+
         # Data rows
         total_aps = 0
         total_abs = 0
@@ -3186,7 +3187,7 @@ class LeaderReportGenerator:
         row_idx = 1
         for cssm_name in sorted(team_data.keys()):
             data = team_data[cssm_name]
-            
+
             # Rules-based sentiment derived from pulse scores and AB severity.
             # The optional ARR-based analyzer still wins when available so
             # richer signals are not discarded.
@@ -3207,9 +3208,10 @@ class LeaderReportGenerator:
                     team_sentiment = sentiment_data.get('overall_sentiment', team_sentiment)
                 except Exception as e:
                     logger.debug(f"Sentiment analysis failed for {cssm_name}: {e}")
-            
+
             num_aps = self.safe_len(data['action_plans'])
-            num_abs = self.safe_len(data['adoption_barriers'])
+            # Round 53.1: team activity rows show logical barrier records.
+            num_abs = cm.count_total_barriers(data['adoption_barriers'])
             num_cps = self.safe_len(data['customer_pulse'])
             num_tac = self.safe_len(data.get('tac_cases', pd.DataFrame()))
 
@@ -3250,7 +3252,7 @@ class LeaderReportGenerator:
             for i in range(1, 8):
                 if row_cells[i].paragraphs:
                     row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
             # Round 13 / Phase 5.3: previously Positive/Negative pulse
             # text colours were hand-mixed RGB (``(0,128,0)`` /
             # ``(255,0,0)``) and the BEMS row shading was a hard-coded
@@ -3291,11 +3293,11 @@ class LeaderReportGenerator:
                     _r13_bems_fill = 'D62728'
                 shading_elm.set(qn('w:fill'), _r13_bems_fill)
                 row_cells[5]._element.get_or_add_tcPr().append(shading_elm)
-            
+
             # Add individual summary paragraph immediately after this team member's row
             # This is where the black arrow points in the user's image
             self.doc.add_paragraph()  # Add spacing after table row
-            
+
             # Add the comprehensive summary paragraph for this team member
             try:
                 self._add_individual_summary_paragraph(cssm_name, data, days)
@@ -3305,7 +3307,7 @@ class LeaderReportGenerator:
                 # Add a fallback paragraph
                 fallback_para = self.doc.add_paragraph()
                 fallback_para.add_run(f"Summary for {cssm_name}: Portfolio analysis temporarily unavailable.").font.italic = True
-            
+
             if row_idx < self.safe_len(team_data):
                 separator_para = self.doc.add_paragraph()
                 separator_para.add_run("_" * 80).font.color.rgb = CISCO_GRAY
@@ -3313,7 +3315,34 @@ class LeaderReportGenerator:
                 self.doc.add_paragraph()
 
             row_idx += 1
-        
+
+        # Round 53.2: the per-CSSM ``num_abs`` rows above are each a
+        # distinct count for that CSSM's slice, but barriers shared by
+        # customers visible to multiple CSSMs would be double-counted
+        # if we just summed the rows. The leader DOCX previously
+        # emitted that double-counted sum (e.g. 72) while the
+        # workbook's Adoption_Barriers sheet -- and the late
+        # ``Detailed Adoption Barriers List`` summary -- showed the
+        # source-backed distinct count (e.g. 68). Recompute
+        # ``total_abs`` from the union of all per-CSSM slices,
+        # deduped via ``cm.count_total_barriers``, so the TOTAL row
+        # and the Key Insights bullet agree with the workbook truth.
+        try:
+            _r532_ab_frames = [
+                d.get('adoption_barriers')
+                for d in team_data.values()
+                if isinstance(d.get('adoption_barriers'), pd.DataFrame)
+                and not d.get('adoption_barriers').empty
+            ]
+            if _r532_ab_frames:
+                _r532_combined = pd.concat(_r532_ab_frames, ignore_index=True, sort=False)
+                total_abs = cm.count_total_barriers(_r532_combined)
+        except Exception as _r532_exc:
+            logger.debug(
+                "Round 53.2: failed to recompute distinct team AB total, falling back to sum: %s",
+                _r532_exc,
+            )
+
         # Totals row (Round 39 / Phase 1.2: 8-column layout with TAC + canonical AP+AB+CP+TAC+BEMS total)
         _grand_total = total_aps + total_abs + total_cps + total_tac + total_bems
         totals_cells = table.rows[row_idx].cells
@@ -3365,12 +3394,12 @@ class LeaderReportGenerator:
                 f'• Average activities per team member: '
                 f'{_grand_total / team_size:.1f}\n'
             )
-        
+
         # NEW: Add Technology Breakdown
         self._add_technology_breakdown(team_data)
-        
+
         # NOTE: BEMS Summary moved to TAC Cases section for better context
-        
+
         self.doc.add_page_break()
 
     # ------------------------------------------------------------------
@@ -4101,22 +4130,22 @@ class LeaderReportGenerator:
         heading = self.doc.add_heading('AdoptIQ Summaries by Team Member', level=1)
         if heading.runs:
             heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         desc_para = self.doc.add_paragraph()
         desc_para.add_run(
             'Detailed AdoptIQ analysis for each team member including accounts, '
             'products, adoption barriers, and challenges.\n\n'
         )
-        
+
         # Create a section for each team member
         for idx, cssm_name in enumerate(sorted(team_data.keys())):
             data = team_data[cssm_name]
-            
+
             # Section heading
             member_heading = self.doc.add_heading(f'{idx + 1}. {cssm_name}', level=2)
             if member_heading.runs:
                 member_heading.runs[0].font.color.rgb = CISCO_BLUE
-            
+
             # Overview statistics
             stats_para = self.doc.add_paragraph()
             stats_para.add_run('Overview:\n').font.bold = True
@@ -4126,62 +4155,62 @@ class LeaderReportGenerator:
             stats_para.add_run(f'  • Adoption Barriers: {self.safe_len(data.get("adoption_barriers"))}\n')
             stats_para.add_run(f'  • Customer Pulse: {self.safe_len(data.get("customer_pulse"))}\n')
             stats_para.add_run(f'  • TAC Cases: {self.safe_len(data.get("tac_cases"))}\n')
-            
+
             # Add detailed activity table for this team member
             self._add_team_member_activity_table(cssm_name, data)
-            
+
             # Add comprehensive account summaries with source attribution
             self._add_account_summaries_with_sources(cssm_name, data)
-            
+
             # Customer list
             if data['customers']:
                 customers_heading = self.doc.add_heading('Customers', level=3)
                 if customers_heading.runs:
                     customers_heading.runs[0].font.size = Pt(12)
-                
+
                 # FIXED: Show ALL customers
                 customers_para = self.doc.add_paragraph()
                 for customer in sorted(data['customers']):
                     customers_para.add_run(f'• {customer}\n')
-            
+
             # Products/Technologies - FIXED: Show ALL technologies
             if not data['adoption_barriers'].empty and 'SUB_TECHNOLOGY_C' in data['adoption_barriers'].columns:
                 products = data['adoption_barriers']['SUB_TECHNOLOGY_C'].dropna().unique()
-                
+
                 if self.safe_len(products) > 0:
                     products_heading = self.doc.add_heading('Technologies', level=3)
                     if products_heading.runs:
                         products_heading.runs[0].font.size = Pt(12)
-                    
+
                     products_para = self.doc.add_paragraph()
                     for product in sorted(products):
                         products_para.add_run(f'• {product}\n')
-            
+
             # Top challenges (from ABs)
             if not data['adoption_barriers'].empty:
                 challenges_heading = self.doc.add_heading('Top Challenges', level=3)
                 if challenges_heading.runs:
                     challenges_heading.runs[0].font.size = Pt(12)
-                
+
                 # FIXED: Show ALL category counts
                 if 'AB_CATEGORY_C' in data['adoption_barriers'].columns:
                     category_counts = data['adoption_barriers']['AB_CATEGORY_C'].value_counts()
-                    
+
                     challenges_para = self.doc.add_paragraph()
                     for category, count in category_counts.items():
                         challenges_para.add_run(f'• {category}: {count} barriers\n')
-                
+
                 # Show recent high-severity barriers (canonical normalized severity)
                 if 'SEVERITY_C' in data['adoption_barriers'].columns:
                     high_severity = data['adoption_barriers'][
                         self._high_or_critical_barrier_mask(data['adoption_barriers'])
                     ]
-                    
+
                     if not high_severity.empty:
                         severity_heading = self.doc.add_heading('High-Severity Barriers', level=3)
                         if severity_heading.runs:
                             severity_heading.runs[0].font.size = Pt(12)
-                        
+
                         # FIXED: Show ALL high-severity barriers
                         for _, barrier in high_severity.iterrows():
                             barrier_para = self.doc.add_paragraph(style='List Bullet')
@@ -4237,13 +4266,13 @@ class LeaderReportGenerator:
                             note = self._format_external_note(barrier, cssm_name)
                             if note:
                                 barrier_para.add_run(f' {note}').font.italic = True
-            
+
             # Recent Action Plans - FIXED: Show ALL action plans
             if not data['action_plans'].empty:
                 ap_heading = self.doc.add_heading('All Action Plans', level=3)
                 if ap_heading.runs:
                     ap_heading.runs[0].font.size = Pt(12)
-                
+
                 for _, ap in data['action_plans'].iterrows():
                     ap_para = self.doc.add_paragraph(style='List Bullet')
 
@@ -4337,21 +4366,21 @@ class LeaderReportGenerator:
                 tac_heading = self.doc.add_heading(f'TAC Cases ({tac_count} cases)', level=3)
                 if tac_heading.runs:
                     tac_heading.runs[0].font.size = Pt(12)
-                
+
                 tac_cases = data['tac_cases']
-                
+
                 # Find customer column
                 customer_col = None
                 for col in tac_cases.columns:
                     if any(term in col.lower() for term in ['customer name', 'account name', 'customer:', 'bu_name']):
                         customer_col = col
                         break
-                
+
                 # Create a simple table for TAC cases - FIXED: Show ALL cases
                 tac_count = self.safe_len(tac_cases)
                 if tac_count > 0:
                     display_cases = tac_cases  # Show ALL cases
-                    
+
                     # Summary by priority - use canonical case_priority_norm so
                     # mixed raw labels ("P1", "1", "Critical") collapse into a
                     # single bucket, matching cm.count_p1/p2/etc.
@@ -4371,11 +4400,11 @@ class LeaderReportGenerator:
                         for priority, count in priority_counts.items():
                             summary_para.add_run(f'{priority}: {count}  ')
                         self.doc.add_paragraph()  # spacing
-                    
+
                     # Create table for TAC cases
                     table = self.doc.add_table(rows=1, cols=6)
                     table.style = 'Light Grid Accent 1'
-                    
+
                     # Header row
                     header_cells = table.rows[0].cells
                     headers = ['Case #', 'Customer', 'Title', 'Priority', 'Status', 'Date Opened']
@@ -4389,15 +4418,15 @@ class LeaderReportGenerator:
                         shading_elm = OxmlElement('w:shd')
                         shading_elm.set(qn('w:fill'), '0076CE')  # Cisco blue
                         header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-                    
+
                     # Add data rows
                     for _, case in display_cases.iterrows():
                         row_cells = table.add_row().cells
-                        
+
                         # Case number with source attribution
                         case_num = case.get('SR Number', case.get('Case Number', case.get('Case #', 'N/A')))
                         row_cells[0].text = f"TAC #{case_num}"
-                        
+
                         # Customer - FIXED: No truncation
                         # Round 11 / Phase 3.5: normalize TAC table
                         # customer cell so spelling variants render
@@ -4409,20 +4438,20 @@ class LeaderReportGenerator:
                         except Exception:
                             customer = str(raw_customer_cell)
                         row_cells[1].text = customer
-                        
+
                         # Title - FIXED: No truncation
                         title = case.get('Title', 'No title')
                         row_cells[2].text = str(title)
-                        
+
                         # Priority
                         priority = case.get('Highest Priority', case.get('Priority', ''))
                         row_cells[3].text = str(priority) if priority else ''
                         row_cells[3].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        
+
                         # Status
                         status = case.get('Case Status', case.get('Status', ''))
                         row_cells[4].text = str(status) if status else ''
-                        
+
                         # Date
                         date_opened = case.get('Date/Time Opened', '')
                         if pd.notna(date_opened) and date_opened:
@@ -4437,7 +4466,7 @@ class LeaderReportGenerator:
                             date_str = ''
                         row_cells[5].text = date_str
                         row_cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    
+
                     self.doc.add_paragraph()
 
                     tac_count = self.safe_len(tac_cases)
@@ -4452,59 +4481,65 @@ class LeaderReportGenerator:
                 self.doc.add_page_break()
 
         self.doc.add_page_break()
-    
+
     def _create_detailed_ab_list(self, team_data: Dict[str, Dict]):
         """Create detailed list of all Adoption Barriers with metadata"""
         heading = self.doc.add_heading('Detailed Adoption Barriers List', level=1)
         if heading.runs:
             heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         desc_para = self.doc.add_paragraph()
         desc_para.add_run(
             'Complete list of all Adoption Barriers showing product, category, '
             'last updated date, and linked Customer Pulse or Action Plans.\n\n'
         )
-        
+
         # Collect all ABs from all team members
         all_abs = []
-        
+
         for cssm_name, data in team_data.items():
             if not data['adoption_barriers'].empty:
                 abs_copy = data['adoption_barriers'].copy()
                 abs_copy['CSSM'] = cssm_name
                 all_abs.append(abs_copy)
-        
+
         if not all_abs:
             self.doc.add_paragraph('No adoption barriers found for the selected time period.')
             return
-        
+
         # Combine all ABs
         combined_abs = pd.concat(all_abs, ignore_index=True)
-        
+
         # Add summary
         summary_para = self.doc.add_paragraph()
-        summary_para.add_run(f'Total Adoption Barriers: {self.safe_len(combined_abs)}\n').font.bold = True
-        
+        # Round 53.1: all-barriers summary uses distinct records.
+        summary_para.add_run(f'Total Adoption Barriers: {cm.count_total_barriers(combined_abs)}\n').font.bold = True
+
         # Count by team member
-        cssm_counts = combined_abs['CSSM'].value_counts()
+        _combined_for_counts = combined_abs
+        if 'ID' in _combined_for_counts.columns:
+            _with_id = _combined_for_counts[_combined_for_counts['ID'].notna()].drop_duplicates(subset=['ID'])
+            _without_id = _combined_for_counts[_combined_for_counts['ID'].isna()]
+            _combined_for_counts = pd.concat([_with_id, _without_id], ignore_index=True)
+        cssm_counts = _combined_for_counts['CSSM'].value_counts()
         summary_para.add_run('\nBarriers per Team Member:\n')
         for cssm, count in cssm_counts.items():
             summary_para.add_run(f'  • {cssm}: {count} barriers\n')
-        
+
         # FIXED: Show ALL categories
         if 'AB_CATEGORY_C' in combined_abs.columns:
-            category_counts = combined_abs['AB_CATEGORY_C'].value_counts()
+            category_counts = _combined_for_counts['AB_CATEGORY_C'].value_counts()
             summary_para.add_run('\nAll Categories:\n')
             for category, count in category_counts.items():
                 summary_para.add_run(f'  • {category}: {count} barriers\n')
-        
+
         self.doc.add_paragraph('\n')
-        
+
         # Create detailed table
         detail_heading = self.doc.add_heading('Complete Barrier Details', level=2)
         if detail_heading.runs:
             detail_heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         columns_to_show = []
         column_headers = []
 
@@ -4530,7 +4565,7 @@ class LeaderReportGenerator:
             elif db_col in combined_abs.columns:
                 columns_to_show.append(db_col)
                 column_headers.append(display_col)
-        
+
         # Create table. Cap at 100 displayed rows for document length;
         # the cap is disclosed below the table so readers know they are
         # looking at a truncated sample, not the entire data set.
@@ -4540,7 +4575,7 @@ class LeaderReportGenerator:
         num_rows = displayed_rows + 1  # +1 for header
         table = self.doc.add_table(rows=num_rows, cols=self.safe_len(column_headers))
         table.style = 'Light Grid Accent 1'
-        
+
         # Header row
         header_cells = table.rows[0].cells
         for i, header_text in enumerate(column_headers):
@@ -4553,7 +4588,7 @@ class LeaderReportGenerator:
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '007BC7')
             cell._element.get_or_add_tcPr().append(shading_elm)
-        
+
         # Round 12 / Phase 9.3: previously this iteration called
         # ``combined_abs.head(100)`` on a frame assembled from
         # multiple sources (CSSM-owned + collaborator) with NO
@@ -4635,7 +4670,7 @@ class LeaderReportGenerator:
                 row_cells[col_idx].text = value
                 if row_cells[col_idx].paragraphs and row_cells[col_idx].paragraphs[0].runs:
                     row_cells[col_idx].paragraphs[0].runs[0].font.size = Pt(8)
-        
+
         # Add note about linked records and explicit list cap disclosure so
         # readers never confuse a truncated sample with a complete list.
         note_para = self.doc.add_paragraph('\n')
@@ -4654,7 +4689,7 @@ class LeaderReportGenerator:
             cap_run.font.italic = True
             cap_run.font.size = Pt(9)
             cap_run.font.color.rgb = CISCO_GRAY
-    
+
     def _add_team_member_activity_table(self, cssm_name: str, data: Dict):
         """Add a detailed activity table for an individual team member.
 
@@ -4746,33 +4781,33 @@ class LeaderReportGenerator:
 
         # Add spacing after table
         self.doc.add_paragraph()
-    
+
     def _add_account_summaries_with_sources(self, cssm_name: str, data: Dict):
         """Add comprehensive account summaries with full source attribution"""
         # Add spacing
         self.doc.add_paragraph()
-        
+
         # Account Summary heading
         summary_heading = self.doc.add_heading('Account Summary & Source Attribution', level=3)
         if summary_heading.runs:
             summary_heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         # Get unique customers for this team member
         customers = data.get('customers', [])
         if not customers:
             no_customers_para = self.doc.add_paragraph()
             no_customers_para.add_run('No customers assigned to this team member.').italic = True
             return
-        
+
         # FIXED: Process ALL customers with comprehensive data
         for customer in sorted(customers):
             self._add_customer_summary_with_sources(customer, data)
-    
+
     def _add_customer_summary_with_sources(self, customer: str, data: Dict):
         """Add detailed summary for a single customer with full source attribution in unified table"""
         # Determine specific technology for this customer
         customer_technology = self._get_customer_specific_technology(customer, data)
-        
+
         # Round 39 / Phase 4.4: prettify ``__`` separators in the
         # display label so account names like
         # ``"TRIBUNAL...__GOBIERNO...__MX"`` render as a comma-
@@ -4792,12 +4827,12 @@ class LeaderReportGenerator:
             customer_heading = self.doc.add_heading(f'Account: {_customer_display}', level=4)
         if customer_heading.runs:
             customer_heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         # Add sentiment summary for this customer
         try:
             if not self.arr_sentiment_analyzer:
                 raise ValueError("sentiment analyzer not available")
-            
+
             # Get customer-specific data for sentiment analysis
             customer_data = {
                 'adoption_barriers': data.get('adoption_barriers', pd.DataFrame())[
@@ -4813,26 +4848,26 @@ class LeaderReportGenerator:
                     data.get('tac_cases', pd.DataFrame())['Customer'] == customer
                 ] if not data.get('tac_cases', pd.DataFrame()).empty and 'Customer' in data.get('tac_cases', pd.DataFrame()).columns else pd.DataFrame()
             }
-            
+
             sentiment_data = self.arr_sentiment_analyzer.analyze_customer_sentiment(customer, customer_data)
-            
+
             # Add sentiment summary
             summary_para = self.doc.add_paragraph()
             sentiment_text = f"Sentiment: {sentiment_data.get('overall_sentiment', 'Unknown')} ({sentiment_data.get('confidence_level', 'Low')} confidence)"
-            
+
             summary_para.add_run(sentiment_text)
             if summary_para.runs:
                 summary_para.runs[0].font.italic = True
-                
+
         except Exception as e:
             logger.debug(f"Error adding sentiment context for {customer}: {e}")
             pass
-        
+
         # Initialize all items list with type information
         all_items = []
         customer_norm = normalize_customer_name(customer)
         _name_match = lambda series: series.fillna("").astype(str).apply(normalize_customer_name) == customer_norm
-        
+
         # Collect Action Plans
         if not data.get('action_plans', pd.DataFrame()).empty:
             customer_aps = data['action_plans'][
@@ -4844,7 +4879,7 @@ class LeaderReportGenerator:
                 status = ap.get('STATUS_C') or ap.get('STATUS') or 'In Progress'
                 category = ap.get('AB_CATEGORY_C') or ap.get('CATEGORY') or ap.get('TYPE') or 'General'
                 severity = ap.get('SEVERITY_C') or ap.get('SEVERITY') or ap.get('PRIORITY') or 'Medium'
-                
+
                 all_items.append({
                     'type': 'AP',
                     'type_full': 'Action Plan',
@@ -4859,7 +4894,7 @@ class LeaderReportGenerator:
                     'external_account': bool(ap.get('_EXTERNAL_ACCOUNT', False)),
                     'note': self._format_external_note(ap, ''),
                 })
-        
+
         # Collect Adoption Barriers
         if not data.get('adoption_barriers', pd.DataFrame()).empty:
             customer_abs = data['adoption_barriers'][
@@ -4871,7 +4906,7 @@ class LeaderReportGenerator:
                 status = ab.get('STATUS_C') or ab.get('STATUS') or 'Open'
                 category = ab.get('AB_CATEGORY_C') or ab.get('CATEGORY') or ab.get('TYPE') or 'Technical'
                 severity = ab.get('SEVERITY_C') or ab.get('SEVERITY') or ab.get('PRIORITY') or 'Medium'
-                
+
                 all_items.append({
                     'type': 'AB',
                     'type_full': 'Adoption Barrier',
@@ -4886,7 +4921,7 @@ class LeaderReportGenerator:
                     'external_account': bool(ab.get('_EXTERNAL_ACCOUNT', False)),
                     'note': self._format_external_note(ab, ''),
                 })
-        
+
         # Collect Customer Pulse
         if not data.get('customer_pulse', pd.DataFrame()).empty:
             customer_cps = data['customer_pulse'][
@@ -4898,7 +4933,7 @@ class LeaderReportGenerator:
                 status = cp.get('STATUS_C') or cp.get('STATUS') or 'Active'
                 category = cp.get('AB_CATEGORY_C') or cp.get('CATEGORY') or cp.get('TYPE') or 'Feedback'
                 severity = cp.get('SEVERITY_C') or cp.get('SEVERITY') or cp.get('PRIORITY') or 'Low'
-                
+
                 all_items.append({
                     'type': 'CP',
                     'type_full': 'Customer Pulse',
@@ -4913,7 +4948,7 @@ class LeaderReportGenerator:
                     'external_account': bool(cp.get('_EXTERNAL_ACCOUNT', False)),
                     'note': self._format_external_note(cp, ''),
                 })
-        
+
         # Collect TAC Cases
         # Round 40 / Phase 1: replace the legacy customer-name TAC filter
         # with the same three-tier authoritative join Phase B uses at the
@@ -5009,7 +5044,7 @@ class LeaderReportGenerator:
                 status = tac.get('Status') or 'Open'
                 category = tac.get('Priority') or tac.get('Category') or 'P3'
                 severity = tac.get('Severity') or tac.get('Impact') or 'Medium'
-                
+
                 all_items.append({
                     'type': 'TAC',
                     'type_full': 'TAC Case',
@@ -5021,13 +5056,13 @@ class LeaderReportGenerator:
                     'date': str(tac.get('Date/Time Opened', 'N/A') if pd.notna(tac.get('Date/Time Opened')) else 'N/A'),
                     'source': 'CSOne'
                 })
-        
+
         # Summary paragraph
         ap_count = len([i for i in all_items if i['type'] == 'AP'])
         ab_count = len([i for i in all_items if i['type'] == 'AB'])
         cp_count = len([i for i in all_items if i['type'] == 'CP'])
         tac_count = len([i for i in all_items if i['type'] == 'TAC'])
-        
+
         # Analyze BEMS escalations for this customer
         bems_count = 0
         customer_norm = normalize_customer_name(customer)
@@ -5038,7 +5073,7 @@ class LeaderReportGenerator:
                     data['adoption_barriers']['BU_NAME'].fillna("").astype(str).apply(normalize_customer_name) == customer_norm
                 ]
                 bems_count += int(detect_bems_mask(customer_abs).sum())
-            
+
             # Check for BEMS references in TAC cases
             if not data.get('tac_cases', pd.DataFrame()).empty:
                 # Try multiple possible customer name columns
@@ -5047,7 +5082,7 @@ class LeaderReportGenerator:
                     if col in data['tac_cases'].columns:
                         customer_col = col
                         break
-                
+
                 if customer_col:
                     customer_tacs = data['tac_cases'][
                         data['tac_cases'][customer_col].fillna("").astype(str).apply(normalize_customer_name) == customer_norm
@@ -5055,40 +5090,40 @@ class LeaderReportGenerator:
                     bems_count += int(detect_bems_mask(customer_tacs).sum())
         except Exception as e:
             logger.warning(f"Error counting BEMS escalations: {e}")
-        
+
         summary_para = self.doc.add_paragraph()
         summary_para.add_run(f'Total Activities: {len(all_items)}').font.bold = True
         summary_para.add_run(f' (APs: {ap_count}, ABs: {ab_count}, CPs: {cp_count}, TAC: {tac_count})')
-        
+
         # Add BEMS indicator if found
         if bems_count > 0:
             summary_para.add_run(f' | Warning: BEMS Escalations: {bems_count}')
             summary_para.runs[-1].font.color.rgb = RGBColor(255, 140, 0)  # Orange color
             summary_para.runs[-1].font.bold = True
-        
+
         if not all_items:
             no_data_para = self.doc.add_paragraph()
             no_data_para.add_run('No activities found for this customer.').italic = True
             self.doc.add_paragraph()
             return
-        
+
         # Create comprehensive unified table
         self._add_unified_customer_table(all_items, bems_count)
-        
+
         # Add account-level summary
         self._add_account_summary(customer, all_items, data)
-        
+
         # Add enhanced Snowflake insights for this customer
         self._add_customer_enhanced_insights(customer, data)
-        
+
         # Add spacing between customers
         self.doc.add_paragraph()
-    
+
     def _add_unified_customer_table(self, all_items: List[Dict], bems_count: int = 0):
         """Create a single unified table showing all customer activities grouped by type"""
         if not all_items:
             return
-        
+
         # Create comprehensive table with all activity types
         table = self.doc.add_table(rows=1, cols=8)
         table.style = 'Light Grid Accent 1'
@@ -5106,11 +5141,11 @@ class LeaderReportGenerator:
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), 'E3F2FD')  # Light blue
             header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-        
+
         # Sort items by type for better readability (APs, ABs, CPs, TAC)
         type_order = {'AP': 1, 'AB': 2, 'CP': 3, 'TAC': 4}
         all_items_sorted = sorted(all_items, key=lambda x: (type_order.get(x['type'], 5), str(x.get('date', '') or '')))
-        
+
         # Color coding for different types
         type_colors = {
             'AP': 'C8E6C9',   # Light green
@@ -5118,12 +5153,12 @@ class LeaderReportGenerator:
             'CP': 'BBDEFB',   # Light blue
             'TAC': 'F8BBD0'   # Light pink
         }
-        
+
         # Add data rows (limit to 25 items for readability)
         # FIXED: Show ALL items
         for item in all_items_sorted:
             row_cells = table.add_row().cells
-            
+
             # Type (bold and colored)
             row_cells[0].text = item['type']
             if row_cells[0].paragraphs and row_cells[0].paragraphs[0].runs:
@@ -5134,14 +5169,14 @@ class LeaderReportGenerator:
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), type_colors.get(item['type'], 'FFFFFF'))
             row_cells[0]._element.get_or_add_tcPr().append(shading_elm)
-            
+
             # Record ID (with hyperlink for CSConsole records)
             record_id = item.get('id', 'N/A')
             record_id_str = str(record_id)
-            
+
             # Clear the cell first
             row_cells[1].text = ''
-            
+
             # Add hyperlink for CSConsole records (AP, AB, CP types)
             if item['type'] in ['AP', 'AB', 'CP'] and record_id != 'N/A' and '-' in record_id_str:
                 # Extract the actual ID (after the prefix like "AP-", "AB-", "CP-")
@@ -5175,7 +5210,7 @@ class LeaderReportGenerator:
                 row_cells[1].text = record_id_str
                 if row_cells[1].paragraphs and row_cells[1].paragraphs[0].runs:
                     row_cells[1].paragraphs[0].runs[0].font.size = Pt(8)
-            
+
             # Subject/Title (truncated for readability)
             subject = item.get('subject', 'N/A')
             if subject is None or subject == '':
@@ -5190,28 +5225,28 @@ class LeaderReportGenerator:
             row_cells[2].text = _strip_markdown_chrome(subject) or 'N/A'
             if row_cells[2].paragraphs and row_cells[2].paragraphs[0].runs:
                 row_cells[2].paragraphs[0].runs[0].font.size = Pt(8)
-            
+
             # Status
             status = item.get('status', 'N/A')
             row_cells[3].text = str(status) if status else 'N/A'
             if row_cells[3].paragraphs and row_cells[3].paragraphs[0].runs:
                 row_cells[3].paragraphs[0].runs[0].font.size = Pt(8)
             row_cells[3].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
             # Category/Priority (show category for ABs, priority for TAC)
             category = item.get('category', 'N/A')
             row_cells[4].text = str(category) if category and category != 'N/A' else '-'
             if row_cells[4].paragraphs and row_cells[4].paragraphs[0].runs:
                 row_cells[4].paragraphs[0].runs[0].font.size = Pt(8)
             row_cells[4].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
             # Severity (mainly for ABs)
             severity = item.get('severity', 'N/A')
             row_cells[5].text = str(severity) if severity and severity != 'N/A' else '-'
             if row_cells[5].paragraphs and row_cells[5].paragraphs[0].runs:
                 row_cells[5].paragraphs[0].runs[0].font.size = Pt(8)
             row_cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
             # Date
             date = item.get('date', 'N/A')
             if date != 'N/A' and date:
@@ -5239,29 +5274,29 @@ class LeaderReportGenerator:
             row_cells[7].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         # FIXED: Removed limit message - now showing ALL items
-        
+
         # Add legend for type colors
         legend_para = self.doc.add_paragraph()
         legend_para.add_run('Legend: ').font.bold = True
         legend_para.add_run('AP = Action Plan, AB = Adoption Barrier, CP = Customer Pulse, TAC = TAC Case')
         legend_para.style = 'Normal'
-    
+
     def _add_account_summary(self, customer: str, all_items: List[Dict], data: Dict):
         """Add comprehensive account-level summary for each customer"""
-        
+
         # Account Summary Heading
         summary_heading = self.doc.add_heading('Account Summary', level=3)
         if summary_heading.runs:
             summary_heading.runs[0].font.color.rgb = CISCO_BLUE
             summary_heading.runs[0].font.size = Pt(12)
-        
+
         # Calculate account statistics
         ap_count = len([i for i in all_items if i['type'] == 'AP'])
         ab_count = len([i for i in all_items if i['type'] == 'AB'])
         cp_count = len([i for i in all_items if i['type'] == 'CP'])
         tac_count = len([i for i in all_items if i['type'] == 'TAC'])
         total_activities = len(all_items)
-        
+
         # Status breakdown
         # Round 39 / Phase 4.1: split severity / category counters by
         # record type so the per-account summary stops mixing TAC
@@ -5293,11 +5328,11 @@ class LeaderReportGenerator:
             elif _itype in ('AB', 'AP'):
                 ab_severity_counts[severity] = ab_severity_counts.get(severity, 0) + 1
                 ab_category_counts[category] = ab_category_counts.get(category, 0) + 1
-        
+
         # Create account summary table
         summary_table = self.doc.add_table(rows=1, cols=2)
         summary_table.style = 'Light Grid Accent 1'
-        
+
         # Header
         header_cells = summary_table.rows[0].cells
         header_cells[0].text = 'Metric'
@@ -5308,13 +5343,13 @@ class LeaderReportGenerator:
         if header_cells[1].paragraphs and header_cells[1].paragraphs[0].runs:
             header_cells[1].paragraphs[0].runs[0].font.bold = True
             header_cells[1].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
-        
+
         # Header background
         for cell in header_cells:
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '007BC7')
             cell._element.get_or_add_tcPr().append(shading_elm)
-        
+
         # Round 39 / Phase 4.1: derive Top Category / Top Severity
         # from the AB-side counters specifically so the summary row
         # doesn't surface a TAC numeric priority labelled "Severity".
@@ -5346,7 +5381,7 @@ class LeaderReportGenerator:
             ('Top AB Category', _top_category),
             ('Top AB Severity', _top_severity),
         ]
-        
+
         for metric, value in summary_data:
             if metric == '':  # Spacer row
                 row_cells = summary_table.add_row().cells
@@ -5361,7 +5396,7 @@ class LeaderReportGenerator:
                 if row_cells[1].paragraphs and row_cells[1].paragraphs[0].runs:
                     row_cells[1].paragraphs[0].runs[0].font.size = Pt(9)
                     row_cells[1].paragraphs[0].runs[0].font.bold = True
-        
+
         # Add detailed breakdowns
         if status_counts:
             self.doc.add_paragraph()
@@ -5369,7 +5404,7 @@ class LeaderReportGenerator:
             status_para.add_run('Status Breakdown: ').font.bold = True
             status_breakdown = ', '.join([f"{status} ({count})" for status, count in sorted(status_counts.items())])
             status_para.add_run(status_breakdown)
-        
+
         # Round 39 / Phase 4.1: render AB and TAC breakdowns on
         # SEPARATE labeled lines so a reader can tell numeric TAC
         # priorities apart from string AB severities.  Pre-Round-39
@@ -5415,12 +5450,12 @@ class LeaderReportGenerator:
                     for s, n in sorted(tac_priority_counts.items())
                 ])
             )
-        
+
         # Add account health indicator
         self.doc.add_paragraph()
         health_para = self.doc.add_paragraph()
         health_para.add_run('Account Health: ').font.bold = True
-        
+
         # Simple health calculation
         # Round 39 / Phase 4.1: read from the AB-side severity counter
         # specifically (the legacy combined ``severity_counts`` dict
@@ -5432,7 +5467,7 @@ class LeaderReportGenerator:
             ab_severity_counts.get('High', 0) + ab_severity_counts.get('Critical', 0)
         )
         open_ab_count = status_counts.get('Open', 0) + status_counts.get('New', 0)
-        
+
         # Round 13 / Phase 5.2: previously the Account Health pill
         # used hand-mixed ``RGBColor(0,128,0)`` / ``(255,165,0)`` /
         # ``(255,0,0)``.  Those greens / oranges / reds are NOT the
@@ -5461,31 +5496,31 @@ class LeaderReportGenerator:
         else:
             health_status = 'Attention Needed'
             health_color = CANONICAL_RISK_HIGH_RGB
-        
+
         health_run = health_para.add_run(health_status)
         health_run.font.bold = True
         health_run.font.color.rgb = health_color
-        
+
         # Add source verification note
         source_para = self.doc.add_paragraph()
         source_para.add_run('Source Verification: ').font.bold = True
         source_para.add_run('All records can be verified in their respective source systems (CSConsole or CSOne) using the Record ID provided above.')
-    
+
     def _add_overall_individual_summary(self, team_data: Dict[str, Dict], manager_name: str, days: int):
         """Add comprehensive overall summary for the individual/manager"""
-        
+
         # Overall Summary Heading
         summary_heading = self.doc.add_heading('📊 Overall Individual Summary', level=1)
         if summary_heading.runs:
             summary_heading.runs[0].font.color.rgb = CISCO_BLUE
             summary_heading.runs[0].font.size = Pt(16)
-        
+
         # Executive Summary
         exec_para = self.doc.add_paragraph()
         exec_para.add_run('Executive Summary\n').font.bold = True
         exec_para.add_run(f'This report provides a comprehensive analysis of {(manager_name or "Manager")}\'s team performance over the last {days} days. ')
         exec_para.add_run('The analysis covers all team members, their customer accounts, adoption barriers, action plans, customer pulse records, and TAC cases.\n\n')
-        
+
         # Calculate overall team statistics
         total_team_members = len(team_data)
         total_customers = 0
@@ -5508,7 +5543,7 @@ class LeaderReportGenerator:
         # Collect all team data
         team_summary_data = []
         customer_health_summary = {}
-        
+
         for cssm_name, data in team_data.items():
             # Count activities
             num_customers = self.safe_len(data.get('customers', []))
@@ -5534,13 +5569,13 @@ class LeaderReportGenerator:
             num_abs = self.safe_len(data.get('adoption_barriers', []))
             num_cps = self.safe_len(data.get('customer_pulse', []))
             num_tac = self.safe_len(data.get('tac_cases', []))
-            
+
             total_customers += num_customers
             total_aps += num_aps
             total_abs += num_abs
             total_cps += num_cps
             total_tac_cases += num_tac
-            
+
             # Count BEMS escalations.
             # Round 2 / Phase 3.3: also track the canonical TAC-only
             # count so the dashboard footnote can show both numbers.
@@ -5554,7 +5589,7 @@ class LeaderReportGenerator:
             except Exception:
                 bems_tac_only = 0
             total_bems_tac_only += bems_tac_only
-            
+
             high_severity_count = 0
             open_ab_count = 0
             resolved_ab_count = 0
@@ -5646,15 +5681,15 @@ class LeaderReportGenerator:
                     mode=cm.ACTIVITIES_MODE_FULL,
                 ),
             })
-        
+
         # Create overall statistics table
         stats_heading = self.doc.add_heading('Team Performance Metrics', level=2)
         if stats_heading.runs:
             stats_heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         stats_table = self.doc.add_table(rows=1, cols=3)
         stats_table.style = 'Light Grid Accent 1'
-        
+
         # Header
         header_cells = stats_table.rows[0].cells
         headers = ['Metric', 'Total', 'Average per Team Member']
@@ -5668,7 +5703,7 @@ class LeaderReportGenerator:
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '007BC7')
             header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-        
+
         # Statistics rows
         avg_divisor = max(total_team_members, 1)
         # Round 11 / Phase 6.8: headline number is now the count
@@ -5701,7 +5736,7 @@ class LeaderReportGenerator:
             # TOTAL row and the Activity Counts Cross-Check grand total.
             ('Total Activities', str(total_aps + total_abs + total_cps + total_tac_cases + total_bems), f"{(total_aps + total_abs + total_cps + total_tac_cases + total_bems)/avg_divisor:.1f}")
         ]
-        
+
         for metric, total, avg in stats_data:
             row_cells = stats_table.add_row().cells
             row_cells[0].text = metric
@@ -5718,16 +5753,16 @@ class LeaderReportGenerator:
             # Center align numeric columns
             for i in range(1, 3):
                 row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+
         # Team Member Performance Table
         self.doc.add_paragraph()
         performance_heading = self.doc.add_heading('Individual Team Member Performance', level=2)
         if performance_heading.runs:
             performance_heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         perf_table = self.doc.add_table(rows=1, cols=8)
         perf_table.style = 'Light Grid Accent 1'
-        
+
         # Header
         perf_header_cells = perf_table.rows[0].cells
         perf_headers = ['Team Member', 'Customers', 'APs', 'ABs', 'CPs', 'TAC', 'BEMS', 'Total']
@@ -5741,7 +5776,7 @@ class LeaderReportGenerator:
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), '007BC7')
             perf_header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-        
+
         # Data rows
         # Round 18 / Phase 2.2: tuple sort key with a casefolded
         # cssm_name secondary tiebreaker so two CSSMs tied on the
@@ -5764,7 +5799,7 @@ class LeaderReportGenerator:
             row_cells[5].text = str(member_data['tac_cases'])
             row_cells[6].text = str(member_data['bems'])
             row_cells[7].text = str(member_data['total_activities'])
-            
+
             # Formatting
             for i in range(8):
                 if row_cells[i].paragraphs and row_cells[i].paragraphs[0].runs:
@@ -5773,13 +5808,13 @@ class LeaderReportGenerator:
                         row_cells[i].paragraphs[0].runs[0].font.bold = True
                 if i > 0:  # Center align numeric columns
                     row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+
         # Key Insights and Recommendations
         self.doc.add_paragraph()
         insights_heading = self.doc.add_heading('Key Insights and Recommendations', level=2)
         if insights_heading.runs:
             insights_heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         # Activity and impact leaders (separated so volume is not confused
         # with outcomes). "Most Active" is by raw activity counts; "Top Impact"
         # is a blended outcome score (resolved ABs + completed APs, lightly
@@ -5802,27 +5837,27 @@ class LeaderReportGenerator:
             f"{top_impact.get('completed_aps', 0)} APs completed, "
             f"impact score {top_impact.get('impact_score', 0)}\n"
         )
-        
+
         # BEMS attention
         if total_bems > 0:
             bems_para = self.doc.add_paragraph()
             bems_para.add_run('Warning: BEMS Escalations: ').font.bold = True
             bems_para.add_run(f"Total of {total_bems} backend engineering escalations require immediate attention across the team.\n")
-        
+
         # High severity issues
         total_high_severity = sum(member['high_severity'] for member in team_summary_data)
         if total_high_severity > 0:
             severity_para = self.doc.add_paragraph()
             severity_para.add_run('ERROR: High Severity Issues: ').font.bold = True
             severity_para.add_run(f"{total_high_severity} high/critical severity adoption barriers need priority resolution.\n")
-        
+
         # Open adoption barriers
         total_open_abs = sum(member['open_abs'] for member in team_summary_data)
         if total_open_abs > 0:
             open_para = self.doc.add_paragraph()
             open_para.add_run('INFO: Open Adoption Barriers: ').font.bold = True
             open_para.add_run(f"{total_open_abs} adoption barriers remain open and require follow-up.\n")
-        
+
         # Recommendations
         self.doc.add_paragraph()
         rec_para = self.doc.add_paragraph()
@@ -5832,7 +5867,7 @@ class LeaderReportGenerator:
         rec_para.add_run('• Address BEMS escalations promptly to maintain customer satisfaction\n')
         rec_para.add_run('• Leverage top performer insights for team knowledge sharing\n')
         rec_para.add_run('• Monitor customer pulse trends for proactive issue identification\n')
-        
+
         # Report metadata
         self.doc.add_paragraph()
         meta_para = self.doc.add_paragraph()
@@ -5843,7 +5878,7 @@ class LeaderReportGenerator:
         meta_para.add_run(f'• Data Sources: CSConsole (APs, ABs, CPs), CSOne (TAC Cases), Snowflake (Customer Data)\n')
         meta_para.add_run(f'• Total Records Analyzed: {total_aps + total_abs + total_cps + total_tac_cases}\n')
         meta_para.style = 'Normal'
-    
+
     def _add_customer_enhanced_insights(self, customer: str, data: Dict, days: Optional[int] = None):
         """Add comprehensive enhanced insights including Snowflake data, BEMS, and defects.
 
@@ -5927,7 +5962,7 @@ class LeaderReportGenerator:
 
                     if customer_insights and customer_insights.get('insights'):
                         insights_added = True
-                        
+
                         # Account insights
                         account_data = customer_insights.get('insights', {}).get('account', {})
                         if account_data and account_data.get('account_summary'):
@@ -5962,7 +5997,7 @@ class LeaderReportGenerator:
                                     _risk = (str(_risk_raw).strip() if pd.notna(_risk_raw) else '') or 'N/A'
                                     acct_para.add_run(f"Tier: {_tier}, ")
                                     acct_para.add_run(f"Renewal Risk: {_risk}")
-                        
+
                         # Contract insights
                         contract_data = customer_insights.get('insights', {}).get('contract', {})
                         if contract_data and contract_data.get('contract_data'):
@@ -5973,14 +6008,14 @@ class LeaderReportGenerator:
                                 contract_para.add_run(f"Active Contracts: {contract_info.get('contracts_found', 0)}")
             except Exception as e:
                 logger.warning(f"Could not retrieve enhanced Snowflake insights for {customer}: {e}")
-            
+
             # BEMS Escalation Details
             try:
                 if not data.get('adoption_barriers', pd.DataFrame()).empty:
                     customer_abs = data['adoption_barriers'][
                         data['adoption_barriers']['BU_NAME'].fillna("").astype(str).apply(normalize_customer_name) == normalize_customer_name(customer)
                     ]
-                    
+
                     bems_items = []
                     for _, ab in customer_abs[detect_bems_mask(customer_abs)].iterrows():
                         subject = str(ab.get('SUBJECT_C', ''))
@@ -5992,7 +6027,7 @@ class LeaderReportGenerator:
                             'status': str(ab.get('STATUS_C', 'N/A') if pd.notna(ab.get('STATUS_C')) else 'N/A'),
                             'date': str(ab.get('CREATED_DATE', 'N/A') if pd.notna(ab.get('CREATED_DATE')) else 'N/A')
                         })
-                    
+
                     if bems_items:
                         insights_added = True
                         bems_para = self.doc.add_paragraph()
@@ -6000,7 +6035,7 @@ class LeaderReportGenerator:
                         if bems_para.runs:
                             bems_para.runs[0].font.color.rgb = RGBColor(255, 140, 0)  # Orange
                         bems_para.add_run(f"{len(bems_items)} backend engineering escalation(s)")
-                        
+
                         # FIXED: Show ALL BEMS items
                         for bems_item in bems_items:
                             bems_detail = self.doc.add_paragraph(style='List Bullet')
@@ -6009,7 +6044,7 @@ class LeaderReportGenerator:
                             bems_detail.add_run(f"(Severity: {bems_item['severity']}, Status: {bems_item['status']})")
             except Exception as e:
                 logger.warning(f"Could not analyze BEMS escalations for {customer}: {e}")
-            
+
             # Known Defects Summary
             try:
                 # Get defect analysis
@@ -6020,43 +6055,43 @@ class LeaderReportGenerator:
                     ]
                     products = (customer_abs['SUB_TECHNOLOGY_C'].dropna().unique().tolist()
                                 if 'SUB_TECHNOLOGY_C' in customer_abs.columns else [])
-                
+
                 if products and self.defect_analyzer:
                     # Analyze defects for customer products
                     defect_para = self.doc.add_paragraph()
                     defect_para.add_run('🐛 Product Defect Intelligence: ').font.bold = True
                     defect_para.add_run(f"Analyzing {len(products)} product area(s) for known defects")
-                    
+
                     insights_added = True
-                    
+
                     # Note about defect sources
                     defect_note = self.doc.add_paragraph()
                     defect_note.add_run('Sources: BST (Bug Search Tool), Circuit, help.webex.com').italic = True
                     defect_note.style = 'Normal'
             except Exception as e:
                 logger.warning(f"Could not analyze defects for {customer}: {e}")
-            
+
             if not insights_added:
                 no_insights_para = self.doc.add_paragraph()
                 no_insights_para.add_run('No additional insights available at this time.').italic = True
-        
+
         except Exception as e:
             logger.error(f"Error adding enhanced insights for {customer}: {e}")
-    
+
     def _add_source_section(self, section_name: str, items: List[Dict]):
         """Add a section with source attribution for each item"""
         if not items:
             return
-        
+
         # Section heading
         section_heading = self.doc.add_heading(f'{section_name} ({len(items)})', level=5)
         if section_heading.runs:
             section_heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         # Create table for structured display
         table = self.doc.add_table(rows=1, cols=4)
         table.style = 'Light Grid Accent 1'
-        
+
         # Header row
         header_cells = table.rows[0].cells
         headers = ['Record ID', 'Subject/Title', 'Status', 'Date']
@@ -6069,12 +6104,12 @@ class LeaderReportGenerator:
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), 'E3F2FD')  # Light blue
             header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-        
+
         # Add data rows
         # FIXED: Show ALL items per section
         for item in items:
             row_cells = table.add_row().cells
-            
+
             # Record ID with source and hyperlink
             if section_name == 'TAC Cases':
                 record_id = f"TAC Case: {item.get('case_number', 'N/A')}"
@@ -6085,10 +6120,10 @@ class LeaderReportGenerator:
                 # CSConsole record - add hyperlink
                 record_id = item.get('id', 'N/A')
                 record_id_display = f"CSConsole ID: {record_id}"
-                
+
                 # Clear the cell
                 row_cells[0].text = ''
-                
+
                 if record_id != 'N/A':
                     try:
                         # Add hyperlink
@@ -6103,7 +6138,7 @@ class LeaderReportGenerator:
                     row_cells[0].text = record_id_display
                     if row_cells[0].paragraphs and row_cells[0].paragraphs[0].runs:
                         row_cells[0].paragraphs[0].runs[0].font.size = Pt(9)
-            
+
             # Subject/Title (truncated)
             subject = item.get('subject', item.get('title', 'N/A'))
             if subject is None or subject == '':
@@ -6115,14 +6150,14 @@ class LeaderReportGenerator:
             row_cells[1].text = _strip_markdown_chrome(subject) or 'N/A'
             if row_cells[1].paragraphs and row_cells[1].paragraphs[0].runs:
                 row_cells[1].paragraphs[0].runs[0].font.size = Pt(9)
-            
+
             # Status
             status = item.get('status', 'N/A')
             row_cells[2].text = status
             if row_cells[2].paragraphs and row_cells[2].paragraphs[0].runs:
                 row_cells[2].paragraphs[0].runs[0].font.size = Pt(9)
             row_cells[2].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
             # Date
             date = item.get('created_date', item.get('opened_date', 'N/A'))
             if date != 'N/A':
@@ -6135,10 +6170,10 @@ class LeaderReportGenerator:
             if row_cells[3].paragraphs and row_cells[3].paragraphs[0].runs:
                 row_cells[3].paragraphs[0].runs[0].font.size = Pt(9)
             row_cells[3].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+
         # Add note about source attribution
         # FIXED: Removed limit message - now showing ALL items
-        
+
         # Add source verification note
         source_para = self.doc.add_paragraph()
         source_para.add_run('Source Verification: ').font.bold = True
@@ -6146,24 +6181,24 @@ class LeaderReportGenerator:
             source_para.add_run('All TAC cases can be verified in CSOne using the Case # provided above.')
         else:
             source_para.add_run(f'All {section_name.lower()} can be verified in CSConsole using the Record ID provided above.')
-        
+
         # Add spacing
         self.doc.add_paragraph()
-    
+
     def _add_source_verification_section(self, cssm_name: str, data: Dict):
         """Add comprehensive source verification section for each team member"""
         # Add spacing
         self.doc.add_paragraph()
-        
+
         # Source Verification heading
         verification_heading = self.doc.add_heading('Source Verification & Data Attribution', level=3)
         if verification_heading.runs:
             verification_heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         # Create comprehensive source verification table
         table = self.doc.add_table(rows=1, cols=4)
         table.style = 'Light Grid Accent 1'
-        
+
         # Header row
         header_cells = table.rows[0].cells
         headers = ['Data Source', 'Record Count', 'Source System', 'Verification Method']
@@ -6176,7 +6211,7 @@ class LeaderReportGenerator:
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), 'E3F2FD')  # Light blue
             header_cells[i]._element.get_or_add_tcPr().append(shading_elm)
-        
+
         # Add data rows for each data source
         data_sources = [
             ('Action Plans', self.safe_len(data.get('action_plans')), 'CSConsole (Snowflake)', 'Record ID in CSConsole'),
@@ -6185,46 +6220,46 @@ class LeaderReportGenerator:
             ('TAC Cases', self.safe_len(data.get('tac_cases')), 'CSOne (Excel)', 'Case # in CSOne'),
             ('Subscriptions', self.safe_len(data.get('subscriptions')), 'DSM Assignment (Snowflake)', 'Subscription ID in DSM Table')
         ]
-        
+
         for source_name, count, system, verification in data_sources:
             row_cells = table.add_row().cells
             row_cells[0].text = source_name
             row_cells[1].text = str(count)
             row_cells[2].text = system
             row_cells[3].text = verification
-            
+
             if row_cells[1].paragraphs:
                 row_cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+
         # Add verification instructions
         self.doc.add_paragraph()
         instructions_heading = self.doc.add_heading('How to Verify This Data', level=4)
         if instructions_heading.runs:
             instructions_heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         instructions_para = self.doc.add_paragraph()
         instructions_para.add_run('To verify the accuracy of this report:\n\n').font.bold = True
-        
+
         instructions_para.add_run('1. CSConsole Records (Action Plans, Adoption Barriers, Customer Pulse):\n')
         instructions_para.add_run('   • Log into CSConsole\n')
         instructions_para.add_run('   • Search by Record ID provided in the detailed tables above\n')
         instructions_para.add_run('   • Verify customer name, dates, and status match the report\n\n')
-        
+
         instructions_para.add_run('2. CSOne TAC Cases:\n')
         instructions_para.add_run('   • Log into CSOne\n')
         instructions_para.add_run('   • Search by Case # provided in the TAC cases table above\n')
         instructions_para.add_run('   • Verify customer name, priority, status, and dates match the report\n\n')
-        
+
         instructions_para.add_run('3. Subscription Data:\n')
         instructions_para.add_run('   • Access DSM Assignment table in Snowflake\n')
         instructions_para.add_run('   • Search by Subscription ID to verify team member assignments\n')
         instructions_para.add_run('   • Confirm customer assignments and business unit information\n\n')
-        
+
         instructions_para.add_run('4. Date Range Verification:\n')
         instructions_para.add_run('   • All records are filtered to the specified time period\n')
         instructions_para.add_run('   • Check creation dates in source systems match the report timeframe\n')
         instructions_para.add_run('   • Verify no records outside the specified period are included\n\n')
-        
+
         # Add data integrity note
         integrity_para = self.doc.add_paragraph()
         integrity_para.add_run('Data Integrity Assurance:\n').font.bold = True
@@ -6233,10 +6268,10 @@ class LeaderReportGenerator:
         integrity_para.add_run('• Date filtering is applied consistently across all data sources\n')
         integrity_para.add_run('• Record counts are cross-validated between systems\n')
         integrity_para.add_run('• All facts include source attribution for verification\n')
-        
+
         # Add spacing
         self.doc.add_paragraph()
-    
+
     def _validate_and_verify_data(self, team_data: Dict[str, Dict], days: int) -> Dict:
         """
         Comprehensive data validation and verification to prevent hallucination
@@ -6252,35 +6287,35 @@ class LeaderReportGenerator:
             'errors': [],
             'audit_trail': []
         }
-        
+
         logger.info("=" * 80)
         logger.info("DATA VALIDATION AND VERIFICATION STARTED")
         logger.info("=" * 80)
-        
+
         # 1. Data Source Verification
         validation_results['validation_checks']['data_sources'] = self._verify_data_sources(team_data)
-        
+
         # 2. Count Cross-Checking
         validation_results['cross_checks']['activity_counts'] = self._cross_check_activity_counts(team_data)
-        
+
         # 3. Date Range Validation
         validation_results['validation_checks']['date_ranges'] = self._validate_date_ranges(team_data, days)
-        
+
         # 4. Customer-Data Consistency
         validation_results['data_integrity']['customer_consistency'] = self._validate_customer_data_consistency(team_data)
-        
+
         # 5. TAC Case Validation
         validation_results['validation_checks']['tac_cases'] = self._validate_tac_cases(team_data, days)
-        
+
         # 6. Generate Validation Summary
         validation_results['summary'] = self._generate_validation_summary(validation_results)
-        
+
         logger.info("=" * 80)
         logger.info("DATA VALIDATION COMPLETED")
         logger.info("=" * 80)
-        
+
         return validation_results
-    
+
     def _verify_data_sources(self, team_data: Dict[str, Dict]) -> Dict:
         """Verify data sources and completeness.
 
@@ -6297,14 +6332,14 @@ class LeaderReportGenerator:
         roster size rather than left at the default ``False``.
         """
         logger.info("Verifying data sources...")
-        
+
         source_verification = {
             'snowflake_connection': False,
             'csone_data_loaded': False,
             'team_roster_loaded': False,
             'data_completeness': {}
         }
-        
+
         # Check Snowflake connection
         try:
             if self.ctx:
@@ -6360,7 +6395,7 @@ class LeaderReportGenerator:
             logger.info("  WARN: No TAC cases attributed; CSOne may be empty/missing")
 
         return source_verification
-    
+
     def _cross_check_activity_counts(self, team_data: Dict[str, Dict]) -> Dict:
         """Cross-check activity counts for consistency.
 
@@ -6447,7 +6482,7 @@ class LeaderReportGenerator:
             f"  Team Totals: AP={team_total_aps}, AB={team_total_abs}, "
             f"CP={team_total_cps}, TAC={team_total_tac}, BEMS={team_total_bems}"
         )
-        
+
         # Consistency checks with safe length calculation
         def safe_len_for_consistency(obj):
             if obj is None:
@@ -6456,12 +6491,12 @@ class LeaderReportGenerator:
                 return len(obj)
             except (TypeError, AttributeError):
                 return 0
-        
+
         cross_checks['consistency_checks'] = {
             'all_members_have_data': all(
-                safe_len_for_consistency(data.get('action_plans', [])) + 
-                safe_len_for_consistency(data.get('adoption_barriers', [])) + 
-                safe_len_for_consistency(data.get('customer_pulse', [])) > 0 
+                safe_len_for_consistency(data.get('action_plans', [])) +
+                safe_len_for_consistency(data.get('adoption_barriers', [])) +
+                safe_len_for_consistency(data.get('customer_pulse', [])) > 0
                 for data in team_data.values()
             ),
             'reasonable_activity_levels': all(
@@ -6471,13 +6506,13 @@ class LeaderReportGenerator:
                 for data in team_data.values()
             )
         }
-        
+
         return cross_checks
-    
+
     def _validate_date_ranges(self, team_data: Dict[str, Dict], days: int) -> Dict:
         """Validate that data falls within expected date ranges"""
         logger.info(f"Validating date ranges (last {days} days)...")
-        
+
         # Round 7 / Phase 6.7: validation date range computed in UTC
         # so it lines up with Snowflake's UTC ``CURRENT_DATE()`` and
         # the leader header's UTC analysis period.
@@ -6490,10 +6525,10 @@ class LeaderReportGenerator:
             'actual_date_ranges': {},
             'date_violations': []
         }
-        
+
         for cssm_name, data in team_data.items():
             date_ranges = {}
-            
+
             # Safe DataFrame check function
             def safe_df_check(df, col_name):
                 if df is None:
@@ -6502,7 +6537,7 @@ class LeaderReportGenerator:
                     return not df.empty and col_name in df.columns
                 except (AttributeError, TypeError):
                     return False
-            
+
             # Round 13 / Phase 2.11: parse date columns with utc=True
             # so the min/max strftime values reflect UTC calendar
             # dates.  Without utc=True, rows that carried explicit
@@ -6548,16 +6583,16 @@ class LeaderReportGenerator:
                         'max': dates.max().strftime('%Y-%m-%d'),
                         'count': len(dates.dropna())
                     }
-            
+
             date_validation['actual_date_ranges'][cssm_name] = date_ranges
             logger.info(f"  {cssm_name}: {date_ranges}")
-        
+
         return date_validation
-    
+
     def _validate_customer_data_consistency(self, team_data: Dict[str, Dict]) -> Dict:
         """Validate consistency between customer lists and activity data"""
         logger.info("Validating customer data consistency...")
-        
+
         consistency_checks = {}
 
         for cssm_name, data in team_data.items():
@@ -6597,7 +6632,7 @@ class LeaderReportGenerator:
                             subscription_customers = len(subscriptions_df)
             except Exception:
                 subscription_customers = 0
-            
+
             # Check if customers in activities match assigned customers. We now
             # distinguish records attributed via owner/creator on external
             # accounts (legitimate collaboration) from truly unexpected
@@ -6648,21 +6683,21 @@ class LeaderReportGenerator:
             )
 
         return consistency_checks
-    
+
     def _validate_tac_cases(self, team_data: Dict[str, Dict], days: int) -> Dict:
         """Validate TAC case data and matching"""
         logger.info("Validating TAC case data...")
-        
+
         tac_validation = {
             'total_tac_cases': 0,
             'cases_by_member': {},
             'date_validation': {},
             'matching_accuracy': {}
         }
-        
+
         for cssm_name, data in team_data.items():
             tac_cases = data.get('tac_cases', pd.DataFrame())
-            
+
             # Safe DataFrame check
             def safe_df_check(df):
                 if df is None:
@@ -6671,12 +6706,12 @@ class LeaderReportGenerator:
                     return not df.empty
                 except (AttributeError, TypeError):
                     return False
-            
+
             if safe_df_check(tac_cases):
                 case_count = len(tac_cases)
                 tac_validation['total_tac_cases'] += case_count
                 tac_validation['cases_by_member'][cssm_name] = case_count
-                
+
                 # Validate TAC case dates
                 if 'Date/Time Opened' in tac_cases.columns:
                     # Round 13 / Phase 2.11 + 2.12: parse with utc=True
@@ -6693,14 +6728,14 @@ class LeaderReportGenerator:
                             'max_date': dates.max().strftime('%Y-%m-%d'),
                             'cases_in_range': len(dates.dropna())
                         }
-                
+
                 logger.info(f"  {cssm_name}: {case_count} TAC cases")
             else:
                 tac_validation['cases_by_member'][cssm_name] = 0
                 logger.info(f"  {cssm_name}: 0 TAC cases")
-        
+
         return tac_validation
-    
+
     def _generate_validation_summary(self, validation_results: Dict) -> Dict:
         """Generate a summary of validation results.
 
@@ -6721,32 +6756,32 @@ class LeaderReportGenerator:
             'data_quality_score': 100,
             'recommendations': []
         }
-        
+
         # Check for critical issues
         if not validation_results['validation_checks']['data_sources']['snowflake_connection']:
             summary['critical_issues'].append("No Snowflake connection - data may be incomplete")
             summary['overall_status'] = 'FAILED'
             summary['data_quality_score'] -= 30
-        
+
         # Check for data consistency issues
         consistency = validation_results['data_integrity']['customer_consistency']
         for cssm_name, checks in consistency.items():
             if checks['unexpected_customers'] > 0:
                 summary['warnings'].append(f"{cssm_name}: {checks['unexpected_customers']} unexpected customers in activities")
                 summary['data_quality_score'] -= 5
-        
+
         # Check for reasonable activity levels
         cross_checks = validation_results['cross_checks']['activity_counts']
         if not cross_checks['consistency_checks']['reasonable_activity_levels']:
             summary['warnings'].append("Some team members have unusually high activity levels")
             summary['data_quality_score'] -= 10
-        
+
         # Generate recommendations
         if summary['data_quality_score'] < 90:
             summary['recommendations'].append("Review data sources and customer assignments")
         if summary['data_quality_score'] < 80:
             summary['recommendations'].append("Manual verification of activity counts recommended")
-        
+
         return summary
 
     def _apply_late_quality_penalties(self, summary: Dict) -> Dict:
@@ -6789,7 +6824,7 @@ class LeaderReportGenerator:
         except Exception:
             pass
         return summary
-    
+
     def _add_validation_section(self, validation_results: Dict):
         """Add a validation and verification section to the report.
 
@@ -6828,7 +6863,7 @@ class LeaderReportGenerator:
         summary_para.add_run(f'  • Overall Status: {summary.get("overall_status", "N/A")}\n')
         summary_para.add_run(f'  • Data Quality Score: {summary.get("data_quality_score", "N/A")}/100\n')
         summary_para.add_run(f'  • Validation Timestamp: {validation_results.get("timestamp", "N/A")}\n')
-        
+
         # Critical Issues
         if summary.get('critical_issues'):
             issues_heading = self.doc.add_heading('Critical Issues', level=2)
@@ -6838,7 +6873,7 @@ class LeaderReportGenerator:
                 issue_para = self.doc.add_paragraph(f'• {issue}')
                 if issue_para.runs:
                     issue_para.runs[0].font.color.rgb = RGBColor(220, 20, 60)
-        
+
         # Warnings
         if summary.get('warnings'):
             warnings_heading = self.doc.add_heading('Warnings', level=2)
@@ -6848,23 +6883,23 @@ class LeaderReportGenerator:
                 warning_para = self.doc.add_paragraph(f'• {warning}')
                 if warning_para.runs:
                     warning_para.runs[0].font.color.rgb = RGBColor(255, 140, 0)
-        
+
         # Data Sources Verification
         sources_heading = self.doc.add_heading('Data Sources Verification', level=2)
         if sources_heading.runs:
             sources_heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         sources_para = self.doc.add_paragraph()
         data_sources = (validation_results.get('validation_checks') or {}).get('data_sources', {})
         sources_para.add_run(f'• Snowflake Connection: {"OK: Verified" if data_sources.get("snowflake_connection") else "✗ Failed"}\n')
         sources_para.add_run(f'• Team Roster: OK: Loaded\n')
         sources_para.add_run(f'• CSOne Data: {"OK: Loaded" if data_sources.get("csone_data_loaded") else "WARN: Not Available"}\n')
-        
+
         # Activity Counts Cross-Check
         counts_heading = self.doc.add_heading('Activity Counts Cross-Check', level=2)
         if counts_heading.runs:
             counts_heading.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         # Round 39 / Phase 1.2: 7 columns including BEMS so the cross-check
         # rendering carries the same column set as the canonical
         # AP+AB+CP+TAC+BEMS total formula.
@@ -6901,7 +6936,7 @@ class LeaderReportGenerator:
             for i in range(1, 7):
                 if row_cells[i].paragraphs:
                     row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+
         # Recommendations
         if summary['recommendations']:
             rec_heading = self.doc.add_heading('Recommendations', level=2)
@@ -6913,33 +6948,33 @@ class LeaderReportGenerator:
     def _add_enhanced_snowflake_insights(self, cssm_name: str, data: Dict):
         """Add enhanced Snowflake insights section with comprehensive data analysis"""
         self.doc.add_heading('Enhanced Snowflake Insights', level=2)
-        
+
         # Get customers for this team member
         customers = data.get('customers', [])
         if not customers:
             self.doc.add_paragraph("No customer data available for enhanced insights.")
             return
-        
+
         self.doc.add_paragraph("This section provides comprehensive insights from 89+ Snowflake tables across 8 major categories:")
-        
+
         # Create insights table
         insights_table = self.doc.add_table(rows=1, cols=4)
         insights_table.style = 'Table Grid'
         insights_table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        
+
         # Header row
         header_cells = insights_table.rows[0].cells
         header_cells[0].text = 'Data Category'
         header_cells[1].text = 'Tables Analyzed'
         header_cells[2].text = 'Key Insights'
         header_cells[3].text = 'Source Verification'
-        
+
         # Style header
         for cell in header_cells:
             if cell.paragraphs and cell.paragraphs[0].runs:
                 cell.paragraphs[0].runs[0].font.bold = True
                 cell.paragraphs[0].runs[0].font.color.rgb = CISCO_BLUE
-        
+
         # Round 42 / Phase 5: replaced raw Snowflake table identifiers
         # (e.g. ``ACCOUNT_ID_C in COLLAB_ACCOUNT_SUMMARY``,
         # ``ESA_C360_CS_TASK__C``) with friendly business labels.  The
@@ -6961,19 +6996,19 @@ class LeaderReportGenerator:
             ('Risk & Renewal Data', '6 tables', 'Risk scores, renewal probability', 'Look up by Account ID in the Risk Assessment feed'),
             ('Product & Technology Data', '5 tables', 'Product usage, technology adoption', 'Look up by Product ID in the Product Usage feed'),
         ]
-        
+
         for category, tables, insights, verification in insights_data:
             row_cells = insights_table.add_row().cells
             row_cells[0].text = category
             row_cells[1].text = tables
             row_cells[2].text = insights
             row_cells[3].text = verification
-        
+
         self.doc.add_paragraph()
-        
+
         # Add customer-specific insights
         self.doc.add_heading('Customer-Specific Enhanced Insights', level=3)
-        
+
         # Resolve the analysis window so per-customer Snowflake fetches honor
         # the user-selected timeframe instead of silently defaulting to 90 days.
         # Priority: data['analysis_days'] -> self._analysis_days -> 90 fallback.
@@ -7044,7 +7079,7 @@ class LeaderReportGenerator:
 
                 if enhanced_data and enhanced_data.get('insights'):
                     insights = enhanced_data['insights']
-                    
+
                     # Round 3: surface was_truncated/fetch_limit so the
                     # leader sees "Showing N of capped" instead of
                     # treating the displayed totals as the universe.
@@ -7096,7 +7131,7 @@ class LeaderReportGenerator:
                             f"• Customer Pulse: {engagement['customer_pulse'].get('customer_pulse_found', 0)}"
                             f"{_trunc_suffix(engagement.get('customer_pulse'))}"
                         )
-                    
+
                     # Add source attribution
                     if engagement.get('sources'):
                         self.doc.add_paragraph("  Sources:")
@@ -7107,13 +7142,13 @@ class LeaderReportGenerator:
                             # instead of "EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C".
                             self.doc.add_paragraph(f"    - {_friendly_source_label(source['table'])}: {source['records_found']} records")
                             self.doc.add_paragraph(f"      Verification: {source['verification_method']}")
-                
+
             except Exception as e:
                 logger.debug(f"Enhanced insights error: {e}")
                 self.doc.add_paragraph("• Enhanced insights unavailable.")
-            
+
             self.doc.add_paragraph()
-        
+
         # Add comprehensive data source summary
         self.doc.add_heading('Comprehensive Data Source Summary', level=3)
 
@@ -7153,27 +7188,27 @@ class LeaderReportGenerator:
             ('Customer Pulse feed', 'Customer pulse and sentiment', 'Pulse ID, Subject, Status, Account'),
             ('Success Priority feed', 'Success priorities and goals', 'Priority ID, Subject, Priority Level, Related Customer'),
         ]
-        
+
         for db_table, purpose, fields in key_sources:
             row_cells = sources_table.add_row().cells
             row_cells[0].text = db_table
             row_cells[1].text = purpose
             row_cells[2].text = fields
-        
+
         self.doc.add_paragraph()
-        
+
         # Add verification instructions
         self.doc.add_heading('Data Verification Instructions', level=3)
-        
+
         self.doc.add_paragraph("To verify any data point in this report:")
         self.doc.add_paragraph("1. Note the specific table reference provided")
         self.doc.add_paragraph("2. Use the verification method specified")
         self.doc.add_paragraph("3. Search by the key field mentioned")
         self.doc.add_paragraph("4. Check the record count and date ranges")
         self.doc.add_paragraph("5. Validate the data matches the report findings")
-        
+
         self.doc.add_paragraph("All queries use parameterized statements to prevent SQL injection and ensure data security.")
-        
+
         self.doc.add_paragraph()
         self.doc.add_paragraph("Enhanced insights generated using AdoptIQ Enhanced Snowflake Insights System v1.0")
         # Round 7 / Phase 6.7: render in UTC so the timestamp matches
@@ -7189,25 +7224,25 @@ class LeaderReportGenerator:
             logger.debug("Defect analyzer not available, skipping enhanced defect analysis section")
             return
         self.doc.add_heading('Enhanced Defect Analysis', level=2)
-        
+
         # Get customers for this team member
         customers = data.get('customers', [])
         if not customers:
             self.doc.add_paragraph("No customer data available for defect analysis.")
             return
-        
+
         # Add classification warning
         warning_para = self.doc.add_paragraph()
         warning_run = warning_para.add_run("Warning: CISCO INTERNAL DATA CLASSIFICATION WARNING Warning:")
         warning_run.font.bold = True
         warning_run.font.color.rgb = RGBColor(0xDC, 0x35, 0x45)  # Cisco Red
-        
+
         self.doc.add_paragraph("This section contains data from BST (Bug Search Tool) and Circuit with the following classifications:")
         self.doc.add_paragraph("• CISCO_PUBLIC: Can be shared externally")
         self.doc.add_paragraph("• CISCO_RESTRICTED: Cisco employees and partners only")
         self.doc.add_paragraph("• CISCO_INTERNAL: Cisco employees only")
         self.doc.add_paragraph("• CISCO_CONFIDENTIAL: Strict confidentiality required")
-        
+
         # FIXED: Analyze defects for ALL customers
         # Round 3: thread the run's analysis window into the per-customer
         # defect lookup so this section matches the rest of the report's
@@ -7220,39 +7255,39 @@ class LeaderReportGenerator:
             _resolved_days = 90
         for customer in customers:
             self.doc.add_heading(f'Defect Analysis: {customer}', level=3)
-            
+
             try:
                 # Build product search terms based on customer context
                 product_terms = ["Webex", "meeting", "calling", "contact center", "devices"]
-                
+
                 # Get defect analysis
                 analysis = self.defect_analyzer.analyze_defects_for_customer(
                     customer_name=customer,
                     product_terms=product_terms,
                     days_back=_resolved_days
                 )
-                
+
                 # Add classification summary
                 if analysis.get('classification_summary'):
                     self.doc.add_paragraph("Data Classification Summary:")
                     for classification, count in analysis['classification_summary'].items():
                         self.doc.add_paragraph(f"• {classification}: {count} items")
                     self.doc.add_paragraph()
-                
+
                 # Add BST defects summary
                 bst_defects = analysis.get('bst_defects', [])
                 if bst_defects:
                     self.doc.add_paragraph(f"BST Defects Found: {len(bst_defects)}")
-                    
+
                     # Group by severity
                     severity_counts = {}
                     for defect in bst_defects:
                         severity = defect.severity
                         severity_counts[severity] = severity_counts.get(severity, 0) + 1
-                    
+
                     for severity, count in severity_counts.items():
                         self.doc.add_paragraph(f"• {severity}: {count} defects")
-                    
+
                     # FIXED: Show ALL defects for complete verification
                     self.doc.add_paragraph("All Defects:")
                     for defect in bst_defects:
@@ -7260,12 +7295,12 @@ class LeaderReportGenerator:
                         self.doc.add_paragraph(f"  Status: {defect.status}, Severity: {defect.severity}")
                         self.doc.add_paragraph(f"  Classification: {defect.classification.value}")
                         self.doc.add_paragraph(f"  Verification: {defect.verification_method}")
-                
+
                 # Add Circuit data summary
                 circuit_data = analysis.get('circuit_data', [])
                 if circuit_data:
                     self.doc.add_paragraph(f"Circuit Internal Data Found: {len(circuit_data)}")
-                    
+
                     # Show top 3 items
                     self.doc.add_paragraph("Top Circuit Items:")
                     for item in circuit_data[:3]:
@@ -7273,70 +7308,70 @@ class LeaderReportGenerator:
                         self.doc.add_paragraph(f"  Author: {item.author}")
                         self.doc.add_paragraph(f"  Classification: {item.classification.value}")
                         self.doc.add_paragraph(f"  Verification: {item.verification_method}")
-                
+
                 # Add data sources
                 if analysis.get('data_sources'):
                     self.doc.add_paragraph("Data Sources:")
                     for source in analysis['data_sources']:
                         self.doc.add_paragraph(f"• {source}")
-                
+
             except Exception as e:
                 logger.debug(f"Defect analysis error for {customer}: {e}")
                 self.doc.add_paragraph(f"Defect analysis unavailable for {customer}.")
-            
+
             self.doc.add_paragraph()
-        
+
         # Add comprehensive data source summary
         self.doc.add_heading('Defect Analysis Data Sources', level=3)
-        
+
         self.doc.add_paragraph("This enhanced defect analysis leverages the following Cisco internal systems:")
-        
+
         # Create data sources table
         sources_table = self.doc.add_table(rows=1, cols=4)
         sources_table.style = 'Table Grid'
         sources_table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        
+
         # Header row
         header_cells = sources_table.rows[0].cells
         header_cells[0].text = 'System'
         header_cells[1].text = 'URL'
         header_cells[2].text = 'Purpose'
         header_cells[3].text = 'Classification'
-        
+
         # Style header
         for cell in header_cells:
             if cell.paragraphs and cell.paragraphs[0].runs:
                 cell.paragraphs[0].runs[0].font.bold = True
                 cell.paragraphs[0].runs[0].font.color.rgb = CISCO_BLUE
-        
+
         # Add data sources
         sources_data = [
             ('BST (Bug Search Tool)', 'https://bst.cisco.com', 'Defect tracking and resolution', 'CISCO_RESTRICTED'),
             ('Circuit', 'https://circuit.cisco.com', 'Internal collaboration and discussions', 'CISCO_INTERNAL'),
             ('AdoptIQ Integration', 'Internal API', 'Automated data aggregation', 'CISCO_RESTRICTED')
         ]
-        
+
         for system, url, purpose, classification in sources_data:
             row_cells = sources_table.add_row().cells
             row_cells[0].text = system
             row_cells[1].text = url
             row_cells[2].text = purpose
             row_cells[3].text = classification
-        
+
         self.doc.add_paragraph()
-        
+
         # Add verification instructions
         self.doc.add_heading('Defect Data Verification Instructions', level=3)
-        
+
         self.doc.add_paragraph("To verify defect information in this report:")
         self.doc.add_paragraph("1. Access BST (Bug Search Tool) at https://bst.cisco.com")
         self.doc.add_paragraph("2. Search for the specific defect ID provided")
         self.doc.add_paragraph("3. Verify status, severity, and resolution information")
         self.doc.add_paragraph("4. Check Circuit for related internal discussions")
         self.doc.add_paragraph("5. Confirm classification level before sharing")
-        
+
         self.doc.add_paragraph("All defect data is sourced from official Cisco internal systems with proper authentication.")
-        
+
         self.doc.add_paragraph()
         self.doc.add_paragraph("Enhanced defect analysis generated using AdoptIQ Enhanced Defect Analyzer v1.0")
         # Round 7 / Phase 6.7: UTC timestamp for parity with doc header.
@@ -7415,7 +7450,7 @@ def _r17_append_historical_context(doc, team_data: Dict, *, technology=None) -> 
         return {"rendered": False, "available": False, "reason": "build_failed"}
 
 
-def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[Tuple[str, str, str]], 
+def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[Tuple[str, str, str]],
                           csone_df: Optional[pd.DataFrame] = None,
                           ext_bugs: List[Dict] = None, ext_incidents: List[Dict] = None,
                           software_defects: Dict = None, psirt_vulns: Dict = None,
@@ -7428,7 +7463,7 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                           partial_data_warnings: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, str, Dict]:
     """
     Main function to generate leader report
-    
+
     Args:
         manager_name: Name of the manager
         days: Time frame in days
@@ -7440,7 +7475,7 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
         software_defects: Software defects extracted from data (optional)
         psirt_vulns: PSIRT vulnerabilities extracted from data (optional)
         progress_callback: Optional callable(progress, message, step) for status updates
-        
+
     Returns:
         Tuple of (filepath, success_message, team_data dict)
     """
@@ -7453,7 +7488,7 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
 
     try:
         logger.info(f"Starting leader report generation for {manager_name}")
-        
+
         # Round 7 / Phase 6.11: forward strict_mode through to the
         # generator so partial-data conditions raise instead of being
         # silently swallowed when callers opt in.
@@ -7466,7 +7501,7 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             strict_mode=strict_mode,
             arr_impact=arr_impact,
         )
-        
+
         doc, filepath, team_data, direct_reports = generator.generate_leader_report(
             manager_name, days,
             ext_bugs=ext_bugs, ext_incidents=ext_incidents,
@@ -7477,7 +7512,7 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             partial_data_warnings=partial_data_warnings,
         )
         logger.info(f"generator.generate_leader_report() completed. filepath: {filepath}")
-        
+
         if csone_df is not None and not csone_df.empty:
             _cb(84, 'Integrating TAC cases from CSOne...', 'TAC Integration')
             generator.add_tac_cases_from_csone(team_data, csone_df, days)
@@ -7509,7 +7544,7 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
 
             _cb(85, 'Validating data integrity...', 'Data Validation')
             validation_results = generator._validate_and_verify_data(team_data, days)
-            
+
             _cb(86, 'Regenerating document with TAC data...', 'Document Finalization')
             generator.doc = Document()
             generator._setup_document_settings()
@@ -7597,12 +7632,12 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                 )
             _cb(87, 'Saving final Word document...', 'Document Finalization')
             generator.doc.save(filepath)
-            
+
             logger.info(f"Leader report regenerated with TAC cases and validation (filtered to last {days} days)")
         else:
             _cb(85, 'Validating data integrity...', 'Data Validation')
             validation_results = generator._validate_and_verify_data(team_data, days)
-            
+
             generator._add_validation_section(validation_results)
             # Round 39 / Phase 2.3: same section_errors -> partial_data_warnings
             # roll-up as the post-TAC branch above.
@@ -7641,14 +7676,14 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                 )
             _cb(86, 'Saving final Word document...', 'Document Finalization')
             generator.doc.save(filepath)
-            
+
             logger.info(f"Leader report updated with validation section")
-        
+
         success_msg = f"Leader report generated successfully: {filepath}"
         logger.info(success_msg)
-        
+
         return filepath, success_msg, team_data
-        
+
     except Exception as e:
         error_msg = f"Error generating leader report: {e}"
         logger.error(error_msg, exc_info=True)

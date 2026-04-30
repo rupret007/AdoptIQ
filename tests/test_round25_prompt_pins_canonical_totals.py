@@ -90,7 +90,7 @@ def test_template_format_renders_canonical_totals_verbatim() -> None:
     # paraphrasing or ranging the numbers.
     for label, value in (
         ("Total Customers", 37),
-        ("Active Adoption Barriers", 67),
+        ("Total Adoption Barriers", 67),
         ("TAC Cases", 412),
         ("BEMS Escalations", 5),
     ):

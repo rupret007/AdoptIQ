@@ -716,12 +716,50 @@ def count_total_barriers(ab_df: Optional[pd.DataFrame]) -> int:
         cols = []
     if "ID" in cols:
         try:
-            return int(ab_df["ID"].dropna().nunique())
+            distinct = int(ab_df["ID"].dropna().nunique())
         except Exception:
             # Defensive: an unhashable ID column should not degrade the
             # report.  Fall through to the rowcount path.
-            pass
+            distinct = 0
+        # Round 53.3: when the ``ID`` column exists but every value is
+        # null/blank (broken extract, CSV without IDs, mocked frame),
+        # ``nunique()`` returns 0 even for a non-empty frame and would
+        # collapse the dashboard tile to 0. Fall through to the
+        # rowcount path so the headline does not lie about there being
+        # zero barriers when the data clearly has rows.
+        if distinct > 0:
+            return distinct
     return _safe_len(ab_df)
+
+
+def _count_barrier_records(
+    ab_df: Optional[pd.DataFrame],
+    mask: Optional[pd.Series] = None,
+) -> int:
+    """Round 53: count filtered adoption barriers as records, not fan-out rows."""
+
+    if _is_empty(ab_df):
+        return 0
+    frame = ab_df
+    if mask is not None:
+        try:
+            aligned = mask.reindex(ab_df.index, fill_value=False).astype(bool)
+            frame = ab_df.loc[aligned]
+        except Exception:
+            frame = ab_df.iloc[0:0]
+    if _is_empty(frame):
+        return 0
+    try:
+        if "ID" in getattr(frame, "columns", []):
+            distinct = int(frame["ID"].dropna().nunique())
+            # Round 53.3: mirror ``count_total_barriers`` -- if every
+            # ID is null we cannot dedupe, so fall back to the filtered
+            # row count instead of returning 0 for a non-empty frame.
+            if distinct > 0:
+                return distinct
+    except Exception:
+        pass
+    return _safe_len(frame)
 
 
 def count_critical_barriers(
@@ -760,8 +798,11 @@ def count_critical_barriers(
     if series.empty:
         return 0
     if mode == CRITICAL_AB_MODE_CRITICAL_ONLY:
-        return int((series == "Critical").sum())
-    return int(series.isin(["Critical", "High"]).sum())
+        # Round 53: dedupe by barrier ID after filtering; Snowflake AB extracts
+        # can fan out one logical barrier into multiple assignee/detail rows.
+        return _count_barrier_records(ab_df, series == "Critical")
+    # Round 53: same record semantics for the dashboard's Critical/High band.
+    return _count_barrier_records(ab_df, series.isin(["Critical", "High"]))
 
 
 def count_open_barriers(ab_df: Optional[pd.DataFrame]) -> int:
@@ -779,7 +820,9 @@ def count_open_barriers(ab_df: Optional[pd.DataFrame]) -> int:
         if col is None:
             return 0
         series = ab_df[col].fillna("").astype(str).apply(normalize_status_label)
-    return int((series == "Open").sum())
+    # Round 53: open barriers are distinct barrier records, not duplicate
+    # assignee/detail rows.
+    return _count_barrier_records(ab_df, series == "Open")
 
 
 def count_closed_barriers(ab_df: Optional[pd.DataFrame]) -> int:
@@ -810,7 +853,9 @@ def count_closed_barriers(ab_df: Optional[pd.DataFrame]) -> int:
         if col is None:
             return 0
         series = ab_df[col].fillna("").astype(str).apply(normalize_status_label)
-    return int((series == "Closed").sum())
+    # Round 53.1: closed barriers use the same distinct-record semantics as
+    # open / critical counts so status-mix narratives do not re-inflate rows.
+    return _count_barrier_records(ab_df, series == "Closed")
 
 
 def count_customers_with_barriers(ab_df: Optional[pd.DataFrame]) -> int:
@@ -960,7 +1005,9 @@ def count_total_activities(
         )
 
     ap = _safe_len(action_plans_df)
-    ab = _safe_len(ab_df)
+    # Round 53.1: adoption-barrier activity uses the same logical record
+    # count as report KPIs; raw rows can fan out by assignee/detail.
+    ab = count_total_barriers(ab_df)
     cp = _safe_len(customer_pulse_df)
     tac = _safe_len(tac_df)
     bems = int(bems_count or 0)

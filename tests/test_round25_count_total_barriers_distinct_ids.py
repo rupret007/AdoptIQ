@@ -5,8 +5,8 @@ Pre-Round 25 ``canonical_metrics.count_total_barriers`` returned
 extract joins barrier rows to assignees / status-history changes, so a
 single barrier with three assignees inflated the count by 3x.  The
 reference Brian Frazier / All Contact Center / 90d report had 71 rows
-but only 67 distinct ``ID`` values; the dashboard tile said ``Active
-Barriers: 71`` while a recipient who actually pivoted the Excel export
+but only 67 distinct ``ID`` values; the dashboard tile said ``Total
+Adoption Barriers: 71`` while a recipient who actually pivoted the Excel export
 got 67.
 
 Phase F.1 switches the canonical helper to ``ab_df["ID"].nunique()`` so
@@ -47,7 +47,7 @@ def test_distinct_id_count_drops_71_to_67_on_reference_shape() -> None:
     assert cm.count_total_barriers(ab_df) == 67, (
         "Round 25 / Phase F.1: count_total_barriers must return the "
         "distinct-ID count (67), not the rowcount (71).  This is the "
-        "headline that powers the 'Active Adoption Barriers' tile in "
+        "headline that powers the 'Total Adoption Barriers' tile in "
         "the Word report and the canonical totals in the LLM prompt."
     )
 
@@ -97,3 +97,44 @@ def test_empty_and_none_inputs_yield_zero() -> None:
     assert cm.count_total_barriers(None) == 0
     assert cm.count_total_barriers(pd.DataFrame()) == 0
     assert cm.count_total_barriers(pd.DataFrame(columns=["ID"])) == 0
+
+
+def test_round533_id_present_but_all_null_falls_back_to_rowcount() -> None:
+    """Round 53.3: an all-null ``ID`` column must NOT collapse the headline.
+
+    Pre-Round-53.3 ``count_total_barriers`` returned 0 whenever the
+    ``ID`` column was present but every value was ``None``/``NaN``
+    (broken extract, schema drift, mocked frame). The dashboard tile
+    therefore showed ``Total Adoption Barriers: 0`` over what was
+    clearly a non-empty barrier frame, hiding the real volume from
+    operators. The helper now falls back to the rowcount in that case
+    so the tile reports the actual number of records the report was
+    built from.
+    """
+
+    ab_df = pd.DataFrame(
+        [
+            {"ID": None, "BarrierName": "Adoption blocked"},
+            {"ID": np.nan, "BarrierName": "Pricing concern"},
+            {"ID": None, "BarrierName": "Network gap"},
+        ]
+    )
+
+    assert cm.count_total_barriers(ab_df) == 3, (
+        "Round 53.3: when every ID is null the count must fall back to "
+        "the rowcount instead of silently collapsing to zero."
+    )
+    # Also pin the same fallback for the filtered helper used by
+    # ``count_open_barriers`` / ``count_critical_barriers``.
+    open_df = pd.DataFrame(
+        [
+            {"ID": None, "Status": "Open"},
+            {"ID": None, "Status": "Open"},
+            {"ID": None, "Status": "Resolved"},
+        ]
+    )
+    assert cm.count_open_barriers(open_df) == 2, (
+        "Round 53.3: the open-barrier filter must also fall back to "
+        "filtered rowcount when IDs are all null, so dashboards do not "
+        "report 0 open barriers when the data clearly has open rows."
+    )

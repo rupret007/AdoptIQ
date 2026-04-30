@@ -798,8 +798,11 @@ _R25B_VALIDATED_TOTALS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
     (
         "total_barriers",
-        "Active Adoption Barriers",
+        "Total Adoption Barriers",
         (
+            # Round 53: accept the new accurate "total" label while retaining
+            # the old "active" label for already-generated artifacts.
+            r"total\s+adoption\s+barriers?\s*:?\s*\**\s*(\d+)\b",
             r"active\s+adoption\s+barriers?\s*:?\s*\**\s*(\d+)\b",
         ),
     ),

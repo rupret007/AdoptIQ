@@ -218,11 +218,11 @@ def _ensure_inline_source_claim(
 
 class CompactReportFormatter:
     """Creates compact executive reports focused on renewal risk and critical issues"""
-    
+
     def __init__(self):
         self.doc = Document()
         self.setup_document_styles()
-    
+
     def _add_section_separator(self):
         """Add a visual separator line between major sections for better readability"""
         from docx.shared import RGBColor
@@ -234,7 +234,7 @@ class CompactReportFormatter:
         separator_run.font.size = Pt(10)
         separator_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
         self.doc.add_paragraph()  # Spacing after
-    
+
     def setup_document_styles(self):
         """Setup document styles for professional appearance"""
         try:
@@ -245,13 +245,13 @@ class CompactReportFormatter:
             font.size = Pt(11)
             style.paragraph_format.line_spacing = 1.15
             style.paragraph_format.space_after = Pt(6)
-            
+
             # Create custom styles
             self._create_custom_styles()
-            
+
         except Exception as e:
             logger.warning(f"Could not setup custom styles: {e}")
-    
+
     def _create_custom_styles(self):
         """Create custom styles for the document"""
         try:
@@ -271,14 +271,14 @@ class CompactReportFormatter:
             header_font.color.rgb = None  # Dark blue
             header_style.paragraph_format.space_before = Pt(12)
             header_style.paragraph_format.space_after = Pt(6)
-            
+
             # Risk style
             risk_style = self.doc.styles.add_style('RiskText', 1)
             risk_font = risk_style.font
             risk_font.name = 'Calibri'
             risk_font.size = Pt(11)
             risk_font.color.rgb = None  # Red for warnings
-            
+
             # Highlight style for important information
             highlight_style = self.doc.styles.add_style('CompactHighlight', 1)
             highlight_font = highlight_style.font
@@ -287,7 +287,7 @@ class CompactReportFormatter:
             highlight_font.bold = True
             highlight_font.color.rgb = None  # Red for warnings
             highlight_style.paragraph_format.space_after = Pt(6)
-            
+
             # Callout style for key insights
             callout_style = self.doc.styles.add_style('CompactCallout', 1)
             callout_font = callout_style.font
@@ -296,7 +296,7 @@ class CompactReportFormatter:
             callout_font.italic = True
             callout_style.paragraph_format.left_indent = Inches(0.5)
             callout_style.paragraph_format.space_after = Pt(6)
-            
+
             # Metric style for numbers
             metric_style = self.doc.styles.add_style('CompactMetric', 1)
             metric_font = metric_style.font
@@ -304,11 +304,11 @@ class CompactReportFormatter:
             metric_font.size = Pt(12)
             metric_font.bold = True
             metric_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
         except Exception as e:
             logger.warning(f"Could not create custom styles: {e}")
-    
-    def create_compact_title_page(self, manager: str, technology: str, days: int, 
+
+    def create_compact_title_page(self, manager: str, technology: str, days: int,
                                  analysis_id: str, risk_summary: Dict,
                                  data_retrieved_at: Optional[datetime] = None):
         """Create compact title page with key metrics.
@@ -323,14 +323,14 @@ class CompactReportFormatter:
             # Title
             title = self.doc.add_heading('AdoptIQ Compact Executive Report', 0)
             title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
             # Subtitle
             subtitle = self.doc.add_heading(
                 _safe_doc_text(f'Renewal Risk Analysis - {manager or "N/A"}'),
                 level=1,
             )
             subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
             details = self.doc.add_paragraph()
             details.add_run(f'Technology: {technology or "N/A"}\n').bold = True
             details.add_run(f'Analysis Period: {days or "N/A"} days\n').bold = True
@@ -349,25 +349,25 @@ class CompactReportFormatter:
                 details.add_run(f'Data as of: {_data_str}\n').bold = True
             details.add_run(f'Analysis ID: {analysis_id}').bold = True
             details.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
             # Key metrics box
             self.doc.add_paragraph()
             metrics_p = self.doc.add_paragraph()
             metrics_p.add_run('KEY METRICS').bold = True
             metrics_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
             # Create metrics table
             metrics_table = self.doc.add_table(rows=2, cols=4)
             metrics_table.alignment = WD_TABLE_ALIGNMENT.CENTER
             metrics_table.style = 'Table Grid'
-            
+
             # Header row
             header_cells = metrics_table.rows[0].cells
             header_cells[0].text = 'High Risk Customers'
             header_cells[1].text = 'Critical ABs'
             header_cells[2].text = 'Escalated Cases'
             header_cells[3].text = 'Renewal Risk Score'
-            
+
             # Data row
             data_cells = metrics_table.rows[1].cells
             # Round 8 / Phase 3.1: route through ``_safe_cell_text``
@@ -378,7 +378,7 @@ class CompactReportFormatter:
             _safe_cell_text(data_cells[1], str(risk_summary.get('critical_adoption_barriers', 0)))
             _safe_cell_text(data_cells[2], str(risk_summary.get('escalated_cases', 0)))
             _safe_cell_text(data_cells[3], f"{risk_summary.get('overall_risk_score', 'N/A')}/10")
-            
+
             # Style the table with enhanced formatting
             for row_idx, row in enumerate(metrics_table.rows):
                 for cell in row.cells:
@@ -409,13 +409,13 @@ class CompactReportFormatter:
                                         run.font.color.rgb = None  # Orange for moderate risk
                                     else:
                                         run.font.color.rgb = None  # Green for low risk
-            
+
             self.doc.add_page_break()
-            
+
         except Exception as e:
             logger.error(f"Error creating title page: {e}")
             raise
-    
+
     def add_at_a_glance_dashboard(
         self,
         ab_data: pd.DataFrame,
@@ -535,12 +535,12 @@ class CompactReportFormatter:
             # Canonical (TAC-only) BEMS count. This is what the cross-report
             # consistency contract enforces.
             bems_count = cm.count_bems(csone_norm)
-            
+
             # Create dashboard table (matches example format)
             dashboard_table = self.doc.add_table(rows=2, cols=5)
             dashboard_table.alignment = WD_TABLE_ALIGNMENT.CENTER
             dashboard_table.style = 'Table Grid'
-            
+
             # Header row
             #
             # Round 49 / F-COMP-AAG-SCOPE-LABEL: scope-explicit
@@ -575,7 +575,7 @@ class CompactReportFormatter:
                 for para in cell.paragraphs:
                     for run in para.runs:
                         run.font.color.rgb = RGBColor(*_ThemeColors.WHITE_RGB)
-            
+
             # Data row
             values = [str(total_customers), str(total_support_cases), str(critical_p1), str(high_p2), str(bems_count)]
             for i, value in enumerate(values):
@@ -596,7 +596,7 @@ class CompactReportFormatter:
                             run.font.color.rgb = RGBColor(*_ThemeColors.CRIMSON_RGB)
                         elif i == 4 and _v > 0:  # BEMS
                             run.font.color.rgb = RGBColor(*_ThemeColors.CRIMSON_RGB)
-            
+
             # Inline source-backed facts for each metric
             fact_p = self.doc.add_paragraph()
             fact_p.add_run("Metric source backing:\n").bold = True
@@ -633,11 +633,11 @@ class CompactReportFormatter:
                 bullet.add_run(metric_fact)
 
             self.doc.add_paragraph()  # Spacing
-            
+
         except Exception as e:
             logger.error(f"Error adding At-a-Glance dashboard: {e}")
             raise
-    
+
     def add_executive_summary(self, risk_summary: Dict, ai_insights: Dict):
         """Add enhanced executive summary section with comprehensive analysis"""
         try:
@@ -647,16 +647,16 @@ class CompactReportFormatter:
                 ai_insights = {}
             summary_heading = self.doc.add_heading('📊 Executive Summary', level=1)
             summary_heading.style = 'CompactHeader'
-            
+
             risk_section = self.doc.add_paragraph()
             risk_section.add_run('🎯 Overall Portfolio Risk Assessment: ').bold = True
             risk_section.add_run('\n')
-            
+
             raw_overall = risk_summary.get('overall_risk_score', 0)
             overall_risk = raw_overall if isinstance(raw_overall, (int, float)) else 0
             risk_level_p = self.doc.add_paragraph()
             risk_level_p.style = 'CompactMetric'
-            
+
             # Round 6 / Phase 5.1 + Round 10 / Phase 2.2: drive the band
             # label from the shared ``_compact_portfolio_band`` helper so
             # the executive summary and the executive takeaway can never
@@ -665,7 +665,7 @@ class CompactReportFormatter:
             risk_level_p.add_run(_band['label']).bold = True
             risk_level_p.runs[-1].font.color.rgb = None
             risk_level_p.add_run('\n\n' + _band['summary_message'])
-            
+
             # Key metrics summary
             metrics_p = self.doc.add_paragraph()
             metrics_p.add_run('📈 Key Portfolio Metrics:\n').bold = True
@@ -706,14 +706,14 @@ class CompactReportFormatter:
                 f"• Escalated support cases: {risk_summary.get('escalated_cases', 0)}",
                 f"• Total customers analyzed: {_prose_total}"
             ]
-            
+
             for metric in metrics_data:
                 metrics_p.add_run(f'{metric}\n')
-            
+
             # Key concerns with enhanced formatting
             concerns_p = self.doc.add_paragraph()
             concerns_p.add_run('🚨 Critical Renewal Concerns:\n').bold = True
-            
+
             concerns = risk_summary.get('key_concerns', [])
             if concerns:
                 # FIXED: Show ALL concerns
@@ -726,11 +726,11 @@ class CompactReportFormatter:
                     )
             else:
                 concerns_p.add_run('✅ No critical concerns identified in this analysis period.\n')
-            
+
             # Immediate actions with priority indicators
             actions_p = self.doc.add_paragraph()
             actions_p.add_run('⚡ Immediate Actions Required:\n').bold = True
-            
+
             actions = risk_summary.get('immediate_actions', [])
             if actions:
                 # FIXED: Show ALL actions with appropriate priority
@@ -741,7 +741,7 @@ class CompactReportFormatter:
                     )
             else:
                 actions_p.add_run('📋 Continue monitoring current initiatives and maintain regular check-ins.\n')
-            
+
             # AI insights summary with enhanced formatting.
             # Phase 1.6: detect the non-AI fallback marker so we don't label
             # rule-based output as AI. The fallback writer prefixes its
@@ -790,7 +790,7 @@ class CompactReportFormatter:
                 if not ai_summary or ai_summary.strip() == "" or "AI analysis is currently processing" in ai_summary:
                     # Generate meaningful fallback content based on actual data
                     ai_summary = self._generate_fallback_insights(risk_summary)
-                
+
                 # FIXED: Create a callout box for AI insights - show FULL summary
                 # Round 49 / F-COMP-BEMS-MD-LEAK-R49: strip square
                 # brackets around BEMS/CSC IDs from LLM-emitted
@@ -806,20 +806,20 @@ class CompactReportFormatter:
                 ai_callout.add_run(
                     f"\"{_ensure_inline_source_claim(strip_bems_brackets_from_llm_text(ai_summary), 'Derived Metric', fields=['customer_name', 'risk_score'])}\""
                 )
-            
+
             # Add visual separator
             self.doc.add_paragraph('─' * 50).alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
         except Exception as e:
             logger.error(f"Error adding enhanced executive summary: {e}")
             raise
-    
-    def add_high_risk_customers(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame, 
+
+    def add_high_risk_customers(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame,
                                 risk_data: Dict[str, Dict]):
         """Add section highlighting high-risk customers with color-coded categories"""
         try:
             self.doc.add_heading('Customer Risk Assessment - Color-Coded Categories', level=1)
-            
+
             # Round 10 / Phase 2.3: drive the red bucket from the canonical
             # ``cm.is_high_risk_profile`` predicate so this section's row
             # count cannot disagree with the headline (which already uses
@@ -859,12 +859,12 @@ class CompactReportFormatter:
                 k: v for k, v in risk_data.items()
                 if _color_eq(v, 'gray') and k not in red_customers and k not in yellow_customers and k not in green_customers
             }
-            
+
             if not risk_data:
                 no_risk_p = self.doc.add_paragraph()
                 no_risk_p.add_run('✅ No customer data available for risk assessment.').bold = True
                 return
-            
+
             # Red customers (Critical/High Risk) - FIXED: Show ALL red customers
             if red_customers:
                 self.doc.add_heading('🔴 RED - Critical/High Risk Customers', level=2)
@@ -883,10 +883,10 @@ class CompactReportFormatter:
                         str(x[0] or '').casefold(),
                     ),
                 )
-                
+
                 for customer_name, risk_info in sorted_red:  # Show ALL red customers
                     self._add_customer_risk_section(customer_name, risk_info, ab_data, csone_data, 'Red')
-            
+
             # Yellow customers (Moderate Risk) - FIXED: Show ALL yellow customers
             if yellow_customers:
                 self.doc.add_heading('🟡 YELLOW - Moderate Risk Customers', level=2)
@@ -903,10 +903,10 @@ class CompactReportFormatter:
                         str(x[0] or '').casefold(),
                     ),
                 )
-                
+
                 for customer_name, risk_info in sorted_yellow:  # Show ALL yellow customers
                     self._add_customer_risk_section(customer_name, risk_info, ab_data, csone_data, 'Yellow')
-            
+
             # Green customers (Low Risk) - FIXED: Show ALL green customers
             if green_customers:
                 self.doc.add_heading('🟢 GREEN - Low Risk Customers', level=2)
@@ -919,7 +919,7 @@ class CompactReportFormatter:
                 # boundaries and produced diff churn between runs).
                 green_list = ', '.join(sorted(green_customers.keys(), key=lambda s: str(s).lower()))
                 green_p.add_run(f'\nCustomers: {green_list}')
-            
+
             # Gray customers (No Risk) - FIXED: Show ALL gray customers
             if gray_customers:
                 self.doc.add_heading('⚫ GRAY - No Renewal Risk', level=2)
@@ -928,12 +928,12 @@ class CompactReportFormatter:
                 # Round 6 / Phase 1.16: see green list comment above.
                 gray_list = ', '.join(sorted(gray_customers.keys(), key=lambda s: str(s).lower()))
                 gray_p.add_run(f'\nCustomers: {gray_list}')
-                
+
         except Exception as e:
             logger.error(f"Error adding high-risk customers section: {e}")
             raise
-    
-    def _add_customer_risk_section(self, customer_name: str, risk_info: Dict, 
+
+    def _add_customer_risk_section(self, customer_name: str, risk_info: Dict,
                                   ab_data: pd.DataFrame, csone_data: pd.DataFrame, color: str):
         """Add detailed risk section for a customer - MATCHES EXAMPLE FORMAT"""
         import re
@@ -945,7 +945,7 @@ class CompactReportFormatter:
                 ),
                 level=3,
             )
-            
+
             if ab_data is None:
                 ab_data = pd.DataFrame()
             if csone_data is None:
@@ -969,7 +969,7 @@ class CompactReportFormatter:
                 if (not csone_data.empty and csone_customer_col)
                 else pd.DataFrame()
             )
-            
+
             # Extract BEMS IDs and count from customer cases.
             # Round 2 / Phase 3.4: ``bems_count`` was previously
             # ``len(unique BEMS IDs)`` while every other surface (EI,
@@ -989,7 +989,7 @@ class CompactReportFormatter:
                     bems_count = int(cm.count_bems(customer_csone))
                 except Exception:
                     bems_count = bems_unique_id_count
-            
+
             # PROBLEMS section (matches example format)
             problems_p = self.doc.add_paragraph()
             problems_p.add_run('- Problems: ').bold = True
@@ -1003,7 +1003,7 @@ class CompactReportFormatter:
                     if subject and subject not in problems_list:
                         problems_list.append(subject)
             problems_p.add_run('; '.join(problems_list) if problems_list else 'Multiple technical/operational issues identified')  # FIXED: Show all
-            
+
             # BARRIERS section with BEMS IDs (matches example format)
             barriers_p = self.doc.add_paragraph()
             barriers_p.add_run('- Barriers: ').bold = True
@@ -1055,9 +1055,11 @@ class CompactReportFormatter:
                 barriers_text_parts.append(f'{_open_tac} open TAC cases (of {_total_tac} total)')
             else:
                 barriers_text_parts.append('TAC count unavailable (normalization failed)')
-            barriers_text_parts.append(f'{len(customer_ab)} adoption barriers')
+            # Round 53.1: cite logical adoption-barrier records, not duplicate
+            # assignee/detail rows.
+            barriers_text_parts.append(f'{cm.count_total_barriers(customer_ab)} adoption barriers')
             barriers_p.add_run(', '.join(barriers_text_parts))
-            
+
             # DEFECTS section (matches example format)
             defects_p = self.doc.add_paragraph()
             defects_p.add_run('- Defects: ').bold = True
@@ -1074,7 +1076,7 @@ class CompactReportFormatter:
                 defects_p.add_run(', '.join([f'[{d}]' for d in sorted(list(defect_ids))]))
             else:
                 defects_p.add_run('Pending defect correlation analysis')
-            
+
             # IMPACT section (matches example format)
             impact_p = self.doc.add_paragraph()
             impact_p.add_run('- Impact: ').bold = True
@@ -1088,7 +1090,7 @@ class CompactReportFormatter:
             else:
                 impact_text += 'Standard monitoring and engagement recommended'
             impact_p.add_run(impact_text)
-            
+
             # ACTION section with timeframe (matches example format)
             action_p = self.doc.add_paragraph()
             action_p.add_run('- Action: ').bold = True
@@ -1098,23 +1100,23 @@ class CompactReportFormatter:
                 action_p.add_run('Schedule proactive check-in and review open cases (within 14 days)')
             else:
                 action_p.add_run('Continue standard engagement cadence')
-            
+
             self.doc.add_paragraph()  # Spacing between customers
-            
+
         except Exception as e:
             logger.error(f"Error adding high-risk customers: {e}")
             raise
-    
+
     def add_critical_adoption_barriers(self, ab_data: pd.DataFrame):
         """Add section for critical adoption barriers"""
         try:
             self.doc.add_heading('Critical Adoption Barriers Requiring Action', level=1)
-            
+
             if ab_data is None or ab_data.empty:
                 no_ab_p = self.doc.add_paragraph()
                 no_ab_p.add_run('✅ No critical adoption barriers identified in this analysis period.').bold = True
                 return
-            
+
             # Round 3 hardening: route severity through canonical
             # ``normalize_severity_label`` so that "Critical/High" matches the
             # leader/EI definitions and ``cm.count_critical_barriers``
@@ -1169,7 +1171,14 @@ class CompactReportFormatter:
                 no_critical_p = self.doc.add_paragraph()
                 no_critical_p.add_run('✅ No critical severity adoption barriers found.').bold = True
                 return
-            
+
+            # Round 53.1: the extract can fan out one critical barrier across
+            # multiple assignees/details. Display each barrier record once.
+            if 'ID' in critical_ab.columns:
+                _with_id = critical_ab[critical_ab['ID'].notna()].drop_duplicates(subset=['ID'])
+                _without_id = critical_ab[critical_ab['ID'].isna()]
+                critical_ab = pd.concat([_with_id, _without_id], ignore_index=True)
+
             cust_col = 'customer_name' if 'customer_name' in critical_ab.columns else ('BU_NAME' if 'BU_NAME' in critical_ab.columns else None)
             if not cust_col:
                 return
@@ -1215,8 +1224,13 @@ class CompactReportFormatter:
                 # (customer name, AB subject/status/assignee/description)
                 # through ``_safe_add_run`` so stray control codes from
                 # CSOne free text cannot crash python-docx.
-                _safe_add_run(customer_p, f'{customer_name} ({len(group)} critical barriers)').bold = True
-                
+                # Round 53.1: group can include duplicate fan-out rows for one
+                # barrier ID; the heading should count records.
+                _safe_add_run(
+                    customer_p,
+                    f'{customer_name} ({cm.count_total_barriers(group)} critical barriers)',
+                ).bold = True
+
                 # Show all barriers for this customer, not limited
                 for _, ab in group.iterrows():
                     ab_p = self.doc.add_paragraph()
@@ -1232,14 +1246,14 @@ class CompactReportFormatter:
                     description = ab.get("DESCRIPTION_C", ab.get("DESCRIPTION__C", ""))
                     if description:
                         _safe_add_run(ab_p, f'  Description: {description}\n').italic = True
-                
+
                 self.doc.add_paragraph()  # Spacing
-            
+
         except Exception as e:
             logger.error(f"Error adding critical adoption barriers: {e}")
             raise
-    
-    def add_renewal_recommendations_detailed(self, risk_scores: Dict, 
+
+    def add_renewal_recommendations_detailed(self, risk_scores: Dict,
                                   ab_data: pd.DataFrame, csone_data: pd.DataFrame):
         """Add detailed renewal-specific recommendations (alternative to add_renewal_recommendations)"""
         try:
@@ -1342,7 +1356,7 @@ class CompactReportFormatter:
                 rec_p.add_run('• Provide targeted training and enablement resources\n')
                 rec_p.add_run('• Monitor adoption metrics more closely\n')
                 rec_p.add_run('• Address open adoption barriers within 60 days\n')
-            
+
             # General recommendations
             rec_p = self.doc.add_paragraph()
             rec_p.add_run('General Portfolio Recommendations:\n').bold = True
@@ -1350,11 +1364,11 @@ class CompactReportFormatter:
             rec_p.add_run('• Create early warning system for adoption barriers\n')
             rec_p.add_run('• Establish regular executive business reviews\n')
             rec_p.add_run('• Develop customer success playbooks for common issues\n')
-            
+
         except Exception as e:
             logger.error(f"Error adding renewal recommendations: {e}")
             raise
-    
+
     def save_document(
         self,
         file_path: str,
@@ -1430,7 +1444,7 @@ class CompactReportFormatter:
         except Exception as e:
             logger.error(f"Error saving compact report: {e}")
             raise
-    
+
     def _generate_key_concerns(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame) -> List[str]:
         """Generate key concerns from canonical metrics.
 
@@ -1499,18 +1513,18 @@ class CompactReportFormatter:
             actions.append("Continue monitoring current initiatives and maintain regular check-ins")
 
         return actions
-    
+
     def _generate_fallback_insights(self, risk_summary: Dict) -> str:
         """Generate meaningful fallback insights when AI is not available"""
         insights = []
-        
+
         # Analyze risk summary data
         if risk_summary:
             total_customers = risk_summary.get('total_customers', 0)
             high_risk_count = risk_summary.get('high_risk_customers', 0)
             critical_abs = risk_summary.get('critical_adoption_barriers', 0)
             escalated_cases = risk_summary.get('escalated_cases', 0)
-            
+
             # Portfolio health assessment
             if high_risk_count > 0:
                 risk_percentage = (high_risk_count / total_customers * 100) if total_customers > 0 else 0
@@ -1518,41 +1532,41 @@ class CompactReportFormatter:
                     insights.append(f"Portfolio shows elevated risk with {high_risk_count} of {total_customers} customers ({risk_percentage:.1f}%) requiring immediate attention.")
                 else:
                     insights.append(f"Portfolio health is stable with {high_risk_count} customers requiring focused support out of {total_customers} total.")
-            
+
             # Adoption barriers analysis
             if critical_abs > 0:
                 insights.append(f"Identified {critical_abs} critical adoption barriers that could impact customer success and renewal likelihood.")
-            
+
             # Support case analysis
             if escalated_cases > 0:
                 insights.append(f"Currently tracking {escalated_cases} escalated support cases requiring executive attention.")
-            
+
             # Strategic recommendations
             if high_risk_count > 0 or critical_abs > 0:
                 insights.append("Recommend implementing proactive customer health monitoring and establishing dedicated success plans for at-risk accounts.")
-        
+
         if not insights:
             insights.append("Portfolio analysis completed. Continue monitoring customer health metrics and maintaining regular engagement cadence.")
-        
+
         return " ".join(insights)
-    
+
     def add_portfolio_health_dashboard(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame, risk_summary: Dict):
         """Add portfolio health dashboard section"""
         try:
             if risk_summary is None:
                 risk_summary = {}
             self.doc.add_heading('📈 Portfolio Health Dashboard', level=1)
-            
+
             # Create health metrics table
             health_table = self.doc.add_table(rows=5, cols=3)
             health_table.style = 'Table Grid'
-            
+
             # Headers
             headers = health_table.rows[0].cells
             headers[0].text = 'Health Metric'
             headers[1].text = 'Current Status'
             headers[2].text = 'Trend Indicator'
-            
+
             # Data rows
             score = risk_summary.get('overall_risk_score', 0)
             # Round 4: route the renewal-risk row through the canonical
@@ -1580,55 +1594,55 @@ class CompactReportFormatter:
                 ('Support Load', 'Normal' if risk_summary.get('escalated_cases', 0) < 10 else 'High', '⚠️'),
                 ('Renewal Risk', renewal_risk_status, '🎯')
             ]
-            
+
             for i, (metric, status, trend) in enumerate(metrics_data, 1):
                 cells = health_table.rows[i].cells
                 # Round 8 / Phase 3.1: safe text wrap.
                 _safe_cell_text(cells[0], metric)
                 _safe_cell_text(cells[1], status)
                 _safe_cell_text(cells[2], trend)
-                
+
                 # Style the cells
                 for cell in cells:
                     for paragraph in cell.paragraphs:
                         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         for run in paragraph.runs:
                             run.bold = True
-            
+
         except Exception as e:
             logger.error(f"Error adding portfolio health dashboard: {e}")
             raise
-    
+
     def add_renewal_recommendations(self, risk_summary: Dict, ai_insights: Dict):
         """Add renewal recommendations section"""
         try:
             if risk_summary is None:
                 risk_summary = {}
             self.doc.add_heading('💡 Strategic Renewal Recommendations', level=1)
-            
+
             # Immediate actions
             immediate_p = self.doc.add_paragraph()
             immediate_p.add_run('⚡ Immediate Actions (Next 30 Days):\n').bold = True
-            
+
             # FIXED: Show ALL immediate actions
             actions = risk_summary.get('immediate_actions', [])
             for i, action in enumerate(actions, 1):
                 immediate_p.add_run(f'{i}. {action}\n')
-            
+
             # Strategic recommendations
             strategic_p = self.doc.add_paragraph()
             strategic_p.add_run('🎯 Strategic Recommendations (Next 90 Days):\n').bold = True
-            
+
             strategic_recommendations = [
                 "Implement proactive customer health monitoring",
                 "Develop customer success playbooks for high-risk segments",
                 "Create escalation protocols for critical issues",
                 "Establish regular executive business reviews"
             ]
-            
+
             for i, rec in enumerate(strategic_recommendations, 1):
                 strategic_p.add_run(f'{i}. {rec}\n')
-            
+
             # AI-powered insights
             if ai_insights:
                 # Round 6 / Phase 3.13: render only whitelisted keys,
@@ -1674,18 +1688,18 @@ class CompactReportFormatter:
                     # ai_callout above).  See compact_report_formatter
                     # ~L770 for the canonical wire.
                     ai_p.add_run(strip_bems_brackets_from_llm_text(ai_summary))
-            
+
         except Exception as e:
             logger.error(f"Error adding renewal recommendations: {e}")
             raise
-    
+
     def add_bems_escalation_section(self, csone_data: pd.DataFrame):
         """Add comprehensive BEMS escalation analysis section"""
         try:
             if csone_data is None:
                 csone_data = pd.DataFrame()
             self.doc.add_heading('🚨 BEMS Escalations & TAC Case Analysis', level=1)
-            
+
             if csone_data.empty:
                 # Phase 3.2: distinguish failed / not_configured / empty for CSOne TAC.
                 from report_utils import classify_data_state, render_empty_state_message
@@ -1702,7 +1716,7 @@ class CompactReportFormatter:
                 else:
                     no_data_p.add_run('No CSOne (TAC) case data was provided for this analysis. BEMS escalations are identified from CSOne (Transaction ID, bemscsc_refs). Upload a CSOne export to include TAC cases and BEMS analysis.')
                 return
-            
+
             # Canonical BEMS extraction from normalized TAC fields
             csone_norm = add_case_lifecycle_fields(csone_data)
             bems_mask = detect_bems_mask(csone_norm)
@@ -1718,7 +1732,7 @@ class CompactReportFormatter:
                 bems_rate = float(cm.bems_rate(csone_data))
             except Exception:
                 bems_rate = (total_bems / len(csone_norm) * 100) if len(csone_norm) > 0 else 0.0
-            
+
             # Active BEMS summary
             summary_heading = self.doc.add_paragraph()
             summary_heading.add_run('Active BEMS Escalations\n').bold = True
@@ -1727,7 +1741,7 @@ class CompactReportFormatter:
                 f"Total BEMS Escalations: {total_bems} "
                 f"{format_inline_source('BEMS Escalations', fields=['Transaction ID', 'bemscsc_refs'])}\n"
             )
-            
+
             if total_bems > 0 and 'customer_name' in bems_cases.columns:
                 summary_p.add_run('\nBEMS Escalations by Customer:\n')
 
@@ -1786,7 +1800,7 @@ class CompactReportFormatter:
                 summary_p.add_run('\nActive BEMS Escalations: None Detected\n')
                 summary_p.add_run('No BEMS escalations were detected in the CSOne data for this period.\n')
                 summary_p.add_run('Note: BEMS detection checks Transaction ID and bemscsc_refs columns.\n')
-            
+
             # Debug info
             debug_p = self.doc.add_paragraph()
             debug_p.add_run('\nDebug Information:\n').bold = True
@@ -1795,12 +1809,12 @@ class CompactReportFormatter:
                 debug_p.add_run(f'• Transaction ID column: {csone_data["Transaction ID"].notna().sum()} non-null values\n')
             if 'bemscsc_refs' in csone_data.columns:
                 debug_p.add_run(f'• bemscsc_refs column: {csone_data["bemscsc_refs"].notna().sum()} non-null values\n')
-            
+
             # TAC Cases without BEMS
             self.doc.add_paragraph()
             non_bems_heading = self.doc.add_paragraph()
             non_bems_heading.add_run('TAC Cases Without BEMS Escalations\n').bold = True
-            
+
             non_bems_cases = csone_norm[~bems_mask]
             non_bems_p = self.doc.add_paragraph()
             non_bems_p.add_run(
@@ -1808,7 +1822,7 @@ class CompactReportFormatter:
                 f"{format_inline_source('Support Cases (TAC)', fields=['Case #', 'Status'])}\n"
             )
             non_bems_p.add_run('These cases may require monitoring for potential escalation risk.\n\n')
-            
+
             if not non_bems_cases.empty and 'customer_name' in non_bems_cases.columns:
                 non_bems_p.add_run('TAC Cases by Customer (No BEMS):\n')
 
@@ -1853,20 +1867,20 @@ class CompactReportFormatter:
                     # Round 8 / Phase 3.1: customer / case-num are
                     # backend-derived; route through ``_safe_add_run``.
                     _safe_add_run(non_bems_p, f'• {display_name}: {count} case(s) - {case_nums_str}\n')
-            
+
         except Exception as e:
             logger.error(f"Error adding BEMS escalation section: {e}")
             raise
-    
+
     def add_adoption_barriers_voice_section(self, ab_data: pd.DataFrame):
         """Add Voice of Customer section for adoption barriers"""
         ab_data = ab_data if ab_data is not None else pd.DataFrame()
         try:
             self.doc.add_heading('🗣️ Voice of Customer: Adoption Barriers', level=1)
-            
+
             intro_p = self.doc.add_paragraph()
             intro_p.add_run('This section represents direct feedback from customers about what is blocking their adoption and success.\n\n').italic = True
-            
+
             if ab_data.empty:
                 # Phase 3.2: tristate empty-state classification
                 from report_utils import classify_data_state, render_empty_state_message
@@ -1884,12 +1898,15 @@ class CompactReportFormatter:
                         _state, source_label='Adoption barrier records'
                     ))
                 return
-            
+
             # Overview stats
             overview_p = self.doc.add_paragraph()
             overview_p.add_run('Adoption Barriers Overview\n').bold = True
-            overview_p.add_run(f'• Total Adoption Barriers: {len(ab_data)}\n')
-            
+            # Round 53.1: align Voice-of-Customer totals with the exported
+            # barrier-ID ledger and the dashboard helper.
+            total_barriers = cm.count_total_barriers(ab_data)
+            overview_p.add_run(f'• Total Adoption Barriers: {total_barriers}\n')
+
             if 'customer_name' in ab_data.columns:
                 # Round 13 / Phase 3.13 + Round 30 / M3: route through the
                 # canonical ``count_customers_with_barriers`` helper so this
@@ -1916,14 +1933,14 @@ class CompactReportFormatter:
                     _cust_norm_series = _cust_norm_series[_cust_norm_series.astype(str) != '']
                     n_cust = int(_cust_norm_series.nunique())
                 overview_p.add_run(f'• Customers with Barriers: {n_cust}\n')
-                avg_per_customer = len(ab_data) / n_cust if n_cust > 0 else 0
+                avg_per_customer = total_barriers / n_cust if n_cust > 0 else 0
                 overview_p.add_run(f'• Average Barriers per Customer: {avg_per_customer:.1f}\n')
-            
+
             # Critical barriers
             self.doc.add_paragraph()
             critical_heading = self.doc.add_paragraph()
             critical_heading.add_run('Critical Adoption Barriers Requiring Attention\n').bold = True
-            
+
             # Round 3 hardening: route severity through canonical
             # normalization so this matches ``cm.count_critical_barriers``
             # and the Compact "Critical Adoption Barriers Requiring Action"
@@ -1948,19 +1965,25 @@ class CompactReportFormatter:
                     critical_barriers = ab_data.iloc[0:0]
                 else:
                     critical_barriers = ab_data[_sev_series.isin(['Critical', 'High'])]
+                    # Round 53.1: Voice-of-Customer critical list displays
+                    # logical barriers once, not duplicate fan-out rows.
+                    if 'ID' in critical_barriers.columns:
+                        _with_id = critical_barriers[critical_barriers['ID'].notna()].drop_duplicates(subset=['ID'])
+                        _without_id = critical_barriers[critical_barriers['ID'].isna()]
+                        critical_barriers = pd.concat([_with_id, _without_id], ignore_index=True)
                 sev_col = _sev_picked_col  # preserved so downstream display still works
             except Exception:
                 critical_barriers = ab_data.iloc[0:0]
                 sev_col = None
             if sev_col:
-                
+
                 if not critical_barriers.empty:
                     # FIXED: Show ALL critical barriers
                     for _, barrier in critical_barriers.iterrows():
                         subj = barrier.get('SUBJECT_C', barrier.get('subject_c', barrier.get('title', 'No subject')))
                         customer = barrier.get('customer_name', 'Unknown')
                         sev = barrier.get(sev_col, 'Unknown')
-                        
+
                         barrier_p = self.doc.add_paragraph()
                         # Round 8 / Phase 3.1: safe wrap.
                         _safe_add_run(barrier_p, f'• {customer}: ').bold = True
@@ -1972,11 +1995,11 @@ class CompactReportFormatter:
                 else:
                     no_critical_p = self.doc.add_paragraph()
                     no_critical_p.add_run('No critical adoption barriers identified in current data.')
-            
+
         except Exception as e:
             logger.error(f"Error adding adoption barriers voice section: {e}")
             raise
-    
+
     def add_data_citations_section(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame):
         """Add data citations and source verification section – uses canonical data sources (same across all AdoptIQ reports)."""
         ab_data = ab_data if ab_data is not None else pd.DataFrame()
@@ -1984,10 +2007,10 @@ class CompactReportFormatter:
         csone_norm = add_case_lifecycle_fields(csone_data) if not csone_data.empty else pd.DataFrame()
         try:
             self.doc.add_heading('📑 Data Citations & Source Verification', level=1)
-            
+
             intro_p = self.doc.add_paragraph()
             intro_p.add_run('Every metric in this report is traceable to its source. Same canonical data sources used across all AdoptIQ reports.\n\n').italic = True
-            
+
             # Canonical Report Data Sources paragraph
             try:
                 from report_utils import get_data_sources_paragraph_text, get_data_sources_list
@@ -2005,7 +2028,7 @@ class CompactReportFormatter:
             sources_para = self.doc.add_paragraph()
             sources_para.add_run(get_data_sources_paragraph_text())
             self.doc.add_paragraph()
-            
+
             # Run-specific metrics table (values from this analysis, sources from canonical)
             canonical = {m: (s, v) for m, s, v in get_data_sources_list()}
             support_source, support_verif = canonical.get('Support Cases (TAC)', ('CSOne (TAC case data)', 'Query by Case Number in CSOne'))
@@ -2046,7 +2069,7 @@ class CompactReportFormatter:
                 if (not ab_data.empty and ab_customer_col)
                 else 0
             )
-            
+
             citations_table = self.doc.add_table(rows=1, cols=5)
             citations_table.style = 'Table Grid'
             header_cells = citations_table.rows[0].cells
@@ -2055,7 +2078,7 @@ class CompactReportFormatter:
                 for paragraph in header_cells[i].paragraphs:
                     for run in paragraph.runs:
                         run.bold = True
-            
+
             # Phase 3.4: replace hardcoded "95% / 90%" confidence
             # percentages with qualitative labels. The numeric values
             # were not derived from any model output and implied a
@@ -2064,7 +2087,7 @@ class CompactReportFormatter:
                 ('Total Support Cases', str(len(csone_norm)) if not csone_norm.empty else '0', support_source, support_verif, 'Source-of-truth'),
                 ('Unique Customers with Cases', str(csone_unique_customers), support_source, support_verif, 'Source-of-truth'),
                 ('P1/Critical Cases', str(p1_critical_count), support_source, support_verif, 'Source-of-truth'),
-                ('Total Adoption Barriers', str(len(ab_data)) if not ab_data.empty else '0', ab_source, ab_verif, 'Source-of-truth'),
+                ('Total Adoption Barriers', str(cm.count_total_barriers(ab_data)), ab_source, ab_verif, 'Source-of-truth'),
                 ('Customers with Adoption Barriers', str(ab_unique_customers), ab_source, ab_verif, 'Source-of-truth'),
             ]
             for metric, value, source, method, confidence in citations_data:
@@ -2076,16 +2099,16 @@ class CompactReportFormatter:
                 _safe_cell_text(row.cells[2], source)
                 _safe_cell_text(row.cells[3], method)
                 _safe_cell_text(row.cells[4], confidence)
-            
+
             self.doc.add_paragraph()
             note_p = self.doc.add_paragraph()
             note_p.add_run('To verify any metric: ').bold = True
             note_p.add_run('Use the Verification Method column to locate the specific record in the source system (CSOne, CSConsole, or Snowflake).')
-            
+
         except Exception as e:
             logger.error(f"Error adding data citations section: {e}")
             raise
-    
+
     def add_early_warning_section(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame, risk_data: Dict):
         """Add early warning indicators section for proactive risk identification.
 
@@ -2102,7 +2125,7 @@ class CompactReportFormatter:
             if csone_data is None:
                 csone_data = pd.DataFrame()
             self.doc.add_heading('🚨 Early Warning Indicators - Proactive Risk Identification', level=1)
-            
+
             intro_p = self.doc.add_paragraph()
             intro_p.add_run('These indicators identify at-risk customers BEFORE issues escalate. ')
             intro_p.add_run(
@@ -2110,9 +2133,9 @@ class CompactReportFormatter:
                 'The case-volume check below uses a 30-day short-horizon spotlight regardless of the '
                 'overall analysis window so new momentum is surfaced quickly.\n\n'
             ).italic = True
-            
+
             warnings = []
-            
+
             csone_norm = add_case_lifecycle_fields(csone_data) if not csone_data.empty else pd.DataFrame()
 
             # Round 12 / Phase 3.3: every Early-Warning indicator
@@ -2153,7 +2176,7 @@ class CompactReportFormatter:
                             'action': 'Coordinate with engineering team and provide customer with escalation timeline',
                             'confidence_label': 'Verified (BEMS escalation rule)'
                         })
-            
+
             # Check for increasing case volume
             date_col_csone = next((c for c in ['open_date', 'Date/Time Opened', 'CREATED_DATE', 'Created', 'Created Date'] if c in csone_norm.columns), None)
             if not csone_norm.empty and 'customer_name' in csone_norm.columns and date_col_csone:
@@ -2193,7 +2216,7 @@ class CompactReportFormatter:
                             continue
                         recent_count = len(recent_30[recent_30['customer_name_norm'] == customer])
                         total_count = len(csone_copy[csone_copy['customer_name_norm'] == customer]) if 'customer_name_norm' in csone_copy.columns else len(csone_copy[csone_copy['customer_name'] == customer])
-                        
+
                         if recent_count >= 5 and recent_count / max(total_count, 1) > 0.5:
                             warnings.append({
                                 'severity': 'HIGH',
@@ -2205,7 +2228,7 @@ class CompactReportFormatter:
                             })
                 except Exception as _ew_err:
                     logger.debug(f"Early warning date parse error: {_ew_err}")
-            
+
             # Check for unresolved adoption barriers
             if not ab_data.empty and 'customer_name' in ab_data.columns:
                 status_col = 'AB_STATUS_C' if 'AB_STATUS_C' in ab_data.columns else ('STATUS_C' if 'STATUS_C' in ab_data.columns else None)
@@ -2230,7 +2253,9 @@ class CompactReportFormatter:
                     for customer in open_barriers['customer_name_norm'].dropna().unique():
                         if not customer:
                             continue
-                        count = len(open_barriers[open_barriers['customer_name_norm'] == customer])
+                        count = cm.count_total_barriers(
+                            open_barriers[open_barriers['customer_name_norm'] == customer]
+                        )
                         if count >= 3:
                             warnings.append({
                                 'severity': 'MEDIUM',
@@ -2240,7 +2265,7 @@ class CompactReportFormatter:
                                 'action': 'Review barriers and create remediation plan with customer',
                                 'confidence_label': 'Heuristic (open-barrier threshold)'
                             })
-            
+
             # Display warnings by severity
             for severity in ['CRITICAL', 'HIGH', 'MEDIUM']:
                 sev_warnings = [w for w in warnings if w['severity'] == severity]
@@ -2254,7 +2279,7 @@ class CompactReportFormatter:
                     else:
                         sev_heading = self.doc.add_paragraph()
                         sev_heading.add_run(f'🟡 {severity} - Monitor Closely\n').bold = True
-                    
+
                     # FIXED: Show ALL warnings per severity
                     for warning in sev_warnings:
                         warn_p = self.doc.add_paragraph()
@@ -2264,7 +2289,7 @@ class CompactReportFormatter:
                         warn_p.add_run(
                             f'Basis: {warning.get("confidence_label", warning.get("confidence", "Heuristic"))}\n'
                         )
-            
+
             # Summary
             self.doc.add_paragraph()
             summary_p = self.doc.add_paragraph()
@@ -2273,21 +2298,21 @@ class CompactReportFormatter:
             summary_p.add_run(f'• Critical: {len([w for w in warnings if w["severity"] == "CRITICAL"])}\n')
             summary_p.add_run(f'• High: {len([w for w in warnings if w["severity"] == "HIGH"])}\n')
             summary_p.add_run(f'• Medium: {len([w for w in warnings if w["severity"] == "MEDIUM"])}\n')
-            
+
         except Exception as e:
             logger.error(f"Error adding early warning section: {e}")
             raise
-    
+
     def add_common_problems_section(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame):
         """Add Common Problems Across Portfolio section - MATCHES EXAMPLE FORMAT"""
         import re
         try:
             self.doc.add_heading('Common Problems Across Portfolio', level=1)
-            
+
             # Analyze patterns across all data
             problem_themes = {}
             affected_customers_by_theme = {}
-            
+
             # Extract common themes from adoption barriers
             if not ab_data.empty:
                 subjects = ab_data['SUBJECT_C'].fillna('').astype(str).str.lower() if 'SUBJECT_C' in ab_data.columns else pd.Series("", index=ab_data.index)
@@ -2302,7 +2327,7 @@ class CompactReportFormatter:
                     if customer_col
                     else pd.Series("Unknown", index=ab_data.index)
                 )
-                
+
                 # Common problem patterns
                 patterns = {
                     'Backend Escalation Bottleneck': ['bems', 'escalat', 'engineering', 'backend'],
@@ -2311,7 +2336,7 @@ class CompactReportFormatter:
                     'Performance Problems': ['slow', 'timeout', 'performance', 'latency'],
                     'User Experience Issues': ['login', 'access', 'permission', 'role']
                 }
-                
+
                 for theme, keywords in patterns.items():
                     theme_mask = row_text.apply(lambda text: any(kw in str(text) for kw in keywords))
                     count = int(theme_mask.sum())
@@ -2324,7 +2349,7 @@ class CompactReportFormatter:
                             .unique()
                             .tolist()
                         )
-            
+
             # Sort by frequency - FIXED: Show ALL problem themes
             # Round 16 / Phase 2.2: tie-break on the theme name (case-
             # folded) so two themes that detect the same number of
@@ -2356,7 +2381,7 @@ class CompactReportFormatter:
 
             for idx, (theme, count) in enumerate(sorted_themes, 1):
                 theme_heading = self.doc.add_heading(f'{idx}. {theme}', level=3)
-                
+
                 # What's Happening
                 what_p = self.doc.add_paragraph()
                 what_p.add_run("- What's Happening: ").bold = True
@@ -2374,44 +2399,44 @@ class CompactReportFormatter:
                 else:
                     _customer_phrase = f'affecting {_affected_count} customers with recurring patterns'
                 what_p.add_run(f'{_count} {_instance_word} detected - {_customer_phrase}')
-                
+
                 # Barrier
                 barrier_p = self.doc.add_paragraph()
                 barrier_p.add_run('- Barrier: ').bold = True
                 barrier_p.add_run('Root cause resolution delayed, requiring cross-functional coordination')
-                
+
                 # Customers Affected (extract from data) - FIXED: Show all affected customers
                 affected_customers = affected_customers_by_theme.get(theme, [])
                 affected_p = self.doc.add_paragraph()
                 affected_p.add_run('- Customers Affected: ').bold = True
                 affected_p.add_run(', '.join(affected_customers) if affected_customers else 'Multiple customers')
-                
+
                 # Business Impact
                 impact_p = self.doc.add_paragraph()
                 impact_p.add_run('- Business Impact: ').bold = True
                 impact_p.add_run('Resolution times exceed SLA, customer satisfaction at risk, potential renewal impact')
-                
+
                 # Fix Needed
                 fix_p = self.doc.add_paragraph()
                 fix_p.add_run('- Fix Needed: ').bold = True
                 fix_p.add_run('Prioritized remediation plan with engineering engagement and customer communication')
-                
+
                 self.doc.add_paragraph()  # Spacing
-            
+
         except Exception as e:
             logger.error(f"Error adding common problems section: {e}")
             raise
-    
+
     def add_action_plan_section(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame, risk_data: Dict):
         """Add What We Need To Do section - MATCHES EXAMPLE FORMAT"""
         try:
             self.doc.add_heading('What We Need To Do', level=1)
-            
+
             # IMMEDIATE section
             immediate_heading = self.doc.add_heading('🔥 IMMEDIATE (This Week)', level=2)
-            
+
             immediate_actions = self.doc.add_paragraph()
-            
+
             # Round 5 / Phase 5.9: previously the war-room list keyed
             # off the legacy ``color == 'Red'`` flag alone, which
             # silently disagreed with every other "high risk
@@ -2433,7 +2458,7 @@ class CompactReportFormatter:
                         is_high = (str(v.get('color', '')).lower() == 'red')
                     if is_high:
                         red_customers.append(k)
-            
+
             if red_customers:
                 # Round 8 / Phase 3.6: sort by case-insensitive name
                 # so the war-room list is deterministic across runs.
@@ -2447,30 +2472,30 @@ class CompactReportFormatter:
                 # Round 8 / Phase 3.1: red_customers are
                 # backend-derived; route through ``_safe_add_run``.
                 _safe_add_run(immediate_actions, f'For {", ".join(_red_sorted)} - daily status until critical issues resolved\n')
-            
+
             immediate_actions.add_run('- Adoption Barrier Review: ').bold = True
             immediate_actions.add_run('Categorize all known barriers, assign owners, and communicate timelines in CSConsole (by Friday)\n')
-            
+
             immediate_actions.add_run('- Executive Communication: ').bold = True
             immediate_actions.add_run('Brief leadership on at-risk accounts and remediation plan\n')
-            
+
             # SHORT-TERM section
             short_term_heading = self.doc.add_heading('📋 SHORT-TERM (30-60 Days)', level=2)
-            
+
             short_term_actions = self.doc.add_paragraph()
             short_term_actions.add_run('- Defect Blitz: ').bold = True
             short_term_actions.add_run('Engineering/Product to hotfix & deploy for all open "multi-customer" defects\n')
-            
+
             short_term_actions.add_run('- Pre-Change Checklist: ').bold = True
             short_term_actions.add_run('Launch mandatory checklist for all customers planning integration, upgrade, or config work\n')
-            
+
             short_term_actions.add_run('- Customer Health Reviews: ').bold = True
             short_term_actions.add_run('Schedule quarterly reviews with all moderate+ risk customers\n')
-            
+
         except Exception as e:
             logger.error(f"Error adding action plan section: {e}")
             raise
-    
+
     def add_predictive_risk_section(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame, risk_data: Dict):
         """Add Predictive Risk section - MATCHES EXAMPLE FORMAT"""
         import re
@@ -2480,7 +2505,7 @@ class CompactReportFormatter:
             if csone_data is None:
                 csone_data = pd.DataFrame()
             self.doc.add_heading('Predictive Risk', level=2)
-            
+
             # Use canonical high-risk count (legacy 0-10 ``color/score`` model
             # because risk_data here comes from ``calculate_renewal_risk_scores``
             # which still returns a 0-10 score with a ``color`` flag).
@@ -2500,21 +2525,21 @@ class CompactReportFormatter:
                 risk_p.add_run(f'BEMS rate at {bems_rate:.1f}% - if not reduced below 15% in 90 days, expect additional escalations\n')
             else:
                 risk_p.add_run('Low - minimal BEMS escalations detected\n')
-            
+
             risk_p.add_run('- Monitoring Needed: ').bold = True
             risk_p.add_run('Weekly portfolio health check-ins, monthly defect/adoption review\n')
-            
+
         except Exception as e:
             logger.error(f"Error adding predictive risk section: {e}")
             raise
-    
+
     def add_executive_takeaway_section(self, risk_summary: Dict):
         """Add Executive Takeaway section - MATCHES EXAMPLE FORMAT"""
         try:
             if risk_summary is None:
                 risk_summary = {}
             self.doc.add_heading('Executive Takeaway', level=1)
-            
+
             overall_score = risk_summary.get('overall_risk_score', 5)
 
             # Round 5 / Phase 5.13: previously the takeaway used hard-coded
@@ -2545,16 +2570,16 @@ class CompactReportFormatter:
             _takeaway_action = takeaway_p.add_run(_band['takeaway_action'])
             if _band['tier'] == 'HIGH':
                 _takeaway_action.bold = True
-            
+
         except Exception as e:
             logger.error(f"Error adding executive takeaway section: {e}")
             raise
-    
+
     def add_methodology_section(self):
         """Add methodology and data quality section"""
         try:
             self.doc.add_heading('📋 Analysis Methodology & Data Quality', level=1)
-            
+
             methodology_p = self.doc.add_paragraph()
             methodology_p.add_run('🔍 Data Sources (canonical – same across all AdoptIQ reports):\n').bold = True
             try:
@@ -2569,21 +2594,21 @@ class CompactReportFormatter:
                 methodology_p.add_run('• Software Defects: help.webex.com, CSC/BST refs in CSOne and Adoption Barriers\n')
                 methodology_p.add_run('• Customer Pulse, Action Plans, Success Priorities: CSConsole\n')
             methodology_p.add_run('• AI-powered analysis using CircuIT AI\n')
-            
+
             risk_p = self.doc.add_paragraph()
             risk_p.add_run('📊 Risk Scoring Methodology:\n').bold = True
             risk_p.add_run('• Deterministic weighted model reused across reports (0-100 -> displayed as /10)\n')
             risk_p.add_run('• Inputs: adoption barriers, TAC cases, BEMS, customer pulse, action plans, incidents, contract signals\n')
             risk_p.add_run('• TAC severity/priority and case type are normalized before scoring\n')
             risk_p.add_run('• Missing fields are treated as unknown, not auto-escalated to high severity\n')
-            
+
             quality_p = self.doc.add_paragraph()
             quality_p.add_run('✅ Data Quality Assurance:\n').bold = True
             quality_p.add_run('• All data validated for completeness\n')
             quality_p.add_run('• Duplicate entries removed\n')
             quality_p.add_run('• Date/time fields standardized\n')
             quality_p.add_run('• Customer names normalized\n')
-            
+
         except Exception as e:
             logger.error(f"Error adding methodology section: {e}")
             raise
@@ -2632,7 +2657,7 @@ def calculate_renewal_risk_scores(
             if not csone_norm.empty and 'customer_name' in csone_norm.columns:
                 customers.update(normalize_customer_name(v) for v in csone_norm['customer_name'].dropna().unique())
         customers = {c for c in customers if c and c != "Unknown"}
-        
+
         for customer in customers:
             customer_ab = (
                 ab_data[ab_data['customer_name'].fillna("").astype(str).apply(normalize_customer_name) == customer]
@@ -2668,7 +2693,7 @@ def calculate_renewal_risk_scores(
                     f"{aging_open} barrier(s) open 60+ days "
                     f"{format_inline_source('Adoption Barriers', fields=['OPEN_DATE_C', 'AB_STATUS_C'])}"
                 )
-            
+
             # Round 4: route the color/category tiers through the
             # canonical RISK_BAND_THRESHOLDS (CRITICAL=75, HIGH=55,
             # MEDIUM=35, LOW=15 on the 0-100 axis) so the same numeric
@@ -2689,7 +2714,7 @@ def calculate_renewal_risk_scores(
             else:
                 color = "Gray"
                 category = "No Renewal Risk - Minimal Engagement"
-            
+
             risk_data[customer] = {
                 'score': final_score,
                 'color': color,
@@ -2698,16 +2723,16 @@ def calculate_renewal_risk_scores(
                 'risk_score_0_100': profile["risk_score_0_100"],
                 'risk_band': profile["risk_band"],
             }
-        
+
         return risk_data
-        
+
     except Exception as e:
         logger.error(f"Error calculating risk scores: {e}")
         return {}
 
 
 def create_compact_executive_report(analysis_id: str, manager: str, technology: str, days: int,
-                                  ab_data: pd.DataFrame, csone_data: pd.DataFrame, 
+                                  ab_data: pd.DataFrame, csone_data: pd.DataFrame,
                                   ai_insights: Dict, output_path: str,
                                   *,
                                   team_subs_df: Optional[pd.DataFrame] = None,
@@ -2729,7 +2754,7 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
     under-report any customer that exists only in subscription / pulse /
     action-plan data.
     """
-    
+
     ab_data = ab_data if ab_data is not None else pd.DataFrame()
     csone_data = csone_data if csone_data is not None else pd.DataFrame()
     csone_norm = add_case_lifecycle_fields(csone_data)
@@ -2754,10 +2779,10 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
         _mgr_digest = '?'
     logger.info("Creating compact executive report (manager_digest=%s)", _mgr_digest)
     logger.debug("Creating compact executive report for %s", manager)
-    
+
     try:
         formatter = CompactReportFormatter()
-        
+
         # Calculate risk scores.  Round 4: pass through the multi-source
         # ``extra_frames`` and ``account_to_customer`` map already
         # available in this scope so subscription-only / pulse-only
@@ -2772,7 +2797,7 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
             # Compact / EI / Excel surfaces describe.
             recent_window_days=int(days) if days else 30,
         )
-        
+
         # Create risk summary.
         # Phase 1.5: cm.is_high_risk_profile honors color="Red" and risk_band
         # overrides on the 0-10 branch so the count agrees with EI / Leader.
@@ -2797,7 +2822,7 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
             and not cm.is_high_risk_profile(v, scale=cm.RISK_SCALE_0_TO_10)
             and _COMPACT_MOD_LO <= v.get('score', 0) < _COMPACT_MOD_HI
         }
-        
+
         # All cross-report counts come from canonical_metrics so this
         # report agrees byte-for-byte with the Leader / EI / Comprehensive
         # documents. ``critical_adoption_barriers`` here is the executive
@@ -2964,7 +2989,7 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
                 "Compact report consistency checks failed: "
                 + "; ".join(consistency.get("errors", []) or ["unknown"])
             )
-        
+
         # Create title page
         formatter.create_compact_title_page(
             manager, technology, days, analysis_id, risk_summary,
@@ -3050,55 +3075,55 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
             pulse_df=csconsole_customer_pulse,
         )
         formatter._add_section_separator()
-        
+
         # Add comprehensive sections matching example report quality
         formatter.add_executive_summary(risk_summary, ai_insights)
         formatter._add_section_separator()
-        
+
         formatter.add_high_risk_customers(ab_data, csone_data, risk_data)
         formatter._add_section_separator()
-        
+
         # Add early warning indicators (NEW - matches example report)
         formatter.add_early_warning_section(ab_data, csone_data, risk_data)
         formatter._add_section_separator()
-        
+
         formatter.add_portfolio_health_dashboard(ab_data, csone_data, risk_summary)
         formatter._add_section_separator()
-        
+
         # Add critical adoption barriers (WAS MISSING - function existed but wasn't called)
         formatter.add_critical_adoption_barriers(ab_data)
         formatter._add_section_separator()
-        
+
         # Add BEMS escalation analysis (NEW - critical for example report quality)
         formatter.add_bems_escalation_section(csone_data)
         formatter._add_section_separator()
-        
+
         # Add adoption barriers voice section (NEW - matches example report)
         formatter.add_adoption_barriers_voice_section(ab_data)
         formatter._add_section_separator()
-        
+
         formatter.add_renewal_recommendations(risk_summary, ai_insights)
         formatter._add_section_separator()
-        
+
         # Add Common Problems Across Portfolio (NEW - matches example report)
         formatter.add_common_problems_section(ab_data, csone_data)
         formatter._add_section_separator()
-        
+
         # Add What We Need To Do section (NEW - matches example report)
         formatter.add_action_plan_section(ab_data, csone_data, risk_data)
         formatter._add_section_separator()
-        
+
         # Add Predictive Risk section (NEW - matches example report)
         formatter.add_predictive_risk_section(ab_data, csone_data, risk_data)
         formatter._add_section_separator()
-        
+
         # Add Executive Takeaway (NEW - matches example report)
         formatter.add_executive_takeaway_section(risk_summary)
         formatter._add_section_separator()
-        
+
         # Add page break before long sections
         formatter.doc.add_page_break()
-        
+
         # Add Top 10 by Risk / Focus Accounts
         # Round 10 / Phase 2.4: sort by ``-score`` then customer-name lower
         # so ties produce a stable, alphabetical order. Previously two
@@ -3179,13 +3204,13 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
                 )
                 _trunc_run.italic = True
             formatter._add_section_separator()
-        
+
         # Add data citations (NEW - matches example report)
         formatter.add_data_citations_section(ab_data, csone_data)
         formatter._add_section_separator()
-        
+
         formatter.add_methodology_section()
-        
+
         # Report metadata footer
         try:
             from report_utils import get_report_metadata_footer
@@ -3200,7 +3225,7 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
             technology=technology,
             days=days,
         )).font.size = Pt(8)
-        
+
         # Round 25 / Phase E: thread the manager + technology through
         # to ``save_document`` so the .docx Properties dialog shows a
         # meaningful ``Title`` (e.g. ``"Brian Frazier All Contact Center
@@ -3216,10 +3241,10 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
             customer_name=f"{manager} {technology}".strip(),
             report_subject=_r25e_subject,
         )
-        
+
         logger.info(f"Compact executive report completed: {result_path}")
         return result_path
-        
+
     except Exception as e:
         logger.error(f"Failed to create compact executive report: {e}")
         raise

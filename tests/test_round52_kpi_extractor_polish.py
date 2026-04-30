@@ -114,7 +114,7 @@ def test_round52_team_summary_skips_title_row_to_find_real_header(tmp_path: Path
     """Real leader Team_Summary sheets have a TITLE row above the
     actual header row.  Before this fix the harness counted the
     header row itself as a team member (so a team of 11 reported
-    total_customers=12).  Detect the real header by scanning for
+    team_members=12).  Detect the real header by scanning for
     the marker columns ("Team_Member" / "Num_Customers")."""
     import openpyxl
     from report_iteration_loop import _extract_team_summary_sheet
@@ -142,9 +142,9 @@ def test_round52_team_summary_skips_title_row_to_find_real_header(tmp_path: Path
     values: dict[str, str] = {}
     _extract_team_summary_sheet(ws2, values)
 
-    assert values.get("total_customers") == "11", (
+    assert values.get("team_members") == "11", (
         f"team_summary handler must skip title row and count 11 team "
-        f"members; got {values.get('total_customers')!r}"
+        f"members; got {values.get('team_members')!r}"
     )
 
 
@@ -170,7 +170,7 @@ def test_round52_team_summary_handles_no_title_row(tmp_path: Path):
     values: dict[str, str] = {}
     _extract_team_summary_sheet(ws2, values)
 
-    assert values.get("total_customers") == "7"
+    assert values.get("team_members") == "7"
 
 
 def test_round52_escalated_support_cases_canonical_distinct_from_support_cases():

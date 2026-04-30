@@ -26,8 +26,11 @@ from typing import Any, Iterable, Optional
 from urllib.parse import quote
 
 import openpyxl
+import pandas as pd
 import requests
 from docx import Document
+
+import canonical_metrics as cm
 
 TERMINAL_STATUSES = {"completed", "error", "cancelled"}
 CSRF_META_RE = re.compile(
@@ -46,10 +49,16 @@ KPI_ALIASES = {
     "total_customers": {
         "total customers",
         "customers in portfolio",
+        "customers",
+        "num customers",
         "total customer count",
         "total customers analyzed",
+    },
+    "team_members": {
+        # Round 53: leader team size is not the same KPI as customer count.
         "team size",
         "team members",
+        "direct reports",
     },
     "support_cases": {
         "support cases",
@@ -84,8 +93,13 @@ KPI_ALIASES = {
         "adoption barriers",
         "total adoption barriers",
         "adoption barriers total",
-        "active adoption barriers",
         "num adoption barriers",
+    },
+    "open_adoption_barriers": {
+        # Round 53: "active" report labels mean open AB records.
+        "active adoption barriers",
+        "open adoption barriers",
+        "adoption barriers open",
     },
     "critical_barriers": {
         "critical abs",
@@ -177,7 +191,7 @@ SCENARIO_REQUIRED_KPIS: dict[str, tuple[str, ...]] = {
     "comprehensive": ("manager", "technology", "window_days", "total_customers"),
     "compact": ("manager", "technology", "window_days", "total_customers"),
     "renewal": ("technology", "window_days"),
-    "leader": ("manager", "window_days"),
+    "leader": ("manager", "window_days", "team_members", "total_customers"),
 }
 
 
@@ -315,7 +329,9 @@ class ScenarioResult:
     artifacts: list[ArtifactRecord]
     all_passed: bool
     parity: GateResult = field(default_factory=lambda: GateResult(True, {"reason": "not_applicable"}))
+    quality: GateResult = field(default_factory=lambda: GateResult(True, {"reason": "not_applicable"}))
     kpi_sidecar_path: Optional[str] = None
+    quality_sidecar_path: Optional[str] = None
     log_excerpt_path: Optional[str] = None
     failure_phase: Optional[str] = None
     exception_type: Optional[str] = None
@@ -903,11 +919,33 @@ _CORPUS_CONTEXT_MARKERS: tuple[str, ...] = (
     "Prior occurrences:",
     "Sentiment direction:",
 )
+TOTALS_MARKERS: frozenset[str] = frozenset({
+    "total",
+    "totals",
+    "team total",
+    "team totals",
+    "grand total",
+    "grand totals",
+})
 
 
 def _looks_like_corpus_context_line(text: str) -> bool:
     """Return True when ``text`` carries report_corpus_context tells."""
     return any(marker in text for marker in _CORPUS_CONTEXT_MARKERS)
+
+
+def _select_multicolumn_value_rows(rows: list[list[str]]) -> list[list[str]]:
+    """Round 53.2: choose the same multi-column value rows for KPI and citation scans."""
+
+    if len(rows) < 2 or len(rows[0]) < 3:
+        return []
+    if len(rows) == 2:
+        return [rows[1]]
+    return [
+        row
+        for row in rows[1:]
+        if row and str(row[0] or "").strip().lower() in TOTALS_MARKERS
+    ]
 
 
 def _scan_paragraph_for_kpis(text: str, values: dict[str, str]) -> None:
@@ -957,18 +995,8 @@ def extract_docx_kpis(path: Path) -> dict[str, Any]:
         # single value row, e.g. comprehensive Title Page metrics).
         if len(rows) >= 2 and len(rows[0]) >= 3:
             header = rows[0]
-            chosen_value_row: Optional[list[str]] = None
-            totals_markers = {"total", "totals", "team total", "team totals", "grand total", "grand totals"}
-            if len(rows) == 2:
-                chosen_value_row = rows[1]
-            else:
-                for candidate in rows[1:]:
-                    if not candidate:
-                        continue
-                    first_cell = str(candidate[0] or "").strip().lower()
-                    if first_cell in totals_markers:
-                        chosen_value_row = candidate
-                        break
+            value_rows = _select_multicolumn_value_rows(rows)
+            chosen_value_row = value_rows[0] if value_rows else None
             if chosen_value_row is not None and len(header) == len(chosen_value_row):
                 for label, value in zip(header, chosen_value_row):
                     canonical = _canonical_kpi_label(label)
@@ -1039,6 +1067,75 @@ def _extract_label_value_sheet(sheet: Any, values: dict[str, str]) -> None:
             values.setdefault(canonical, _normalize_kpi_value(value))
 
 
+def _worksheet_to_frame(sheet: Any) -> pd.DataFrame:
+    """Round 53: convert a report detail sheet into a DataFrame for source-backed KPI checks."""
+
+    rows = list(sheet.iter_rows(min_row=1, max_row=5000, values_only=True))
+    if not rows:
+        return pd.DataFrame()
+    header_idx = 0
+    best_score = -1
+    for idx, row in enumerate(rows[:8]):
+        normalized = [str(cell).strip() for cell in row if cell not in (None, "")]
+        score = len(normalized)
+        if score > best_score:
+            header_idx = idx
+            best_score = score
+    header = [
+        str(cell).strip() if cell not in (None, "") else f"blank_{idx}"
+        for idx, cell in enumerate(rows[header_idx])
+    ]
+    data_rows = [
+        row for row in rows[header_idx + 1 :]
+        if any(cell not in (None, "") for cell in row)
+    ]
+    if not data_rows or not header:
+        return pd.DataFrame()
+    return pd.DataFrame([dict(zip(header, row)) for row in data_rows])
+
+
+def _extract_source_backed_detail_kpis(sheet_name: str, sheet: Any, values: dict[str, str]) -> None:
+    """Round 53: recompute high-value KPIs from detail sheets, not only summary tiles."""
+
+    normalized = sheet_name.lower()
+    role_by_sheet = {
+        "ab_detail_all": "adoption_barriers",
+        "adoption_barriers": "adoption_barriers",
+        "customer_adoption_barriers": "adoption_barriers",
+        "all_adoption_barriers": "adoption_barriers",
+        "critical_adoption_barriers": "critical_adoption_barriers",
+        "csone_detail_all": "support_cases",
+        "tac_cases": "support_cases",
+        "customer_support_cases": "support_cases",
+        "all_support_cases": "support_cases",
+        "customer_action_plans": "action_plans",
+        "action_plans": "action_plans",
+        "customer_customer_pulse": "customer_pulse",
+        "customer_pulse": "customer_pulse",
+    }
+    role = role_by_sheet.get(normalized)
+    if not role:
+        return
+    frame = _worksheet_to_frame(sheet)
+    if frame.empty:
+        return
+    if role == "adoption_barriers":
+        values["adoption_barriers"] = _normalize_kpi_value(cm.count_total_barriers(frame))
+        values["open_adoption_barriers"] = _normalize_kpi_value(cm.count_open_barriers(frame))
+        values["critical_barriers"] = _normalize_kpi_value(cm.count_critical_barriers(frame))
+    elif role == "critical_adoption_barriers":
+        values["critical_barriers"] = _normalize_kpi_value(cm.count_total_barriers(frame))
+    elif role == "support_cases":
+        values["support_cases"] = _normalize_kpi_value(cm.count_total_tac(frame))
+        values["critical_cases"] = _normalize_kpi_value(cm.count_p1(frame))
+        values["high_cases"] = _normalize_kpi_value(cm.count_p2(frame))
+        values["bems"] = _normalize_kpi_value(cm.count_bems(frame))
+    elif role in {"action_plans", "customer_pulse"}:
+        # Round 53.2: when detail sheets exist they are the source of truth;
+        # overwrite summary cells so stale dashboard values cannot pass.
+        values[role] = _normalize_kpi_value(len(frame))
+
+
 def _extract_team_summary_sheet(sheet: Any, values: dict[str, str]) -> None:
     """Sum numeric columns across rows for leader Team_Summary semantics.
 
@@ -1084,16 +1181,13 @@ def _extract_team_summary_sheet(sheet: Any, values: dict[str, str]) -> None:
     if not data_rows:
         return
 
-    # Round 52 (Phase 2): row count maps to total customers (team size).
-    if "total_customers" not in values:
-        team_size_canonical = _canonical_kpi_label("Team Members")
-        if team_size_canonical:
-            values.setdefault(team_size_canonical, str(len(data_rows)))
+    # Round 53: row count maps to team_members, not total_customers.
+    team_size_canonical = _canonical_kpi_label("Team Members")
+    if team_size_canonical:
+        values[team_size_canonical] = str(len(data_rows))
 
     for col_idx, canonical in enumerate(canonical_headers):
         if not canonical:
-            continue
-        if canonical in values:
             continue
         total = 0.0
         any_numeric = False
@@ -1121,7 +1215,16 @@ def _extract_renewal_summary_sheet(sheet: Any, values: dict[str, str]) -> None:
     rows = list(sheet.iter_rows(min_row=1, max_row=2000, max_col=20, values_only=True))
     if not rows:
         return
-    header = rows[0]
+    # Round 53: generated renewal workbooks include a title row above the real
+    # header, so scan for the Customer / Overall_Risk_Score header instead of
+    # assuming row 1 is tabular data.
+    header_idx = 0
+    for idx, row in enumerate(rows[:5]):
+        normalized = {str(cell).strip().lower() for cell in row if cell is not None}
+        if {"customer", "overall_risk_score"} & normalized:
+            header_idx = idx
+            break
+    header = rows[header_idx]
     if not header:
         return
     headers_norm = [str(cell).strip() if cell is not None else "" for cell in header]
@@ -1132,7 +1235,7 @@ def _extract_renewal_summary_sheet(sheet: Any, values: dict[str, str]) -> None:
             risk_score_idx = idx
             break
 
-    data_rows = [row for row in rows[1:] if any(cell not in (None, "") for cell in row)]
+    data_rows = [row for row in rows[header_idx + 1:] if any(cell not in (None, "") for cell in row)]
     if not data_rows:
         return
 
@@ -1203,10 +1306,11 @@ def extract_xlsx_kpis(path: Path) -> dict[str, Any]:
         for sheet_name in workbook.sheetnames:
             normalized_sheet = sheet_name.lower()
             handler = _SCENARIO_SHEET_HANDLERS.get(normalized_sheet)
+            sheet = workbook[sheet_name]
+            _extract_source_backed_detail_kpis(sheet_name, sheet, values)
             if not handler:
                 continue
             scanned_sheets.append(sheet_name)
-            sheet = workbook[sheet_name]
             if handler == "label_value":
                 _extract_label_value_sheet(sheet, values)
             elif handler == "team_summary":
@@ -1244,10 +1348,9 @@ def compare_kpi_parity(
         passed = not mismatches
         reason = "compared_common_kpis"
     else:
-        # No common KPI is an extraction coverage gap, not by itself a
-        # product-report failure. Surface it in metadata without failing the
-        # strict run; real KPI mismatches above still fail.
-        passed = True  # Round 52: no-common is extraction coverage, not report drift.
+        # Round 53.2: in strict mode, zero overlap means we cannot prove
+        # cross-format accuracy, so fail closed.
+        passed = not strict
         reason = "no_common_kpis"
 
     if strict and missing_required:
@@ -1298,6 +1401,313 @@ def extract_and_write_kpis(
     }
     sidecar_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return payload, parity
+
+
+def _count_docx_chart_parts(path: Path) -> int:
+    """Round 53: count embedded chart parts as a report-quality signal."""
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return sum(1 for name in archive.namelist() if name.startswith("word/charts/chart"))
+    except Exception:
+        return 0
+
+
+def _docx_full_text(doc: Document) -> str:
+    parts: list[str] = []
+    for paragraph in doc.paragraphs:
+        if paragraph.text:
+            parts.append(paragraph.text)
+    for table in doc.tables:
+        for row in table.rows:
+            row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+            if row_text:
+                parts.append(row_text)
+    return "\n".join(parts)
+
+
+def _source_backed_cell(row: list[str], value_idx: int) -> bool:
+    """Round 53.2: source must be in the metric/value cell or an adjacent source cell."""
+
+    candidates = {value_idx}
+    if value_idx > 0:
+        candidates.add(value_idx - 1)
+    if value_idx + 1 < len(row):
+        candidates.add(value_idx + 1)
+    return any("[source:" in str(row[idx] or "").lower() for idx in candidates)
+
+
+def _paragraph_claim_source_backed(text: str, match_idx: int, matches: list[re.Match[str]]) -> bool:
+    """Round 53.2: a paragraph source backs only the current metric span."""
+
+    match = matches[match_idx]
+    next_start = matches[match_idx + 1].start() if match_idx + 1 < len(matches) else len(text)
+    segment = text[match.start():next_start]
+    return "[source:" in segment.lower()
+
+
+def _numeric_tokens_requiring_source(text: str) -> list[str]:
+    """Round 53.2: find narrative numeric tokens that need source backing."""
+
+    clean = str(text or "").strip()
+    if not clean or "[source:" in clean.lower():
+        return []
+    lowered = clean.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "generated",
+            "analysis id",
+            "report metadata",
+            "page ",
+            "build ",
+            "version ",
+        )
+    ):
+        return []
+    tokens = []
+    for token in NUMERIC_TOKEN_RE.findall(clean):
+        stripped = token.replace(",", "").replace("%", "")
+        if len(stripped) >= 4 and stripped.isdigit():
+            # Long IDs / dates are handled by structural metadata, not as
+            # business facts in this lightweight review pass.
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def _extract_docx_metric_claims(doc: Document) -> list[dict[str, Any]]:
+    """Round 53: collect rendered metric claims and whether source backing is adjacent."""
+
+    claims: list[dict[str, Any]] = []
+    for table_idx, table in enumerate(doc.tables):
+        rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
+        if not rows:
+            continue
+        if len(rows) >= 2 and len(rows[0]) >= 3:
+            header = rows[0]
+            value_rows = _select_multicolumn_value_rows(rows)
+            for value_row in value_rows:
+                row_text = " | ".join(item for item in value_row if item)
+                for col_idx, (label, value) in enumerate(zip(header, value_row)):
+                    canonical = _canonical_kpi_label(label)
+                    if canonical and _is_numeric_kpi_value(value):
+                        claims.append(
+                            {
+                                "location": f"table[{table_idx}]",
+                                "label": label,
+                                "canonical": canonical,
+                                "value": _normalize_kpi_value(value),
+                                "source_backed": _source_backed_cell(value_row, col_idx),
+                                "excerpt": row_text[:240],
+                            }
+                        )
+        for row_idx, row in enumerate(rows):
+            if len(row) < 2:
+                continue
+            canonical = _canonical_kpi_label(row[0])
+            if canonical and _is_numeric_kpi_value(row[1]):
+                row_text = " | ".join(item for item in row if item)
+                claims.append(
+                    {
+                        "location": f"table[{table_idx}].row[{row_idx}]",
+                        "label": row[0],
+                        "canonical": canonical,
+                        "value": _normalize_kpi_value(row[1]),
+                        "source_backed": _source_backed_cell(row, 1),
+                        "excerpt": row_text[:240],
+                    }
+                )
+    for paragraph_idx, paragraph in enumerate(doc.paragraphs):
+        text = (paragraph.text or "").strip()
+        if not text:
+            continue
+        matches = list(_PARAGRAPH_KPI_NUMERIC_RE.finditer(text))
+        for match_idx, match in enumerate(matches):
+            label = match.group("label").strip()
+            canonical = _canonical_kpi_label(label)
+            if canonical:
+                claims.append(
+                    {
+                        "location": f"paragraph[{paragraph_idx}]",
+                        "label": label,
+                        "canonical": canonical,
+                        "value": _normalize_kpi_value(match.group("value")),
+                        "source_backed": _paragraph_claim_source_backed(text, match_idx, matches),
+                        "excerpt": text[:240],
+                    }
+                )
+    return claims
+
+
+def _chart_recommendations(scenario_key: str, chart_count: int, values: dict[str, str]) -> list[dict[str, Any]]:
+    """Round 53: suggest visual improvements without treating them as automatic failures."""
+
+    if chart_count:
+        return []
+    if scenario_key == "leader" and {"team_members", "total_customers"} & set(values):
+        return [
+            {
+                "kind": "chart_opportunity",
+                "section": "team_summary",
+                "suggestion": "Consider a team workload chart using Team_Summary counts if it improves scanability.",
+            }
+        ]
+    if scenario_key == "renewal" and {"risk_score", "risk_category", "total_customers"} & set(values):
+        return [
+            {
+                "kind": "chart_opportunity",
+                "section": "renewal_summary",
+                "suggestion": "Consider a renewal-risk distribution chart backed by Renewal_Summary rows.",
+            }
+        ]
+    if scenario_key in {"compact", "comprehensive"} and {"total_customers", "support_cases"} & set(values):
+        return [
+            {
+                "kind": "chart_opportunity",
+                "section": "executive_summary",
+                "suggestion": "Consider a compact risk or support-volume visual if the source rows expose stable buckets.",
+            }
+        ]
+    return []
+
+
+def evaluate_report_quality(
+    docx_path: Path,
+    xlsx_path: Optional[Path],
+    *,
+    scenario_key: str,
+    strict: bool,
+) -> tuple[dict[str, Any], GateResult]:
+    """Round 53: evaluate accuracy-adjacent report quality beyond baseline drift."""
+
+    try:
+        doc = Document(str(docx_path))
+        full_text = _docx_full_text(doc)
+        paragraphs = [p.text.strip() for p in doc.paragraphs if (p.text or "").strip()]
+        headings = [
+            p.text.strip()
+            for p in doc.paragraphs
+            if (p.text or "").strip() and str(getattr(p.style, "name", "")).lower().startswith("heading")
+        ]
+        metric_claims = _extract_docx_metric_claims(doc)
+        uncited_numeric_paragraphs = [
+            {
+                "paragraph_index": idx,
+                "numbers": _numeric_tokens_requiring_source(text),
+                "excerpt": text[:240],
+            }
+            for idx, text in enumerate(paragraphs)
+            if _numeric_tokens_requiring_source(text)
+        ]
+        unbacked_metric_claims = [
+            claim for claim in metric_claims if not claim.get("source_backed")
+        ]
+        docx_kpis = extract_docx_kpis(docx_path)
+        xlsx_kpis = extract_xlsx_kpis(xlsx_path) if xlsx_path else {"values": {}}
+        value_union = {
+            **(xlsx_kpis.get("values", {}) if isinstance(xlsx_kpis, dict) else {}),
+            **(docx_kpis.get("values", {}) if isinstance(docx_kpis, dict) else {}),
+        }
+        chart_count = _count_docx_chart_parts(docx_path)
+        source_citation_count = len(re.findall(r"\[\s*source\s*:", full_text, flags=re.IGNORECASE))
+        empty_table_count = 0
+        for table in doc.tables:
+            if not any(cell.text.strip() for row in table.rows for cell in row.cells):
+                empty_table_count += 1
+
+        errors: list[str] = []
+        recommendations: list[dict[str, Any]] = []
+        if not paragraphs:
+            errors.append("DOCX contains no readable paragraphs.")
+        if not doc.tables:
+            errors.append("DOCX contains no tables; KPI scanability is likely poor.")
+        if empty_table_count:
+            recommendations.append(
+                {
+                    "kind": "formatting",
+                    "suggestion": f"Remove or populate {empty_table_count} empty Word table(s).",
+                }
+            )
+        if metric_claims and source_citation_count == 0:
+            errors.append("Metric claims are present but the report contains no inline [Source:] citations.")
+        if strict and unbacked_metric_claims:
+            errors.append(
+                f"{len(unbacked_metric_claims)} metric claim(s) lack adjacent [Source:] backing."
+            )
+        if strict and uncited_numeric_paragraphs:
+            errors.append(
+                f"{len(uncited_numeric_paragraphs)} paragraph(s) contain uncited numeric claims."
+            )
+        if len(headings) < 2:
+            recommendations.append(
+                {
+                    "kind": "formatting",
+                    "suggestion": "Review heading hierarchy; the report has fewer than two detected headings.",
+                }
+            )
+        recommendations.extend(_chart_recommendations(scenario_key, chart_count, value_union))
+
+        payload = {
+            "scenario": scenario_key,
+            "docx_path": str(docx_path),
+            "xlsx_path": str(xlsx_path) if xlsx_path else None,
+            "paragraph_count": len(paragraphs),
+            "heading_count": len(headings),
+            "table_count": len(doc.tables),
+            "chart_count": chart_count,
+            "source_citation_count": source_citation_count,
+            "metric_claim_count": len(metric_claims),
+            "unbacked_metric_claim_count": len(unbacked_metric_claims),
+            "unbacked_metric_claims": unbacked_metric_claims[:25],
+            "uncited_numeric_paragraph_count": len(uncited_numeric_paragraphs),
+            "uncited_numeric_paragraphs": uncited_numeric_paragraphs[:25],
+            "recommendations": recommendations,
+            "errors": errors,
+        }
+        return payload, GateResult(
+            passed=not errors,
+            details={
+                "reason": "quality_review",
+                "strict": strict,
+                "errors": errors,
+                "recommendation_count": len(recommendations),
+                "metric_claim_count": len(metric_claims),
+                "unbacked_metric_claim_count": len(unbacked_metric_claims),
+                "uncited_numeric_paragraph_count": len(uncited_numeric_paragraphs),
+                "chart_count": chart_count,
+                "source_citation_count": source_citation_count,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - diagnostics only
+        return (
+            {
+                "scenario": scenario_key,
+                "docx_path": str(docx_path),
+                "xlsx_path": str(xlsx_path) if xlsx_path else None,
+                "errors": [str(exc)],
+            },
+            GateResult(False, {"reason": "quality_review_error", "error": str(exc)}),
+        )
+
+
+def extract_and_write_quality(
+    docx_path: Path,
+    xlsx_path: Optional[Path],
+    sidecar_path: Path,
+    *,
+    scenario_key: str,
+    strict: bool,
+) -> tuple[dict[str, Any], GateResult]:
+    payload, quality = evaluate_report_quality(
+        docx_path,
+        xlsx_path,
+        scenario_key=scenario_key,
+        strict=strict,
+    )
+    payload["quality"] = asdict(quality)
+    sidecar_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return payload, quality
 
 
 def _filename_matches_scenario(name: str, scenario_key: str, extension: str) -> bool:
@@ -1808,6 +2218,7 @@ class LiveReportRunner:
         artifacts: list[ArtifactRecord] = []
         operational_gate = GateResult(False, {"reason": "not_started"})
         parity_gate = GateResult(True, {"reason": "not_applicable"})
+        quality_gate = GateResult(True, {"reason": "not_applicable"})
         all_passed = False
         failure_phase = "start"
         try:
@@ -1989,9 +2400,41 @@ class LiveReportRunner:
             else:
                 kpi_sidecar = None
 
-            all_passed = operational_gate.passed and all(
-                artifact.structural.passed and artifact.baseline_diff.passed for artifact in artifacts
-            ) and (parity_gate.passed if self.config.strict else True)
+            if "docx" in artifact_paths:
+                failure_phase = "report_quality"
+                quality_sidecar = (
+                    self.config.downloads_dir
+                    / f"AdoptIQ_Report_{analysis_id}__data-loop-{_slug(self.config.run_id)}__scenario-{scenario.key}.quality.json"
+                )
+                _, quality_gate = extract_and_write_quality(
+                    artifact_paths["docx"],
+                    artifact_paths.get("xlsx"),
+                    quality_sidecar,
+                    scenario_key=scenario.key,
+                    strict=self.config.strict,
+                )
+            else:
+                quality_sidecar = None
+
+            # Round 53.3: parity_gate.passed already encodes the strict
+            # gradient correctly -- it only fails when there is a real
+            # cross-format mismatch (or strict-only edges like
+            # ``no_common_kpis`` and ``missing_required_kpis``). The
+            # legacy ``... if self.config.strict else True`` collapse
+            # silently swallowed real DOCX vs XLSX mismatches whenever
+            # a caller forgot to pass ``--strict``, defeating the
+            # accuracy gate the harness exists to enforce. Always honor
+            # the parity gate's verdict so non-strict callers still see
+            # numeric drift.
+            all_passed = (
+                operational_gate.passed
+                and all(
+                    artifact.structural.passed and artifact.baseline_diff.passed
+                    for artifact in artifacts
+                )
+                and parity_gate.passed
+                and quality_gate.passed
+            )
 
             if (
                 self.config.init_baseline
@@ -2024,6 +2467,8 @@ class LiveReportRunner:
                 all_passed=all_passed,
                 parity=parity_gate,
                 kpi_sidecar_path=str(kpi_sidecar) if kpi_sidecar else None,
+                quality=quality_gate,
+                quality_sidecar_path=str(quality_sidecar) if quality_sidecar else None,
             )
         except Exception as exc:  # noqa: BLE001
             if not final_status:
@@ -2056,7 +2501,9 @@ class LiveReportRunner:
         artifacts: list[ArtifactRecord],
         all_passed: bool,
         parity: Optional[GateResult] = None,
+        quality: Optional[GateResult] = None,
         kpi_sidecar_path: Optional[str] = None,
+        quality_sidecar_path: Optional[str] = None,
         crash_error: Optional[str] = None,
         failure_phase: Optional[str] = None,
         exception_type: Optional[str] = None,
@@ -2079,7 +2526,9 @@ class LiveReportRunner:
             artifacts=artifacts,
             all_passed=all_passed,
             parity=parity or GateResult(True, {"reason": "not_applicable"}),
+            quality=quality or GateResult(True, {"reason": "not_applicable"}),
             kpi_sidecar_path=kpi_sidecar_path,
+            quality_sidecar_path=quality_sidecar_path,
             failure_phase=failure_phase if crash_error else None,
             exception_type=exception_type if crash_error else None,
         )
@@ -2211,6 +2660,10 @@ def run_iterations(config: RunnerConfig) -> dict[str, Any]:
         "thresholds": thresholds_summary(config),
         "partial_data_warning_summary": {
             result.scenario: partial_data_warning_summary(result.final_status)
+            for result in all_results
+        },
+        "quality_summary": {
+            result.scenario: result.quality.details
             for result in all_results
         },
         "results": [asdict(result) for result in all_results],

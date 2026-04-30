@@ -664,7 +664,7 @@ def _load_team_config():
         if config_path.exists():
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-            
+
             # Convert JSON format to tuple format for backward compatibility
             team_roster = [
                 (member.get("manager", ""), member.get("name", ""), member.get("email", ""))
@@ -672,7 +672,7 @@ def _load_team_config():
                 if isinstance(member, dict)
             ]
             managers = config.get("managers", ["Dee Kindrick", "Brian Frazier", "Shams", "All Managers"])
-            
+
             return team_roster, managers
         else:
             # Fallback to default if file doesn't exist
@@ -949,7 +949,7 @@ def _filter_tech_text_fuzzy_all_bucket(tech_field: Any, sub_tech_field: Any, tec
 def _filter_tech_text_enhanced(tech_field: str, sub_tech_field: str, tech: str) -> bool:
     """
     Enhanced technology filtering that prioritizes Sub Technology over Tech field
-    to ensure accurate categorization (e.g., UCCX showing as 'Contact Center Software' 
+    to ensure accurate categorization (e.g., UCCX showing as 'Contact Center Software'
     in Tech field but 'UCCX' in Sub Technology field)
 
     Round 32 / Phase 1.C: any ``All <X>`` bucket (e.g. ``All Contact
@@ -960,9 +960,9 @@ def _filter_tech_text_enhanced(tech_field: str, sub_tech_field: str, tech: str) 
     well-formed but didn't match any of the 30+ explicit regexes;
     see ~/.adoptiq/adoptiq.46198.log line 230.
     """
-    if tech == "All": 
+    if tech == "All":
         return True
-    
+
     # Special handling for "All Contact Center" - match any contact center technology
     if tech == "All Contact Center":
         contact_center_techs = ["Webex Contact Center", "Webex Contact Center Enterprise", "Cisco UCCE", "Cisco UCCX"]
@@ -976,7 +976,7 @@ def _filter_tech_text_enhanced(tech_field: str, sub_tech_field: str, tech: str) 
         if _filter_tech_text_fuzzy_all_bucket(tech_field, sub_tech_field, tech):
             return True
         return False
-    
+
     # Convert to strings and lowercase
     tech_field = str(tech_field).lower() if tech_field else ""
     sub_tech_field = str(sub_tech_field).lower() if sub_tech_field else ""
@@ -985,7 +985,7 @@ def _filter_tech_text_enhanced(tech_field: str, sub_tech_field: str, tech: str) 
     if tech == "Webex Contact Center":
         if _is_wxcce_signature(sub_tech_field) or _is_wxcce_signature(tech_field):
             return False
-    
+
     # Priority 1: Check Sub Technology field first (most specific)
     if sub_tech_field:
         # Handle specific Sub Technology conflicts
@@ -998,12 +998,12 @@ def _filter_tech_text_enhanced(tech_field: str, sub_tech_field: str, tech: str) 
         elif tech == "Webex Contact Center Enterprise" and ("uccx" in sub_tech_field or "ucce" in sub_tech_field):
             # Don't match Webex Contact Center Enterprise if Sub Technology contains UCCX/UCCE
             return False
-        
+
         # Standard pattern matching for Sub Technology
         for pat in TECH_FILTERS[tech]:
             if re.search(pat, sub_tech_field):
                 return True
-    
+
     # Priority 2: Check Tech field with conflict resolution
     if tech_field:
         # Handle specific conflicts where Tech field is ambiguous
@@ -1021,12 +1021,12 @@ def _filter_tech_text_enhanced(tech_field: str, sub_tech_field: str, tech: str) 
                     return tech == "Webex Contact Center"
             # If no Sub Technology, default to Webex Contact Center Enterprise
             return tech == "Webex Contact Center Enterprise"
-        
+
         # For all other Tech field values, use standard pattern matching
         for pat in TECH_FILTERS[tech]:
             if re.search(pat, tech_field):
                 return True
-    
+
     return False
 
 def _normalize_category(cat: str) -> str:
@@ -1093,10 +1093,10 @@ def load_csone_excel(path: Optional[Path]) -> pd.DataFrame:
             rows.append(dict(zip(header, r)))
         df = pd.DataFrame(rows)
         df.columns = [c.strip() for c in df.columns]
-        
+
         if 'col_0' in df.columns:
             df.drop(columns=['col_0'], inplace=True)
-            
+
         title_col = next((c for c in LIKELY_TITLE_COLS if c in df.columns), None)
         desc_col = next((c for c in LIKELY_DESC_COLS if c in df.columns), None)
         _title = df[title_col].fillna("").astype(str) if title_col else pd.Series([""] * len(df), index=df.index)
@@ -1630,11 +1630,11 @@ def _connect_with_keeper():
 def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, Any]:
     """
     Fetch comprehensive data for a specific subscription ID
-    
+
     Args:
         subscription_id: The subscription ID to analyze
         days: Number of days to look back for data
-        
+
     Returns:
         Dictionary containing customer info and all related data
     """
@@ -1643,13 +1643,13 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         # Round 5 / Phase 6.2: subscription IDs are customer-attributable
         # in the operator log stream; demote to DEBUG.
         logger.debug(f"[[SEARCH]] Fetching subscription data for: {subscription_id}")
-        
+
         # Connect to Snowflake
         ctx = _connect_with_keeper()
         if ctx is None:
             raise RuntimeError("Unable to establish Snowflake connection")
         cur = ctx.cursor(snowflake.connector.DictCursor)
-        
+
         dsm_columns = _get_table_columns(ctx, DSM_TABLE)
 
         # First, get account information from subscription (schema-aware column selection)
@@ -1745,7 +1745,7 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
                 'found': False,
                 'error': f'No account found for subscription {subscription_id}'
             }
-        
+
         account_id = account_result['ACCOUNT_ID_C']
         customer_name = account_result['BU_NAME']
         technology = account_result.get('TECHNOLOGY_C', 'Unknown')
@@ -1754,7 +1754,7 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         # Round 3 / Phase 3.2: capture DSM's renewal_risk_category so
         # downstream contract scoring can read it.
         renewal_risk_category = account_result.get('RENEWAL_RISK_CATEGORY')
-        
+
         # Round 5 / Phase 6.2: customer name + account ID is PII (or
         # at least customer-attributable internal data) and should
         # not appear at INFO in the steady-state log stream.  Keep
@@ -1765,7 +1765,7 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
             "[[OK]] Found account: %s (ID: %s) | Technology: %s | Sub-Technology: %s | Status: %s",
             customer_name, account_id, technology, sub_technology, status,
         )
-        
+
         # Set up date filters with parameterized queries.
         # Round 8 / Phase 2.3: bind an explicit Python-computed UTC
         # window-start date instead of ``DATEADD(day, -%s, CURRENT_DATE())``
@@ -1773,54 +1773,54 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         date_filter_task = "AND DATE(CREATED_DATE) >= %s"
         date_filter_pulse_priority = "AND DATE(CREATEDDATE) >= %s"
         _window_start = _utc_window_start_iso(days)
-        
+
         # Fetch all related data
         logger.info(f"[[CHART]] Fetching adoption barriers...")
         ab_query = f"""
-        SELECT *, 'Adoption Barrier' as RECORD_SOURCE 
-        FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW 
-        WHERE record_type_id = '0122T000000GJfTQAW' 
-        AND ACCOUNT_ID_C = %s 
+        SELECT *, 'Adoption Barrier' as RECORD_SOURCE
+        FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
+        WHERE record_type_id = '0122T000000GJfTQAW'
+        AND ACCOUNT_ID_C = %s
         {date_filter_task}
         """
         cur.execute(ab_query, (account_id, _window_start))
         adoption_barriers = cur.fetchall()
-        
+
         logger.info(f"[[LIST]] Fetching action plans...")
         ap_query = f"""
-        SELECT *, 'Action Plan' as RECORD_SOURCE 
-        FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW 
-        WHERE record_type_id = '0122T000000QHBGQA4' 
-        AND ACCOUNT_ID_C = %s 
+        SELECT *, 'Action Plan' as RECORD_SOURCE
+        FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW
+        WHERE record_type_id = '0122T000000QHBGQA4'
+        AND ACCOUNT_ID_C = %s
         {date_filter_task}
         """
         cur.execute(ap_query, (account_id, _window_start))
         action_plans = cur.fetchall()
-        
+
         logger.info(f"[EMOJI] Fetching customer pulse...")
         cp_query = f"""
-        SELECT *, 'Customer Pulse' as RECORD_SOURCE 
-        FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C 
-        WHERE ACCOUNT__C = %s 
+        SELECT *, 'Customer Pulse' as RECORD_SOURCE
+        FROM EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C
+        WHERE ACCOUNT__C = %s
         {date_filter_pulse_priority}
         """
         cur.execute(cp_query, (account_id, _window_start))
         customer_pulse = cur.fetchall()
-        
+
         success_priorities = []
         if is_table_blocked("EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C"):
             logger.info("[[BULLSEYE]] Success priorities query skipped by Snowflake table policy.")
         else:
             logger.info(f"[[BULLSEYE]] Fetching success priorities...")
             sp_query = f"""
-            SELECT *, 'Success Priority' as RECORD_SOURCE 
-            FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C 
-            WHERE RELATED_CUSTOMER__C = %s 
+            SELECT *, 'Success Priority' as RECORD_SOURCE
+            FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C
+            WHERE RELATED_CUSTOMER__C = %s
             {date_filter_pulse_priority}
             """
             cur.execute(sp_query, (customer_name, _window_start))
             success_priorities = cur.fetchall()
-        
+
         # Get team information using schema-aware select expressions.
         logger.info(f"[EMOJI] Fetching team information...")
         team_select_exprs = [
@@ -1846,6 +1846,8 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
         team_data = cur.fetchall()
 
         # Compile results (include cssm_email for single-customer renewal manager fallback)
+        import canonical_metrics as _r531_sub_cm
+        _ab_record_count = _r531_sub_cm.count_total_barriers(adoption_barriers)
         subscription_data = {
             'subscription_id': subscription_id,
             'customer_name': customer_name,
@@ -1861,13 +1863,13 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
             'action_plans': action_plans,
             'customer_pulse': customer_pulse,
             'success_priorities': success_priorities,
-            'total_records': len(adoption_barriers) + len(action_plans) + len(customer_pulse) + len(success_priorities),
+            'total_records': _ab_record_count + len(action_plans) + len(customer_pulse) + len(success_priorities),
             # Round 3 / Phase 3.2: surface DSM's renewal_risk_category
             # so the renewal_risk endpoint can feed it into
             # compute_customer_risk_profile via customer_subs.
             'renewal_risk_category': renewal_risk_category,
             'summary': {
-                'adoption_barriers_count': len(adoption_barriers),
+                'adoption_barriers_count': _ab_record_count,
                 'action_plans_count': len(action_plans),
                 'customer_pulse_count': len(customer_pulse),
                 'success_priorities_count': len(success_priorities),
@@ -1875,17 +1877,17 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
                 'renewal_risk_category': renewal_risk_category,
             }
         }
-        
+
         logger.info(f"[[OK]] Subscription data fetch complete:")
         logger.info(f"   [[DATA]] Total records: {subscription_data['total_records']}")
-        logger.info(f"   [EMOJI] Adoption barriers: {len(adoption_barriers)}")
+        logger.info(f"   [EMOJI] Adoption barrier records: {_ab_record_count}")
         logger.info(f"   [[LIST]] Action plans: {len(action_plans)}")
         logger.info(f"   [EMOJI] Customer pulse: {len(customer_pulse)}")
         logger.info(f"   [[BULLSEYE]] Success priorities: {len(success_priorities)}")
         logger.info(f"   [EMOJI] Team members: {len(team_data)}")
-        
+
         return subscription_data
-        
+
     except Exception as e:
         # Round 5 / Phase 4.3: include a structured ``failure_kind`` /
         # ``error_code`` so the UI and validators can distinguish a
@@ -1939,11 +1941,11 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
 def search_subscriptions_by_customer(customer_name: str, limit: int = 10) -> List[Dict[str, Any]]:
     """
     Search for subscriptions by customer name
-    
+
     Args:
         customer_name: Customer name to search for
         limit: Maximum number of results to return
-        
+
     Returns:
         List of subscription records
     """
@@ -1968,7 +1970,7 @@ def search_subscriptions_by_customer(customer_name: str, limit: int = 10) -> Lis
             "[[SEARCH]] Searching subscriptions for customer (digest=%s)",
             _r12_cust_digest,
         )
-        
+
         ctx = _connect_with_keeper()
         cur = ctx.cursor(snowflake.connector.DictCursor)
         try:
@@ -2007,7 +2009,7 @@ def search_subscriptions_by_customer(customer_name: str, limit: int = 10) -> Lis
                 _needle = (customer_name or '').strip()
             cur.execute(search_query, (f'%{_needle}%', limit))
             results = cur.fetchall()
-            
+
             logger.info(f"[[OK]] Found {len(results)} subscriptions for customer search")
             # Round 12 / Phase 11.6: redact via SHA-256 digest as above.
             logger.debug(
@@ -2017,7 +2019,7 @@ def search_subscriptions_by_customer(customer_name: str, limit: int = 10) -> Lis
             return results
         finally:
             cur.close()
-        
+
     except Exception as e:
         # Round 5 / Phase 4.13: previously this returned ``[]`` on any
         # exception, which is identical to "no subscriptions matched
@@ -2054,20 +2056,20 @@ def search_subscriptions_by_customer(customer_name: str, limit: int = 10) -> Lis
 def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[str, Any]:
     """
     Calculate renewal risk specifically for a subscription
-    
+
     Args:
         subscription_id: The subscription ID to analyze
         days: Number of days to look back for data
-        
+
     Returns:
         Renewal risk analysis for the subscription
     """
     try:
         logger.debug(f"[[BULLSEYE]] Calculating renewal risk for subscription: {subscription_id}")
-        
+
         # Get subscription data
         sub_data = fetch_subscription_data(subscription_id, days)
-        
+
         if not sub_data['found']:
             # Round 3 / Phase 5.3: return ``null`` and a state field
             # instead of ``risk_score=0`` when we genuinely don't
@@ -2081,12 +2083,12 @@ def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[
                 'risk_level': 'UNKNOWN',
                 'state': 'unavailable',
             }
-        
+
         # Convert to DataFrames for analysis
         ab_df = pd.DataFrame(sub_data['adoption_barriers']) if sub_data['adoption_barriers'] else pd.DataFrame()
         ap_df = pd.DataFrame(sub_data['action_plans']) if sub_data['action_plans'] else pd.DataFrame()
         cp_df = pd.DataFrame(sub_data['customer_pulse']) if sub_data['customer_pulse'] else pd.DataFrame()
-        
+
         profile = compute_customer_risk_profile(
             customer_name=sub_data.get("customer_name", subscription_id),
             customer_ab=ab_df,
@@ -2107,7 +2109,7 @@ def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[
         risk_components = profile["components"]
         overall_risk = profile["risk_score_0_10"]
         risk_level = profile["risk_band"]
-        
+
         # Round 8 / Phase 2.7: drive the recommendation buckets off
         # the canonical risk band (``risk_band`` field, populated by
         # ``risk_scoring._risk_band`` against
@@ -2141,7 +2143,7 @@ def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[
             recommendations.extend([
                 "Risk band is UNKNOWN; investigate scoring inputs before recommending action."
             ])
-        
+
         renewal_analysis = {
             'subscription_id': subscription_id,
             'customer_name': sub_data['customer_name'],
@@ -2166,12 +2168,12 @@ def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[
             # offset.
             'analysis_date': datetime.now(timezone.utc).isoformat()
         }
-        
+
         logger.info(f"[[OK]] Renewal risk analysis complete: {risk_level} risk ({overall_risk:.1f}/10)")
         logger.debug(f"[[OK]] Renewal risk customer: {sub_data['customer_name']}")
-        
+
         return renewal_analysis
-        
+
     except Exception as e:
         # Round 5 / Phase 4.1: align the exception path with the
         # ``not found`` path -- return ``risk_score=None`` /
@@ -2199,7 +2201,7 @@ def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
         return pd.DataFrame()
     if not emails:
         return pd.DataFrame()
-    
+
     cur = None
     try:
         cur = ctx.cursor()
@@ -2301,7 +2303,7 @@ def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
 def fetch_arr_data(ctx, account_ids: List[str]) -> pd.DataFrame:
     """
     Fetch ARR/revenue data for accounts from Snowflake
-    
+
     NOTE: ARR fields may not exist in DSM table - this function attempts to query them
     but gracefully falls back to basic customer data if they don't exist.
     """
@@ -2940,13 +2942,13 @@ def fetch_adoption_barriers(ctx, account_ids: List[str], days: int) -> pd.DataFr
     """Fetch adoption barriers with proper resource management and input validation"""
     if ctx is None:
         return pd.DataFrame()
-    if not account_ids: 
+    if not account_ids:
         return pd.DataFrame()
-    
+
     # Validate input parameters
     if days < 1 or days > 365:
         raise ValueError("Days parameter must be between 1 and 365")
-    
+
     cur = None
     try:
         logger.debug(f"Starting adoption barriers query for {len(account_ids)} accounts...")
@@ -2976,7 +2978,7 @@ def fetch_adoption_barriers(ctx, account_ids: List[str], days: int) -> pd.DataFr
         logger.debug("Query executed, fetching results...")
         rows = cur.fetchall()
         logger.debug(f"Fetched {len(rows)} rows from adoption barriers query")
-        if not rows: 
+        if not rows:
             return pd.DataFrame()
         cols = [c[0] for c in cur.description]
         return pd.DataFrame(rows, columns=cols)
@@ -2993,14 +2995,14 @@ def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_
     if ctx is None:
         return "Error", csone_data
     cur = None
-    
+
     try:
         cur = ctx.cursor(snowflake.connector.DictCursor)
         sub_id_column_dsm = 'SUBSCRIPTION_ID'
         account_id_column_dsm = 'ACCOUNT_ID_C'
-        
+
         logging.info(f"Fetching Account ID for Subscription ID '{subscription_id}'...")
-        
+
         # Use parameterized query to prevent SQL injection
         # Column names are hardcoded constants, so this is safe
         # Round 11 / Phase 7.3: when a subscription has multiple
@@ -3029,12 +3031,12 @@ def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_
             )
             cur.execute(legacy_query, (subscription_id,))
             account_result = cur.fetchone()
-        
+
         if not account_result:
             logging.warning(f"No account found for Subscription ID '{subscription_id}' in dsm_assignment_data. Only Excel data will be used.")
             customer_name = "Unknown (Not found in CSConsole)"
             return customer_name, csone_data
-            
+
         account_id = account_result[account_id_column_dsm]
         customer_name = account_result['BU_NAME']
         logging.info(f"Found Account ID: {account_id} for Customer: {customer_name}. Fetching related records for the last {days} days...")
@@ -3077,12 +3079,12 @@ def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_
         else:
             cur.execute(sp_query, (customer_name, _legacy_window_start))
             success_priorities = cur.fetchall()
-        
+
         logging.info(f"Found {len(action_plans)} action plans, {len(adoption_barriers)} adoption barriers, {len(customer_pulse)} pulse records, and {len(success_priorities)} success priorities.")
 
         all_records = csone_data + action_plans + adoption_barriers + customer_pulse + success_priorities
         return customer_name, all_records
-        
+
     except Exception as e:
         logging.error(f"Error in load_and_merge_data_for_subscription: {e}")
         return "Error", csone_data
@@ -3315,7 +3317,7 @@ def fetch_csconsole_success_priorities(ctx, customer_identifiers: List[str], day
     if is_table_blocked("EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C"):
         logger.info("Success priorities table blocked by Snowflake table policy; returning empty result.")
         return pd.DataFrame()
-    
+
     cur = None
     try:
         cur = ctx.cursor()
@@ -5760,7 +5762,7 @@ def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
             r.raise_for_status()
             soup = BeautifulSoup(_response_text_capped(r), "html.parser")
             text = soup.get_text(" ")
-            
+
             # Look for various bug patterns - PRIORITIZE CSC format
             # First, look for CSC format (most important)
             csc_pattern = r"\bCSC[a-zA-Z0-9]{6,10}\b"
@@ -5774,7 +5776,7 @@ def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
                         "source": "help.webex.com",
                         "discovered_at": time.strftime('%Y-%m-%d %H:%M:%S')
                     }
-            
+
             # Only look for other formats if we haven't found CSC format
             # Skip DEFECT/DEF patterns to avoid creating non-standard DEF- format
             other_patterns = [
@@ -5784,14 +5786,14 @@ def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
                 # r"\bDEFECT[_-]?(\d+)\b",   # DEFECT-123 format - SKIPPED
                 r"\bLIMITATION[_-]?(\d+)\b"   # LIMITATION-123 format (only if no CSC found)
             ]
-            
+
             for pattern in other_patterns:
                 for match in re.findall(pattern, text, re.IGNORECASE):
                     if isinstance(match, tuple):
                         bug_id = match[0] if match[0] else match
                     else:
                         bug_id = match
-                    
+
                     # Clean and standardize bug ID
                     bug_id = bug_id.upper().strip()
                     # Only add if it's not already a CSC format and not a numeric-only ID
@@ -5806,7 +5808,7 @@ def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
                                 "source": "help.webex.com",
                                 "discovered_at": time.strftime('%Y-%m-%d %H:%M:%S')
                             }
-                        
+
         except requests.exceptions.RequestException as e:
             logger.warning(f"Failed to fetch {url}: {e}")
             sources_failed += 1
@@ -5825,7 +5827,7 @@ def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
                 'error': str(e) or e.__class__.__name__,
             })
             continue
-    
+
     # Strategy 2: Search for specific bug-related content
     try:
         search_terms = ["known issues", "software bugs", "defects", "limitations", "troubleshooting"]
@@ -5836,26 +5838,26 @@ def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
                 headers = {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 }
-                
+
                 # Round 5 / Phase 4.8: stream + cap to bound memory.
                 r = requests.get(search_url, headers=headers, timeout=timeout, stream=True)
                 r.raise_for_status()
                 soup = BeautifulSoup(_response_text_capped(r), "html.parser")
-                
+
                 # Look for bug-related links
                 bug_links = soup.find_all('a', href=re.compile(r'help\.webex\.com.*(bug|issue|defect|limitation)', re.IGNORECASE))
-                
+
                 for link in bug_links[:3]:  # Limit to 3 per search term
                     try:
                         href = link.get('href', '')
                         if not href.startswith('http'):
                             href = f"https://help.webex.com{href}"
-                        
+
                         # Extract bug ID from URL or text
                         bug_id = re.search(r'(bug|issue|defect|limitation)[_-]?(\d+)', href, re.IGNORECASE)
                         if not bug_id:
                             bug_id = re.search(r'(\d+)', link.get_text())
-                        
+
                         if bug_id:
                             bug_id = bug_id.group(2) if len(bug_id.groups()) >= 2 else bug_id.group(1)
                             # Only use numeric-only IDs if we can't find a proper CSC format
@@ -5870,7 +5872,7 @@ def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
                                     continue
                             else:
                                 bug_id = bug_id.upper()
-                            
+
                             all_bugs[bug_id] = {
                                 "bug_id": bug_id,
                                 "source_url": href,
@@ -5881,9 +5883,9 @@ def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
                     except Exception as e:
                         logger.warning(f"Error processing bug link: {e}")
                         continue
-                
+
                 time.sleep(0.5)  # Rate limiting
-                
+
             except Exception as e:
                 logger.warning(f"Error searching for '{term}': {e}")
                 sources_failed += 1
@@ -5893,7 +5895,7 @@ def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
                     'error': str(e) or e.__class__.__name__,
                 })
                 continue
-                
+
     except Exception as e:
         logger.warning(f"Error in secondary search strategy: {e}")
         fetch_errors.append({
@@ -5901,7 +5903,7 @@ def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
             'kind': 'strategy_error',
             'error': str(e) or e.__class__.__name__,
         })
-    
+
     # Return unique bugs
     # Round 2 / Phase 5.2: subclass list so callers can introspect
     # ``.fetch_errors`` / ``.all_sources_failed`` without changing the
@@ -5939,7 +5941,7 @@ def fetch_help_webex_bugs(timeout=25) -> List[Dict[str,str]]:
 def fetch_status_webex_incident_history_playwright():
     """Use Playwright to fetch historical incidents from status.webex.com/incident/history"""
     logger.info("Fetching historical incidents using Playwright...")
-    
+
     incidents = []
     # Round 5 / Phase 4.16: track per-run parse skip counters at
     # function scope so we can compare "rows seen" vs "rows
@@ -5950,27 +5952,27 @@ def fetch_status_webex_incident_history_playwright():
 
     try:
         from playwright.sync_api import sync_playwright
-        
+
         url = STATUS_HISTORY_HTML_URL
-        
+
         with sync_playwright() as p:
             # Launch browser
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
-            
+
             # Set user agent
             page.set_extra_http_headers({
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             })
-            
+
             # Navigate to page
             logger.info(f"Navigating to {url}...")
             page.goto(url, wait_until="networkidle", timeout=30000)
-            
+
             # Wait for content to load
             logger.info("Waiting for dynamic content...")
             page.wait_for_timeout(10000)  # Wait 10 seconds
-            
+
             # Get page content
             content = page.content()
 
@@ -6029,26 +6031,26 @@ def fetch_status_webex_incident_history_playwright():
                             pass  # noqa: PIE790
                 except Exception as _dump_err:
                     logger.debug(f"Could not write Playwright debug dump: {_dump_err}")
-            
+
             # Parse with BeautifulSoup
             soup = BeautifulSoup(content, 'html.parser')
-            
+
             # Look for PUB references
             pub_matches = soup.find_all(string=re.compile(r'PUB\d{7}'))
             logger.debug(f"Found {len(pub_matches)} PUB references")
-            
+
             # Look for table rows
             rows = soup.find_all('tr')
             _rows_seen = len(rows)
             logger.debug(f"Found {len(rows)} table rows")
-            
+
             # Parse incidents from table rows
             for row in rows:
                 try:
                     cells = row.find_all(['td', 'th'])
                     if len(cells) < 4:  # Need at least Change #, Date, Service, Description
                         continue
-                    
+
                     # Extract PUB reference from first cell
                     pub_ref = None
                     change_cell = cells[0]
@@ -6057,14 +6059,14 @@ def fetch_status_webex_incident_history_playwright():
                         pub_ref = pub_match.group(1)
                     else:
                         continue  # Skip if no PUB reference
-                    
+
                     # Extract other data
                     date_text = cells[1].get_text(strip=True) if len(cells) > 1 else ""
                     location_text = cells[2].get_text(strip=True) if len(cells) > 2 else ""
                     sector_text = cells[3].get_text(strip=True) if len(cells) > 3 else ""
                     service_text = cells[4].get_text(strip=True) if len(cells) > 4 else ""
                     description_text = cells[5].get_text(strip=True) if len(cells) > 5 else ""
-                    
+
                     # Determine impact level
                     impact_level = "Low"  # Default to Low
                     desc_lower = description_text.lower()
@@ -6074,7 +6076,7 @@ def fetch_status_webex_incident_history_playwright():
                         impact_level = "Medium"
                     elif any(word in desc_lower for word in ["minor", "scheduled", "planned", "maintenance"]):
                         impact_level = "Low"
-                    
+
                     # Create incident
                     incident = {
                         "id": f"https://status.webex.com/incident/history?lang=en_US#{pub_ref}",
@@ -6089,7 +6091,7 @@ def fetch_status_webex_incident_history_playwright():
                         "location": location_text,
                         "sector": sector_text
                     }
-                    
+
                     incidents.append(incident)
                     logger.debug(f"SUCCESS: {pub_ref} - {description_text[:50]}...")
 
@@ -6124,12 +6126,12 @@ def fetch_status_webex_incident_history_playwright():
             )
 
         logger.info(f"Successfully parsed {len(incidents)} historical incidents")
-        
+
     except ImportError:
         logger.info("Playwright not available, skipping...")
     except Exception as e:
         logger.warning(f"Playwright failed: {e}")
-    
+
     return incidents
 
 def fetch_status_incidents(timeout=25, days_back: Optional[int] = None) -> List[Dict[str,str]]:
@@ -6163,7 +6165,7 @@ def fetch_status_incidents(timeout=25, days_back: Optional[int] = None) -> List[
     _window_default_used = days_back is None
 
     data = []
-    
+
     # First, try to get incidents from storage
     if storage_available:
         try:
@@ -6173,12 +6175,12 @@ def fetch_status_incidents(timeout=25, days_back: Optional[int] = None) -> List[
                     si['_from_storage'] = True
                 data.extend(stored_incidents)
                 logger.info(f"Loaded {len(stored_incidents)} incidents from historical storage")
-                
+
                 stats = get_incident_statistics()
                 logger.info(f"Storage contains {stats['total']} total incidents from {len(stats['sources'])} sources")
         except Exception as e:
             logger.warning(f"Error loading from storage: {e}")
-    
+
     # Primary strategy: JSON API (returns up to 50 incidents with full detail)
     json_api_succeeded = False
     try:
@@ -6188,7 +6190,7 @@ def fetch_status_incidents(timeout=25, days_back: Optional[int] = None) -> List[
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json',
         }
-        
+
         # Round 5 / Phase 4.7: stream + cap the response body before
         # parsing JSON.  An upstream that returns a malformed
         # multi-GB body (or a confused proxy serving a binary blob)
@@ -6199,50 +6201,50 @@ def fetch_status_incidents(timeout=25, days_back: Optional[int] = None) -> List[
         api_data = _response_json_capped(r)
         incidents_list = api_data.get('incidents', []) if isinstance(api_data, dict) else []
         logger.info(f"JSON API returned {len(incidents_list)} incidents")
-        
+
         # Round 2 / Phase 5.5: preserve the Statuspage 'critical' label
         # instead of collapsing it into 'High'.  Critical = full outage
         # / customer-impacting; downstream scoring and the EI / leader
         # dashboards now have a distinct band so a critical incident
         # is not visually equal to a single high-impact event.
         impact_map = {'none': 'Low', 'minor': 'Medium', 'major': 'High', 'critical': 'Critical'}
-        
+
         for inc in incidents_list:
             try:
                 inc_id = inc.get('id', '')
                 title = inc.get('name', '').strip()
                 if not title:
                     continue
-                
+
                 inc_status = inc.get('status', 'resolved')
                 if inc_status in ('investigating', 'identified', 'monitoring'):
                     mapped_status = 'active'
                 else:
                     mapped_status = 'resolved'
-                
+
                 impact_raw = inc.get('impact', 'minor')
                 impact_level = impact_map.get(impact_raw, 'Medium')
-                
+
                 published = inc.get('created_at', '')
                 resolved_at = inc.get('resolved_at', '')
                 locations = inc.get('locations', '')
                 pub_id = inc.get('publicationId', '')
                 inc_number = inc.get('incidentNumber', '')
-                
+
                 link = f"https://status.webex.com/incident/history?lang=en_US#{inc_id}"
-                
+
                 description = ''
                 updates = inc.get('incident_updates', [])
                 if updates:
                     latest = updates[0]
                     description = latest.get('body', '')[:500]
-                
+
                 affected = []
                 for comp in inc.get('components', []):
                     cname = comp.get('name', '')
                     if cname:
                         affected.append(cname)
-                
+
                 data.append({
                     "id": inc_id,
                     "title": title,
@@ -6261,13 +6263,13 @@ def fetch_status_incidents(timeout=25, days_back: Optional[int] = None) -> List[
             except Exception as e:
                 logger.warning(f"Error processing JSON API incident: {e}")
                 continue
-        
+
         json_api_succeeded = True
         logger.info(f"JSON API processed: {len(incidents_list)} incidents added")
-        
+
     except Exception as e:
         logger.warning(f"Error fetching JSON API: {e}")
-    
+
     # Supplement: incidents.rss (always runs to catch items the JSON API may not include)
     try:
         logger.info("Supplementing incidents from incidents.rss...")
@@ -6786,11 +6788,11 @@ def _correlate_incidents_with_cases(ext_incidents: List[Dict], csone_df: pd.Data
     Correlate status.webex.com incidents with customer service cases based on:
     1. Temporal proximity (incident date vs case open date)
     2. Keyword matching (incident title/description vs case title/description)
-    
+
     Returns a dictionary mapping incident_id to list of correlated cases
     """
     correlations = {}
-    
+
     # Round 4 / Phase 3.1: previously bailed out when ``csone_df`` was
     # empty even though the function accepted ``ab_df``.  Customer
     # adoption barriers can also reference outage language ("Webex
@@ -6801,18 +6803,18 @@ def _correlate_incidents_with_cases(ext_incidents: List[Dict], csone_df: pd.Data
     ab_empty = ab_df is None or getattr(ab_df, 'empty', True)
     if not ext_incidents or (csone_empty and ab_empty):
         return correlations
-    
+
     from datetime import datetime, timedelta
     import re
-    
+
     for incident in ext_incidents:
         incident_id = (incident.get('id') or '')
         incident_title = (incident.get('title') or '').lower()
         incident_desc = (incident.get('description') or '').lower()
         incident_published = (incident.get('published') or '')
-        
+
         correlated_cases = []
-        
+
         # Try to parse incident date.
         # Round 3 / Phase 4.6: status.webex.com publishes ISO 8601
         # timestamps like ``2024-03-04T14:23:00Z`` which the previous
@@ -6863,7 +6865,7 @@ def _correlate_incidents_with_cases(ext_incidents: List[Dict], csone_df: pd.Data
                         "Cross-reference legacy date parse failed: %s",
                         _legacy_err,
                     )
-        
+
         incident_keywords = set(re.findall(r'\b\w{4,}\b', incident_title + ' ' + incident_desc))
 
         def _scan_dataframe(_df, *, source: str, title_cols, desc_cols, date_cols, case_cols, customer_cols):
@@ -6949,7 +6951,7 @@ def _correlate_incidents_with_cases(ext_incidents: List[Dict], csone_df: pd.Data
 
         if correlated_cases:
             correlations[incident_id] = correlated_cases
-    
+
     return correlations
 
 def cross_reference_refs(ab_df: pd.DataFrame, csone_df: pd.DataFrame, ext_bugs: List[Dict[str,str]]):
@@ -6994,7 +6996,7 @@ def cross_reference_refs(ab_df: pd.DataFrame, csone_df: pd.DataFrame, ext_bugs: 
     except Exception as e:
         logger.warning(f"Error creating matched dataframe: {e}")
         matched_df = pd.DataFrame(columns=["source","id","case","customer_name","title","sub_technology","matches"])
-    
+
     return matches, matched_df
 
 # --------------------------- CircuIT client ---------------------------
@@ -7390,25 +7392,25 @@ class CircuitChatClient:
             # classified ERROR string that the UI/Excel can surface.
             return f"ERROR: {_kind}: {_err_text}"
 
-def create_enhanced_word_report(manager: str, technology: str, days: int, ab_data: pd.DataFrame, 
+def create_enhanced_word_report(manager: str, technology: str, days: int, ab_data: pd.DataFrame,
                                csone_data: pd.DataFrame, ai_insights: Dict, ext_bugs: List[Dict] = None,
                                ext_incidents: List[Dict] = None) -> Optional[str]:
     """Create an enhanced Word report using the new executive formatter.
     Returns None if executive_report_formatter module is not available (graceful fallback)."""
     try:
         from executive_report_formatter import ExecutiveReportFormatter
-        
+
         # Create executive formatter
         formatter = ExecutiveReportFormatter()
-        
+
         # Create enhanced document
         filepath = formatter.create_executive_report(
             manager, technology, days, ab_data, csone_data, ai_insights, ext_bugs, ext_incidents
         )
-        
+
         logger.info(f"Enhanced Word report created successfully: {filepath}")
         return filepath
-        
+
     except ImportError:
         # executive_report_formatter not available - skip enhanced report (base report still generated)
         logger.info("executive_report_formatter not available - enhanced Word report skipped")
@@ -7426,21 +7428,21 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
         from docx.oxml import OxmlElement
         from docx.oxml.ns import qn
         import io
-        
+
         # Try to create charts using matplotlib
         try:
             import matplotlib.pyplot as plt
             import matplotlib.patches as mpatches
-            
+
             # Add dashboard heading
             dashboard_heading = doc.add_heading("Portfolio Dashboard - At-A-Glance", level=2)
             if dashboard_heading.runs:
                 dashboard_heading.runs[0].font.color.rgb = RGBColor(0, 123, 199)
-            
+
             # Create figure with subplots for multiple charts
             fig = plt.figure(figsize=(12, 8))
             fig.patch.set_facecolor('white')
-            
+
             # Chart 1: Portfolio Health Metrics (Top Left)
             ax1 = plt.subplot(2, 2, 1)
             # Round 11 / Phase 8.5: the previous chart shared a single
@@ -7484,7 +7486,7 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             for i, (bar, value, label) in enumerate(zip(bars, values, metrics)):
                 _unit = _metric_units.get(label, '')
                 ax1.text(value, i, f'  {int(value)} {_unit}'.rstrip(), va='center', fontweight='bold')
-            
+
             # Chart 2: Risk Distribution (Top Right)
             # Round 3: split the legacy "High Risk" wedge — which was
             # actually CRITICAL + HIGH — into two distinct slices so the
@@ -7623,7 +7625,7 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                 autotext.set_color('white')
                 autotext.set_fontweight('bold')
             ax2.set_title('Customer Risk Distribution', fontsize=12, fontweight='bold')
-            
+
             # Chart 3: Case Severity Distribution (Bottom Left)
             ax3 = plt.subplot(2, 2, 3)
             severity_labels = ['P1 Critical', 'P2 High', 'P3 Medium', 'P4+ Low']
@@ -7711,7 +7713,7 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                 height = bar.get_height()
                 ax3.text(bar.get_x() + bar.get_width()/2., height,
                         f'{int(value)}', ha='center', va='bottom', fontweight='bold')
-            
+
             # Chart 4: Trend Indicator (Bottom Right)
             ax4 = plt.subplot(2, 2, 4)
             # Round 3 / Phase 1.3: do not fabricate "Stable" when no
@@ -7725,9 +7727,9 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                 else 'n/a (not computed)'
             )
             health_score = portfolio_metrics.get('health_score', 'C')
-            
+
             # Create a simple gauge/indicator
-            ax4.text(0.5, 0.6, f'Portfolio Health', ha='center', va='center', 
+            ax4.text(0.5, 0.6, f'Portfolio Health', ha='center', va='center',
                     fontsize=14, fontweight='bold')
             # Round 13 / Phase 5.7: resolve the Grade colour through
             # ``canonical_metrics.HEALTH_GRADE_COLORS`` instead of
@@ -7747,7 +7749,7 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             ax4.text(0.5, 0.4, f'Grade: {health_score}', ha='center', va='center',
                     fontsize=32, fontweight='bold',
                     color=_r13_grade_color_hex)
-            ax4.text(0.5, 0.2, f'Trend: {trend_data}', ha='center', va='center', 
+            ax4.text(0.5, 0.2, f'Trend: {trend_data}', ha='center', va='center',
                     fontsize=12, style='italic')
             ax4.set_xlim(0, 1)
             ax4.set_ylim(0, 1)
@@ -7758,7 +7760,7 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                 f"BEMS split: break-fix={portfolio_metrics.get('break_fix_cases', 0)} | provisioning={portfolio_metrics.get('provisioning_cases', 0)}",
                 fontsize=9,
             )
-            
+
             # Round 12 / Phase 8.2: ``fig.text`` placed at y=0.01 risks
             # being clipped by ``tight_layout()`` on some matplotlib
             # backends (especially when the four subplots already eat
@@ -7797,7 +7799,7 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                 plt.close(fig)
             except Exception:
                 plt.close()
-            
+
             # Add chart to document
             # Round 13 / Phase 8.6 + 9.10: previously ``add_picture``
             # was called without an alt-text follow-up, so the
@@ -7818,7 +7820,7 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                 )
             except Exception:
                 pass
-            
+
             # Add space after chart
             doc.add_paragraph()
 
@@ -7829,24 +7831,24 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                 note.add_run(
                     f'{unknown_priority_cases} TAC case(s) had unknown or non-standard priority labels and are excluded from P1/P2/P3/P4 buckets.'
                 )
-            
+
             return True
-            
+
         except ImportError:
             # If matplotlib not available, create text-based visual dashboard
             doc.add_heading("Portfolio Dashboard - At-A-Glance", level=2)
-            
+
             # Create a simple table dashboard
             table = doc.add_table(rows=3, cols=4)
             table.style = 'Light Grid Accent 1'
-            
+
             # Row 1: Metrics
             cells = table.rows[0].cells
             cells[0].text = f"👥 Customers\n{portfolio_metrics.get('total_customers', 0)}"
             cells[1].text = f"⚠️ Barriers\n{portfolio_metrics.get('total_barriers', 0)}"
             cells[2].text = f"📞 TAC Cases\n{portfolio_metrics.get('total_cases', 0)}"
             cells[3].text = f"🔴 BEMS\n{portfolio_metrics.get('bems_count', 0)}"
-            
+
             # Row 2: Risk
             # Round 3 / Phase 1.4: ``high_risk_customers`` from
             # ``compute_portfolio_risk_summary`` is band CRITICAL +
@@ -7859,7 +7861,7 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
             cells[1].text = f"🟡 Medium Risk\n{portfolio_metrics.get('medium_risk_customers', 0)}"
             cells[2].text = f"🟢 Low Risk\n{portfolio_metrics.get('low_risk_customers', 0)}"
             cells[3].text = f"✅ Healthy\n{portfolio_metrics.get('healthy_customers', 0)}"
-            
+
             # Row 3: Severity
             cells = table.rows[2].cells
             p1_cases = int(portfolio_metrics.get('critical_p1', portfolio_metrics.get('p1_cases', 0)) or 0)
@@ -7877,7 +7879,7 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                 else 'n/a (not computed)'
             )
             cells[3].text = f"Grade: {portfolio_metrics.get('health_score', 'C')}\nTrend: {_trend_cell}"
-            
+
             # Style the table
             for row in table.rows:
                 for cell in row.cells:
@@ -7887,7 +7889,7 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
                         for run in paragraph.runs:
                             run.font.size = Pt(11)
                             run.font.bold = True
-            
+
             unknown_priority_cases = int(portfolio_metrics.get('unknown_priority_cases', 0) or 0)
             if unknown_priority_cases > 0:
                 note = doc.add_paragraph()
@@ -7898,7 +7900,7 @@ def add_executive_visual_dashboard(doc, portfolio_metrics: dict):
 
             doc.add_paragraph()
             return True
-            
+
     except Exception as e:
         logger.warning(f"Could not create visual dashboard: {e}")
         return False
@@ -7909,11 +7911,11 @@ def create_executive_title_page(doc, manager: str, technology: str, days: int, p
         from docx.shared import Pt, RGBColor, Inches
         from docx.enum.text import WD_ALIGN_PARAGRAPH
         from datetime import datetime
-        
+
         # Add spacing at top
         doc.add_paragraph()
         doc.add_paragraph()
-        
+
         # Main title
         title = doc.add_heading(f"{manager}'s Portfolio", level=1)
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -7921,21 +7923,21 @@ def create_executive_title_page(doc, manager: str, technology: str, days: int, p
             title.runs[0].font.size = Pt(28)
             title.runs[0].font.bold = True
             title.runs[0].font.color.rgb = RGBColor(0, 123, 199)
-        
+
         # Subtitle
         subtitle = doc.add_paragraph(f"{technology} Executive Analysis")
         subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
         if subtitle.runs:
             subtitle.runs[0].font.size = Pt(18)
             subtitle.runs[0].font.color.rgb = RGBColor(100, 100, 100)
-        
+
         doc.add_paragraph()
-        
+
         # Key metrics box (if provided)
         if portfolio_metrics:
             metrics_para = doc.add_paragraph()
             metrics_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
+
             # Round 12 / Phase 10.5: previously stamped the title page
             # via ``datetime.now().strftime(...)`` (HOST-LOCAL clock,
             # no timezone marker).  An operator running the same plan
@@ -7960,10 +7962,12 @@ Report Date: {_r12_now_utc.strftime("%B %d, %Y")} UTC
             if 'total_customers' in portfolio_metrics and portfolio_metrics['total_customers'] is not None:
                 metrics_text += f"\nTotal Customers: {portfolio_metrics['total_customers']}"
             if 'total_barriers' in portfolio_metrics and portfolio_metrics['total_barriers'] is not None:
-                metrics_text += f"\nActive Barriers: {portfolio_metrics['total_barriers']}"
+                # Round 53: this value is the distinct total barrier count,
+                # not the active/open-only count.
+                metrics_text += f"\nTotal Adoption Barriers: {portfolio_metrics['total_barriers']}"
             if 'total_cases' in portfolio_metrics and portfolio_metrics['total_cases'] is not None:
                 metrics_text += f"\nSupport Cases: {portfolio_metrics['total_cases']}"
-            
+
             metrics_para.add_run(metrics_text.strip())
             if metrics_para.runs:
                 metrics_para.runs[0].font.size = Pt(12)
@@ -7980,17 +7984,17 @@ Report Date: {_r12_now_utc.strftime("%B %d, %Y")} UTC
             if meta.runs:
                 meta.runs[0].font.size = Pt(12)
                 meta.runs[0].font.color.rgb = RGBColor(100, 100, 100)
-        
+
         doc.add_paragraph()
         doc.add_paragraph()
-        
+
         notice = doc.add_paragraph("CONFIDENTIAL - Executive Leadership Review")
         notice.alignment = WD_ALIGN_PARAGRAPH.CENTER
         if notice.runs:
             notice.runs[0].font.size = Pt(10)
             notice.runs[0].font.italic = True
             notice.runs[0].font.color.rgb = RGBColor(150, 150, 150)
-        
+
         # Page break after title
         doc.add_page_break()
 
@@ -8106,10 +8110,10 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
     markdown_content = markdown_content.replace('**TECHNOLOGY FOCUS:**', 'TECHNOLOGY FOCUS:')
     markdown_content = markdown_content.replace('**DATA:**', 'DATA:')
     markdown_content = markdown_content.replace('**DATA SOURCES:**', 'DATA SOURCES:')
-    
+
     # Ensure headings are on their own lines
     markdown_content = re.sub(r'([^\n])(\n)(#{1,5} )', r'\1\n\n\3', markdown_content)
-    
+
     # Handle different parameter types for backward compatibility
     if isinstance(doc_or_path, str):
         from docx import Document
@@ -8124,19 +8128,19 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
         doc = doc_or_path
         should_save = False
         file_path = None
-    
+
     # Set up professional styles first - Executive-ready formatting
     try:
         from docx.shared import Pt, RGBColor, Inches
         from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
-        
+
         # Configure Normal style for maximum readability
         style = doc.styles['Normal']
         font = style.font
         font.name = 'Calibri'
         font.size = Pt(11)
         font.color.rgb = RGBColor(0, 0, 0)  # Black text for clarity
-        
+
         # Set document margins for professional appearance
         try:
             sections = doc.sections
@@ -8147,7 +8151,7 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
                 section.right_margin = Inches(1)
         except Exception as _margin_err:
             logger.debug(f"Margin setup skipped: {_margin_err}")
-        
+
         # Configure Heading styles with professional hierarchy
         for level in range(1, 5):
             try:
@@ -8155,7 +8159,7 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
                 heading_style.font.name = 'Calibri'
                 heading_style.font.bold = True
                 heading_style.font.color.rgb = RGBColor(0, 123, 199)  # Cisco blue for visual hierarchy
-                
+
                 # Set appropriate sizes for clear hierarchy
                 if level == 1:
                     heading_style.font.size = Pt(18)
@@ -8173,12 +8177,12 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
                     heading_style.font.size = Pt(11)
                     heading_style.paragraph_format.space_before = Pt(6)
                     heading_style.paragraph_format.space_after = Pt(2)
-                
+
                 # Keep headings with their content
                 heading_style.paragraph_format.keep_with_next = True
             except Exception as _style_err:
                 logger.debug(f"Heading style setup skipped for level {level}: {_style_err}")
-        
+
         # Configure List Bullet style for professional appearance
         try:
             bullet_style = doc.styles['List Bullet']
@@ -8189,7 +8193,7 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
             bullet_style.paragraph_format.left_indent = Inches(0.25)
         except Exception as _bs_err:
             logger.debug("List Bullet style config skipped: %s", _bs_err)
-            
+
         # Configure List Number style
         try:
             number_style = doc.styles['List Number']
@@ -8200,10 +8204,10 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
             number_style.paragraph_format.left_indent = Inches(0.25)
         except Exception as _ns_err:
             logger.debug("List Number style config skipped: %s", _ns_err)
-            
+
     except Exception as _style_err:
         logger.debug("Document style configuration skipped: %s", _style_err)
-    
+
     # Round 15 / Phase 3.1: the section heading argument used to land
     # on Heading 1, so every per-customer / per-section ``append_to_word_report``
     # call stamped another H1 entry into the docx (the gold report
@@ -8218,26 +8222,26 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
     if len(doc.paragraphs) > 1:
         # Add some spacing
         doc.add_paragraph()
-    
+
     # Helper function to process text and remove ALL markdown while preserving formatting
     def clean_and_format_text(text, paragraph):
         """Process text to remove ** and apply proper bold formatting - NO ** SYMBOLS SHOWN"""
         # First, handle the case where ** might not be paired correctly
         # Count the number of ** - if odd, just remove all of them
         count = text.count('**')
-        
+
         if count == 0:
             # No bold markers, just add clean text
             paragraph.add_run(text.strip())
             return paragraph
-        
+
         if count == 1 or count % 2 != 0:
             # Odd number of ** - malformed markdown, just remove all ** and don't try to bold
             clean_text = text.replace('**', '')
             run = paragraph.add_run(clean_text.strip())
             run.bold = True  # Make it bold since it was probably meant to be emphasized
             return paragraph
-        
+
         # Even number of ** - process pairs for bold formatting
         # The ** symbols themselves are NOT added - only used to determine bold sections
         parts = text.split('**')
@@ -8248,20 +8252,20 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
                 if idx % 2 == 1:  # Odd indices are bold (text between ** pairs)
                     run.bold = True
         return paragraph
-    
+
     # Process content with professional executive formatting
     # Remove ALL markdown symbols and convert to clean Word formatting
     lines = markdown_content.split('\n')
     i = 0
-    
+
     while i < len(lines):
         line = lines[i].strip()
-        
+
         # Skip empty lines
         if not line:
             i += 1
             continue
-        
+
         # Round 15 / Phase 3.1: previously every markdown ``# heading``
         # in LLM-generated content collapsed onto Heading 1, producing
         # the 38-H1 gold docx (and a TOC where every customer section
@@ -8293,7 +8297,7 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
         elif line.startswith('#'):
             heading_text = line.lstrip('#').strip().replace('**', '')
             h = doc.add_heading(heading_text, level=_r15_word_styling.markdown_heading_level(1))
-        
+
         # Handle bullet points - remove ALL markdown symbols
         elif line.startswith(('* ', '- ', '• ')):
             bullet_text = line[2:].strip()
@@ -8306,7 +8310,7 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
                 p.paragraph_format.line_spacing = 1.15
             except Exception as _fmt_err:
                 logger.debug("Bullet paragraph format skipped: %s", _fmt_err)
-        
+
         # Handle numbered lists - remove ALL markdown symbols
         # Round 11 / Phase 9.4: previous match required the digit at
         # position 0 followed by ``. `` / ``) `` at positions 1-2,
@@ -8325,7 +8329,7 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
                 p.paragraph_format.line_spacing = 1.15
             except Exception as _fmt_err:
                 logger.debug("Numbered list paragraph format skipped: %s", _fmt_err)
-        
+
         # Regular paragraphs - use helper to clean ALL markdown
         else:
             p = doc.add_paragraph()
@@ -8342,19 +8346,19 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
                     p.paragraph_format.first_line_indent = Inches(0)  # No indent - keep clean
             except Exception as _fmt_err:
                 logger.debug("Paragraph format skipped: %s", _fmt_err)
-        
+
         i += 1
-    
+
     # Save the document if we created it from a path
     if should_save and file_path:
         doc.save(file_path)
         return file_path
-    
+
     return doc
 
 def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: dict = None, manager: str = "Portfolio Manager", technology: str = "Technology Analysis", days: int = 90):
     """Enhanced Excel workbook writer with professional formatting"""
-    
+
     # Handle different parameter combinations for backward compatibility
     if isinstance(sheets_or_path, pd.DataFrame) and isinstance(title_or_sheets, str):
         # Called as write_excel_workbook(dataframe, filename, title)
@@ -8384,7 +8388,7 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
         # Default case - assume it's a path and sheets
         base_path = str(sheets_or_path)
         sheets = title_or_sheets if title_or_sheets else {}
-    
+
     # Round 25 / Phase D: prior to this round the writer wrapped the
     # call body in a `try: from enhanced_excel_formatter ... except: ...`
     # fallback.  ``enhanced_excel_formatter`` was never present in the
@@ -9123,10 +9127,13 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
         briefing.append("---")
 
     # Metrics
-    total_ab = len(ab_df) if ab_df is not None else 0
+    import canonical_metrics as _r531_metrics_cm
+    # Round 53.1: the cited ID-backed barrier metric is a distinct barrier
+    # record count, not the raw export row count.
+    total_ab = _r531_metrics_cm.count_total_barriers(ab_df)
     total_csone = len(csone_df) if csone_df is not None else 0
     esc_rate, chronic_rate = _calc_rates(csone_df)
-    
+
     # Calculate BEMS metrics (PRIMARY: Transaction ID column from CSOne Excel)
     total_bems = 0
     bems_rate = 0.0
@@ -9139,18 +9146,21 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
         # returns 0% instead of leaking a divide-by-zero into the
         # briefing book.
         bems_rate = _safe_div(total_bems, total_csone) * 100
-    
+
     # CSConsole metrics
     csconsole_action_plans = csconsole_data.get('action_plans', pd.DataFrame()) if csconsole_data else pd.DataFrame()
     csconsole_customer_pulse = csconsole_data.get('customer_pulse', pd.DataFrame()) if csconsole_data else pd.DataFrame()
     csconsole_success_priorities = csconsole_data.get('success_priorities', pd.DataFrame()) if csconsole_data else pd.DataFrame()
     csconsole_adoption_barriers = csconsole_data.get('adoption_barriers', pd.DataFrame()) if csconsole_data else pd.DataFrame()
-    
+
     total_action_plans = len(csconsole_action_plans) if not csconsole_action_plans.empty else 0
     total_customer_pulse = len(csconsole_customer_pulse) if not csconsole_customer_pulse.empty else 0
     total_success_priorities = len(csconsole_success_priorities) if not csconsole_success_priorities.empty else 0
-    total_csconsole_adoption_barriers = len(csconsole_adoption_barriers) if not csconsole_adoption_barriers.empty else 0
-    
+    total_csconsole_adoption_barriers = (
+        _r531_metrics_cm.count_total_barriers(csconsole_adoption_barriers)
+        if not csconsole_adoption_barriers.empty else 0
+    )
+
     briefing.append("### Key Metrics:")
     briefing.append(
         f"* **Adoption Barriers Found:** {total_ab} "
@@ -9166,14 +9176,14 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
     )
     briefing.append(f"* **Inferred Escalation Rate (from CSOne):** {esc_rate}%")
     briefing.append("---")
-    
+
     briefing.append("### CSConsole Data:")
     briefing.append(f"* **Action Plans:** {total_action_plans}")
     briefing.append(f"* **Customer Pulse Records:** {total_customer_pulse}")
     briefing.append(f"* **Success Priorities:** {total_success_priorities}")
     briefing.append(f"* **CSConsole Adoption Barriers:** {total_csconsole_adoption_barriers}")
     briefing.append("---")
-    
+
     if engagement_counts is not None and not engagement_counts.empty:
         # FIXED: Show ALL customers by engagement volume
         briefing.append("### All Customers by Engagement Volume:")
@@ -9218,7 +9228,7 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
         briefing.append(json.dumps({str(k):int(v) for k,v in by_sub.items() if pd.notna(k)}, indent=2))
         briefing.append("\n### All Adoption Barrier Titles for Thematic Analysis:")
         briefing.append("\n".join("- " + str(title) for title in ab_df['title'].dropna()))
-        
+
         # Add full adoption barrier details with source citations
         briefing.append("\n### Complete Adoption Barrier Details (with Source Citations):")
         for _, row in ab_df.iterrows():
@@ -9245,7 +9255,7 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
             briefing.append(f"**Title:** {title}")
             briefing.append(f"**Full Description:** {description}")
             briefing.append("---")
-        
+
         briefing.append("---")
     else:
         briefing.append("No Adoption Barrier data found in scope.")
@@ -9288,16 +9298,16 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
         csone_df_display['display_id'] = csone_df_display.get('SR Number', csone_df_display.get('Case Number'))
         briefing.append("### Complete CSOne (TAC) Case Data:")
         briefing.append(_json_lite(csone_df_display, limit=len(csone_df_display), keep=["display_id","Title","Owner Email","customer_name","bemscsc_refs"]))
-        
+
         # Add BEMS-specific analysis using canonical detector
         csone_norm = add_case_lifecycle_fields(csone_df)
         bems_mask = detect_bems_mask(csone_norm)
         bems_cases = csone_norm[bems_mask]
-        
+
         if not bems_cases.empty:
                 briefing.append(f"\n### BEMS Escalation Analysis ({len(bems_cases)} cases requiring Back End Engineering):")
                 briefing.append("**CRITICAL INSIGHT:** BEMS (Back End Engineering Management System) escalations indicate complex technical issues that TAC could not resolve independently. These represent high-severity, high-complexity problems requiring specialized engineering expertise.")
-                
+
                 # Round 12 / Phase 3.1: ``groupby('customer_name')`` was
                 # raw, so ``"acme co."`` and ``"Acme Co"`` produced
                 # two separate rows in the BEMS-by-customer block --
@@ -9326,14 +9336,14 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                     'Transaction ID': lambda x: list(x) if 'Transaction ID' in bems_cases.columns else []  # List of Transaction IDs
                 })
                 bems_by_customer['bems_count'] = bems_cases.groupby('_r12_cust_key').size()
-                
+
                 briefing.append("\n**BEMS Cases by Customer (with BEMS IDs):**")
                 for _cust_key, row in bems_by_customer.iterrows():
                     customer = row.get('customer_name') or _cust_key
                     count = row['bems_count']
                     bems_refs = row.get('bemscsc_refs', [])
                     transaction_ids = row.get('Transaction ID', [])
-                    
+
                     # Extract actual BEMS IDs from both sources
                     bems_ids = set()
                     for ref in bems_refs:
@@ -9342,14 +9352,14 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                     for tid in transaction_ids:
                         if tid and str(tid) != 'nan':
                             bems_ids.update(extract_bems_ids_from_row(pd.Series({"Transaction ID": tid})))
-                    
+
                     # Format BEMS IDs with brackets for consistent citation
                     bems_id_list = ', '.join([f'[{bid}]' for bid in sorted(bems_ids)]) if bems_ids else 'No specific BEMS IDs found'
                     briefing.append(
                         f"- **{customer}:** {count} BEMS escalation{'s' if count > 1 else ''} | **BEMS IDs:** {bems_id_list} "
                         f"{format_inline_source('BEMS Escalations', fields=['Transaction ID', 'bemscsc_refs'])}"
                     )
-                
+
                 # FIXED: Show ALL BEMS cases for complete analysis
                 briefing.append(f"\n**All BEMS Cases with Full Details (for Predictive Risk Assessment):**")
                 for _, row in bems_cases.iterrows():
@@ -9372,7 +9382,7 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                         customer = _raw_customer or 'Unknown Customer'
                     bems_refs = row.get('bemscsc_refs', 'No BEMS refs')
                     transaction_id = row.get('Transaction ID', '')
-                    
+
                     # Show both sources of BEMS info
                     bems_info = []
                     extracted_ids = extract_bems_ids_from_row(row)
@@ -9382,10 +9392,10 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                         bems_info.append(f"BEMS Refs: {bems_refs}")
                     if extracted_ids:
                         bems_info.append(f"Extracted IDs: {', '.join(extracted_ids)}")
-                    
+
                     bems_detail = ' | '.join(bems_info) if bems_info else 'BEMS detected but ID not specified'
                     briefing.append(f"- **TAC Case: {case_number}** ({customer}): {title} | **{bems_detail}**")
-        
+
         # Add full CSOne case details with source citations
         briefing.append("\n### Complete CSOne (TAC) Case Details (with Source Citations):")
         for _, row in csone_df.iterrows():
@@ -9407,7 +9417,7 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
             except Exception:
                 customer = _raw_customer or 'Unknown Customer'
             owner = row.get('Owner Email', 'Unknown Owner')
-            
+
             # Format with source citation
             briefing.append(f"\n**TAC Case: {case_number}**")
             briefing.append(f"**Customer:** {customer}")
@@ -9417,7 +9427,7 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
             if row.get('bemscsc_refs'):
                 briefing.append(f"**BEMS References:** {row.get('bemscsc_refs')}")
             briefing.append("---")
-        
+
         briefing.append("---")
     else:
         briefing.append("No CSOne (TAC) data found in scope.")
@@ -9436,7 +9446,7 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
 
         briefing.append("\n### CSConsole Data Analysis:")
         briefing.append("**CRITICAL:** CSConsole data provides comprehensive customer success insights including strategic action plans, real-time customer pulse, success priorities, and additional adoption barriers. This data is essential for understanding the complete customer journey and success metrics.")
-        
+
         # Action Plans
         if not csconsole_action_plans.empty:
             briefing.append(f"\n**Action Plans ({len(csconsole_action_plans)} records):**")
@@ -9455,7 +9465,7 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                 briefing.append(f"  Status: {status} | Priority: {priority}")
                 if description and description != 'No Description':
                     briefing.append(f"  Description: {description}")
-        
+
         # Customer Pulse - Summary by customer first (quick reference for AI)
         if not csconsole_customer_pulse.empty:
             cust_col = next((c for c in ['BU_NAME', 'CUSTOMER_NAME', 'ACCOUNT__C'] if c in csconsole_customer_pulse.columns), None)
@@ -9483,7 +9493,7 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                 cssm = row.get('CSSM_EMAIL', 'Unknown CSSM')
                 briefing.append(f"- **Pulse [{pulse_id}]** ({customer}, CSSM: {cssm})")
                 briefing.append(f"  Pulse Score: {pulse_score} | Sentiment: {sentiment} | Engagement: {engagement}")
-        
+
         # Success Priorities - FIXED: Show ALL records
         if not csconsole_success_priorities.empty:
             briefing.append(f"\n**All Success Priorities ({len(csconsole_success_priorities)} records):**")
@@ -9500,7 +9510,7 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                 briefing.append(f"  Status: {status} | Priority Level: {priority_level}")
                 if description and description != 'No Description':
                     briefing.append(f"  Description: {description}")
-        
+
         # CSConsole Adoption Barriers - FIXED: Show ALL records
         if not csconsole_adoption_barriers.empty:
             briefing.append(f"\n**All CSConsole Adoption Barriers ({len(csconsole_adoption_barriers)} records):**")
@@ -9526,7 +9536,7 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                 briefing.append(f"  Status: {status} | Severity: {severity}")
                 if description and description != 'No Description':
                     briefing.append(f"  Description: {description}")
-        
+
         briefing.append("\n**CSConsole Integration Summary:**")
         briefing.append(f"- **Total Action Plans:** {total_action_plans}")
         briefing.append(f"- **Total Customer Pulse Records:** {total_customer_pulse}")
@@ -9553,7 +9563,7 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                 f"(first 10 of {_matched_total} rows; sample only — full list available in source data)"
             )
         briefing.append(_json_lite(matched_df, limit=10))
-    
+
     # Add detailed external intelligence analysis - FIXED: Show ALL bugs and incidents
     if ext_bugs:
         briefing.append("\n### Software Defects Analysis (help.webex.com):")
@@ -9562,21 +9572,21 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
             bug_id = bug.get('bug_id', 'Unknown')
             title = bug.get('title', 'No Title')
             briefing.append(f"- **Bug [{bug_id}]:** {title}")
-    
+
     if ext_incidents:
         briefing.append("\n### Service Incident Analysis (status.webex.com):")
         briefing.append("**CRITICAL INSIGHT:** Recent service incidents can directly impact customer experience and adoption rates. These represent system-wide issues that may affect multiple customers.")
-        
+
         # Correlate incidents with customer service cases
         incident_correlations = _correlate_incidents_with_cases(ext_incidents, csone_df, ab_df)
-        
+
         # Show ALL incidents
         for incident in ext_incidents:
             incident_id = (incident.get('id') or 'Unknown')
             title = (incident.get('title') or 'No Title')
             status = (incident.get('status') or 'Unknown')
             published = (incident.get('published') or 'Unknown')
-            
+
             # FIXED: Check for ALL correlations
             correlated_cases = incident_correlations.get(incident_id, [])
             if correlated_cases:
@@ -9585,10 +9595,10 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                 briefing.append(f"  → **CORRELATED WITH:** {case_list} - This service incident may have contributed to customer-reported issues")
             else:
                 briefing.append(f"- **Incident {incident_id}:** {title} (Status: {status}, Date: {published})")
-        
+
         if incident_correlations:
             briefing.append(f"\n**Correlation Summary:** {len(incident_correlations)} service incidents from status.webex.com correlate with customer service cases, indicating potential service-impacting incidents that affected customers.")
-    
+
     briefing.append("---")
 
     if db_profile:
@@ -9663,14 +9673,14 @@ def _apply_per_section_cap(briefing_text: str, max_chars: int = 12000) -> str:
 def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
     """Create a focused briefing book for executive analysis using adoption barriers"""
     briefing = []
-    
+
     briefing.append(f"# Executive Portfolio Analysis - {manager}")
     briefing.append(f"## Technology Focus: {technology}")
     # Round 12 / Phase 10.5: anchor briefing analysis date on UTC and tag the
     # timezone so cross-region operators see the same logical timestamp.
     briefing.append(f"## Analysis Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
     briefing.append("")
-    
+
     # Team overview
     if not team_subs_df.empty:
         briefing.append("## Team Portfolio Overview")
@@ -9695,7 +9705,7 @@ def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
         briefing.append(f"- **Unique Customers:** {_unique_customers}")
         briefing.append(f"- **Active CSSMs:** {team_subs_df['CSSM_EMAIL'].nunique() if 'CSSM_EMAIL' in team_subs_df.columns else 'N/A'}")
         briefing.append("")
-        
+
         # Customer list - FIXED: Show ALL customers
         if 'BU_NAME' in team_subs_df.columns:
             # Round 13 / Phase 3.2: normalize before .unique() so two
@@ -9719,14 +9729,28 @@ def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
     # Adoption barriers analysis
     if not ab_norm.empty:
         briefing.append("## Critical Adoption Barriers Analysis")
-        briefing.append(f"- **Total Adoption Barriers:** {len(ab_norm)}")
-        
+        import canonical_metrics as _r531_cm
+
+        def _r531_barrier_records(df: pd.DataFrame) -> pd.DataFrame:
+            """Round 53.1: collapse Snowflake fan-out rows to barrier records."""
+
+            if df is None or df.empty:
+                return pd.DataFrame()
+            if 'ID' not in df.columns:
+                return df
+            _with_id = df[df['ID'].notna()].drop_duplicates(subset=['ID'])
+            _without_id = df[df['ID'].isna()]
+            return pd.concat([_with_id, _without_id], ignore_index=True)
+
+        ab_records = _r531_barrier_records(ab_norm)
+        briefing.append(f"- **Total Adoption Barriers:** {_r531_cm.count_total_barriers(ab_norm)}")
+
         # Top customers with barriers
         if 'customer_name' in ab_norm.columns:
             # Round 13 / Phase 3.5/3.7: normalize before value_counts so
             # cosmetic spelling drift (whitespace, NBSPs, casing) does
             # not split a single customer into multiple briefing lines.
-            _ab_min = ab_norm.copy()
+            _ab_min = ab_records.copy()
             _ab_min['_cust_disp'] = (
                 _ab_min['customer_name'].fillna('Unknown').apply(normalize_customer_name)
             )
@@ -9739,24 +9763,24 @@ def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
             for customer, count in customer_barriers.items():
                 briefing.append(f"- **{customer}**: {count} barriers")
             briefing.append("")
-        
+
         # Barrier categories
-        if 'ab_category_c' in ab_norm.columns:
-            categories = ab_norm['ab_category_c'].value_counts()
+        if 'ab_category_c' in ab_records.columns:
+            categories = ab_records['ab_category_c'].value_counts()
             briefing.append("### All Barrier Categories:")
             # FIXED: Show ALL categories
             for category, count in categories.items():
                 briefing.append(f"- **{category}**: {count} barriers")
             briefing.append("")
-        
+
         # Severity analysis
-        if 'severity_c' in ab_norm.columns:
-            severity = ab_norm['severity_c'].value_counts()
+        if 'severity_c' in ab_records.columns:
+            severity = ab_records['severity_c'].value_counts()
             briefing.append("### Severity Distribution:")
             for sev, count in severity.items():
                 briefing.append(f"- **{sev}**: {count} barriers")
             briefing.append("")
-        
+
         # Recent barriers (short-horizon spotlight). Round 3: this 30-day
         # window is intentional — it surfaces *new momentum* regardless
         # of the broader analysis window. Rename the heading to make
@@ -9795,7 +9819,7 @@ def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
                 briefing.append("")
             except Exception as _barrier_trend_err:
                 logger.debug(f"Barrier trend analysis skipped: {_barrier_trend_err}")
-        
+
         briefing.append("### Complete Barrier Details:")
         for idx, barrier in ab_norm.iterrows():
             barrier_id = barrier.get('ID', barrier.get('id', ''))
@@ -9825,7 +9849,7 @@ def _create_executive_briefing_book(manager, ab_norm, team_subs_df, technology):
             elif 'SEVERITY_C' in barrier:
                 briefing.append(f"- Severity: {barrier['SEVERITY_C']}")
             briefing.append("")
-    
+
     return "\n".join(briefing)
 
 def _create_minimal_briefing_book(manager, ab_norm, team_subs_df, technology):
@@ -9835,23 +9859,24 @@ def _create_minimal_briefing_book(manager, ab_norm, team_subs_df, technology):
     if team_subs_df is None:
         team_subs_df = pd.DataFrame()
     briefing = []
-    
+
     briefing.append(f"# Executive Portfolio Analysis - {manager}")
     briefing.append(f"## Technology Focus: {technology}")
     # Round 12 / Phase 10.5: anchor briefing analysis date on UTC and tag the
     # timezone so cross-region operators see the same logical timestamp.
     briefing.append(f"## Analysis Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
     briefing.append("")
-    
+
     briefing.append("## Data Summary")
-    briefing.append(f"- **Adoption Barriers Available:** {len(ab_norm) if not ab_norm.empty else 0}")
+    import canonical_metrics as _r531_limited_cm
+    briefing.append(f"- **Adoption Barriers Available:** {_r531_limited_cm.count_total_barriers(ab_norm)}")
     briefing.append(f"- **Team Subscriptions Available:** {len(team_subs_df) if not team_subs_df.empty else 0}")
     briefing.append("")
-    
+
     if not ab_norm.empty:
         briefing.append("## Available Data Analysis")
         briefing.append("Limited data available for analysis. Focus on available adoption barriers.")
-        
+
         # FIXED: Show ALL customers with data
         if 'customer_name' in ab_norm.columns:
             # Round 13 / Phase 3.8: dedupe on the canonical
@@ -9869,12 +9894,12 @@ def _create_minimal_briefing_book(manager, ab_norm, team_subs_df, technology):
             for customer in customers:
                 briefing.append(f"  - {customer}")
         briefing.append("")
-    
+
     briefing.append("## Executive Recommendations")
     briefing.append("- Limited data requires broader portfolio review")
     briefing.append("- Consider expanding data collection scope")
     briefing.append("- Focus on customer engagement and feedback collection")
-    
+
     return "\n".join(briefing)
 
 def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_subs_df, technology,
@@ -9896,14 +9921,14 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
     if team_subs_df is None:
         team_subs_df = pd.DataFrame()
     briefing = []
-    
+
     briefing.append(f"# Executive Portfolio Analysis - {manager}")
     briefing.append(f"## Technology Focus: {technology}")
     # Round 12 / Phase 10.5: anchor briefing analysis date on UTC and tag the
     # timezone so cross-region operators see the same logical timestamp.
     briefing.append(f"## Analysis Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
     briefing.append("")
-    
+
     # =========================================================================
     # SECTION 1: TEAM PORTFOLIO OVERVIEW
     # =========================================================================
@@ -9930,7 +9955,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
         briefing.append(f"- **Unique Customers:** {_unique_customers}")
         briefing.append(f"- **Active CSSMs:** {team_subs_df['CSSM_EMAIL'].nunique() if 'CSSM_EMAIL' in team_subs_df.columns else 'N/A'}")
         briefing.append("")
-        
+
         # FULL customer list (not truncated - AI needs this for comprehensive analysis)
         if 'BU_NAME' in team_subs_df.columns:
             # Round 13 / Phase 3.3: normalize and dedupe so the AI does
@@ -9949,7 +9974,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
             for customer in customers:  # NO LIMIT - include all customers
                 briefing.append(f"- {customer}")
             briefing.append("")
-    
+
     # =========================================================================
     # SECTION 2: BEMS ESCALATION ANALYSIS (CRITICAL FOR EXECUTIVE VISIBILITY)
     # =========================================================================
@@ -9959,7 +9984,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
         bems_cases = csone_norm[bems_mask]
         total_bems = len(bems_cases)
         bems_rate = (total_bems / len(csone_df) * 100) if len(csone_df) > 0 else 0.0
-        
+
         briefing.append("## 🔴 BEMS ESCALATION ANALYSIS (CRITICAL)")
         briefing.append(
             f"- **Total BEMS Escalations:** {total_bems} "
@@ -9970,7 +9995,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
             f"{format_inline_source('BEMS Escalations', fields=['Transaction ID', 'bemscsc_refs'])}"
         )
         briefing.append("")
-        
+
         if total_bems > 0:
             briefing.append("### BEMS Escalations by Customer (with BEMS IDs):")
             if 'customer_name' in bems_cases.columns:
@@ -9980,7 +10005,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
                     bems_ids = set()
                     for _, row in customer_bems.iterrows():
                         bems_ids.update(extract_bems_ids_from_row(row))
-                    
+
                     # Format all BEMS IDs with brackets for citation
                     bems_id_list = ', '.join([f'[{bid}]' for bid in sorted(bems_ids)]) if bems_ids else 'IDs pending extraction'
                     briefing.append(
@@ -9988,33 +10013,33 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
                         f"{format_inline_source('BEMS Escalations', fields=['Transaction ID', 'bemscsc_refs'])}"
                     )
             briefing.append("")
-    
+
     # =========================================================================
     # SECTION 3: COMPREHENSIVE SUPPORT CASES ANALYSIS
     # =========================================================================
     if not csone_df.empty:
         briefing.append("## Support Cases Analysis (CSOne/TAC)")
         briefing.append(f"- **Total Support Cases:** {len(csone_df)}")
-        
+
         # Customers with cases - FULL LIST
         if 'customer_name' in csone_df.columns:
             customer_cases = csone_df['customer_name'].value_counts()
             briefing.append(f"- **Customers with Cases:** {len(customer_cases)}")
             briefing.append("")
-            
+
             briefing.append("### All Customers with Support Cases (sorted by case volume):")
             for customer, count in customer_cases.items():  # ALL customers, not just top 5
                 # Get BEMS count for this customer
                 cust_mask = csone_df['customer_name'] == customer
                 cust_cases = csone_df[cust_mask]
                 cust_bems_count = int(detect_bems_mask(add_case_lifecycle_fields(cust_cases)).sum())
-                
+
                 if cust_bems_count > 0:
                     briefing.append(f"- **{customer}**: {count} cases ({cust_bems_count} BEMS escalations)")
                 else:
                     briefing.append(f"- **{customer}**: {count} cases")
             briefing.append("")
-        
+
         # Case severity analysis - FULL (canonical normalized priority for accuracy)
         # Use case_priority_norm (computed via normalize_priority_label) so the
         # distribution agrees with cm.count_p1/p2/etc. and the dashboards.
@@ -10071,7 +10096,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
             status = case.get('Case Status', 'Unknown')
             sev = case.get('case_priority_norm', case.get('Severity', case.get('Highest Priority', 'Unknown')))
             trans_id = case.get('Transaction ID', '')
-            
+
             # Build comprehensive case line
             case_line = f"- TAC #{case_num} | Customer: {customer} | Severity: {sev} | Status: {status}"
             row_bems_ids = extract_bems_ids_from_row(case)
@@ -10080,26 +10105,37 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
             case_line += f" | Title: {title}"
             briefing.append(case_line)
             briefing.append("")
-    
+
     # =========================================================================
-    # SECTION 4: COMPREHENSIVE ADOPTION BARRIERS ANALYSIS  
+    # SECTION 4: COMPREHENSIVE ADOPTION BARRIERS ANALYSIS
     # =========================================================================
+    import canonical_metrics as _r531_full_cm
     if not ab_norm.empty:
         briefing.append("## Critical Adoption Barriers Analysis")
-        briefing.append(f"- **Total Adoption Barriers:** {len(ab_norm)}")
-        
+        def _r531_barrier_records_full(df: pd.DataFrame) -> pd.DataFrame:
+            """Round 53.1: collapse duplicate AB fan-out rows for briefing counts."""
+
+            if df is None or df.empty:
+                return pd.DataFrame()
+            if 'ID' not in df.columns:
+                return df
+            _with_id = df[df['ID'].notna()].drop_duplicates(subset=['ID'])
+            _without_id = df[df['ID'].isna()]
+            return pd.concat([_with_id, _without_id], ignore_index=True)
+
+        ab_records = _r531_barrier_records_full(ab_norm)
+        total_barrier_records = _r531_full_cm.count_total_barriers(ab_norm)
+        briefing.append(f"- **Total Adoption Barriers:** {total_barrier_records}")
+
         # Open vs Closed barriers (status visibility)
         status_col = 'AB_STATUS_C' if 'AB_STATUS_C' in ab_norm.columns else ('STATUS_C' if 'STATUS_C' in ab_norm.columns else None)
         if status_col:
-            status_counts = ab_norm[status_col].astype(str).str.strip().value_counts()
-            open_keywords = ['open', 'new', 'in progress', 'pending']
-            closed_keywords = ['closed', 'resolved', 'completed', 'cancelled']
-            open_count = sum(c for s, c in status_counts.items() if any(k in s.lower() for k in open_keywords))
-            closed_count = sum(c for s, c in status_counts.items() if any(k in s.lower() for k in closed_keywords))
-            other_count = len(ab_norm) - open_count - closed_count
+            open_count = _r531_full_cm.count_open_barriers(ab_norm)
+            closed_count = _r531_full_cm.count_closed_barriers(ab_norm)
+            other_count = max(total_barrier_records - open_count - closed_count, 0)
             briefing.append(f"- **Open/Active Barriers:** {open_count} | **Closed/Resolved:** {closed_count}" + (f" | **Other:** {other_count}" if other_count > 0 else ""))
         briefing.append("")
-        
+
         # ALL customers with barriers (not truncated)
         if 'customer_name' in ab_norm.columns:
             # Round 13 / Phase 3.7: normalize before value_counts so a
@@ -10109,7 +10145,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
             # number of cosmetic variants and the listing emitted the
             # same customer multiple times under sub-totals that did
             # not match the headline.
-            _ab_for_count = ab_norm.copy()
+            _ab_for_count = ab_records.copy()
             _ab_for_count['_cust_disp'] = (
                 _ab_for_count['customer_name']
                 .fillna('Unknown')
@@ -10123,33 +10159,33 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
             for customer, count in customer_barriers.items():  # ALL customers
                 briefing.append(f"- **{customer}**: {count} barriers")
             briefing.append("")
-        
+
         # Barrier categories - ALL categories
         cat_col = 'ab_category_c' if 'ab_category_c' in ab_norm.columns else ('ab_category_final' if 'ab_category_final' in ab_norm.columns else None)
         if cat_col:
-            categories = ab_norm[cat_col].value_counts()
+            categories = ab_records[cat_col].value_counts()
             briefing.append("### Barrier Categories (complete breakdown):")
             for category, count in categories.items():  # ALL categories
                 briefing.append(f"- **{category}**: {count} barriers")
             briefing.append("")
-        
+
         # Severity analysis - ALL severities
         sev_col = 'severity_c' if 'severity_c' in ab_norm.columns else ('SEVERITY_C' if 'SEVERITY_C' in ab_norm.columns else None)
         if sev_col:
-            severity = ab_norm[sev_col].value_counts()
+            severity = ab_records[sev_col].value_counts()
             briefing.append("### Barrier Severity Distribution:")
             for sev, count in severity.items():
                 briefing.append(f"- **{sev}**: {count} barriers")
             briefing.append("")
-        
+
             # Highlight HIGH/CRITICAL barriers using canonical severity
             # normalization to keep parity with leader/EI/compact reports
             # and avoid substring false positives like "Highest" or
             # "Critical-but-resolved" labels.
             try:
                 from data_normalization import normalize_severity_label as _norm_sev
-                _sev_series = ab_norm[sev_col].apply(_norm_sev).fillna('').astype(str)
-                high_sev = ab_norm[_sev_series.isin(['Critical', 'High'])]
+                _sev_series = ab_records[sev_col].apply(_norm_sev).fillna('').astype(str)
+                high_sev = ab_records[_sev_series.isin(['Critical', 'High'])]
             except Exception:
                 high_sev = ab_norm.iloc[0:0]
             if not high_sev.empty:
@@ -10170,12 +10206,12 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
                     id_tag = f" [AB-ID: {b_id}]" if b_id else ''
                     briefing.append(f"- **{customer}**: {subj} - Severity: {sev}, Status: {status}{id_tag}")
                 briefing.append("")
-        
+
         # ALL Adoption Barrier Titles - COMPREHENSIVE for AI thematic analysis
         briefing.append("### All Adoption Barrier Titles for Thematic Analysis:")
         subj_col = 'SUBJECT_C' if 'SUBJECT_C' in ab_norm.columns else ('subject_c' if 'subject_c' in ab_norm.columns else ('title' if 'title' in ab_norm.columns else None))
         if subj_col:
-            for _, barrier in ab_norm.iterrows():
+            for _, barrier in ab_records.iterrows():
                 # Round 13 / Phase 3.7: normalize customer for the
                 # thematic-analysis listing so cosmetic variants
                 # don't fan out into multiple model-context buckets.
@@ -10194,7 +10230,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
 
         # Complete barrier details with record IDs for traceability
         briefing.append("### Complete Adoption Barrier Details (with CSConsole Record IDs):")
-        for idx, barrier in ab_norm.iterrows():
+        for idx, barrier in ab_records.iterrows():
             record_id = barrier.get('ID', barrier.get('RECORD_ID', f'AB-{idx}'))
             subj = barrier.get('SUBJECT_C', barrier.get('subject_c', barrier.get('title', 'No subject')))
             # Round 13 / Phase 3.7: normalize customer for the complete
@@ -10208,7 +10244,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
             cat = barrier.get(cat_col, 'Uncategorized') if cat_col else 'Uncategorized'
             status = barrier.get('AB_STATUS_C', barrier.get('STATUS_C', 'Unknown'))
             product = barrier.get('PRODUCT_C', barrier.get('CSS_PRE_UNLINK_TECHNOLOGY_NAME_C', 'Unknown'))
-            
+
             briefing.append(f"**CSConsole Record: {record_id}**")
             briefing.append(f"  - Customer: {customer}")
             briefing.append(f"  - Subject: {subj}")
@@ -10217,7 +10253,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
             briefing.append(f"  - Status: {status}")
             briefing.append(f"  - Product: {product}")
             briefing.append("")
-    
+
     # =========================================================================
     # SECTION 4b: OPTIONAL ENRICHMENT (ARR, Feature Requests, Defects, PSIRT)
     # =========================================================================
@@ -10303,7 +10339,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
                 f"({cust_count} customers){_amt_suf_b}"
             )
         briefing.append("")
-    
+
     if feature_requests and feature_requests.get('total_requests', 0) > 0:
         briefing.append("## Feature Requests (Product Gap Signal)")
         # Round 12 / Phase 1.1: honour ``arr_impact_comparable`` to
@@ -10338,7 +10374,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
                         f"{_amt_pre_b}{_r12_format_number(c.get('arr', 0))} ARR{_amt_suf_b}"
                     )
         briefing.append("")
-    
+
     if software_defects and software_defects.get('total_defects', 0) > 0:
         briefing.append("## Software Defects (BST/CSC IDs in Cases)")
         briefing.append(f"**{software_defects['total_defects']}** defect references in **{software_defects.get('total_cases_with_defects', 0)}** cases.")
@@ -10347,7 +10383,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
             for cust, refs in sorted(defect_by_cust.items(), key=lambda x: -len(x[1]))[:8]:
                 briefing.append(f"- **{cust}:** {', '.join(list(refs)[:5])}{'...' if len(refs) > 5 else ''}")
         briefing.append("")
-    
+
     if psirt_vulns and psirt_vulns.get('total_vulnerabilities', 0) > 0:
         briefing.append("## PSIRT / Security Vulnerabilities (in Cases)")
         cves = psirt_vulns.get('cve_ids', set())
@@ -10358,7 +10394,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
             for cust, refs in sorted(vuln_by_cust.items(), key=lambda x: -len(x[1]))[:5]:
                 briefing.append(f"- **{cust}:** {', '.join(list(refs)[:3])}{'...' if len(refs) > 3 else ''}")
         briefing.append("")
-    
+
     # =========================================================================
     # SECTION 4b (Round 4 / Phase 5.2): EXTERNAL INTELLIGENCE
     # status.webex.com incidents and help.webex defects.  These are
@@ -10420,7 +10456,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
     # =========================================================================
     briefing.append("## Data Sources and Quality Summary")
     briefing.append("This analysis is based on the following data sources:")
-    briefing.append(f"- **CSConsole (Snowflake)**: {len(ab_norm) if not ab_norm.empty else 0} adoption barriers")
+    briefing.append(f"- **CSConsole (Snowflake)**: {_r531_full_cm.count_total_barriers(ab_norm)} adoption barrier records")
     briefing.append(f"- **CSOne (TAC Cases)**: {len(csone_df) if not csone_df.empty else 0} support cases")
     briefing.append(f"- **Team Subscriptions**: {len(team_subs_df) if not team_subs_df.empty else 0} subscriptions")
     # Round 4 / Phase 5.2: also disclose external intel availability so the
@@ -10451,7 +10487,7 @@ PROMPT_PORTFOLIO_TEMPLATE = """
 **🔒 CANONICAL TOTALS (Round 25 / Phase B — MUST use these exact values):**
 The following totals are computed by the canonical metrics pipeline directly from the displayed data sheets (Adoption Barriers ∪ TAC ∪ Customer Pulse).  When the **Executive Summary: What's Really Happening** "Portfolio Snapshot" block below names a count, you MUST use the value listed here verbatim.  Do NOT recompute, round, summarize as a range, or substitute "approximately" -- a downstream validator compares your rendered numbers to these canonical values and will block the report build on any drift.
 - **Total Customers:** {TOTAL_CUSTOMERS}
-- **Active Adoption Barriers:** {TOTAL_BARRIERS}
+- **Total Adoption Barriers:** {TOTAL_BARRIERS}
 - **TAC Cases (total):** {TAC_CASES}
 - **TAC Cases (P1 / Critical):** {P1_CASES}
 - **TAC Cases (P2 / High):** {P2_CASES}
@@ -10460,7 +10496,7 @@ The following totals are computed by the canonical metrics pipeline directly fro
 **CRITICAL REQUIREMENTS:**
 - **Show the Problems:** Don't sugarcoat - executives need to see the real issues
 - **Cite Specifics:** Reference actual record identifiers from the data: AB-IDs for adoption barriers, SP-IDs for success priorities, AP-IDs for action plans, CSC IDs for software defects, BEMS IDs for escalations, Case IDs for TAC cases, and incident IDs for service disruptions. These identifiers let readers verify and follow up on each claim
-- **Quantify Impact:** How many customers? What's the business impact? 
+- **Quantify Impact:** How many customers? What's the business impact?
 - **Flag Escalations:** BEMS escalations are RED FLAGS - call them out explicitly
 - **Define Barriers:** Clearly explain what adoption barriers are blocking customers
 
@@ -10494,7 +10530,7 @@ The following totals are computed by the canonical metrics pipeline directly fro
 
 **Portfolio Snapshot:** (use the CANONICAL TOTALS above verbatim)
 • **Total Customers:** {TOTAL_CUSTOMERS}
-• **Active Adoption Barriers:** {TOTAL_BARRIERS} (provide severity breakdown narrative -- do NOT change the total)
+• **Total Adoption Barriers:** {TOTAL_BARRIERS} (provide severity breakdown narrative -- do NOT change the total)
 • **TAC Cases:** {TAC_CASES} (with {P1_CASES} P1 and {P2_CASES} P2)
 • **BEMS Escalations:** {BEMS_ESCALATIONS} - THIS IS CRITICAL
 • **Known Defects Impacting Portfolio:** [Count from help.webex.com -- cite the briefing's Help Center section verbatim]
@@ -10892,7 +10928,7 @@ def generate_llm_response(system_prompt: str, briefing_book: str) -> str:
     import signal
     import time
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-    
+
     def call_circuit_ai():
         """Call CircuIT AI in a separate thread with proper error handling."""
         try:
@@ -10905,7 +10941,7 @@ def generate_llm_response(system_prompt: str, briefing_book: str) -> str:
                 app_key=CIRCUIT_CONFIG["app_key"],
                 model_name=CIRCUIT_CONFIG["model_name"]
             )
-            
+
             # Round 6 / Phase 3.7: log using the shared timeout
             # constant rather than a hard-coded literal.
             logger.info(
@@ -10916,7 +10952,7 @@ def generate_llm_response(system_prompt: str, briefing_book: str) -> str:
         except Exception as e:
             logger.error(f"[[ERROR]] CircuIT AI call failed: {e}")
             return None
-    
+
     # Round 6 / Phase 3.7: align the future.result() wall-clock budget
     # with the underlying CircuIT HTTP timeout, plus a small grace
     # window for thread bookkeeping and JSON parsing on the way back.
@@ -11334,14 +11370,14 @@ def generate_llm_json_response(system_prompt: str, briefing_book: str, schema: D
 
 # --------------------------- Core flow ---------------------------
 def _apply_scope_filter_ab(df: pd.DataFrame, tech: str, days: int) -> pd.DataFrame:
-    if df is None or df.empty: 
+    if df is None or df.empty:
         logger.debug("AB filter: Input DataFrame is empty or None")
         return df
-    
+
     logger.debug(f"AB filter: Starting with {len(df)} adoption barriers")
     logger.debug(f"AB filter: Technology='{tech}', Days={days}")
     logger.debug(f"AB filter: Available columns: {list(df.columns)}")
-    
+
     use = df.copy()
     # date
     date_cols = [c for c in ["OPEN_DATE_C","CREATED_DATE","CREATED_DATE_C"] if c in use.columns]
@@ -11355,7 +11391,7 @@ def _apply_scope_filter_ab(df: pd.DataFrame, tech: str, days: int) -> pd.DataFra
         logger.debug(f"AB filter: After date filter: {len(use)} records (removed {before_date_filter - len(use)})")
     else:
         logger.debug("AB filter: No date columns found, skipping date filter")
-        
+
     # tech
     if tech != "All":
         if tech == "All Contact Center":
@@ -11403,7 +11439,7 @@ def _apply_scope_filter_ab(df: pd.DataFrame, tech: str, days: int) -> pd.DataFra
             logger.debug(f"AB filter: After technology filter: {len(use)} records (removed {before_tech_filter - len(use)})")
     else:
         logger.debug("AB filter: Technology='All', skipping technology filter")
-        
+
     logger.debug(f"AB filter: Final result: {len(use)} adoption barriers")
     return use
 
@@ -11415,36 +11451,36 @@ def _apply_scope_filter_csone(
     team_customer_names: List[str],
     include_all_cases: bool = True,
 ) -> pd.DataFrame:
-    if df is None or df.empty: 
+    if df is None or df.empty:
         logger.debug("CSOne filter: Input DataFrame is empty or None")
         return pd.DataFrame()
-    
+
     logger.debug(f"CSOne filter: Starting with {len(df)} cases")
     logger.debug(f"CSOne filter: Technology='{tech}', Days={days}")
     logger.debug(f"CSOne filter: Team customer names: {team_customer_names[:5]}...")
     logger.debug(f"CSOne filter: Available columns: {list(df.columns)}")
-    
+
     use = df.copy()
 
     sub_col = next((c for c in LIKELY_SUB_COLS if c in use.columns), None)
     cust_col = 'customer_name' # Standardized name from _prepare_csone
-    
+
     logger.debug(f"CSOne filter: Subscription column='{sub_col}', Customer column='{cust_col}'")
 
     filtered_dfs = []
     if sub_col and sub_ids:
         use[sub_col] = use[sub_col].astype(str)
         sub_ids_str = [str(s) for s in sub_ids]
-        
+
         logger.debug(f"CSOne filter: Looking for subscription IDs: {sub_ids_str[:5]}...")
-        
+
         valid_sub_mask = use[sub_col].str.lower().str.startswith('sub', na=False)
         logger.debug(f"CSOne filter: Found {valid_sub_mask.sum()} rows with valid subscription format")
-        
+
         by_sub = use[valid_sub_mask & use[sub_col].isin(sub_ids_str)]
         logger.debug(f"CSOne filter: Found {len(by_sub)} rows matching team subscription IDs")
         filtered_dfs.append(by_sub)
-        
+
         no_valid_sub_df = use[~valid_sub_mask]
         if not no_valid_sub_df.empty and cust_col in no_valid_sub_df.columns:
             logger.info(f"Falling back to Customer Name filter for {len(no_valid_sub_df)} CSOne rows with non-standard Subscription IDs.")
@@ -11463,7 +11499,7 @@ def _apply_scope_filter_csone(
     if not filtered_dfs:
         logger.debug("CSOne filter: No filtered dataframes created")
         return pd.DataFrame()
-        
+
     use = pd.concat(filtered_dfs).drop_duplicates()
     logger.debug(f"CSOne filter: After team filtering: {len(use)} cases")
 
@@ -11484,24 +11520,24 @@ def _apply_scope_filter_csone(
             logger.debug(f"CSOne filter: After date filter: {len(use)} cases (removed {before_date_filter - len(use)})")
         else:
             logger.debug("CSOne filter: No date columns found, skipping date filter")
-        
+
     # tech filter
     if tech != "All":
         logger.debug(f"CSOne filter: Applying enhanced technology filter for '{tech}'")
-        
+
         # Check if we have both Tech and Sub Technology columns
         tech_col = next((c for c in ['Technology', 'Tech', 'PRODUCT'] if c in use.columns), None)
         sub_tech_col = next((c for c in ['Sub Technology', 'Sub_Technology', 'SUB_TECHNOLOGY'] if c in use.columns), None)
-        
+
         logger.debug(f"CSOne filter: Tech column='{tech_col}', Sub Technology column='{sub_tech_col}'")
-        
+
         if tech_col and sub_tech_col:
             # Use enhanced filtering with both fields
             logger.debug("CSOne filter: Using enhanced filtering with both Tech and Sub Technology fields")
             def enhanced_match(row):
                 return _filter_tech_text_enhanced(
-                    row.get(tech_col), 
-                    row.get(sub_tech_col), 
+                    row.get(tech_col),
+                    row.get(sub_tech_col),
                     tech
                 )
             before_tech_filter = len(use)
@@ -11512,14 +11548,14 @@ def _apply_scope_filter_csone(
             logger.debug("CSOne filter: Using fallback filtering (missing Tech or Sub Technology columns)")
             cols = [c for c in use.columns if c in LIKELY_TECH_COLS] or [c for c in use.columns if c in LIKELY_TITLE_COLS | LIKELY_DESC_COLS]
             logger.debug(f"CSOne filter: Technology filter columns: {cols}")
-            
+
             # Show sample technology values for debugging
             if cols:
                 for col in cols[:3]:  # Show first 3 columns
                     if col in use.columns:
                         sample_values = use[col].dropna().unique()[:10]  # First 10 unique values
                         logger.debug(f"CSOne filter: Sample values in '{col}': {list(sample_values)}")
-            
+
             def any_match(row):
                 for c in cols:
                     if _filter_tech_text(row.get(c), tech): return True
@@ -11529,7 +11565,7 @@ def _apply_scope_filter_csone(
             logger.debug(f"CSOne filter: After fallback technology filter: {len(use)} cases (removed {before_tech_filter - len(use)})")
     else:
         logger.debug("CSOne filter: Technology='All', skipping technology filter")
-        
+
     logger.debug(f"CSOne filter: Final result: {len(use)} cases")
     return use
 
@@ -11537,12 +11573,12 @@ def _apply_scope_filter_csone_inclusive(csone_df, technology, days, include_all_
     """Apply inclusive filtering to CSOne data for executive analysis - only technology and date filters"""
     if csone_df is None or csone_df.empty:
         return pd.DataFrame() if csone_df is None else csone_df
-    
+
     logger.debug(f"CSOne inclusive filter: Starting with {len(csone_df)} cases")
     logger.debug(f"CSOne inclusive filter: Technology='{technology}', Days={days}")
-    
+
     filtered_df = csone_df.copy()
-    
+
     # Apply date filter only when strict mode is requested.
     if not include_all_cases and 'Date/Time Opened' in filtered_df.columns:
         logger.debug("CSOne inclusive filter: Applying date filter using column 'Date/Time Opened'")
@@ -11556,7 +11592,7 @@ def _apply_scope_filter_csone_inclusive(csone_df, technology, days, include_all_
         # regardless of host timezone (mirrors Round 11 / Phase 2.x
         # tz-aware filter pattern).
         cutoff_date = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days=days)
-        
+
         # Convert date column to datetime if needed
         try:
             filtered_df['Date/Time Opened'] = pd.to_datetime(
@@ -11568,25 +11604,25 @@ def _apply_scope_filter_csone_inclusive(csone_df, technology, days, include_all_
             logger.debug(f"CSOne inclusive filter: After date filter: {after_filter} cases (removed {before_filter - after_filter})")
         except Exception as e:
             logger.warning(f"[WARN] CSOne inclusive filter: Date filtering failed: {e}")
-    
+
     # Apply technology filter only (more lenient)
     if technology and technology != "All Technologies":
         logger.debug(f"CSOne inclusive filter: Applying technology filter for '{technology}'")
-        
+
         # Get technology patterns
         tech_patterns = TECH_FILTERS.get(technology, [])
         if tech_patterns:
             # Create a combined pattern for all technology patterns (non-capturing to avoid pandas warning)
             combined_pattern = '|'.join(tech_patterns)
             combined_pattern = re.sub(r'\((?![\?<])', r'(?:', combined_pattern)  # ( not followed by ? or < (lookahead/lookbehind)
-            
+
             # Apply to relevant columns
             tech_columns = ['Sub Technology', 'Title', 'Problem Description', 'Technology Lookup: Technology Auto Number']
             available_columns = [col for col in tech_columns if col in filtered_df.columns]
-            
+
             if available_columns:
                 logger.debug(f"CSOne inclusive filter: Technology filter columns: {available_columns}")
-                
+
                 # Create a mask for any column matching the technology (suppress pandas "match groups" warning)
                 mask = pd.Series([False] * len(filtered_df), index=filtered_df.index)
                 with warnings.catch_warnings():
@@ -11595,14 +11631,14 @@ def _apply_scope_filter_csone_inclusive(csone_df, technology, days, include_all_
                         if not filtered_df[col].empty:
                             col_mask = filtered_df[col].astype(str).str.contains(combined_pattern, case=False, na=False, regex=True)
                             mask = mask | col_mask
-                
+
                 before_filter = len(filtered_df)
                 filtered_df = filtered_df[mask]
                 after_filter = len(filtered_df)
                 logger.debug(f"CSOne inclusive filter: After technology filter: {after_filter} cases (removed {before_filter - after_filter})")
             else:
                 logger.warning(f"[WARN] CSOne inclusive filter: No technology columns found")
-    
+
     logger.debug(f"CSOne inclusive filter: Final result: {len(filtered_df)} cases")
     return filtered_df
 
@@ -11615,19 +11651,19 @@ def _filter_csconsole_data_by_technology(
     """
     Filter CSConsole data (Action Plans, Customer Pulse, etc.) by technology and customer names.
     This ensures CSConsole data matches the technology scope selected by the user.
-    
+
     Args:
         df: CSConsole DataFrame to filter
         technology: Technology filter (e.g., "All Contact Center", "Webex Meetings & Messaging")
         customer_names: Optional list of customer names to filter by (from team subscriptions)
-    
+
     Returns:
         Filtered DataFrame
     """
     if df is None or df.empty:
         logger.info(f"[[FILTER]] CSConsole filter: Input DataFrame is empty or None")
         return df
-    
+
     logger.info(f"[[FILTER]] CSConsole filter: Starting with {len(df)} records for technology '{technology}'")
 
     filtered_df = df.copy()
@@ -11702,7 +11738,7 @@ def _filter_csconsole_data_by_technology(
 
         after_count = len(filtered_df)
         logger.info(f"[[FILTER]] CSConsole filter: After customer filter: {after_count} records (removed {before_count - after_count})")
-    
+
     # Filter by technology if not "All"
     if technology and technology not in ["All", "All Technologies"]:
         tech_patterns = TECH_FILTERS.get(technology, [])
@@ -11711,16 +11747,16 @@ def _filter_csconsole_data_by_technology(
             combined_pattern = '|'.join(tech_patterns)
             # Use non-capturing groups to avoid pandas "match groups" warning with str.contains (don't replace (? or (< lookbehind)
             combined_pattern = re.sub(r'\((?![\?<])', r'(?:', combined_pattern)
-            
+
             # Technology columns to check in CSConsole data
             tech_columns = [
                 'SUB_TECHNOLOGY_C', 'TECHNOLOGY_C',  # From dsm_assignment_data join
                 'SUBJECT_C', 'DESCRIPTION_C',  # Text fields that may contain tech info
                 'CSS_PRE_UNLINK_TECHNOLOGY_NAME_C', 'PRODUCT_NAME_C', 'PRODUCT_C'  # Product fields
             ]
-            
+
             available_columns = [col for col in tech_columns if col in filtered_df.columns]
-            
+
             if available_columns:
                 logger.info(f"[[FILTER]] CSConsole filter: Checking technology in columns: {available_columns}")
 
@@ -11762,7 +11798,7 @@ def _filter_csconsole_data_by_technology(
                 logger.info(f"[[FILTER]] CSConsole filter: After technology filter: {after_count} records (removed {before_count - after_count})")
             else:
                 logger.warning(f"[[FILTER]] CSConsole filter: No technology columns found - skipping tech filter")
-    
+
     logger.info(f"[[FILTER]] CSConsole filter: Final result: {len(filtered_df)} records")
     return filtered_df
 
@@ -11772,7 +11808,7 @@ def _prepare_ab(df: pd.DataFrame, dsm_df: pd.DataFrame) -> pd.DataFrame:
     use.rename(columns={"CUSTOMER_NAME": "customer_name"}, inplace=True, errors='ignore')
     if "BU_NAME" in use.columns: use.rename(columns={"BU_NAME":"customer_name"}, inplace=True)
     if "CSSM_EMAIL" in use.columns: use.rename(columns={"CSSM_EMAIL":"assignee_cssm_email"}, inplace=True)
-    
+
     # Title: use first available column that looks like subject/title (EDW/CSConsole/view naming)
     _html = lambda x: re.sub(r'<.*?>', '', str(x)).strip() if x is not None and str(x) else ''
     _s = lambda c: use[c].fillna('').astype(str).apply(_html) if c in use.columns else pd.Series([''] * len(use), index=use.index)
@@ -11880,15 +11916,15 @@ def _prepare_ab(df: pd.DataFrame, dsm_df: pd.DataFrame) -> pd.DataFrame:
     return use
 
 def _prepare_csone(df: pd.DataFrame, team_subs_df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty: 
+    if df is None or df.empty:
         logger.debug("CSOne prepare: Input DataFrame is empty or None")
         return df
-    
+
     logger.debug(f"CSOne prepare: Starting with {len(df)} cases")
     logger.debug(f"CSOne prepare: Available columns: {list(df.columns)}")
-    
+
     use = df.copy()
-    
+
     original_cust_col = 'customer_name_orig'
     found_customer_col = False
     for col_name in LIKELY_CUST_COLS:
@@ -11903,7 +11939,7 @@ def _prepare_csone(df: pd.DataFrame, team_subs_df: pd.DataFrame) -> pd.DataFrame
 
     sub_col = next((c for c in LIKELY_SUB_COLS if c in use.columns), None)
     logger.debug(f"CSOne prepare: Subscription column='{sub_col}'")
-    
+
     if sub_col:
         use[sub_col] = use[sub_col].astype(str)
 
@@ -12087,7 +12123,7 @@ def main():
     """Main function with proper resource management and error handling"""
     print("AdoptIQ — All‑in‑One (CircuIT-only) + External Intelligence")
     print("Please wait while we setup the environment...")
-    
+
     ctx = None
     try:
         out_dir = _ensure_outputs()
@@ -12108,7 +12144,7 @@ def main():
         ctx = _connect_with_keeper()
         print("Fetching subscriptions for the selected team...")
         team_subs_df = get_subscriptions_for_team(ctx, cssm_emails)
-        
+
         if team_subs_df.empty:
             print(f"\n[WARN] No subscriptions found in DSM for the team of '{manager}'. Exiting.")
             return
@@ -12183,7 +12219,7 @@ def main():
         csconsole_customer_pulse = fetch_csconsole_customer_pulse(ctx, account_ids, days)
         csconsole_success_priorities = fetch_csconsole_success_priorities(ctx, team_customer_names, days)
         csconsole_adoption_barriers = fetch_csconsole_adoption_barriers(ctx, account_ids, days)
-        
+
         print(f"Found {len(csconsole_action_plans)} action plans, {len(csconsole_customer_pulse)} customer pulse records, "
               f"{len(csconsole_success_priorities)} success priorities, and {len(csconsole_adoption_barriers)} adoption barriers from CSConsole.")
 
@@ -12224,10 +12260,10 @@ def main():
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
         tag = f"{manager.replace(' ','_')}_{tech.replace(' ','_').replace('&','and')}_{days}d_{ts}"
         base = str(out_dir / f"AdoptIQ_{tag}")
-        
+
         # Create Word document
         doc = Document()
-        
+
         # Fetch external intelligence
         print("Fetching external intelligence (Help Center bugs & Status incidents)...")
         ext_bugs = fetch_help_webex_bugs()
@@ -12238,7 +12274,7 @@ def main():
             _inc_days = 365
         ext_incidents = fetch_status_incidents(days_back=_inc_days)
         print(f"Found {len(ext_bugs)} Help Center bug references and {len(ext_incidents)} status incidents.")
-        
+
         # Generate portfolio summary.
         #
         # Round 5 / Phase 5.12: previously the AB / CSOne value
@@ -12381,7 +12417,7 @@ def main():
             customer_series.append(ab_norm['customer_name'])
         if csone_df is not None and not csone_df.empty and 'customer_name' in csone_df.columns:
             customer_series.append(csone_df['customer_name'])
-        
+
         # Add customers from CSConsole data
         if not filtered_action_plans.empty and 'BU_NAME' in filtered_action_plans.columns:
             customer_series.append(filtered_action_plans['BU_NAME'])
@@ -12391,7 +12427,7 @@ def main():
             customer_series.append(filtered_success_priorities['CUSTOMER_BU_NAME__C'])
         if not filtered_adoption_barriers.empty and 'BU_NAME' in filtered_adoption_barriers.columns:
             customer_series.append(filtered_adoption_barriers['BU_NAME'])
-        
+
         if not customer_series:
             print("\n[INFO] No customer activity found in either Adoption Barriers, CSOne, or CSConsole data. No deep dives to generate.")
             all_customers = []
@@ -12473,25 +12509,25 @@ def main():
             # so a normalized iterator key cannot miss its own rows.
             cust_ab = ab_norm[ab_norm['_r10_cust_key'] == customer_name].copy() if ab_norm is not None and '_r10_cust_key' in getattr(ab_norm, 'columns', []) else pd.DataFrame()
             cust_csone = csone_df[csone_df['_r10_cust_key'] == customer_name].copy() if csone_df is not None and '_r10_cust_key' in getattr(csone_df, 'columns', []) else pd.DataFrame()
-            
+
             cust_action_plans = filtered_action_plans[filtered_action_plans['_r10_cust_key'] == customer_name].copy() if not filtered_action_plans.empty and '_r10_cust_key' in filtered_action_plans.columns else pd.DataFrame()
             cust_customer_pulse = filtered_customer_pulse[filtered_customer_pulse['_r10_cust_key'] == customer_name].copy() if not filtered_customer_pulse.empty and '_r10_cust_key' in filtered_customer_pulse.columns else pd.DataFrame()
             cust_success_priorities = filtered_success_priorities[filtered_success_priorities['_r10_cust_key'] == customer_name].copy() if not filtered_success_priorities.empty and '_r10_cust_key' in filtered_success_priorities.columns else pd.DataFrame()
             cust_csconsole_adoption_barriers = filtered_adoption_barriers[filtered_adoption_barriers['_r10_cust_key'] == customer_name].copy() if not filtered_adoption_barriers.empty and '_r10_cust_key' in filtered_adoption_barriers.columns else pd.DataFrame()
-            
+
             if cust_ab.empty and cust_csone.empty and cust_action_plans.empty and cust_customer_pulse.empty and cust_success_priorities.empty and cust_csconsole_adoption_barriers.empty:
                 continue
 
             cssm_name = cssm_lookup.get(customer_name, "N/A")
             matches, matched_df = cross_reference_refs(cust_ab, cust_csone, ext_bugs)
-            
+
             customer_csconsole_data = {
                 'action_plans': cust_action_plans,
                 'customer_pulse': cust_customer_pulse,
                 'success_priorities': cust_success_priorities,
                 'adoption_barriers': cust_csconsole_adoption_barriers
             }
-            
+
             customer_briefing = _create_briefing_book(customer_name, cust_ab, cust_csone, ext_bugs, ext_incidents, matches, matched_df, db_profile, None, customer_csconsole_data)
             # Round 5 / Phase 3.2: pass TECHNOLOGY and MANAGER as well so
             # the prompt template's ``{TECHNOLOGY}`` / ``{MANAGER}``
@@ -12513,18 +12549,18 @@ def main():
         # Save Word document
         docx_path = f"{base}.docx"
         doc.save(docx_path)
-        
+
         # Create enhanced Word report
         try:
             enhanced_docx_path = create_enhanced_word_report(
-                manager, tech, days, ab_norm, csone_df, 
+                manager, tech, days, ab_norm, csone_df,
                 {"portfolio_summary": {"portfolio_health_score": "B", "executive_summary": "Portfolio analysis completed successfully"}},
                 ext_bugs, ext_incidents
             )
             print(f"   Enhanced Word: {enhanced_docx_path}")
         except Exception as e:
             print(f"   Enhanced Word report failed: {e}")
-        
+
         # Write Excel file
         final_ab_output = pd.DataFrame()
         if not ab_norm.empty:
@@ -12544,11 +12580,11 @@ def main():
             "Cross_References": matched_df if not matched_df.empty else pd.DataFrame()
         }
         write_excel_workbook(base, sheets)
-        
+
         print(f"\nSUCCESS: Analysis complete! Files generated:")
         print(f"   Word Report: {docx_path}")
         print(f"   Excel Report: {base}.xlsx")
-        
+
     except Exception as e:
         print(f"\nERROR: Analysis failed: {e}")
         import traceback

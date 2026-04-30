@@ -86,7 +86,7 @@ def validate_data_sources_for_report(
 ) -> Tuple[bool, List[str], Dict[str, str]]:
     """
     Validate all required data sources for report generation.
-    
+
     Args:
         report_type: Type of report ('comprehensive', 'compact', 'renewal', 'leader')
         snowflake_ctx: Snowflake connection context (can be None)
@@ -98,13 +98,13 @@ def validate_data_sources_for_report(
         csconsole_success_priorities: CSConsole success priorities DataFrame (optional)
         arr_data: Reserved for backward compatibility (ignored)
         required_sources: List of required data sources (if None, uses defaults for report_type)
-    
+
     Returns:
         Tuple of (is_valid, missing_sources, error_details)
     """
     missing_sources = []
     error_details = {}
-    
+
     # Define required sources by report type
     if required_sources is None:
         if report_type == 'comprehensive':
@@ -127,7 +127,7 @@ def validate_data_sources_for_report(
     # quietly proceeding without TAC evidence.
     if csone_file_provided and 'csone' not in required_sources:
         required_sources = list(required_sources) + ['csone']
-    
+
     # Validate Snowflake connection
     if 'snowflake' in required_sources:
         if snowflake_ctx is None:
@@ -140,7 +140,7 @@ def validate_data_sources_for_report(
                 "- Database server unavailability\n"
                 "- Connection timeout (check if database is responding)"
             )
-    
+
     # Validate team subscriptions
     if 'team_subscriptions' in required_sources:
         # Round 3 / Phase 3.3: explicitly distinguish a fetch failure
@@ -182,7 +182,7 @@ def validate_data_sources_for_report(
                 f"(any of: {', '.join(_aliases_for('subscriptions', 'customer')) or 'ACCOUNT_ID_C'}). "
                 "This indicates a data schema issue."
             )
-    
+
     # Validate adoption barriers
     if 'adoption_barriers' in required_sources:
         # Round 5 / Phase 4.2: an empty DataFrame can mean either
@@ -278,7 +278,7 @@ def validate_data_sources_for_report(
             logger.warning("CSOne data is empty due to fetch error (optional for renewal reports): %s", _opt_err)
         else:
             logger.warning("CSOne data is empty (optional for renewal reports)")
-    
+
     # Round 6 / Phase 4.16: surface optional-CSConsole fetch_error
     # attrs into error_details so downstream summaries / UIs can show
     # *why* the optional source is empty (e.g. permissions issue,
@@ -329,9 +329,9 @@ def validate_data_sources_for_report(
                 error_details['csconsole_success_priorities'] = _err
             else:
                 logger.warning("CSConsole success priorities data is empty (optional)")
-    
+
     is_valid = len(missing_sources) == 0
-    
+
     return is_valid, missing_sources, error_details
 
 
@@ -413,7 +413,7 @@ def raise_validation_error_if_invalid(
 ):
     """
     Validate data sources and raise descriptive error if invalid.
-    
+
     Raises:
         DataSourceValidationError: If required data sources are missing
     """
@@ -425,7 +425,7 @@ def raise_validation_error_if_invalid(
         csone_data=csone_data,
         **kwargs
     )
-    
+
     if not is_valid:
         # Build comprehensive error message (ASCII-safe for Windows console cp1252)
         error_parts = [
@@ -434,12 +434,12 @@ def raise_validation_error_if_invalid(
             "Missing Required Data Sources:",
             "=" * 60
         ]
-        
+
         for source in missing_sources:
             error_parts.append(f"\n[REQUIRED] {source.upper()}:")
             error_parts.append(error_details.get(source, "No details available"))
             error_parts.append("")
-        
+
         error_parts.extend([
             "=" * 60,
             "",
@@ -453,17 +453,17 @@ def raise_validation_error_if_invalid(
             "The report cannot be generated without these required data sources.",
             "Please resolve the issues and try again."
         ])
-        
+
         error_message = "\n".join(error_parts)
-        
+
         logger.error(error_message)
-        
+
         raise DataSourceValidationError(
             message=error_message,
             missing_sources=missing_sources,
             details=error_details
         )
-    
+
     logger.info(f"[OK] Data source validation passed for {report_type} report")
 
 
@@ -479,19 +479,19 @@ def get_data_source_summary(
 ) -> Dict[str, Dict]:
     """
     Get a summary of all data sources and their status.
-    
+
     Returns:
         Dictionary with status information for each data source
     """
     summary = {}
-    
+
     # Snowflake
     summary['snowflake'] = {
         'available': snowflake_ctx is not None,
         'status': 'connected' if snowflake_ctx is not None else 'not_connected',
         'details': 'Snowflake connection active' if snowflake_ctx is not None else 'Snowflake connection unavailable'
     }
-    
+
     # Team subscriptions
     summary['team_subscriptions'] = {
         'available': team_subs_df is not None and not team_subs_df.empty,
@@ -499,15 +499,19 @@ def get_data_source_summary(
         'status': 'available' if team_subs_df is not None and not team_subs_df.empty else 'empty',
         'details': f'{len(team_subs_df)} subscriptions found' if team_subs_df is not None and not team_subs_df.empty else 'No team subscriptions found'
     }
-    
+
     # Adoption barriers
+    import canonical_metrics as _r531_cm
+    _ab_record_count = _r531_cm.count_total_barriers(ab_data)
     summary['adoption_barriers'] = {
         'available': ab_data is not None and not ab_data.empty,
         'row_count': len(ab_data) if ab_data is not None and not ab_data.empty else 0,
         'status': 'available' if ab_data is not None and not ab_data.empty else 'empty',
-        'details': f'{len(ab_data)} adoption barriers found' if ab_data is not None and not ab_data.empty else 'No adoption barriers found'
+        # Round 53.1: human-facing details use distinct barrier records; keep
+        # row_count above for diagnostics of the raw export shape.
+        'details': f'{_ab_record_count} adoption barrier records found' if ab_data is not None and not ab_data.empty else 'No adoption barriers found'
     }
-    
+
     # CSOne
     summary['csone'] = {
         'available': csone_data is not None and not csone_data.empty,
@@ -515,7 +519,7 @@ def get_data_source_summary(
         'status': 'available' if csone_data is not None and not csone_data.empty else 'empty',
         'details': f'{len(csone_data)} support cases found' if csone_data is not None and not csone_data.empty else 'No CSOne cases found'
     }
-    
+
     # CSConsole (optional)
     if csconsole_action_plans is not None:
         summary['csconsole_action_plans'] = {
@@ -523,20 +527,20 @@ def get_data_source_summary(
             'row_count': len(csconsole_action_plans),
             'status': 'available' if not csconsole_action_plans.empty else 'empty'
         }
-    
+
     if csconsole_customer_pulse is not None:
         summary['csconsole_customer_pulse'] = {
             'available': not csconsole_customer_pulse.empty,
             'row_count': len(csconsole_customer_pulse),
             'status': 'available' if not csconsole_customer_pulse.empty else 'empty'
         }
-    
+
     if csconsole_success_priorities is not None:
         summary['csconsole_success_priorities'] = {
             'available': not csconsole_success_priorities.empty,
             'row_count': len(csconsole_success_priorities),
             'status': 'available' if not csconsole_success_priorities.empty else 'empty'
         }
-    
+
     return summary
 

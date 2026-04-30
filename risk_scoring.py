@@ -354,16 +354,43 @@ def _score_adoption_barriers(customer_ab: pd.DataFrame) -> Dict[str, Any]:
         else:
             use["open_age_days"] = pd.NA
 
-    count = len(use)
-    severity_points = sum(_severity_weight(v) for v in use["severity_norm"]) / max(count * 4, 1) * 45
-    open_count = int(use["status_norm"].eq("Open").sum())
+    import canonical_metrics as cm  # local import avoids module-cycle risk
+
+    # Round 53.1: score logical adoption-barrier records, not Snowflake fan-out
+    # rows. Duplicate assignee/detail rows with the same ID should not inflate
+    # risk factors or push the customer into a higher band.
+    count = cm.count_total_barriers(use)
+
+    if "ID" in use.columns:
+        def _record_key(row: pd.Series) -> str:
+            raw = row.get("ID")
+            if pd.notna(raw) and str(raw).strip():
+                return f"id::{str(raw).strip()}"
+            return f"row::{row.name}"
+
+        use["_r531_record_key"] = use.apply(_record_key, axis=1)
+    else:
+        use["_r531_record_key"] = [f"row::{idx}" for idx in use.index]
+
+    _severity_weights = use["severity_norm"].apply(_severity_weight)
+    record_severity_weight = _severity_weights.groupby(use["_r531_record_key"]).max()
+    severity_points = float(record_severity_weight.sum()) / max(count * 4, 1) * 45
+
+    open_count = cm.count_open_barriers(use)
     open_points = (open_count / max(count, 1)) * 30
-    aging_open_count = int(((use["status_norm"].eq("Open")) & (pd.to_numeric(use["open_age_days"], errors="coerce") >= 60)).sum())
+    _aging_mask = (
+        use["status_norm"].eq("Open")
+        & (pd.to_numeric(use["open_age_days"], errors="coerce") >= 60)
+    )
+    aging_open_count = int(use.loc[_aging_mask, "_r531_record_key"].nunique())
     aging_points = min(float(aging_open_count) * 8.0, 20.0)
     volume_points = min(float(count) * 2.0, 15.0)
     score = _clamp(severity_points + open_points + aging_points + volume_points)
 
-    critical_high_count = int(use["severity_norm"].isin(["Critical", "High"]).sum())
+    critical_high_count = cm.count_critical_barriers(
+        use,
+        mode=cm.CRITICAL_AB_MODE_CRITICAL_OR_HIGH,
+    )
     return {
         "score": score,
         "details": {

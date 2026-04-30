@@ -361,8 +361,9 @@ def _write_leader_docx_fixture(path: Path) -> None:
     doc = Document()
     doc.add_paragraph("Manager: Brian Frazier")
     doc.add_paragraph("Analysis Period: 90 days")
-    table = doc.add_table(rows=6, cols=2)
+    table = doc.add_table(rows=7, cols=2)
     rows = (
+        ("Customers", "15"),
         ("Team Members", "3"),
         ("Action Plans", "12"),
         ("Adoption Barriers", "8"),
@@ -397,10 +398,10 @@ def test_round52_leader_fixture_parity_passes_strict_required_keys(tmp_path: Pat
         required_keys=SCENARIO_REQUIRED_KPIS["leader"],
     )
     assert parity.passed, parity.details
-    # Cross-format coverage: DOCX "Team Members" / XLSX team_summary row count
-    # both feed the total_customers KPI; both must be present.
+    # Round 53: team size and customer count are separate KPIs.
     docx_values = docx_kpis["values"]
     xlsx_values = xlsx_kpis["values"]
+    assert docx_values.get("team_members") == xlsx_values.get("team_members")
     assert docx_values.get("total_customers") == xlsx_values.get("total_customers")
     assert docx_values.get("action_plans") == xlsx_values.get("action_plans")
     assert docx_values.get("adoption_barriers") == xlsx_values.get("adoption_barriers")
