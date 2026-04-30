@@ -7485,3 +7485,34 @@ Categories: **A** = writer pre-cites a multi-match paragraph with a single trail
 
 **Trailer:** Made-with: Cursor
 
+### Round 60 — Build 33 packaged smoke results 2026-04-30
+
+Round 60 source (commit `1a95fd2`) plus the Build 33 release prep (commit `f01e49a`, bumps `ADOPTIQ_BUILD = "32" → "33"` + backfills five "What's New" sections in `README.md` for Builds 29-33) were packaged into `OUTBOX/AdoptIQ-v1.0.4-build33.dmg` (403 MB) via `ADOPTIQ_VERSION=1.0.4 ADOPTIQ_BUILD=33 bash build_mac_dmg.sh`. The `update_version_pc.py` env-var footgun (Round 59 hot-spot 3) was avoided by pinning both env vars on the command line. Build log at `/tmp/build33.log` is clean: 0 `ImportError` / `ModuleNotFoundError` / `FATAL` matches; `Build complete!` + `Created DMG` + `Wrote build info` + `Signing final DMG` markers all present. `OUTBOX/build_info.txt` reads `AdoptIQ v1.0.4 build 33 / Built: 2026-04-30T19:03:14Z / Artifact: AdoptIQ-v1.0.4-build33.dmg`.
+
+**Round 60 / Build 33 packaged smoke matrix (vs `dist/AdoptIQ.app/Contents/MacOS/AdoptIQ`):**
+
+The packaged binary was spawned with `ADOPTIQ_PORT=15151 ADOPTIQ_BIND_HOST=127.0.0.1 ADOPTIQ_INTERNAL_TOKEN=r60-pkg-smoke ADOPTIQ_NO_BROWSER=1` so the smoke target sat on alt port 15151 rather than the default 5151 — preserving the plan's "do not disturb a running Build 32" contract even though the user's Build 32 had already exited (PID 79650 gone, ports 5151/5152 confirmed free pre-smoke).
+
+| # | check | result | evidence |
+|---|---|---|---|
+| 1 | App boots (HTTP 200 from `/` on `127.0.0.1:15151`) | **PASS** | `curl -o /dev/null -w "HTTP %{http_code}"` returned `HTTP 200`; werkzeug log at `14:06:50` shows `"GET / HTTP/1.1" 200 -`; `lsof -nP -iTCP:15151 -sTCP:LISTEN` shows `AdoptIQ 33706 jestory ... TCP 127.0.0.1:15151 (LISTEN)` |
+| 2 | Build 33 footer renders in HTML | **PASS** | `curl http://127.0.0.1:15151/ \| grep "v1\.0\.4 build [0-9]+"` returned `v1.0.4 build 33`; stdout banner during boot also reads `AdoptIQ Simple - AI-Powered Executive Analytics / v1.0.4 build 33` (proves the `update_version_pc.py` footgun did not recur) |
+| 3 | `/static/js/quit_adoptiq.js` bundled and served, with Round 60 marker | **PASS** | `curl http://127.0.0.1:15151/static/js/quit_adoptiq.js \| grep -c "Round 60"` returned `5`; werkzeug log shows three successful `GET /static/js/quit_adoptiq.js HTTP/1.1 200` requests; on-disk asset at `dist/AdoptIQ.app/Contents/Resources/static/js/quit_adoptiq.js` is 10,357 bytes, mode `0644`. Also confirms `templates/base.html` bundled (58,231 bytes) with one `adoptiq-quit-btn` reference |
+| 4 | `POST /api/shutdown` with `X-AdoptIQ-Internal` token returns 202 + correct payload | **PASS** | HTTP 202; response body `{"force": false, "in_progress_count": 0, "ok": true, "shutdown_in_ms": 500, "success": true}` (matches the contract pinned by `tests/test_round60_shutdown_endpoint.py::test_shutdown_accepted_with_internal_token_and_no_running` byte-for-byte) |
+| 5 | **SIGTERM through PyInstaller bootloader works** — port 15151 released and process gone within 1 s | **PASS** | At `T = POST + 1s`: `lsof -nP -iTCP:15151 -sTCP:LISTEN` returns nothing; `ps -p 33706` returns no row. Boot log at `14:07:22.047` shows `Round 60 / api_shutdown: SIGTERM scheduled in 0.50s (force=False, running=0)` followed by werkzeug's `POST /api/shutdown HTTP/1.1 202`. **This is the headline result for Round 60** — pre-Build 33 the SIGTERM path had only been smoke-tested through `python3 app_simple.py` (R60 plan risk #2). The frozen binary now confirms `signal.SIGTERM` propagates correctly through PyInstaller's bootloader |
+| 6 | Ports 5151 / 5152 stay free (adapted from "Build 32 untouched" — Build 32 had already exited before smoke) | **PASS** | Pre-smoke: PID 79650 not running; ports 5151 / 5152 / 15151 all free. Post-smoke: `lsof -nP -iTCP:5151 -sTCP:LISTEN` and `lsof -nP -iTCP:5152 -sTCP:LISTEN` both return nothing. The smoke run used alt port 15151 throughout; default-port surface untouched |
+| 7 | Boot log clean (no `ImportError` / `ModuleNotFoundError` / `Traceback`) | **PASS** | `grep -cE "ImportError\|ModuleNotFoundError\|Traceback" /tmp/build33_smoke.log` returned `0` against 739 log lines. Confirms (a) Round 59 `hiddenimports` pin held — `report_source_injector` + `report_iteration_loop` loaded cleanly inside the frozen binary, and (b) Round 60 source compiled and imported cleanly inside the frozen binary. The corpus index pass completed (`files_seen=441 parsed=0 skipped=441 chunks_added=0 schema=1`), the admin daemon launched on `127.0.0.1:5152` (free), `/api/intel/status` returned 200 |
+
+**Files touched by this smoke step:** `QUALITY_AUDIT.md` (this subsection appended). No source changes.
+
+**Verify status (post-smoke):**
+- Build artifacts: `OUTBOX/AdoptIQ-v1.0.4-build33.dmg` (403 MB), `dist/AdoptIQ.app` (with bundled `quit_adoptiq.js` + `base.html`), `OUTBOX/build_info.txt` (`v1.0.4 build 33 / 2026-04-30T19:03:14Z`).
+- Smoke matrix: 7/7 PASS. The Round 60 plan's risk #2 ("only smoke-tested through python3 app_simple.py, not through the frozen binary") is closed.
+- Pre-existing pytest floor (`3600 passed / 2 skipped`) is unchanged by this smoke step (no source touched).
+
+**Hot spots Claude should audit first (post-Build 33):**
+1. Future builds MUST continue to invoke the build script with explicit `ADOPTIQ_VERSION` and `ADOPTIQ_BUILD` env vars or `update_version_pc.py` will reset the build number to `"1"` (Round 59 hot-spot 3, still applies). The smoke check 2 (`grep "v1\.0\.4 build N"`) catches this regression in 1 second. A future Round 60+ candidate is to teach `update_version_pc.py` to read the existing `ADOPTIQ_BUILD` value from `config.py` as the default when the env var is unset.
+2. The packaged Quit button now ships in real installs. Operators upgrading from Build 32 will see a new red Quit control on both navbars; the on-disk install flow does not change. The Round 60 / Build 33 deferrals carry forward (no `cancel_analysis()` call on `force=1`; no `window.close()` after 202 ack — both intentional).
+
+**Trailer:** Made-with: Cursor
+
