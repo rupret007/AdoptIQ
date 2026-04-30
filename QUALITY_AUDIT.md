@@ -7347,3 +7347,76 @@ Cosmetic drift (citation/paragraph counts) on `comprehensive` across iterations:
 
 **Trailer:** Made-with: Cursor
 
+## Round 59 — handoff 2026-04-30
+
+**What changed (plain English):**
+- Cut **Build32** (`OUTBOX/AdoptIQ-v1.0.4-build32.dmg`) to package the Round 57 post-render source-citation injector that landed on `main` in commit `6a42a99` but never made it into a shipped artifact (Build31 predated R57). Bumped `ADOPTIQ_BUILD = "31" → "32"` in `config.py:908`.
+- Added two explicit `hiddenimports` entries to `adoptiq_mac.spec` (around line 82): `report_source_injector` and `report_iteration_loop`. The first is statically imported by `app_simple.py` (PyInstaller would normally find it) but pinned for clarity; the second is **lazy-imported** inside `report_source_injector._gate_kpi_aliases()` and PyInstaller's static analyzer does NOT follow lazy imports inside function bodies. Without this pin the frozen build would silently degrade to a no-op injector (canonical KPI filter returns `False` for every match → zero citations injected) even though the source code is correct.
+- Ran the full Build32 manual acceptance loop: user installed the new DMG, generated all 4 report scenarios through the packaged `.app` (compact / comprehensive Brian Frazier / renewal portfolio / leader Brian Frazier, 90d each), and Cursor verified each rendered (DOCX, XLSX) pair offline against the harness gates and the R57 baselines. Result: **all 4 scenarios GREEN.**
+
+**Files touched:**
+- `config.py:908` — `ADOPTIQ_BUILD = "31" → "32"` + Round 59 marker comment.
+- `adoptiq_mac.spec` (around line 82) — added `report_source_injector` + `report_iteration_loop` (and `knowledge_schema`) to `hiddenimports` with a Round 59 explanatory comment block.
+- `QUALITY_AUDIT.md` — this Round 59 section + closing the prior R58 handoff.
+
+**SSoT modules touched:** `none` (build/packaging changes only; no source-of-truth data, scoring, or schema modules edited).
+
+**Tests added/updated:**
+- None. Round 59 is a packaging round + live acceptance against the existing R57 supervisor. No new code paths to pin.
+
+**Verify status:**
+- `make verify` — pass (run before the bump as part of the preflight commit `3a775ad`).
+- pytest: **3570 passed / 2 skipped** (Round 58 floor preserved).
+- ruff: 0 findings.
+- bandit HIGH/MED: 0.
+- pip-audit: clean.
+- Build smoke: `bash build_mac_dmg.sh` produced `OUTBOX/AdoptIQ-v1.0.4-build32.dmg` (~280 MB) and `dist/AdoptIQ.app`. App boot smoke: `.app` started on `127.0.0.1:5151` and returned HTTP 200 from PID 79650 = `/Users/jestory/AdoptIQ/AdoptIQ/dist/AdoptIQ.app/Contents/MacOS/AdoptIQ`. Boot logs scanned for `ImportError` / `ModuleNotFoundError` for `report_source_injector` / `report_iteration_loop` — none found.
+- Live manual acceptance: 4 reports generated through the user-installed Build32 `.app`, all 4 `analysis_status.json` entries `state=completed err=''`. No R38.2-class tracebacks (`KeyError` / `_bu_disp` / `_age_days` / `_xxx`) in today's app log.
+
+**Round 59 Build32 manual acceptance matrix (the headline result of this round):**
+
+User-supplied artifact paths (8 files, all timestamped 2026-04-30 10:42 local):
+- compact:       `~/Downloads/AdoptIQ_Report_Compact_All_Managers_All_Contact_Center_90d_1777563305.docx` + `~/Downloads/AdoptIQ_Data_Compact_All_Managers_All_Contact_Center_90d_1777563305.xlsx`
+- comprehensive: `~/Downloads/AdoptIQ_Report_Brian_Frazier_All_Contact_Center_90d_1777563290.docx` + `~/Downloads/AdoptIQ_Data_Brian_Frazier_All_Contact_Center_90d_1777563290.xlsx`
+- renewal:       `~/Downloads/AdoptIQ_Report_Renewal_Portfolio_All_Managers_All_Contact_Center_90d_1777563317.docx` + `~/Downloads/AdoptIQ_Data_Renewal_Portfolio_All_Managers_All_Contact_Center_90d_1777563317.xlsx`
+- leader:        `~/Downloads/AdoptIQ_Report_Leader_Brian_Frazier_90d_1777563328.docx` + `~/Downloads/AdoptIQ_Data_Leader_Brian_Frazier_90d_1777563328.xlsx`
+
+| scenario      | DOCX cites | cells cited / total | doubled (idempotency) | table-claim gate (R57 supervisor's gate) | KPI parity DOCX↔XLSX | verdict |
+|---|---:|---:|---:|---|---|---|
+| compact       | 500  | 64 / 215    | **0** | **0 unbacked / 12 claims**  | **PASS** (0/8 mismatches) | **GREEN** |
+| comprehensive | 195  | 11 / 28     | **0** | **0 unbacked / 92 claims**  | **PASS** (0/9 mismatches) | **GREEN** |
+| renewal       | 577  | 33 / 114    | **0** | **0 unbacked / 11 claims**  | **PASS** (0/8 mismatches) | **GREEN** |
+| leader        | 2206 | 1383 / 13286| **0** | **0 unbacked / 407 claims** | **PASS** (0/7 mismatches) | **GREEN** |
+
+3,478 `[Source: ...]` markers rendered across the 4 reports — the R57 injector is shipping correctly in the frozen build. KPI parity is bit-identical for every common KPI in every scenario (32 KPI pairs, zero mismatches). 522 table claims across the 4 scenarios, all source-backed. Sample injection looks correctly anchored to canonical KPIs:
+
+- `Total Customers: 190 [Source: Normalized customer set from team subscriptions + CSConsole + CSOne; Field(s): Customer Name, Account ID; Verification: Cross-check customer IDs/names in source exports]`
+- `Total Adoption Barriers: 70 [Source: AdoptIQ Report Data Sources]`
+- `Team Size: 11 Direct Reports [Source: AdoptIQ Report Data Sources]`
+
+**Build32 vs R57 baseline drift (sanity cross-check):**
+
+Re-ran the harness's stricter per-segment paragraph gate (`_paragraph_claim_source_backed` from `report_iteration_loop.py:1462`) against both the Round 59 user reports AND the R57 baseline DOCX files. Both sets fail this stricter check at essentially identical rates — confirming Build32 is NOT a regression vs R57:
+
+| scenario      | R57 baseline unbacked-paragraph-segments | Build32 unbacked-paragraph-segments | delta | interpretation |
+|---|---:|---:|---|---|
+| compact       | 14  (all cat A) | 18  (12 cat A + 6 cat B LLM-fallback)   | +4 (LLM 429 fallback content)              | not a regression |
+| comprehensive | 47  (19 cat A)  | 14  (14 cat A)                           | -33 (Build32 is BETTER)                    | not a regression |
+| renewal       | 87  (39 cat A)  | 89  (37 cat A + 51 cat D harness false-positives on case IDs like `Case: 700356476`) | +2 | not a regression |
+| leader        | 214 (all cat A) | 215 (all cat A)                          | +1 (essentially identical)                 | not a regression |
+
+Categories: **A** = writer pre-cites a multi-match paragraph with a single trailing `[Source: ...]` (e.g. `Total Activities: 17 (APs: 8, ABs: 1, CPs: 0, TAC: 8) [Source: ...]`); the injector deliberately skips already-cited paragraphs for idempotency, so the per-segment gate flags N-1 of N matches. **B** = compact got an LLM rate-limit (HTTP 429) and the writer emitted `[Non-AI fallback summary] ... Error code: 429 ...` content; the harness regex matched the error code as a "metric claim". **D** = the harness regex matches case/TAC IDs (`Case: 700356476`) as `Label: number` KPI claims even though they are identifiers not metrics. None of the three categories are reachable from the supervisor's table-claim gate (the gate that actually decides ship/no-ship), which is why R57's supervisor reported 0 unbacked despite the same baselines exhibiting the same paragraph-segment shape.
+
+**Hot spots Claude should audit first:**
+1. `adoptiq_mac.spec` `hiddenimports` — the Round 59 lesson is that any module statically reachable ONLY through a lazy import inside a function body is invisible to PyInstaller's static analyzer. The R57 `report_source_injector` would have shipped fine (it's statically imported by `app_simple.py`), but `_gate_kpi_aliases()` lazy-imports `report_iteration_loop` inside a function body, and that module would have been omitted by default. Any future module added to the codebase that's only referenced via lazy / deferred / TYPE_CHECKING imports needs the same treatment. Audit: `git grep -n "from report_iteration_loop import" -- "*.py"` should return ONLY the lazy import in `report_source_injector.py:_gate_kpi_aliases()`; if that ever expands into more lazy import sites, each one needs a corresponding `hiddenimports` pin (or a static module-level `import report_iteration_loop  # noqa: F401` guard at the top of the importer file).
+2. `report_iteration_loop.py:_paragraph_claim_source_backed` (line 1462) and `_PARAGRAPH_KPI_NUMERIC_RE` — the per-segment paragraph gate is significantly stricter than the table-claim gate the supervisor actually uses. The R59 cross-check showed both Build32 AND R57 baselines fail the stricter gate at near-identical rates (Cat A "writer pre-cites with trailing chrome"). If a future round wants to tighten the supervisor to ALSO check paragraph segments, the writers need to emit per-segment chrome (not trailing chrome) for multi-match paragraphs, OR the injector needs to be allowed to mutate already-cited paragraphs (breaking the current idempotency contract).
+3. `update_version_pc.py` — Round 59 hit the build-versioning footgun where running `bash build_mac_dmg.sh` without explicitly exporting `ADOPTIQ_VERSION` and `ADOPTIQ_BUILD` causes `update_version_pc.py` to RESET `ADOPTIQ_BUILD` in `config.py` to its default `"1"`. Workaround used in R59: `ADOPTIQ_VERSION=1.0.4 ADOPTIQ_BUILD=32 bash build_mac_dmg.sh`. Round 60 candidate: have `update_version_pc.py` READ the existing `ADOPTIQ_BUILD` value from `config.py` and use it as the default when the env var is unset, instead of falling through to literal `"1"`. The current behavior makes it easy to ship a build labeled `build1` when the source said `build32`.
+
+**Known deferrals (intentional non-fixes):**
+- The R58 deferrals carry forward: (a) the `comprehensive.action_plans` LLM-phrasing-sensitive KPI extraction, (b) the renewal UTC-day-boundary baseline drift, (c) the `corpus_bootstrap` pytest-shutdown logger race. None are R59 regressions; all are pre-existing harness fragility not affecting production reports.
+- The Build32 manual run ran into an LLM rate-limit (HTTP 429) on the `compact` scenario, which produced 6 cat-B unbacked paragraph claims when the writer emitted the documented `[Non-AI fallback summary]` block. This is **expected fallback behavior**, NOT a code regression. Operators who hit rate limits will see their compact reports shaped by the rule-based fallback writer; the table-claim gate still passes because the fallback writer doesn't claim numeric metrics.
+- The harness regex false-positives on case/TAC IDs (`Case: 700356476` matched as `Label: number` KPI claim) inflate the renewal cat-D count to 51. The R57 baselines have the same shape. The fix would be to teach `_PARAGRAPH_KPI_NUMERIC_RE` to skip purely-numeric "values" of length ≥ 7 digits (case IDs are 9 digits, TAC numbers are 9 digits), but R57 baselines and R59 Build32 outputs both fail the per-segment gate identically and the supervisor's primary gate is unaffected, so this is deferred.
+- The `OUTBOX/AdoptIQ.app` staging bundle was deleted as part of the build-cleanup-and-retry loop in this round (the first run produced `AdoptIQ-v1.0.4-build1.dmg` due to the `update_version_pc.py` env-var footgun above; cleanup removed the wrong-version `OUTBOX/AdoptIQ.app`, `OUTBOX/AdoptIQ-v1.0.4-build1.dmg`, and `OUTBOX/build_info.txt` before the second build produced the correct `build32` DMG). The current `OUTBOX/` contains only the final correct artifact.
+
+**Trailer:** Made-with: Cursor
+
