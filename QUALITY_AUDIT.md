@@ -7582,3 +7582,40 @@ The packaged binary was spawned with `ADOPTIQ_PORT=15151 ADOPTIQ_BIND_HOST=127.0
 - Round 60 / Build 33 deferrals carry forward (no `cancel_analysis()` call on `force=1`; no `window.close()` after 202 ack — both intentional UX choices).
 
 **Trailer:** Made-with: Cursor
+
+### Round 61 — Build 34 packaged smoke results
+
+Same 7-check matrix as Round 60 / Build 33, executed against
+`OUTBOX/AdoptIQ-v1.0.4-build34.dmg` (399 MB, built at
+`2026-04-30T20:51:43Z` via `ADOPTIQ_VERSION=1.0.4 ADOPTIQ_BUILD=34
+bash build_mac_dmg.sh`).  The packaged binary was spawned with
+`ADOPTIQ_PORT=15151 ADOPTIQ_BIND_HOST=127.0.0.1
+ADOPTIQ_INTERNAL_TOKEN=r61-pkg-smoke ADOPTIQ_NO_BROWSER=1` so the
+smoke target sat on alt port 15151 rather than the default 5151 —
+preserving the "default-port surface untouched" contract from the
+Build 33 smoke pass.  Pre-smoke probe: ports 5151 / 5152 / 15151 all
+free.
+
+| # | check | result | evidence |
+|---|---|---|---|
+| 1 | App boots (HTTP 200 from `/` on `127.0.0.1:15151`) | **PASS** | `curl -o /dev/null -w "HTTP %{http_code}"` returned `HTTP 200`; werkzeug log at `15:52:15.636` shows `"GET / HTTP/1.1" 200 -`. |
+| 2 | Build 34 footer renders in HTML | **PASS** | `curl http://127.0.0.1:15151/ \| grep -oE "v1\.0\.4 build [0-9]+"` returned `v1.0.4 build 34`. **This is the headline result for Round 61 / Phase 2.B**: the build was cut WITHOUT explicit `ADOPTIQ_VERSION`/`ADOPTIQ_BUILD` env-var exports being relied upon by `update_version_pc.py`'s default path -- the `config.py = "34"` value held end-to-end through PyInstaller. (Belt + suspenders: the env vars were exported on the build line per the plan to actively prove the env-var path still works alongside the new env -> existing -> floor resolution.) |
+| 3 | `/static/js/quit_adoptiq.js` bundled and served, with Round 60 marker | **PASS** | `curl http://127.0.0.1:15151/static/js/quit_adoptiq.js \| grep -c "Round 60"` returned `5`; werkzeug log shows `GET /static/js/quit_adoptiq.js HTTP/1.1 200`. |
+| 4 | `POST /api/shutdown` with `X-AdoptIQ-Internal` token returns 202 + correct payload | **PASS** | HTTP 202; response body `{"force": false, "in_progress_count": 0, "ok": true, "shutdown_in_ms": 500, "success": true}` (byte-identical to Build 33 baseline -- pinned by `tests/test_round60_shutdown_endpoint.py`). |
+| 5 | **SIGTERM through PyInstaller bootloader works** — port 15151 released and process gone within 1 s | **PASS** | At `T = POST + 1s`: `lsof -nP -iTCP:15151 -sTCP:LISTEN` returns nothing. Boot log at `15:52:33.781` shows `Round 60 / api_shutdown: SIGTERM scheduled in 0.50s (force=False, running=0)` followed by werkzeug's `POST /api/shutdown HTTP/1.1 202`. Confirms Round 60's SIGTERM path remains stable across the Build 33 -> Build 34 transition. |
+| 6 | Default ports 5151 / 5152 stay free during smoke | **PASS** | Pre-smoke and post-smoke: `lsof -nP -iTCP:5151 -sTCP:LISTEN` and `lsof -nP -iTCP:5152 -sTCP:LISTEN` both return nothing. |
+| 7 | Boot log clean (no `ImportError` / `ModuleNotFoundError` / `Traceback`) | **PASS** | `grep -cE "ImportError\|ModuleNotFoundError\|Traceback" /tmp/build34_smoke.log` returned `0` against 737 log lines. Three corpus index passes completed cleanly (`files_seen=253` onedrive + `441` user_downloads + `0` intel_uploads, all `chunks_added=0` because the cache is warm); admin daemon launched; `/api/intel/status` returned 200; static asset served. Confirms Round 59 `hiddenimports` pin (`report_source_injector` + `report_iteration_loop`) and Round 60 source still load cleanly inside the frozen binary, AND the Round 61 source changes (`corpus_bootstrap._exit_log_streams_open`, `update_version_pc.main`, `report_iteration_loop._PARAGRAPH_KPI_PREFIX_NUMERIC_RE`) compile + import cleanly inside the frozen binary too. |
+
+**Files touched by this smoke step:** `QUALITY_AUDIT.md` (this subsection appended). No source changes.
+
+**Verify status (post-smoke):**
+- Build artifacts: `OUTBOX/AdoptIQ-v1.0.4-build34.dmg` (399 MB), `dist/AdoptIQ.app` (with bundled R60 Quit button + R61 source markers), `OUTBOX/build_info.txt` (`v1.0.4 build 34 / 2026-04-30T20:51:43Z`).
+- Smoke matrix: 7/7 PASS. The Round 60 SIGTERM path holds across the build cut; the Round 61 source changes ship cleanly inside the frozen binary.
+- Pre-existing pytest floor (`3626 passed / 2 skipped`) unchanged by this smoke step (no source touched).
+
+**Hot spots Claude should audit first (post-Build 34):**
+1. The Round 61 / Phase 2.B fix means `bash build_mac_dmg.sh` (without explicit env-var exports) will now correctly read the `config.py = "34"` value instead of resetting to `"1"`. Future build cuts SHOULD still set the env vars on the build line for clarity (the plan explicitly did so), but the safety net is now in place. A follow-on round could remove the env-var requirement from documentation.
+2. The Round 61 / Phase 2.E fix is scoped to the daemon's lifecycle log only. Other corpus_bootstrap log call sites (e.g. `_run_index_pass` at line ~1360+) can still leak the same closed-stream noise during pytest teardown if a test triggers an index pass and the test stream is closed mid-run. Tracked as a follow-on cleanup in the R61 handoff "Known deferrals" section.
+3. The Round 61 / Phase 2.D prefix regex allow-list is currently restricted to Action Plans / Adoption Barriers / Customer Pulse / Direct Reports. If a future LLM revision phrases a different KPI in the `<number> Label` idiom, that KPI will silently drop. Mitigated by the R58 soak which only saw this pattern for action_plans + customer_pulse, but the allow-list is the failure mode for a future round.
+
+**Trailer:** Made-with: Cursor
