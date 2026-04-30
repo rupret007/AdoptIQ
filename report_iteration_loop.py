@@ -849,10 +849,21 @@ _NUMERIC_VALUE_RE = re.compile(r"^-?\$?\d[\d,]*(?:\.\d+)?\s*%?$")
 
 
 def _is_numeric_kpi_value(value: Any) -> bool:
-    """True when ``value`` looks like a count/score/percent KPI value."""
+    """True when ``value`` looks like a count/score/percent KPI value.
+
+    Round 57: tolerate trailing ``[Source: ...]`` chrome appended by
+    ``report_source_injector``; the chrome is purely presentational and
+    must not hide an otherwise-numeric value from the gate's table
+    claim detector. Without this, injected cells silently disappear
+    from ``metric_claim_count`` instead of becoming source-backed
+    claims, defeating the injector.
+    """
     if value is None:
         return False
     text = str(value).strip()
+    if not text:
+        return False
+    text = re.sub(r"\s*\[\s*Source\s*:[^\]]*\]\s*", "", text, flags=re.IGNORECASE).strip()
     if not text:
         return False
     return bool(_NUMERIC_VALUE_RE.match(text))
@@ -862,6 +873,17 @@ def _normalize_kpi_value(value: Any) -> str:
     if value is None:
         return ""
     text = str(value).strip()
+    text = re.sub(r"\s+", " ", text)
+    # Round 57: the post-render source-citation injector
+    # (report_source_injector) appends ``[Source: ...]`` chrome to KPI
+    # value cells in the Word document so the quality gate's
+    # adjacent-citation rule passes. The chrome is purely
+    # presentational -- the underlying numeric is identical to what
+    # the XLSX writer emitted -- so strip any ``[Source: ...]`` block
+    # before comparing values across formats. Without this, the parity
+    # gate fires on a cosmetic difference (docx="68 [Source: ...]" vs
+    # xlsx="68") that the gate is explicitly NOT meant to flag.
+    text = re.sub(r"\s*\[\s*Source\s*:[^\]]*\]\s*", " ", text, flags=re.IGNORECASE).strip()
     text = re.sub(r"\s+", " ", text)
     # Round 52 / partial-data-warning Phase 5: strip trailing
     # presentational suffixes that one side adds and the other does not

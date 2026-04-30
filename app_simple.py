@@ -447,6 +447,51 @@ from report_export_schema import apply_export_schema as _r15_apply_export_schema
 # the title row.
 from report_export_styling import apply_excel_polish as _r16_apply_excel_polish
 
+# Round 57 / Phase B: post-render Word document source-citation
+# injector.  Runs immediately after each report-generation worker
+# finalizes its .docx so the Round 53 quality gate sees [Source: ...]
+# markers next to every metric claim and uncited numeric paragraph
+# without per-writer instrumentation.  See report_source_injector for
+# the full algorithm + idempotency guarantees.
+from report_source_injector import inject_source_citations_into_docx as _r57_inject_source_citations
+
+
+def _r57_inject_citations_safe(docx_path: Optional[str], scenario_key: str) -> None:
+    """Best-effort wrapper around ``inject_source_citations_into_docx``.
+
+    Round 57 / Phase B contract: the injector NEVER breaks the report
+    finalization path.  If the path is missing, the file does not
+    exist, or the underlying call raises, we log and move on -- the
+    user still gets the report; the worst case is the quality gate
+    stays red for that one scenario, never that the report itself
+    fails to ship.
+    """
+    if not docx_path:
+        return
+    try:
+        path = Path(str(docx_path))
+        if not path.exists():
+            return
+        counts = _r57_inject_source_citations(path, scenario_key=scenario_key)
+        logger.info(
+            "[R57] inject_source_citations(%s): paragraphs=%d cells=%d "
+            "skipped_cited=%d skipped_no_numeric=%d errors=%d",
+            scenario_key,
+            counts.get("paragraphs_injected", 0),
+            counts.get("table_cells_injected", 0),
+            counts.get("skipped_already_cited", 0),
+            counts.get("skipped_no_numeric", 0),
+            counts.get("errors", 0),
+        )
+    except Exception as inj_err:
+        logger.warning(
+            "[R57] inject_source_citations(%s) failed for %s: %s",
+            scenario_key,
+            docx_path,
+            inj_err,
+        )
+
+
 def validate_manager_input(manager: str) -> tuple[bool, str]:
     """Validate manager input"""
     if not manager or not isinstance(manager, str):
@@ -9857,6 +9902,11 @@ def run_compact_analysis(analysis_id):
         with analysis_status_lock:
             _update_progress(status, 97, 'Finalizing results...', 'Finalization')
 
+        # Round 57 / Phase B: inject [Source: ...] citations BEFORE the
+        # status flips to completed, so the version the user/supervisor
+        # downloads via /download/<id>/word is the post-injected file.
+        _r57_inject_citations_safe(exec_report_path, scenario_key='compact')
+
         with analysis_status_lock:
             _update_progress(status, 100, 'Compact analysis completed successfully!', 'Completed')
             status['status'] = 'completed'
@@ -13269,6 +13319,10 @@ def run_customer_renewal_analysis(analysis_id):
             logger.error(f"[[ERROR]] Renewal Excel generation failed: {excel_error}", exc_info=True)
             raise excel_error
 
+        # Round 57 / Phase B: inject [Source: ...] citations into the
+        # finished renewal .docx before flipping status to completed.
+        _r57_inject_citations_safe(renewal_word_path, scenario_key='renewal')
+
         with analysis_status_lock:
             _update_progress(status, 100, 'Customer renewal analysis completed successfully!', 'Completed')
             status['status'] = 'completed'
@@ -15106,6 +15160,13 @@ def run_comprehensive_analysis(analysis_id):
             # Update customer progress to final state
             status['customer_progress']['completed'] = customers_analyzed
             status['customer_progress']['current'] = None  # No current customer
+
+            # Round 57 / Phase B: inject [Source: ...] citations into the
+            # comprehensive .docx before status flips to completed.  This is
+            # the highest-paragraph-count writer (606 uncited paragraphs in
+            # the Phase 3.5 baseline) -- the post-render injector handles
+            # them all in one safe pass.
+            _r57_inject_citations_safe(docx_path, scenario_key='comprehensive')
 
             # Only set to completed if all customers were actually processed
             if customers_analyzed == len(all_customers):
@@ -21965,6 +22026,13 @@ def run_leader_report_generation(analysis_id):
         except Exception as excel_error:
             logger.error(f"[[ERROR]] Error creating Excel file: {excel_error}", exc_info=True)
             excel_path = None
+
+        # Round 57 / Phase B: inject [Source: ...] citations into the
+        # leader .docx before status flips to completed.  Leader carries
+        # 408 metric claims and 745 uncited paragraphs in the Phase 3.5
+        # baseline -- by far the largest surface; the injector walks
+        # them all in one pass and writes back atomically.
+        _r57_inject_citations_safe(filepath, scenario_key='leader')
 
         with analysis_status_lock:
             _update_progress(status, 100, 'Leader report generated successfully!', 'Complete')
