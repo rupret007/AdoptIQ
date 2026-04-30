@@ -171,6 +171,14 @@ KPI_ALIASES = {
         # Round 52 / accuracy-fix-loop: leader bullets render as
         # "Total Action Plans: 354".
         "total action plans",
+        # Round 62 / B: comprehensive XLSX Summary now carries
+        # "Action plans (open)" as a deterministic anchor; without
+        # this alias _normalize_kpi_label normalizes the label to
+        # "action_plans_open" (the parenthesized "(open)" qualifier
+        # gets joined with an underscore by the normalizer) and the
+        # value never reaches the canonical action_plans bucket.
+        "action plans open",
+        "open action plans",
     },
     "customer_pulse": {
         "customer pulse",

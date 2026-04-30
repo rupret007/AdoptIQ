@@ -911,6 +911,45 @@ def count_customers_with_barriers(ab_df: Optional[pd.DataFrame]) -> int:
     return int(keys.nunique())
 
 
+def count_open_action_plans(ab_df: Optional[pd.DataFrame]) -> int:
+    """Round 62 / B: deterministic action-plan count derived from the
+    ``AB_Detail_All`` sheet's ``Action Plan Title`` column (non-empty
+    rows are open action plans).
+
+    Returns 0 when the AB frame is empty, ``None``, or missing every
+    candidate column.  Mirrors the LLM phrasing ``"there are X Action
+    Plans"`` so the comprehensive XLSX ``Summary`` sheet and the report
+    narrative carry the same value regardless of LLM wording variation
+    (the R58 soak observed the LLM emit ``"0 Action Plans"`` while the
+    canonical KPI extractor missed it because the comprehensive
+    scenario carries no dedicated ``action_plans`` table cell).
+
+    The check tolerates the four naming conventions seen in the wild:
+    ``Action Plan Title`` (CSConsole export header),
+    ``action_plan_title`` (snake_case internal), ``AP_TITLE_C`` (raw
+    Salesforce custom field), ``ACTION_PLAN_TITLE`` (Snowflake
+    upper-case variant).  Whitespace-only cells are NOT counted.
+
+    This helper is intentionally specific to the AB frame because the
+    leader scenario has its OWN dedicated ``Action_Plans`` sheet (see
+    ``leader_report_components``); this counter exists for the
+    comprehensive / compact / renewal flows whose only structured AP
+    surface is embedded inside ``AB_Detail_All``.
+    """
+
+    if _is_empty(ab_df):
+        return 0
+    candidates = ("Action Plan Title", "action_plan_title", "AP_TITLE_C", "ACTION_PLAN_TITLE")
+    col = next((c for c in candidates if c in ab_df.columns), None)
+    if col is None:
+        return 0
+    try:
+        series = ab_df[col].fillna("").astype(str).str.strip()
+    except Exception:  # noqa: BLE001 - defensive against weird mixed dtypes
+        return 0
+    return int((series != "").sum())
+
+
 def count_action_plan_completed(ap_df: Optional[pd.DataFrame]) -> int:
     """Round 30 / M1: Completed action-plan count via canonical normalization.
 

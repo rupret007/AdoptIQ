@@ -427,6 +427,12 @@ EXPECTED_KPIS: Dict[str, Any] = {
         "Adoption barriers (detail rows)",
         "Adoption barriers (critical)",
         "Adoption barriers (open)",
+        # Round 62 / B: deterministic action_plans anchor inserted
+        # after the AB cluster (count is derived from AB_Detail_All's
+        # "Action Plan Title" column via canonical_metrics.count_open_
+        # action_plans).  Pinned by tests/test_round62_action_plans_in_
+        # summary.py.
+        "Action plans (open)",
         "TAC cases (total)",
         "TAC cases (P1)",
         "TAC cases (open)",

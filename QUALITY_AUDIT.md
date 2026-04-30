@@ -7686,3 +7686,70 @@ The prefix regex did NOT change parity outcomes (still 32/32 match — the value
 3. The Quit button click-through worked behaviorally but produced no app-log evidence (PyInstaller `.app` redirects stdout/stderr away from unified log).  A future round could wire `_trigger_shutdown_sigterm()` to also emit a syslog message via `log` so manual acceptance can pin it from `Console.app`.  Tracked as a low-priority cleanup.
 
 **Trailer:** Made-with: Cursor
+
+## Round 62 — handoff 2026-04-30
+
+**What changed (plain English):**
+- Closed the three Round-61 / Build-34 follow-on deferrals selected by the user (Tier A: broader corpus_bootstrap logger gate + Quit-button Console.app observability; Tier B: deterministic `comprehensive.action_plans` XLSX cell). All three were called out as hot spots in the Round 61 acceptance section above, so the audit floor is now strictly cleaner than where Build 34 left it.
+- **R62 / A1 (logger gate, broader scope):** added `_safe_log_info(msg, *args)` helper to `corpus_bootstrap.py` (next to the existing `_exit_log_streams_open()`); replaced 11 `logger.info(` call sites with `_safe_log_info(` so the closed-stream race during pytest teardown is silenced module-wide, not just on the daemon's start + exit lifecycle log lines (R61's narrow scope). Also discovered + fixed the SAME race in `corpus_indexer.py` (5 call sites; helper duplicated to avoid circular import — `corpus_bootstrap` imports from `corpus_indexer`, not the other way). The R61 acceptance run leaked tracebacks from `corpus_indexer.py:1470` through to stderr; the R62 fix closes that path entirely. Pinned by `tests/test_round62_corpus_logger_module_wide.py` (8 tests) and the existing `tests/test_round61_corpus_shutdown_logger_quiet.py` (still 6 tests, still passing).
+- **R62 / A2 (Quit-button macOS Console.app observability):** added `_emit_macos_syslog(tag, msg)` helper to `app_simple.py` near `_trigger_shutdown_sigterm()`; called at TWO points -- (a) `api_shutdown()` right after the existing `logger.info("SIGTERM scheduled ...")` so operators can see WHEN the timer was queued and WITH WHICH params, and (b) `_trigger_shutdown_sigterm()` right before the actual `os.kill(pid, SIGTERM)` so operators see the exact moment the kill is dispatched. Helper shells out to `/usr/bin/logger -t AdoptIQ -t <msg>` (~10 ms native macOS binary), `subprocess.run(check=False, timeout=2)` so a hung/missing logger binary cannot block shutdown. Skipped on non-Darwin and in TESTING mode (Flask config flag OR `ADOPTIQ_TESTING=1`) so pytest never spawns a real logger subprocess. Pinned by `tests/test_round62_quit_button_syslog.py` (8 tests including helper smoke, non-Darwin short-circuit, TESTING short-circuit via both config flag and env var, never-raises on subprocess exception, call-order assertion `emit -> kill`, and R60 byte-identical 202 contract preservation).
+- **R62 / B (`comprehensive.action_plans` deterministic XLSX cell):** added `count_open_action_plans(ab_df)` helper to `canonical_metrics.py` (next to `count_action_plan_completed()`); derives the count from `AB_Detail_All`'s `Action Plan Title` column (non-empty rows = open APs). Tolerates four naming conventions seen in the wild: `Action Plan Title` (CSConsole header), `action_plan_title` (snake_case), `AP_TITLE_C` (raw Salesforce custom field), `ACTION_PLAN_TITLE` (Snowflake upper-case). Wired into `report_export_styling.build_summary_rows` as a new row `("Action plans (open)", _format_kpi(open_action_plans))` inserted right after `Adoption barriers (open)` and before `TAC cases (total)` (canonical sequence: Customers -> Barriers cluster -> Action plans -> TAC cluster -> Escalations -> BEMS). Also added `"action plans open"` and `"open action plans"` to the harness's `KPI_ALIASES["action_plans"]` set as belt-and-suspenders coverage. End-to-end verified against the user's Build 34 comprehensive XLSX: helper says 0 (matches LLM's `"0 Action Plans"` phrasing exactly), normalized to canonical `action_plans` bucket, and `extract_xlsx_kpis` surfaces it. Pinned by `tests/test_round62_action_plans_in_summary.py` (12 tests). Updated `tests/fixtures/round19/golden.py` to insert the new label in the `excel_summary_label_order` tuple (the SINGLE source of truth that `test_round21_1_*`, `test_round21_canonical_*`, and `test_round23_*` all consume).
+
+**Files touched:**
+- `corpus_bootstrap.py` — added `_safe_log_info` helper, replaced 11 `logger.info(` sites with `_safe_log_info(`. (R62 / A1)
+- `corpus_indexer.py` — added module-local `_safe_log_info` + `_exit_log_streams_open` helpers (duplicated, not imported, to avoid circular import), replaced 5 `logger.info(` sites with `_safe_log_info(`. (R62 / A1)
+- `app_simple.py` — added `_emit_macos_syslog` helper near `_trigger_shutdown_sigterm()`; wired into `api_shutdown()` (~17407) and `_trigger_shutdown_sigterm()` (~17317). (R62 / A2)
+- `canonical_metrics.py` — added `count_open_action_plans(ab_df)` helper next to `count_action_plan_completed()`. (R62 / B)
+- `report_export_styling.py` — initialized `open_action_plans: Any = None` in the canonical-call defaults block, called `cm.count_open_action_plans(ab_df)` in the canonical try block, inserted `("Action plans (open)", _format_kpi(open_action_plans))` row between `Adoption barriers (open)` and `TAC cases (total)`. (R62 / B)
+- `report_iteration_loop.py` — added `"action plans open"` and `"open action plans"` to `KPI_ALIASES["action_plans"]`. (R62 / B)
+- `tests/fixtures/round19/golden.py` — added `"Action plans (open)"` to `excel_summary_label_order` between `Adoption barriers (open)` and `TAC cases (total)`. (R62 / B)
+- `tests/test_round62_corpus_logger_module_wide.py` — NEW (8 tests). (R62 / A1)
+- `tests/test_round62_quit_button_syslog.py` — NEW (8 tests). (R62 / A2)
+- `tests/test_round62_action_plans_in_summary.py` — NEW (13 tests). (R62 / B)
+
+**SSoT modules touched:** canonical_metrics, report_export_schema (transitively via the new Summary row), report_export_styling, structured_logging (transitively via the closed-stream race fix in corpus_bootstrap + corpus_indexer)
+
+**Tests added/updated:**
+- `tests/test_round62_corpus_logger_module_wide.py::test_safe_log_info_emits_once_when_stream_is_open` — pins helper happy path.
+- `tests/test_round62_corpus_logger_module_wide.py::test_safe_log_info_skipped_when_stream_closed` — pins the closed-stream defense (no `Logging error` traceback to stderr).
+- `tests/test_round62_corpus_logger_module_wide.py::test_safe_log_info_no_handlers_emits_silently` — pins no-handler short-circuit.
+- `tests/test_round62_corpus_logger_module_wide.py::test_safe_log_info_walks_propagation_chain` — pins parent-handler defense.
+- `tests/test_round62_corpus_logger_module_wide.py::test_index_pass_per_source_log_silenced_with_closed_stream` — pins the SPECIFIC site (`corpus_bootstrap.py:1380`) that was the noisiest in the R61 acceptance run.
+- `tests/test_round62_corpus_logger_module_wide.py::test_index_pass_per_source_log_emits_with_open_stream` — pins real-run emission.
+- `tests/test_round62_corpus_logger_module_wide.py::test_no_bare_logger_info_call_outside_helper_body` — REGRESSION GUARD: source-level scan asserts ZERO bare `logger.info(` calls in `corpus_bootstrap.py` outside the helper body. Catches future drift.
+- `tests/test_round62_corpus_logger_module_wide.py::test_safe_log_info_call_site_count_matches_expected_floor` — REGRESSION FLOOR: 11+ `_safe_log_info(` call sites in production code.
+- `tests/test_round62_quit_button_syslog.py::test_emit_macos_syslog_happy_path_on_darwin` — pins the canonical `/usr/bin/logger` argv shape on Darwin.
+- `tests/test_round62_quit_button_syslog.py::test_emit_macos_syslog_skipped_on_linux` / `_skipped_on_win32` — pin non-Darwin no-op.
+- `tests/test_round62_quit_button_syslog.py::test_emit_macos_syslog_skipped_in_testing_config` — pins Flask `TESTING=True` short-circuit.
+- `tests/test_round62_quit_button_syslog.py::test_emit_macos_syslog_skipped_with_env_var` — pins `ADOPTIQ_TESTING=1` short-circuit.
+- `tests/test_round62_quit_button_syslog.py::test_emit_macos_syslog_swallows_subprocess_exception` — pins never-raises contract.
+- `tests/test_round62_quit_button_syslog.py::test_trigger_shutdown_sigterm_emits_syslog_before_kill` — pins the call-order invariant (`emit -> kill`, NOT `kill -> emit` -- the SIGTERM may tear down the process so quickly that a post-kill emit never reaches the unified log).
+- `tests/test_round62_quit_button_syslog.py::test_api_shutdown_202_payload_unchanged_by_syslog_wiring` — REGRESSION GUARD: the R60 byte-identical 202 contract survives R62/A2.
+- `tests/test_round62_action_plans_in_summary.py::test_count_open_action_plans_returns_zero_for_none` / `_for_empty_frame` / `_when_column_missing` — pin defensive defaults.
+- `tests/test_round62_action_plans_in_summary.py::test_count_open_action_plans_counts_nonempty_rows_in_action_plan_title` — pins core logic.
+- `tests/test_round62_action_plans_in_summary.py::test_count_open_action_plans_strips_whitespace_only_cells` — pins whitespace-stripping (a stray space from copy-paste must NOT count as an open AP).
+- `tests/test_round62_action_plans_in_summary.py::test_count_open_action_plans_tolerates_alternate_column_names` — pins the four naming conventions.
+- `tests/test_round62_action_plans_in_summary.py::test_count_open_action_plans_zero_when_all_cells_empty` — mirrors the Build 34 comprehensive case (70 AB rows, 0 populated AP titles).
+- `tests/test_round62_action_plans_in_summary.py::test_build_summary_rows_includes_action_plans_row` / `_value_matches_helper` / `_position_is_after_adoption_barriers` / `_zero_when_ab_empty` — pin the wiring.
+- `tests/test_round62_action_plans_in_summary.py::test_harness_normalizes_action_plans_open_to_canonical_action_plans` — pins the harness alias resolution.
+- `tests/test_round62_action_plans_in_summary.py::test_build_summary_rows_action_plans_is_in_round19_golden_fixture` — REGRESSION GUARD: cross-pin between the live builder and the golden fixture.
+
+**Verify status:**
+- `make verify` — **pass**
+- pytest: **3655 passed / 2 skipped** (R61 floor 3626; net +29 passed = +8 R62/A1 tests + +8 R62/A2 tests + +13 R62/B tests)
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. **`corpus_indexer.py` helper duplication.** R62/A1 added `_safe_log_info` + `_exit_log_streams_open` to BOTH `corpus_bootstrap.py` AND `corpus_indexer.py` because the latter cannot import from the former (circular). The two implementations are byte-equivalent and both are pinned by tests, but if a future round changes the closed-stream defense semantics in one place it MUST also update the other. Tracked as a known acceptable duplication; deferring a shared utility module to a separate cleanup round (would need a new `_logging_helpers.py` or similar that both modules import from). The regression-count test in `test_round62_corpus_logger_module_wide.py::test_no_bare_logger_info_call_outside_helper_body` only covers `corpus_bootstrap.py`; a parallel test for `corpus_indexer.py` would be a nice-to-have but is not strictly required because the leaked-stderr signature would surface in pytest output immediately.
+2. **`_emit_macos_syslog` adds a process spawn per Quit click.** Bounded to ONE call (~10 ms native macOS binary), guarded by `sys.platform == "darwin"` so non-macOS test runs are no-ops, and `timeout=2` so a hung `/usr/bin/logger` cannot block shutdown. Defense in depth: a broken logger binary is swallowed by the helper's try/except so the actual SIGTERM dispatch proceeds regardless. Confirmed by `test_emit_macos_syslog_swallows_subprocess_exception`. The packaged-app smoke matrix in Phase 5 below adds a check that the syslog line is visible from `Console.app` / `log show`.
+3. **The R62/B `count_open_action_plans` helper assumes the AB frame uses the "Action Plan Title" column header.** This is the canonical header from CSConsole exports and matches the Build 34 comprehensive XLSX. If a future Snowflake schema migration renames the column, the helper will silently return 0 (and the comprehensive action_plans row will say "0" forever). The test `test_count_open_action_plans_tolerates_alternate_column_names` covers the four currently-known variants; a future round adding a new variant should extend the `candidates` tuple AND the test.
+
+**Known deferrals (intentional non-fixes):**
+- **CI alignment to `make verify`.** `.github/workflows/build.yml` still runs only `pytest -q`, NOT the full `make verify` (lint + security + audit + tests). Remediation requires a CI-specific PR; tracked as a separate round.
+- **Renewal UTC sliding-window drift.** Intrinsic to the analytic; not a code defect.
+- **Round 60 UX deferrals.** No `cancel_analysis()` on `force=1` POST, no `window.close()` after 202 ack -- both are intentional UX choices, not bugs.
+- **R61/D regex hardening edge cases.** Theoretical -- no real KPI portfolio-wide is at risk. Documented in the R61 hot-spots section (#2).
+
+**Trailer:** Made-with: Cursor

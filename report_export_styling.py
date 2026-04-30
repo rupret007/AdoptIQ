@@ -763,6 +763,7 @@ def build_summary_rows(
     open_tac: Any = None
     escalated: Any = None
     bems: Any = None
+    open_action_plans: Any = None  # Round 62 / B
 
     try:
         import canonical_metrics as cm  # noqa: PLC0415 -- lazy import keeps
@@ -805,6 +806,15 @@ def build_summary_rows(
         open_tac = _safe_canonical_call(cm.count_open_tac, csone_df)
         escalated = _safe_canonical_call(cm.count_escalated, csone_df)
         bems = _safe_canonical_call(cm.count_bems, csone_df)
+        # Round 62 / B: deterministic action-plan count derived from
+        # AB_Detail_All so the comprehensive XLSX Summary sheet
+        # surfaces a structured-data anchor for the action_plans KPI
+        # regardless of LLM narrative phrasing variations.  Pre-R62
+        # the comprehensive scenario carried action_plans only inside
+        # the LLM narrative (R58 soak event: LLM emitted "0 Action
+        # Plans" but the canonical KPI extractor missed it because no
+        # XLSX cell carried the value).
+        open_action_plans = _safe_canonical_call(cm.count_open_action_plans, ab_df)
     except Exception as err:  # pragma: no cover - defensive only
         logger.debug("Round 15 summary canonical import failed: %s", err)
 
@@ -859,6 +869,13 @@ def build_summary_rows(
             ("Adoption barriers (detail rows)", ab_detail_label),
             ("Adoption barriers (critical)", _format_kpi(critical_barriers)),
             ("Adoption barriers (open)", _format_kpi(open_barriers)),
+            # Round 62 / B: deterministic action_plans anchor for the
+            # comprehensive scenario.  Inserted after the AB cluster
+            # (because the count is derived from AB_Detail_All's
+            # "Action Plan Title" column) and before the TAC cluster
+            # so the Summary still reads as Customers -> Barriers ->
+            # APs -> TAC -> Escalations -> BEMS.
+            ("Action plans (open)", _format_kpi(open_action_plans)),
             ("TAC cases (total)", _format_kpi(total_tac)),
             ("TAC cases (P1)", _format_kpi(p1_tac)),
             ("TAC cases (open)", _format_kpi(open_tac)),

@@ -47,6 +47,51 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Round 62 / A1: closed-stream defense for logger.info during pytest
+# teardown.  Same pattern as ``corpus_bootstrap._safe_log_info`` --
+# duplicated here (instead of imported) to avoid circular imports
+# (``corpus_bootstrap`` depends on this module).  See the
+# ``_exit_log_streams_open`` docstring in ``corpus_bootstrap.py`` for
+# the full explanation of why ``Handler.handleError()`` cannot be
+# defeated by a try/except wrapped around ``logger.info()`` itself.
+# ---------------------------------------------------------------------------
+
+
+def _exit_log_streams_open() -> bool:
+    """True when every reachable StreamHandler from this module's
+    logger has an open underlying stream.  Returns False when ANY
+    reachable handler is closed (signal to skip the log emission)."""
+    target_logger = logger
+    seen: set[int] = set()
+    while target_logger is not None and id(target_logger) not in seen:
+        seen.add(id(target_logger))
+        for h in getattr(target_logger, "handlers", []):
+            stream = getattr(h, "stream", None)
+            if stream is None:
+                continue
+            try:
+                if getattr(stream, "closed", False):
+                    return False
+            except Exception:  # noqa: BLE001 - defensive
+                return False
+        if not getattr(target_logger, "propagate", True):
+            break
+        target_logger = getattr(target_logger, "parent", None)
+    return True
+
+
+def _safe_log_info(msg: str, *args: object) -> None:
+    """Round 62 / A1: gate logger.info on ``_exit_log_streams_open()``
+    so any pytest-teardown closed-stream race is silenced module-wide.
+    Real runs (open streams) emit normally."""
+    if _exit_log_streams_open():
+        try:
+            logger.info(msg, *args)
+        except (ValueError, OSError):
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Stop signal -- callers can flip ``stop_requested`` to abort a long run
 # ---------------------------------------------------------------------------
 
@@ -733,7 +778,10 @@ def _parse_xlsx(path: Path) -> list[ParsedRecord]:
             layout, header_row = ("plain", 0)
         # Round 17.2: per-sheet layout decision so the operator can
         # see how the indexer is interpreting each tab.
-        logger.info(
+        # Round 62 / A1: route through _safe_log_info so the
+        # closed-stream race during pytest teardown does not leak
+        # tracebacks (see helper docstring).
+        _safe_log_info(
             "Round 17.2 / corpus_indexer: xlsx file=%s sheet=%s layout=%s header_row=%d",
             path.name, sheet_name, layout, int(header_row),
         )
@@ -1284,7 +1332,8 @@ def index_folder(
                 and existing["parse_status"] == "ok"
             ):
                 stats.files_skipped += 1
-                logger.info(
+                # Round 62 / A1: closed-stream gate via _safe_log_info.
+                _safe_log_info(
                     "Round 17.2 / corpus_indexer: skip ext=%s file=%s bytes=%d reason=cache_hit",
                     cf.extension or "",
                     cf.filename,
@@ -1299,7 +1348,8 @@ def index_folder(
                     parse_status="oversized",
                     parse_error=f"size={cf.size_bytes} bytes > cap",
                 )
-                logger.info(
+                # Round 62 / A1: closed-stream gate via _safe_log_info.
+                _safe_log_info(
                     "Round 17.2 / corpus_indexer: skip ext=%s file=%s bytes=%d reason=oversized cap=%d",
                     cf.extension or "",
                     cf.filename,
@@ -1333,7 +1383,8 @@ def index_folder(
             # Round 17.2: per-file INFO line so the operator can tail
             # the application log and verify the indexer is making
             # progress without any PII leaking into the message.
-            logger.info(
+            # Round 62 / A1: closed-stream gate via _safe_log_info.
+            _safe_log_info(
                 "Round 17.2 / corpus_indexer: indexed ext=%s file=%s bytes=%d records=%d",
                 cf.extension or "",
                 cf.filename,
@@ -1467,7 +1518,12 @@ def index_folder(
         conn.commit()
 
     stats.finished_at = _utc_now_iso()
-    logger.info(
+    # Round 62 / A1: closed-stream gate via _safe_log_info -- this
+    # specific call site is the one that surfaced the leak in R62/A1
+    # acceptance (pytest teardown coincided with a daemon-thread
+    # index pass and the daemon's exit log emission tripped
+    # Handler.handleError() -> stderr traceback).
+    _safe_log_info(
         "Round 17 / corpus index pass complete: files_seen=%d parsed=%d skipped=%d "
         "failed=%d chunks_added=%d schema=%d",
         stats.files_seen, stats.files_parsed, stats.files_skipped,

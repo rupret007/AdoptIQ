@@ -647,13 +647,13 @@ def _install_baked_corpus_if_present() -> Optional[str]:
         except OSError:
             pass
     if self_healed:
-        logger.info(
+        _safe_log_info(
             "Round 39 / corpus_bootstrap: self-healed baked corpus "
             "into %s (bake_dir=%s indexed_at=%s)",
             user_dir, bake_dir, indexed_at,
         )
     else:
-        logger.info(
+        _safe_log_info(
             "Round 35 / corpus_bootstrap: installed baked corpus into %s "
             "(bake_dir=%s indexed_at=%s)",
             user_dir, bake_dir, indexed_at,
@@ -760,18 +760,18 @@ def _daily_refresh_loop() -> None:
     # which can coincide with pytest teardown; both must skip the
     # logger call when reachable streams are closed to avoid the
     # ``Handler.handleError()`` -> stderr traceback path.
-    if _exit_log_streams_open():
-        try:
-            logger.info(
-                "Round 53 / corpus_bootstrap: daily refresh worker started "
-                "(interval=%.0fs tick=%.0fs blocked_tick=%.0fs blocked_cap=%d)",
-                _DAILY_REFRESH_INTERVAL_S,
-                _DAILY_REFRESH_TICK_S,
-                _DAILY_REFRESH_TICK_BLOCKED_S,
-                _DAILY_REFRESH_BLOCKED_MAX_TICKS,
-            )
-        except (ValueError, OSError):
-            pass
+    # Round 62 / A1: replaced the inline gate+try/except wrap with a
+    # call through the ``_safe_log_info`` helper that now centralizes
+    # the closed-stream defense for every ``logger.info`` site in this
+    # module.  Behavior is unchanged.
+    _safe_log_info(
+        "Round 53 / corpus_bootstrap: daily refresh worker started "
+        "(interval=%.0fs tick=%.0fs blocked_tick=%.0fs blocked_cap=%d)",
+        _DAILY_REFRESH_INTERVAL_S,
+        _DAILY_REFRESH_TICK_S,
+        _DAILY_REFRESH_TICK_BLOCKED_S,
+        _DAILY_REFRESH_BLOCKED_MAX_TICKS,
+    )
     blocked_streak = 0
     while not _DAILY_REFRESH_STOP.is_set():
         # Sleep with .wait() so stop() can interrupt the worker
@@ -824,7 +824,7 @@ def _daily_refresh_loop() -> None:
                     blocked_streak = 0
                     continue
             blocked_streak = 0
-            logger.info(
+            _safe_log_info(
                 "Round 53 / corpus_bootstrap: triggering refresh "
                 "(last_successful=%s onedrive_files=%s "
                 "transition_unblocked=%s)",
@@ -862,9 +862,29 @@ def _daily_refresh_loop() -> None:
     # if any reachable StreamHandler is wired to a closed stream,
     # skip the exit log entirely.  Real runs (where streams are
     # alive) still emit the log line exactly once.
+    # Round 62 / A1: replaced the inline gate+try/except wrap with a
+    # call through the ``_safe_log_info`` helper.  Same defense, less
+    # duplication; the helper docstring carries the long explanation
+    # of WHY we cannot just rely on Python's logging exception path.
+    _safe_log_info("Round 36 / corpus_bootstrap: daily refresh worker exiting")
+
+
+def _safe_log_info(msg: str, *args: object) -> None:
+    """Round 62 / A1: gate ``logger.info`` on ``_exit_log_streams_open()``
+    so any pytest-teardown closed-stream race is silenced module-wide.
+
+    Real runs (open streams) emit normally.  R61 / Phase 2.E shipped
+    the same pattern for the daemon's start + exit lifecycle log
+    lines; R62 / A1 broadens the same gate to every other ``logger.info``
+    call site in this module so a test that triggers an index pass
+    (``_run_index_pass``, ``run_bootstrap``, etc.) during pytest
+    teardown cannot leak the ``"I/O operation on closed file"``
+    traceback either.  Pinned by
+    ``tests/test_round62_corpus_logger_module_wide.py``.
+    """
     if _exit_log_streams_open():
         try:
-            logger.info("Round 36 / corpus_bootstrap: daily refresh worker exiting")
+            logger.info(msg, *args)
         except (ValueError, OSError):
             pass
 
@@ -1044,7 +1064,7 @@ def _resolve_index_sources() -> list[dict[str, object]]:
                 }
             )
         else:
-            logger.info(
+            _safe_log_info(
                 "Round 36 / corpus_bootstrap: onedrive source skipped "
                 "(no synced copy at %s)",
                 onedrive_root,
@@ -1184,7 +1204,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
             _STATE.in_progress = False
             _STATE.last_finished_at = _utc_now_iso()
             _STATE.completed = False
-        logger.info(
+        _safe_log_info(
             "Round 53 / corpus_bootstrap: corpus open blocked "
             "(onedrive_status=%s sentinel_present=%s)",
             od_status, sentinel_present,
@@ -1253,7 +1273,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
                     _STATE.in_progress = False
                     _STATE.last_finished_at = _utc_now_iso()
                     _STATE.completed = False
-                logger.info(
+                _safe_log_info(
                     "Round 54 / F1 corpus_bootstrap: TOCTOU race -- "
                     "open raised CorpusCryptoError and re-probe shows "
                     "(onedrive_status=%s sentinel_present=%s); "
@@ -1292,7 +1312,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
             src_dir = source.get("dir")
             filter_kind = source.get("filter") or "all_supported"
             if not src_dir:
-                logger.info(
+                _safe_log_info(
                     "Round 17 / corpus_bootstrap: source=%s skipped (no dir configured)",
                     label,
                 )
@@ -1357,7 +1377,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
                     "chunks_added": int(src_stats.chunks_added),
                 }
             )
-            logger.info(
+            _safe_log_info(
                 "Round 17 / corpus_bootstrap: corpus source=%s dir=%s "
                 "files_seen=%d files_parsed=%d files_skipped=%d files_failed=%d "
                 "chunks_added=%d",
@@ -1405,7 +1425,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
             _STATE.last_refresh_error = None
             _STATE.onedrive_status = post_status
             _STATE.onedrive_file_count = post_count
-        logger.info(
+        _safe_log_info(
             "Round 17.1 / corpus_bootstrap: indexed files_parsed=%d chunks=%d sources=%d",
             int(aggregate.files_parsed),
             int(aggregate.chunks_added),

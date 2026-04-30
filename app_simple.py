@@ -17304,6 +17304,39 @@ def _r17_2_authorize_corpus_admin() -> Optional[Tuple[Dict[str, Any], int]]:
 # ---------------------------------------------------------------------------
 
 
+def _emit_macos_syslog(tag: str, msg: str) -> None:
+    """Round 62 / A2: best-effort syslog emission so ``Console.app`` /
+    ``log show --process AdoptIQ`` can pin Round 60 SIGTERM activity
+    inside the packaged ``.app`` (where stdout / stderr are not in the
+    macOS unified log by default).
+
+    Skipped on non-Darwin platforms and in TESTING mode (so pytest
+    never spawns ``/usr/bin/logger`` subprocesses).  Best-effort by
+    design: a missing/broken ``logger(1)`` binary, a non-zero exit, or
+    a hung subprocess must NEVER block the actual shutdown path.
+
+    Pinned by ``tests/test_round62_quit_button_syslog.py``.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        if bool(app.config.get('TESTING')) or os.environ.get('ADOPTIQ_TESTING') == '1':
+            return
+    except Exception:  # noqa: BLE001 - never fail the kill on a config probe
+        pass
+    try:
+        import subprocess  # noqa: PLC0415 - lazy: keeps non-shutdown imports light
+        subprocess.run(
+            ["/usr/bin/logger", "-t", tag, msg],
+            check=False,
+            timeout=2,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:  # noqa: BLE001 - shutdown best-effort
+        pass
+
+
 def _trigger_shutdown_sigterm() -> None:
     """Round 60: send SIGTERM to ourselves so atexit handlers fire.
 
@@ -17312,7 +17345,17 @@ def _trigger_shutdown_sigterm() -> None:
     try/except so a missing signal module on an exotic platform
     cannot raise inside the Timer thread (which would only print to
     stderr but might confuse the post-shutdown UX).
+
+    Round 62 / A2: emits a macOS syslog line right before the
+    SIGTERM so ``Console.app`` and ``log show --process AdoptIQ``
+    capture the actual moment the kill is dispatched (Python's
+    logger writes through stdout/stderr which PyInstaller redirects
+    away from the unified log inside the packaged ``.app``).
     """
+    _emit_macos_syslog(
+        "AdoptIQ",
+        "Round 60 / api_shutdown: SIGTERM dispatching now",
+    )
     try:
         os.kill(os.getpid(), signal.SIGTERM)
     except Exception:  # noqa: BLE001 - shutdown best-effort
@@ -17405,6 +17448,16 @@ def api_shutdown():
     timer.daemon = True
     timer.start()
     logger.info("Round 60 / api_shutdown: SIGTERM scheduled in %.2fs (force=%s, running=%d)", delay_seconds, force, len(running))
+    # Round 62 / A2: also push the schedule line through macOS syslog
+    # so manual acceptance and operators can see the shutdown intent
+    # in Console.app / `log show` (the Python logger above only writes
+    # to the .app's stdout/stderr which PyInstaller does not surface).
+    _emit_macos_syslog(
+        "AdoptIQ",
+        "Round 60 / api_shutdown: SIGTERM scheduled in %dms (force=%s, running=%d)" % (
+            int(delay_seconds * 1000), str(force), len(running),
+        ),
+    )
 
     return jsonify({
         'ok': True,
