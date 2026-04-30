@@ -14,7 +14,7 @@ python app_simple.py                        # Main app — http://localhost:5151
 python enhanced_admin_dashboard_v2.py       # Admin dashboard — http://127.0.0.1:5152
 
 # Tests
-python -m pytest -v                         # Full test suite (current floor: 3191 passed / 2 skipped after Round 48 / Build25; Round 0 floor 2570)
+python -m pytest -v                         # Full test suite (current floor: 3655 passed / 2 skipped after Round 62 / Build35; R61 floor 3626; R0 floor 2570)
 python -m pytest tests/test_canonical_metrics.py -v   # Single test file
 python -m pytest -k "ask_ai" -v            # Filter by name
 python -m pytest tests/test_round16_*.py -v # Round 16 regression suite (cross-format consistency, sort determinism, AI grounding, polish offset)
@@ -154,6 +154,8 @@ Every build's bake script (`scripts/bake_corpus.py`) mints a fresh sentinel when
 - Word top-N tables go through `report_word_styling.add_banded_top_n_table` — keep custom paint logic only where leader-report tables need per-cell color overrides
 - Top-N sorts must include a stable name-based tiebreaker so `make verify` stays deterministic across runs
 - LLM-generated narratives that flow into reports must pass through `ai_narrative_validator.validate_narrative` — don't bypass the gate
+- Comprehensive `action_plans` is now a deterministic count via `canonical_metrics.count_open_action_plans(ab_df)` and surfaces as the `Action plans (open)` row in `report_export_styling.build_summary_rows` (Round 62 / B). Never recompute the AB → action-plan derivation inline in a formatter; always go through the canonical helper so the supervisor harness's structured-data anchor agrees with the LLM narrative bucket.
+- Logger emissions in `corpus_bootstrap.py` and `corpus_indexer.py` MUST go through the local `_safe_log_info(msg, *args)` helper (Round 62 / A1), NOT bare `logger.info(...)`. The helper gates emission on `_exit_log_streams_open()` so the closed-stream race during pytest teardown cannot leak `"I/O operation on closed file"` tracebacks via Python's internal `Handler.handleError()` path. Source-shape pinned by `tests/test_round62_corpus_logger_module_wide.py::test_no_bare_logger_info_call_outside_helper_body` (regression guard).
 
 **Frontend:**
 - All `target="_blank"` links need `rel="noopener noreferrer"`
