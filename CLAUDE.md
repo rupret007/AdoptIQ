@@ -162,6 +162,8 @@ Every build's bake script (`scripts/bake_corpus.py`) mints a fresh sentinel when
 
 **Admin security:** Admin dashboard binds to loopback (`127.0.0.1`) by default. Don't change this default without the `ADOPTIQ_ADMIN_BIND_PUBLIC=1` escape hatch.
 
+**Quit / shutdown (Round 60):** the user can stop the local AdoptIQ process from either navbar (main app `#adoptiq-quit-btn` → `POST /api/shutdown`; admin dashboard `#adoptiq-quit-btn` → `POST /admin_quit`, which proxies to the same main-app endpoint with `X-AdoptIQ-Internal`). The endpoint enforces the same dual-auth as `/api/corpus/refresh` (CSRF token OR `X-AdoptIQ-Internal`), snapshots `analysis_status` under the lock, and returns 409 + `needs_force=True` when one or more entries are `status='running'` so the browser can prompt the user before killing in-flight work. Shutdown is `signal.SIGTERM` (NOT `os._exit(0)` / `SIGKILL`) scheduled via a 0.5s `threading.Timer` so the HTTP response flushes BEFORE the process dies AND the existing `atexit` handlers fire — `_shutdown_handler` saves `analysis_status.json` and `_r17_corpus_shutdown` scrubs the in-memory plaintext corpus temp file. `os._exit(0)` would skip both. In TESTING mode (Flask config OR `ADOPTIQ_TESTING=1` env) the endpoint returns `would_shutdown=True` and skips the kill so pytest does not terminate itself. Source-shape pinned by `tests/test_round60_shutdown_endpoint.py` (19 endpoint tests) and `tests/test_round60_quit_button_template.py` (11 template tests).
+
 ## Development Workflow
 
 Branch model: develop on machine-specific branches (`pc-sync-YYYY-MM-DD`, `mac-sync-YYYY-MM-DD`), integrate to `master` only after `make verify` passes and platform build + smoke test complete.

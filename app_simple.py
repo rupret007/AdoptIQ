@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import secrets
+import signal  # Round 60: SIGTERM-based graceful shutdown for /api/shutdown
 import time
 import threading
 import re
@@ -17261,6 +17262,156 @@ def _r17_2_authorize_corpus_admin() -> Optional[Tuple[Dict[str, Any], int]]:
     if not authorized:
         return ({'ok': False, 'error': 'CSRF validation failed'}, 403)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Round 60: user-facing graceful shutdown.
+#
+# The packaged macOS .app has no native window, so once the user closes
+# the browser tab the Flask server keeps running on port 5151 (and the
+# in-process admin daemon keeps running on 5152) until the user finds
+# the PID and kills it manually -- or reboots.  ``POST /api/shutdown``
+# gives the user a single in-browser button (rendered in
+# ``templates/base.html`` and the admin template) that schedules a
+# clean exit:
+#
+#   * Auth: same dual-path as ``/api/corpus/refresh`` -- a Flask-WTF
+#     CSRF token (browser path) OR a constant-time-compared
+#     ``X-AdoptIQ-Internal`` header (admin-app proxy path).  Reuses the
+#     ``_r17_2_authorize_corpus_admin()`` helper above so we don't
+#     duplicate the auth code.
+#   * In-progress detection: when one or more entries in the global
+#     ``analysis_status`` are ``status == 'running'`` AND the caller did
+#     not pass ``force=1``, return 409 + ``needs_force=True`` + a small
+#     per-job summary so the browser can prompt the user with a
+#     "Force quit anyway" modal.
+#   * Shutdown via ``signal.SIGTERM`` (NOT ``os._exit(0)``): SIGTERM
+#     fires the existing ``atexit`` hooks (``_shutdown_handler`` saves
+#     ``analysis_status.json``, ``_r17_corpus_shutdown`` scrubs the
+#     in-memory plaintext corpus temp file).  ``os._exit(0)`` would
+#     skip them.  A 0.5s ``threading.Timer`` delay schedules the kill
+#     so Werkzeug can flush the HTTP response before the process
+#     dies; without the delay the browser would see connection-reset
+#     and not know whether the request succeeded.
+#   * Test-mode short-circuit: when the Flask app is in TESTING mode
+#     OR ``ADOPTIQ_TESTING=1``, return ``would_shutdown=True`` and skip
+#     the actual ``os.kill`` so pytest doesn't kill itself.
+#
+# The admin daemon thread is in the SAME process as the main app, so
+# one SIGTERM releases both ports.  The Round 38.1 duplicate-launch
+# probe re-fires on next ``.app`` launch, sees port 5151 closed, and
+# boots a fresh instance normally.
+# ---------------------------------------------------------------------------
+
+
+def _trigger_shutdown_sigterm() -> None:
+    """Round 60: send SIGTERM to ourselves so atexit handlers fire.
+
+    Pulled out as a module-level function so the ``threading.Timer``
+    target is picklable / testable.  Wraps the actual kill in a
+    try/except so a missing signal module on an exotic platform
+    cannot raise inside the Timer thread (which would only print to
+    stderr but might confuse the post-shutdown UX).
+    """
+    try:
+        os.kill(os.getpid(), signal.SIGTERM)
+    except Exception:  # noqa: BLE001 - shutdown best-effort
+        # Last-ditch fallback: hard exit without atexit.  Better to
+        # exit dirty than hang the user's browser tab forever waiting
+        # for a port that never closes.
+        try:
+            os._exit(1)
+        except Exception:  # pragma: no cover - truly unreachable
+            pass
+
+
+@app.route('/api/shutdown', methods=['POST'])
+def api_shutdown():
+    """Round 60: cleanly shut down the AdoptIQ process.
+
+    See the Round 60 module-level comment block immediately above for
+    the auth contract, in-progress detection rules, and shutdown
+    sequencing.  Returns:
+
+      * 403 if neither CSRF token nor ``X-AdoptIQ-Internal`` validates.
+      * 409 ``{ok: false, needs_force: true, in_progress: [...]}``
+        when one or more ``status == 'running'`` analyses exist and
+        the caller did not pass ``force=1``.
+      * 202 ``{ok: true, shutdown_in_ms: 500}`` when the shutdown is
+        accepted; SIGTERM is scheduled 0.5s in the future so the
+        response can flush.
+      * 202 ``{ok: true, would_shutdown: true}`` in TESTING mode --
+        the actual ``os.kill`` is skipped so the test runner survives.
+    """
+    auth_failure = _r17_2_authorize_corpus_admin()
+    if auth_failure is not None:
+        body, status_code = auth_failure
+        return jsonify(body), status_code
+
+    force = (request.form.get('force') or request.args.get('force') or '').strip() == '1'
+
+    # Round 60: snapshot the running set under the lock.  We expose
+    # only id / type / manager / start_time / progress / current_step
+    # to the browser -- enough for the warning modal to be useful, no
+    # PII or internal pipeline state.
+    running: List[Dict[str, Any]] = []
+    try:
+        with analysis_status_lock:
+            for analysis_id, status_dict in analysis_status.items():
+                if not isinstance(status_dict, dict):
+                    continue
+                if str(status_dict.get('status', '')).lower() != 'running':
+                    continue
+                running.append({
+                    'id': str(analysis_id),
+                    'type': str(status_dict.get('report_type') or status_dict.get('analysis_type') or 'unknown'),
+                    'manager': str(status_dict.get('manager') or '—'),
+                    'start_time': str(status_dict.get('start_time') or ''),
+                    'progress': int(status_dict.get('progress') or 0) if str(status_dict.get('progress', '')).isdigit() else 0,
+                    'current_step': str(status_dict.get('current_step') or ''),
+                })
+    except Exception as snapshot_err:  # noqa: BLE001 - never block shutdown on a snapshot bug
+        logger.warning("Round 60 / api_shutdown: in-progress snapshot raised %s", type(snapshot_err).__name__)
+        running = []
+
+    if running and not force:
+        return jsonify({
+            'ok': False,
+            'needs_force': True,
+            'in_progress_count': len(running),
+            'in_progress': running,
+            'error': 'Analyses still running. Pass force=1 to shut down anyway.',
+        }), 409
+
+    # Round 60: TESTING short-circuit so pytest doesn't kill itself.
+    # Both the Flask config flag and the env var are honored so the
+    # test fixture can pick whichever is more convenient.
+    in_testing_mode = bool(app.config.get('TESTING')) or os.environ.get('ADOPTIQ_TESTING') == '1'
+    if in_testing_mode:
+        logger.info("Round 60 / api_shutdown: TESTING mode -- would_shutdown=True (force=%s, running=%d)", force, len(running))
+        return jsonify({
+            'ok': True,
+            'would_shutdown': True,
+            'force': force,
+            'in_progress_count': len(running),
+        }), 202
+
+    # Round 60: schedule the kill on a daemon Timer so the response
+    # flushes first.  0.5s is generous; typical Werkzeug flush is
+    # < 50ms but we want margin for slow event loops (LLM-occupied
+    # workers, large status snapshots, etc.).
+    delay_seconds = 0.5
+    timer = threading.Timer(delay_seconds, _trigger_shutdown_sigterm)
+    timer.daemon = True
+    timer.start()
+    logger.info("Round 60 / api_shutdown: SIGTERM scheduled in %.2fs (force=%s, running=%d)", delay_seconds, force, len(running))
+
+    return jsonify({
+        'ok': True,
+        'shutdown_in_ms': int(delay_seconds * 1000),
+        'force': force,
+        'in_progress_count': len(running),
+    }), 202
 
 
 # Round 36 / onedrive-sync-auth: the legacy MSAL/Graph SharePoint

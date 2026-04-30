@@ -7420,3 +7420,68 @@ Categories: **A** = writer pre-cites a multi-match paragraph with a single trail
 
 **Trailer:** Made-with: Cursor
 
+## Round 60 — handoff 2026-04-30
+
+**What changed (plain English):**
+- Added a Quit button to both navbars so the user can cleanly stop the local AdoptIQ process from the browser. Today the user has to find the PID and `kill` it manually because the packaged `.app` has no native window — closing the tab leaves the Flask server running on port 5151 (and the in-process admin daemon on 5152) until the user reboots. Asked-for feature: "exit or shut down button to close the app and shut down the port."
+- New main-app endpoint `POST /api/shutdown` (`app_simple.py:17266+`) reuses the existing `_r17_2_authorize_corpus_admin()` helper for dual-auth (CSRF token OR `X-AdoptIQ-Internal`), snapshots `analysis_status` under the existing lock, and returns 409 + `needs_force=True` when one or more entries are `status='running'` so the browser can prompt the user before killing in-flight work. When `force=1` (or no running jobs), schedules `signal.SIGTERM` to `os.getpid()` via a 0.5s `threading.Timer` so the HTTP response flushes BEFORE the process dies AND the existing `atexit` handlers fire (`_shutdown_handler` saves `analysis_status.json`, `_r17_corpus_shutdown` scrubs the in-memory plaintext corpus temp file). `os._exit(0)` would skip both — that's why SIGTERM is the only correct kill mechanism here.
+- New admin proxy `POST /admin_quit` (`enhanced_admin_dashboard_v2.py:3380+`) mirrors the existing `/corpus_refresh` and `/corpus_reset` proxy pattern: validate admin CSRF, then make a server-to-server call to `/api/shutdown` with `X-AdoptIQ-Internal` and forward the `force` form field. Returns the main app's JSON verbatim (NOT a 302 redirect, because the admin's page is about to die too — a redirect would race the SIGTERM).
+- TESTING-mode short-circuit: when `app.config['TESTING']` is True OR `ADOPTIQ_TESTING=1`, the endpoint returns `would_shutdown=True` and skips `os.kill` so pytest does not terminate itself. Both flags are honored so external smoke harnesses can opt in without flipping Flask config.
+- Frontend: `templates/base.html` got a `#adoptiq-quit-btn` `<li>` immediately after the theme-toggle, a `.quit-btn` CSS rule (red-tinted hover/focus on `var(--cisco-danger)`), pre-rendered `#adoptiq-shutdown-overlay` (post-202 success view) and `#adoptiq-quit-confirm-modal` (Bootstrap modal for 409 needs_force), and a new `static/js/quit_adoptiq.js` IIFE that wires the click handler. The admin template (`ENHANCED_ADMIN_TEMPLATE_V2` string constant) got the same button + a sibling inline IIFE that POSTs to `/admin_quit` with `X-AdoptIQ-Admin-CSRF` (since the admin template doesn't share base.html and doesn't load Bootstrap, the admin handler falls back to `window.confirm` for the 409 needs_force prompt).
+- Documentation: `CLAUDE.md` got a "Quit / shutdown (Round 60)" entry under Critical Rules; `.cursor/rules/adoptiq.mdc` route tables got the two new endpoints; the design rationale is captured in the Round-60 comment block at `app_simple.py:17266` so future sessions don't have to re-derive why SIGTERM (not `os._exit`).
+
+**Files touched:**
+- `app_simple.py` — added `import signal`; new module-level Round-60 comment block + `_trigger_shutdown_sigterm()` helper + `api_shutdown()` route handler (one new route, ~140 LoC including docstrings).
+- `enhanced_admin_dashboard_v2.py` — `.quit-btn` + `#adoptiq-shutdown-overlay` CSS in the existing `<style>` block; `#adoptiq-quit-btn` `<button>` after the theme-toggle in the header; new IIFE in the existing `<script>` block; `#adoptiq-shutdown-overlay` markup before `</body>`; new `admin_quit_route()` view (~90 LoC including docstrings).
+- `templates/base.html` — `.quit-btn` + overlay/modal CSS in the existing `<style>` block; `#adoptiq-quit-btn` `<li>` after `#theme-toggle`; pre-rendered `#adoptiq-shutdown-overlay` and `#adoptiq-quit-confirm-modal` before `<main>`; new `<script src="quit_adoptiq.js">` after `intel_status.js`.
+- `static/js/quit_adoptiq.js` — new file. IIFE-wrapped, no globals; reads CSRF token from `<meta name="csrf-token">`; `window.confirm` → POST → branch on 202 (overlay) / 409 (modal) / other (toast); modal force button wired with `addEventListener` (no inline onclick, CSP-clean); textContent escaping for in-progress entry rendering so corrupt manager/customer names cannot inject HTML.
+- `tests/test_round60_shutdown_endpoint.py` — new file, 19 tests pinning the auth contract, the in-progress detection, the SIGTERM call shape (monkeypatched `os.kill` + `threading.Timer`), and the admin proxy forwarding behavior.
+- `tests/test_round60_quit_button_template.py` — new file, 11 tests asserting both `templates/base.html` and `ENHANCED_ADMIN_TEMPLATE_V2` carry `#adoptiq-quit-btn` + the supporting elements (overlay, modal, CSRF meta, script tag).
+- `CLAUDE.md` — added "Quit / shutdown (Round 60)" paragraph under Critical Rules.
+- `.cursor/rules/adoptiq.mdc` — added `/api/shutdown` to the main-app route table and `/admin_quit` to the admin route table.
+
+**SSoT modules touched:** `none` (the Round 60 surface is a new endpoint + UI control; no scoring, schema, normalization, contract, or canonical-metrics modules edited).
+
+**Tests added/updated:**
+- `tests/test_round60_shutdown_endpoint.py::test_shutdown_rejects_missing_csrf_and_internal` — 403 on bare POST with CSRF enabled.
+- `tests/test_round60_shutdown_endpoint.py::test_shutdown_rejects_wrong_internal_token` — constant-time comparator rejects close matches.
+- `tests/test_round60_shutdown_endpoint.py::test_shutdown_rejects_empty_internal_token` — empty == empty does NOT bypass auth.
+- `tests/test_round60_shutdown_endpoint.py::test_shutdown_accepted_with_csrf_disabled_and_no_running` — 202 + `would_shutdown=True` (TESTING short-circuit) when no running jobs.
+- `tests/test_round60_shutdown_endpoint.py::test_shutdown_accepted_with_internal_token_and_no_running` — 202 via `X-AdoptIQ-Internal` (admin proxy path).
+- `tests/test_round60_shutdown_endpoint.py::test_shutdown_returns_409_when_analyses_running` — 409 + `needs_force=True` + per-job summary shape.
+- `tests/test_round60_shutdown_endpoint.py::test_shutdown_409_lists_all_running_entries` — multi-job aggregation works.
+- `tests/test_round60_shutdown_endpoint.py::test_shutdown_409_skips_non_running_entries` — `completed`/`failed` entries do NOT trigger the gate.
+- `tests/test_round60_shutdown_endpoint.py::test_shutdown_force_overrides_running_check` — `force=1` bypasses the gate AND still reports the killed-job count for audit.
+- `tests/test_round60_shutdown_endpoint.py::test_shutdown_force_in_query_string_also_works` — `force=1` accepted from `request.args`.
+- `tests/test_round60_shutdown_endpoint.py::test_shutdown_method_only_post` — GET / PUT / DELETE / PATCH all yield 405.
+- `tests/test_round60_shutdown_endpoint.py::test_shutdown_calls_sigterm_in_non_testing_mode` — pins the `signal.SIGTERM` call shape AND the 0.5s Timer interval; this is the test that would catch a regression to `os._exit(0)` or `SIGKILL` (either of which would skip atexit handlers and lose the in-flight `analysis_status` save).
+- `tests/test_round60_shutdown_endpoint.py::test_shutdown_env_var_also_short_circuits` — `ADOPTIQ_TESTING=1` env var path.
+- `tests/test_round60_shutdown_endpoint.py::test_admin_quit_route_requires_csrf` — admin proxy 403 on bare POST.
+- `tests/test_round60_shutdown_endpoint.py::test_admin_quit_route_rejects_wrong_csrf` — admin proxy 403 on wrong token.
+- `tests/test_round60_shutdown_endpoint.py::test_admin_quit_route_accepts_valid_csrf_and_proxies` — happy path: admin proxy forwards to `/api/shutdown` with `X-AdoptIQ-Internal`.
+- `tests/test_round60_shutdown_endpoint.py::test_admin_quit_route_forwards_force_field` — `force=1` is propagated to the main app.
+- `tests/test_round60_shutdown_endpoint.py::test_admin_quit_route_passes_through_409` — 409 needs_force is passed through verbatim so the admin's confirm prompt fires.
+- `tests/test_round60_shutdown_endpoint.py::test_admin_quit_route_502_when_main_unreachable` — 502 (NOT a stale 200) when the main app is down.
+- `tests/test_round60_quit_button_template.py` — 11 source-shape tests pinning `#adoptiq-quit-btn` + supporting elements in both templates.
+
+**Verify status:**
+- `make verify` — **deferred to the dedicated verify step** (next todo); narrowest checks already green.
+- pytest scoped: **30 passed** (`tests/test_round60_*.py` — 19 endpoint + 11 template) in 1.9s. Zero failures, zero errors, zero new lints.
+- ruff (manual on touched files): 0 findings.
+- bandit / pip-audit: not yet re-run; no new dependencies introduced (no `import requests` added at module level — admin proxy reuses the existing module-level `import requests`), so no audit-list change is expected.
+- The benign `ValueError: I/O operation on closed file` from `corpus_bootstrap._daily_refresh_loop` at pytest teardown still appears (Round 59 deferral) — not a Round 60 regression.
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py:17266` and following — the new Round-60 comment block + `_trigger_shutdown_sigterm()` + `api_shutdown()` route. The auth path delegates to the existing `_r17_2_authorize_corpus_admin()` helper (lines 17234-17263, no behavior change), so the new attack surface is essentially the in-progress snapshot + the SIGTERM scheduling. Worth specifically scrutinizing: (a) the `analysis_status_lock` is held only for the snapshot (we do NOT hold it across the `os.kill`), so a job that was `running` at snapshot time could complete before the SIGTERM fires — that's intentional and harmless because the atexit handler captures the FINAL status. (b) `int(status_dict.get('progress') or 0) if str(status_dict.get('progress', '')).isdigit()` is a defensive coercion — some `progress` values in the wild are floats (e.g. `42.5`); the gate-and-coerce pattern means floats fall through to `0` rather than raising. Acceptable, but if anyone wants to display the float, the coercion needs to widen. (c) The `_trigger_shutdown_sigterm()` last-resort `os._exit(1)` only fires if `os.kill(getpid, SIGTERM)` itself raises, which is essentially unreachable on macOS / Linux — but it exists to avoid hanging the user's tab forever waiting for a port that never closes if something exotic goes wrong.
+2. `enhanced_admin_dashboard_v2.py` `admin_quit_route()` — uses the same `import requests as _r60_req` lazy-import pattern as the existing `corpus_refresh_route` / `corpus_reset_route` proxies. Round 59's PyInstaller lesson does NOT apply here because `requests` is also imported at module level (`enhanced_admin_dashboard_v2.py:30`) — but if a future refactor removes that module-level import, the new route AND the existing two would all silently break in the frozen build. Pin: `requests` MUST stay imported at module level in this file.
+3. `static/js/quit_adoptiq.js` and the inline admin handler — both use `window.confirm` for the destructive prompt. On macOS, Chrome / Safari render the browser's native modal, which is fine UX. But on some Linux distros the native confirm has been observed to suppress focus return; if the user reports the page becoming unresponsive after canceling Quit, the handler may need a `setTimeout(0)` re-focus on the button. Not seen on macOS in dev testing.
+4. The Round-60 comment block at `app_simple.py:17266` documents the SIGTERM rationale in detail. Future sessions that add a "skip atexit on shutdown" flag MUST update that comment; the current `_shutdown_handler` and `_r17_corpus_shutdown` MUST keep firing on this path.
+
+**Known deferrals (intentional non-fixes):**
+- We do NOT call `cancel_analysis()` on each running job before SIGTERM when `force=1`. The atexit handler captures the last-known `status='running'` as the final snapshot, and on next launch those entries appear as "stuck running" — which the existing `/clear_stuck_analyses` route already handles. Calling cancel adds wait/timeout complexity that produces no user-visible benefit. Documented in the plan as risk #3.
+- `window.close()` is intentionally NOT used after the 202 ack. Browsers block scripted tab closure for tabs not opened by `window.open`, so the post-shutdown UX is "page swaps to an overlay that tells the user to close the tab themselves." Documented in the plan as risk #6.
+- The Round-58 + Round-59 pre-existing deferrals carry forward unchanged: (a) `comprehensive.action_plans` LLM-phrasing-sensitive KPI extraction, (b) renewal UTC-day-boundary baseline drift, (c) `corpus_bootstrap` pytest-shutdown logger race, (d) harness regex false-positives on case/TAC IDs.
+- `make verify` (the full lint + security + audit + test pipeline) is deferred to the next todo (`verify_and_smoke`); the narrowest scoped tests (R60 only) are green here, the broader suite + ruff + bandit + pip-audit will run next.
+
+**Trailer:** Made-with: Cursor
+

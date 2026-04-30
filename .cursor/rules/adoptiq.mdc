@@ -169,6 +169,7 @@ The codebase is **flat**: no `__init__.py` files anywhere. All ~33 modules live 
 | `/leader_report_form` | GET | Leader report form |
 | `/simple_test`, `/test_generate_report` | POST | Internal test hooks |
 | `/bst_psirt_search` (and related) | POST | BST / PSIRT defect search |
+| `/api/shutdown` | POST | **Round 60:** clean Quit / graceful shutdown. Dual-auth (CSRF token OR `X-AdoptIQ-Internal`). Returns 409 + `needs_force=True` when `analysis_status` has `status='running'` entries; pass `force=1` to override. Schedules `signal.SIGTERM` to `os.getpid()` via a 0.5s `threading.Timer` so the response flushes AND the existing `atexit` handlers (status save, corpus temp scrub) fire. TESTING-mode short-circuit (`would_shutdown=True`) so pytest cannot kill itself. |
 
 #### Admin app (`enhanced_admin_dashboard_v2.py`, port 5152)
 
@@ -186,6 +187,7 @@ The codebase is **flat**: no `__init__.py` files anywhere. All ~33 modules live 
 | `/audit_report/<analysis_id>` | Per-analysis audit report |
 | `/api/audit_summary` | Audit summary |
 | `/api/diag/connectivity`, `/api/debug/verbose` | Diagnostics shared with main app |
+| `/admin_quit` | **Round 60:** admin proxy for the Quit button. Validates the admin CSRF token (`_admin_csrf` form field OR `X-AdoptIQ-Admin-CSRF` header), then proxies to the main app's `/api/shutdown` with `X-AdoptIQ-Internal`. Returns the main app's JSON response verbatim so the admin's JS can branch on 202 (success → overlay) vs 409 (needs_force → confirm prompt) the same way the main-app navbar does. |
 
 ## Build Infrastructure
 

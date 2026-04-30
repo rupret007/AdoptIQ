@@ -1812,6 +1812,68 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
         [data-bs-theme="dark"] .theme-toggle .theme-icon-dark { display: inline; }
         [data-bs-theme="dark"] .theme-toggle .theme-icon-light { display: none; }
 
+        /* Round 60: Quit / shutdown button.  Lives in the same admin
+         * header strip as the theme-toggle so the navbar stays
+         * consistent with the main app.  Positioned just to the LEFT
+         * of #theme-toggle (which is absolute / top-right) so the two
+         * controls visually pair.  Uses a red hover/focus accent to
+         * flag that this action is destructive (it kills the local
+         * Flask process and releases ports 5151 + 5152). */
+        .quit-btn {
+            position: absolute;
+            top: 16px;
+            right: 64px;  /* 16px header padding + 40px theme-toggle width + 8px gap */
+            background: transparent;
+            border: 2px solid var(--border-subtle);
+            color: var(--text-primary);
+            border-radius: 8px;
+            padding: 6px 10px;
+            font-size: 1rem;
+            line-height: 1;
+            cursor: pointer;
+            transition: all 0.25s ease;
+        }
+        .quit-btn:hover {
+            color: #fff;
+            border-color: #e31c3d;
+            background-color: #e31c3d;
+            box-shadow: 0 2px 10px rgba(227, 28, 61, 0.35);
+        }
+        .quit-btn:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(227, 28, 61, 0.45);
+        }
+        .quit-btn[disabled] {
+            opacity: 0.5;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+        /* Round 60: full-screen post-shutdown overlay.  Hidden by
+         * default; the JS toggles ``hidden`` off after a successful
+         * 202 ack.  Same UX as the main app for consistency. */
+        #adoptiq-shutdown-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.85);
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 2147483647;
+            padding: 2rem;
+            text-align: center;
+        }
+        #adoptiq-shutdown-overlay h1 {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+        }
+        #adoptiq-shutdown-overlay p {
+            font-size: 1.125rem;
+            max-width: 32rem;
+            opacity: 0.85;
+        }
+
         .dashboard-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -2101,6 +2163,19 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                     title="Toggle light or dark theme">
                 <span class="theme-icon-dark" aria-hidden="true">&#9728;</span>
                 <span class="theme-icon-light" aria-hidden="true">&#9789;</span>
+            </button>
+            {# Round 60: Quit / shutdown button.  Posts to /admin_quit
+               which proxies to the main app's /api/shutdown using
+               X-AdoptIQ-Internal so a single SIGTERM kills both the
+               main server (5151) and this admin daemon (5152, same
+               PID).  Click handler is in the inline IIFE near the
+               bottom of this template. #}
+            <button type="button"
+                    id="adoptiq-quit-btn"
+                    class="quit-btn"
+                    aria-label="Quit AdoptIQ and shut down the local server"
+                    title="Quit AdoptIQ">
+                <span aria-hidden="true">&#9211;</span>
             </button>
             <h1>🚀 AdoptIQ Admin Dashboard v2.0</h1>
             <p>Advanced Monitoring & Security Analytics</p>
@@ -2928,7 +3003,138 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 }
             });
         })();
+
+        /*
+         * Round 60: Quit / shutdown button click handler.
+         *
+         * Mirrors static/js/quit_adoptiq.js (main app) but adapted for
+         * the admin context:
+         *   * POSTs to /admin_quit (admin proxy) instead of
+         *     /api/shutdown -- the proxy handles the X-AdoptIQ-Internal
+         *     header attachment and the main app does the rest.
+         *   * Uses the admin CSRF header X-AdoptIQ-Admin-CSRF instead
+         *     of the Flask-WTF token (admin uses a separate session-
+         *     scoped token; see _admin_csrf_token).
+         *   * No Bootstrap modal in the admin template; on a 409
+         *     "needs_force" response we fall back to window.confirm so
+         *     we don't have to ship a modal framework.
+         *   * The post-shutdown overlay is the same idea -- swap the
+         *     page so the user knows the local server is down.
+         */
+        (function () {
+            var QUIT_URL = '/admin_quit';
+            var BTN_ID = 'adoptiq-quit-btn';
+            var OVERLAY_ID = 'adoptiq-shutdown-overlay';
+            var ADMIN_CSRF = '{{ admin_csrf_token }}';
+
+            function disableButton(btn) {
+                if (!btn) { return; }
+                btn.disabled = true;
+                btn.setAttribute('aria-busy', 'true');
+            }
+            function enableButton(btn) {
+                if (!btn) { return; }
+                btn.disabled = false;
+                btn.removeAttribute('aria-busy');
+            }
+            function showOverlay() {
+                var overlay = document.getElementById(OVERLAY_ID);
+                if (!overlay) { return; }
+                overlay.hidden = false;
+                try { overlay.focus(); } catch (_) { /* ignore */ }
+            }
+            function buildRunningSummary(payload) {
+                var entries = (payload && payload.in_progress) ? payload.in_progress : [];
+                var lines = [];
+                for (var i = 0; i < entries.length; i++) {
+                    var e = entries[i] || {};
+                    var line = (e.type || 'analysis') + ' \u2014 ' + (e.manager || '\u2014');
+                    if (typeof e.progress === 'number' && e.progress > 0) {
+                        line += ' (' + e.progress + '%)';
+                    }
+                    lines.push(line);
+                }
+                var count = (payload && typeof payload.in_progress_count === 'number')
+                    ? payload.in_progress_count
+                    : entries.length;
+                var summary = (count === 1)
+                    ? 'One analysis is still running:'
+                    : (count + ' analyses are still running:');
+                if (lines.length) {
+                    summary += '\n  - ' + lines.join('\n  - ');
+                }
+                summary += '\n\nForce quit anyway?';
+                return summary;
+            }
+            function sendShutdown(force, btn) {
+                disableButton(btn);
+                var headers = {
+                    'X-AdoptIQ-Admin-CSRF': ADMIN_CSRF,
+                    'X-Requested-With': 'XMLHttpRequest'
+                };
+                var formBody = force ? 'force=1' : '';
+                if (formBody) {
+                    headers['Content-Type'] = 'application/x-www-form-urlencoded';
+                }
+                window.fetch(QUIT_URL, {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: headers,
+                    body: formBody
+                }).then(function (resp) {
+                    return resp.json().catch(function () { return {}; }).then(function (payload) {
+                        return { status: resp.status, payload: payload };
+                    });
+                }).then(function (result) {
+                    if (result.status === 202 && result.payload && result.payload.ok) {
+                        showOverlay();
+                        return;
+                    }
+                    if (result.status === 409 && result.payload && result.payload.needs_force) {
+                        enableButton(btn);
+                        var msg = buildRunningSummary(result.payload);
+                        if (window.confirm(msg)) {
+                            sendShutdown(true, btn);
+                        }
+                        return;
+                    }
+                    enableButton(btn);
+                    var err = (result.payload && result.payload.error)
+                        ? result.payload.error
+                        : ('Quit failed (HTTP ' + result.status + ').');
+                    alert(err);
+                }).catch(function (err) {
+                    enableButton(btn);
+                    alert('Quit failed: ' + ((err && err.message) ? err.message : 'network error'));
+                });
+            }
+            function onQuitClick(ev) {
+                ev.preventDefault();
+                var btn = ev.currentTarget || document.getElementById(BTN_ID);
+                var ok = window.confirm(
+                    "Quit AdoptIQ?\n\n" +
+                    "The local server will stop. Both the main app (5151) and this admin dashboard (5152) will go offline. You will need to reopen the .app to use AdoptIQ again."
+                );
+                if (!ok) { return; }
+                sendShutdown(false, btn);
+            }
+            document.addEventListener('DOMContentLoaded', function () {
+                var btn = document.getElementById(BTN_ID);
+                if (btn) {
+                    btn.addEventListener('click', onQuitClick);
+                }
+            });
+        })();
     </script>
+
+    {# Round 60: post-shutdown overlay.  Pre-rendered + hidden so the
+       JS just toggles the ``hidden`` attribute -- no innerHTML
+       construction at runtime, CSP-clean. #}
+    <div id="adoptiq-shutdown-overlay" hidden role="alertdialog"
+         aria-modal="true" aria-labelledby="adoptiq-shutdown-overlay-title">
+        <h1 id="adoptiq-shutdown-overlay-title">AdoptIQ has shut down.</h1>
+        <p>The local server has stopped and ports 5151 and 5152 are released. You can close this tab. To use AdoptIQ again, reopen the .app from your Applications folder.</p>
+    </div>
 </body>
 </html>
 """
@@ -3375,6 +3581,78 @@ def corpus_reset_route():
         message=f'Corpus reset: {reset_status}',
         message_type=('success' if 'started' in reset_status else 'warning'),
     ))
+
+
+# ---------------------------------------------------------------------------
+# Round 60: admin-side proxy for the user-facing Quit / shutdown action.
+#
+# The admin Flask app runs as a daemon thread INSIDE the main Flask
+# process (see ``app_simple._start_admin_server_in_thread``), so a
+# clean shutdown is the same physical syscall on both sides -- one
+# ``signal.SIGTERM`` to PID os.getpid() releases both 5151 and 5152.
+# This proxy lets the admin's "Quit AdoptIQ" button invoke the same
+# main-app ``/api/shutdown`` endpoint without copying its
+# in-progress-detection logic.
+#
+# Returns JSON (NOT a redirect) because:
+#   * the admin's page is about to die too -- a 302 would race the
+#     SIGTERM and either fire before the response flushes (browser
+#     sees the redirect target on a dead port) or never fire at all;
+#   * the JS handler wants the same payload shape as the main-app
+#     ``/api/shutdown`` so the 409 ``needs_force`` modal works
+#     identically from both navbars.
+# ---------------------------------------------------------------------------
+
+
+@admin_app.route('/admin_quit', methods=['POST'])
+def admin_quit_route():
+    """Round 60: proxy a CSRF-protected Quit request to the main app's
+    ``/api/shutdown`` endpoint, mirroring the auth + transport pattern
+    of :func:`corpus_refresh_route` / :func:`corpus_reset_route`.
+
+    Auth: validate the admin CSRF token first (so a hostile cross-
+    origin POST cannot kill the local process), then make a server-
+    to-server HTTP call with the ``X-AdoptIQ-Internal`` header so the
+    main app can authorize without us holding its CSRF token.
+
+    Returns the main app's JSON response verbatim so the calling
+    JavaScript can branch on 202 (success) vs 409 (needs_force) the
+    same way it does when called directly from the main navbar.
+    """
+    _require_admin_csrf()
+    force_form = (request.form.get('force') or '').strip()
+    try:
+        import requests as _r60_req
+        headers = {}
+        _internal_tok = os.environ.get('ADOPTIQ_INTERNAL_TOKEN')
+        if _internal_tok:
+            headers['X-AdoptIQ-Internal'] = _internal_tok
+        body = {'force': force_form} if force_form else {}
+        resp = _r60_req.post(
+            f'{MAIN_APP_URL.rstrip("/")}/api/shutdown',
+            data=body,
+            headers=headers,
+            timeout=5,
+        )
+        # Pass through the main app's JSON + status so the browser
+        # gets the canonical {ok, shutdown_in_ms, needs_force, ...}
+        # contract regardless of which navbar the user clicked from.
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = {'ok': False, 'error': f'main app returned non-JSON HTTP {resp.status_code}'}
+        return jsonify(payload), resp.status_code
+    except Exception as err:
+        log_error(
+            'WARNING',
+            f'Round 60 admin_quit proxy failed: {type(err).__name__}',
+            'admin_quit_route',
+        )
+        return jsonify({
+            'ok': False,
+            'error': 'main app unreachable',
+            'detail': type(err).__name__,
+        }), 502
 
 
 @admin_app.route('/start_server', methods=['POST'])

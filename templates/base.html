@@ -403,6 +403,75 @@
         .theme-toggle .theme-icon-light { display: inline; }
         [data-bs-theme="dark"] .theme-toggle .theme-icon-dark { display: inline; }
         [data-bs-theme="dark"] .theme-toggle .theme-icon-light { display: none; }
+
+        /* Round 60: Quit / shutdown button.  Visual twin of
+         * ``.theme-toggle`` so the navbar stays balanced, but uses the
+         * Cisco danger token on hover/focus to flag that this action
+         * is destructive (it stops the local server and releases ports
+         * 5151 + 5152).  The button itself is kept neutral at rest so
+         * a user can't accidentally click it because it "looked like
+         * an alert"; the red only appears once intent is signaled by
+         * hover or keyboard focus.  Tracked via the existing brand
+         * variables so light + dark themes both look right. */
+        .quit-btn {
+            background: transparent;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            color: rgba(255, 255, 255, 0.9);
+            border-radius: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            margin-left: 0.5rem;
+            font-size: 1rem;
+            line-height: 1;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 2.5rem;
+        }
+        .quit-btn:hover {
+            color: #fff;
+            border-color: var(--cisco-danger);
+            background-color: var(--cisco-danger);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(227, 28, 61, 0.35);
+        }
+        .quit-btn:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(227, 28, 61, 0.45);
+        }
+        .quit-btn[disabled] {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        /* Round 60: full-screen overlay shown after a 202 ack so the
+         * user has unambiguous feedback that the process has stopped
+         * and the tab is safe to close.  Hidden by default; the JS
+         * toggles ``hidden`` off after a successful POST. */
+        #adoptiq-shutdown-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.85);
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 2147483647;
+            padding: 2rem;
+            text-align: center;
+        }
+        #adoptiq-shutdown-overlay h1 {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+        }
+        #adoptiq-shutdown-overlay p {
+            font-size: 1.125rem;
+            max-width: 32rem;
+            opacity: 0.85;
+        }
         
         /* Enhanced Buttons */
         .btn {
@@ -1239,6 +1308,23 @@
                             <span class="theme-icon-light" aria-hidden="true">&#9789;</span>
                         </button>
                     </li>
+                    {# Round 60: Quit / shutdown button.  Posts to
+                       /api/shutdown (CSRF-protected) so the local
+                       Flask server stops and ports 5151 + 5152 are
+                       released.  Without this button the user has to
+                       find the PID and kill it manually -- the .app
+                       has no native window so closing the browser tab
+                       leaves the process running until reboot.
+                       JS handler is in static/js/quit_adoptiq.js. #}
+                    <li class="nav-item d-flex align-items-center">
+                        <button type="button"
+                                id="adoptiq-quit-btn"
+                                class="quit-btn"
+                                aria-label="Quit AdoptIQ and shut down the local server"
+                                title="Quit AdoptIQ">
+                            <span aria-hidden="true">&#9211;</span>
+                        </button>
+                    </li>
                 </ul>
             </div>
         </div>
@@ -1258,6 +1344,39 @@
             </div>
         {% endif %}
     {% endwith %}
+
+    {# Round 60: Quit / shutdown UI scaffolding.  Both elements are
+       pre-rendered with `hidden` so the page is byte-identical to
+       pre-Round-60 output until the user actually clicks Quit.  The
+       overlay is shown after a 202 ack so the user has unambiguous
+       "process stopped, safe to close tab" feedback.  The modal is a
+       Bootstrap modal that the JS unhides + populates when the
+       endpoint returns 409 needs_force (analyses still running). #}
+    <div id="adoptiq-shutdown-overlay" hidden role="alertdialog"
+         aria-modal="true" aria-labelledby="adoptiq-shutdown-overlay-title">
+        <h1 id="adoptiq-shutdown-overlay-title">AdoptIQ has shut down.</h1>
+        <p>The local server has stopped and ports 5151 and 5152 are released. You can close this tab. To use AdoptIQ again, reopen the .app from your Applications folder.</p>
+    </div>
+    <div class="modal fade" id="adoptiq-quit-confirm-modal" tabindex="-1"
+         aria-labelledby="adoptiq-quit-confirm-title" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="adoptiq-quit-confirm-title">Analyses still running</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p id="adoptiq-quit-confirm-summary">One or more analyses are still in progress. Quitting now will stop them.</p>
+                    <ul id="adoptiq-quit-confirm-list" class="small text-muted"></ul>
+                    <p class="mb-0 small text-muted">In-progress jobs will appear as "stuck" the next time AdoptIQ launches; you can clear them from the navbar.</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Stay</button>
+                    <button type="button" class="btn btn-danger" id="adoptiq-quit-force-btn">Force quit anyway</button>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <!-- Main Content -->
     <main>
@@ -1321,6 +1440,11 @@
        Loaded after Bootstrap so DOM and the badge element exist
        when the script runs. #}
     <script src="{{ url_for('static', filename='js/intel_status.js') }}"></script>
+    {# Round 60: wire the navbar Quit button to /api/shutdown.  Loaded
+       after Bootstrap so window.bootstrap is defined when the modal
+       fallback renders the 409 needs_force prompt.  Same-origin so no
+       CSP changes needed (script-src 'self'). #}
+    <script src="{{ url_for('static', filename='js/quit_adoptiq.js') }}"></script>
     {# Round 8 / Phase 5.5: client-side fallback to populate the
        footer copyright year if the server context processor failed
        to set ``adoptiq_footer_year``.  This avoids the previous
