@@ -7157,3 +7157,48 @@ Three observations vs the Phase 3.5 (Round 54.1) supervisor pass:
 
 **Trailer:** Made-with: Cursor
 
+## Round 56 — handoff 2026-04-29 (rebaseline against Build31 + supervisor default repoint + harness gate verified)
+
+**What changed (plain English):**
+- Captured a fresh Build31 baseline at `baselines/round56/baseline_manifest.json` against the live .app on `:5151` for all four canonical scenarios (`comprehensive / compact / renewal / leader`). Capture took ~10 minutes; the runner wrote `.docx` + `.xlsx` per scenario plus the manifest with sha256 + size_bytes per artifact, environment block (`adoptiq_build=31`, `adoptiq_version=1.0.4`, `git_sha=74ed783` -- the Round 55 head), and `label="Round 56 / Build31"`.
+- Preserved `baselines/round52/` untouched for historical comparison. Future supervisor invocations can still diff against it via `--baseline-manifest baselines/round52/baseline_manifest.json`.
+- Repointed the supervisor's hard-coded default `--baseline-manifest` arg from `baselines/round52/baseline_manifest.json` to `baselines/round56/baseline_manifest.json` so the autofix loop, when invoked without an explicit baseline, diffs against the current intentional ground truth instead of the stale Build28 snapshot.
+- Re-ran the supervisor against the Build31 .app with the new default. **Result: all 8 baseline_diff gates GREEN (4 scenarios x 2 artifacts each).** The only red is the known CITATION_GAP on `quality.passed`, which is Round 57 work. parity.passed = True everywhere; baseline_integrity.passed = True everywhere.
+- Round 55 reported "the `baseline_diff` block is empty `{}` on every per-scenario summary." This was a JSON-read bug in the Round 55 classifier script -- `baseline_diff` is NOT a top-level result field, it lives per-artifact at `result.artifacts[*].baseline_diff` (alongside `baseline_path`, `baseline_source`, `baseline_sha256`, `baseline_manifest_key`, `baseline_integrity`). Fresh Round 56 inspection confirms the gate has been populating cleanly all along; the harness never broke. The Round 55 finding was a reader bug, not a runner bug. **No code change needed in the harness; the shape pin test in Round 56 indirectly inoculates against future readers making the same mistake by documenting the artifact-level location.**
+- Added `tests/test_round56_baseline_manifest_shape.py` (12 tests) pinning the manifest contract: top-level metadata keys present, exactly the four canonical scenarios, both DOCX + XLSX per scenario with valid 64-char sha256 + positive size_bytes + on-disk file matching the manifest size, captured against build >= 31, AND the supervisor default's source-text invariant (a future rebaseline that doesn't repoint the supervisor default fails this test).
+
+**Files touched:**
+- `baselines/round56/baseline_manifest.json` -- new (4 scenarios, 8 artifacts, 3279 bytes).
+- `baselines/round56/{compact,comprehensive,leader,renewal}/*.{docx,xlsx}` -- 8 baseline artifacts (~3.5 MB total).
+- `scripts/run_report_accuracy_autofix_loop.py` -- one-line change to the argparse default for `--baseline-manifest`.
+- `tests/test_round56_baseline_manifest_shape.py` -- new, 12 parametrized tests pinning the manifest contract.
+- `QUALITY_AUDIT.md` -- this Round 56 section.
+
+**SSoT modules touched:** none. The baseline manifest schema is documented in `report_iteration_loop.py` and pinned-by-test in this round; no SSoT module list change.
+
+**Tests added/updated:**
+- `tests/test_round56_baseline_manifest_shape.py::test_round56_manifest_has_top_level_metadata`
+- `tests/test_round56_baseline_manifest_shape.py::test_round56_manifest_carries_canonical_four_scenarios`
+- `tests/test_round56_baseline_manifest_shape.py::test_round56_manifest_has_build31_environment`
+- `tests/test_round56_baseline_manifest_shape.py::test_round56_each_scenario_artifact_is_real[*]` (8 parametrized cases over 4 scenarios x 2 artifact kinds)
+- `tests/test_round56_baseline_manifest_shape.py::test_round56_supervisor_default_points_at_round56_manifest`
+
+**Verify status:**
+- `make verify` -- pass.
+- pytest: **3545 passed / 2 skipped** (Round 55 floor 3533 + 12 new Round 56 tests).
+- ruff: 0 findings.
+- bandit HIGH/MED: 0.
+- pip-audit: clean.
+- Live supervisor against Build31 with new default baseline: all 4 scenarios completed, all 8 baseline_diff gates green, all 4 parity gates green, all 4 quality gates red on CITATION_GAP only (Round 57 work).
+
+**Hot spots Claude should audit first:**
+1. `baselines/round56/baseline_manifest.json` -- if Build31 is shipping unchanged, the captured numerics here are now the ground truth. Any future code change that legitimately moves a KPI MUST also update this baseline (re-capture in a new round directory: `baselines/round58/` etc.) AND repoint the supervisor default. The Round 56 shape pin test will fail loudly if rebaselining lands without repointing.
+2. `scripts/run_report_accuracy_autofix_loop.py:407-410` -- the comment block above the new default explains why future rebaselines must follow the same pattern (new dir, new manifest, repoint, update test). Don't strip that comment.
+3. The Round 55 misreport about empty `baseline_diff` (corrected above) -- if you build new tooling on top of `result.artifacts[*]`, remember the gate lives per-artifact, not at the result top level. The old `r.get('baseline_diff', {})` pattern silently returns `{}` and looks like the gate didn't run.
+
+**Known deferrals (intentional non-fixes):**
+- The `[Source:]` citation gap remains -- Round 57 work, by design.
+- `baselines/round52/` is preserved on disk as a historical snapshot but no longer the default. If it is no longer needed for any historical comparison, a cleanup round can drop it; for now keeping it costs ~3 MB and provides Build28 vs Build31 KPI delta evidence on demand.
+
+**Trailer:** Made-with: Cursor
+

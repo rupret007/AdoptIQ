@@ -404,7 +404,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default="http://127.0.0.1:5151")
     parser.add_argument("--downloads-dir", type=Path, default=Path("~/Downloads").expanduser())
     parser.add_argument("--bundle-dir", type=Path, default=Path("~/Downloads/adoptiq_repair_bundles").expanduser())
-    parser.add_argument("--baseline-manifest", type=Path, default=REPO_ROOT / "baselines/round52/baseline_manifest.json")
+    # Round 56: default to the Build31 baseline (round56) so drift detection
+    # compares against the current intentional KPI set, not the stale round52
+    # snapshot. Pass ``--baseline-manifest <path>`` explicitly to compare against
+    # any other captured baseline (e.g. baselines/round52 for historical diffs).
+    parser.add_argument("--baseline-manifest", type=Path, default=REPO_ROOT / "baselines/round56/baseline_manifest.json")
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--scenarios", default="all")
     parser.add_argument("--run-id", default=f"round53-{_utc_stamp()}")
