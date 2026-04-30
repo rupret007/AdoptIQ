@@ -7109,3 +7109,51 @@ Three real findings from this run, all classified as pre-existing gaps and NOT B
 
 **Trailer:** Made-with: Cursor
 
+## Round 55 — handoff 2026-04-29 (fresh discovery loop on Build31 / live-app supervisor pass)
+
+**What changed (plain English):**
+- Re-ran the live autofix supervisor against the running Build31 .app on `:5151` with the corrected scenario name (`renewal`, not the Phase 3.5 typo `renewal_portfolio`) and `--max-repair-attempts 0 --repair-agent none` (manual-triage mode, no auto-edits). All 4 scenarios completed.
+- Classified every per-scenario failure into one of three buckets per the Round 55 plan: CITATION_GAP (known Round 57 work), R53.2_DRIFT (intentional Round 53.2 KPI changes vs the round52 baseline), or NEW_BUG (anything else). **Result: 0 NEW_BUGs surfaced.** All four red gates collapse to the single known CITATION_GAP class.
+- Verified the Round 53.2 distinct-AB fix is taking effect end-to-end in the live Build31 binary by inspecting the freshly generated leader Word doc (`AdoptIQ_Report_Leader_Brian_Frazier_90d_20260430_041948.docx`) and Excel sheet. Word `table[2]` TOTAL row reads `Adoption Barriers | 68`, matching the 68 distinct AB IDs in the `Adoption_Barriers` sheet (which contains 72 raw rows due to legitimate cross-CSSM duplication). The pre-fix per-CSSM column sum is 72; the post-fix TOTAL is 68. The contract pinned by `tests/test_round53_report_accuracy.py::test_round532_leader_team_total_uses_distinct_ab_records_not_sum_of_per_cssm` matches the live output.
+- No source files were touched in this round; no commits other than this handoff. The classification table itself is the deliverable — it is the evidence that everything red in the supervisor output is already accounted for by Round 53.2 and Round 57 work, not by latent Build31 regressions.
+
+**Files touched:**
+- `QUALITY_AUDIT.md` — appended this Round 55 section.
+
+**SSoT modules touched:** none.
+
+**Tests added/updated:** none. The Round 55 plan's stop condition — "if zero NEW_BUGs, the handoff just records the clean classification table" — is met. The Round 53.2 distinct-count contract is already pinned by `test_round532_leader_team_total_uses_distinct_ab_records_not_sum_of_per_cssm` which passes against the live Build31 output.
+
+**Verify status:**
+- `make verify` — pass (last run before this handoff: 3533 passed / 2 skipped; this round did not change source).
+- pytest: 3533 passed / 2 skipped (Round 54.1 floor; unchanged).
+- ruff: 0 findings.
+- bandit HIGH/MED: 0.
+- pip-audit: clean.
+- Live autofix supervisor (`scripts/run_report_accuracy_autofix_loop.py`) against Build31 on `:5151` with `--scenarios comprehensive,compact,renewal,leader --max-repair-attempts 0 --repair-agent none`: 4 scenarios completed, supervisor returncode = 1 (because `quality.passed = False` on each, due to CITATION_GAP). **`parity.passed = True` on all 4** — the hard contract holds. Run summary at `~/Downloads/AdoptIQ_ReportQualitySupervisor__round53-20260430T041157Z__20260430T042034Z.json`; per-scenario summaries under same prefix.
+
+**Round 55 classification table (live Build31 against round52 baseline):**
+
+| scenario | parity (DOCX↔XLSX) | quality.passed | metric_claims | source_citations | unbacked | uncited paragraphs | classification |
+|---|---|---|---|---|---|---|---|
+| comprehensive | PASS | FAIL | 14 | 0 | 14 | 606 | CITATION_GAP |
+| compact | PASS | FAIL | 14 | 56 | 8 | 423 | CITATION_GAP |
+| renewal | PASS | FAIL | 11 | 4 | 11 | 533 | CITATION_GAP |
+| leader | PASS | FAIL | 408 | 0 | 408 | 745 | CITATION_GAP |
+
+Three observations vs the Phase 3.5 (Round 54.1) supervisor pass:
+1. **Compact citation count climbed from 50 → 56**, unbacked claims held at 8. Compact is closest to "done" and the citation pattern present there is the natural reference template for the Round 57 instrumentation work on the other three writers.
+2. **Renewal newly shows 4 citations** (Phase 3.5 wasn't broken out as `renewal` — the typo `renewal_portfolio` aborted the runner before generating a report). 11 metric claims, 4 backed by source markers somewhere in the report; 11 unbacked individual claims (the 4 markers don't sit adjacent to the 11 specific claims the gate pattern-matches).
+3. **The `baseline_diff` block is empty `{}` on every per-scenario summary** even though the supervisor invoked `--baseline-mode manifest --baseline-manifest baselines/round52/baseline_manifest.json`. This is a harness behavior to investigate in Round 56 — possibly the manifest's keying/extractor has drifted such that no comparable KPIs are emitted, OR the gate is being short-circuited before it runs. Either way, the empty block silently suppresses what would otherwise be R53.2_DRIFT classifications. Round 56 (rebaseline + manifest shape pin) will surface the cause; if `baseline_diff` continues to come back empty after the new manifest lands, that is itself a Round 56 NEW_BUG against the harness.
+
+**Hot spots Claude should audit first:**
+1. `report_iteration_loop.py::evaluate_report_quality` (lines 1632-1641) — confirm the Round 55 classification matches what the gate is documenting and that no error string we mapped to CITATION_GAP is in fact masking a different failure mode (e.g. a parser exception masquerading as "no citations found" because the doc couldn't be opened).
+2. The empty `baseline_diff: {}` block (observation 3 above) — when Round 56 captures a fresh manifest, verify the gate populates non-empty per-scenario diff payloads. If it stays empty, treat as a Round 56 harness bug, write a regression test that asserts the gate produces a non-empty diff structure for at least one scenario, and fix.
+3. `compact_report_formatter.py` — Round 57 instrumentation reference. The 56 citations + 8 unbacked-claims pattern in the live compact report indicates the writer has SOME citations but not in the format the gate's adjacency check resolves. Diff that against `_source_backed_cell` / `_paragraph_claim_source_backed` to derive the canonical citation pattern for the other three writers.
+
+**Known deferrals (intentional non-fixes):**
+- The CITATION_GAP findings are deferred to Round 57 by plan design. Round 55's job was to surface NEW_BUGs, not to close known deferrals.
+- The empty `baseline_diff` block is deferred to Round 56 (rebaseline). If it persists post-rebaseline it becomes a Round 56 NEW_BUG.
+
+**Trailer:** Made-with: Cursor
+
