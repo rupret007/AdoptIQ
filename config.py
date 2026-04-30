@@ -905,7 +905,7 @@ ADOPTIQ_VERSION = "1.0.4"
 # ``table_numeric_similarity == 1.0``; strict 3-iter repeatability
 # 12/12 green.  No upstream Snowflake query, formatter, boot-order,
 # corpus, or admin-console changes ship in this build.
-ADOPTIQ_BUILD = "30"  # Round 52.1 / live-data-drift-hardening
+ADOPTIQ_BUILD = "31"  # Round 53 / corpus-fail-closed-onedrive-sentinel
 
 def version_string():
     """e.g. 'v1.0.1 build 1'"""
@@ -1052,7 +1052,7 @@ class Config:
     TESTING = str(os.environ.get('TESTING', 'false')).strip().lower() in {'true', '1', 'yes', 'on'} and not _is_production_env()
     VERBOSE_DEBUG = os.environ.get('ADOPTIQ_VERBOSE_DEBUG', 'false').lower() in ('true', '1', 'yes', 'on')
     FLASK_ENV = os.environ.get('FLASK_ENV', 'development')
-    
+
     # Analysis Configuration
     ANALYSIS_TIMEOUT = int(os.environ.get('ANALYSIS_TIMEOUT', '300'))
     STEP_TIMEOUT = int(os.environ.get('STEP_TIMEOUT', '60'))
@@ -1061,7 +1061,7 @@ class Config:
     UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', './uploads')
     TEMP_FOLDER = os.environ.get('TEMP_FOLDER', './temp')
     LOG_FOLDER = os.environ.get('LOG_FOLDER', './logs')
-    
+
     # CSOne OneDrive folder: when no file is uploaded, use the most recent .xlsx from this folder.
     # Macro places reports here daily. Override via CSONE_ONEDRIVE_FOLDER env var.
     # Round 17.2: auto-discover the synced OneDrive folder across the
@@ -1170,6 +1170,23 @@ class Config:
         os.environ.get('ADOPTIQ_SHAREPOINT_FOLDER_URL')
         or ADOPTIQ_CORPUS_SHARE_URL
     )
+    # Round 53 / Phase 53.4.1: clickable "Open OneDrive" link rendered
+    # in the analyze-page panel when the corpus is in the
+    # ``blocked_no_onedrive`` state.  The default is the same
+    # SharePoint web URL used for ``ADOPTIQ_CORPUS_SHARE_URL`` -- when
+    # the user clicks it in their browser, SharePoint's UI offers a
+    # prominent "Sync" button that wires the folder into the OneDrive
+    # desktop client.  An operator who has provisioned a true
+    # ``odopen://`` deep link can override via the env var below to
+    # skip the browser hop entirely.  Validated by the status-payload
+    # serializer in ``app_simple._r17_corpus_status_payload`` -- only
+    # ``http://``, ``https://``, ``odopen:``, and ``ms-onedrive:``
+    # schemes are surfaced to the UI; anything else is replaced with
+    # ``None`` to defang an env-driven open-redirect / XSS attempt.
+    ADOPTIQ_CORPUS_ONEDRIVE_DEEP_LINK = (
+        os.environ.get('ADOPTIQ_CORPUS_ONEDRIVE_DEEP_LINK')
+        or ADOPTIQ_CORPUS_SHARE_URL
+    )
     # Round 36: dead settings retained as ``None`` so any operator env
     # script that exports these vars does not crash on missing
     # attribute access.  Removing them entirely is deferred to a
@@ -1206,7 +1223,7 @@ class Config:
         ).strip().lower()
         in {'production', 'prod'}
     )
-    
+
     # Keeper Configuration - from environment only (no defaults for secrets)
     KEEPER_CONFIG = {
         "url": os.environ.get('KEEPER_URL', 'https://keeper.cisco.com'),
@@ -1215,7 +1232,7 @@ class Config:
         "secret_id": os.environ.get('KEEPER_SECRET_ID') or '',
         "secret_path": os.environ.get('KEEPER_SECRET_PATH', 'secret/snowflake/prd/cx_swssbst_etl_svc/key')
     }
-    
+
     # Snowflake Configuration - from environment only (password = direct auth; no Keeper needed when set)
     SNOWFLAKE_CONFIG = {
         "user": os.environ.get('SNOWFLAKE_USER') or '',
@@ -1224,7 +1241,7 @@ class Config:
         "warehouse": os.environ.get('SNOWFLAKE_WAREHOUSE') or '',
         "password": os.environ.get('SNOWFLAKE_PASSWORD') or '',
     }
-    
+
     # CircuIT Configuration - from environment only
     CIRCUIT_CONFIG = {
         "client_id": os.environ.get('CIRCUIT_CLIENT_ID') or '',
@@ -1232,11 +1249,11 @@ class Config:
         "app_key": os.environ.get('CIRCUIT_APP_KEY') or '',
         "model_name": os.environ.get('CIRCUIT_MODEL_NAME', 'gpt-5-nano')
     }
-    
+
     # Database Table Names
     DSM_TABLE = "CX_DB.CX_SWSSBST_BR.dsm_assignment_data"
     AB_TABLE = "EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW"
-    
+
     # Round 7 / Phase 3.17: removed the hard-coded ``TEAM_ROSTER`` and
     # ``MANAGERS`` defaults that previously embedded ~30 personal email
     # addresses (Cisco internal) directly into source control.  The
@@ -1247,7 +1264,7 @@ class Config:
     # repo and packaged binary.  Tests should populate
     # ``team_config.json`` (or monkey-patch ``adoptiq_backend.TEAM_ROSTER``)
     # rather than relying on a baked-in roster.
-    
+
     # Technology Choices
     TECH_CHOICES = [
         "Webex Meetings & Messaging",
@@ -1257,7 +1274,7 @@ class Config:
         "Cisco UCCE",
         "Cisco UCCX",
     ]
-    
+
     # Technology Filters
     TECH_FILTERS = {
         "Webex Meetings & Messaging": [
@@ -1301,12 +1318,12 @@ class Config:
             r'enterprise\s*contact\s*center'
         ],
         "Cisco UCCE": [
-            r'\bucce\b', 
+            r'\bucce\b',
             r'unified\s*contact\s*center\s*enterprise',
             r'contact\s*center\s*enterprise'
         ],
         "Cisco UCCX": [
-            r'\buccx\b', 
+            r'\buccx\b',
             r'unified\s*contact\s*center\s*express',
             r'contact\s*center\s*express'
         ],
@@ -1322,7 +1339,7 @@ class Config:
         r"\bwebex\s*meetings?\b|\bwebex\s*messag(ing|e)\b|\bwebex\s*app\b|\bcollaboration\b": "Webex Meetings & Messaging",
         r"\bcontact\s*center\s*software\b|\bcontact\s*center\b": "All Contact Center",
     }
-    
+
     # Official Categories
     OFFICIAL_CATEGORIES = {
         "Cisco External": [
@@ -1362,14 +1379,14 @@ class Config:
             "Internal Use Case Exit Criteria Issue", "Internal Use Case Telemetry Issue"
         ],
     }
-    
+
     # Help URLs
     HELP_URLS = [
         "https://help.webex.com/en-us/article/mqkve8/Webex-App-%7C-Release-notes",
         "https://help.webex.com/en-us/article/8dmbcr/What's-New-in-Webex-Suite",
         "https://help.webex.com/en-us/article/n8z6v5c/Webex-App-%7C-Known-issues",
     ]
-    
+
     # Likely Column Names for CSOne Excel Files
     LIKELY_DATE_COLS = {"Date/Time Opened", "Created", "Created Date", "OPEN_DATE", "OPEN_DATE_C", "CREATED_DATE", "CREATED_DATE_C"}
     LIKELY_TITLE_COLS = {"Title", "TITLE", "SUBJECT", "SUBJECT_C", "NAME", "ACTION_PLAN_TITLE_C"}
