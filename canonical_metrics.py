@@ -988,6 +988,19 @@ def count_open_action_plans(
 
     # Round 64 / Phase 2 (B2) -- dedicated Action_Plans sheet path.
     if ap_df is not None and not _is_empty(ap_df):
+        # Round 65 / Phase 1 (C-2): the comprehensive XLSX always-write
+        # fallback may stamp a single provenance row when both CSConsole
+        # and Snowflake returned zero APs (so the operator sees honest
+        # provenance instead of a missing sheet). Skip those rows from
+        # the open-count so the Summary KPI reads 0 in that case (not 1).
+        if "_adoptiq_provenance_row" in ap_df.columns:
+            try:
+                _mask = ap_df["_adoptiq_provenance_row"].fillna(False).astype(bool)
+                ap_df = ap_df.loc[~_mask]
+            except Exception:  # noqa: BLE001 - defensive
+                pass
+            if _is_empty(ap_df):
+                return 0
         status_col = next(
             (c for c in _AP_STATUS_COLUMN_CANDIDATES if c in ap_df.columns),
             None,

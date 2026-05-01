@@ -939,14 +939,53 @@ def validate_word_numeric_drift(
 
     errors = sorted(errors)
     warnings = sorted(warnings)
+    # Round 65 / C-1: build a structured drift_detail block so the
+    # outer ``except ValueError`` branch in app_simple.py can render
+    # an operator-actionable fallback paragraph instead of the
+    # generic "builder error" boilerplate.  The block enumerates
+    # every drifted field with the canonical truth and the LLM's
+    # claim so the operator can act on it without re-running the
+    # validator.
+    drift_detail: Dict[str, Any] = {
+        "kind": "numeric",
+        "validator": "validate_word_numeric_drift",
+        "round": "R25B",
+        "fields": [],
+    }
+    for key, label, _patterns in _R25B_VALIDATED_TOTALS:
+        if key not in canonical_totals:
+            continue
+        try:
+            canonical_value = int(canonical_totals[key])
+        except (TypeError, ValueError):
+            continue
+        narrated_values = parsed.get(key) or []
+        bad = [v for v in narrated_values if v != canonical_value]
+        if bad:
+            drift_detail["fields"].append({
+                "field": key,
+                "label": label,
+                "canonical_value": canonical_value,
+                "llm_values": list(narrated_values),
+                "drifted_values": list(bad),
+            })
     result: ConsistencyResultContract = {
         "is_valid": len(errors) == 0,
         "errors": errors,
         "warnings": warnings,
         "metrics": metrics,
+        # Round 65 / C-1: surface drift_detail in the result dict so
+        # non-raising callers (e.g. ADOPTIQ_NONSTRICT_R25B=1) can
+        # also access the structured field-level breakdown.
+        "drift_detail": drift_detail,  # type: ignore[typeddict-unknown-key]
     }
     if raise_on_drift and errors:
-        raise ValueError("; ".join(errors))
+        exc = ValueError("; ".join(errors))
+        # Round 65 / C-1: attach structured drift detail to the
+        # exception so the caller's ``except ValueError`` branch
+        # can render it without re-parsing the error string.
+        exc.drift_detail = drift_detail  # type: ignore[attr-defined]
+        raise exc
     return result
 
 
@@ -1109,12 +1148,45 @@ def validate_word_risk_band_claims(
 
     errors = sorted(errors)
     warnings = sorted(warnings)
+    # Round 65 / C-1: structured drift_detail mirrors the
+    # numeric-drift validator so app_simple's outer except-branch
+    # can render an operator-actionable fallback for both kinds.
+    drift_detail: Dict[str, Any] = {
+        "kind": "risk_band",
+        "validator": "validate_word_risk_band_claims",
+        "round": "R25C",
+        "fields": [],
+    }
+    if invalid_labels:
+        drift_detail["fields"].append({
+            "field": "invalid_band_labels",
+            "label": "Risk band label",
+            "canonical_value": "CRITICAL|HIGH|MEDIUM|LOW|HEALTHY",
+            "llm_values": sorted(set(invalid_labels)),
+            "drifted_values": sorted(set(invalid_labels)),
+        })
+    try:
+        _canon_high_int = int(canonical_high_risk_customers)
+    except (TypeError, ValueError):
+        _canon_high_int = None
+    if _canon_high_int is not None and critical_high != _canon_high_int:
+        drift_detail["fields"].append({
+            "field": "high_risk_customers",
+            "label": "CRITICAL+HIGH narrative count",
+            "canonical_value": _canon_high_int,
+            "llm_values": [critical_high],
+            "drifted_values": [critical_high],
+        })
     result: ConsistencyResultContract = {
         "is_valid": len(errors) == 0,
         "errors": errors,
         "warnings": warnings,
         "metrics": metrics,
+        # Round 65 / C-1: see numeric-drift validator above.
+        "drift_detail": drift_detail,  # type: ignore[typeddict-unknown-key]
     }
     if raise_on_drift and errors:
-        raise ValueError("; ".join(errors))
+        exc = ValueError("; ".join(errors))
+        exc.drift_detail = drift_detail  # type: ignore[attr-defined]
+        raise exc
     return result

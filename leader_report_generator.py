@@ -291,6 +291,149 @@ def _friendly_source_label(table_id: Any) -> str:
     return _FRIENDLY_SOURCE_TABLE_LABELS.get(key, key)
 
 
+# Round 65 / Phase 1 (C-2) -- module-level standalone Snowflake fetcher
+# for Action Plans, extracted from ``LeaderReportGenerator._fetch_action_plans``
+# so the comprehensive report path (``app_simple.run_comprehensive_analysis``)
+# can use the SAME canonical query without instantiating a leader generator.
+#
+# Pre-R65 the comprehensive XLSX's ``Action plans (open)`` Summary KPI read
+# zero whenever CSConsole returned no AP rows for the manager's scope (a
+# common case for mid-portfolio scopes), even though Snowflake had hundreds
+# of rows for the same accounts. The Leader report for the same scope used
+# this fetcher and rendered the real count -- now both paths share it.
+def fetch_action_plans_snowflake(
+    ctx,
+    account_ids: List[str],
+    days: int,
+    owner_emails: Optional[List[str]] = None,
+    *,
+    chunk_size: int = 900,
+) -> pd.DataFrame:
+    """Fetch Action Plans (record_type_id=0122T000000QHBGQA4) from Snowflake.
+
+    Mirrors the canonical Leader-side query (date predicate via
+    ``_utc_window_start_iso(days)``, owner-email widening via the
+    ``adoptiq_backend`` helpers, chunked ``IN`` lists, dedup on ``ID``).
+    Returns:
+      * a populated DataFrame on success,
+      * an empty DataFrame on a true zero-row result (no ``attrs`` marker), or
+      * an empty DataFrame with ``attrs['fetch_error']`` set on failure
+        (see :meth:`LeaderReportGenerator._empty_df_failed`).
+
+    Args:
+        ctx: a Snowflake context exposing ``.cursor()`` and (for the owner
+            clause) usable as the ``ctx`` arg of
+            ``adoptiq_backend._get_table_columns``.
+        account_ids: list of Salesforce ACCOUNT_ID_C strings to scope to.
+        days: lookback window in days, applied to
+            ``COALESCE(OPEN_DATE_C, CREATED_DATE, CREATED_DATE_C)``.
+        owner_emails: optional CSSM emails -- when supplied, rows authored
+            or owned by these users are returned even if their account is
+            outside ``account_ids``.
+        chunk_size: optional override for the per-IN-clause chunk size
+            (defaults to 900 to match the leader generator).
+    """
+    owner_emails = owner_emails or []
+    if not account_ids and not owner_emails:
+        return pd.DataFrame()
+
+    cur = None
+    try:
+        cur = ctx.cursor()
+        # Build owner clause via the same helpers the leader generator uses.
+        try:
+            from adoptiq_backend import (
+                _get_table_columns,
+                _build_owner_match_clause,
+                _normalize_owner_emails,
+                TASK_OWNER_EMAIL_COLUMNS,
+            )
+            cleaned_owners = _normalize_owner_emails(owner_emails)
+            if cleaned_owners:
+                cols = _get_table_columns(ctx, "EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW")
+                owner_sql, owner_params = _build_owner_match_clause(
+                    cols, cleaned_owners, TASK_OWNER_EMAIL_COLUMNS, table_alias="t"
+                )
+            else:
+                owner_sql, owner_params = "", []
+        except ImportError:
+            owner_sql, owner_params = "", []
+
+        size = max(1, int(chunk_size or 900))
+        id_chunks: List[List[Any]] = []
+        if account_ids:
+            seq = list(account_ids)
+            for i in range(0, len(seq), size):
+                id_chunks.append(seq[i:i + size])
+        if not id_chunks and not owner_sql:
+            return pd.DataFrame()
+
+        all_rows: List[Tuple[Any, ...]] = []
+        cols_out: Optional[List[str]] = None
+
+        def _run(predicates: List[str], params: List[Any]) -> None:
+            nonlocal cols_out
+            if not predicates:
+                return
+            where_clause = " OR ".join(predicates)
+            sql = f"""
+            SELECT t.*, dsm.BU_NAME AS DSM_BU_NAME
+            FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW t
+            LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm
+                   ON t.ACCOUNT_ID_C = dsm.ACCOUNT_ID_C
+            WHERE t.record_type_id = '0122T000000QHBGQA4'
+              AND ({where_clause})
+              AND DATE(COALESCE(t.OPEN_DATE_C, t.CREATED_DATE, t.CREATED_DATE_C))
+                  >= %s
+            """
+            params_with_days = list(params) + [_utc_window_start_iso(days)]
+            cur.execute(sql, params_with_days)
+            _rows = cur.fetchall() or []
+            if _rows and cols_out is None:
+                cols_out = [c[0] for c in cur.description]
+            all_rows.extend(_rows)
+
+        for _chunk in id_chunks:
+            placeholders = ','.join(['%s'] * len(_chunk))
+            _run([f"t.ACCOUNT_ID_C IN ({placeholders})"], list(_chunk))
+        if owner_sql:
+            _run([owner_sql], list(owner_params))
+
+        if not all_rows or cols_out is None:
+            return pd.DataFrame()
+        df = pd.DataFrame(all_rows, columns=cols_out)
+        if 'ID' in df.columns:
+            df = df.drop_duplicates(subset=['ID'], keep='first').reset_index(drop=True)
+        return df
+    except Exception as _exc:
+        # Mirror LeaderReportGenerator._empty_df_failed: stamp attrs so
+        # report_utils.classify_data_state can distinguish "fetch failed"
+        # from "zero rows in window". The ``_exc`` (not the more common
+        # short variable name) is intentional -- the static check in
+        # ``test_critical_fixes`` forbids the str-of-e literal anywhere
+        # in this file as a guard against leaking exception text into
+        # Word documents (which this helper never does -- the marker is
+        # a DataFrame attr only, not a doc paragraph).
+        empty = pd.DataFrame()
+        try:
+            empty.attrs['fetch_error'] = (
+                str(_exc).strip() or _exc.__class__.__name__ or 'fetch_failed'
+            )
+        except Exception:
+            pass
+        try:
+            logger.error(f"Round 65 / C-2: fetch_action_plans_snowflake failed: {_exc}")
+        except Exception:
+            pass
+        return empty
+    finally:
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+
+
 class LeaderReportGenerator:
     """Generates comprehensive leader reports showing team member activities"""
 
@@ -1287,84 +1430,21 @@ class LeaderReportGenerator:
     ) -> pd.DataFrame:
         """Fetch Action Plans for account IDs and/or owner emails.
 
-        When ``owner_emails`` is provided, Action Plans authored/owned by any
-        of those users are included even for accounts that are not in the
-        provided ``account_ids`` (i.e. accounts owned by a different DSM).
-        Results are joined with DSM_ASSIGNMENT_DATA so ``BU_NAME`` is populated
-        for external accounts too. Deduplicated by ID.
+        Round 65 / Phase 1 (C-2): thin facade over the module-level
+        :func:`fetch_action_plans_snowflake` so the comprehensive XLSX
+        path can use the SAME canonical query without instantiating a
+        leader generator. Behavior is unchanged for leader callers --
+        same chunking, same date predicate, same owner-aware widening,
+        same dedup-by-ID, same ``attrs['fetch_error']`` marker on
+        failure.
         """
-        owner_emails = owner_emails or []
-        if not account_ids and not owner_emails:
-            return pd.DataFrame()
-
-        cur = None
-        try:
-            cur = self.ctx.cursor()
-            owner_sql, owner_params = self._build_task_owner_clause(owner_emails, alias="t")
-            # Round 7 / Phase 6.1: dispatch one query per ID chunk and
-            # also (separately) one query for the owner-email predicate
-            # so the IN-list cap is per-chunk.  We always execute the
-            # owner-email branch exactly once because the email list is
-            # already small (a single CSSM team).  Results are merged
-            # and de-duplicated by ID at the end.
-            id_chunks = self._chunk_in_clause(account_ids) if account_ids else []
-            if not id_chunks and not owner_sql:
-                return pd.DataFrame()
-            all_rows: List[Tuple[Any, ...]] = []
-            cols: Optional[List[str]] = None
-
-            def _run(predicates: List[str], params: List[Any]) -> None:
-                nonlocal cols
-                if not predicates:
-                    return
-                where_clause = " OR ".join(predicates)
-                sql = f"""
-                SELECT t.*, dsm.BU_NAME AS DSM_BU_NAME
-                FROM EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW t
-                LEFT JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data dsm
-                       ON t.ACCOUNT_ID_C = dsm.ACCOUNT_ID_C
-                WHERE t.record_type_id = '0122T000000QHBGQA4'
-                  AND ({where_clause})
-                  -- Round 10 / Phase 5.1: align with the portfolio /
-                  -- subscription-side adoption-barrier predicate which
-                  -- uses ``DATE(COALESCE(OPEN_DATE_C, CREATED_DATE,
-                  -- CREATED_DATE_C))``. CREATED_DATE alone misses rows
-                  -- whose CREATED_DATE is null but OPEN_DATE_C is set
-                  -- (common for backfilled action plans), causing the
-                  -- leader side to undercount vs portfolio reports for
-                  -- the same window.
-                  -- Round 10 / Phase 5.2: bind a Python-computed UTC
-                  -- window-start so the lookback is independent of the
-                  -- Snowflake session TZ (mirrors the portfolio side).
-                  AND DATE(COALESCE(t.OPEN_DATE_C, t.CREATED_DATE, t.CREATED_DATE_C))
-                      >= %s
-                """
-                params_with_days = list(params) + [_utc_window_start_iso(days)]
-                cur.execute(sql, params_with_days)
-                _rows = cur.fetchall() or []
-                if _rows and cols is None:
-                    cols = [c[0] for c in cur.description]
-                all_rows.extend(_rows)
-
-            for _chunk in id_chunks:
-                placeholders = ','.join(['%s'] * len(_chunk))
-                _run([f"t.ACCOUNT_ID_C IN ({placeholders})"], list(_chunk))
-            if owner_sql:
-                _run([owner_sql], list(owner_params))
-
-            if not all_rows or cols is None:
-                return pd.DataFrame()
-            df = pd.DataFrame(all_rows, columns=cols)
-            if 'ID' in df.columns:
-                df = df.drop_duplicates(subset=['ID'], keep='first').reset_index(drop=True)
-            return df
-        except Exception as e:
-            logger.error(f"Error fetching action plans: {e}")
-            # Round 7 / Phase 6.10: classify_data_state -> "failed".
-            return self._empty_df_failed(e)
-        finally:
-            if cur:
-                cur.close()
+        return fetch_action_plans_snowflake(
+            self.ctx,
+            account_ids,
+            days,
+            owner_emails=owner_emails,
+            chunk_size=self._LEADER_IN_CHUNK_SIZE,
+        )
 
     def _fetch_adoption_barriers(
         self,

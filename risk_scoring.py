@@ -593,9 +593,15 @@ def _score_incidents(ext_incidents: Optional[List[Dict[str, Any]]]) -> Dict[str,
             "score": 0.0,
             "details": {
                 "count": 0,
+                # Round 65 / R-2: emit the same ``count_capped`` /
+                # ``count_cap_applied`` keys the populated branch
+                # surfaces, so the Risk_Components sheet can render
+                # a stable schema across empty / populated paths.
+                "count_capped": 0,
                 "active_count": 0,
                 "high_impact_count": 0,
                 "critical_impact_count": 0,
+                "count_cap_applied": False,
             },
         }
     count = len(ext_incidents)
@@ -619,9 +625,24 @@ def _score_incidents(ext_incidents: Optional[List[Dict[str, Any]]]) -> Dict[str,
             high_impact_count += 1  # critical is also high-impact for legacy callers
         elif impact in {"high", "major"}:
             high_impact_count += 1
+    # Round 65 / R-2: Build 37 surfaced an Incidents-component
+    # saturation bug — the per-customer scorer was being fed the
+    # portfolio-wide ``ext_incidents`` list (Webex Status feed has no
+    # customer_id field; every customer received the same 33-element
+    # list) and the unbounded ``count * 6.0`` term clamped the
+    # component to 100 for every account.  Cap the raw-count weight
+    # at 5 (`min(count, 5) * 6.0` -> max 30 of the 100-pt budget) so
+    # a high portfolio-shared count can NEVER dominate the score on
+    # its own; severity (active/high/critical) still differentiates
+    # accounts, and a customer-level caller that genuinely tags
+    # incidents per-customer (caller-side fix in app_simple.py) is
+    # unaffected because the active/high/critical weights are not
+    # capped.  ``count_capped`` is exposed in details so the
+    # Risk_Components sheet can disclose the cap explicitly.
+    _count_capped = min(int(count), 5)
     score = _clamp(
         min(
-            count * 6.0
+            _count_capped * 6.0
             + active_count * 8.0
             + high_impact_count * 12.0
             + critical_impact_count * 8.0,  # extra weight on critical
@@ -632,9 +653,11 @@ def _score_incidents(ext_incidents: Optional[List[Dict[str, Any]]]) -> Dict[str,
         "score": score,
         "details": {
             "count": count,
+            "count_capped": _count_capped,
             "active_count": active_count,
             "high_impact_count": high_impact_count,
             "critical_impact_count": critical_impact_count,
+            "count_cap_applied": bool(count > _count_capped),
         },
     }
 

@@ -56,25 +56,30 @@ def test_compact_captures_polish_result() -> None:
 
 
 def test_compact_legacy_autofilter_is_guarded_by_polish_flag() -> None:
-    """The legacy ``worksheet.autofilter(1, 0, len(df_clean), ...)`` call that
-    sits right after ``apply_excel_polish`` MUST be wrapped in
+    """The legacy ``worksheet.autofilter(0, 0, len(df_clean), ...)`` call
+    that sits right after ``apply_excel_polish`` MUST be wrapped in
     ``if not _r43_polish_added_table:`` so it is skipped when the Table
     already provides an autofilter.  Without this guard, xlsxwriter raises
     the ``Worksheet autofilter range overlaps previous Table autofilter
     range`` error that killed the build-19 demo compact run.
 
-    Note: ``app_simple.py`` has multiple ``worksheet.autofilter`` sites --
-    only the one IMMEDIATELY following ``apply_excel_polish`` needs the
-    guard; the dashboard sheet writer at L9006 has no preceding polish
-    call and so cannot have the overlap.  This test specifically asserts
-    the polish-adjacent site is guarded.
+    Round 65 / R-1 update: the autofilter row anchor moved from row 1
+    (was under a merged title in row 0) to row 0 (header row 0; no
+    title row above).  The ``if not _r43_polish_added_table:`` guard
+    is unchanged -- only the absolute row index shifted.
+
+    Note: ``app_simple.py`` has multiple ``worksheet.autofilter`` sites
+    -- only the one IMMEDIATELY following ``apply_excel_polish`` needs
+    the guard.  This test specifically asserts the polish-adjacent
+    site is guarded.
     """
     src = _read()
-    pattern = r"worksheet\.autofilter\(1,\s*0,\s*len\(df_clean\),\s*len\(df_clean\.columns\)-1\)"
+    pattern = r"worksheet\.autofilter\(0,\s*0,\s*len\(df_clean\),\s*len\(df_clean\.columns\)-1\)"
     matches = list(re.finditer(pattern, src))
     assert matches, (
         "expected at least one legacy autofilter call to still exist; "
-        "Round 43 / Phase 2 only adds a guard, it does NOT remove the call."
+        "Round 43 / Phase 2 only adds a guard, it does NOT remove the call. "
+        "Round 65 / R-1 changed the anchor from row 1 to row 0 (header at row 0)."
     )
     # At least one of the matches MUST be guarded by the polish flag.
     guarded = [

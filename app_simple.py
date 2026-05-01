@@ -435,6 +435,12 @@ from leader_report_generator import generate_leader_report, LeaderReportGenerato
 # emphasis markers.  Sourced from the same helper to keep the strip
 # semantics identical across reports.
 from leader_report_generator import _strip_markdown_chrome as _r44_strip_markdown_chrome
+# Round 65 / Phase 1 (C-2): standalone Snowflake AP fetcher reused by the
+# comprehensive XLSX flow so its ``Action_Plans`` sheet and
+# ``Action plans (open)`` Summary KPI no longer read zero whenever
+# CSConsole returned no AP rows for the manager's scope (a common case).
+# The leader path uses the same canonical query.
+from leader_report_generator import fetch_action_plans_snowflake as _r65_fetch_aps_snowflake
 # Round 15 / Phase 1.3: customer-facing column SSoT.  All Excel-writing
 # code paths in this module project sheets through this filter so we
 # stop leaking Salesforce/ETL plumbing into customer deliverables.
@@ -1156,6 +1162,35 @@ def _r64_first_offending_token(sample_offending: Any) -> str:
         return ""
 
 
+def _r65_grounding_excerpt(text: Any, max_len: int = 200) -> str:
+    """Round 65 / C-3: produce a bounded excerpt of LLM/briefing
+    text for the grounding rejection diagnostic.
+
+    Pre-Round-65 the rejection records carried only failure codes
+    and a single ``first_offending_token``.  Round 64 surfaced the
+    34.5% rejection rate (10/29 customers in the Build 37 audit)
+    but provided no per-customer text excerpt to root-cause WHY
+    the validator rejected each narrative.  Round 65 captures a
+    short briefing-book excerpt + narrative excerpt so a follow-on
+    round (66) can decide between validator tuning vs prompt
+    enrichment without re-running the report.
+
+    Whitespace is collapsed so multi-line briefings/narratives don't
+    blow out the persisted JSON.  Output is hard-capped at
+    ``max_len`` chars to keep ``analysis_status.json`` bounded.
+    """
+    if text is None:
+        return ""
+    try:
+        s = str(text)
+    except Exception:  # noqa: BLE001
+        return ""
+    s = " ".join(s.split())
+    if len(s) > max_len:
+        return s[: max_len - 1] + "…"
+    return s
+
+
 def _r64_record_grounding_outcome(
     status: dict,
     *,
@@ -1165,6 +1200,8 @@ def _r64_record_grounding_outcome(
     sample_offending: Any = None,
     rejected: bool,
     scope: str = "customer",
+    briefing_excerpt: Any = None,
+    narrative_excerpt: Any = None,
 ) -> None:
     """Append a per-narrative grounding outcome to the diagnostics rollup.
 
@@ -1174,6 +1211,15 @@ def _r64_record_grounding_outcome(
     running-reports tile without grepping the log file.  Customer
     names are digested via ``_id_digest`` so the persisted status
     file does not echo PII.
+
+    Round 65 / C-3: callers may now pass ``briefing_excerpt`` and
+    ``narrative_excerpt`` (bounded ~200 chars each via
+    ``_r65_grounding_excerpt``).  When present these are persisted
+    on the rejection record so a follow-on diagnostics endpoint
+    (``/api/grounding-diagnostics/<id>``) can return the per-
+    rejection text excerpts to the operator.  Both fields are
+    optional so legacy callers (and the never-rejected
+    ``rejected=False`` path) remain unchanged.
     """
 
     if not isinstance(status, dict):
@@ -1190,12 +1236,29 @@ def _r64_record_grounding_outcome(
                     failure_codes = sorted({str(f) for f in (failures or []) if f})
                 except Exception:  # noqa: BLE001
                     failure_codes = []
+                # Round 65 / C-3: also persist a sanitised copy of
+                # the full ``sample_offending`` map (not just the
+                # first token) so Round 66's root-cause work can
+                # compare offending-value patterns across rejections.
+                _r65_sample_map: dict = {}
+                if isinstance(sample_offending, dict):
+                    for _k, _v in sample_offending.items():
+                        try:
+                            _r65_sample_map[str(_k)[:64]] = str(_v)[:120]
+                        except Exception:  # noqa: BLE001
+                            continue
                 records.append({
                     "scope": scope,
                     "customer_digest": _id_digest(customer_name) if customer_name else "",
                     "narrative_length": int(narrative_length or 0),
                     "failure_codes": failure_codes,
                     "first_offending_token": _r64_first_offending_token(sample_offending),
+                    # Round 65 / C-3: structured per-rejection diagnostic
+                    # for downstream root-cause analysis.
+                    "sample_offending": _r65_sample_map,
+                    "briefing_excerpt": _r65_grounding_excerpt(briefing_excerpt),
+                    "narrative_excerpt": _r65_grounding_excerpt(narrative_excerpt),
+                    "recorded_at": _now_utc_iso_z(),
                 })
         total = max(1, int(summary.get("total", 0)))
         rejected_n = int(summary.get("rejected", 0))
@@ -9823,6 +9886,14 @@ def run_compact_analysis(analysis_id):
                 logger.info(f"[[SEARCH]] DEBUGGING - About to process {len(sheets)} sheets")
                 logger.info(f"[[SEARCH]] DEBUGGING - Sheet names: {list(sheets.keys())}")
 
+                # Round 65 / R-1: collect per-sheet titles so the
+                # Report_Info sheet can carry them as Sheet_Title rows.
+                # The data sheets themselves no longer prepend a merged
+                # title row in row 0 -- that schema regression broke
+                # downstream pd.read_excel(sheet_name) consumers
+                # (Build 37 audit).
+                _r65_sheet_titles: list[tuple[str, str]] = []
+
                 # CRITICAL FIX: Always write dashboard first, even if empty
                 dashboard_sheet_name = None
                 dashboard_df_data = None
@@ -9847,29 +9918,26 @@ def run_compact_analysis(analysis_id):
                                 'Status': ['Data source issue']
                             })
 
-                        df_clean.to_excel(writer, sheet_name=dashboard_sheet_name, index=False, startrow=1)
+                        # Round 65 / R-1: drop title-row-in-row-0 so
+                        # headers land in row 0 and downstream consumers
+                        # of pd.read_excel(sheet_name) see the canonical
+                        # column schema.  Title text is preserved in the
+                        # Report_Info sheet (see Sheet_Title rows).
+                        df_clean.to_excel(writer, sheet_name=dashboard_sheet_name, index=False, startrow=0)
                         worksheet = writer.sheets[dashboard_sheet_name]
                         title_text = f" {dashboard_sheet_name.replace('_', ' ')} - {manager} Portfolio Analysis"
-                        # Round 5 / Phase 1.8: previously the multi-column
-                        # dashboard branch only set the merge_range title;
-                        # header_format, column autosize, autofilter, and
-                        # data_format were all only applied in the
-                        # ``len(columns) == 1`` branch.  Apply them in
-                        # both branches so the multi-column Executive_
-                        # Dashboard renders consistently.
-                        if len(df_clean.columns) > 1:
-                            worksheet.merge_range(0, 0, 0, len(df_clean.columns)-1, title_text, title_format)
-                        else:
-                            worksheet.write(0, 0, title_text, title_format)
+                        _r65_sheet_titles.append((dashboard_sheet_name, title_text))
+                        # Round 5 / Phase 1.8: keep multi-column +
+                        # single-column branches consistent.
                         for col_num, value in enumerate(df_clean.columns.values):
-                            worksheet.write(1, col_num, value, header_format)
-                        for row_idx in range(2, len(df_clean) + 2):
+                            worksheet.write(0, col_num, value, header_format)
+                        for row_idx in range(1, len(df_clean) + 1):
                             for col_idx in range(len(df_clean.columns)):
                                 # Round 6 / Phase 1.2: coerce non-finite
                                 # numerics (NaN/inf/pd.NA) to blank to
                                 # avoid xlsxwriter rendering them as
                                 # literal "nan" / out-of-range numbers.
-                                cell_value = _excel_safe_cell(df_clean.iloc[row_idx-2, col_idx])
+                                cell_value = _excel_safe_cell(df_clean.iloc[row_idx-1, col_idx])
                                 worksheet.write(row_idx, col_idx, cell_value, data_format)
                         for i, col in enumerate(df_clean.columns):
                             if df_clean.empty:
@@ -9883,8 +9951,8 @@ def run_compact_analysis(analysis_id):
                                 max_length = max(content_max, len(str(col)))
                             worksheet.set_column(i, i, min(max_length + 2, 50))
                         if not df_clean.empty and len(df_clean) > 0:
-                            worksheet.autofilter(1, 0, len(df_clean), len(df_clean.columns)-1)
-                        worksheet.freeze_panes(2, 0)
+                            worksheet.autofilter(0, 0, len(df_clean), len(df_clean.columns)-1)
+                        worksheet.freeze_panes(1, 0)
                         logger.info(f"[[OK]] Dashboard sheet '{dashboard_sheet_name}' written successfully")
                     except Exception as dash_error:
                         logger.error(f"[[ERROR]] Error writing dashboard sheet: {dash_error}")
@@ -9929,9 +9997,10 @@ def run_compact_analysis(analysis_id):
                                     'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
                                 }
                             ])
-                            unavailable_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
-                            worksheet = writer.sheets[sheet_name]
-                            worksheet.write(0, 0, f"{sheet_name.replace('_', ' ')} — Data Unavailable", title_format)
+                            # Round 65 / R-1: clean schema -- no merged
+                            # title row; data sheet header lives in row 0.
+                            unavailable_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0)
+                            _r65_sheet_titles.append((sheet_name, f"{sheet_name.replace('_', ' ')} — Data Unavailable"))
                             logger.warning(f"[EXCEL] Sheet '{sheet_name}' rendered as Data_Unavailable: {_fetch_error}")
                         except Exception as _du_err:
                             logger.error(f"[EXCEL] Failed to write Data_Unavailable for '{sheet_name}': {_du_err}")
@@ -9957,32 +10026,25 @@ def run_compact_analysis(analysis_id):
                             )
 
                         logger.info(f" Writing data to Excel sheet '{sheet_name}'...")
-                        df_clean.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
+                        # Round 65 / R-1: header in row 0 (no merged
+                        # title row above) so consumers can use
+                        # ``pd.read_excel(sheet_name)`` and get the
+                        # canonical column schema without prefix
+                        # contamination.  The branded title text moves
+                        # to the Report_Info sheet as ``Sheet_Title``
+                        # rows for back-compat.
+                        df_clean.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0)
                         logger.info(f"[[OK]] Data written to sheet '{sheet_name}'")
 
                         # Round 16 / Phase 5.1: layer Round-15 polish
                         # (Excel Table + conditional formatting) on the
-                        # ``startrow=1`` data range.  ``apply_excel_polish``
-                        # is internally defensive (try/except per rule) so
-                        # a sheet-level failure here cannot brick the
-                        # workbook write -- but we still wrap it so a
-                        # truly unexpected exception (e.g. xlsxwriter
-                        # API drift) cannot crash the report pipeline.
-                        # Round 43 / Phase 2: capture the polish return value so
-                        # we can skip the legacy ``worksheet.autofilter(...)`` at
-                        # L9156 when a Table was added.  ``apply_excel_polish``
-                        # adds an Excel Table whose declared range INCLUDES an
-                        # implicit autofilter on ``A2:F<last_row+1>``; the
-                        # legacy autofilter at L9156 then declares ``A2:F<n>``
-                        # (off by one because ``len(df_clean)`` does not include
-                        # the header row).  xlsxwriter raises
-                        # ``Worksheet autofilter range 'A2:F53' overlaps
-                        # previous Table autofilter range 'A2:F54'``, which
-                        # killed the build-19 demo compact run
-                        # (``Compact_Brian_Frazier_All_Contact_Center_90d_1777428644``).
-                        # When polish returns ``table_added=True``, the Table's
-                        # built-in autofilter already covers the full range, so
-                        # the legacy call is BOTH redundant and conflict-prone.
+                        # ``startrow=0`` data range (Round 65 / R-1).
+                        # ``apply_excel_polish`` is internally defensive
+                        # (try/except per rule) so a sheet-level failure
+                        # here cannot brick the workbook write -- but we
+                        # still wrap it so a truly unexpected exception
+                        # (e.g. xlsxwriter API drift) cannot crash the
+                        # report pipeline.
                         _r43_polish_result: dict = {}
                         try:
                             _r43_polish_result = _r16_apply_excel_polish(
@@ -9991,7 +10053,7 @@ def run_compact_analysis(analysis_id):
                                 df_clean,
                                 sheet_name,
                                 _r16_used_table_names,
-                                startrow=1,
+                                startrow=0,
                             ) or {}
                         except Exception as _r16_err:
                             logger.warning(
@@ -10004,16 +10066,18 @@ def run_compact_analysis(analysis_id):
                         # Enhanced sheet formatting
                         worksheet = writer.sheets[sheet_name]
 
-                        # Write enhanced title with analysis info
-                        title_text = f" {sheet_name.replace('_', ' ')} - {manager} Portfolio Analysis"
-                        if len(df_clean.columns) > 1:
-                            worksheet.merge_range(0, 0, 0, len(df_clean.columns)-1, title_text, title_format)
-                        else:
-                            worksheet.write(0, 0, title_text, title_format)
+                        # Round 65 / R-1: capture the legacy title text
+                        # for the Report_Info sheet so the branded
+                        # context survives even though the data sheet
+                        # itself no longer carries it.
+                        title_text = f"{sheet_name.replace('_', ' ')} - {manager} Portfolio Analysis"
+                        _r65_sheet_titles.append((sheet_name, title_text))
 
                         # Format headers with enhanced styling
+                        # (overwriting pd.to_excel's default header at
+                        # row 0 so the branded format is preserved).
                         for col_num, value in enumerate(df_clean.columns.values):
-                            worksheet.write(1, col_num, value, header_format)
+                            worksheet.write(0, col_num, value, header_format)
 
                         # Apply conditional formatting based on sheet type
                         if 'Risk' in sheet_name or 'High_Risk' in sheet_name:
@@ -10032,11 +10096,11 @@ def run_compact_analysis(analysis_id):
                             _med_cut_100 = float(_RBT.get('MEDIUM', 35))
                             _high_cut_10 = _high_cut_100 / 10.0  # e.g. 5.5 (HIGH band start)
                             _med_cut_10 = _med_cut_100 / 10.0    # e.g. 3.5 (MEDIUM band start)
-                            for row_idx in range(2, len(df_clean) + 2):
+                            for row_idx in range(1, len(df_clean) + 1):
                                 for col_idx in range(len(df_clean.columns)):
                                     # Round 6 / Phase 1.2: coerce non-finite
                                     # numerics to blank (see _excel_safe_cell).
-                                    cell_value = _excel_safe_cell(df_clean.iloc[row_idx-2, col_idx])
+                                    cell_value = _excel_safe_cell(df_clean.iloc[row_idx-1, col_idx])
                                     col_name_lower = str(df_clean.columns[col_idx]).lower()
                                     if isinstance(cell_value, (int, float)) and 'risk' in col_name_lower:
                                         # Detect axis: 0-100 vs 0-10.
@@ -10082,11 +10146,13 @@ def run_compact_analysis(analysis_id):
                         # autofilter on the same sheet (and worse, an off-by-one
                         # range) makes xlsxwriter raise ``Worksheet autofilter
                         # range overlaps previous Table autofilter range``.
+                        # Round 65 / R-1: header is now in row 0, so the
+                        # autofilter and freeze pane both anchor at row 0/1.
                         if not _r43_polish_added_table:
-                            worksheet.autofilter(1, 0, len(df_clean), len(df_clean.columns)-1)
+                            worksheet.autofilter(0, 0, len(df_clean), len(df_clean.columns)-1)
 
                         # Freeze header row
-                        worksheet.freeze_panes(2, 0)
+                        worksheet.freeze_panes(1, 0)
 
                         logger.info(f"[[OK]] Sheet '{sheet_name}' formatted with enhanced styling")
                     else:
@@ -10113,9 +10179,12 @@ def run_compact_analysis(analysis_id):
                                 'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
                             }
                         ])
-                        empty_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
-                        worksheet = writer.sheets[sheet_name]
-                        worksheet.write(0, 0, f"{sheet_name.replace('_', ' ')} - {manager} Portfolio Analysis", title_format)
+                        # Round 65 / R-1: clean schema (header in row 0)
+                        # so empty sheets parse the same way as populated
+                        # ones via pd.read_excel.  Title text is captured
+                        # in Report_Info instead of a merged title row.
+                        empty_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0)
+                        _r65_sheet_titles.append((sheet_name, f"{sheet_name.replace('_', ' ')} - {manager} Portfolio Analysis"))
                         logger.info(f"[[OK]] Empty sheet '{sheet_name}' created (state={_state})")
 
                 # Round 4 / Phase 1.4: surface the workbook-level
@@ -10141,7 +10210,16 @@ def run_compact_analysis(analysis_id):
                         f"Excel cap {EXCEL_MAX_CELL_CHARS} chars (max seen "
                         f"{int(_trunc_snap.get('max_seen', 0))})"
                     )
-                if _excel_partial_warnings or _trunc_rows:
+                # Round 65 / R-1: always emit Report_Info when we have
+                # captured per-sheet titles, even if no partial warnings
+                # or truncation rows accrued.  Sheet_Title rows preserve
+                # the branded context that used to live in row 0 of each
+                # data sheet (Build 37 audit -- title rows broke
+                # downstream pd.read_excel consumers).  ``_r65_sheet_titles``
+                # is unconditionally bound at the top of this try-block
+                # (around L9838) so a direct read is safe.
+                _r65_titles_local = _r65_sheet_titles or []
+                if _excel_partial_warnings or _trunc_rows or _r65_titles_local:
                     try:
                         _info_records = []
                         for w in _excel_partial_warnings or []:
@@ -10156,13 +10234,20 @@ def run_compact_analysis(analysis_id):
                                 'Warning': str(t)[:512],
                                 'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
                             })
+                        for _sn, _tt in _r65_titles_local:
+                            _info_records.append({
+                                'Status': 'SHEET_TITLE',
+                                'Warning': f"{_sn}: {_tt}",
+                                'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
+                            })
                         report_info_df = pd.DataFrame(_info_records)
                         report_info_df.to_excel(writer, sheet_name='Report_Info', index=False)
                         logger.warning(
-                            "[EXCEL] Report_Info sheet written with %d row(s) (%d partial-data, %d truncation)",
+                            "[EXCEL] Report_Info sheet written with %d row(s) (%d partial-data, %d truncation, %d sheet-title)",
                             len(_info_records),
                             len(_excel_partial_warnings or []),
                             len(_trunc_rows),
+                            len(_r65_titles_local),
                         )
                     except Exception as _ri_err:
                         logger.error(
@@ -10366,6 +10451,54 @@ def _r532_count_customers_with_min_open_barriers(
     return int((by_cust >= threshold).sum())
 
 
+def _r65_filter_customer_tagged_incidents(
+    ext_incidents: Optional[List[Dict]],
+    customer_name: str,
+) -> List[Dict]:
+    """Round 65 / R-2: filter portfolio-shared incidents to only
+    those explicitly tagged for ``customer_name`` when a tagging
+    field is present.
+
+    Webex Status (``status.webex.com``) incidents do NOT carry a
+    ``customer_id`` / ``customer_name`` field — every incident in
+    the portfolio is shared across the entire customer base.  When
+    no tagging field exists on ANY incident we return the original
+    list unchanged and rely on the formula-side cap in
+    ``risk_scoring._score_incidents`` (also Round 65 / R-2) to
+    prevent saturation.  When a tagging field IS present (future-
+    proofing for incident sources that DO tag customers), we
+    filter to the matching subset so a customer's score only
+    reflects incidents that actually impact their services.
+    """
+    if not ext_incidents or not customer_name:
+        return list(ext_incidents or [])
+    norm_target = normalize_customer_name(customer_name)
+    if not norm_target:
+        return list(ext_incidents)
+    has_tagging_field = False
+    for inc in ext_incidents:
+        if not isinstance(inc, dict):
+            continue
+        for _field in ('customer_id', 'customer_name', 'BU_NAME'):
+            if inc.get(_field):
+                has_tagging_field = True
+                break
+        if has_tagging_field:
+            break
+    if not has_tagging_field:
+        return list(ext_incidents)
+    matched: List[Dict] = []
+    for inc in ext_incidents:
+        if not isinstance(inc, dict):
+            continue
+        for _field in ('customer_id', 'customer_name', 'BU_NAME'):
+            _val = inc.get(_field)
+            if _val and normalize_customer_name(str(_val)) == norm_target:
+                matched.append(inc)
+                break
+    return matched
+
+
 def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame,
                                    customer_csone: pd.DataFrame, team_subs_df: pd.DataFrame,
                                    days: int, ext_incidents: List[Dict] = None) -> Dict:
@@ -10383,6 +10516,13 @@ def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame
         else pd.DataFrame()
     )
     normalized_csone = add_case_lifecycle_fields(customer_csone)
+    # Round 65 / R-2: filter portfolio-shared incidents to those
+    # explicitly tagged for this customer (no-op for Webex Status
+    # incidents which carry no tagging field — those rely on the
+    # formula-side cap in risk_scoring._score_incidents).
+    _r65_per_customer_incidents = _r65_filter_customer_tagged_incidents(
+        ext_incidents, customer_name,
+    )
     profile = compute_customer_risk_profile(
         customer_name=customer_name,
         customer_ab=customer_ab if customer_ab is not None else pd.DataFrame(),
@@ -10390,7 +10530,7 @@ def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame
         customer_pulse=pd.DataFrame(),
         customer_action_plans=pd.DataFrame(),
         customer_subs=customer_subs,
-        ext_incidents=ext_incidents,
+        ext_incidents=_r65_per_customer_incidents,
         # Round 3 / Phase 4.2: thread the report's analysis horizon
         # so the support-case "recent" window matches the period
         # the rest of the report is talking about.
@@ -13375,6 +13515,26 @@ def run_customer_renewal_analysis(analysis_id):
                     })
                 except Exception:
                     continue
+        # Round 65 / R-1: pre-stamp the canonical Sheet_Title rows for
+        # each renewal data sheet so consumers retain the branded
+        # context that previously lived in row 0 of each data sheet.
+        # (The data sheets themselves now carry a clean header in row
+        # 0 so pd.read_excel returns the canonical column schema.)
+        for _ren_sn in (
+            'Renewal_Summary',
+            'Risk_Components',
+            'Recommendations',
+            'Customer_Adoption_Barriers',
+            'Customer_Support_Cases',
+            'Customer_Action_Plans',
+            'Customer_Customer_Pulse',
+            'Customer_Success_Priorities',
+            'Key_Metrics',
+        ):
+            _report_info_rows.append({
+                'Field': f'Sheet_Title:{_ren_sn}',
+                'Value': f"{_ren_sn.replace('_', ' ')} - {customer_name_for_report} Renewal Analysis",
+            })
         report_info_df = pd.DataFrame(_report_info_rows)
         sheets = {
             "Report_Info": report_info_df,
@@ -13508,6 +13668,11 @@ def run_customer_renewal_analysis(analysis_id):
                     'align': 'center'
                 })
 
+                # Round 65 / R-1: per-sheet titles are pre-stamped
+                # into Report_Info above (the canonical sheet list is
+                # known statically), so the for-loop just emits clean
+                # data sheets with the header in row 0.
+
                 # Write each sheet
                 for sheet_name, df in sheets.items():
                     # Round 2 / Phase 2.1: surface fetch_error tristate
@@ -13531,9 +13696,8 @@ def run_customer_renewal_analysis(analysis_id):
                                     'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
                                 }
                             ])
-                            unavailable_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
-                            worksheet = writer.sheets[sheet_name]
-                            worksheet.write(0, 0, f"{sheet_name.replace('_', ' ')} — Data Unavailable", title_format)
+                            # Round 65 / R-1: clean schema -- header in row 0.
+                            unavailable_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0)
                             logger.warning(f"[RENEWAL EXCEL] Sheet '{sheet_name}' rendered as Data_Unavailable: {_fetch_error}")
                         except Exception as _du_err:
                             logger.error(f"[RENEWAL EXCEL] Failed to write Data_Unavailable for '{sheet_name}': {_du_err}")
@@ -13550,7 +13714,11 @@ def run_customer_renewal_analysis(analysis_id):
                                 sheet_name,
                                 _schema_err,
                             )
-                        df_clean.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
+                        # Round 65 / R-1: header in row 0 (was row 1
+                        # under a merged title row that broke
+                        # pd.read_excel).  Title text is captured into
+                        # Report_Info as Sheet_Title rows below.
+                        df_clean.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0)
 
                         # Format the sheet
                         worksheet = writer.sheets[sheet_name]
@@ -13567,7 +13735,7 @@ def run_customer_renewal_analysis(analysis_id):
                                 df_clean,
                                 sheet_name,
                                 _r16_used_table_names,
-                                startrow=1,
+                                startrow=0,
                             )
                         except Exception as _r16_err:
                             logger.warning(
@@ -13576,21 +13744,15 @@ def run_customer_renewal_analysis(analysis_id):
                                 _r16_err,
                             )
 
-                        # Round 5 / Phase 1.9: use ``merge_range`` across the
-                        # full column span so the sheet title is centered
-                        # over the data rather than pinned to column A.
-                        # ``merge_range`` requires >= 2 columns, so fall
-                        # back to ``write`` for single-column sheets.
-                        _renewal_title_text = f"{sheet_name.replace('_', ' ')} - {customer_name} Renewal Analysis"
-                        _renewal_n_cols = len(df_clean.columns)
-                        if _renewal_n_cols > 1:
-                            worksheet.merge_range(0, 0, 0, _renewal_n_cols - 1, _renewal_title_text, title_format)
-                        else:
-                            worksheet.write(0, 0, _renewal_title_text, title_format)
+                        # Round 65 / R-1: drop the legacy merged-row
+                        # title write at row 0; the canonical sheet
+                        # title is now pre-stamped into Report_Info.
 
-                        # Format headers
+                        # Format headers (overwriting pd.to_excel's
+                        # default header at row 0 with the branded
+                        # format).
                         for col_num, value in enumerate(df_clean.columns.values):
-                            worksheet.write(1, col_num, value, header_format)
+                            worksheet.write(0, col_num, value, header_format)
 
                         # Auto-adjust column widths (guard against NaN from empty columns)
                         for i, col in enumerate(df_clean.columns):
@@ -13602,17 +13764,11 @@ def run_customer_renewal_analysis(analysis_id):
                             max_length = max(content_max, len(str(col)))
                             worksheet.set_column(i, i, min(max_length + 2, 50))
                     else:
-                        # Create empty sheet with title
+                        # Round 65 / R-1: empty branch matches the
+                        # populated branch -- header in row 0, title
+                        # captured in Report_Info upstream.
                         empty_df = pd.DataFrame({'Message': ['No data available for this analysis']})
-                        empty_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
-                        worksheet = writer.sheets[sheet_name]
-                        # Round 5 / Phase 1.9: merge across columns when possible.
-                        _empty_title_text = f"{sheet_name.replace('_', ' ')} - {customer_name} Renewal Analysis"
-                        _empty_cols = len(empty_df.columns)
-                        if _empty_cols > 1:
-                            worksheet.merge_range(0, 0, 0, _empty_cols - 1, _empty_title_text, title_format)
-                        else:
-                            worksheet.write(0, 0, _empty_title_text, title_format)
+                        empty_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0)
         except Exception as excel_error:
             logger.error(f"[[ERROR]] Renewal Excel generation failed: {excel_error}", exc_info=True)
             raise excel_error
@@ -14329,6 +14485,14 @@ def run_comprehensive_analysis(analysis_id):
             c_pulse = _slice_customer(csconsole_customer_pulse, customer, ["BU_NAME", "CUSTOMER_NAME", "RELATED_CUSTOMER__C"])
             c_action = _slice_customer(csconsole_action_plans, customer, ["BU_NAME", "CUSTOMER_NAME"])
             c_subs = _slice_customer(team_subs_for_customer_counting, customer, ["BU_NAME"])
+            # Round 65 / R-2: filter portfolio-shared incidents to
+            # those tagged for this customer (no-op when the source
+            # carries no customer tagging — formula-side cap in
+            # risk_scoring._score_incidents prevents saturation in
+            # that case).
+            _r65_cust_incidents = _r65_filter_customer_tagged_incidents(
+                ext_incidents, customer,
+            )
             risk_profiles[customer] = compute_customer_risk_profile(
                 customer_name=customer,
                 customer_ab=c_ab,
@@ -14336,7 +14500,7 @@ def run_comprehensive_analysis(analysis_id):
                 customer_pulse=c_pulse,
                 customer_action_plans=c_action,
                 customer_subs=c_subs,
-                ext_incidents=ext_incidents,
+                ext_incidents=_r65_cust_incidents,
                 # Round 3 / Phase 4.2: align the support-case
                 # "recent" window with the comprehensive report's
                 # analysis horizon (default 90) instead of the
@@ -14696,6 +14860,112 @@ def run_comprehensive_analysis(analysis_id):
         filtered_adoption_barriers = _filter_csconsole_data_by_technology(csconsole_adoption_barriers, status['tech'], team_customer_names, account_ids=account_ids)
         _log_customer_pulse_parity(team_subs_df, filtered_customer_pulse, f"{status['manager']}::{status['tech']}")
 
+        # Round 65 / Phase 1 (C-2): Snowflake AP fetch + merge.
+        #
+        # Pre-R65 the comprehensive XLSX's ``Action_Plans`` sheet was only
+        # written when CSConsole returned at least one AP row, and its
+        # Summary KPI ``Action plans (open)`` was reading zero whenever
+        # CSConsole returned zero -- even when Snowflake had hundreds of
+        # matching AP rows for the SAME accounts. The Leader report for
+        # the same scope used the canonical Snowflake fetcher and showed
+        # the real count (e.g. Brian Frazier: Comprehensive said 0 / 0,
+        # Leader said 367 / 120). Both flows now share the canonical
+        # Snowflake query via ``fetch_action_plans_snowflake``.
+        #
+        # Snowflake-AP rows are added to ``filtered_action_plans`` (the
+        # name is preserved for back-compat with downstream per-customer
+        # drilldowns at L15257+, the Excel writer at L15605, and the
+        # build_summary_rows lookup of ``sheets["Action_Plans"]``).
+        # ``ctx`` may be ``None`` (Snowflake unavailable / connect_failed)
+        # -- the merge degrades to the CSConsole-only frame in that case.
+        # Pre-binding ``_r65_snowflake_aps`` outside the try keeps the
+        # R20 / R20-001 floor stable (no NEW conditional-bind guards).
+        _r65_snowflake_aps: pd.DataFrame = pd.DataFrame()
+        _r65_aps_provenance = "csconsole"  # default when no Snowflake fetch
+        try:
+            if ctx is not None and (account_ids or comprehensive_owner_emails):
+                _r65_snowflake_aps = _r65_fetch_aps_snowflake(
+                    ctx,
+                    account_ids,
+                    days,
+                    owner_emails=comprehensive_owner_emails,
+                )
+                # Apply the same technology + customer-scope filter as
+                # CSConsole APs so the two sources can be merged on equal
+                # footing.
+                if _r65_snowflake_aps is not None and not _r65_snowflake_aps.empty:
+                    _r65_snowflake_aps = _filter_csconsole_data_by_technology(
+                        _r65_snowflake_aps,
+                        status['tech'],
+                        team_customer_names,
+                        account_ids=account_ids,
+                    )
+                # Promote a fetch_error attr (if any) into partial-data
+                # warnings so the report banner is honest when Snowflake
+                # failed mid-run.
+                _r65_aps_attrs = getattr(_r65_snowflake_aps, 'attrs', {}) or {}
+                _r65_aps_fetch_err = _r65_aps_attrs.get('fetch_error')
+                if _r65_aps_fetch_err:
+                    partial_data_warnings.append({
+                        'dataset': 'snowflake_action_plans',
+                        'error': str(_r65_aps_fetch_err),
+                        'kind': 'runtime',
+                    })
+                    logger.warning(
+                        "Round 65 / C-2: Snowflake AP fetch failed: %s",
+                        _r65_aps_fetch_err,
+                    )
+        except Exception as _r65_ap_fetch_err:
+            logger.warning(
+                "Round 65 / C-2: Snowflake AP fetch raised: %s",
+                _r65_ap_fetch_err,
+            )
+            partial_data_warnings.append({
+                'dataset': 'snowflake_action_plans',
+                'error': _redact_partial_warning_error(_r65_ap_fetch_err) or 'fetch_failed',
+                'kind': 'runtime',
+            })
+
+        # Merge Snowflake APs into ``filtered_action_plans`` so the
+        # downstream Excel sheet, Summary KPI, and per-customer
+        # drilldowns all see the same canonical AP universe. Dedup by
+        # ID (preferring the CSConsole row when both sources have the
+        # same record so any CSConsole-side enrichment is preserved).
+        try:
+            _r65_csconsole_ap_count = len(filtered_action_plans) if filtered_action_plans is not None else 0
+            _r65_snowflake_ap_count = len(_r65_snowflake_aps) if _r65_snowflake_aps is not None else 0
+            if _r65_snowflake_ap_count > 0:
+                if filtered_action_plans is None or filtered_action_plans.empty:
+                    filtered_action_plans = _r65_snowflake_aps.copy()
+                    _r65_aps_provenance = "snowflake"
+                else:
+                    _r65_combined = pd.concat(
+                        [filtered_action_plans, _r65_snowflake_aps],
+                        ignore_index=True,
+                    )
+                    if 'ID' in _r65_combined.columns:
+                        _r65_combined = _r65_combined.drop_duplicates(
+                            subset=['ID'], keep='first'
+                        ).reset_index(drop=True)
+                    filtered_action_plans = _r65_combined
+                    _r65_aps_provenance = "csconsole+snowflake"
+            elif _r65_csconsole_ap_count > 0:
+                _r65_aps_provenance = "csconsole"
+            else:
+                _r65_aps_provenance = "empty"
+            logger.info(
+                "Round 65 / C-2: Action Plans merged: csconsole=%d, snowflake=%d, total=%d (provenance=%s)",
+                _r65_csconsole_ap_count,
+                _r65_snowflake_ap_count,
+                len(filtered_action_plans) if filtered_action_plans is not None else 0,
+                _r65_aps_provenance,
+            )
+        except Exception as _r65_ap_merge_err:
+            logger.warning(
+                "Round 65 / C-2: AP merge raised, falling back to CSConsole-only: %s",
+                _r65_ap_merge_err,
+            )
+
         logger.info(f"[[FILTER]] CSConsole data after filtering - Action Plans: {len(filtered_action_plans)}, "
                     f"Customer Pulse: {len(filtered_customer_pulse)}, "
                     f"Success Priorities: {len(filtered_success_priorities)}, "
@@ -15010,6 +15280,11 @@ def run_comprehensive_analysis(analysis_id):
                             # portfolio-level narrative in the same
                             # rollup so the operator sees a single
                             # consolidated rejection count.
+                            # Round 65 / C-3: also include bounded
+                            # excerpts of the briefing book and the
+                            # rejected narrative so a follow-on
+                            # round can root-cause WHY the validator
+                            # rejected this output.
                             _r64_record_grounding_outcome(
                                 status,
                                 customer_name=f"__portfolio__/{status.get('manager') or 'unknown'}",
@@ -15018,6 +15293,8 @@ def run_comprehensive_analysis(analysis_id):
                                 sample_offending=_r27_result_port.sample_offending,
                                 rejected=True,
                                 scope="portfolio",
+                                briefing_excerpt=portfolio_briefing,
+                                narrative_excerpt=portfolio_summary,
                             )
                         else:
                             _r64_record_grounding_outcome(
@@ -15101,19 +15378,72 @@ def run_comprehensive_analysis(analysis_id):
             # forbids ``locals().get()`` here.
             _r64_attempts = int(_r64_portfolio_diag.get("attempts", 0) or 0)
             _r64_kind = str(_r64_portfolio_diag.get("last_error_kind") or type(portfolio_error).__name__)
-            report_builder.add_heading(f"AdoptIQ Executive Analysis: {status['manager']}'s Portfolio", level=1)
-            report_builder.add_heading("Portfolio Overview", level=2)
-            report_builder.add_paragraph(
-                "Portfolio-level AI summary unavailable for this run "
-                f"(builder error{f' after {_r64_attempts} LLM attempts' if _r64_attempts else ''}; "
-                f"last_error_kind={_r64_kind}). "
-                "The per-customer sections below and the data tabs in the XLSX "
-                "remain authoritative."
-            )
-            report_builder.add_paragraph(f"Manager: {status['manager']}")
-            report_builder.add_paragraph(f"Technology Focus: {status['tech']}")
-            report_builder.add_paragraph(f"Analysis Period: {status['days']} days")
-            report_builder.add_paragraph("Error details have been logged. Report data was processed successfully.")
+            # Round 65 / C-1: distinguish R25B/R25C numeric or
+            # risk-band drift (a true LLM-output disagreement with
+            # the canonical pipeline) from a generic builder error.
+            # Pre-Round-65 BOTH paths emitted the bland "builder
+            # error after 1 LLM attempts; last_error_kind=ValueError"
+            # paragraph, which made it look like a code regression
+            # when the actual cause was the LLM rendering a number
+            # that disagreed with canonical totals.  The validators
+            # now attach a structured ``drift_detail`` dict to the
+            # raised ValueError; we read it here to render a
+            # specific "numeric drift detected" or "risk-band drift
+            # detected" paragraph naming the drifted field, the
+            # LLM's claim, and the canonical truth.
+            _r65_drift_detail = getattr(portfolio_error, "drift_detail", None)
+            if isinstance(_r65_drift_detail, dict) and _r65_drift_detail.get("fields"):
+                _r65_drift_kind = str(_r65_drift_detail.get("kind") or "numeric")
+                # Surface the structured drift block on the diag so
+                # the admin dashboard can display it.
+                try:
+                    _r64_portfolio_diag["drift_detail"] = dict(_r65_drift_detail)
+                    status['portfolio_llm_diag'] = dict(_r64_portfolio_diag)
+                except Exception:  # noqa: BLE001
+                    pass
+                _r65_field_lines = []
+                for _f in _r65_drift_detail.get("fields", []):
+                    if not isinstance(_f, dict):
+                        continue
+                    _r65_field_lines.append(
+                        f"- {_f.get('label') or _f.get('field')}: "
+                        f"LLM rendered {_f.get('drifted_values') or _f.get('llm_values')}, "
+                        f"canonical = {_f.get('canonical_value')}"
+                    )
+                _r65_kind_label = (
+                    "numeric drift detected" if _r65_drift_kind == "numeric"
+                    else f"{_r65_drift_kind} drift detected"
+                )
+                report_builder.add_heading(f"AdoptIQ Executive Analysis: {status['manager']}'s Portfolio", level=1)
+                report_builder.add_heading("Portfolio Overview", level=2)
+                report_builder.add_paragraph(
+                    "Portfolio-level AI summary withheld: "
+                    f"{_r65_kind_label} ({_r65_drift_detail.get('round') or 'R25B/R25C'} "
+                    "validator). The LLM emitted values that disagreed with the "
+                    "canonical pipeline; the per-customer sections below and the "
+                    "data tabs in the XLSX remain authoritative."
+                )
+                if _r65_field_lines:
+                    report_builder.add_paragraph("Drifted fields:")
+                    for _line in _r65_field_lines[:8]:
+                        report_builder.add_paragraph(_line)
+                report_builder.add_paragraph(f"Manager: {status['manager']}")
+                report_builder.add_paragraph(f"Technology Focus: {status['tech']}")
+                report_builder.add_paragraph(f"Analysis Period: {status['days']} days")
+            else:
+                report_builder.add_heading(f"AdoptIQ Executive Analysis: {status['manager']}'s Portfolio", level=1)
+                report_builder.add_heading("Portfolio Overview", level=2)
+                report_builder.add_paragraph(
+                    "Portfolio-level AI summary unavailable for this run "
+                    f"(builder error{f' after {_r64_attempts} LLM attempts' if _r64_attempts else ''}; "
+                    f"last_error_kind={_r64_kind}). "
+                    "The per-customer sections below and the data tabs in the XLSX "
+                    "remain authoritative."
+                )
+                report_builder.add_paragraph(f"Manager: {status['manager']}")
+                report_builder.add_paragraph(f"Technology Focus: {status['tech']}")
+                report_builder.add_paragraph(f"Analysis Period: {status['days']} days")
+                report_builder.add_paragraph("Error details have been logged. Report data was processed successfully.")
 
         # === 2. Generate Customer-by-Customer Deep Dives ===
         status['progress'] = 75
@@ -15396,6 +15726,10 @@ def run_comprehensive_analysis(analysis_id):
                                 # Round 64 / Phase 3 (B5): record per-customer
                                 # rejection so the admin dashboard can surface
                                 # ``rejected=11 total=28`` rollup at a glance.
+                                # Round 65 / C-3: include bounded excerpts of
+                                # the briefing book and rejected narrative so
+                                # Round 66 can root-cause the 34% rejection
+                                # rate without re-running the report.
                                 _r64_record_grounding_outcome(
                                     status,
                                     customer_name=customer_name,
@@ -15404,6 +15738,8 @@ def run_comprehensive_analysis(analysis_id):
                                     sample_offending=_r27_result_cust.sample_offending,
                                     rejected=True,
                                     scope="customer",
+                                    briefing_excerpt=customer_briefing,
+                                    narrative_excerpt=customer_storyboard,
                                 )
                             else:
                                 # Round 64 / Phase 3 (B5): track validator
@@ -15596,14 +15932,40 @@ def run_comprehensive_analysis(analysis_id):
             # sheet is pure barriers, not joined with APs). The Leader
             # XLSX for the same portfolio carried 365 AP rows (120 open)
             # via its own ``Action_Plans`` sheet -- mirroring that
-            # naming convention here. ``filtered_action_plans`` is
-            # unconditionally bound at L14693 by
-            # ``_filter_csconsole_data_by_technology``; the same name
-            # is also referenced unguarded in the ``write_excel_workbook``
-            # call below so a presence guard here would be dead -- only
-            # gate on emptiness (R20-001 floor pin).
+            # naming convention here.
+            #
+            # Round 65 / Phase 1 (C-2): ``filtered_action_plans`` now
+            # contains the merged CSConsole + Snowflake AP universe (see
+            # ~L14704). Always write the sheet -- when both sources
+            # returned zero rows, write a single explanatory row so the
+            # operator can distinguish "scope truly has no APs" from
+            # "the writer skipped this sheet for some reason". The
+            # Summary KPI helper picks up ``sheets["Action_Plans"]``
+            # automatically (build_summary_rows lookup at L764 of
+            # report_export_styling.py).
             if filtered_action_plans is not None and not filtered_action_plans.empty:
                 all_sheets["Action_Plans"] = filtered_action_plans
+            else:
+                # Always-write fallback: render a single explanatory row
+                # so downstream consumers (and the operator) see honest
+                # provenance instead of a missing sheet. The
+                # ``_adoptiq_provenance_row`` marker tells
+                # ``canonical_metrics.count_open_action_plans`` to skip
+                # this row so the Summary KPI reads ``0`` (not ``1``).
+                _r65_provenance_str = _r65_aps_provenance
+                all_sheets["Action_Plans"] = pd.DataFrame([{
+                    "_adoptiq_provenance_row": True,
+                    "AdoptIQ_Status": "EMPTY",
+                    "AdoptIQ_Source": "CSConsole+Snowflake",
+                    "AdoptIQ_Provenance": _r65_provenance_str,
+                    "AdoptIQ_Message": (
+                        "No action plans found for this scope. "
+                        "Both CSConsole and Snowflake (C360_CS_TASK_C_VW, "
+                        "record_type_id=0122T000000QHBGQA4) returned zero "
+                        "rows for the configured technology / customer-name / "
+                        "owner-email scope and lookback window."
+                    ),
+                }])
 
             xlsx_path = write_excel_workbook(base, all_sheets, {
                 'action_plans': filtered_action_plans,
@@ -16360,6 +16722,84 @@ def get_status(analysis_id):
         )
 
     return jsonify(status_copy)
+
+@app.route('/api/grounding-diagnostics/<analysis_id>')
+def get_grounding_diagnostics(analysis_id):
+    """Round 65 / C-3: read-only diagnostic for the per-customer
+    grounding rejections recorded during a specific analysis run.
+
+    Pre-Round-65 the only rejection visibility was the running
+    summary (``rejected=N total=M rate=X``) on the running-reports
+    tile.  Build 37 surfaced a 34.5% (10/29) customer-narrative
+    rejection rate but the operator had no way to see WHY each
+    rejection happened without grepping the log file (and the log
+    didn't have the briefing-book / narrative excerpts -- only the
+    failure codes and a single offending token).  This endpoint
+    returns the structured rejection records persisted by
+    ``_r64_record_grounding_outcome``, including the bounded
+    briefing/narrative excerpts and full sample_offending map.
+    Round 66 will use this data to root-cause the rejection rate.
+
+    Loopback-only by default (the main app binds to 127.0.0.1
+    unless ``ADOPTIQ_BIND_PUBLIC=1``); no auth wrapper is added
+    here because the endpoint is strictly read-only and surfaces
+    only PII-digested data (customer names are sha256-prefix
+    digested by ``_id_digest`` per Round-64 contract).
+    """
+    try:
+        with analysis_status_lock:
+            status = analysis_status.get(analysis_id)
+            if not status:
+                return jsonify({"ok": False, "error": "analysis_not_found"}), 404
+            diag = status.get("grounding_diagnostics")
+        if not isinstance(diag, dict):
+            return jsonify({
+                "ok": True,
+                "analysis_id": analysis_id,
+                "grounding_diagnostics": {
+                    "rejection_summary": {"rejected": 0, "total": 0, "rate": 0.0},
+                    "rejection_records": [],
+                    "max_records": _R64_MAX_GROUNDING_RECORDS,
+                },
+            })
+        # Project to a JSON-safe shape (the helper already stores
+        # only json-serializable scalars but be defensive).
+        out_records = []
+        for rec in (diag.get("rejection_records") or []):
+            if not isinstance(rec, dict):
+                continue
+            out_records.append({
+                "scope": str(rec.get("scope") or "customer"),
+                "customer_digest": str(rec.get("customer_digest") or ""),
+                "narrative_length": int(rec.get("narrative_length", 0) or 0),
+                "failure_codes": list(rec.get("failure_codes") or []),
+                "first_offending_token": str(rec.get("first_offending_token") or ""),
+                "sample_offending": dict(rec.get("sample_offending") or {}),
+                "briefing_excerpt": str(rec.get("briefing_excerpt") or ""),
+                "narrative_excerpt": str(rec.get("narrative_excerpt") or ""),
+                "recorded_at": str(rec.get("recorded_at") or ""),
+            })
+        summary = diag.get("rejection_summary") or {}
+        return jsonify({
+            "ok": True,
+            "analysis_id": analysis_id,
+            "grounding_diagnostics": {
+                "rejection_summary": {
+                    "rejected": int(summary.get("rejected", 0) or 0),
+                    "total": int(summary.get("total", 0) or 0),
+                    "rate": float(summary.get("rate", 0.0) or 0.0),
+                },
+                "rejection_records": out_records,
+                "max_records": int(diag.get("max_records", _R64_MAX_GROUNDING_RECORDS) or _R64_MAX_GROUNDING_RECORDS),
+            },
+        })
+    except Exception as _diag_err:  # noqa: BLE001
+        logger.warning(
+            "[R65 / C-3] /api/grounding-diagnostics failed for %s: %s",
+            analysis_id, _diag_err,
+        )
+        return jsonify({"ok": False, "error": "internal_error"}), 500
+
 
 @app.route('/api/status/all')
 def get_all_status():
@@ -22503,6 +22943,14 @@ def run_leader_report_generation(analysis_id):
                         'valign': 'vcenter'
                     })
 
+                    # Round 65 / R-1: collect per-sheet titles to enrich
+                    # the Report_Info sheet.  Build 37 audit found that
+                    # writing a merged title row in row 0 of every data
+                    # sheet broke downstream pd.read_excel consumers
+                    # (column headers landed in row 1, so the parsed
+                    # column names were the title strings).
+                    _r65_leader_sheet_titles: list[tuple[str, str]] = []
+
                     for sheet_name, df in sheets.items():
                         # Round 2 / Phase 2.1: surface fetch_error
                         # tristate so a failed fetch is rendered as
@@ -22526,9 +22974,9 @@ def run_leader_report_generation(analysis_id):
                                         'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
                                     }
                                 ])
-                                unavailable_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
-                                worksheet = writer.sheets[sheet_name]
-                                worksheet.write(0, 0, f"{sheet_name.replace('_', ' ')} — Data Unavailable", title_format)
+                                # Round 65 / R-1: clean schema (header in row 0).
+                                unavailable_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0)
+                                _r65_leader_sheet_titles.append((sheet_name, f"{sheet_name.replace('_', ' ')} — Data Unavailable"))
                                 sheets_written += 1
                                 logger.warning(f"[LEADER EXCEL] Sheet '{sheet_name}' rendered as Data_Unavailable: {_fetch_error}")
                             except Exception as _du_err:
@@ -22550,8 +22998,9 @@ def run_leader_report_generation(analysis_id):
                                         _schema_err,
                                     )
 
-                                # Write data
-                                df_clean.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
+                                # Round 65 / R-1: header in row 0, no
+                                # merged title row above (Build 37 audit).
+                                df_clean.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0)
 
                                 # Format worksheet
                                 worksheet = writer.sheets[sheet_name]
@@ -22570,7 +23019,7 @@ def run_leader_report_generation(analysis_id):
                                         df_clean,
                                         sheet_name,
                                         _r16_used_table_names,
-                                        startrow=1,
+                                        startrow=0,
                                     )
                                 except Exception as _r16_err:
                                     logger.warning(
@@ -22579,17 +23028,16 @@ def run_leader_report_generation(analysis_id):
                                         _r16_err,
                                     )
 
-                                # Write title -- merge_range requires >=2 columns
+                                # Round 65 / R-1: capture the legacy
+                                # title for Report_Info (drop the merged
+                                # title row write at row 0).
                                 title_text = f"{sheet_name.replace('_', ' ')} - {manager} Team Report"
-                                n_cols = len(df_clean.columns)
-                                if n_cols > 1:
-                                    worksheet.merge_range(0, 0, 0, n_cols - 1, title_text, title_format)
-                                else:
-                                    worksheet.write(0, 0, title_text, title_format)
+                                _r65_leader_sheet_titles.append((sheet_name, title_text))
 
-                                # Format headers
+                                # Format headers (overwrite pd.to_excel
+                                # default at row 0 with branded format).
                                 for col_num, value in enumerate(df_clean.columns.values):
-                                    worksheet.write(1, col_num, value, header_format)
+                                    worksheet.write(0, col_num, value, header_format)
 
                                 # Auto-adjust column widths (guard against NaN from empty columns)
                                 for i, col in enumerate(df_clean.columns):
@@ -22670,6 +23118,18 @@ def run_leader_report_generation(analysis_id):
                                 'Value': fs['sheet'],
                                 'Detail': fs['error'],
                                 'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
+                            })
+                        # Round 65 / R-1: surface the per-sheet titles
+                        # that previously lived in row 0 of each data
+                        # sheet so the branded context survives even
+                        # though data sheets now carry a clean header in
+                        # row 0 (consumable via pd.read_excel).
+                        for _ldr_sn, _ldr_tt in _r65_leader_sheet_titles:
+                            _info_rows.append({
+                                'Field': f'Sheet_Title:{_ldr_sn}',
+                                'Value': _ldr_tt,
+                                'Detail': '',
+                                'Generated_At': '',
                             })
                         report_info_df = pd.DataFrame(_info_rows)
                         report_info_df.to_excel(writer, sheet_name='Report_Info', index=False)

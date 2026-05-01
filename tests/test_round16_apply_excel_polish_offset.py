@@ -178,11 +178,21 @@ def test_phase_5_1_apply_excel_polish_marker_present_in_styling():
     assert "startrow" in src
 
 
-def test_phase_5_1_app_simple_writers_pass_startrow_one():
-    """Self-pin: every place ``app_simple.py`` invokes the polish
-    helper has the ``startrow=1`` argument and a Round-16 marker
-    next to it.  That guarantees the merged-title-row writers don't
-    silently fall back to ``startrow=0``.
+def test_phase_5_1_app_simple_writers_pass_startrow_zero():
+    """Self-pin (UPDATED Round 65 / R-1): every place
+    ``app_simple.py`` invokes the polish helper has ``startrow=0``
+    (header in row 0) and a Round-16 marker next to it.
+
+    Pre-Round-65, the writers prepended a merged title row at row 0
+    and called ``apply_excel_polish(..., startrow=1)`` to anchor the
+    Excel Table on the header at row 1.  This broke every consumer
+    that used ``pd.read_excel(sheet_name)`` to read the workbook
+    programmatically -- the column headers landed in row 1, so the
+    parsed column names were the title strings instead of the
+    canonical schema (Build 37 audit / R-1).  Round 65 / R-1 dropped
+    the title-in-row-0 pattern from the Compact / Renewal / Leader
+    writers; the canonical sheet titles now live in the
+    ``Report_Info`` sheet under ``Sheet_Title:<sheet>`` rows.
     """
     src = Path("app_simple.py").read_text(encoding="utf-8")
     polish_invocations = src.count("_r16_apply_excel_polish(")
@@ -192,12 +202,14 @@ def test_phase_5_1_app_simple_writers_pass_startrow_one():
         f"_r16_apply_excel_polish invoked only {polish_invocations} times in app_simple.py "
         "(expected at least 3 for compact/renewal/leader writers)"
     )
-    # Every invocation must be paired with ``startrow=1``.
-    assert src.count("startrow=1,\n                            )") + src.count(
-        "startrow=1,\n                                    )"
-    ) >= 3, "_r16_apply_excel_polish callsites must pass startrow=1 explicitly"
+    # Every invocation must be paired with ``startrow=0`` (Round 65 / R-1).
+    assert src.count("startrow=0,\n                            )") + src.count(
+        "startrow=0,\n                                    )"
+    ) >= 3, "_r16_apply_excel_polish callsites must pass startrow=0 explicitly (Round 65 / R-1)"
     # And every invocation must carry the Round-16 marker.
     assert src.count("Round 16 / Phase 5.1") >= 3
+    # Pin the Round-65 marker too so the contract is explicit.
+    assert src.count("Round 65 / R-1") >= 3
 
 
 # ---------------------------------------------------------------------------
