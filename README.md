@@ -1,8 +1,17 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 35).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 36).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 36 (Round 63 — Tier A bundle: shared logging helpers + CI alignment)
+
+Build 36 closes the R62 hot spot #1 (helper duplication between `corpus_bootstrap.py` and `corpus_indexer.py`) and the long-carried CI-alignment deferral that's been documented since Round 18 (`R18-NEXT-004` → `R20-NEXT-005` → `R22-NEXT-CI` → R62). None of the changes are user-visible, but they reduce code duplication, prevent a future regression class, and ensure CI now catches the same lint / security / audit issues that `make verify` catches locally.
+
+- **One source of truth for the closed-stream logger gate.** Round 62 / A1 had to copy `_safe_log_info` + `_exit_log_streams_open` into both `corpus_bootstrap.py` and `corpus_indexer.py` because the latter cannot import the former (circular). The two implementations were near-byte-equivalent but had drifted on one detail: the `propagate` default in `getattr(target_logger, "propagate", ...)` — bootstrap used `False`, indexer used `True`. Build 36 promotes the implementation to a new top-level `_logging_helpers.py` (no AdoptIQ-specific imports, so neither side of the cycle is reintroduced) and unifies the `propagate` default on `True` (matching `logging.Logger.__init__`'s actual default). Both modules keep their original `_safe_log_info` / `_exit_log_streams_open` names as thin wrappers so all 14 R61 + R62 tests still pass unchanged.
+- **Parity regression-count guard for `corpus_indexer.py`.** The R62 acceptance section flagged that `tests/test_round62_corpus_logger_module_wide.py` only pinned the bare-`logger.info` floor in `corpus_bootstrap.py` — `corpus_indexer.py` was exposed because a future PR could quietly add a raw `logger.info(...)` call there and silently re-introduce the closed-stream race. Build 36 mirrors the regression guard onto `corpus_indexer.py`: zero bare `logger.info(` calls outside the wrapper body, and a floor of 5 `_safe_log_info(` call sites preserved.
+- **CI now runs the full `make verify` gate.** The `.github/workflows/build.yml::quality-checks` job has run only `pytest -q` since the workflow was added; `ruff` / `bandit` / `pip-audit` were local-only via `make verify`. Build 36 closes that gap so a Cursor edit that's clean locally but adds a ruff or bandit regression cannot land via CI either. The dev-only quality tools are pip-installed in the workflow (they are deliberately NOT in `requirements.txt` per the local-only convention); the `build-mac` and `build-windows` jobs still gate on `needs: quality-checks`, so a failing lint / security / audit check now blocks the full build pipeline.
+- **Pinned by 8 new tests (3663 floor; R62 floor was 3655; one existing CI-gate test updated rather than added).** 6 `tests/test_round63_logging_helpers.py` tests pin the shared module's contract (open-stream emits, closed-stream silences, propagation chain walk, `propagate=True` canonical default). 2 `tests/test_round63_corpus_indexer_logger_parity.py` tests mirror the R62 regression guard for the indexer. R62 source (Quit-button syslog + comprehensive `Action plans (open)` XLSX row + R61 closed-stream gate) carries forward unchanged.
 
 ### What's New in Build 35 (Round 62 — Close R61 follow-on items)
 
