@@ -247,22 +247,72 @@ def _append_run(paragraph: Any, text: str) -> None:
 def _rewrite_paragraph_with_inline_citations(
     text: str, matches: list[Any], citation_chrome: str
 ) -> str:
-    """Insert ``citation_chrome`` immediately after each match's value end.
+    """Insert ``citation_chrome`` per-line, respecting end-of-line vs unit semantics.
 
-    For ``"Customers: 52. Barriers: 68. Cases: 381"`` with three matches,
-    returns ``"Customers: 52 [Source: ...]. Barriers: 68 [Source: ...]. Cases: 381 [Source: ...]"``.
-    The trailing citation also satisfies the narrative-paragraph gate.
+    Round 64 / Phase 1 (B4): the original (Round 57) implementation
+    inserted the citation immediately after each
+    ``_PARAGRAPH_KPI_NUMERIC_RE`` match's value end. That worked for
+    the R57 use case ("Total Customers: 52. Adoption Barriers: 68."
+    on a SINGLE line with multiple distinct KPIs separated by
+    punctuation -- every segment between matches must contain
+    ``[source:]`` for the gate to mark it source-backed). It broke
+    for the Build-36 Comprehensive Title Page, where the regex value
+    group does not include trailing units (``Days``, ``UTC``,
+    ``%``-less suffixes), so a line like ``"Analysis Period: 90
+    Days"`` was rewritten to ``"Analysis Period: 90 [Source: AdoptIQ
+    Report Data Sources] Days"`` -- the citation was jammed mid-string
+    between the value and its unit on five consecutive title-page
+    lines, breaking readability of the report's primary KPI tile.
+
+    Fix: split the paragraph into logical lines on ``\n`` first; for
+    each line:
+      * Skip lines already carrying ``[source:`` (idempotency).
+      * If the line has exactly ONE match: append a single citation at
+        end-of-line (preserves value->unit pairing -- the R64 fix).
+      * If the line has TWO OR MORE matches: interleave citations
+        between matches AND at end-of-line, so every match's segment
+        contains ``[source:]`` (preserves the R57 contract for
+        single-line multi-KPI sentences).
+
+    Round-tripping the title-tile string ``"Analysis Period: 90
+    Days\\nTotal Customers: 39"`` now produces
+    ``"Analysis Period: 90 Days [Source: ...]\\nTotal Customers: 39
+    [Source: ...]"`` -- one citation per line, none mid-string.
+    Round-tripping ``"Total Customers: 52. Adoption Barriers: 68.
+    Support Cases: 381."`` still produces
+    ``"Total Customers: 52 [Source: ...]. Adoption Barriers: 68
+    [Source: ...]. Support Cases: 381 [Source: ...]."`` -- every
+    segment source-backed (R57 contract).
     """
     if not matches:
         return f"{text} {citation_chrome}"
-    parts: list[str] = []
-    last_end = 0
-    for m in matches:
-        parts.append(text[last_end : m.end()])
-        parts.append(f" {citation_chrome}")
-        last_end = m.end()
-    parts.append(text[last_end:])
-    return "".join(parts)
+    lines = text.split("\n")
+    out_lines: list[str] = []
+    for line in lines:
+        line_matches = list(_PARAGRAPH_KPI_NUMERIC_RE.finditer(line))
+        if not line_matches:
+            out_lines.append(line)
+            continue
+        if _SOURCE_TOKEN_RE.search(line):
+            out_lines.append(line)
+            continue
+        if len(line_matches) == 1:
+            # Single match on this line: append citation at
+            # end-of-line so we never split a value->unit pair.
+            out_lines.append(f"{line.rstrip()} {citation_chrome}")
+            continue
+        # Multi-match line: interleave so every segment between
+        # consecutive matches contains the citation. Preserves the
+        # R57 ``_paragraph_claim_source_backed`` contract.
+        parts: list[str] = []
+        last_end = 0
+        for m in line_matches:
+            parts.append(line[last_end : m.end()])
+            parts.append(f" {citation_chrome}")
+            last_end = m.end()
+        parts.append(line[last_end:])
+        out_lines.append("".join(parts).rstrip())
+    return "\n".join(out_lines)
 
 
 def _replace_paragraph_text(paragraph: Any, new_text: str) -> None:

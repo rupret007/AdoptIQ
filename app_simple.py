@@ -20,7 +20,7 @@ import webbrowser
 from threading import Lock, RLock
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Optional as TypingOptional, Dict, Any, List, Union, Tuple
+from typing import Optional, Optional as TypingOptional, Dict, Any, List, Union, Tuple, Callable
 import pandas as pd
 import numpy as np
 
@@ -927,6 +927,303 @@ def _id_digest(value: Any, length: int = 12) -> str:
         return _h.sha256(str(value).encode("utf-8", errors="replace")).hexdigest()[: max(4, length)]
     except Exception:
         return "unavailable"
+
+
+# Round 64 / Phase 3 (B3): error-kind classifier shared between the
+# portfolio-LLM retry helper below and the regression test that pins
+# its behavior.  ``generate_llm_response`` returns ``"ERROR: <kind>:
+# <body>"`` on classified failures (see adoptiq_backend.py L10995-
+# 11017) -- the kinds in this set are transient enough that a second
+# attempt has a real chance of succeeding (network blip, upstream
+# 5xx, rate-limiter cooldown, request timeout).  Anything outside
+# this set (e.g. ``content_filter``, ``credentials``, ``auth``) is
+# either policy-driven or operator-fixable and a retry would just
+# burn budget without changing the verdict.
+_R64_TRANSIENT_LLM_ERROR_KINDS: frozenset[str] = frozenset({
+    "timeout",
+    "rate_limited",
+    "rate_limit",
+    "server_error",
+    "network",
+    "transient",
+    "llm.timeout",
+    "llm.rate_limit_429",
+    "llm.network",
+    "llm.5xx",
+    "llm.503",
+    "llm.504",
+    "unknown",
+})
+
+
+def _r64_classify_llm_result(result: Any) -> str:
+    """Round 64 / Phase 3 (B3): return one of ``ok``/``transient``/``hard``/``empty``.
+
+    ``ok`` -- non-empty string that does not start with ``ERROR:`` (the
+    happy path; caller should accept the result).
+    ``transient`` -- ``ERROR:`` string whose classified kind is in
+    ``_R64_TRANSIENT_LLM_ERROR_KINDS``.  Caller should retry.
+    ``hard`` -- ``ERROR:`` string whose kind is not transient (policy
+    violation, missing credentials, etc.).  Caller should NOT retry --
+    a second attempt will produce the same verdict.
+    ``empty`` -- ``None`` or empty string.  Treat as transient and
+    retry; an empty body is most often a silent timeout in the
+    underlying HTTP client.
+    """
+
+    if not isinstance(result, str) or not result:
+        return "empty"
+    if not result.startswith("ERROR:"):
+        return "ok"
+    try:
+        body = result[len("ERROR:"):].lstrip()
+        kind = body.split(":", 1)[0].strip().lower()
+    except Exception:  # noqa: BLE001
+        kind = "unknown"
+    if kind in _R64_TRANSIENT_LLM_ERROR_KINDS:
+        return "transient"
+    return "hard"
+
+
+def _r64_call_llm_with_retry(
+    fn: Callable[..., Any],
+    *args: Any,
+    max_attempts: int = 3,
+    backoff_base_seconds: float = 1.0,
+    sleep: Callable[[float], None] | None = None,
+    correlation_id: str | None = None,
+    **kwargs: Any,
+) -> tuple[Any, dict[str, Any]]:
+    """Round 64 / Phase 3 (B3): wrap an LLM call with bounded retry + structured diag.
+
+    Calls ``fn(*args, **kwargs)`` up to ``max_attempts`` times.  Between
+    attempts, sleeps for an exponential backoff window
+    (``backoff_base_seconds * 2**(attempt-1)``).  ``sleep`` defaults to
+    :func:`time.sleep`; tests inject a no-op so the suite does not block
+    on real wall-clock waits.  Returns a tuple of ``(result, diag)``
+    where ``diag`` is a dict with at least ``attempts``,
+    ``final_outcome`` (one of ``ok|transient|hard|empty|exception``),
+    and ``last_error_kind``.  The portfolio caller below uses this to
+    decide between accepting the LLM body, substituting an honest
+    fallback paragraph, and emitting a structured-logging diagnostic.
+
+    Behavior contract:
+
+    - Success on attempt N -> ``(<body>, {attempts: N, final_outcome:
+      "ok"})`` with no further retries.
+    - Transient ERROR / empty / exception -> retry until
+      ``max_attempts`` exhausted.
+    - Non-transient ERROR (``hard``) -> return immediately; a retry
+      would not change the verdict.
+    """
+
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be >= 1")
+    sleep_fn = sleep if sleep is not None else time.sleep
+    last_result: Any = ""
+    last_error_kind: str | None = None
+    last_outcome: str = "empty"
+    attempts = 0
+    while attempts < max_attempts:
+        attempts += 1
+        try:
+            last_result = fn(*args, **kwargs)
+        except Exception as call_err:  # noqa: BLE001
+            last_result = ""
+            last_outcome = "exception"
+            last_error_kind = type(call_err).__name__
+            logger.warning(
+                "[R64-B3] LLM call attempt %d/%d raised %s; "
+                "%s; correlation_id=%s",
+                attempts,
+                max_attempts,
+                last_error_kind,
+                "will retry" if attempts < max_attempts else "no more retries",
+                correlation_id or "n/a",
+            )
+            if attempts >= max_attempts:
+                break
+            sleep_fn(backoff_base_seconds * (2 ** (attempts - 1)))
+            continue
+
+        outcome = _r64_classify_llm_result(last_result)
+        last_outcome = outcome
+        if outcome == "ok":
+            break
+        if outcome == "hard":
+            try:
+                kind_body = str(last_result)[len("ERROR:"):].lstrip()
+                last_error_kind = kind_body.split(":", 1)[0].strip().lower() or "hard"
+            except Exception:  # noqa: BLE001
+                last_error_kind = "hard"
+            logger.warning(
+                "[R64-B3] LLM call attempt %d/%d returned non-transient ERROR "
+                "kind=%s; not retrying; correlation_id=%s",
+                attempts,
+                max_attempts,
+                last_error_kind,
+                correlation_id or "n/a",
+            )
+            break
+        if outcome == "transient":
+            try:
+                kind_body = str(last_result)[len("ERROR:"):].lstrip()
+                last_error_kind = kind_body.split(":", 1)[0].strip().lower() or "transient"
+            except Exception:  # noqa: BLE001
+                last_error_kind = "transient"
+        else:
+            last_error_kind = last_error_kind or "empty"
+        logger.warning(
+            "[R64-B3] LLM call attempt %d/%d outcome=%s kind=%s; "
+            "%s; correlation_id=%s",
+            attempts,
+            max_attempts,
+            outcome,
+            last_error_kind,
+            "will retry" if attempts < max_attempts else "no more retries",
+            correlation_id or "n/a",
+        )
+        if attempts >= max_attempts:
+            break
+        sleep_fn(backoff_base_seconds * (2 ** (attempts - 1)))
+
+    diag = {
+        "attempts": attempts,
+        "final_outcome": last_outcome,
+        "last_error_kind": last_error_kind,
+        "max_attempts": max_attempts,
+    }
+    return last_result, diag
+
+
+# Round 64 / Phase 3 (B5): grounding-failure diagnostics for the
+# Comprehensive report's per-customer + portfolio narrative gates.
+# Build 36 acceptance found 11/28 customer narratives rejected by the
+# R16 / R27 ai_narrative_validator with no per-report rollup -- the
+# operator could see "AI insight could not be grounded" repeated in
+# the document but had no signal as to which customer / failure
+# code / first-offending token tripped each rejection.  Surface a
+# bounded summary on the analysis ``status`` dict so the admin
+# dashboard's running-reports payload (and the persisted
+# ``analysis_status.json``) carries an honest rollup.
+_R64_MAX_GROUNDING_RECORDS: int = 50
+
+
+def _r64_init_grounding_diagnostics(status: dict) -> dict:
+    """Initialise (or fetch) the grounding diagnostics container.
+
+    Lives on ``status['grounding_diagnostics']`` so it is automatically
+    persisted via ``save_analysis_status`` and surfaced on every
+    ``/status/<analysis_id>`` poll without a separate code path.
+    """
+
+    diag = status.get("grounding_diagnostics")
+    if not isinstance(diag, dict):
+        diag = {
+            "rejection_summary": {"rejected": 0, "total": 0, "rate": 0.0},
+            "rejection_records": [],
+            "max_records": _R64_MAX_GROUNDING_RECORDS,
+        }
+        status["grounding_diagnostics"] = diag
+    return diag
+
+
+def _r64_first_offending_token(sample_offending: Any) -> str:
+    """Pick a single short representative sample from validator output.
+
+    The R16 validator returns a ``sample_offending`` mapping of
+    ``failure_code -> sample_value``.  For diagnostics we only want one
+    short token per record (the operator does not need the whole map);
+    pick the first key in iteration order and truncate the value to 80
+    chars so the persisted status payload stays bounded.
+    """
+
+    if not sample_offending:
+        return ""
+    try:
+        if isinstance(sample_offending, dict):
+            for _k, v in sample_offending.items():
+                if v is None:
+                    continue
+                s = str(v).strip()
+                if not s:
+                    continue
+                return s[:80]
+            return ""
+        s = str(sample_offending).strip()
+        return s[:80]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _r64_record_grounding_outcome(
+    status: dict,
+    *,
+    customer_name: str,
+    narrative_length: int,
+    failures: Any = None,
+    sample_offending: Any = None,
+    rejected: bool,
+    scope: str = "customer",
+) -> None:
+    """Append a per-narrative grounding outcome to the diagnostics rollup.
+
+    Round 64 / Phase 3 (B5): every customer-level narrative call
+    (and the portfolio-level call) routes through this helper so the
+    operator can see ``rejected=11 total=28 rate=0.393`` on the
+    running-reports tile without grepping the log file.  Customer
+    names are digested via ``_id_digest`` so the persisted status
+    file does not echo PII.
+    """
+
+    if not isinstance(status, dict):
+        return
+    diag = _r64_init_grounding_diagnostics(status)
+    summary = diag["rejection_summary"]
+    try:
+        summary["total"] = int(summary.get("total", 0)) + 1
+        if rejected:
+            summary["rejected"] = int(summary.get("rejected", 0)) + 1
+            records = diag.setdefault("rejection_records", [])
+            if len(records) < _R64_MAX_GROUNDING_RECORDS:
+                try:
+                    failure_codes = sorted({str(f) for f in (failures or []) if f})
+                except Exception:  # noqa: BLE001
+                    failure_codes = []
+                records.append({
+                    "scope": scope,
+                    "customer_digest": _id_digest(customer_name) if customer_name else "",
+                    "narrative_length": int(narrative_length or 0),
+                    "failure_codes": failure_codes,
+                    "first_offending_token": _r64_first_offending_token(sample_offending),
+                })
+        total = max(1, int(summary.get("total", 0)))
+        rejected_n = int(summary.get("rejected", 0))
+        summary["rate"] = round(rejected_n / total, 3)
+    except Exception:  # noqa: BLE001
+        # Diagnostics must never break the report pipeline -- fall
+        # silent if the status dict cannot be mutated for any reason.
+        return
+    if rejected:
+        try:
+            from structured_logging import analysis_logger as _r64_alog
+            log = _r64_alog(status.get("analysis_id"), scope=scope)
+            log.warning(
+                "[R64-B5] grounding rejection recorded: customer_digest=%s "
+                "narrative_length=%d failure_codes=%s first_offending_token=%s "
+                "running_total=%d/%d",
+                _id_digest(customer_name) if customer_name else "",
+                int(narrative_length or 0),
+                ",".join(sorted({str(f) for f in (failures or []) if f})) or "",
+                _r64_first_offending_token(sample_offending) or "",
+                int(summary.get("rejected", 0)),
+                int(summary.get("total", 0)),
+            )
+        except Exception:  # noqa: BLE001
+            # ``structured_logging`` import or emit failure must not
+            # block the surrounding analysis run; a missed structured
+            # log line is tolerable but a missed report is not.
+            pass
 
 
 def _redact_partial_warning_error(value: Any) -> str:
@@ -14047,7 +14344,53 @@ def run_comprehensive_analysis(analysis_id):
                 recent_window_days=int(days) if days else 30,
             )
 
-        portfolio_risk_summary = compute_portfolio_risk_summary(risk_profiles)
+        # Round 64 / Phase 1 (B1): the Title Page risk-band buckets
+        # (Critical+High / Medium / Low / Healthy) MUST sum to
+        # ``portfolio_metrics['total_customers']`` so the operator does
+        # not see "Customers in portfolio: 39" alongside risk bands
+        # that sum to 53 on the same one-page tile.  Build 36 surfaced
+        # this exact split on the Brian Frazier / All Contact Center /
+        # 90d run: ``total_customers`` was the AB ∪ CSOne ∪ Pulse
+        # narrow universe (39) while the band counts came from
+        # ``risk_profiles`` keyed on ``all_customers_comprehensive``
+        # (the wider AB ∪ CSOne ∪ Pulse ∪ Subs ∪ AP ∪ SP ∪ AB-CSConsole
+        # union, 53).  The narrow set is what the headline tile
+        # advertises; rebuild ``risk_profiles`` for the narrow scope
+        # before computing the bucket counts so the tile is internally
+        # coherent.  ``risk_profiles`` itself stays at the wider
+        # universe so downstream per-customer narrative sections still
+        # cover every customer with activity in any source.
+        try:
+            from data_normalization import normalize_customer_name as _r64_norm_cust  # noqa: PLC0415
+            _r64_narrow_customer_list = cm.list_customers(
+                ab_df=_ab,
+                csone_df=_cs_norm,
+                pulse_df=csconsole_customer_pulse if csconsole_customer_pulse is not None else pd.DataFrame(),
+            )
+            _r64_narrow_customer_set = {
+                _r64_norm_cust(name) for name in _r64_narrow_customer_list
+            }
+            _r64_narrow_risk_profiles = {
+                cust: profile
+                for cust, profile in risk_profiles.items()
+                if _r64_norm_cust(cust) in _r64_narrow_customer_set
+            }
+            logger.info(
+                "[[CUSTOMER_COUNT]] Round 64 / B1: narrow risk_profiles "
+                "scoped to %d customers (vs %d wide) for title-page band coherence",
+                len(_r64_narrow_risk_profiles),
+                len(risk_profiles),
+            )
+        except Exception as _r64_narrow_err:  # noqa: BLE001
+            logger.debug(
+                "[[CUSTOMER_COUNT]] Round 64 / B1: narrow risk_profiles "
+                "filter failed: %s; falling back to full risk_profiles "
+                "(may produce incoherent title-page bands).",
+                _r64_narrow_err,
+            )
+            _r64_narrow_risk_profiles = risk_profiles
+
+        portfolio_risk_summary = compute_portfolio_risk_summary(_r64_narrow_risk_profiles)
         high_risk_customers = int(portfolio_risk_summary.get("high_risk_customers", 0))
         medium_risk_customers = int(portfolio_risk_summary.get("medium_risk_customers", 0))
         low_risk_customers = int(portfolio_risk_summary.get("low_risk_customers", 0))
@@ -14363,6 +14706,14 @@ def run_comprehensive_analysis(analysis_id):
         # But we log here for consistency
         logger.info(f"[[CUSTOMER_COUNT]] Portfolio metrics using {portfolio_metrics['total_customers']} customers (unfiltered)")
 
+        # Round 64 / Phase 3 (B3): pre-initialise the diag dict
+        # OUTSIDE the portfolio try/except so the bottom-of-block
+        # ``except Exception as portfolio_error`` branch can read it
+        # without resorting to ``locals().get(...)``.  The R20 / R20-001
+        # floor regression test ratchets the dead-presence-guard count
+        # downwards; reading a sentinel value pre-bound here is the
+        # documented R20 pattern.
+        _r64_portfolio_diag: dict[str, Any] = {}
         try:
             # Round 13 / Phase 3.10: canonicalize ``customer_name`` on
             # both sides of the engagement merge so cosmetic spelling
@@ -14493,7 +14844,31 @@ def run_comprehensive_analysis(analysis_id):
                 P2_CASES=_r25b_p2,
                 BEMS_ESCALATIONS=_r25b_bems,
             )
-            portfolio_summary = generate_llm_response(portfolio_prompt, portfolio_briefing)
+            # Round 64 / Phase 3 (B3): retry the portfolio LLM call up
+            # to 3 times with exponential backoff (1s, 2s) between
+            # attempts.  Pre-R64, a single empty body or transient
+            # ``ERROR: timeout`` collapsed straight into the bland
+            # ``"AI analysis encountered an error. Data processed
+            # successfully."`` fallback at L14729 with no chance of
+            # recovery -- Build 36 acceptance hit this on the
+            # Brian Frazier / Contact Center comprehensive run.
+            # ``_r64_call_llm_with_retry`` classifies non-transient
+            # ERROR shapes (content_filter, credentials, auth) as
+            # ``hard`` and short-circuits without burning the budget;
+            # the structured ``diag`` dict captures attempt count and
+            # last error kind for the operator-facing fallback below.
+            portfolio_summary, _r64_portfolio_diag = _r64_call_llm_with_retry(
+                generate_llm_response,
+                portfolio_prompt,
+                portfolio_briefing,
+                max_attempts=3,
+                backoff_base_seconds=1.0,
+                correlation_id=status.get('analysis_id'),
+            )
+            try:
+                status['portfolio_llm_diag'] = dict(_r64_portfolio_diag)
+            except Exception:  # noqa: BLE001
+                pass
 
             # Check if AI response is valid
             if portfolio_summary and not portfolio_summary.startswith("ERROR:"):
@@ -14631,6 +15006,29 @@ def run_comprehensive_analysis(analysis_id):
                                 },
                             )
                             _r27_safe_portfolio = _r27_anv_port.GROUNDING_FAILURE_PLACEHOLDER
+                            # Round 64 / Phase 3 (B5): include the
+                            # portfolio-level narrative in the same
+                            # rollup so the operator sees a single
+                            # consolidated rejection count.
+                            _r64_record_grounding_outcome(
+                                status,
+                                customer_name=f"__portfolio__/{status.get('manager') or 'unknown'}",
+                                narrative_length=len(portfolio_summary or ""),
+                                failures=list(_r27_result_port.failures),
+                                sample_offending=_r27_result_port.sample_offending,
+                                rejected=True,
+                                scope="portfolio",
+                            )
+                        else:
+                            _r64_record_grounding_outcome(
+                                status,
+                                customer_name=f"__portfolio__/{status.get('manager') or 'unknown'}",
+                                narrative_length=len(portfolio_summary or ""),
+                                failures=None,
+                                sample_offending=None,
+                                rejected=False,
+                                scope="portfolio",
+                            )
                     except Exception as _r27_anv_port_err:  # noqa: BLE001
                         # Round 30 / M6: validator-exception path now treats the
                         # exception identically to a validator REJECTION --
@@ -14664,10 +15062,26 @@ def run_comprehensive_analysis(analysis_id):
                 logger.info(f"[[OK]] Portfolio AI analysis completed successfully - NO markdown symbols")
             else:
                 logger.warning(f"[[WARNING]] Portfolio AI analysis failed: {portfolio_summary}")
-                # Add a fallback portfolio summary with clean formatting
+                # Round 64 / Phase 3 (B3): replace the bland
+                # "temporarily unavailable" line with an honest
+                # fallback that names the failure mode (LLM call) and
+                # tells the reader where the authoritative data lives
+                # (per-customer sections + XLSX tabs).  The diag dict
+                # populated above is included so the operator can
+                # correlate the report-level fallback with the
+                # structured-logging records emitted by the retry
+                # helper.
+                _r64_attempts = int(_r64_portfolio_diag.get("attempts", 0) or 0)
+                _r64_kind = str(_r64_portfolio_diag.get("last_error_kind") or "unknown")
                 report_builder.add_heading(f"AdoptIQ Executive Analysis: {status['manager']}'s Portfolio", level=1)
                 report_builder.add_heading("Portfolio Overview", level=2)
-                report_builder.add_paragraph("AI analysis temporarily unavailable. Data processed successfully.")
+                report_builder.add_paragraph(
+                    "Portfolio-level AI summary unavailable for this run "
+                    f"(LLM call failed after {_r64_attempts} attempt"
+                    f"{'s' if _r64_attempts != 1 else ''}; last_error_kind={_r64_kind}). "
+                    "The per-customer sections below and the data tabs in the XLSX "
+                    "remain authoritative."
+                )
                 report_builder.add_paragraph(f"Manager: {status['manager']}")
                 report_builder.add_paragraph(f"Technology Focus: {status['tech']}")
                 report_builder.add_paragraph(f"Analysis Period: {status['days']} days")
@@ -14677,10 +15091,25 @@ def run_comprehensive_analysis(analysis_id):
 
         except Exception as portfolio_error:
             logger.error(f"[[ERROR]] Portfolio AI analysis failed: {portfolio_error}")
-            # Add a fallback portfolio summary with clean formatting
+            # Round 64 / Phase 3 (B3): same honest-fallback contract as
+            # the in-band failure branch above.  This branch covers
+            # exceptions raised OUTSIDE the LLM call itself (e.g.
+            # validator regressions, prompt-template KeyError, briefing
+            # builder failure).  ``_r64_portfolio_diag`` is pre-bound
+            # to ``{}`` BEFORE the surrounding try block (see L14709)
+            # so this read is always safe -- the R20 / R20-001 floor
+            # forbids ``locals().get()`` here.
+            _r64_attempts = int(_r64_portfolio_diag.get("attempts", 0) or 0)
+            _r64_kind = str(_r64_portfolio_diag.get("last_error_kind") or type(portfolio_error).__name__)
             report_builder.add_heading(f"AdoptIQ Executive Analysis: {status['manager']}'s Portfolio", level=1)
             report_builder.add_heading("Portfolio Overview", level=2)
-            report_builder.add_paragraph("AI analysis encountered an error. Data processed successfully.")
+            report_builder.add_paragraph(
+                "Portfolio-level AI summary unavailable for this run "
+                f"(builder error{f' after {_r64_attempts} LLM attempts' if _r64_attempts else ''}; "
+                f"last_error_kind={_r64_kind}). "
+                "The per-customer sections below and the data tabs in the XLSX "
+                "remain authoritative."
+            )
             report_builder.add_paragraph(f"Manager: {status['manager']}")
             report_builder.add_paragraph(f"Technology Focus: {status['tech']}")
             report_builder.add_paragraph(f"Analysis Period: {status['days']} days")
@@ -14964,6 +15393,32 @@ def run_comprehensive_analysis(analysis_id):
                                     },
                                 )
                                 _r27_safe_storyboard = _r27_anv.GROUNDING_FAILURE_PLACEHOLDER
+                                # Round 64 / Phase 3 (B5): record per-customer
+                                # rejection so the admin dashboard can surface
+                                # ``rejected=11 total=28`` rollup at a glance.
+                                _r64_record_grounding_outcome(
+                                    status,
+                                    customer_name=customer_name,
+                                    narrative_length=len(customer_storyboard or ""),
+                                    failures=list(_r27_result_cust.failures),
+                                    sample_offending=_r27_result_cust.sample_offending,
+                                    rejected=True,
+                                    scope="customer",
+                                )
+                            else:
+                                # Round 64 / Phase 3 (B5): track validator
+                                # successes too so ``rate`` is a true rejection
+                                # ratio (rejected / total) rather than a raw
+                                # rejection count.
+                                _r64_record_grounding_outcome(
+                                    status,
+                                    customer_name=customer_name,
+                                    narrative_length=len(customer_storyboard or ""),
+                                    failures=None,
+                                    sample_offending=None,
+                                    rejected=False,
+                                    scope="customer",
+                                )
                         except Exception as _r27_anv_err:  # noqa: BLE001
                             # Round 30 / M6: validator-exception path now
                             # treats the exception identically to a validator
@@ -15131,6 +15586,24 @@ def run_comprehensive_analysis(analysis_id):
                 "External_Bugs": pd.DataFrame(ext_bugs),
                 "External_Incidents": pd.DataFrame(ext_incidents)
             }
+
+            # Round 64 / Phase 2 (B2): add a dedicated ``Action_Plans``
+            # sheet so the comprehensive XLSX can surface a real
+            # ``Action plans (open)`` count in the Summary tab. Pre-R64
+            # the only AP-related column the Summary helper could read
+            # was ``AB_Detail_All.Action Plan Title``, which the
+            # comprehensive flow's AB_Detail_All never populates (the
+            # sheet is pure barriers, not joined with APs). The Leader
+            # XLSX for the same portfolio carried 365 AP rows (120 open)
+            # via its own ``Action_Plans`` sheet -- mirroring that
+            # naming convention here. ``filtered_action_plans`` is
+            # unconditionally bound at L14693 by
+            # ``_filter_csconsole_data_by_technology``; the same name
+            # is also referenced unguarded in the ``write_excel_workbook``
+            # call below so a presence guard here would be dead -- only
+            # gate on emptiness (R20-001 floor pin).
+            if filtered_action_plans is not None and not filtered_action_plans.empty:
+                all_sheets["Action_Plans"] = filtered_action_plans
 
             xlsx_path = write_excel_workbook(base, all_sheets, {
                 'action_plans': filtered_action_plans,

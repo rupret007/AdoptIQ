@@ -911,32 +911,106 @@ def count_customers_with_barriers(ab_df: Optional[pd.DataFrame]) -> int:
     return int(keys.nunique())
 
 
-def count_open_action_plans(ab_df: Optional[pd.DataFrame]) -> int:
-    """Round 62 / B: deterministic action-plan count derived from the
-    ``AB_Detail_All`` sheet's ``Action Plan Title`` column (non-empty
-    rows are open action plans).
+_AP_CLOSED_STATUSES = frozenset({
+    # Round 64 / Phase 2 (B2): canonical "closed" set used to derive the
+    # open count from a dedicated Action_Plans frame. All comparisons are
+    # case-insensitive and the candidate's whitespace is collapsed before
+    # membership check (so "Completed -  Successful" with double-space
+    # also matches). Values mined from the CSConsole STATUS_C field
+    # (R57 audit notes; see report_source_injector.py:469 for the LLM
+    # status-breakdown reference).
+    "completed - successful",
+    "completed - unsuccessful",
+    "closed - cancelled",
+    "closed - canceled",
+    "closed",
+})
 
-    Returns 0 when the AB frame is empty, ``None``, or missing every
-    candidate column.  Mirrors the LLM phrasing ``"there are X Action
-    Plans"`` so the comprehensive XLSX ``Summary`` sheet and the report
-    narrative carry the same value regardless of LLM wording variation
-    (the R58 soak observed the LLM emit ``"0 Action Plans"`` while the
-    canonical KPI extractor missed it because the comprehensive
-    scenario carries no dedicated ``action_plans`` table cell).
+_AP_STATUS_COLUMN_CANDIDATES = (
+    "STATUS_C",
+    "AP_STATUS_C",
+    "Status",
+    "STATUS",
+    "status",
+    "case_status_norm",
+    "status_norm",
+)
 
-    The check tolerates the four naming conventions seen in the wild:
-    ``Action Plan Title`` (CSConsole export header),
-    ``action_plan_title`` (snake_case internal), ``AP_TITLE_C`` (raw
-    Salesforce custom field), ``ACTION_PLAN_TITLE`` (Snowflake
-    upper-case variant).  Whitespace-only cells are NOT counted.
 
-    This helper is intentionally specific to the AB frame because the
-    leader scenario has its OWN dedicated ``Action_Plans`` sheet (see
-    ``leader_report_components``); this counter exists for the
-    comprehensive / compact / renewal flows whose only structured AP
-    surface is embedded inside ``AB_Detail_All``.
+def _normalize_ap_status_for_open_check(value: Any) -> str:
+    """Lower + whitespace-collapse a single status cell for membership check."""
+    if value is None:
+        return ""
+    try:
+        text = str(value).strip().lower()
+    except Exception:  # noqa: BLE001
+        return ""
+    if not text:
+        return ""
+    # Collapse internal whitespace so "completed -  successful" -> "completed - successful".
+    return " ".join(text.split())
+
+
+def count_open_action_plans(
+    ab_df: Optional[pd.DataFrame],
+    ap_df: Optional[pd.DataFrame] = None,
+) -> int:
+    """Deterministic count of currently-open action plans.
+
+    Round 64 / Phase 2 (B2) extends the Round 62 / B helper with an
+    optional ``ap_df`` parameter so the comprehensive XLSX flow (which
+    now ships a dedicated ``Action_Plans`` sheet -- mirroring the
+    Compact and Leader flows -- instead of leaning on the empty
+    ``AB_Detail_All.Action Plan Title`` column) can derive the count
+    from real action-plan rows.
+
+    Resolution order:
+
+    1. If ``ap_df`` is provided AND non-empty AND has a recognizable
+       status column (``STATUS_C`` / ``AP_STATUS_C`` / ``Status`` /
+       ``STATUS`` / ``status`` / ``case_status_norm`` / ``status_norm``),
+       count rows whose normalized status is NOT in the closed set
+       (``Completed - Successful``, ``Completed - Unsuccessful``,
+       ``Closed - Cancelled``, ``Closed``). The check is
+       case-insensitive and whitespace-collapsed so cosmetic variants
+       (``"completed -  successful"`` etc.) still match.
+    2. If ``ap_df`` is provided but has NO recognizable status column,
+       count all non-null rows (treat them all as "currently
+       represented"). This matches Compact's earlier behavior when the
+       Snowflake projection skipped STATUS_C.
+    3. If ``ap_df`` is None or empty: fall back to the Round 62 / B
+       AB_Detail_All path (count non-empty ``Action Plan Title``
+       cells). Preserves R62/B back-compat for the renewal scenario
+       and for any older workbook that pre-dates the dedicated sheet.
+
+    Returns 0 in every fully-empty / fully-missing branch.
     """
 
+    # Round 64 / Phase 2 (B2) -- dedicated Action_Plans sheet path.
+    if ap_df is not None and not _is_empty(ap_df):
+        status_col = next(
+            (c for c in _AP_STATUS_COLUMN_CANDIDATES if c in ap_df.columns),
+            None,
+        )
+        if status_col is None:
+            # No recognizable status column: every row counts as
+            # "currently represented" (we cannot reason about open vs
+            # closed). Same fallback as Compact's pre-Round-30 behavior.
+            try:
+                return int(len(ap_df))
+            except Exception:  # noqa: BLE001
+                return 0
+        try:
+            series = ap_df[status_col].apply(_normalize_ap_status_for_open_check)
+        except Exception:  # noqa: BLE001 - defensive against weird mixed dtypes
+            return 0
+        # An empty/blank status is treated as OPEN (the safer half: an
+        # action plan with no status is more likely an unfinished /
+        # in-flight item than an explicitly closed one).
+        is_closed = series.isin(_AP_CLOSED_STATUSES)
+        return int((~is_closed).sum())
+
+    # Round 62 / B back-compat path -- AB_Detail_All embedded title column.
     if _is_empty(ab_df):
         return 0
     candidates = ("Action Plan Title", "action_plan_title", "AP_TITLE_C", "ACTION_PLAN_TITLE")

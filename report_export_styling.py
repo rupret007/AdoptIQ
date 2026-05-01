@@ -753,6 +753,19 @@ def build_summary_rows(
     ext_bugs = sheets.get("External_Bugs")
     ext_incidents = sheets.get("External_Incidents")
     cs_pulse = csconsole_data.get("customer_pulse") if csconsole_data else None
+    # Round 64 / Phase 2 (B2): the comprehensive XLSX now ships a
+    # dedicated ``Action_Plans`` sheet (mirroring Compact / Leader),
+    # so the Summary's ``Action plans (open)`` row can derive its count
+    # from real action-plan rows + status field rather than the empty
+    # ``AB_Detail_All.Action Plan Title`` column. Falls back to the
+    # ``CSConsole_Action_Plans`` key (the writer's csconsole-side
+    # naming) and finally to the ``csconsole_data['action_plans']``
+    # dict shape so older callers still resolve.
+    ap_df = sheets.get("Action_Plans")
+    if ap_df is None:
+        ap_df = sheets.get("CSConsole_Action_Plans")
+    if ap_df is None and csconsole_data:
+        ap_df = csconsole_data.get("action_plans")
 
     customers: Any = None
     total_barriers: Any = None
@@ -814,7 +827,17 @@ def build_summary_rows(
         # the LLM narrative (R58 soak event: LLM emitted "0 Action
         # Plans" but the canonical KPI extractor missed it because no
         # XLSX cell carried the value).
-        open_action_plans = _safe_canonical_call(cm.count_open_action_plans, ab_df)
+        #
+        # Round 64 / Phase 2 (B2): now also threads the dedicated
+        # ``Action_Plans`` sheet (when present) through the helper so
+        # the comprehensive flow's structurally-always-zero
+        # ``AB_Detail_All.Action Plan Title`` column is no longer the
+        # only signal. The R62/B AB-fallback path remains for renewal
+        # and for any older workbook that pre-dates the dedicated
+        # sheet.
+        open_action_plans = _safe_canonical_call(
+            cm.count_open_action_plans, ab_df, ap_df
+        )
     except Exception as err:  # pragma: no cover - defensive only
         logger.debug("Round 15 summary canonical import failed: %s", err)
 
