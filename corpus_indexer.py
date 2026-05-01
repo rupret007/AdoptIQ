@@ -36,6 +36,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
+from _logging_helpers import exit_log_streams_open as _shared_exit_log_streams_open
+from _logging_helpers import safe_log_info as _shared_safe_log_info
 from knowledge_schema import (
     SCHEMA_VERSION,
     all_table_names,
@@ -47,48 +49,35 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Round 62 / A1: closed-stream defense for logger.info during pytest
-# teardown.  Same pattern as ``corpus_bootstrap._safe_log_info`` --
-# duplicated here (instead of imported) to avoid circular imports
-# (``corpus_bootstrap`` depends on this module).  See the
-# ``_exit_log_streams_open`` docstring in ``corpus_bootstrap.py`` for
-# the full explanation of why ``Handler.handleError()`` cannot be
-# defeated by a try/except wrapped around ``logger.info()`` itself.
+# Round 63 / Tier A: closed-stream defense for logger.info during
+# pytest teardown.  R62 / A1 originally duplicated ``corpus_bootstrap``'s
+# inline implementation here to break the circular-import edge
+# (``corpus_bootstrap`` depends on this module).  R63 promotes the
+# implementation to ``_logging_helpers`` (which has no AdoptIQ-specific
+# imports, so neither side of the cycle is reintroduced) and keeps
+# wrapper names of the same shape so existing R62 tests + call sites
+# remain stable.  See ``_logging_helpers.safe_log_info`` for the full
+# explanation of why ``Handler.handleError()`` cannot be defeated by
+# a try/except wrap on ``logger.info`` alone.
 # ---------------------------------------------------------------------------
 
 
 def _exit_log_streams_open() -> bool:
-    """True when every reachable StreamHandler from this module's
-    logger has an open underlying stream.  Returns False when ANY
-    reachable handler is closed (signal to skip the log emission)."""
-    target_logger = logger
-    seen: set[int] = set()
-    while target_logger is not None and id(target_logger) not in seen:
-        seen.add(id(target_logger))
-        for h in getattr(target_logger, "handlers", []):
-            stream = getattr(h, "stream", None)
-            if stream is None:
-                continue
-            try:
-                if getattr(stream, "closed", False):
-                    return False
-            except Exception:  # noqa: BLE001 - defensive
-                return False
-        if not getattr(target_logger, "propagate", True):
-            break
-        target_logger = getattr(target_logger, "parent", None)
-    return True
+    """Round 63: thin wrapper around
+    ``_logging_helpers.exit_log_streams_open``.  Wrapper name preserved
+    for back-compat with R62 tests and call sites in this module."""
+    return _shared_exit_log_streams_open(logger)
 
 
 def _safe_log_info(msg: str, *args: object) -> None:
-    """Round 62 / A1: gate logger.info on ``_exit_log_streams_open()``
-    so any pytest-teardown closed-stream race is silenced module-wide.
-    Real runs (open streams) emit normally."""
-    if _exit_log_streams_open():
-        try:
-            logger.info(msg, *args)
-        except (ValueError, OSError):
-            pass
+    """Round 63: thin wrapper around ``_logging_helpers.safe_log_info``.
+
+    Wrapper name preserved so the 5 ``_safe_log_info`` call sites in
+    this module (introduced by R62 / A1) keep delegating through a
+    stable name.  Pinned by
+    ``tests/test_round63_corpus_indexer_logger_parity.py``.
+    """
+    _shared_safe_log_info(logger, msg, *args)
 
 
 # ---------------------------------------------------------------------------

@@ -7781,3 +7781,57 @@ Smoke target: `OUTBOX/AdoptIQ-v1.0.4-build35.dmg` (402 MB, built at `2026-04-30T
 3. **The R62/B `Action plans (open)` row has not yet been observed in a live packaged-app generated comprehensive XLSX** -- the smoke matrix only exercises the boot + Quit paths (no actual report was generated against Snowflake).  A user-driven manual acceptance (post-DMG install) generating the comprehensive scenario is the next confirmation step; the unit-test layer pins the source-shape and the end-to-end harness verification was done against the Build 34 comprehensive XLSX (helper said 0, matching LLM phrasing).  Tracked as the canonical R62 manual acceptance hot spot.
 
 **Trailer:** Made-with: Cursor
+
+
+## Round 63 — handoff 2026-04-30
+
+**What changed (plain English):**
+- Closed the R62 hot spot #1 (helper duplication between `corpus_bootstrap.py` and `corpus_indexer.py`) by promoting the closed-stream defense implementation to a new top-level `_logging_helpers.py` module. Both consumers now keep their original `_safe_log_info` / `_exit_log_streams_open` names as thin wrappers that delegate via `_shared_safe_log_info(logger, ...)` / `_shared_exit_log_streams_open(logger)`. This preserves back-compat with all 14 R61 + R62 tests AND unifies the subtle drift between the two pre-R63 copies (`corpus_bootstrap` defaulted `getattr(target_logger, "propagate", False)`; `corpus_indexer` defaulted to `True`). R63 unifies on `True` because that matches `logging.Logger.__init__`'s actual default.
+- Added the parity regression-count guard for `corpus_indexer.py` that the R62 acceptance section flagged as a known gap. New file `tests/test_round63_corpus_indexer_logger_parity.py` mirrors the shape of `tests/test_round62_corpus_logger_module_wide.py::test_no_bare_logger_info_call_outside_helper_body` but applied to the indexer module: zero bare `logger.info(` calls outside the wrapper body, floor of 5 `_safe_log_info(...)` call sites preserved.
+- Closed the long-carried CI-alignment deferral (R18-NEXT-004 → R20-NEXT-005 → R22-NEXT-CI → R62 deferral) by replacing `pytest -q` with `make verify` in `.github/workflows/build.yml::quality-checks`. Added `pip install ruff bandit pip-audit` to the workflow's install step (the dev-only quality tools are deliberately NOT in `requirements.txt` per the local-only convention). The `build-mac` and `build-windows` jobs still gate on `needs: quality-checks` so a failing lint / security / audit check now blocks the full build pipeline. Updated the existing `tests/test_ci_quality_gates.py::test_build_workflow_runs_pytest_gate` test to pin the new contract; renamed to `test_build_workflow_runs_full_verify_gate`.
+
+**Files touched:**
+- `_logging_helpers.py` — NEW top-level utility module. Two pure functions (`safe_log_info(target_logger, msg, *args)` and `exit_log_streams_open(target_logger)`). No AdoptIQ-specific imports, so neither side of the original `corpus_bootstrap → corpus_indexer` cycle is reintroduced.
+- `corpus_bootstrap.py` — replaced lines 872-915 (the inline `_safe_log_info` + `_exit_log_streams_open` bodies) with thin wrappers that delegate via `_shared_safe_log_info(logger, ...)` / `_shared_exit_log_streams_open(logger)`. Added the two import lines for the shared helpers immediately above `from config import Config`.
+- `corpus_indexer.py` — same shape as `corpus_bootstrap.py`. Replaced lines 60-91 with thin wrappers, added the same two imports above `from knowledge_schema import (...)`.
+- `tests/test_round63_logging_helpers.py` — NEW. 6 tests pinning the shared module directly: open-stream emit, closed-stream skipped (no stderr traceback), `exit_log_streams_open` returns True/False for open/closed handlers, propagation-chain walk, and the canonical `propagate=True` default choice.
+- `tests/test_round63_corpus_indexer_logger_parity.py` — NEW. 2 tests mirroring R62's regression-count guard but applied to `corpus_indexer.py`.
+- `.github/workflows/build.yml` — `quality-checks` job now installs `ruff bandit pip-audit` (in addition to `requirements.txt`) and runs `make verify` instead of `pytest -q`. The step name was updated to `Run quality gate (lint + security + audit + tests)` to reflect the broader contract.
+- `tests/test_ci_quality_gates.py` — renamed `test_build_workflow_runs_pytest_gate` to `test_build_workflow_runs_full_verify_gate`; pin the new `run: make verify` contract AND the `pip install ruff bandit pip-audit` install line.
+
+**SSoT modules touched:** `structured_logging` (indirectly — both `corpus_bootstrap` and `corpus_indexer` use the module-level `logger`), `_logging_helpers` (new SSoT for the closed-stream defense pattern). No changes to `canonical_metrics`, `risk_scoring`, `report_export_schema`, `report_export_styling`, `report_word_styling`, `ai_narrative_validator`, `data_contracts`, `data_normalization`, `config`, `report_utils`, or `snowflake_table_policy`.
+
+**Tests added/updated:**
+- `tests/test_round63_logging_helpers.py::test_safe_log_info_emits_when_stream_open` — open-stream emits exactly once.
+- `tests/test_round63_logging_helpers.py::test_safe_log_info_skipped_when_stream_closed_no_stderr_traceback` — closed-stream silences emission entirely (no `Logging error` / `I/O operation on closed file` / `ValueError` on stderr).
+- `tests/test_round63_logging_helpers.py::test_exit_log_streams_open_returns_true_for_open_stream` — direct contract pin.
+- `tests/test_round63_logging_helpers.py::test_exit_log_streams_open_returns_false_for_closed_stream` — direct contract pin.
+- `tests/test_round63_logging_helpers.py::test_exit_log_streams_open_walks_propagation_chain` — closed parent handler via propagation also blocks emission.
+- `tests/test_round63_logging_helpers.py::test_propagate_default_is_true_matching_logging_module` — pins the canonical-default choice (R62 had drift between bootstrap=`False` and indexer=`True`; R63 unifies on `True`).
+- `tests/test_round63_corpus_indexer_logger_parity.py::test_no_bare_logger_info_call_outside_helper_body_in_corpus_indexer` — REGRESSION GUARD: parallel to R62's `corpus_bootstrap` test.
+- `tests/test_round63_corpus_indexer_logger_parity.py::test_safe_log_info_call_site_count_matches_expected_floor_in_corpus_indexer` — REGRESSION FLOOR: 5+ `_safe_log_info(` call sites in indexer.
+- `tests/test_ci_quality_gates.py::test_build_workflow_runs_full_verify_gate` — UPDATED (renamed from `test_build_workflow_runs_pytest_gate`): pins the new `run: make verify` contract AND the dev-tool install line.
+
+**Verify status:**
+- `make verify` — **pass** (lint + security + audit + tests).
+- pytest: **3663 passed / 2 skipped** (R62 floor 3655 → R63 floor 3663; net +8 = 6 R63 helper tests + 2 R63 indexer parity tests; one existing CI-gate test was UPDATED in lockstep with the workflow change rather than added).
+- ruff: 0 findings.
+- bandit HIGH/MED: 0.
+- pip-audit: clean.
+
+**Hot spots Claude should audit first:**
+1. **`_logging_helpers.py` is now a single point of failure for the closed-stream defense.** A bug in `safe_log_info` or `exit_log_streams_open` immediately affects both `corpus_bootstrap` and `corpus_indexer` (whereas pre-R63 the duplication meant a bug in one didn't reach the other). Mitigated by 6 new direct-against-shared-module tests AND the 14 existing R61 + R62 wrapper tests (which exercise the wrappers end-to-end). If a future round changes the helper's contract, ALL three test files must update in lockstep.
+2. **CI build time will increase by ~2-3 min** (the time `make verify` takes locally). Acceptable for the first-class quality signal it provides on every push, but if CI throughput becomes a concern, the lint / security / audit could be split into a separate job that runs in parallel with `make test`.
+3. **The `propagate=True` canonical-default choice is now pinned by `test_propagate_default_is_true_matching_logging_module`.** A future refactor that swaps the default back to `False` will trip both this test AND change the chain-walk semantics for any custom Logger subclass that omits the attribute (extremely unlikely in practice — `logging.Logger.__init__` always sets it). The pin exists to prevent silent regression.
+
+**Known deferrals (intentional non-fixes):**
+- **R62 manual acceptance for the `Action plans (open)` row carries forward** — Build 36 is source-only with respect to that row (the R62/B helper + summary-row wiring + golden-fixture pin all ship unchanged). The user-side validation needs to happen post-DMG install: install Build 36, run a Comprehensive analysis, open the resulting XLSX, confirm the new row appears in the Summary sheet with the correct value.
+- **Renewal UTC sliding-window drift.** Intrinsic to the analytic; not a code defect.
+- **Round 60 UX deferrals.** No `cancel_analysis()` on `force=1` POST, no `window.close()` after 202 ack -- both are intentional UX choices, not bugs.
+- **R61/D regex hardening edge cases.** Theoretical -- no real KPI portfolio-wide is at risk.
+- **R18-NEXT-001 / R20-NEXT-002 long-tail in-locals triage** (currently ~40 sites in `app_simple.py`, last counted in the R20 / R23 chunks). Multi-round work; safe to chunk.
+- **R18-NEXT-002 / R20-NEXT-003 broad-except observability sub-audit** (currently 293 `except Exception:`-without-`as e:` sites in `app_simple.py`). Mass change risks breaking the rugged-pipeline contract; needs targeted tests per site.
+- **R18-NEXT-003 / R20-NEXT-006 dependency hygiene** (76 outdated packages per the R18 baseline; pip-audit currently clean — no CVEs). Conservative bumps in dedicated round.
+- **R18-NEXT-005 doc/code parity expansion** (CSP defaults, port overrides, corpus opt-in default). Reusable pattern from `tests/test_round18_doc_code_parity.py`; one per invariant.
+
+**Trailer:** Made-with: Cursor

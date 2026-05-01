@@ -35,6 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from _logging_helpers import exit_log_streams_open as _shared_exit_log_streams_open
+from _logging_helpers import safe_log_info as _shared_safe_log_info
 from config import Config
 from corpus_crypto import (
     CorpusCryptoError,
@@ -870,49 +872,27 @@ def _daily_refresh_loop() -> None:
 
 
 def _safe_log_info(msg: str, *args: object) -> None:
-    """Round 62 / A1: gate ``logger.info`` on ``_exit_log_streams_open()``
-    so any pytest-teardown closed-stream race is silenced module-wide.
+    """Round 63: thin wrapper around ``_logging_helpers.safe_log_info``.
 
-    Real runs (open streams) emit normally.  R61 / Phase 2.E shipped
-    the same pattern for the daemon's start + exit lifecycle log
-    lines; R62 / A1 broadens the same gate to every other ``logger.info``
-    call site in this module so a test that triggers an index pass
-    (``_run_index_pass``, ``run_bootstrap``, etc.) during pytest
-    teardown cannot leak the ``"I/O operation on closed file"``
-    traceback either.  Pinned by
-    ``tests/test_round62_corpus_logger_module_wide.py``.
+    The implementation moved out of this module in R63 to deduplicate
+    the helper that ``corpus_indexer.py`` had been carrying as a
+    near-byte-equivalent copy (R62 / A1 had to duplicate it because
+    ``corpus_bootstrap`` already imports from ``corpus_indexer`` and
+    a direct import in the other direction would create a cycle).
+    The wrapper name is preserved so the R61 + R62 tests that
+    reference ``corpus_bootstrap._safe_log_info`` keep passing
+    unchanged.  See ``_logging_helpers.safe_log_info`` for the full
+    explanation of why a try/except wrap alone is insufficient.
+    Pinned by ``tests/test_round63_logging_helpers.py``.
     """
-    if _exit_log_streams_open():
-        try:
-            logger.info(msg, *args)
-        except (ValueError, OSError):
-            pass
+    _shared_safe_log_info(logger, msg, *args)
 
 
 def _exit_log_streams_open() -> bool:
-    """Round 61 / Phase 2.E: True when every StreamHandler reachable
-    from this module's logger has an open underlying stream.  Returns
-    False when ANY reachable handler is closed (signal to skip the
-    exit log so we do not trigger ``Handler.handleError()`` -> stderr
-    traceback).  Pinned by ``tests/test_round61_corpus_shutdown_logger_quiet.py``.
-    """
-    target_logger = logger
-    seen: set[int] = set()
-    while target_logger is not None and id(target_logger) not in seen:
-        seen.add(id(target_logger))
-        for h in getattr(target_logger, "handlers", []):
-            stream = getattr(h, "stream", None)
-            if stream is None:
-                continue
-            try:
-                if getattr(stream, "closed", False):
-                    return False
-            except Exception:  # noqa: BLE001 - defensive
-                return False
-        if not getattr(target_logger, "propagate", False):
-            break
-        target_logger = getattr(target_logger, "parent", None)
-    return True
+    """Round 63: thin wrapper around
+    ``_logging_helpers.exit_log_streams_open``.  Wrapper name preserved
+    for back-compat with R61 + R62 tests."""
+    return _shared_exit_log_streams_open(logger)
 
 
 def start_daily_refresh_worker() -> bool:

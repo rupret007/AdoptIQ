@@ -36,9 +36,14 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+          # Round 63 / Tier A: dev-only quality tools are NOT in
+          # requirements.txt (per the local-only convention). Install
+          # them here so `make verify` runs lint + security + audit
+          # in CI the same way it does locally.
+          pip install ruff bandit pip-audit
 
-      - name: Run test suite
-        run: pytest -q
+      - name: Run quality gate (lint + security + audit + tests)
+        run: make verify
 
   build-mac:
     name: Build macOS DMG
