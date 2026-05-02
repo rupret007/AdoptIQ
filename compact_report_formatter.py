@@ -2614,6 +2614,61 @@ class CompactReportFormatter:
             raise
 
 
+def _r66_b8_classify_extra_frames(
+    extra_frames: Optional[List[pd.DataFrame]],
+) -> tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+    """Round 66 / Pass 2 (B8): split ``extra_frames`` into pulse / AP / subs.
+
+    Pre-R66 the Compact + Excel paths passed pulse / action plans /
+    subscriptions to ``calculate_renewal_risk_scores`` only via the
+    ``extra_frames`` list (used for customer-universe expansion in
+    ``cm.list_customers``); the actual per-customer scoring then ran
+    against ``pd.DataFrame()`` for those three components, which made
+    pulse / AP / incidents / contract score as 0.0 (NOT excluded)
+    inside ``compute_customer_risk_profile``. The result was a
+    Compact composite ~30% lower than Renewal for the same customer
+    (Build 38 acceptance: Renewal 73 vs Compact 47-ish).
+
+    This classifier inspects each frame's columns and returns
+    ``(pulse_df, action_plans_df, subs_df)`` so the caller can slice
+    per-customer rows and feed them to ``compute_customer_risk_profile``
+    directly. The classification is conservative: a frame is only
+    bound when its column set carries the characteristic marker for
+    that source. Anything ambiguous is left as ``None`` so the
+    weighted-mean composite stays consistent with the pre-R66
+    behaviour for that one component.
+    """
+    pulse_df: Optional[pd.DataFrame] = None
+    action_plans_df: Optional[pd.DataFrame] = None
+    subs_df: Optional[pd.DataFrame] = None
+    if not extra_frames:
+        return (None, None, None)
+    for frame in extra_frames:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            continue
+        cols = set(frame.columns)
+        # Pulse: characteristic marker is the rating/score columns.
+        # CSConsole emits ``PULSE_RATING__C`` and ``SCORE__C``;
+        # legacy fixtures use ``PULSE_RATING``.
+        if pulse_df is None and ({"PULSE_RATING__C", "PULSE_RATING", "SCORE__C", "PULSE_SCORE"} & cols):
+            pulse_df = frame
+            continue
+        # Subscriptions: characteristic marker is the renewal-risk
+        # category or subscription-id column.
+        if subs_df is None and ({"RENEWAL_RISK_CATEGORY", "SUBSCRIPTION_ID", "SUBSCRIPTION_ID__C", "RENEWAL_DATE"} & cols):
+            subs_df = frame
+            continue
+        # Action plans: characteristic marker is a status column AND
+        # the absence of pulse / subs / AB markers (AB has SEVERITY_C
+        # or AB_STATUS_C).
+        ap_marker = bool({"STATUS_C", "STATUS__C", "Status"} & cols)
+        ap_disqualifier = bool({"PULSE_RATING__C", "SCORE__C", "RENEWAL_RISK_CATEGORY", "SEVERITY_C", "AB_STATUS_C"} & cols)
+        if action_plans_df is None and ap_marker and not ap_disqualifier:
+            action_plans_df = frame
+            continue
+    return (pulse_df, action_plans_df, subs_df)
+
+
 def calculate_renewal_risk_scores(
     ab_data: pd.DataFrame,
     csone_data: pd.DataFrame,
@@ -2630,12 +2685,26 @@ def calculate_renewal_risk_scores(
     row.  Previously the universe was AB ∪ CSOne only, which silently
     dropped customers visible in the headline ``total_customers`` from
     the renewal table.
+
+    Round 66 / Pass 2 (B8): the same ``extra_frames`` list is now also
+    used to thread per-customer pulse / action_plan / subscription
+    slices into ``compute_customer_risk_profile``. Pre-R66 the
+    Compact and Excel paths passed empty DataFrames for those three
+    components even when the data was available, dampening the
+    Compact composite ~30% relative to Renewal for the same customer
+    (Build 38 acceptance gap). The classification is opt-in via
+    column markers (see ``_r66_b8_classify_extra_frames``); a frame
+    that doesn't carry the characteristic markers is left out so
+    the composite math stays stable for legacy callers.
     """
     try:
         ab_data = ab_data if ab_data is not None else pd.DataFrame()
         csone_data = csone_data if csone_data is not None else pd.DataFrame()
         csone_norm = add_case_lifecycle_fields(csone_data)
         risk_data = {}
+        # Round 66 / Pass 2 (B8): classify extra_frames once up-front
+        # so the per-customer loop below can do simple slicing.
+        _r66_b8_pulse, _r66_b8_aps, _r66_b8_subs = _r66_b8_classify_extra_frames(extra_frames)
 
         # Use the canonical customer-list helper so the renewal table's
         # universe matches the headline ``total_customers``.
@@ -2669,13 +2738,33 @@ def calculate_renewal_risk_scores(
                 if not csone_norm.empty and 'customer_name' in csone_norm.columns
                 else pd.DataFrame()
             )
+            # Round 66 / Pass 2 (B8): per-customer slicing for pulse /
+            # AP / subs from the classified extra_frames. Mirrors the
+            # comprehensive flow's ``_slice_customer`` helper at
+            # app_simple.py L14471.
+            def _r66_b8_slice(df: Optional[pd.DataFrame], cust: str) -> pd.DataFrame:
+                if df is None or df.empty:
+                    return pd.DataFrame()
+                for col in ("customer_name", "BU_NAME", "CUSTOMER_NAME", "RELATED_CUSTOMER__C"):
+                    if col in df.columns:
+                        try:
+                            mask = df[col].fillna("").astype(str).apply(normalize_customer_name) == cust
+                            if mask.any():
+                                return df[mask].copy()
+                        except Exception:
+                            continue
+                return pd.DataFrame()
+
+            _customer_pulse = _r66_b8_slice(_r66_b8_pulse, customer)
+            _customer_aps = _r66_b8_slice(_r66_b8_aps, customer)
+            _customer_subs = _r66_b8_slice(_r66_b8_subs, customer)
             profile = compute_customer_risk_profile(
                 customer_name=customer,
                 customer_ab=customer_ab,
                 customer_csone=customer_csone,
-                customer_pulse=pd.DataFrame(),
-                customer_action_plans=pd.DataFrame(),
-                customer_subs=pd.DataFrame(),
+                customer_pulse=_customer_pulse,
+                customer_action_plans=_customer_aps,
+                customer_subs=_customer_subs,
                 ext_incidents=None,
                 # Round 3 / Phase 4.2: thread the report's analysis
                 # horizon down to the support-case "recent" window

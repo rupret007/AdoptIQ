@@ -2860,8 +2860,36 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         if rows:
             logger.info(f"[[RENEWAL]] Snowflake SUPPORT_CASES returned {len(rows)} support cases")
             return _normalize_cases_df(pd.DataFrame(rows, columns=cols))
-        logger.info(f"[[RENEWAL]] Snowflake SUPPORT_CASES returned 0 rows for scope")
-        return _normalize_cases_df(pd.DataFrame())
+        # Round 66 / Pass 2 (B10): when SUPPORT_CASES Try 1 returns 0
+        # rows for the requested manager+technology scope, we are
+        # currently returning an empty DataFrame WITHOUT trying the
+        # ACCOUNT_ID_C / dsm_assignment_data fallbacks (those only
+        # fire on exception, not on empty-result). Pre-R66 the only
+        # signal was a ``logger.info`` line that the operator could
+        # easily miss in a busy log. Promote to ``warning`` AND
+        # attach a structured ``fetch_error_kind = 'empty_for_scope'``
+        # marker on the returned DataFrame's ``attrs`` so the renewal
+        # narrative gate, the ``partial_data_warnings`` surface in
+        # ``analysis_status``, and the Ask AI grounding briefing can
+        # all see "Snowflake returned 0 cases for the requested scope"
+        # as a first-class signal rather than silently treating it as
+        # "0 cases happened in this window".
+        logger.warning(
+            "[[RENEWAL]] Snowflake SUPPORT_CASES returned 0 rows for scope "
+            "(accounts=%d, days=%d) -- confirm SUPPORT_CASES is populated for "
+            "this manager+technology window before treating zero as real data.",
+            len(account_ids_clean),
+            days,
+        )
+        _empty = _normalize_cases_df(pd.DataFrame())
+        _empty.attrs['fetch_error_kind'] = 'empty_for_scope'
+        _empty.attrs['fetch_error'] = (
+            f"SUPPORT_CASES returned 0 rows for scope "
+            f"(accounts={len(account_ids_clean)}, days={days})"
+        )
+        _empty.attrs['scope_account_count'] = len(account_ids_clean)
+        _empty.attrs['scope_window_days'] = int(days)
+        return _empty
     except Exception as e1:
         if cur:
             try:
@@ -8482,10 +8510,46 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
             _r25d_generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         except Exception:
             _r25d_generated_at = ""
-        report_info = pd.DataFrame([
+        # Round 66 / Pass 2 (B5): the Comprehensive XLSX (this writer's
+        # primary consumer) was missing the ``Sheet_Title:<sheet>``
+        # parity rows that the Compact / Renewal / Leader writers
+        # already emit (R65 / R-1). Without them, a downstream
+        # ``pd.read_excel`` consumer of the Comprehensive workbook has
+        # no in-band way to retrieve the descriptive title for each
+        # data sheet (the data sheets themselves carry only column
+        # headers in row 0, no merged title row above). Build 38
+        # acceptance smoke surfaced this as a parity gap. Pre-stamp
+        # one row per data sheet so the consumer can recover the
+        # title from ``Item == 'Sheet_Title:<sheet>'``. Defensive: a
+        # malformed sheet name cannot break Report_Info because
+        # ``str()`` is wrapped.
+        _r66_b5_report_info_rows: list[list[str]] = [
             ["Export type", "Standard"],
             ["Generated at (UTC)", _r25d_generated_at],
-        ], columns=["Item", "Value"])
+            ["Manager", str(manager) if manager is not None else ""],
+            ["Technology", str(technology) if technology is not None else ""],
+            ["Days", str(days) if days is not None else ""],
+        ]
+        try:
+            _r66_b5_data_sheet_names: list[str] = []
+            for _sheet_name in (sheets or {}).keys():
+                try:
+                    _safe_name = str(_sheet_name) if _sheet_name is not None else ""
+                except Exception:
+                    _safe_name = ""
+                if _safe_name and _safe_name not in {"Summary", "Report_Info"}:
+                    _r66_b5_data_sheet_names.append(_safe_name)
+            for _safe_name in _r66_b5_data_sheet_names:
+                # Title format mirrors the R65/R-1 Compact pattern:
+                # ``"<Sheet Name> - <Manager> Portfolio Analysis"``.
+                _safe_manager = str(manager) if manager is not None else "Portfolio Manager"
+                _r66_b5_report_info_rows.append([
+                    f"Sheet_Title:{_safe_name}",
+                    f"{_safe_name.replace('_', ' ')} - {_safe_manager} Portfolio Analysis",
+                ])
+        except Exception as _r66_b5_err:
+            logger.debug("Round 66 / B5: Sheet_Title pre-stamp skipped: %s", _r66_b5_err)
+        report_info = pd.DataFrame(_r66_b5_report_info_rows, columns=["Item", "Value"])
         report_info.to_excel(xw, sheet_name="Report_Info", index=False)
         _used_sheet_names = {"Summary", "Report_Info"}
 

@@ -75,6 +75,19 @@ KPI_ALIASES = {
         # paragraph extractor canonicalizes nothing, leaving the gate
         # to rely on the table heuristic alone.
         "total tac cases",
+        # Round 66 / Pass 2 (B7): renewal Word emits the parenthesized
+        # form ``Total Support Cases (90 days): 293`` (see
+        # _create_simple_renewal_report). The KPI label normalizer
+        # collapses parens to spaces, producing ``total support cases
+        # 90 days`` (with a space-separated ``90 days``, not ``90d``).
+        # Without these aliases the renewal Word doc's headline TAC
+        # paragraph fell through ``_paragraph_match_is_canonical_kpi``
+        # and never received an inline citation -- a parity gap vs
+        # Compact, which uses the colon-suffix-free ``Total Support
+        # Cases: 293`` form already covered above.
+        "total support cases 90 days",
+        "support cases 90 days",
+        "support cases last days",
     },
     # Round 52 / partial-data-warning Phase 5: ``escalated support cases``
     # is a SUBSET of total ``support_cases`` (specifically, P1/P2 + BEMS
@@ -159,6 +172,13 @@ KPI_ALIASES = {
         "risk category",
         "renewal risk category",
         "overall risk category",
+        # Round 66 / Pass 2 (B7): renewal subscription summary line
+        # emits ``Renewal Risk Level: HIGH (7.3/10)`` (see
+        # app_simple.py L21125). Without this alias the renewal
+        # narrative did not surface as a canonical KPI claim and
+        # was missing the inline ``[Source: ...]`` chip.
+        "renewal risk level",
+        "risk level",
     },
     "high_risk_customers": {
         "high risk customers",
@@ -188,6 +208,29 @@ KPI_ALIASES = {
         # "Total Customer Pulse records: 87" (mixed case).
         "total customer pulse",
         "total customer pulse records",
+    },
+    # Round 66 / Pass 2 (B7): canonicals introduced to enrich the
+    # renewal Word document's inline citation density. Pre-R66 the
+    # renewal narrative emitted ``Total Success Priorities: 12`` and
+    # ``Service Incidents (status.webex.com)`` paragraphs that the
+    # canonical-KPI gate did not recognise -- the injector then
+    # silently relied on the narrative-token gate alone, which
+    # filters out 4+ digit values as ``IDs``. The new canonicals
+    # mirror the renewal sections at app_simple.py L11758 (success
+    # priorities) and L11842 (incidents).
+    "success_priorities": {
+        "success priorities",
+        "total success priorities",
+        "num success priorities",
+        "customer success priorities",
+        "total customer success priorities",
+    },
+    "incidents": {
+        "incidents",
+        "service incidents",
+        "total incidents",
+        "high impact incidents",
+        "external incidents",
     },
 }
 

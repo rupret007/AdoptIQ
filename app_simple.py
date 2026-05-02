@@ -15999,6 +15999,83 @@ def run_comprehensive_analysis(analysis_id):
                     ),
                 }])
 
+            # Round 66 / Pass 2 (B6): per-customer ``Risk_Components``
+            # sheet. Pre-R66 the Comprehensive XLSX advertised a
+            # portfolio-level risk band tile but never surfaced the
+            # per-customer component breakdown -- operators reviewing
+            # the workbook had no row-level way to see *why* a given
+            # customer landed in CRITICAL / HIGH / MEDIUM / LOW (i.e.
+            # whether their adoption-barrier score, TAC support score,
+            # pulse score, etc. was the dominant signal). The Renewal
+            # XLSX has carried a single-customer ``Risk_Components``
+            # tab since Round 4; this builds the comprehensive cousin
+            # by iterating ``risk_profiles`` (already keyed on the
+            # full ``all_customers_comprehensive`` universe by line
+            # 14481) and emitting one row per customer with the
+            # individual component scores from
+            # ``compute_customer_risk_profile``. Sort key is
+            # (risk_score_0_100 DESC, customer_name ASC) per the SSoT
+            # determinism rule; an empty profile dict short-circuits
+            # to a single ``Data_Unavailable`` row so consumers see
+            # honest provenance instead of a missing sheet.
+            try:
+                _r66_risk_rows: List[Dict[str, Any]] = []
+                _r66_components_keys = (
+                    ("adoption_barriers", "Adoption_Barriers_Score"),
+                    ("support_cases", "Support_Cases_Score"),
+                    ("customer_pulse", "Customer_Pulse_Score"),
+                    ("action_plans", "Action_Plans_Score"),
+                    ("incidents", "Incidents_Score"),
+                    ("contract", "Contract_Score"),
+                    ("engagement", "Engagement_Score"),
+                )
+                for _r66_cust, _r66_profile in (risk_profiles or {}).items():
+                    if not isinstance(_r66_profile, dict):
+                        continue
+                    _r66_components = _r66_profile.get("components") or {}
+                    _r66_factors = _r66_profile.get("risk_factors") or []
+                    _r66_top_factor = ""
+                    if isinstance(_r66_factors, list) and _r66_factors:
+                        _r66_top_factor = str(_r66_factors[0])[:480]
+                    _r66_row: Dict[str, Any] = {
+                        "Customer_Name": str(_r66_cust),
+                        "Risk_Score_0_100": _r66_profile.get("risk_score_0_100"),
+                        "Risk_Band": _r66_profile.get("risk_band") or "",
+                    }
+                    for _r66_ck, _r66_col in _r66_components_keys:
+                        _r66_comp = _r66_components.get(_r66_ck) if isinstance(_r66_components, dict) else None
+                        if isinstance(_r66_comp, dict):
+                            _r66_row[_r66_col] = _r66_comp.get("score")
+                        else:
+                            _r66_row[_r66_col] = None
+                    _r66_row["Top_Risk_Factor"] = _r66_top_factor
+                    _r66_risk_rows.append(_r66_row)
+                if _r66_risk_rows:
+                    _r66_risk_rows.sort(
+                        key=lambda r: (
+                            -(float(r.get("Risk_Score_0_100") or 0.0)),
+                            str(r.get("Customer_Name") or "").lower(),
+                        )
+                    )
+                    all_sheets["Risk_Components"] = pd.DataFrame(_r66_risk_rows)
+                else:
+                    all_sheets["Risk_Components"] = pd.DataFrame([{
+                        "_adoptiq_provenance_row": True,
+                        "AdoptIQ_Status": "EMPTY",
+                        "AdoptIQ_Source": "risk_scoring.compute_customer_risk_profile",
+                        "AdoptIQ_Message": (
+                            "No customer risk profiles were computed for this scope. "
+                            "Confirm that CSOne / Snowflake returned at least one "
+                            "customer in the analyzed universe."
+                        ),
+                    }])
+            except Exception as _r66_risk_err:  # noqa: BLE001
+                logger.debug(
+                    "[COMPREHENSIVE] Round 66 / B6: per-customer Risk_Components "
+                    "construction failed: %s",
+                    _r66_risk_err,
+                )
+
             xlsx_path = write_excel_workbook(base, all_sheets, {
                 'action_plans': filtered_action_plans,
                 'customer_pulse': filtered_customer_pulse,
@@ -22917,6 +22994,17 @@ def run_leader_report_generation(analysis_id):
             # PSIRT vulnerabilities (from CSOne/Adoption Barriers)
             if psirt_vulns and psirt_vulns.get('total_vulnerabilities', 0) > 0:
                 vuln_rows = []
+                # Round 66 / Pass 2 (B9): per-customer rows MUST drop
+                # NaN / blank / "Unknown" customer keys -- pre-R66 the
+                # writer leaked rows with ``Customer=NaN`` (or empty
+                # string from a malformed ``vulnerability_by_customer``
+                # entry) into the PSIRT_Vulnerabilities XLSX sheet,
+                # which downstream readers misread as "the vuln applies
+                # to an unknown customer". Portfolio-wide CVE / PSIRT
+                # advisories are still emitted below with the explicit
+                # ``Customer = '(Portfolio-wide)'`` label so the
+                # operator can tell "no customer attribution was
+                # established" apart from "the writer dropped a row".
                 for cust, ids in (psirt_vulns.get('vulnerability_by_customer') or {}).items():
                     # Round 5 / Phase 1.13: normalize customer name (see
                     # Software_Defects above).
@@ -22924,12 +23012,29 @@ def run_leader_report_generation(analysis_id):
                         _cust_norm = normalize_customer_name(cust) or cust
                     except Exception:
                         _cust_norm = cust
+                    # Round 66 / B9: skip blank / NaN / Unknown customer keys.
+                    _cust_str = str(_cust_norm or "").strip()
+                    if not _cust_str or _cust_str.lower() in {"nan", "none", "null", "unknown", "n/a"}:
+                        continue
                     for vid in (ids if isinstance(ids, (list, set)) else [ids]):
-                        vuln_rows.append({'Customer': _cust_norm, 'Vulnerability_ID': vid})
+                        # Round 66 / B9: also skip empty vulnerability IDs.
+                        _vid_str = str(vid or "").strip()
+                        if not _vid_str or _vid_str.lower() in {"nan", "none"}:
+                            continue
+                        vuln_rows.append({'Customer': _cust_str, 'Vulnerability_ID': _vid_str})
+                # Portfolio-wide CVE / PSIRT advisories: label clearly
+                # so a downstream reader cannot misread the empty-
+                # Customer rows as "Unknown customer".
                 for vid in (psirt_vulns.get('cve_ids') or set()):
-                    vuln_rows.append({'Customer': '', 'Vulnerability_ID': vid, 'Type': 'CVE'})
+                    _vid_str = str(vid or "").strip()
+                    if not _vid_str or _vid_str.lower() in {"nan", "none"}:
+                        continue
+                    vuln_rows.append({'Customer': '(Portfolio-wide)', 'Vulnerability_ID': _vid_str, 'Type': 'CVE'})
                 for vid in (psirt_vulns.get('psirt_advisories') or set()):
-                    vuln_rows.append({'Customer': '', 'Vulnerability_ID': vid, 'Type': 'PSIRT'})
+                    _vid_str = str(vid or "").strip()
+                    if not _vid_str or _vid_str.lower() in {"nan", "none"}:
+                        continue
+                    vuln_rows.append({'Customer': '(Portfolio-wide)', 'Vulnerability_ID': _vid_str, 'Type': 'PSIRT'})
                 if vuln_rows:
                     sheets['PSIRT_Vulnerabilities'] = pd.DataFrame(vuln_rows)
 
