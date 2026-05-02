@@ -14971,6 +14971,38 @@ def run_comprehensive_analysis(analysis_id):
                     f"Success Priorities: {len(filtered_success_priorities)}, "
                     f"Adoption Barriers: {len(filtered_adoption_barriers)}")
 
+        # Round 66 / Pass 1 (B4): scrub Snowflake/CSConsole rich-text HTML
+        # markup from the source DataFrames BEFORE they flow into the
+        # downstream Word renderers. The R25/F.2 strip already covers
+        # the XLSX writeout side; this pass covers the Word side, where
+        # ``filtered_action_plans``, ``filtered_customer_pulse``, etc.
+        # are read by ``_create_briefing_book``, the per-customer
+        # narrative gates, and the ``write_excel_workbook`` consumer.
+        # Stripping at the source means a SINGLE upstream cleanse
+        # covers every downstream renderer (XLSX, DOCX, briefing,
+        # AI prompt). Defensive: each strip wrapped so a regex
+        # failure cannot break the comprehensive pipeline.
+        try:
+            from data_normalization import strip_html_from_dataframe as _r66_strip_html_src
+            try:
+                filtered_action_plans = _r66_strip_html_src(filtered_action_plans)
+            except Exception as _r66_strip_err:
+                logger.debug("R66/B4 source-side HTML strip skipped (action plans): %s", _r66_strip_err)
+            try:
+                filtered_customer_pulse = _r66_strip_html_src(filtered_customer_pulse)
+            except Exception as _r66_strip_err:
+                logger.debug("R66/B4 source-side HTML strip skipped (customer pulse): %s", _r66_strip_err)
+            try:
+                filtered_success_priorities = _r66_strip_html_src(filtered_success_priorities)
+            except Exception as _r66_strip_err:
+                logger.debug("R66/B4 source-side HTML strip skipped (success priorities): %s", _r66_strip_err)
+            try:
+                filtered_adoption_barriers = _r66_strip_html_src(filtered_adoption_barriers)
+            except Exception as _r66_strip_err:
+                logger.debug("R66/B4 source-side HTML strip skipped (adoption barriers): %s", _r66_strip_err)
+        except Exception as _r66_strip_import_err:
+            logger.debug("R66/B4 source-side HTML strip unavailable: %s", _r66_strip_import_err)
+
         # CRITICAL FIX: Update portfolio_metrics customer count AFTER filtering
         # Customer count should still use UNFILTERED data (already calculated above)
         # But we log here for consistency

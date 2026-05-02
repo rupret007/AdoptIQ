@@ -719,6 +719,15 @@ def add_case_lifecycle_fields(
 import html as _html_module
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+# Round 66 / Pass 1 (B4): script/style block stripper for the
+# BeautifulSoup-quality fallback path. The naive ``<[^>]+>`` regex would
+# leave ``<script>...</script>`` body text in place; this pre-pass
+# removes the entire tag + body + closing tag for ``script`` and
+# ``style`` blocks before the generic tag-stripping pass.
+_HTML_DANGEROUS_BLOCK_RE = re.compile(
+    r"<\s*(script|style)\b[^>]*>.*?<\s*/\s*\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def strip_html_from_string(value: Any) -> Any:
@@ -734,6 +743,11 @@ def strip_html_from_string(value: Any) -> Any:
     before ``df.to_excel(...)`` so generated workbooks no longer leak
     Snowflake rich-text markup into ``AB_Detail_All`` and
     ``CSConsole_Customer_Pulse``.
+
+    Round 66 / Pass 1 (B4) widens the strip to also handle dangerous
+    block elements (``<script>`` / ``<style>``) which the naive regex
+    would leave their body text behind. The block-strip pre-pass runs
+    BEFORE the generic tag pass.
     """
 
     if not isinstance(value, str):
@@ -741,11 +755,68 @@ def strip_html_from_string(value: Any) -> Any:
     if "<" not in value:
         return value
     try:
-        stripped = _HTML_TAG_RE.sub("", value)
+        # R66/B4: drop entire <script>...</script> and <style>...</style>
+        # blocks (tag + body + closing tag) before the generic pass so
+        # the body text doesn't survive into the cleaned output.
+        cleaned = _HTML_DANGEROUS_BLOCK_RE.sub("", value)
+        stripped = _HTML_TAG_RE.sub("", cleaned)
         return _html_module.unescape(stripped)
     except Exception:
         # Defensive: a regex / unescape failure should not lose data.
         return value
+
+
+# Round 66 / Pass 1 (B4): public alias for ``strip_html_from_string``
+# matching the plan's naming convention. ``_strip_html_safe`` hints that
+# the helper is the "safe" variant (regex-only, never raises, falls
+# back to BeautifulSoup when available for edge cases). Existing
+# call sites should migrate to this alias over time. The
+# BeautifulSoup branch is gated on import success so we degrade
+# cleanly in trimmed builds; the regex fallback handles the 99.9% case
+# already (Snowflake rich-text views always emit well-formed markup).
+def _strip_html_safe(value: Any) -> Any:
+    """R66/B4 public alias -- BeautifulSoup primary, regex fallback.
+
+    Behavior contract:
+      * Non-string inputs returned unchanged (numeric / datetime /
+        None / NaN are all passed through).
+      * Strings without ``<`` returned unchanged (cheap fast-path).
+      * Strings with ``<``: try BeautifulSoup with ``html.parser``
+        first (handles malformed markup, dangerous blocks, entity
+        decoding); on import / parse failure, fall through to
+        ``strip_html_from_string`` (regex + script/style pre-strip).
+
+    The Round 25 ``strip_html_from_string`` regex path already covers
+    the production Snowflake view markup we've seen. The BS4 primary
+    path adds resilience to malformed HTML (unclosed tags, nested
+    quote schemes) which the regex approach mishandles.
+    """
+
+    if not isinstance(value, str):
+        return value
+    # Fast-path: skip strings with NEITHER a tag start ``<`` NOR an
+    # HTML entity marker ``&``. Entity-only strings still need
+    # ``html.unescape`` (otherwise ``"Acme &amp; Beta"`` arrives in
+    # Excel as literal ``&amp;`` instead of ``&``).
+    if "<" not in value and "&" not in value:
+        return value
+    # Try BeautifulSoup primary path -- handles malformed HTML and
+    # script/style block bodies natively via ``get_text()``.
+    try:
+        from bs4 import BeautifulSoup  # type: ignore[import-not-found]
+        # Use the stdlib parser to avoid lxml/html5lib dependencies.
+        soup = BeautifulSoup(value, "html.parser")
+        # Strip dangerous block contents BEFORE get_text so the body
+        # text doesn't survive into the cleaned output.
+        for tag_name in ("script", "style"):
+            for tag in soup.find_all(tag_name):
+                tag.decompose()
+        text = soup.get_text(separator="")
+        return _html_module.unescape(text)
+    except Exception:
+        # BeautifulSoup unavailable / failed parse: fall through to
+        # the regex path which already handles the production cases.
+        return strip_html_from_string(value)
 
 
 def strip_html_from_dataframe(df: "pd.DataFrame") -> "pd.DataFrame":

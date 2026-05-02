@@ -244,10 +244,80 @@ def _append_run(paragraph: Any, text: str) -> None:
         logger.debug("inject_source_citations: add_run failed", exc_info=False)
 
 
+# Round 66 / Pass 1 (B1): regex used to detect a "trailing unit" between a
+# KPI value and the start of the next KPI label. When the boundary segment
+# between match[i].end() and match[i+1] (logical label start) contains an
+# alphabetic token (e.g. ``Days``, ``UTC``, ``hours``), citation injection
+# must defer past the unit so we never produce ``"90 [Source: ...] Days"``.
+# Pure-punctuation boundaries (``. `` / ``; `` / `` | ``) keep the R57
+# sentence-style behavior (citation immediately after the value).
+_BOUNDARY_HAS_UNIT_RE = re.compile(r"[A-Za-z]")
+
+# Round 66 / Pass 1 (B1): the label group in ``_PARAGRAPH_KPI_NUMERIC_RE``
+# is greedy across whitespace -- ``[A-Za-z /()\-]{2,80}?``. For an inline
+# pair like ``"Period: 90 Days  Customers: 39"`` the regex absorbs ``Days``
+# into the next match's label group: m2.group("label") =
+# ``"Days  Customers"``. The naive between-segment detection (which uses
+# next_m.start("label") as the cut point) then sees only one space and
+# incorrectly classifies the boundary as punctuation-style. The fix here:
+# detect a "wide gap" (2+ whitespace chars) inside the next label group,
+# which signals unit-absorption, and treat the position AFTER the gap as
+# the LOGICAL label start. Two-word labels with a SINGLE space between
+# words (``"Analysis Period"``, ``"Total Customers"``, ``"Adoption
+# Barriers"``) are intentionally excluded -- those are real multi-word KPI
+# labels, not unit absorption.
+_LABEL_WIDE_GAP_RE = re.compile(r"\s{2,}")
+
+
+def _logical_label_start_pos(line: str, next_m: Any) -> int:
+    """Return the position in ``line`` of the LOGICAL next-KPI label start.
+
+    Compensates for the greedy label-group absorption of preceding units.
+    When ``next_m.group("label")`` carries a wide whitespace gap (2+
+    spaces), the substring after the gap is the actual label and the
+    substring before is the previous KPI's unit. Returns
+    ``next_m.start("label")`` unchanged when no wide gap is detected.
+    """
+    try:
+        label_text = next_m.group("label") or ""
+        label_start = next_m.start("label")
+    except Exception:
+        try:
+            return next_m.start()
+        except Exception:
+            return 0
+    gap = _LABEL_WIDE_GAP_RE.search(label_text)
+    if not gap:
+        return label_start
+    return label_start + gap.end()
+
+
+def _value_end_no_trailing_ws(line: str, m: Any) -> int:
+    """Return the position in ``line`` immediately after the LAST non-whitespace value char.
+
+    The KPI regex's value group ``(?P<value>-?\\$?\\d[\\d,]*(?:\\.\\d+)?\\s*%?)``
+    intentionally consumes trailing whitespace before an optional ``%``
+    sign so that ``"32 %"`` matches as cleanly as ``"32%"``. That trailing
+    whitespace consumption breaks naive ``line[cursor:m.end()]`` slicing
+    for citation insertion -- it would produce ``"52  [Source: ...]"``
+    (double space) on a pipe-separated multi-KPI line. This helper
+    rewinds past any trailing whitespace inside the value group so
+    insertion lands flush with the last value digit / unit char.
+    """
+    try:
+        end = m.end("value")
+        start = m.start("value")
+    except Exception:
+        return m.end()
+    while end > start and line[end - 1].isspace():
+        end -= 1
+    return end
+
+
 def _rewrite_paragraph_with_inline_citations(
     text: str, matches: list[Any], citation_chrome: str
 ) -> str:
-    """Insert ``citation_chrome`` per-line, respecting end-of-line vs unit semantics.
+    """Insert ``citation_chrome`` per-line, respecting end-of-line, unit, and inline-KPI semantics.
 
     Round 64 / Phase 1 (B4): the original (Round 57) implementation
     inserted the citation immediately after each
@@ -264,15 +334,34 @@ def _rewrite_paragraph_with_inline_citations(
     between the value and its unit on five consecutive title-page
     lines, breaking readability of the report's primary KPI tile.
 
+    Round 64 fix: split on ``\n`` first; single-match lines append at
+    end-of-line; multi-match lines interleave per R57.
+
+    Round 66 / Pass 1 (B1) extension: the multi-match path now
+    distinguishes between two kinds of boundaries between consecutive
+    matches on the SAME line:
+
+      * ``Customers: 52. Barriers: 68`` -- the boundary ``. `` carries
+        no alphabetic token, so this is a sentence-style multi-KPI
+        line. R57 behavior preserved: citation immediately after the
+        value (``"52 [Source: ...]. 68 [Source: ...]"``).
+      * ``Analysis Period: 90 Days  Total Customers: 39`` -- the
+        boundary ``" Days  "`` carries an alphabetic token (``Days``)
+        which is the unit of the preceding value. Defer the citation
+        past the unit, just before the next KPI label, so the
+        value-unit pair stays adjacent
+        (``"Analysis Period: 90 Days [Source: ...] Total Customers:
+        39 [Source: ...]"``).
+
     Fix: split the paragraph into logical lines on ``\n`` first; for
     each line:
       * Skip lines already carrying ``[source:`` (idempotency).
       * If the line has exactly ONE match: append a single citation at
         end-of-line (preserves value->unit pairing -- the R64 fix).
-      * If the line has TWO OR MORE matches: interleave citations
-        between matches AND at end-of-line, so every match's segment
-        contains ``[source:]`` (preserves the R57 contract for
-        single-line multi-KPI sentences).
+      * If the line has TWO OR MORE matches: per-pair decide whether
+        the boundary contains a unit. If yes, defer citation past the
+        unit; if no, citation immediately after the value (R57). The
+        last match always gets a trailing end-of-line citation.
 
     Round-tripping the title-tile string ``"Analysis Period: 90
     Days\\nTotal Customers: 39"`` now produces
@@ -283,6 +372,11 @@ def _rewrite_paragraph_with_inline_citations(
     ``"Total Customers: 52 [Source: ...]. Adoption Barriers: 68
     [Source: ...]. Support Cases: 381 [Source: ...]."`` -- every
     segment source-backed (R57 contract).
+    Round-tripping the SINGLE-LINE dashboard tile ``"Analysis Period:
+    90 Days  Total Customers: 39"`` (no newline) now produces
+    ``"Analysis Period: 90 Days [Source: ...]  Total Customers: 39
+    [Source: ...]"`` -- citation deferred past the ``Days`` unit
+    (R66/B1 fix).
     """
     if not matches:
         return f"{text} {citation_chrome}"
@@ -301,17 +395,50 @@ def _rewrite_paragraph_with_inline_citations(
             # end-of-line so we never split a value->unit pair.
             out_lines.append(f"{line.rstrip()} {citation_chrome}")
             continue
-        # Multi-match line: interleave so every segment between
-        # consecutive matches contains the citation. Preserves the
-        # R57 ``_paragraph_claim_source_backed`` contract.
-        parts: list[str] = []
-        last_end = 0
-        for m in line_matches:
-            parts.append(line[last_end : m.end()])
-            parts.append(f" {citation_chrome}")
-            last_end = m.end()
-        parts.append(line[last_end:])
-        out_lines.append("".join(parts).rstrip())
+        # Multi-match line: walk pairs, deciding per-boundary whether to
+        # interleave at value-end (R57 sentence behavior) or defer past
+        # the unit token to next-label-start (R66/B1 unit-pair preservation).
+        out_parts: list[str] = []
+        cursor = 0
+        for i, m in enumerate(line_matches):
+            is_last = i == len(line_matches) - 1
+            if is_last:
+                # Append everything from cursor to end of line, then the
+                # trailing citation. Preserves any unit on the LAST KPI
+                # (the R64 single-match-per-line invariant generalized).
+                out_parts.append(line[cursor:].rstrip())
+                out_parts.append(f" {citation_chrome}")
+                continue
+            next_m = line_matches[i + 1]
+            # Boundary segment between this value's TRUE end (excluding
+            # any whitespace consumed by the regex's ``\\s*%?`` tail) and
+            # the next KPI label's LOGICAL start (compensating for unit
+            # absorption in next_m's label group via wide-gap detection).
+            value_end = _value_end_no_trailing_ws(line, m)
+            next_label_start = _logical_label_start_pos(line, next_m)
+            between = line[value_end:next_label_start]
+            if _BOUNDARY_HAS_UNIT_RE.search(between):
+                # Unit token present (e.g. ``Days``): defer citation past
+                # the unit so the value-unit pair stays intact. Emit
+                # text up to ``next_label_start`` (rstrip'd to absorb
+                # the gap whitespace), then citation, then a single
+                # space delimiter so the next label doesn't end up
+                # adjacent to the citation chrome. ``cursor`` advances
+                # to the next label start.
+                out_parts.append(line[cursor:next_label_start].rstrip())
+                out_parts.append(f" {citation_chrome} ")
+                cursor = next_label_start
+            else:
+                # Pure-punctuation boundary (e.g. ``. ``): R57 behavior --
+                # citation immediately after the value. Append from
+                # cursor through ``value_end`` (excludes any trailing
+                # whitespace consumed by the regex), then citation.
+                # ``cursor`` advances to ``m.end()`` so the consumed
+                # whitespace is NOT re-emitted on the next iteration.
+                out_parts.append(line[cursor:value_end])
+                out_parts.append(f" {citation_chrome}")
+                cursor = m.end()
+        out_lines.append("".join(out_parts))
     return "\n".join(out_lines)
 
 

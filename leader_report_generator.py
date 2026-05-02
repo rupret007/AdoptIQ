@@ -308,6 +308,8 @@ def fetch_action_plans_snowflake(
     owner_emails: Optional[List[str]] = None,
     *,
     chunk_size: int = 900,
+    technology_filter: Optional[str] = None,
+    customer_names: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """Fetch Action Plans (record_type_id=0122T000000QHBGQA4) from Snowflake.
 
@@ -332,6 +334,20 @@ def fetch_action_plans_snowflake(
             outside ``account_ids``.
         chunk_size: optional override for the per-IN-clause chunk size
             (defaults to 900 to match the leader generator).
+        technology_filter: optional technology label (e.g.
+            ``"All Contact Center"``). Round 66 / Pass 1 (B2): when
+            supplied with ``customer_names``, the post-fetch result is
+            run through ``_filter_csconsole_data_by_technology`` as
+            defense-in-depth so a future caller that forgets the
+            post-fetch scope filter cannot leak cross-tech APs into a
+            scoped report. The Leader path passes
+            ``technology_filter=None`` (Leader reports are
+            cross-technology by design) and is unaffected.
+        customer_names: optional list of canonical customer names (from
+            ``team_subs_df.BU_NAME``) used in concert with
+            ``technology_filter`` for the post-fetch defense-in-depth
+            scope filter. No-op when ``technology_filter`` is None or
+            in ``{"All", "All Technologies"}``.
     """
     owner_emails = owner_emails or []
     if not account_ids and not owner_emails:
@@ -404,6 +420,33 @@ def fetch_action_plans_snowflake(
         df = pd.DataFrame(all_rows, columns=cols_out)
         if 'ID' in df.columns:
             df = df.drop_duplicates(subset=['ID'], keep='first').reset_index(drop=True)
+
+        # Round 66 / Pass 1 (B2): defense-in-depth post-fetch scope filter.
+        # When the caller supplies ``technology_filter`` (and optionally
+        # ``customer_names``), pipe the result through
+        # ``_filter_csconsole_data_by_technology`` so the function returns
+        # ONLY rows that match the manager+technology scope. The
+        # comprehensive path already calls this filter externally
+        # (app_simple.py ~L14897), so this is belt-and-suspenders for
+        # callers that forget. Leader path passes
+        # ``technology_filter=None`` and is unaffected.
+        if technology_filter and technology_filter not in ("All", "All Technologies"):
+            try:
+                from adoptiq_backend import _filter_csconsole_data_by_technology
+                df = _filter_csconsole_data_by_technology(
+                    df,
+                    technology_filter,
+                    customer_names or [],
+                    account_ids=list(account_ids or []),
+                )
+            except Exception as _scope_err:
+                try:
+                    logger.debug(
+                        "Round 66 / B2: post-fetch scope filter skipped: %s",
+                        _scope_err,
+                    )
+                except Exception:
+                    pass
         return df
     except Exception as _exc:
         # Mirror LeaderReportGenerator._empty_df_failed: stamp attrs so

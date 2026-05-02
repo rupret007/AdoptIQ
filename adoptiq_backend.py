@@ -8591,17 +8591,43 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                     df_copy[col] = df_copy[col].dt.tz_convert(None)
             df_copy = df_copy.replace([_np.inf, -_np.inf], _np.nan)
             df_copy = _defang_formulas(df_copy)
-            # Round 25 / Phase F.2: scrub HTML markup from the two
-            # known-affected sheets.  Other sheets are left alone
-            # because they're either auto-generated (no HTML risk) or
-            # already plain-text by contract.
-            if _r25f_strip_html is not None and name in ("AB_Detail_All", "CSConsole_Customer_Pulse"):
+            # Round 25 / Phase F.2: scrub HTML markup from sheets known
+            # to be sourced from Snowflake / CSConsole rich-text views.
+            # Round 66 / Pass 1 (B4) widens the allow-list to include
+            # the Action_Plans / CSConsole_* family -- Build 38
+            # acceptance smoke surfaced raw ``<a href...>`` and
+            # ``<p><strong>`` markup leaking through the
+            # comprehensive-XLSX Action_Plans sheet (added in R64/B2)
+            # and the CSConsole pass-through sheets (added when the
+            # filtered_action_plans / filtered_success_priorities /
+            # filtered_adoption_barriers frames are written through
+            # for downstream debugging). All listed sheets pass
+            # through ``_strip_html_safe`` (BeautifulSoup primary,
+            # regex fallback) so dangerous block elements
+            # (``<script>``, ``<style>``) are decomposed natively
+            # rather than leaving body text behind.
+            _R66_HTML_STRIP_SHEETS = (
+                # R25 baseline.
+                "AB_Detail_All",
+                "CSConsole_Customer_Pulse",
+                # R66/B4 additions -- known to leak Snowflake markup.
+                "Action_Plans",
+                "CSConsole_Action_Plans",
+                "CSConsole_Adoption_Barriers",
+                "CSConsole_Success_Priorities",
+                # Compact / Renewal AB sheets sometimes carry the same
+                # rich-text fields when fetched from C360_CS_TASK_C_VW.
+                "Adoption_Barriers",
+                "Customer_Pulse",
+                "Success_Priorities",
+            )
+            if _r25f_strip_html is not None and name in _R66_HTML_STRIP_SHEETS:
                 try:
                     df_copy = _r25f_strip_html(df_copy)
                 except Exception as _strip_err:
                     logger.debug(
-                        "Round 25 / Phase F.2: HTML strip skipped for "
-                        "sheet '%s': %s",
+                        "Round 25 / Phase F.2 (R66/B4 widened): HTML "
+                        "strip skipped for sheet '%s': %s",
                         name,
                         _strip_err,
                     )
