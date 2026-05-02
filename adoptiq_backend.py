@@ -8551,6 +8551,25 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
             logger.debug("Round 66 / B5: Sheet_Title pre-stamp skipped: %s", _r66_b5_err)
         report_info = pd.DataFrame(_r66_b5_report_info_rows, columns=["Item", "Value"])
         report_info.to_excel(xw, sheet_name="Report_Info", index=False)
+        # Round 67 / Build 41 (B3): log the produced Report_Info shape
+        # so production drift is greppable in structured logs. Build
+        # 40 acceptance reports surfaced a Report_Info with only 2
+        # rows ("Export type" + "Generated at (UTC)") despite the
+        # R66/B5 contract requiring Manager / Technology / Days +
+        # one ``Sheet_Title:<sheet>`` row per data sheet. Without
+        # this log, the operator can only spot the regression by
+        # opening the produced XLSX in Excel by hand.
+        try:
+            _r67_b3_data_sheets = locals().get("_r66_b5_data_sheet_names", []) or []
+            logger.info(
+                "[XLSX] Round 67 / B3: Report_Info written with %d rows for "
+                "sheets=%s manager=%r technology=%r days=%r",
+                len(_r66_b5_report_info_rows),
+                sorted(_r67_b3_data_sheets),
+                manager, technology, days,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         _used_sheet_names = {"Summary", "Report_Info"}
 
         # Round 13 / Phase 9.8: previously the fallback path emitted
@@ -8684,6 +8703,18 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                 "Adoption_Barriers",
                 "Customer_Pulse",
                 "Success_Priorities",
+                # Round 67 / Build 41 (B4): the Comprehensive XLSX's
+                # ``CSOne_Detail_All`` "Problem Details" / "Resolution
+                # Details" cells leak ``<br />``, ``<agent name>``,
+                # and ``&#34;`` entities verbatim from the Snowflake
+                # CSOne export. The rich-text round-trip happens
+                # because Snowflake stores these fields as HTML and
+                # the comprehensive flow writes the raw frame through
+                # without scrubbing. Adding the sheet here routes it
+                # through the same ``_strip_html_safe`` (BeautifulSoup
+                # primary, regex fallback) the other AB / AP sheets
+                # already use.
+                "CSOne_Detail_All",
             )
             if _r25f_strip_html is not None and name in _R66_HTML_STRIP_SHEETS:
                 try:

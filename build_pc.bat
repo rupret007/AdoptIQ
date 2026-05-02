@@ -5,8 +5,12 @@ REM Run this script ON WINDOWS. Requires: Python 3, pip, PyInstaller.
 setlocal
 cd /d "%~dp0"
 
-set ADOPTIQ_VERSION=1.0.3
-set ADOPTIQ_BUILD=1
+REM Round 67 / Build 41 follow-on: do NOT default to "1.0.3" / "1" here -- that
+REM defeats the Round 61 SSoT fix in update_version_pc.py.  When the operator
+REM does not explicitly set the env vars, leave them empty so update_version_pc.py
+REM reads the existing values from config.py (the source of truth).
+if not defined ADOPTIQ_VERSION set ADOPTIQ_VERSION=
+if not defined ADOPTIQ_BUILD set ADOPTIQ_BUILD=
 set STAGING_DIR=C:\Users\jestory\OneDrive - Cisco\AI Projects\Staging\AdoptIQ_PC
 set MAC_OUTBOX_STAGING_DIR=C:\Users\jestory\OneDrive - Cisco\AI Projects\Staging\AdoptIQ_MAC\OUTBOX
 
@@ -52,6 +56,11 @@ echo Updating version/build in config.py...
 set ADOPTIQ_VERSION=%ADOPTIQ_VERSION%
 set ADOPTIQ_BUILD=%ADOPTIQ_BUILD%
 "%PYTHON%" update_version_pc.py
+REM Round 67 / Build 41: read back the resolved version from config.py so the
+REM rest of the script (DMG name, build_info.txt, OUTBOX copy) sees the SSoT
+REM values regardless of whether the operator passed env-var overrides.
+for /f %%i in ('"%PYTHON%" -c "from config import ADOPTIQ_VERSION; print(ADOPTIQ_VERSION)"') do set ADOPTIQ_VERSION=%%i
+for /f %%i in ('"%PYTHON%" -c "from config import ADOPTIQ_BUILD; print(ADOPTIQ_BUILD)"') do set ADOPTIQ_BUILD=%%i
 echo   -^> Version %ADOPTIQ_VERSION% (Build %ADOPTIQ_BUILD%)
 
 echo.

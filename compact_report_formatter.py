@@ -2676,6 +2676,7 @@ def calculate_renewal_risk_scores(
     extra_frames: Optional[List[pd.DataFrame]] = None,
     account_to_customer: Optional[Dict[str, str]] = None,
     recent_window_days: int = 30,
+    ext_incidents: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Dict]:
     """Calculate renewal risk scores and color categories for each customer.
 
@@ -2696,6 +2697,18 @@ def calculate_renewal_risk_scores(
     column markers (see ``_r66_b8_classify_extra_frames``); a frame
     that doesn't carry the characteristic markers is left out so
     the composite math stays stable for legacy callers.
+
+    Round 67 / Build 41 (B1): accept optional ``ext_incidents`` and
+    thread the per-customer filtered slice into
+    ``compute_customer_risk_profile`` so Compact and Renewal scoring
+    converge for the same customer in the same scope. Pre-R67 the
+    Compact path hardcoded ``ext_incidents=None`` while the Renewal
+    path passed the filtered slice -- producing systematic ~5.7-pt
+    deltas (on the 0-100 scale) for every customer in a portfolio
+    with active service incidents. Filter helper is imported lazily
+    so callers that pre-filter (or that pass ``None``) don't pay the
+    cost. Default ``None`` preserves back-compat for callers that
+    have not yet been updated.
     """
     try:
         ab_data = ab_data if ab_data is not None else pd.DataFrame()
@@ -2758,6 +2771,27 @@ def calculate_renewal_risk_scores(
             _customer_pulse = _r66_b8_slice(_r66_b8_pulse, customer)
             _customer_aps = _r66_b8_slice(_r66_b8_aps, customer)
             _customer_subs = _r66_b8_slice(_r66_b8_subs, customer)
+            # Round 67 / Build 41 (B1): thread per-customer-filtered
+            # ext_incidents (parity with Renewal). Lazy-import the
+            # filter helper so we don't take a circular-import hit
+            # at module load. When the helper isn't reachable (e.g.
+            # legacy direct callers of this module from a test), we
+            # still pass the unfiltered list -- the formula-side cap
+            # in risk_scoring._score_incidents (R65/R-2) keeps the
+            # incidents component bounded to <=30 on the 0-100 axis
+            # so a long ext_incidents list cannot saturate the score.
+            _r67_cust_incidents: Optional[List[Dict[str, Any]]] = None
+            if ext_incidents:
+                try:
+                    from app_simple import _r65_filter_customer_tagged_incidents as _r67_filter
+                    _r67_cust_incidents = _r67_filter(ext_incidents, customer)
+                except Exception as _r67_err:
+                    logger.debug(
+                        "Round 67 / B1: _r65_filter_customer_tagged_incidents "
+                        "unavailable (%s); passing unfiltered ext_incidents",
+                        _r67_err,
+                    )
+                    _r67_cust_incidents = list(ext_incidents)
             profile = compute_customer_risk_profile(
                 customer_name=customer,
                 customer_ab=customer_ab,
@@ -2765,7 +2799,7 @@ def calculate_renewal_risk_scores(
                 customer_pulse=_customer_pulse,
                 customer_action_plans=_customer_aps,
                 customer_subs=_customer_subs,
-                ext_incidents=None,
+                ext_incidents=_r67_cust_incidents,
                 # Round 3 / Phase 4.2: thread the report's analysis
                 # horizon down to the support-case "recent" window
                 # so renewal risk reflects activity in the period

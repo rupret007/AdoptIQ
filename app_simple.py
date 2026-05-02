@@ -8760,6 +8760,11 @@ def run_compact_analysis(analysis_id):
                             # Phase 4.2: thread analysis horizon (was
                             # hardcoded to 30 by the closure-binding bug).
                             recent_window_days=int(_r23_days) if _r23_days else 30,  # Round 23 / R22-NEXT-001
+                            # Round 67 / Build 41 (B1): thread the same
+                            # ext_incidents that Renewal scoring uses
+                            # so Compact and Renewal scores converge
+                            # for the same customer in the same scope.
+                            ext_incidents=ext_incidents if ext_incidents else None,
                         )
                     except Exception as _ei_rs_err:
                         logger.debug(
@@ -8770,6 +8775,11 @@ def run_compact_analysis(analysis_id):
                             ab_norm,
                             csone_df,
                             recent_window_days=int(_r23_days) if _r23_days else 30,  # Round 23 / R22-NEXT-001
+                            # Round 67 / Build 41 (B1): thread the same
+                            # ext_incidents on the fallback path too so
+                            # the parity guarantee holds even when the
+                            # extra_frames lookup raises.
+                            ext_incidents=ext_incidents if ext_incidents else None,
                         )
                     # Phase 1.2: assert risk row count >= total_customers floor.
                     try:
@@ -9081,6 +9091,12 @@ def run_compact_analysis(analysis_id):
                             # hardcoded to 30 by the closure-binding
                             # bug).
                             recent_window_days=int(_r23_days) if _r23_days else 30,  # Round 23 / R22-NEXT-001
+                            # Round 67 / Build 41 (B1): thread the same
+                            # ext_incidents that Renewal scoring uses
+                            # so the XLSX Risk_Summary sheet agrees
+                            # with the Compact Word narrative AND with
+                            # the Renewal report for the same scope.
+                            ext_incidents=ext_incidents if ext_incidents else None,
                         )
                     except Exception as _xl_rs_err:
                         logger.debug(
@@ -9091,6 +9107,10 @@ def run_compact_analysis(analysis_id):
                             ab_norm,
                             csone_df,
                             recent_window_days=int(_r23_days) if _r23_days else 30,  # Round 23 / R22-NEXT-001
+                            # Round 67 / Build 41 (B1): parity on the
+                            # fallback path too (mirrors the Word path
+                            # at L8755).
+                            ext_incidents=ext_incidents if ext_incidents else None,
                         )
                     logger.info(f"[[CHART]] Risk scores calculated for {len(risk_scores)} customers")
                     # Phase 1.2: floor assertion vs total_customers.
@@ -9254,6 +9274,23 @@ def run_compact_analysis(analysis_id):
                 int((_csone_norm_cust_series == _cust_norm).sum())
                 if not _csone_norm_cust_series.empty else 0
             )
+            # Round 67 / Build 41 (B6): publish ``Overall_Risk_Score``
+            # as the headline column for parity with Renewal
+            # ``Renewal_Summary.Overall_Risk_Score`` and keep
+            # ``Risk_Score`` as a back-compat alias for downstream
+            # tile consumers that have already pinned to that name
+            # (the sort/filter logic immediately below this block
+            # still reads ``Risk_Score`` for stable cross-row
+            # ordering -- both column values are identical).
+            # Round 67 / Build 41 (B1, vocab parity): re-map MEDIUM
+            # -> MODERATE on the user-facing ``Risk_Level`` column so
+            # the Compact and Renewal labels read the same word.
+            # ``Risk_Band`` keeps the canonical band key (CRITICAL /
+            # HIGH / MEDIUM / LOW / HEALTHY) so existing band-based
+            # filters and color lookups still match.
+            _r67_b6_score = round(score, 1)
+            _r67_b6_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
+            _r67_b6_risk_level = _r67_b6_LABEL_REMAP.get(risk_level, risk_level)
             risk_summary_data.append({
                 # Round 49 / F-RP-COMPOSITE-KEY-BLEED: collapse merged
                 # Snowflake composite keys (``MARUBENI CORPORATION__
@@ -9262,8 +9299,9 @@ def run_compact_analysis(analysis_id):
                 # ``Risk_Summary`` sheet renders human-readable names
                 # instead of join-key strings.
                 'Customer': _normalize_composite_customer_key(customer),
-                'Risk_Score': round(score, 1),
-                'Risk_Level': risk_level,
+                'Overall_Risk_Score': _r67_b6_score,
+                'Risk_Score': _r67_b6_score,
+                'Risk_Level': _r67_b6_risk_level,
                 'Risk_Band': band,
                 'Adoption_Barriers': ab_count,
                 'Support_Cases': cs_count,
@@ -9271,7 +9309,7 @@ def run_compact_analysis(analysis_id):
 
         risk_summary_df = pd.DataFrame(
             risk_summary_data,
-            columns=['Customer', 'Risk_Score', 'Risk_Level', 'Risk_Band', 'Adoption_Barriers', 'Support_Cases']
+            columns=['Customer', 'Overall_Risk_Score', 'Risk_Score', 'Risk_Level', 'Risk_Band', 'Adoption_Barriers', 'Support_Cases']
         )
         logger.info(f"[[DATA]] Risk summary DataFrame created with {len(risk_summary_df)} rows")
 
@@ -10220,41 +10258,62 @@ def run_compact_analysis(analysis_id):
                 # is unconditionally bound at the top of this try-block
                 # (around L9838) so a direct read is safe.
                 _r65_titles_local = _r65_sheet_titles or []
-                if _excel_partial_warnings or _trunc_rows or _r65_titles_local:
-                    try:
-                        _info_records = []
-                        for w in _excel_partial_warnings or []:
-                            _info_records.append({
-                                'Status': 'PARTIAL',
-                                'Warning': str(w)[:512],
-                                'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
-                            })
-                        for t in _trunc_rows:
-                            _info_records.append({
-                                'Status': 'TRUNCATION',
-                                'Warning': str(t)[:512],
-                                'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
-                            })
-                        for _sn, _tt in _r65_titles_local:
-                            _info_records.append({
-                                'Status': 'SHEET_TITLE',
-                                'Warning': f"{_sn}: {_tt}",
-                                'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
-                            })
-                        report_info_df = pd.DataFrame(_info_records)
-                        report_info_df.to_excel(writer, sheet_name='Report_Info', index=False)
-                        logger.warning(
-                            "[EXCEL] Report_Info sheet written with %d row(s) (%d partial-data, %d truncation, %d sheet-title)",
-                            len(_info_records),
-                            len(_excel_partial_warnings or []),
-                            len(_trunc_rows),
-                            len(_r65_titles_local),
-                        )
-                    except Exception as _ri_err:
-                        logger.error(
-                            "[EXCEL] Failed to write Report_Info partial-data ledger: %s",
-                            _ri_err,
-                        )
+                # Round 67 / Build 41 (B5): align Compact Report_Info
+                # to the canonical ``Item, Value`` schema used by
+                # ``adoptiq_backend.write_excel_workbook`` (R66/B5)
+                # and the Renewal writer (R65/R-1). Pre-R67 the
+                # Compact sheet emitted ``Status, Warning,
+                # Generated_At`` columns -- a parity gap that broke
+                # downstream ``pd.read_excel("Report_Info")`` consumers
+                # that expected the same schema across all four report
+                # formats. The Sheet_Title rows are now keyed
+                # ``Item="Sheet_Title:<sheet_name>", Value=<title>``
+                # so a consumer can recover per-sheet titles via a
+                # single ``df[df["Item"].str.startswith("Sheet_Title:")]``
+                # filter.
+                _r67_b5_now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+                # Always emit the Report_Info sheet (even if no
+                # warnings / truncations / titles) so the schema is
+                # discoverable by downstream consumers. The R67/B5
+                # contract is: Compact Report_Info ALWAYS has at
+                # least the ``Export type`` + ``Generated at (UTC)``
+                # baseline rows.
+                try:
+                    _info_records: list[dict] = [
+                        {'Item': 'Export type', 'Value': 'Standard (Compact)'},
+                        {'Item': 'Generated at (UTC)', 'Value': _r67_b5_now},
+                    ]
+                    for w in _excel_partial_warnings or []:
+                        _info_records.append({
+                            'Item': 'Partial_Data_Warning',
+                            'Value': str(w)[:512],
+                        })
+                    for t in _trunc_rows:
+                        _info_records.append({
+                            'Item': 'Excel_Truncation',
+                            'Value': str(t)[:512],
+                        })
+                    for _sn, _tt in _r65_titles_local:
+                        _info_records.append({
+                            'Item': f'Sheet_Title:{_sn}',
+                            'Value': str(_tt)[:512],
+                        })
+                    report_info_df = pd.DataFrame(_info_records, columns=['Item', 'Value'])
+                    report_info_df.to_excel(writer, sheet_name='Report_Info', index=False)
+                    logger.info(
+                        "[EXCEL] Round 67 / B5: Compact Report_Info written with "
+                        "%d row(s) using Item/Value schema "
+                        "(%d partial-data, %d truncation, %d sheet-title)",
+                        len(_info_records),
+                        len(_excel_partial_warnings or []),
+                        len(_trunc_rows),
+                        len(_r65_titles_local),
+                    )
+                except Exception as _ri_err:
+                    logger.error(
+                        "[EXCEL] Failed to write Report_Info partial-data ledger: %s",
+                        _ri_err,
+                    )
 
                 # Ensure we have at least one sheet with meaningful content
                 logger.info(f"[[SEARCH]] DEBUGGING - Total sheets written: {len(writer.sheets)}")
@@ -10881,6 +10940,19 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     risk_score_raw = renewal_analysis.get('renewal_risk_score', 0)
     risk_score = round(float(risk_score_raw), 1) if risk_score_raw is not None else 0
     risk_category = renewal_analysis.get('renewal_risk_category', 'UNKNOWN')
+    # Round 67 / Build 41 (B1): derive the 0-10 scale headline + the
+    # user-facing label remap (MEDIUM -> MODERATE) so the renewal
+    # narrative agrees with the Compact narrative for the same scope.
+    # The original 0-100 score is preserved alongside for back-compat
+    # with operators who anchor on /100 in muscle memory; the band
+    # key (CRITICAL / HIGH / MEDIUM / LOW / HEALTHY) is also
+    # preserved internally so color-lookup paths still match.
+    try:
+        _r67_score_10 = round(float(risk_score) / 10.0, 2) if risk_score else 0.0
+    except (TypeError, ValueError):
+        _r67_score_10 = 0.0
+    _r67_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
+    _r67_risk_label = _r67_LABEL_REMAP.get(risk_category, risk_category)
     ab_count = renewal_analysis.get('adoption_barriers_count', 0)
     # Round 53: the dashboard row is explicitly "Active", so use the shared
     # open-barrier count rather than the total barrier count.
@@ -10891,7 +10963,14 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     if portfolio_mode and all_customers:
         n_cust = len(all_customers)
         high_risk = renewal_analysis.get('high_risk_customers', [])
-        exec_para.add_run(f'This portfolio of {n_cust} customers has an overall renewal risk score of {risk_score:.1f}/100 ({risk_category}). ')
+        # Round 67 / Build 41 (B1): publish 0-10 headline + MODERATE
+        # label so this matches Compact for the same portfolio scope.
+        # 0-100 is shown in parentheses for back-compat with operators
+        # who anchor on /100 in muscle memory.
+        exec_para.add_run(
+            f'This portfolio of {n_cust} customers has an overall renewal risk score of '
+            f'{_r67_score_10:.2f}/10 ({_r67_risk_label}; {risk_score:.1f}/100). '
+        )
         if high_risk:
             exec_para.add_run(f'{len(high_risk)} customer(s) require immediate attention. ')
         exec_para.add_run(f'Key metrics: {format_number(ab_count)} adoption barriers, {format_number(case_count)} support cases, {format_number(bems_count)} BEMS escalations.')
@@ -10901,7 +10980,13 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         # See _strip_markdown_chrome above for the full rationale
         # (audit baseline showed __AEROPORTI DI ROMA SPA__ italicized
         # in the renewal pulse heading).
-        exec_para.add_run(f'{_strip_markdown_chrome(_normalize_composite_customer_key(customer_name))} has a renewal risk score of {risk_score:.1f}/100 ({risk_category}). ')
+        # Round 67 / Build 41 (B1): same 0-10 + MODERATE remap on the
+        # single-customer narrative path.
+        exec_para.add_run(
+            f'{_strip_markdown_chrome(_normalize_composite_customer_key(customer_name))} '
+            f'has a renewal risk score of {_r67_score_10:.2f}/10 '
+            f'({_r67_risk_label}; {risk_score:.1f}/100). '
+        )
         exec_para.add_run(f'Key metrics: {format_number(ab_count)} adoption barriers, {format_number(case_count)} support cases, {format_number(bems_count)} BEMS escalations. ')
         exec_para.add_run('See Key Findings and Recommendations for actionable next steps.')
     doc.add_paragraph()
@@ -10912,6 +10997,17 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     risk_score_raw = renewal_analysis.get('renewal_risk_score', 0)
     risk_score = round(float(risk_score_raw), 1) if risk_score_raw is not None else 0
     risk_category = renewal_analysis.get('renewal_risk_category', 'UNKNOWN')
+    # Round 67 / Build 41 (B1): re-derive the 0-10 headline + MODERATE
+    # label for the dashboard block (the executive summary block above
+    # bound _r67_score_10 / _r67_risk_label too, but the dashboard
+    # block re-reads risk_score/risk_category from the analysis so
+    # we re-derive defensively rather than relying on closure capture).
+    try:
+        _r67_score_10 = round(float(risk_score) / 10.0, 2) if risk_score else 0.0
+    except (TypeError, ValueError):
+        _r67_score_10 = 0.0
+    _r67_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
+    _r67_risk_label = _r67_LABEL_REMAP.get(risk_category, risk_category)
     ab_count = renewal_analysis.get('adoption_barriers_count', 0)
     case_count = renewal_analysis.get('support_cases_count', 0)
     bems_count = renewal_analysis.get('bems_escalations_count', 0)
@@ -10968,8 +11064,10 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         ('Service Incidents (status.webex.com)', format_number(incident_count)),
         ('High-Impact Incidents', format_number(high_impact_incidents)),
         ('Correlated Service Incidents', format_number(correlated_incidents)),
-        ('Overall Risk Score', f'{risk_score:.1f}/100'),
-        ('Risk Category', risk_category)
+        # Round 67 / Build 41 (B1): publish 0-10 + MODERATE in the
+        # dashboard table to match the executive summary above.
+        ('Overall Risk Score', f'{_r67_score_10:.2f}/10  ({risk_score:.1f}/100)'),
+        ('Risk Category', _r67_risk_label),
     ]
 
     for i, (label, value) in enumerate(dashboard_data):
@@ -13331,6 +13429,50 @@ def run_customer_renewal_analysis(analysis_id):
                 'Analysis_Date': analysis_date,
                 'Next_Review_Date': next_review_date
             }]
+        # Round 67 / Build 41 (B1): align Renewal Overall_Risk_Score to
+        # the Compact 0-10 scale and re-label MEDIUM -> MODERATE so the
+        # two report formats agree byte-for-byte for the same customer
+        # in the same scope. The pre-R67 0-100 score is preserved as
+        # Risk_Score_0_100 for back-compat with downstream consumers
+        # that have already pinned to that column. Risk_Band carries
+        # the canonical band string (CRITICAL / HIGH / MEDIUM / LOW /
+        # HEALTHY) untouched so existing band-based filters still work;
+        # Risk_Level is the user-facing label that flips MEDIUM ->
+        # MODERATE per the operator-confirmed vocabulary.
+        try:
+            _r67_RISK_LEVEL_REMAP = {
+                'MEDIUM': 'MODERATE',
+                'medium': 'MODERATE',
+                'Medium': 'MODERATE',
+            }
+            for _r67_row in renewal_summary_data:
+                if not isinstance(_r67_row, dict):
+                    continue
+                _r67_orig = _r67_row.get('Overall_Risk_Score')
+                try:
+                    _r67_orig_f = float(_r67_orig) if _r67_orig is not None else None
+                except (TypeError, ValueError):
+                    _r67_orig_f = None
+                if _r67_orig_f is None:
+                    _r67_row.setdefault('Risk_Score_0_100', _r67_orig)
+                    continue
+                if _r67_orig_f > 10.0:
+                    _r67_row['Risk_Score_0_100'] = round(_r67_orig_f, 1)
+                    _r67_row['Overall_Risk_Score'] = round(_r67_orig_f / 10.0, 2)
+                else:
+                    _r67_row.setdefault('Risk_Score_0_100', round(_r67_orig_f * 10.0, 1))
+                    _r67_row['Overall_Risk_Score'] = round(_r67_orig_f, 2)
+                _r67_lvl = _r67_row.get('Risk_Level')
+                if isinstance(_r67_lvl, str):
+                    _r67_row['Risk_Band'] = _r67_lvl.upper() if _r67_lvl else _r67_lvl
+                    _r67_row['Risk_Level'] = _r67_RISK_LEVEL_REMAP.get(_r67_lvl, _r67_lvl)
+        except Exception as _r67_norm_err:  # noqa: BLE001
+            logger.debug(
+                "[RENEWAL] Round 67 / B1: scale/label normalization failed (%s); "
+                "leaving Renewal_Summary as-is",
+                _r67_norm_err,
+            )
+
         # Add risk component details (handle missing/empty risk_components gracefully)
         risk_components_data = []
         risk_components = renewal_analysis.get('risk_components', {})
@@ -16019,8 +16161,22 @@ def run_comprehensive_analysis(analysis_id):
             # determinism rule; an empty profile dict short-circuits
             # to a single ``Data_Unavailable`` row so consumers see
             # honest provenance instead of a missing sheet.
+            # Round 67 / Build 41 (B2): hoist the Risk_Components
+            # assignment OUT of the broad try/except so that any
+            # exception inside the row-construction loop CANNOT
+            # silently drop the sheet entirely. Pre-R67 the
+            # ``except`` swallowed at debug-level and the sheet was
+            # never added to ``all_sheets`` -- the produced
+            # Comprehensive XLSX was missing ``Risk_Components`` for
+            # every customer in scopes where any single profile dict
+            # had a non-dict ``components`` field. The new shape:
+            # build the rows defensively, then ALWAYS assign the
+            # sheet (with a single ``_adoptiq_provenance_row=True``
+            # row when construction failed). The logger.info below
+            # makes the sheet's row count greppable in production.
+            _r66_risk_rows: List[Dict[str, Any]] = []
+            _r67_b2_construction_error: Optional[str] = None
             try:
-                _r66_risk_rows: List[Dict[str, Any]] = []
                 _r66_components_keys = (
                     ("adoption_barriers", "Adoption_Barriers_Score"),
                     ("support_cases", "Support_Cases_Score"),
@@ -16051,31 +16207,81 @@ def run_comprehensive_analysis(analysis_id):
                             _r66_row[_r66_col] = None
                     _r66_row["Top_Risk_Factor"] = _r66_top_factor
                     _r66_risk_rows.append(_r66_row)
-                if _r66_risk_rows:
-                    _r66_risk_rows.sort(
-                        key=lambda r: (
-                            -(float(r.get("Risk_Score_0_100") or 0.0)),
-                            str(r.get("Customer_Name") or "").lower(),
-                        )
-                    )
-                    all_sheets["Risk_Components"] = pd.DataFrame(_r66_risk_rows)
-                else:
-                    all_sheets["Risk_Components"] = pd.DataFrame([{
-                        "_adoptiq_provenance_row": True,
-                        "AdoptIQ_Status": "EMPTY",
-                        "AdoptIQ_Source": "risk_scoring.compute_customer_risk_profile",
-                        "AdoptIQ_Message": (
-                            "No customer risk profiles were computed for this scope. "
-                            "Confirm that CSOne / Snowflake returned at least one "
-                            "customer in the analyzed universe."
-                        ),
-                    }])
             except Exception as _r66_risk_err:  # noqa: BLE001
-                logger.debug(
-                    "[COMPREHENSIVE] Round 66 / B6: per-customer Risk_Components "
-                    "construction failed: %s",
+                # Round 67 / B2: capture the failure reason so the
+                # provenance row below names it instead of just
+                # leaving the operator with an empty sheet.
+                _r67_b2_construction_error = str(_r66_risk_err)[:480]
+                # Round 67 / B2: emit BOTH a WARNING (operator-visible
+                # because the failure now triggers an explicit
+                # provenance fallback the user sees in the XLSX) AND
+                # a DEBUG line preserving the R66 contract pinned by
+                # ``tests/test_round66_p1_risk_components_per_customer
+                # ::test_risk_components_block_wraps_in_try_except``.
+                logger.warning(
+                    "[COMPREHENSIVE] Round 67 / B2: Risk_Components row-"
+                    "construction failed; falling back to provenance row: %s",
                     _r66_risk_err,
                 )
+                logger.debug(
+                    "[COMPREHENSIVE] Round 67 / B2: full Risk_Components "
+                    "construction trace (R66 contract preserved for "
+                    "audit-friendly grepping): %s",
+                    _r66_risk_err,
+                    exc_info=True,
+                )
+
+            # Round 67 / B2: ALWAYS assign the sheet (success path or
+            # provenance-row fallback). This is the contract pinned
+            # by tests/test_round67_comprehensive_risk_components_always_present.py
+            # -- the sheet must be in ``all_sheets`` BEFORE the writer
+            # call regardless of which branch ran.
+            if _r66_risk_rows:
+                _r66_risk_rows.sort(
+                    key=lambda r: (
+                        -(float(r.get("Risk_Score_0_100") or 0.0)),
+                        str(r.get("Customer_Name") or "").lower(),
+                    )
+                )
+                all_sheets["Risk_Components"] = pd.DataFrame(_r66_risk_rows)
+                logger.info(
+                    "[COMPREHENSIVE] Round 67 / B2: Risk_Components sheet "
+                    "built with %d rows", len(_r66_risk_rows),
+                )
+            else:
+                _r67_b2_msg = (
+                    "No customer risk profiles were computed for this scope. "
+                    "Confirm that CSOne / Snowflake returned at least one "
+                    "customer in the analyzed universe."
+                )
+                if _r67_b2_construction_error:
+                    _r67_b2_msg = (
+                        f"Risk_Components row construction failed "
+                        f"({_r67_b2_construction_error}). The sheet is "
+                        "rendered with this provenance row so the operator "
+                        "sees an honest failure mode instead of a missing sheet."
+                    )
+                all_sheets["Risk_Components"] = pd.DataFrame([{
+                    "_adoptiq_provenance_row": True,
+                    "AdoptIQ_Status": "EMPTY",
+                    "AdoptIQ_Source": "risk_scoring.compute_customer_risk_profile",
+                    "AdoptIQ_Message": _r67_b2_msg,
+                }])
+                logger.info(
+                    "[COMPREHENSIVE] Round 67 / B2: Risk_Components sheet "
+                    "written with provenance row (no rows constructed; "
+                    "construction_error=%r)", _r67_b2_construction_error,
+                )
+
+            # Round 67 / Build 41 (B3): log the final all_sheets keys
+            # immediately before the writer call so any production
+            # drift (missing Risk_Components, missing Action_Plans,
+            # etc.) is greppable in the structured logs without
+            # having to instrument the writer itself.
+            logger.info(
+                "[COMPREHENSIVE] Round 67 / B3: writing Excel workbook with "
+                "%d sheets: %s", len(all_sheets), sorted(all_sheets.keys()),
+            )
 
             xlsx_path = write_excel_workbook(base, all_sheets, {
                 'action_plans': filtered_action_plans,

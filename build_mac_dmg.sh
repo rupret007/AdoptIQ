@@ -127,8 +127,12 @@ if [[ ! -d "$APP_PATH" ]]; then
   fi
 fi
 
-VERSION="${ADOPTIQ_VERSION:-1.0.4}"
-BUILD="${ADOPTIQ_BUILD:-1}"
+PYTHON_FOR_VER="${PYTHON_BIN:-python3}"
+if [[ -x ".venv/bin/python" ]]; then
+  PYTHON_FOR_VER=".venv/bin/python"
+fi
+VERSION="${ADOPTIQ_VERSION:-$("$PYTHON_FOR_VER" -c 'from config import ADOPTIQ_VERSION; print(ADOPTIQ_VERSION)')}"
+BUILD="${ADOPTIQ_BUILD:-$("$PYTHON_FOR_VER" -c 'from config import ADOPTIQ_BUILD; print(ADOPTIQ_BUILD)')}"
 DMG_PATH="OUTBOX/AdoptIQ-v${VERSION}-build${BUILD}.dmg"
 
 rm -f "$DMG_PATH"

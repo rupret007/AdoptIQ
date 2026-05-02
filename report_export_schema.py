@@ -620,15 +620,91 @@ _CURATED_CSCONSOLE_CUSTOMER_PULSE: tuple[str, ...] = (
 #: the curated set IS already in ``_FRIENDLY_HEADER_LABELS``, the
 #: visible header row drops the raw ``_C`` suffix without any
 #: per-column work in the writers.
+#: Round 67 / Build 41 (B7): curated allowlist for the Compact /
+#: comprehensive ``Action_Plans`` sheet. Pre-R67 the Compact XLSX
+#: dumped the full 243-column Snowflake ``C360_CS_TASK_C_VW`` row
+#: shape (every ``_C`` column the view exposes), making the sheet
+#: unreadable for operators. The curated set keeps the ~30 columns
+#: the Action-Plan operator workflow actually uses (ID + customer
+#: identity, AP title / description, status / stage / priority,
+#: dates, owner / assignee, and the ``_adoptiq_*`` provenance
+#: marker columns from the R65/C-2 empty-fallback row).
+_CURATED_ACTION_PLANS: tuple[str, ...] = (
+    # Identity / customer
+    "ID",
+    "NAME",
+    "BU_NAME",
+    "DSM_BU_NAME",
+    "customer_name",
+    "ACCOUNT_ID_C",
+    "ACCOUNT_MANAGER_C",
+    # AP description
+    "SUBJECT_C",
+    "ACTION_PLAN_TITLE_C",
+    "DESCRIPTION_C",
+    "ACTION_C",
+    "ACTION_TYPE_C",
+    "ACTION_SUB_TYPE_C",
+    # State / lifecycle
+    "STATUS_C",
+    "STAGE_C",
+    "STATE_C",
+    "PRIORITY_C",
+    "AB_HOLD_REASON_C",
+    "AB_WAITING_FOR_C",
+    # Dates / age
+    # Round 67 / B7: ``CREATED_DATE`` (the bare SF system column) is on
+    # ``INTERNAL_COLUMN_DENYLIST`` because it duplicates the customer-
+    # facing ``CREATED_DATE_C`` value while leaking the internal SF
+    # audit timestamp. We carry only ``CREATED_DATE_C`` here so the
+    # Round 15 SSoT validators (``test_phase_1_curated_*``) stay green.
+    "OPEN_DATE_C",
+    "CREATED_DATE_C",
+    "DUE_DATE_C",
+    "ORIGINAL_DUE_DATE_C",
+    "CLOSED_DATE_C",
+    "AGE_C",
+    "DAYS_IN_STAGE_C",
+    # Owner / assignee
+    "OwnerId",
+    "ASSIGNEE_C",
+    "assignee_cssm_email",
+    "NEXT_ACTION_C",
+    "NEXT_STEP_C",
+    "NEXT_ACTION_OWNER_C",
+    "NEXT_ACTION_DUE_DATE_C",
+    # Free-form context (kept last so it doesn't push action columns offscreen)
+    "COMMENTS_C",
+    "CURRENT_STATUS_AND_NOTES_C",
+    "CLOSURE_COMMENTS_C",
+    # Round 65 / C-2 provenance markers are intentionally NOT listed
+    # here. They live on the global ``INTERNAL_COLUMN_DENYLIST`` and
+    # the empty-fallback row construction in ``app_simple.py`` writes
+    # them BEFORE the curated projection runs, so the
+    # ``apply_export_schema`` call simply drops the marker columns
+    # from the projected workbook -- the operator sees the action
+    # plan rows as columns, and the empty-state provenance row
+    # surfaces through the dedicated ``Report_Info`` sheet.
+)
+
 CURATED_COLUMNS: Mapping[str, tuple[str, ...]] = {
     "AB_Detail_All": _CURATED_AB_DETAIL_ALL,
     "Customer_Adoption_Barriers": _CURATED_AB_DETAIL_ALL,
     "All_Adoption_Barriers": _CURATED_AB_DETAIL_ALL,
     "Adoption_Barriers": _CURATED_AB_DETAIL_ALL,
+    # Round 67 / Build 41 (B7): the Compact XLSX's
+    # ``Critical_Adoption_Barriers`` sheet is an AB filter, so the
+    # AB curation set is the right projection (drops 200+ raw
+    # Snowflake columns down to ~60 customer-facing ones).
+    "Critical_Adoption_Barriers": _CURATED_AB_DETAIL_ALL,
     "CSOne_Detail_All": _CURATED_CSONE_DETAIL_ALL,
     "External_Bugs": _CURATED_EXTERNAL_BUGS,
     "External_Incidents": _CURATED_EXTERNAL_INCIDENTS,
     "CSConsole_Customer_Pulse": _CURATED_CSCONSOLE_CUSTOMER_PULSE,
+    # Round 67 / Build 41 (B7): Compact + comprehensive
+    # ``Action_Plans`` curation (drops 243-col Snowflake dump down
+    # to ~30 customer-facing columns).
+    "Action_Plans": _CURATED_ACTION_PLANS,
 }
 
 

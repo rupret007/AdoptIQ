@@ -6,8 +6,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-ADOPTIQ_VERSION="${ADOPTIQ_VERSION:-1.0.4}"
-ADOPTIQ_BUILD="${ADOPTIQ_BUILD:-1}"
+ADOPTIQ_VERSION="${ADOPTIQ_VERSION:-}"
+ADOPTIQ_BUILD="${ADOPTIQ_BUILD:-}"
 
 echo "=============================================="
 echo "  AdoptIQ - Build macOS app bundle"
@@ -42,6 +42,9 @@ echo "  -> Configuration embedded from secrets.env"
 echo
 echo "Updating version/build metadata..."
 ADOPTIQ_VERSION="$ADOPTIQ_VERSION" ADOPTIQ_BUILD="$ADOPTIQ_BUILD" "$PYTHON_BIN" update_version_pc.py
+ADOPTIQ_VERSION="$("$PYTHON_BIN" -c 'from config import ADOPTIQ_VERSION; print(ADOPTIQ_VERSION)')"
+ADOPTIQ_BUILD="$("$PYTHON_BIN" -c 'from config import ADOPTIQ_BUILD; print(ADOPTIQ_BUILD)')"
+echo "  -> Resolved version v${ADOPTIQ_VERSION} build ${ADOPTIQ_BUILD}"
 
 echo
 echo "Running PyInstaller (macOS spec)..."

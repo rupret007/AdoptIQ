@@ -167,7 +167,16 @@ def test_strip_html_from_dataframe_preserves_numeric_and_datetime_columns():
 
 
 def test_write_excel_workbook_strips_html_from_action_plans_sheet(tmp_path):
-    """Round 66 / B4 — Action_Plans sheet must arrive in XLSX with HTML stripped."""
+    """Round 66 / B4 — Action_Plans sheet must arrive in XLSX with HTML stripped.
+
+    Round 67 / B7 update: the test now feeds canonical Snowflake column
+    names (``SUBJECT_C`` / ``DESCRIPTION_C``) so the inputs survive the
+    new ``Action_Plans`` curated-schema projection that R67/B7 added.
+    The post-projection friendly-header rename converts
+    ``SUBJECT_C`` → ``Subject`` and ``DESCRIPTION_C`` → ``Description``
+    in the produced XLSX, so the read-back assertions still anchor on
+    the user-visible header labels.
+    """
     from adoptiq_backend import write_excel_workbook
 
     sheets = {
@@ -175,8 +184,8 @@ def test_write_excel_workbook_strips_html_from_action_plans_sheet(tmp_path):
             {
                 "ID": "AP1",
                 "BU_NAME": "Acme Corp",
-                "Subject": '<a href="/lightning/r/...">Click for details</a>',
-                "Description": "<p>Engage <strong>CSM</strong> for renewal.</p>",
+                "SUBJECT_C": '<a href="/lightning/r/...">Click for details</a>',
+                "DESCRIPTION_C": "<p>Engage <strong>CSM</strong> for renewal.</p>",
                 "STATUS_C": "Open",
             }
         ]),
@@ -185,7 +194,9 @@ def test_write_excel_workbook_strips_html_from_action_plans_sheet(tmp_path):
     xlsx_path = write_excel_workbook(out_base, sheets, {})
     assert xlsx_path is not None
 
-    # Read back and assert HTML is gone.
+    # Read back and assert HTML is gone.  R67/B7 friendly-header rename
+    # converts ``SUBJECT_C`` -> ``Subject`` and ``DESCRIPTION_C`` ->
+    # ``Description`` in the output workbook.
     written = pd.read_excel(xlsx_path, sheet_name="Action_Plans")
     subject = str(written.iloc[0]["Subject"])
     description = str(written.iloc[0]["Description"])

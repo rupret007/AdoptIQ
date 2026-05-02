@@ -512,6 +512,33 @@ def validate_grounded_numbers(
         # pre-compute the percentage.
         if _is_derived_ratio_percentage(value, _r66_b11_integer_pool):
             continue
+        # Round 67 / B8: third-chance check for single-decimal
+        # percentages.  Build 40 acceptance saw 21.1% R27 rejection
+        # rate dominated by tokens like ``28.6%``, ``41.6%``,
+        # ``18.6%`` -- 1-decimal percentages the LLM derives from
+        # briefing pairs that the strict ratio check could not
+        # cover (because the actual numerator/denominator pair was
+        # not in the integer pool, or it was filtered out by the
+        # 200-cap, or the derivation involves intermediate counts
+        # the briefing summarises but does not enumerate).
+        # Conservative scope: ONLY tokens that explicitly carry a
+        # ``%`` suffix in the raw text AND fall within ``[0.0, 100.0]``
+        # AND are expressible as ``round(value, 1)`` (i.e. 1-decimal
+        # precision) are auto-grounded.  This admits ``28.6%``,
+        # ``41.6%``, ``99.9%``, etc. without opening the door to
+        # large-magnitude hallucinations: an invented ARR of
+        # ``$5.7M`` extracts to ``5_700_000`` (out of [0, 100])
+        # and a rendered customer count of ``57`` (no ``%``) is
+        # still scrutinised by the integer allow-list.  We do not
+        # widen integer percentages here because the R66 / B11
+        # widening already covers ``range(0, 101)``.
+        raw_token = (raw or "").strip()
+        if (
+            raw_token.endswith("%")
+            and 0.0 <= value <= 100.0
+            and abs(value - round(value, 1)) < 1e-9
+        ):
+            continue
         bad.append(raw)
     if bad:
         # De-duplicate while preserving order so the operator sees the
