@@ -614,6 +614,15 @@
     //                             OneDrive sentinel which is not
     //                             yet synced.  Buttons disabled;
     //                             clickable deep-link offered.
+    //   * self_healed_baked    -- Round 68 / Build 42 (B2): the
+    //                             upgrade-handoff bake from
+    //                             corpus_bootstrap._STATE.source =
+    //                             "self_healed_baked" rendered the
+    //                             same as ``baked_synced`` pre-R68
+    //                             so the operator never knew a
+    //                             healing cycle ran. Now distinct
+    //                             so the panel can carry the
+    //                             diagnostic.
     //   * unknown              -- pre-poll / no payload yet.
     function classifyCorpusPanel(payload) {
         var boot = (payload && payload.boot) || null;
@@ -630,6 +639,14 @@
         if (boot.last_refresh_error) {
             return 'refresh_failed';
         }
+        // Round 68 / Build 42 (B2): self_healed_baked is a healthy
+        // state semantically (the bundled bake was reinstalled to
+        // recover from a crypto failure on upgrade), but operators
+        // benefit from knowing a heal happened so they can verify
+        // the next refresh.  Falls through to baked_synced labeling
+        // when OneDrive is synced (so the daily-refresh promise
+        // still holds) and to baked_not_synced when not.
+        if (source === 'self_healed_baked') { return 'self_healed_baked'; }
         if (source === 'baked' && od === 'synced') { return 'baked_synced'; }
         if (source === 'baked') { return 'baked_not_synced'; }
         if (source === 'fresh' && od === 'synced') { return 'fresh_indexing'; }
@@ -641,6 +658,7 @@
         switch (state) {
             case 'baked_synced':        return 'Active \u2022 OneDrive synced';
             case 'baked_not_synced':    return 'Active \u2022 baked snapshot';
+            case 'self_healed_baked':   return 'Active \u2022 self-healed bake';
             case 'fresh_indexing':      return 'Indexing OneDrive\u2026';
             case 'fresh_not_synced':    return 'OneDrive sync required';
             case 'refreshing':          return 'Refreshing\u2026';
@@ -654,6 +672,7 @@
         switch (state) {
             case 'baked_synced':        return 'bg-success';
             case 'baked_not_synced':    return 'bg-info text-dark';
+            case 'self_healed_baked':   return 'bg-info text-dark';
             case 'fresh_indexing':      return 'bg-primary';
             case 'fresh_not_synced':    return 'bg-warning text-dark';
             case 'refreshing':          return 'bg-primary';
@@ -680,6 +699,17 @@
                     + 'Sign in to OneDrive and sync '
                     + '\u201CAI Projects/AdoptIQ_CSOne_Reports\u201D '
                     + 'to enable daily refresh.';
+            case 'self_healed_baked':
+                if (fileCount != null && fileCount > 0) {
+                    return 'Bundled snapshot was reinstalled to recover '
+                        + 'from a crypto failure on upgrade.  OneDrive '
+                        + 'synced (\u2265 ' + fileCount + ' file'
+                        + (fileCount === 1 ? '' : 's')
+                        + '); next refresh will pick up newer files.';
+                }
+                return 'Bundled snapshot was reinstalled to recover '
+                    + 'from a crypto failure on upgrade.  Sign in to '
+                    + 'OneDrive to enable the next daily refresh.';
             case 'fresh_indexing':
                 return 'Indexing OneDrive folder for the first time\u2026';
             case 'fresh_not_synced':

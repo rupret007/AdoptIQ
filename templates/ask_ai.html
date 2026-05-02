@@ -95,15 +95,49 @@
                             </button>
                         </div>
                     </div>
-                    <div class="d-flex flex-wrap gap-2">
+                    {# Round 68 / Build 42 (C6): suggestion chips are now
+                       data-driven via GET /api/ask-ai/suggestions.  The
+                       static chips below act as the SSR fallback for
+                       the very first paint -- the JS replaces them
+                       with personalised chips on DOMContentLoaded and
+                       refreshes them on every manager / technology /
+                       days selector change.  The fallback set matches
+                       _ASK_AI_SUGGESTIONS_FALLBACK in app_simple.py
+                       so the no-JS render is never blank. #}
+                    <div class="d-flex flex-wrap gap-2" id="r68SuggestionChipsContainer" data-r68-suggestions-container="1">
                         <small class="text-muted me-1 align-self-center">Try:</small>
-                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">Which accounts have stale barriers over 90 days old and what is their combined ARR at risk?</button>
-                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">Show me the silent risk: high-ARR customers with low pulse scores that might churn without warning</button>
-                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">Cross-reference contract expirations with open barriers - which renewals are in danger?</button>
-                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">What customers keep appearing in report after report with unresolved issues?</button>
-                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">Give me a full portfolio health briefing with revenue-prioritized risk analysis and action items</button>
-                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button">Which technology segments have the worst barrier-to-ARR density and what is the financial exposure?</button>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button" data-category="general">Which accounts have stale barriers over 90 days old and what is their combined ARR at risk?</button>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button" data-category="general">Show me the silent risk: high-ARR customers with low pulse scores that might churn without warning</button>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button" data-category="general">Cross-reference contract expirations with open barriers - which renewals are in danger?</button>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button" data-category="general">Give me a full portfolio health briefing with revenue-prioritized risk analysis and action items</button>
                     </div>
+                </div>
+            </div>
+
+            {# Round 68 / Build 42 (C9): first-time-user empty-state
+               tip card.  Lives OUTSIDE the answerArea so it shows on
+               first page load (no localStorage flag) before any
+               question is asked.  Dismissed permanently via
+               localStorage on first click of "Got it". #}
+            <div id="r68EmptyStateTip"
+                 class="alert alert-info border-0 mb-3"
+                 style="display:none;">
+                <div class="d-flex align-items-start gap-2">
+                    <i class="fas fa-lightbulb text-warning mt-1"></i>
+                    <div class="flex-grow-1">
+                        <strong class="d-block mb-1">Tip: ground your question in the operator selectors above.</strong>
+                        <span class="small">
+                            Start with a manager or technology in the Data Context above so AdoptIQ can scope the
+                            evidence to your actual portfolio.  Try a Smart suggestion chip to see the format
+                            AdoptIQ answers best in.  Click any <strong>[Source: ID]</strong> badge in an answer
+                            to see the underlying evidence record.
+                        </span>
+                    </div>
+                    <button type="button"
+                            id="r68EmptyStateTipDismissBtn"
+                            class="btn btn-link btn-sm text-decoration-none">
+                        Got it
+                    </button>
                 </div>
             </div>
 
@@ -111,17 +145,55 @@
             <div id="answerArea" style="display:none;">
                 <div class="card ai-card fade-in shadow-cisco mb-4">
                     <div class="card-body">
-                        <div id="loadingState" style="display:none;" class="text-center py-4">
+                        <div id="loadingState" style="display:none;" class="py-4">
                             {# Round 8 / Phase 5.6: a Bootstrap .spinner-border
                                with role="status" needs visually-hidden text
                                for screen readers; otherwise assistive
                                technology announces an empty status region
                                and the user has no idea anything is happening. #}
-                            <div class="spinner-border text-primary mb-3" role="status">
-                                <span class="visually-hidden">Loading...</span>
+                            <div class="text-center mb-3">
+                                <div class="spinner-border text-primary mb-3" role="status">
+                                    <span class="visually-hidden">Loading...</span>
+                                </div>
+                                <p class="text-muted mb-1 fw-semibold">Fetching live data from Snowflake...</p>
+                                <p class="text-muted small mb-0" id="loadingDetail">Connecting and gathering portfolio data. This may take 15-30 seconds.</p>
                             </div>
-                            <p class="text-muted mb-1 fw-semibold">Fetching live data from Snowflake...</p>
-                            <p class="text-muted small mb-0" id="loadingDetail">Connecting and gathering portfolio data. This may take 15-30 seconds.</p>
+                            {# Round 68 / Build 42 (C9): 3-step progress
+                               indicator that mirrors the server-side
+                               pipeline (fetch -> retrieve -> synthesize).
+                               Each step is updated by the JS as the
+                               request progresses through the canonical
+                               stages.  Provides clearer feedback than
+                               the rolling spinner-only design that
+                               pre-R68 users found "stuck"-feeling. #}
+                            <div id="r68LoadingSteps" class="mt-2"
+                                 role="progressbar"
+                                 aria-valuemin="0" aria-valuemax="3" aria-valuenow="0">
+                                <ol class="list-unstyled small mb-3">
+                                    <li class="d-flex align-items-center mb-1" id="r68StepFetch">
+                                        <span class="badge bg-light text-muted border me-2"
+                                              data-r68-step-icon="fetch">1</span>
+                                        <span class="text-muted">Fetch portfolio data (Snowflake)</span>
+                                    </li>
+                                    <li class="d-flex align-items-center mb-1" id="r68StepRetrieve">
+                                        <span class="badge bg-light text-muted border me-2"
+                                              data-r68-step-icon="retrieve">2</span>
+                                        <span class="text-muted">Retrieve and rank evidence</span>
+                                    </li>
+                                    <li class="d-flex align-items-center mb-1" id="r68StepSynthesize">
+                                        <span class="badge bg-light text-muted border me-2"
+                                              data-r68-step-icon="synthesize">3</span>
+                                        <span class="text-muted">Synthesize answer with Circuit AI</span>
+                                    </li>
+                                </ol>
+                                <div class="text-center">
+                                    <button type="button"
+                                            id="r68CancelBtn"
+                                            class="btn btn-outline-secondary btn-sm">
+                                        <i class="fas fa-stop me-1"></i>Cancel
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                         <!-- Phase 2.4: legacy ungrounded mode banner -->
                         <div id="ungroundedBanner" class="alert alert-warning small mb-3" style="display:none;">
@@ -163,7 +235,62 @@
                                 </div>
                             </div>
                         </div>
+                        {# Round 68 / Build 42 (C5): debug-chip footer.
+                           Surfaces the per-query ``query_id`` and the
+                           ``retrieval_method`` used (vector / lexical /
+                           hybrid / fallback) so an operator filing a
+                           support ticket can paste the debug ID and we
+                           can pull the full ``/api/ask-ai/diagnostics/<id>``
+                           record (which now persists to SQLite via R68/C2).
+                           Pre-R68 the operator could only screenshot the
+                           answer, leaving us no way to correlate to the
+                           server-side diag.  The chip is hidden until
+                           the answer arrives so it doesn't clutter the
+                           empty state. #}
+                        <div id="r68DebugChip" style="display:none;"
+                             class="mt-2 d-flex align-items-center gap-2 small text-muted">
+                            <span class="badge bg-light text-secondary border"
+                                  id="r68DebugChipMethod">retrieval: -</span>
+                            <span class="badge bg-light text-secondary border font-monospace"
+                                  id="r68DebugChipId">debug: -</span>
+                            <button type="button"
+                                    id="r68DebugChipCopyBtn"
+                                    class="btn btn-link btn-sm p-0 text-decoration-none small">
+                                <i class="fas fa-copy"></i>
+                                <span>Copy debug ID</span>
+                            </button>
+                        </div>
                     </div>
+                </div>
+            </div>
+
+            {# Round 68 / Build 42 (C8): chat history panel.
+               Powered entirely by localStorage so the user's
+               questions never leave the browser (key contract --
+               no PII / scope leakage server-side).  Capped at 20
+               entries via FIFO eviction.  Each entry shows the
+               question, a snippet of the answer, the timestamp,
+               and four actions: Re-ask / Refine / Copy / Delete. #}
+            <div id="r68ChatHistoryCard" class="card fade-in shadow-cisco mb-4" style="display:none;">
+                <div class="card-body">
+                    <div class="d-flex align-items-center justify-content-between mb-3">
+                        <h6 class="mb-0">
+                            <i class="fas fa-clock-rotate-left text-muted me-2"></i>
+                            <span>Recent questions</span>
+                            <span id="r68ChatHistoryCount" class="badge bg-light text-secondary border ms-1"></span>
+                        </h6>
+                        <div>
+                            <button type="button" id="r68ChatHistoryClearBtn"
+                                    class="btn btn-link btn-sm text-decoration-none text-muted">
+                                <i class="fas fa-trash me-1"></i>Clear all
+                            </button>
+                            <button type="button" id="r68ChatHistoryToggleBtn"
+                                    class="btn btn-link btn-sm text-decoration-none">
+                                <i class="fas fa-chevron-up" id="r68ChatHistoryToggleIcon"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <ul id="r68ChatHistoryList" class="list-group list-group-flush small"></ul>
                 </div>
             </div>
 

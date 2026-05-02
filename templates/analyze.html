@@ -167,28 +167,100 @@
                             </button>
                         </div>
                     </div>
-                    {# Round 36 / onedrive-sync-auth: AdoptIQ Knowledge Corpus
-                       sub-panel.  The corpus is baked into the .app at
-                       build time and refreshed daily from the OneDrive
-                       desktop client's local mirror at
+                    {# Round 36 / onedrive-sync-auth (extended Round 53 /
+                       Phase 53.4 fail-closed semantics, expanded
+                       Round 68 / Build 42 (B3) self-healed branch):
+                       AdoptIQ Knowledge Corpus sub-panel.  The corpus
+                       is baked into the .app at build time and
+                       refreshed daily from the OneDrive desktop
+                       client's local mirror at
                        Config.CSONE_ONEDRIVE_FOLDER -- no MSAL, no
                        device-code prompt, no buttons.  The pill below
-                       reflects four states driven by ``boot.source``
-                       and ``boot.onedrive_status``:
+                       reflects EIGHT states driven by ``boot.source``
+                       x ``boot.onedrive_status`` (the JS-side state
+                       machine lives in
+                       ``static/js/intel_status.js::classifyCorpusPanel``
+                       and MUST stay in sync with this comment):
 
-                         * baked + synced     -- Active. OneDrive synced.
-                                                 Daily refresh enabled.
-                         * baked + not_synced -- Active (baked snapshot).
-                                                 OneDrive folder not
-                                                 detected; sign in to
-                                                 OneDrive to enable
-                                                 daily refresh.
-                         * fresh + synced     -- Indexing OneDrive folder.
-                         * fresh + not_synced -- OneDrive sync required.
+                         * baked + synced            -- Active.  OneDrive
+                                                        synced.  Daily
+                                                        refresh enabled.
+                         * baked + not_synced        -- Active (baked
+                                                        snapshot).  OneDrive
+                                                        folder not
+                                                        detected; sign in
+                                                        to OneDrive to
+                                                        enable daily
+                                                        refresh.  Reports
+                                                        from this state
+                                                        DO NOT include
+                                                        any post-bake
+                                                        OneDrive content
+                                                        because the local
+                                                        OneDrive mirror
+                                                        was missing on
+                                                        boot.
+                         * self_healed_baked         -- Active.  The
+                                                        bundled snapshot
+                                                        was reinstalled
+                                                        to recover from a
+                                                        crypto failure on
+                                                        upgrade (Round 39
+                                                        self-heal).  Same
+                                                        content guarantee
+                                                        as ``baked +
+                                                        synced``; surfaces
+                                                        as a distinct
+                                                        pill so the
+                                                        operator knows a
+                                                        heal happened.
+                         * fresh + synced            -- Indexing OneDrive
+                                                        folder for the
+                                                        first time.
+                         * fresh + not_synced        -- OneDrive sync
+                                                        required (no
+                                                        baked snapshot
+                                                        AND no local
+                                                        mirror).
+                         * refreshing                -- Daily refresh in
+                                                        progress.
+                         * refresh_failed            -- Last refresh
+                                                        raised an error;
+                                                        the prior
+                                                        snapshot is
+                                                        still being
+                                                        served (R39
+                                                        commit-or-revert
+                                                        guarantee --
+                                                        the corpus on
+                                                        disk is
+                                                        byte-identical
+                                                        to the last
+                                                        known-good
+                                                        commit).
+                         * blocked_no_onedrive       -- Round 53 / Phase
+                                                        53.4 fail-closed
+                                                        semantics: the
+                                                        corpus is
+                                                        encrypted against
+                                                        a sentinel that
+                                                        lives in the
+                                                        OneDrive folder.
+                                                        Until that
+                                                        folder is synced,
+                                                        AdoptIQ refuses
+                                                        to serve the
+                                                        corpus -- the
+                                                        only fix is to
+                                                        sign in to
+                                                        OneDrive (the
+                                                        clickable
+                                                        deep-link below
+                                                        helps).
 
-                       The ``data-sharepoint-*`` selectors are kept for
-                       back-compat with the JS module name; renaming
-                       them is a follow-up. #}
+                       The ``data-sharepoint-*`` selectors are kept
+                       for back-compat with the JS module name;
+                       renaming them is a follow-up. #}
                     <div class="mt-3 pt-3 border-top"
                          id="adoptiq-corpus-panel"
                          data-sharepoint-panel

@@ -8379,6 +8379,15 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
 
     # Save the document if we created it from a path
     if should_save and file_path:
+        # Round 68 / Build 42 (A1): stamp the build label in the section
+        # footer so an auditor can spot a stale-binary report.  Helper is
+        # internally defensive (logs at debug on failure); we still wrap
+        # so a python-docx API drift cannot brick the save.
+        try:
+            from _r68_build_label import apply_word_footer as _r68_apply_word_footer  # noqa: PLC0415
+            _r68_apply_word_footer(doc)
+        except Exception as _r68_err:  # noqa: BLE001
+            logger.debug("Round 68 / A1: append_to_word_report footer skipped: %s", _r68_err)
         doc.save(file_path)
         return file_path
 
@@ -8530,6 +8539,21 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
             ["Technology", str(technology) if technology is not None else ""],
             ["Days", str(days) if days is not None else ""],
         ]
+        # Round 68 / Build 42 (A1): stamp App_Version / App_Build /
+        # Process_Started_At_UTC / Report_Generated_At_UTC so an auditor
+        # opening this Comprehensive XLSX can spot a stale-binary report
+        # at a glance.  Build 41 acceptance shipped reports from a
+        # pre-Build-41 process because the operator did not quit and
+        # re-launch after install -- without this label the user had no
+        # in-band way to spot it.  The helper itself never raises (logs
+        # at debug on failure) so a missing label cannot brick the
+        # Report_Info write.
+        try:
+            from _r68_build_label import append_build_label_rows_pairs as _r68_append_pairs  # noqa: PLC0415
+
+            _r68_append_pairs(_r66_b5_report_info_rows)
+        except Exception as _r68_err:  # noqa: BLE001
+            logger.debug("Round 68 / A1: build label append skipped: %s", _r68_err)
         try:
             _r66_b5_data_sheet_names: list[str] = []
             for _sheet_name in (sheets or {}).keys():
@@ -12669,6 +12693,14 @@ def main():
 
         # Save Word document
         docx_path = f"{base}.docx"
+        # Round 68 / Build 42 (A1): stamp build label on the legacy
+        # comprehensive Word path so the file carries a visible
+        # version + build marker.
+        try:
+            from _r68_build_label import apply_word_footer as _r68_apply_word_footer  # noqa: PLC0415
+            _r68_apply_word_footer(doc)
+        except Exception as _r68_err:  # noqa: BLE001
+            logger.debug("Round 68 / A1: legacy comprehensive footer skipped: %s", _r68_err)
         doc.save(docx_path)
 
         # Create enhanced Word report

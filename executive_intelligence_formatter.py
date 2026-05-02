@@ -1494,6 +1494,18 @@ class ExecutiveIntelligenceFormatter:
         """Save the document"""
         save_path = filepath or self.output_path
         if save_path:
+            # Round 68 / Build 42 (A1): stamp the build label in the
+            # executive intelligence Word report's section footer so an
+            # auditor can spot a stale-binary report at a glance.  Helper
+            # is internally defensive (logs at debug on failure).
+            try:
+                from _r68_build_label import apply_word_footer as _r68_apply_word_footer  # noqa: PLC0415
+                _r68_apply_word_footer(self.doc)
+            except Exception as _r68_err:  # noqa: BLE001
+                import logging as _r68_logging
+                _r68_logging.getLogger(__name__).debug(
+                    "Round 68 / A1: executive_intelligence word footer skipped: %s", _r68_err,
+                )
             self.doc.save(save_path)
             # Round 9 / Phase 6.4: ``save_path`` is host-absolute and on
             # shipped desktop installs embeds the operator's home /

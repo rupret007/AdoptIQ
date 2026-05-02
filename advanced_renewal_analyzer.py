@@ -1692,6 +1692,15 @@ class AdvancedRenewalAnalyzer:
         filename = f"AdoptIQ_Report_Renewal_{safe_customer}_{days}d_{timestamp}.docx"
         filepath = output_dir / filename
         
+        # Round 68 / Build 42 (A1): stamp the build label in the section
+        # footer so the Renewal docx carries a visible v{VER} build {N}
+        # marker (defends against the stale-binary trap).
+        try:
+            from _r68_build_label import apply_word_footer as _r68_apply_word_footer  # noqa: PLC0415
+            _r68_apply_word_footer(doc)
+        except Exception as _r68_err:  # noqa: BLE001
+            logger.debug("Round 68 / A1: Renewal word footer skipped: %s", _r68_err)
+
         doc.save(str(filepath))
         logger.info(f"Renewal report saved to: {filepath}")
         

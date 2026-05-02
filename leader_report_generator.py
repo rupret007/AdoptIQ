@@ -913,6 +913,14 @@ class LeaderReportGenerator:
         safe_manager = safe_manager.replace(' ', '_')
         filename = f"AdoptIQ_Report_Leader_{safe_manager}_{days}d_{timestamp}.docx"
         filepath = output_dir / filename
+        # Round 68 / Build 42 (A1): stamp the build label in the section
+        # footer so the Leader docx carries a visible v{VER} build {N}
+        # marker (defends against the stale-binary trap).
+        try:
+            from _r68_build_label import apply_word_footer as _r68_apply_word_footer  # noqa: PLC0415
+            _r68_apply_word_footer(self.doc)
+        except Exception as _r68_err:  # noqa: BLE001
+            logger.debug("Round 68 / A1: Leader word footer skipped: %s", _r68_err)
         self.doc.save(str(filepath))
         logger.info(f"Leader report saved to: {filepath}")
         return self.doc, str(filepath), team_data, direct_reports

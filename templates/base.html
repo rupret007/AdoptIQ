@@ -1330,6 +1330,28 @@
         </div>
     </nav>
 
+    {# Round 68 / Build 42 (A2): restart-required banner.  The
+       ``/api/version`` endpoint reports ``restart_required: true`` when
+       a newer ``.app`` is installed but the running process predates
+       it (the exact trap that produced Build 41 acceptance reports
+       from a pre-Build-41 binary).  This banner is rendered at session
+       start by ``static/js/r68_restart_banner.js`` after a single fetch
+       of ``/api/version``.  We pre-render the markup with ``hidden``
+       so the page is byte-identical to pre-R68 output until the JS
+       actually flips it.  Kept above the flash-messages region so it
+       sits at the top of the viewport. #}
+    <div id="r68-restart-required-banner"
+         class="alert alert-warning text-center mb-0 rounded-0"
+         role="alert"
+         hidden
+         data-r68-version
+         data-r68-build>
+        <strong>Newer AdoptIQ build installed but not active.</strong>
+        Quit AdoptIQ from the navbar (top right), then re-launch from the
+        Applications folder so the new build serves your reports.
+        <span class="d-block small mt-1" id="r68-restart-required-detail"></span>
+    </div>
+
     <!-- Flash Messages -->
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
@@ -1445,6 +1467,12 @@
        fallback renders the 409 needs_force prompt.  Same-origin so no
        CSP changes needed (script-src 'self'). #}
     <script src="{{ url_for('static', filename='js/quit_adoptiq.js') }}"></script>
+    {# Round 68 / Build 42 (A2): restart-required banner.  Polls
+       /api/version once per page load; if the server reports
+       ``restart_required=true`` (a newer .app is installed than the
+       one currently running) the pre-rendered banner above the flash-
+       messages region is unhidden.  Same-origin so CSP-clean. #}
+    <script src="{{ url_for('static', filename='js/r68_restart_banner.js') }}"></script>
     {# Round 8 / Phase 5.5: client-side fallback to populate the
        footer copyright year if the server context processor failed
        to set ``adoptiq_footer_year``.  This avoids the previous

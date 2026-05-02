@@ -1438,6 +1438,18 @@ class CompactReportFormatter:
                     _r25e_err,
                 )
 
+            # Round 68 / Build 42 (A1): stamp the build label in the
+            # section footer so an auditor can spot a stale-binary
+            # Compact docx at a glance.  Helper is internally defensive
+            # (logs at debug on failure); we still wrap it so a python-
+            # docx API drift cannot brick the save.
+            try:
+                from _r68_build_label import apply_word_footer as _r68_apply_word_footer  # noqa: PLC0415
+
+                _r68_apply_word_footer(self.doc)
+            except Exception as _r68_err:  # noqa: BLE001
+                logger.debug("Round 68 / A1: Compact word footer skipped: %s", _r68_err)
+
             self.doc.save(file_path)
             logger.info(f"Compact report saved: {file_path}")
             return file_path

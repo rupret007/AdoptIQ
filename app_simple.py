@@ -31,6 +31,18 @@ if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
     sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
     sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
+# Round 68 / Build 42 (A1): import the build-label helper EARLY so the
+# captured ``_PROCESS_STARTED_AT_UTC`` actually reflects process start
+# (not the first time a report writer happens to run).  The helper is
+# inert at import time apart from setting an env var, so this is cheap.
+try:  # pragma: no cover - import wiring
+    import _r68_build_label  # noqa: F401
+except Exception:  # noqa: BLE001
+    # An import failure here would only mean the build label isn't
+    # captured at the canonical earliest moment -- per-writer imports
+    # still work via the inline imports below.  Don't crash app boot.
+    pass
+
 # Round 5 hotfix: prefer the OS trust store (macOS Keychain / Windows cert
 # store / Linux system CAs) over certifi's bundle so Cisco corporate TLS
 # inspection no longer breaks Keeper / Snowflake calls with
@@ -1101,6 +1113,399 @@ def _r64_call_llm_with_retry(
         "max_attempts": max_attempts,
     }
     return last_result, diag
+
+
+# ---------------------------------------------------------------------------
+# Round 68 / Build 42 (A4): bounded portfolio-drift retry + deterministic
+# escalation.
+#
+# Build 41 acceptance smoke surfaced 12 paragraphs of "Portfolio-level AI
+# summary withheld: numeric drift detected (R25B validator)" in a single
+# Comprehensive run.  The root cause: when the LLM repeatedly emitted a
+# headline number that disagreed with the canonical pipeline, the R25B/R25C
+# validators raised ``ValueError`` -> the outer ``except Exception``
+# rendered the bland fallback paragraph -> nothing told the LLM "the
+# number you keep using is wrong, here's the right one."  The fix is a
+# focused retry loop:
+#
+#   1. Call the LLM normally (already retried for transient issues by
+#      ``_r64_call_llm_with_retry``).
+#   2. Run R25B + R25C in non-raising mode and capture ``drift_detail``.
+#   3. If drift is detected, build a TIGHTENED prompt that names the
+#      drifted field(s) + canonical value(s) explicitly, then re-call the
+#      LLM up to ``_R68_MAX_PORTFOLIO_DRIFT_RETRIES`` times.
+#   4. If retries exhaust, ESCALATE to a deterministic narrative built
+#      from ``canonical_metrics`` + the drift_detail block.
+#   5. Persist the full attempt history on
+#      ``status['portfolio_llm_diag']`` so the operator can correlate the
+#      escalation with the underlying drift cause.
+#
+# This is deliberately NOT integrated into ``_r64_call_llm_with_retry`` so
+# the per-customer LLM path (which has different drift semantics) is
+# unchanged.
+# ---------------------------------------------------------------------------
+
+_R68_MAX_PORTFOLIO_DRIFT_RETRIES: int = 2
+
+
+def _r68_validate_portfolio_drift(
+    portfolio_summary: str,
+    *,
+    canonical_totals: dict[str, Any],
+    canonical_high_risk_customers: int,
+    raise_on_drift: bool = False,
+) -> dict[str, Any]:
+    """Run R25B + R25C validators in non-raising mode.
+
+    Returns a dict with ``has_drift``, ``drift_detail`` (either kind),
+    plus the raw warnings from each validator so the caller can log
+    them. Returns ``has_drift=False`` and ``drift_detail=None`` on a
+    fully-clean narrative.  Defensive: a validator import failure
+    returns ``has_drift=False`` so the report still ships (parity with
+    the surrounding flow's existing "validator unavailable" branch).
+    """
+
+    out: dict[str, Any] = {
+        "has_drift": False,
+        "drift_detail": None,
+        "warnings": [],
+        "kind": None,
+    }
+    try:
+        from report_consistency import (  # noqa: PLC0415
+            validate_word_numeric_drift as _r68_r25b,
+            validate_word_risk_band_claims as _r68_r25c,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[R68/A4] validators unavailable, skipping drift check: %s", exc)
+        return out
+
+    try:
+        b_result = _r68_r25b(
+            portfolio_summary,
+            canonical_totals=canonical_totals,
+            raise_on_drift=raise_on_drift,
+        )
+        if isinstance(b_result, dict) and b_result.get("warnings"):
+            out["warnings"].extend(b_result["warnings"])
+        b_drift = (b_result or {}).get("drift_detail") if isinstance(b_result, dict) else None
+        if isinstance(b_drift, dict) and b_drift.get("fields"):
+            out["has_drift"] = True
+            out["drift_detail"] = b_drift
+            out["kind"] = "numeric"
+            return out
+    except ValueError as drift_err:
+        # ``raise_on_drift=True`` was honored by the caller and produced
+        # a structured ``drift_detail``; re-raise to the caller.
+        if raise_on_drift:
+            raise
+        # Should not happen with raise_on_drift=False; degrade gracefully.
+        logger.debug("[R68/A4] R25B unexpectedly raised: %s", drift_err)
+
+    try:
+        c_result = _r68_r25c(
+            portfolio_summary,
+            canonical_high_risk_customers=canonical_high_risk_customers,
+            raise_on_drift=raise_on_drift,
+        )
+        if isinstance(c_result, dict) and c_result.get("warnings"):
+            out["warnings"].extend(c_result["warnings"])
+        c_drift = (c_result or {}).get("drift_detail") if isinstance(c_result, dict) else None
+        if isinstance(c_drift, dict) and c_drift.get("fields"):
+            out["has_drift"] = True
+            out["drift_detail"] = c_drift
+            out["kind"] = "risk_band"
+            return out
+    except ValueError as drift_err:
+        if raise_on_drift:
+            raise
+        logger.debug("[R68/A4] R25C unexpectedly raised: %s", drift_err)
+
+    return out
+
+
+def _r68_drift_signature(drift_detail: dict[str, Any] | None) -> str:
+    """Stable string signature of which field(s) drifted.
+
+    Used to detect "the LLM keeps drifting on the same field" -- if the
+    signature is identical across attempts, retry is unlikely to help
+    and we should escalate to deterministic immediately.
+    """
+
+    if not isinstance(drift_detail, dict):
+        return ""
+    parts: list[str] = []
+    for f in drift_detail.get("fields") or []:
+        if not isinstance(f, dict):
+            continue
+        parts.append(str(f.get("field") or f.get("label") or ""))
+    parts.sort()
+    return ",".join(p for p in parts if p)
+
+
+def _r68_build_drift_correction_prompt(
+    base_prompt: str,
+    drift_detail: dict[str, Any],
+) -> str:
+    """Append a CORRECTION block to the base portfolio prompt.
+
+    Names the specific drifted field(s) and the canonical value(s) the
+    LLM must use.  Kept short so the model can find the correction
+    without losing context for the rest of the prompt.
+    """
+
+    lines: list[str] = []
+    lines.append("")
+    lines.append(
+        "CRITICAL CORRECTION (Round 68 / A4): your previous response used numbers "
+        "that disagreed with the canonical pipeline.  Use ONLY these values:"
+    )
+    for f in drift_detail.get("fields") or []:
+        if not isinstance(f, dict):
+            continue
+        label = f.get("label") or f.get("field") or "field"
+        canonical = f.get("canonical_value")
+        drifted = f.get("drifted_values") or f.get("llm_values")
+        lines.append(
+            f"- {label}: MUST be {canonical}.  You previously emitted {drifted}; do NOT use those values again."
+        )
+    lines.append(
+        "Respond with the corrected narrative.  Do not repeat the drifted values."
+    )
+    return base_prompt + "\n" + "\n".join(lines)
+
+
+def _r68_init_portfolio_llm_diag(status: dict) -> dict:
+    """Initialise (or fetch) the portfolio LLM diag container.
+
+    Lives on ``status['portfolio_llm_diag']`` so it is auto-persisted
+    via ``save_analysis_status``.  Pre-Round-68 ``portfolio_llm_diag``
+    only carried the ``_r64_call_llm_with_retry`` shape; Round 68
+    extends it with ``drift_attempts`` and ``unique_failures`` so the
+    operator can spot a "the LLM keeps drifting" condition.
+    """
+
+    diag = status.get("portfolio_llm_diag")
+    if not isinstance(diag, dict):
+        diag = {}
+        status["portfolio_llm_diag"] = diag
+    diag.setdefault("drift_attempts", [])
+    diag.setdefault("unique_failures", [])
+    diag.setdefault("escalated_to_deterministic", False)
+    diag.setdefault("max_drift_retries", _R68_MAX_PORTFOLIO_DRIFT_RETRIES)
+    return diag
+
+
+def _r68_record_drift_attempt(
+    diag: dict,
+    *,
+    attempt: int,
+    drift_detail: dict | None,
+    signature: str,
+    prompt_was_tightened: bool,
+) -> None:
+    """Append a structured record of one drift attempt to diag."""
+
+    try:
+        record = {
+            "attempt": int(attempt),
+            "signature": signature,
+            "prompt_tightened": bool(prompt_was_tightened),
+            "drift_kind": (drift_detail or {}).get("kind") or "numeric",
+            "drift_round": (drift_detail or {}).get("round") or "R25B/R25C",
+            "field_count": len((drift_detail or {}).get("fields") or []),
+        }
+        diag["drift_attempts"].append(record)
+        if signature and signature not in diag["unique_failures"]:
+            diag["unique_failures"].append(signature)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[R68/A4] drift attempt record skipped: %s", exc)
+
+
+def _r68_build_deterministic_portfolio_narrative(
+    *,
+    manager: str,
+    technology: str,
+    days: int,
+    canonical_totals: dict[str, Any],
+    canonical_high_risk_customers: int,
+    drift_signature: str,
+    attempts: int,
+) -> list[str]:
+    """Build a paragraph list that names the canonical numbers directly.
+
+    Used when ``_r68_validate_portfolio_drift`` reports drift on the
+    same field(s) across ``_R68_MAX_PORTFOLIO_DRIFT_RETRIES + 1``
+    attempts.  The paragraphs are deterministic: pure string formatting
+    over the canonical pipeline values + a transparent operator note
+    about why the LLM commentary was withheld.
+
+    Returns a list of strings (each one paragraph) so the caller can
+    feed them through whatever ``add_paragraph``-style API it prefers.
+    """
+
+    total_customers = int(canonical_totals.get("total_customers") or 0)
+    total_barriers = int(canonical_totals.get("total_barriers") or 0)
+    total_cases = int(canonical_totals.get("total_cases") or 0)
+    bems = int(canonical_totals.get("bems_count") or 0)
+
+    paragraphs: list[str] = []
+    paragraphs.append(
+        "Portfolio-level commentary was generated deterministically from the "
+        "canonical metrics pipeline because the AI narrative drifted off the "
+        f"canonical numbers across {attempts} attempts (drift signature: "
+        f"{drift_signature or 'unspecified'}).  The figures below are sourced "
+        "directly from the same SSoT modules that drive the dashboard tiles "
+        "and the XLSX Summary sheet."
+    )
+    paragraphs.append(f"Manager: {manager}")
+    paragraphs.append(f"Technology Focus: {technology}")
+    paragraphs.append(f"Analysis Period: {days} days")
+    paragraphs.append(f"Total Customers in Portfolio: {total_customers}")
+    paragraphs.append(f"Total Adoption Barriers: {total_barriers}")
+    paragraphs.append(f"Total Support Cases (TAC): {total_cases}")
+    if bems:
+        paragraphs.append(f"BEMS Escalations: {bems}")
+    paragraphs.append(
+        f"High-Risk Customers (Critical or High band): {canonical_high_risk_customers}"
+    )
+    paragraphs.append(
+        "Per-customer detail, including individual risk component breakdowns "
+        "and named adoption barriers, follows in the sections below.  The "
+        "XLSX workbook's Summary, Risk_Components, and Critical_Adoption_"
+        "Barriers tabs remain authoritative for every figure cited above."
+    )
+    return paragraphs
+
+
+# ---------------------------------------------------------------------------
+# Round 68 / Build 42 (A5): per-customer LLM fallback diagnostics.
+#
+# Build 41 acceptance found 2 customers in the Comprehensive docx falling
+# to ``"AI analysis temporarily unavailable. Customer data processed
+# successfully."``.  Pre-Round-68 the operator had no signal as to WHY
+# (rate-limit?  network?  empty response?) and no fallback-rate surface
+# alongside the grounding-rejection rate.  Round 68 / A5 records:
+#
+#   * ``first_error_kind`` per customer (the classified reason the LLM
+#     call failed -- mirrors the kinds tracked by
+#     ``_r64_call_llm_with_retry``)
+#   * ``attempts`` per customer (always 1 today; reserved so a future
+#     per-customer retry helper drops in cleanly)
+#   * ``rate`` rollup at the portfolio level so the operator can see
+#     "5/28 customers (17.9%) hit AI fallback" at a glance
+#
+# Default acceptance: <5% fallback rate.  Above that threshold the
+# admin dashboard can flag the report for review.
+# ---------------------------------------------------------------------------
+
+_R68_MAX_PER_CUSTOMER_LLM_RECORDS: int = 200
+
+
+def _r68_init_per_customer_llm_diag(status: dict) -> dict:
+    """Initialise (or fetch) the per-customer LLM diagnostics container.
+
+    Lives on ``status['per_customer_llm_diag']`` so it is auto-persisted
+    via ``save_analysis_status`` and surfaced on every
+    ``/status/<analysis_id>`` poll.
+    """
+
+    diag = status.get("per_customer_llm_diag")
+    if not isinstance(diag, dict):
+        diag = {
+            "fallback_summary": {"fallback": 0, "total": 0, "rate": 0.0},
+            "fallback_records": [],
+            "max_records": _R68_MAX_PER_CUSTOMER_LLM_RECORDS,
+            "acceptance_threshold": 0.05,
+        }
+        status["per_customer_llm_diag"] = diag
+    return diag
+
+
+def _r68_classify_per_customer_failure(
+    response: Any,
+    *,
+    exception: Exception | None = None,
+) -> str:
+    """Classify a per-customer LLM failure into a stable kind label.
+
+    Mirrors the vocabulary used by ``_r64_classify_llm_result`` so the
+    operator sees consistent labels across the portfolio retry helper
+    and the per-customer fallback rollup.
+    """
+
+    if exception is not None:
+        return type(exception).__name__
+    if response is None:
+        return "none"
+    if not isinstance(response, str) or not response.strip():
+        return "empty"
+    if response.startswith("ERROR:"):
+        try:
+            kind_body = response[len("ERROR:"):].lstrip()
+            return kind_body.split(":", 1)[0].strip().lower() or "error"
+        except Exception:  # noqa: BLE001
+            return "error"
+    return "unknown"
+
+
+def _r68_record_per_customer_llm_outcome(
+    status: dict,
+    *,
+    customer_name: str,
+    success: bool,
+    fallback_kind: str | None = None,
+    attempts: int = 1,
+) -> None:
+    """Append a per-customer LLM-outcome record + update the rollup.
+
+    ``customer_name`` is digested via the existing ``_id_digest`` helper
+    so the persisted analysis_status.json carries no PII (parity with
+    Round 64 / B5's grounding-rejection records).
+    """
+
+    try:
+        diag = _r68_init_per_customer_llm_diag(status)
+        summary = diag["fallback_summary"]
+        try:
+            summary["total"] = int(summary.get("total", 0) or 0) + 1
+        except Exception:  # noqa: BLE001
+            summary["total"] = 1
+        if not success:
+            try:
+                summary["fallback"] = int(summary.get("fallback", 0) or 0) + 1
+            except Exception:  # noqa: BLE001
+                summary["fallback"] = 1
+        try:
+            tot = int(summary.get("total", 0) or 0)
+            fb = int(summary.get("fallback", 0) or 0)
+            summary["rate"] = (fb / tot) if tot else 0.0
+        except Exception:  # noqa: BLE001
+            summary["rate"] = 0.0
+        # Only persist FAILURE records (mirrors the R64/B5 grounding
+        # rollup contract -- successful narratives still count toward
+        # the denominator, but only failures inflate the records list
+        # so the persisted file stays bounded).
+        if not success:
+            try:
+                cust_digest = _id_digest(str(customer_name)) if customer_name else "unknown"
+            except Exception:  # noqa: BLE001
+                cust_digest = "unknown"
+            record = {
+                "customer_digest": cust_digest,
+                "first_error_kind": str(fallback_kind or "unknown"),
+                "attempts": int(attempts or 1),
+                "recorded_at": _now_utc_iso_z(),
+            }
+            records = diag.setdefault("fallback_records", [])
+            records.append(record)
+            # Bound the record list -- drop the oldest if we overflow.
+            cap = int(diag.get("max_records", _R68_MAX_PER_CUSTOMER_LLM_RECORDS) or _R68_MAX_PER_CUSTOMER_LLM_RECORDS)
+            if cap > 0 and len(records) > cap:
+                # FIFO drop -- keep the most recent ``cap`` records.
+                del records[: len(records) - cap]
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[R68/A5] per-customer LLM diag record skipped: %s", exc)
 
 
 # Round 64 / Phase 3 (B5): grounding-failure diagnostics for the
@@ -2627,47 +3032,100 @@ def _resolve_csone_path_safe(csone_file_path: str) -> Optional[str]:
     return None
 
 
-def get_latest_csone_from_folder() -> Optional[str]:
-    """
-    When no CSOne file is uploaded, use the most recent .xlsx from the shared folder.
-    Macro places reports here daily. Returns full path or None if folder missing/empty.
+def get_latest_csone_from_folder_diag() -> Tuple[Optional[str], str, int]:
+    """Round 68 / Build 42 (B1): structured diagnostic variant of
+    :func:`get_latest_csone_from_folder` that returns a 3-tuple
+    ``(path, sync_status, real_file_count)`` so callers can record a
+    ``partial_data_warnings`` entry tagged ``kind='no_onedrive_sync'``
+    when the autodiscovery folder is present-but-empty (a classic
+    Files-On-Demand placeholder situation).
+
+    Mirrors the corpus gate semantics in
+    ``corpus_bootstrap._check_onedrive_sync_status`` so the same
+    ``synced`` / ``not_synced`` / ``unknown`` taxonomy applies to
+    BOTH the corpus refresh path and the CSOne autodiscovery path.
+
+    sync_status values:
+      * ``"synced"``     -- folder exists AND >=1 non-zero-byte
+                            ``.xlsx``/``.xls`` file is present.
+      * ``"not_synced"`` -- folder is missing, unreadable, empty,
+                            OR every entry is a 0-byte placeholder
+                            (classic OneDrive Files-On-Demand stub
+                            that has not yet been pulled to disk).
+      * ``"unknown"``    -- ``CSONE_ONEDRIVE_FOLDER`` is not set.
+
+    Never raises; OS errors collapse to ``("not_synced", 0)``.
     """
     folder = app.config.get('CSONE_ONEDRIVE_FOLDER')
-    # Round 8 / Phase 1.8: previously these messages echoed the verbatim
-    # OneDrive folder path (e.g. ``C:\Users\jdoe\OneDrive - Cisco\...``)
-    # at INFO and the absolute path of the chosen file -- both leak the
-    # operator's local username / sync layout to shipped logs.  Log
-    # only the basename / a short folder digest at INFO; verbatim
-    # paths remain available at DEBUG for support.
     if not folder:
         logger.info("[[ONEDRIVE]] CSOne folder not configured (CSONE_ONEDRIVE_FOLDER)")
-        return None
+        return None, "unknown", 0
     _folder_digest = _id_digest(folder)
     if not os.path.isdir(folder):
         logger.info("[[ONEDRIVE]] CSOne shared folder unavailable folder_digest=%s", _folder_digest)
         logger.debug("[[ONEDRIVE]] CSOne shared folder unavailable verbatim=%s", folder)
-        return None
+        return None, "not_synced", 0
     try:
-        xlsx_files = [
+        all_candidates = [
             os.path.join(folder, f) for f in os.listdir(folder)
             if f.lower().endswith(('.xlsx', '.xls')) and not f.startswith('~')
         ]
-        if not xlsx_files:
-            logger.info("[[ONEDRIVE]] No .xlsx files found in CSOne folder folder_digest=%s", _folder_digest)
-            logger.debug("[[ONEDRIVE]] No .xlsx files in folder verbatim=%s", folder)
-            return None
-        # Sort by modification time, newest first
-        latest = max(xlsx_files, key=lambda p: os.path.getmtime(p))
+        # Round 68 / Build 42 (B1): skip 0-byte files.  OneDrive
+        # Files-On-Demand stubs show up in ``listdir`` with a
+        # zero-byte size on disk until the user (or the OneDrive
+        # client) pulls them; treating those as real candidates
+        # produced the Round 38 "csone missing or empty" failure
+        # mode where the worker dutifully loaded a 0-byte xlsx,
+        # got an empty DataFrame, and the validator tripped the
+        # required-but-empty branch.  Mirrors the corpus gate at
+        # ``corpus_bootstrap._check_onedrive_sync_status`` which
+        # already enforces ``entry.stat().st_size > 0``.
+        real_files: list[str] = []
+        for cand in all_candidates:
+            try:
+                if os.path.getsize(cand) > 0:
+                    real_files.append(cand)
+            except OSError:
+                continue
+        if not real_files:
+            if all_candidates:
+                logger.info(
+                    "[[ONEDRIVE]] CSOne folder has %d xlsx entries but ALL are 0-byte placeholders folder_digest=%s",
+                    len(all_candidates), _folder_digest,
+                )
+            else:
+                logger.info("[[ONEDRIVE]] No .xlsx files found in CSOne folder folder_digest=%s", _folder_digest)
+            logger.debug("[[ONEDRIVE]] No real .xlsx files in folder verbatim=%s", folder)
+            return None, "not_synced", 0
+        latest = max(real_files, key=lambda p: os.path.getmtime(p))
         logger.info(
-            "[[ONEDRIVE]] Using latest CSOne report folder_digest=%s basename=%s",
-            _folder_digest, os.path.basename(latest),
+            "[[ONEDRIVE]] Using latest CSOne report folder_digest=%s basename=%s real_count=%d",
+            _folder_digest, os.path.basename(latest), len(real_files),
         )
         logger.debug("[[ONEDRIVE]] Verbatim latest CSOne report path=%s", latest)
-        return latest
+        return latest, "synced", len(real_files)
     except Exception as e:
-        logger.warning("[[ONEDRIVE]] Could not read CSOne folder folder_digest=%s err_kind=%s", _folder_digest, type(e).__name__)
+        logger.warning(
+            "[[ONEDRIVE]] Could not read CSOne folder folder_digest=%s err_kind=%s",
+            _folder_digest, type(e).__name__,
+        )
         logger.debug("[[ONEDRIVE]] CSOne folder read failure verbatim folder=%s", folder, exc_info=True)
-        return None
+        return None, "not_synced", 0
+
+
+def get_latest_csone_from_folder() -> Optional[str]:
+    """When no CSOne file is uploaded, use the most recent .xlsx from
+    the shared folder.  Macro places reports here daily.  Returns full
+    path or ``None`` if folder missing/empty/contains-only-placeholders.
+
+    Round 68 / Build 42 (B1): thin wrapper over
+    :func:`get_latest_csone_from_folder_diag` that drops the
+    ``sync_status`` / ``count`` diagnostics so legacy callers keep
+    working.  New code that needs to record a partial-data warning
+    on a ``not_synced`` miss should call the diag variant directly.
+    """
+    path, _status, _count = get_latest_csone_from_folder_diag()
+    return path
 
 
 # Round 45 / Phase 4: render a one-line, source-specific user-facing
@@ -10283,6 +10741,13 @@ def run_compact_analysis(analysis_id):
                         {'Item': 'Export type', 'Value': 'Standard (Compact)'},
                         {'Item': 'Generated at (UTC)', 'Value': _r67_b5_now},
                     ]
+                    # Round 68 / Build 42 (A1): build label so an
+                    # auditor can spot a stale-binary Compact report.
+                    try:
+                        from _r68_build_label import append_build_label_records as _r68_append_records  # noqa: PLC0415
+                        _r68_append_records(_info_records, key_field='Item', value_field='Value')
+                    except Exception as _r68_err:  # noqa: BLE001
+                        logger.debug("Round 68 / A1: Compact build label skipped: %s", _r68_err)
                     for w in _excel_partial_warnings or []:
                         _info_records.append({
                             'Item': 'Partial_Data_Warning',
@@ -13646,6 +14111,14 @@ def run_customer_renewal_analysis(analysis_id):
             {'Field': 'Generated_At_UTC', 'Value': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')},
             {'Field': 'Partial_Data_Warning_Count', 'Value': str(len(_ren_pdw))},
         ]
+        # Round 68 / Build 42 (A1): build label so the Renewal XLSX
+        # carries App_Version / App_Build / Process_Started_At_UTC /
+        # Report_Generated_At_UTC -- closes the stale-binary trap.
+        try:
+            from _r68_build_label import append_build_label_records as _r68_append_records  # noqa: PLC0415
+            _r68_append_records(_report_info_rows, key_field='Field', value_field='Value')
+        except Exception as _r68_err:  # noqa: BLE001
+            logger.debug("Round 68 / A1: Renewal build label skipped: %s", _r68_err)
         if _ren_pdw:
             for _i, _w in enumerate(_ren_pdw, 1):
                 try:
@@ -15317,66 +15790,164 @@ def run_comprehensive_analysis(analysis_id):
 
             # Check if AI response is valid
             if portfolio_summary and not portfolio_summary.startswith("ERROR:"):
-                # Round 25 / Phase B: post-render numeric drift validator.
-                # The prompt above pinned the canonical totals via
-                # ``.format(...)`` substitutions; if the LLM still emits
-                # a number that disagrees with the canonical pipeline,
-                # block the build before the artifact reaches the user
-                # rather than ship a numerically dishonest report.
-                # ``ADOPTIQ_NONSTRICT_R25B=1`` opts out for emergency
-                # hotfix scenarios.
+                # Round 68 / Build 42 (A4): bounded portfolio drift
+                # retry with deterministic escalation.  Pre-Round-68,
+                # the R25B/R25C validators raised ValueError on drift
+                # which was caught by the outer ``except Exception as
+                # portfolio_error`` and rendered the bland fallback.
+                # Build 41 acceptance smoke surfaced 12 paragraphs of
+                # the same fallback in one Comprehensive run.  The new
+                # flow:
+                #   1. Validate (non-raising) and capture drift_detail.
+                #   2. If drift, build a tightened correction prompt
+                #      naming the drifted field + canonical value.
+                #   3. Re-call the LLM; revalidate.
+                #   4. After ``_R68_MAX_PORTFOLIO_DRIFT_RETRIES`` failed
+                #      attempts, ESCALATE to a deterministic narrative
+                #      built directly from canonical_metrics.
+                # ``ADOPTIQ_NONSTRICT_R25B=1`` still bypasses the strict
+                # raise; we honor it on the FINAL attempt only.
                 try:
-                    from report_consistency import (
-                        validate_word_numeric_drift as _r25b_validator,
-                        validate_word_risk_band_claims as _r25c_validator,
-                    )
                     _r25b_drift_strict = str(
                         os.getenv("ADOPTIQ_NONSTRICT_R25B", "0")
                     ).strip().lower() not in {"1", "true", "yes", "on"}
-                    _r25b_drift_result = _r25b_validator(
-                        portfolio_summary,
-                        canonical_totals={
-                            "total_customers": _r25b_total_customers,
-                            "total_barriers": _r25b_total_barriers,
-                            "total_cases": _r25b_tac_cases,
-                            "bems_count": _r25b_bems,
-                        },
-                        raise_on_drift=_r25b_drift_strict,
-                    )
-                    if _r25b_drift_result.get("warnings"):
-                        logger.warning(
-                            "[R25B] Portfolio numeric drift validator warnings: %s",
-                            _r25b_drift_result["warnings"],
-                        )
-                    # Round 25 / Phase C: also validate the narrated
-                    # risk bands.  Pulled from portfolio_metrics so a
-                    # drift between dashboard tile (Critical+High = 1)
-                    # and narrative (3 customers labelled CRITICAL or
-                    # HIGH) blocks the build.  Same opt-out env var as
-                    # Phase B since both are part of the same Round 25
-                    # numeric-honesty contract.
                     try:
                         _r25c_canon_high = int(
                             portfolio_metrics.get("high_risk_customers", 0) or 0
                         )
                     except Exception:
                         _r25c_canon_high = 0
-                    _r25c_drift_result = _r25c_validator(
-                        portfolio_summary,
-                        canonical_high_risk_customers=_r25c_canon_high,
-                        raise_on_drift=_r25b_drift_strict,
-                    )
-                    if _r25c_drift_result.get("warnings"):
-                        logger.warning(
-                            "[R25C] Portfolio risk-band validator warnings: %s",
-                            _r25c_drift_result["warnings"],
+                    _r68_canonical_totals = {
+                        "total_customers": _r25b_total_customers,
+                        "total_barriers": _r25b_total_barriers,
+                        "total_cases": _r25b_tac_cases,
+                        "bems_count": _r25b_bems,
+                    }
+                    _r68_diag = _r68_init_portfolio_llm_diag(status)
+                    _r68_drift_attempt = 0
+                    _r68_last_signature = ""
+                    _r68_last_drift = None
+                    while True:
+                        _r68_drift_check = _r68_validate_portfolio_drift(
+                            portfolio_summary,
+                            canonical_totals=_r68_canonical_totals,
+                            canonical_high_risk_customers=_r25c_canon_high,
+                            raise_on_drift=False,
                         )
-                except ValueError as _r25b_drift_err:
-                    logger.error(
-                        "[R25B/R25C] Portfolio numeric or risk-band drift detected; blocking report build: %s",
-                        _r25b_drift_err,
-                    )
-                    raise
+                        if _r68_drift_check.get("warnings"):
+                            logger.warning(
+                                "[R25B/R25C] Portfolio drift validator warnings (attempt %d): %s",
+                                _r68_drift_attempt + 1,
+                                _r68_drift_check["warnings"],
+                            )
+                        if not _r68_drift_check["has_drift"]:
+                            break
+                        _r68_signature = _r68_drift_signature(_r68_drift_check["drift_detail"])
+                        _r68_last_drift = _r68_drift_check["drift_detail"]
+                        _r68_record_drift_attempt(
+                            _r68_diag,
+                            attempt=_r68_drift_attempt + 1,
+                            drift_detail=_r68_last_drift,
+                            signature=_r68_signature,
+                            prompt_was_tightened=_r68_drift_attempt > 0,
+                        )
+                        _r68_drift_attempt += 1
+                        # Cap retries; on exhaustion, escalate.
+                        if _r68_drift_attempt > _R68_MAX_PORTFOLIO_DRIFT_RETRIES:
+                            logger.warning(
+                                "[R68/A4] Portfolio drift retries exhausted (%d attempts) on signature=%r; "
+                                "escalating to deterministic narrative.",
+                                _r68_drift_attempt,
+                                _r68_signature,
+                            )
+                            _r68_diag["escalated_to_deterministic"] = True
+                            # Synthesize a portfolio_summary that the
+                            # downstream parse path can render as
+                            # paragraphs.  Use the canonical
+                            # narrative builder; downstream
+                            # ``parse_ai_output_and_add`` accepts
+                            # plain text with newline-separated
+                            # paragraphs.
+                            _r68_paragraphs = _r68_build_deterministic_portfolio_narrative(
+                                manager=str(status['manager']),
+                                technology=str(status['tech']),
+                                days=int(status.get('days', 0) or 0),
+                                canonical_totals=_r68_canonical_totals,
+                                canonical_high_risk_customers=_r25c_canon_high,
+                                drift_signature=_r68_signature or "unspecified",
+                                attempts=_r68_drift_attempt,
+                            )
+                            portfolio_summary = "\n\n".join(_r68_paragraphs)
+                            break
+                        if _r68_signature and _r68_signature == _r68_last_signature:
+                            # Same drift on the same fields -- a tightened
+                            # prompt did not move the LLM.  Escalate
+                            # immediately rather than burn another budget
+                            # window.
+                            logger.warning(
+                                "[R68/A4] Portfolio drift signature %r repeated on attempt %d; "
+                                "early-escalating to deterministic narrative.",
+                                _r68_signature,
+                                _r68_drift_attempt,
+                            )
+                            _r68_diag["escalated_to_deterministic"] = True
+                            _r68_paragraphs = _r68_build_deterministic_portfolio_narrative(
+                                manager=str(status['manager']),
+                                technology=str(status['tech']),
+                                days=int(status.get('days', 0) or 0),
+                                canonical_totals=_r68_canonical_totals,
+                                canonical_high_risk_customers=_r25c_canon_high,
+                                drift_signature=_r68_signature,
+                                attempts=_r68_drift_attempt,
+                            )
+                            portfolio_summary = "\n\n".join(_r68_paragraphs)
+                            break
+                        _r68_last_signature = _r68_signature
+                        # Build a tightened prompt naming the drifted
+                        # fields + canonical values, then re-call.
+                        _r68_correction_prompt = _r68_build_drift_correction_prompt(
+                            portfolio_prompt,
+                            _r68_last_drift,
+                        )
+                        logger.info(
+                            "[R68/A4] Portfolio drift detected (signature=%r); "
+                            "retrying with tightened prompt (drift attempt %d/%d).",
+                            _r68_signature,
+                            _r68_drift_attempt,
+                            _R68_MAX_PORTFOLIO_DRIFT_RETRIES,
+                        )
+                        portfolio_summary, _r64_portfolio_diag = _r64_call_llm_with_retry(
+                            generate_llm_response,
+                            _r68_correction_prompt,
+                            portfolio_briefing,
+                            max_attempts=2,  # tighter inner-loop budget
+                            backoff_base_seconds=1.0,
+                            correlation_id=status.get('analysis_id'),
+                        )
+                        try:
+                            status['portfolio_llm_diag'].update(dict(_r64_portfolio_diag))
+                        except Exception:  # noqa: BLE001
+                            pass
+                        if not portfolio_summary or portfolio_summary.startswith("ERROR:"):
+                            # Inner LLM call failed; escalate to
+                            # deterministic immediately.
+                            logger.warning(
+                                "[R68/A4] Portfolio drift retry call failed (kind=%s); "
+                                "escalating to deterministic.",
+                                _r64_portfolio_diag.get("last_error_kind"),
+                            )
+                            _r68_diag["escalated_to_deterministic"] = True
+                            _r68_paragraphs = _r68_build_deterministic_portfolio_narrative(
+                                manager=str(status['manager']),
+                                technology=str(status['tech']),
+                                days=int(status.get('days', 0) or 0),
+                                canonical_totals=_r68_canonical_totals,
+                                canonical_high_risk_customers=_r25c_canon_high,
+                                drift_signature=_r68_signature,
+                                attempts=_r68_drift_attempt,
+                            )
+                            portfolio_summary = "\n\n".join(_r68_paragraphs)
+                            break
                 except Exception as _r25b_other_err:
                     logger.warning(
                         "[R25B/R25C] Portfolio drift validator unavailable (%s); proceeding without strict check.",
@@ -15848,6 +16419,32 @@ def run_comprehensive_analysis(analysis_id):
                 customer_prompt = PROMPT_CUSTOMER_TEMPLATE.format(CUSTOMER_NAME=customer_name, CSSM_NAME=cssm_name, TECHNOLOGY=specific_technology, MANAGER=status['manager'])
                 customer_storyboard = generate_llm_response(customer_prompt, customer_briefing)
 
+                # Round 68 / Build 42 (A5): record the per-customer LLM
+                # call outcome so the operator gets a portfolio-level
+                # fallback rate alongside the grounding rejection rate.
+                # Pre-Round-68 the operator could see "AI analysis
+                # temporarily unavailable" repeated in the docx but had
+                # no per-customer-failure-kind breakdown.
+                _r68_per_cust_success = bool(
+                    customer_storyboard and not customer_storyboard.startswith("ERROR:")
+                )
+                if _r68_per_cust_success:
+                    _r68_record_per_customer_llm_outcome(
+                        status,
+                        customer_name=customer_name,
+                        success=True,
+                        attempts=1,
+                    )
+                else:
+                    _r68_per_cust_kind = _r68_classify_per_customer_failure(customer_storyboard)
+                    _r68_record_per_customer_llm_outcome(
+                        status,
+                        customer_name=customer_name,
+                        success=False,
+                        fallback_kind=_r68_per_cust_kind,
+                        attempts=1,
+                    )
+
                 # Check if AI response is valid
                 if customer_storyboard and not customer_storyboard.startswith("ERROR:"):
                     # Round 27 / R27-AI-GATE-CUSTOMER: gate the per-customer
@@ -15976,6 +16573,21 @@ def run_comprehensive_analysis(analysis_id):
 
             except Exception as ai_error:
                 logger.error("  [[ERROR]] AI analysis failed for %s: %s", customer_name, ai_error, exc_info=True)
+                # Round 68 / Build 42 (A5): record the exception-path
+                # fallback so the per-customer rollup includes BOTH
+                # in-band ERROR: returns AND outer exceptions.
+                try:
+                    _r68_record_per_customer_llm_outcome(
+                        status,
+                        customer_name=customer_name,
+                        success=False,
+                        fallback_kind=_r68_classify_per_customer_failure(
+                            None, exception=ai_error,
+                        ),
+                        attempts=1,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 # Add customer separator before each customer section (except the first)
                 if customers_actually_analyzed > 0:
                     report_builder._add_customer_separator()
@@ -17050,12 +17662,151 @@ _ASK_AI_DIAG_LOCK = threading.Lock()
 _ASK_AI_DIAG_BUFFER: "collections.OrderedDict[str, dict]" = collections.OrderedDict()
 _ASK_AI_DIAG_BUFFER_MAX = 100
 
+# Round 68 / Build 42 (C2): SQLite-backed persistence sidecar so the
+# 100-entry FIFO survives a process restart.  Operators investigating
+# a bad answer the user reports the next morning previously found
+# the in-memory buffer wiped by the overnight Quit-and-relaunch
+# (necessary post-R68/A2 to clear the stale-binary trap).  The
+# table lives in the same SQLite file as the rest of the admin
+# monitoring data (``admin_monitoring_v2.db``) so the operator only
+# has to back up one file.
+_ASK_AI_DIAG_TABLE_INIT = False
+
+
+def _r68_ask_ai_diag_db_path() -> Optional[str]:
+    """Resolve the admin monitoring DB path the same way the admin
+    module does.  Returns ``None`` when resolution fails so callers
+    can short-circuit silently (the in-memory buffer is the source
+    of truth; persistence is best-effort)."""
+    try:
+        if getattr(sys, 'frozen', False):
+            if sys.platform == 'darwin':
+                base = Path.home() / 'Library' / 'Application Support' / 'AdoptIQ'
+            elif sys.platform == 'win32':
+                base = Path(os.environ.get('APPDATA', str(Path.home()))) / 'AdoptIQ'
+            else:
+                base = Path.home() / '.adoptiq'
+            base.mkdir(parents=True, exist_ok=True)
+            return str(base / 'admin_monitoring_v2.db')
+        return 'admin_monitoring_v2.db'
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _r68_ensure_ask_ai_diag_table() -> bool:
+    """Create the ``ask_ai_diag`` table if it doesn't exist.  Returns
+    ``True`` on success, ``False`` on any SQLite error (caller falls
+    back to in-memory only)."""
+    global _ASK_AI_DIAG_TABLE_INIT
+    if _ASK_AI_DIAG_TABLE_INIT:
+        return True
+    db_path = _r68_ask_ai_diag_db_path()
+    if not db_path:
+        return False
+    try:
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(db_path, timeout=10.0)
+        try:
+            conn.execute('PRAGMA busy_timeout=10000')
+            conn.execute(
+                'CREATE TABLE IF NOT EXISTS ask_ai_diag ('
+                '  id INTEGER PRIMARY KEY AUTOINCREMENT,'
+                '  query_id TEXT NOT NULL UNIQUE,'
+                '  recorded_at_utc TEXT NOT NULL,'
+                '  retrieval_diag_json TEXT NOT NULL'
+                ')'
+            )
+            conn.execute(
+                'CREATE INDEX IF NOT EXISTS idx_ask_ai_diag_recorded_at '
+                'ON ask_ai_diag (recorded_at_utc)'
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        _ASK_AI_DIAG_TABLE_INIT = True
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _r68_persist_ask_ai_diag(query_id: str, payload: dict) -> None:
+    """Best-effort SQLite persistence sidecar for the FIFO buffer.
+    Writes one row per query and trims to the in-memory cap so the
+    persisted history stays bounded.  Never raises -- a SQLite
+    failure must not break the Ask AI user flow."""
+    if not _r68_ensure_ask_ai_diag_table():
+        return
+    db_path = _r68_ask_ai_diag_db_path()
+    if not db_path:
+        return
+    try:
+        import sqlite3 as _sqlite3
+        recorded_at = _now_utc_iso_z()
+        diag_json = json.dumps(payload, ensure_ascii=False, default=str)
+        conn = _sqlite3.connect(db_path, timeout=10.0)
+        try:
+            conn.execute('PRAGMA busy_timeout=10000')
+            conn.execute(
+                'INSERT OR REPLACE INTO ask_ai_diag '
+                '(query_id, recorded_at_utc, retrieval_diag_json) '
+                'VALUES (?, ?, ?)',
+                (str(query_id), recorded_at, diag_json),
+            )
+            # Trim to FIFO cap.  Keep the newest N (matches the
+            # in-memory ring buffer's eviction contract).
+            conn.execute(
+                'DELETE FROM ask_ai_diag WHERE id IN ('
+                '  SELECT id FROM ask_ai_diag ORDER BY id DESC '
+                '  LIMIT -1 OFFSET ?'
+                ')',
+                (_ASK_AI_DIAG_BUFFER_MAX,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _r68_load_ask_ai_diag(query_id: str) -> Optional[dict]:
+    """Best-effort SQLite read.  Returns the persisted retrieval_diag
+    dict for ``query_id``, or ``None`` if missing / SQLite unavailable."""
+    if not _r68_ensure_ask_ai_diag_table():
+        return None
+    db_path = _r68_ask_ai_diag_db_path()
+    if not db_path:
+        return None
+    try:
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(db_path, timeout=10.0)
+        try:
+            conn.execute('PRAGMA busy_timeout=10000')
+            row = conn.execute(
+                'SELECT retrieval_diag_json FROM ask_ai_diag '
+                'WHERE query_id = ? LIMIT 1',
+                (str(query_id),),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row and row[0]:
+            data = json.loads(row[0])
+            return data if isinstance(data, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
 
 def _record_ask_ai_query_diag(query_id: str, payload: dict) -> None:
     """Round 66 / Pass 5 - record per-query retrieval diagnostics for
     the ``GET /api/ask-ai/diagnostics/<query_id>`` endpoint. Bounded
     via FIFO eviction; never raises (the diagnostic surface must not
     be allowed to break the user-facing Ask AI flow).
+
+    Round 68 / Build 42 (C2): now ALSO persists the same payload to
+    ``admin_monitoring_v2.db.ask_ai_diag`` so the diagnostic survives
+    a Quit-and-relaunch.  In-memory FIFO contract is preserved
+    (same key, same eviction-on-overflow); the SQLite write is
+    best-effort and never raises.
     """
     if not query_id or not isinstance(payload, dict):
         return
@@ -17066,19 +17817,38 @@ def _record_ask_ai_query_diag(query_id: str, payload: dict) -> None:
                 _ASK_AI_DIAG_BUFFER.popitem(last=False)
     except Exception:  # noqa: BLE001 - never raise from diagnostic write
         pass
+    # Round 68 / Build 42 (C2): SQLite sidecar -- happens OUTSIDE the
+    # in-memory lock to avoid serialising disk I/O behind the buffer
+    # mutex.  Lock-free OK because each query_id is written exactly
+    # once (the request handler that owns the call is the only writer
+    # for its own id).
+    try:
+        _r68_persist_ask_ai_diag(query_id, payload)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _get_ask_ai_query_diag(query_id: str) -> Optional[dict]:
     """Round 66 / Pass 5 - read-only accessor for the ring buffer.
-    Returns ``None`` for unknown ids so the endpoint can return 404."""
+    Returns ``None`` for unknown ids so the endpoint can return 404.
+
+    Round 68 / Build 42 (C2): falls through to the SQLite sidecar
+    when the in-memory buffer doesn't carry the id (typical scenario:
+    the operator restarted the app between record+lookup, or the
+    id was evicted from the in-memory ring buffer but is still in
+    the persisted FIFO).
+    """
     if not query_id:
         return None
     try:
         with _ASK_AI_DIAG_LOCK:
             entry = _ASK_AI_DIAG_BUFFER.get(str(query_id))
-            return dict(entry) if entry is not None else None
+            if entry is not None:
+                return dict(entry)
     except Exception:  # noqa: BLE001
-        return None
+        pass
+    # Round 68 / Build 42 (C2): SQLite fallback.
+    return _r68_load_ask_ai_diag(query_id)
 
 
 @app.route('/api/ask-ai/diagnostics/<query_id>')
@@ -17510,6 +18280,68 @@ def verbose_debug_api():
         return jsonify({'ok': False, 'success': False, 'error': 'Failed to update verbose debug mode'}), 500
 
 
+@app.route('/api/version', methods=['GET'])
+def api_version():
+    """Round 68 / Build 42 (A2): expose the running binary's identity.
+
+    Build 41 acceptance shipped reports from a pre-Build-41 binary because
+    the operator copied the new ``.app`` into ``/Applications`` but did not
+    quit and re-launch the running process.  This endpoint surfaces the
+    information needed to spot that condition without opening a report:
+
+    * ``version`` / ``build``       -- ``ADOPTIQ_VERSION`` / ``ADOPTIQ_BUILD``
+    * ``process_started_at_utc``    -- captured at app boot via _r68_build_label
+    * ``code_loaded_at_utc``        -- mtime of ``app_simple.py`` on disk
+    * ``dmg_install_at_utc``        -- mtime of ``sys.executable`` (frozen only)
+    * ``restart_required``          -- ``True`` when ``dmg_install_at_utc`` is
+      strictly after ``process_started_at_utc`` (i.e. a newer .app is
+      installed but not active)
+
+    Loopback safe -- echoes no secret material, no PII.  ``base.html``
+    polls this once per session and renders a non-dismissable banner when
+    ``restart_required=True`` so the operator cannot miss the trap.
+    """
+    try:
+        from _r68_build_label import (  # noqa: PLC0415
+            _resolve_code_loaded_at_utc,
+            _resolve_dmg_install_at_utc,
+            _resolve_version_build,
+            get_process_started_at_utc,
+        )
+
+        version, build = _resolve_version_build()
+        process_started = get_process_started_at_utc()
+        code_loaded = _resolve_code_loaded_at_utc()
+        dmg_install = _resolve_dmg_install_at_utc()
+
+        # Round 68 / A2: ``restart_required`` is the headline signal.  A
+        # truthy value means "a newer .app is installed than the one
+        # currently running" -- the operator must quit and re-launch
+        # before generating new reports.  We only flag this when both
+        # timestamps are present AND the install is strictly newer
+        # (avoids false positives from clock drift / equal mtimes).
+        restart_required = False
+        try:
+            if dmg_install and process_started and dmg_install > process_started:
+                restart_required = True
+        except Exception:  # noqa: BLE001
+            restart_required = False
+
+        return jsonify({
+            'ok': True,
+            'version': version,
+            'build': build,
+            'process_started_at_utc': process_started,
+            'code_loaded_at_utc': code_loaded,
+            'dmg_install_at_utc': dmg_install,
+            'restart_required': restart_required,
+            'frozen': bool(getattr(sys, 'frozen', False)),
+        }), 200
+    except Exception as e:
+        logger.error("Round 68 / A2: /api/version failed: %s", e, exc_info=True)
+        return jsonify({'ok': False, 'error_kind': 'version_endpoint_error'}), 500
+
+
 @app.route('/api/diag/connectivity', methods=['GET'])
 def api_diag_connectivity():
     """Run the DNS -> TLS -> AppRole -> secret-read -> Snowflake self-test.
@@ -17823,6 +18655,226 @@ def ask_ai_page():
         managers=MANAGERS,
         technologies=TECH_CHOICES,
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 68 / Build 42 (C6): Personalized Ask AI suggestion chips
+# ---------------------------------------------------------------------------
+#
+# Pre-R68 the Ask AI page rendered six static "Try:" chips that were
+# the same for every operator regardless of which manager / tech they
+# had selected.  This endpoint generates four data-driven chips at
+# request time (cap 4 + the static fallback, so the chip strip stays
+# bounded):
+#
+#   * top_risk -- name the highest-risk customer in the current scope
+#   * stale_barriers -- count of barriers open >90 days
+#   * recent_renewal -- a subscription expiring within the next 90 days
+#   * last_report -- a follow-up on the most recent generated report
+#
+# Each chip carries a ``category`` (so the UI can group them visually),
+# a ``question`` (the prompt that will be sent if the chip is clicked),
+# and an optional ``label`` (display chrome).  When data is unavailable
+# the endpoint returns the static fallback chips so the operator's UI
+# never goes blank.
+#
+# Bounded latency: the endpoint uses the existing prefetch helpers and
+# never blocks on the LLM.  It is read-only (GET) and idempotent.
+# Inputs are length-capped + allow-listed; manager/technology values
+# go through the same validators as ``/api/ask-ai-portfolio``.
+
+_ASK_AI_SUGGESTIONS_FALLBACK = [
+    {
+        "category": "general",
+        "label": "General",
+        "question": "Which accounts have stale barriers over 90 days old and what is their combined ARR at risk?",
+    },
+    {
+        "category": "general",
+        "label": "General",
+        "question": "Show me the silent risk: high-ARR customers with low pulse scores that might churn without warning",
+    },
+    {
+        "category": "general",
+        "label": "General",
+        "question": "Cross-reference contract expirations with open barriers - which renewals are in danger?",
+    },
+    {
+        "category": "general",
+        "label": "General",
+        "question": "Give me a full portfolio health briefing with revenue-prioritized risk analysis and action items",
+    },
+]
+
+
+def _r68_build_suggestion_chips(
+    manager: str,
+    technology: str,
+    days: int,
+) -> list[dict]:
+    """Build personalized Ask AI suggestion chips for the given scope.
+
+    Pre-R68 the ``ask_ai.html`` template hard-coded six suggestion
+    chips that were identical for every operator.  This helper
+    derives four data-driven chips from the operator's selected
+    scope (manager + technology + days window) AND the most-recent
+    report on disk so the chips are actionable for the operator's
+    actual scope.
+
+    The helper is best-effort -- on any internal exception it falls
+    back to the static chip set so the UI never goes blank.  It does
+    NOT call Snowflake or the LLM (so the chip refresh is sub-100ms
+    even on a cold cache and never inherits Snowflake/LLM flakiness).
+    The chip questions ARE LLM-grade (they will be sent verbatim as
+    the prompt when clicked); the LLM resolves the actual numbers
+    on the click.
+    """
+    chips: list[dict] = []
+    scope_label = ""
+    if manager and technology:
+        scope_label = f"{manager}'s {technology} portfolio"
+    elif manager:
+        scope_label = f"{manager}'s portfolio"
+    elif technology:
+        scope_label = f"the {technology} portfolio"
+    else:
+        scope_label = "my portfolio"
+
+    # Chip 1: top-risk customer (scoped to the operator's selection).
+    chips.append({
+        "category": "top_risk",
+        "label": "Top risk",
+        "question": (
+            f"Which customer in {scope_label} carries the highest renewal risk "
+            f"right now, and what are the top three open issues driving that risk "
+            f"in the last {days} days?"
+        ),
+    })
+
+    # Chip 2: stale barriers in the selected scope.
+    chips.append({
+        "category": "stale_barriers",
+        "label": "Stale barriers",
+        "question": (
+            f"Which adoption barriers in {scope_label} are over 90 days old, "
+            f"who owns each one, and what is the recommended escalation path?"
+        ),
+    })
+
+    # Chip 3: renewals coming up in the days window selected.
+    chips.append({
+        "category": "recent_renewal",
+        "label": "Renewal radar",
+        "question": (
+            f"Which subscriptions in {scope_label} are renewing within the next "
+            f"{max(30, days)} days, and which carry open adoption barriers or "
+            f"recent P1/P2 cases?"
+        ),
+    })
+
+    # Chip 4: last-report follow-up.  Cheap to derive from the
+    # outputs/ directory; falls back gracefully if no reports exist.
+    last_report_chip = None
+    try:
+        outputs_dir = Path(_APP_SUPPORT) / "outputs"
+        if outputs_dir.exists():
+            # Bounded scan -- the outputs directory grows over time.
+            # Take the 32 newest files to keep the sort cheap on
+            # huge directories, then pick the .docx.
+            try:
+                candidates = list(outputs_dir.glob("AdoptIQ_*.docx"))
+            except OSError:
+                candidates = []
+            if candidates:
+                recent = sorted(
+                    candidates,
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )[:1]
+                if recent:
+                    rep_name = recent[0].name
+                    last_report_chip = {
+                        "category": "last_report",
+                        "label": "Last report follow-up",
+                        "question": (
+                            f"My last report was {rep_name}.  What has changed in "
+                            f"{scope_label} since it was generated, and which open items "
+                            f"from that report are still unresolved?"
+                        ),
+                    }
+    except Exception:  # noqa: BLE001
+        last_report_chip = None
+    if last_report_chip:
+        chips.append(last_report_chip)
+    else:
+        chips.append({
+            "category": "last_report",
+            "label": "Last report follow-up",
+            "question": (
+                f"Compare the current state of {scope_label} with the previous "
+                f"report and highlight what is materially worse this week."
+            ),
+        })
+
+    # Cap at 4 personalised + 2 static fallbacks so the chip strip
+    # has 4-6 chips.  De-dupe by question text in case a category
+    # collapses into the static set.
+    out: list[dict] = []
+    seen: set[str] = set()
+    for c in chips[:4]:
+        q = (c.get("question") or "").strip()
+        if q and q not in seen:
+            seen.add(q)
+            out.append(c)
+    for c in _ASK_AI_SUGGESTIONS_FALLBACK[:2]:
+        q = (c.get("question") or "").strip()
+        if q and q not in seen:
+            seen.add(q)
+            out.append(c)
+    return out
+
+
+@app.route('/api/ask-ai/suggestions', methods=['GET'])
+def get_ask_ai_suggestions():
+    """Round 68 / Build 42 (C6): personalized suggestion chips.
+
+    Read-only endpoint that returns up to ~6 suggestion chips
+    (4 personalized + 2 static fallback) for the supplied scope.
+    Inputs:
+      * ``manager`` (display name; optional, default "")
+      * ``technology`` (display name; optional, default "")
+      * ``days`` (int 1-365; default 90)
+
+    Output: ``{ok: true, suggestions: [{category, label, question}, ...]}``
+
+    The endpoint is always 200 -- it falls back to a curated static
+    set on any internal failure so the UI never goes blank.  It is
+    safe to call without an active Snowflake session (returns the
+    fallback set).  It NEVER calls the LLM.
+    """
+    try:
+        manager = (request.args.get('manager') or '').strip()
+        technology = (request.args.get('technology') or '').strip()
+        # Length cap + allow-list so the endpoint can't be used to
+        # smuggle arbitrary data into the suggestion chips.
+        if len(manager) > 200 or (manager and not re.match(r"^[A-Za-z0-9 .,&'\-_/()]+$", manager)):
+            manager = ''
+        if len(technology) > 200 or (technology and not re.match(r"^[A-Za-z0-9 .,&'\-_/()]+$", technology)):
+            technology = ''
+        try:
+            days = int(request.args.get('days') or 90)
+        except (TypeError, ValueError):
+            days = 90
+        days = max(1, min(days, 365))
+
+        suggestions = _r68_build_suggestion_chips(manager, technology, days)
+        return jsonify({"ok": True, "suggestions": suggestions})
+    except Exception as _err:  # noqa: BLE001
+        logger.warning("Round 68 / C6: suggestion chips endpoint failed: %s", _err)
+        return jsonify({
+            "ok": True,
+            "suggestions": list(_ASK_AI_SUGGESTIONS_FALLBACK),
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -19212,6 +20264,10 @@ def ask_ai_portfolio():
                     'corpus': grounded_result.get('corpus') or {},
                     'query_id': _query_id,
                     'retrieval_method': str((_retrieval_diag or {}).get('method') or 'unknown'),
+                    # Round 68 / Build 42 (C7): pass through the
+                    # evidence index so the UI can render clickable
+                    # citation badges with snippet popovers.
+                    'evidence_index': grounded_result.get('evidence_index') or [],
                 })
             # Phase 2.4: only fall back to the legacy ungrounded LLM when
             # the caller explicitly opts in (request flag or env var).
@@ -20105,6 +21161,19 @@ def ask_ai_portfolio():
         # Phase 2.4: legacy ungrounded path is reached only when the
         # caller explicitly opted in. Tag the response so the UI can
         # render an "ungrounded answer" banner.
+        # Round 68 / Build 42 (C5): mint a query_id for this path too
+        # so the debug chip surfaces a copy-able ID even when the
+        # operator opted into the legacy fallback. ``retrieval_method``
+        # is fixed at 'legacy_ungrounded' so the chip distinguishes
+        # this path from the grounded vector / hybrid retrievers.
+        _legacy_query_id = secrets.token_urlsafe(12)
+        try:
+            _record_ask_ai_query_diag(_legacy_query_id, {
+                "method": "legacy_ungrounded",
+                "context_summary": str(context_summary)[:240],
+            })
+        except Exception:  # noqa: BLE001
+            pass
         return jsonify({
             'ok': True,
             'answer': answer or 'No response generated.',
@@ -20115,6 +21184,8 @@ def ask_ai_portfolio():
                 'are not enforced and headline numbers may not match the '
                 'corresponding report.'
             ),
+            'query_id': _legacy_query_id,
+            'retrieval_method': 'legacy_ungrounded',
         })
 
     except Exception as e:
@@ -22547,8 +23618,16 @@ def start_leader_report():
         # convenience hop; it MUST NOT be promoted to a fail-loud
         # required source by the worker.
         csone_file_autopicked: Optional[str] = None
+        # Round 68 / Build 42 (B1): capture the OneDrive sync status
+        # so a present-but-empty / placeholder-only folder shows up
+        # as a partial-data warning the operator sees in the report
+        # banner instead of a silent fall-through to "no CSOne".
+        _r68_csone_sync_status: str = "unknown"
+        _r68_csone_sync_count: int = 0
         if not csone_file_explicit:
-            csone_file_autopicked = get_latest_csone_from_folder()
+            csone_file_autopicked, _r68_csone_sync_status, _r68_csone_sync_count = (
+                get_latest_csone_from_folder_diag()
+            )
 
         # Resolved-effective path the worker actually loads.  Either
         # the explicit upload or the autodiscovered fallback (or
@@ -22590,6 +23669,28 @@ def start_leader_report():
                 'results': None,
                 'error': None
             }
+            # Round 68 / Build 42 (B1): when the operator did NOT
+            # upload a file AND OneDrive autodiscovery came back
+            # ``not_synced`` (folder missing, unreadable, empty, or
+            # all entries are 0-byte placeholders), record an
+            # honest ``partial_data_warnings`` entry so the report
+            # banner names the failure mode.  ``unknown`` (env not
+            # set) is also recorded so the operator knows where to
+            # remediate.  ``synced`` short-circuits silently.
+            if not csone_file_explicit and _r68_csone_sync_status != "synced":
+                _pdw = analysis_status[analysis_id].setdefault('partial_data_warnings', [])
+                _pdw.append({
+                    'dataset': 'csone',
+                    'kind': 'no_onedrive_sync',
+                    'sync_status': _r68_csone_sync_status,
+                    'real_file_count': _r68_csone_sync_count,
+                    'error': (
+                        "OneDrive autodiscovery for CSOne returned no synced "
+                        "data (status={status}). Upload a CSOne export "
+                        "directly, or sync the configured folder via the "
+                        "OneDrive desktop client."
+                    ).format(status=_r68_csone_sync_status),
+                })
             save_analysis_status()
 
         # Start leader report generation in background thread
@@ -23571,6 +24672,14 @@ def run_leader_report_generation(analysis_id):
                             {'Field': 'Partial_Data_Warning_Count', 'Value': str(len(_leader_pdw)),
                              'Detail': '', 'Generated_At': ''},
                         ]
+                        # Round 68 / Build 42 (A1): build label so the
+                        # Leader XLSX carries the canonical version /
+                        # build / process-start / generated-at rows.
+                        try:
+                            from _r68_build_label import append_build_label_records_4col as _r68_append_4col  # noqa: PLC0415
+                            _r68_append_4col(_info_rows)
+                        except Exception as _r68_err:  # noqa: BLE001
+                            logger.debug("Round 68 / A1: Leader build label skipped: %s", _r68_err)
                         for _i, _w in enumerate(_leader_pdw, 1):
                             try:
                                 _ds = (_w.get('dataset') if isinstance(_w, dict) else None) or 'n/a'

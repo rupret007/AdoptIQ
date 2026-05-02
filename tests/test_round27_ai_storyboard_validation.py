@@ -211,17 +211,32 @@ def test_r27_validator_import_failure_does_not_break_report():
 
 
 def test_r27_portfolio_gate_does_not_raise_unlike_r25b_r25c():
-    """R25B/R25C numeric+risk-band drift validators ``raise`` (block
-    the build).  The R27 entity/injection gate substitutes a
-    placeholder and continues.  Pin this asymmetry so a future
-    cleanup round doesn't accidentally upgrade R27 to ``raise`` --
-    which would change behavior on an entity false-positive (e.g. a
-    legitimate customer alias not in the allowlist) by killing the
-    entire report rather than just labeling that one section."""
+    """The R27 entity/injection gate substitutes a placeholder and
+    continues; this contract pre-dates Round 68 / A4.
+
+    Round 68 / A4 changed the R25B/R25C numeric+risk-band drift
+    handling: instead of raising and bailing, the portfolio drift
+    flow now retries with a tightened correction prompt up to
+    ``_R68_MAX_PORTFOLIO_DRIFT_RETRIES`` and then escalates to a
+    deterministic narrative built from canonical_metrics.  The
+    asymmetry remains -- R27 still substitutes a placeholder for
+    entity false-positives -- but R25B/R25C no longer raises.
+    This test pins the R27 side so a future cleanup doesn't
+    accidentally regress the entity-false-positive behavior into
+    a hard fail.
+    """
     src = _read_app_simple()
-    # The R25B/R25C block raises on numeric drift.
-    assert "raise" in src.split("[R25B/R25C] Portfolio numeric or risk-band drift detected; blocking report build")[1].split("# Round 27 / R27-AI-GATE-PORTFOLIO")[0], (
-        "R25B/R25C raise on numeric drift unexpectedly removed"
+    # Round 68 / A4: confirm the new retry-then-escalate marker is
+    # present so a future regression that re-introduces ``raise`` on
+    # R25B/R25C drift surfaces here.
+    assert "Round 68 / Build 42 (A4): bounded portfolio drift" in src, (
+        "R68/A4 retry-then-escalate marker missing -- did the drift loop regress?"
+    )
+    assert "_R68_MAX_PORTFOLIO_DRIFT_RETRIES" in src, (
+        "R68/A4 retry cap constant missing"
+    )
+    assert "_r68_build_deterministic_portfolio_narrative" in src, (
+        "R68/A4 deterministic escalation builder missing"
     )
     # The R27 portfolio gate body must NOT contain a bare ``raise``.
     # Slice the source to just the R27 portfolio gate region.
@@ -241,7 +256,7 @@ def test_r27_portfolio_gate_does_not_raise_unlike_r25b_r25c():
         if ln.strip() == "raise" or ln.strip().startswith("raise ")
     ]
     assert not bad_lines, (
-        f"R27 portfolio gate must not raise (asymmetry vs R25B/R25C); "
+        f"R27 portfolio gate must not raise (entity false-positive contract); "
         f"found bare raise statements: {bad_lines}"
     )
 

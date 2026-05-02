@@ -415,6 +415,7 @@ def compute_retrieval_diag(
     domains: Sequence[str],
     *,
     top_k: int = 10,
+    precomputed_ranked: Optional[Sequence[EvidenceRecord]] = None,
 ) -> Dict[str, Any]:
     """Round 66 / Pass 5 - build a JSON-serialisable retrieval diag
     block for the ``GET /api/ask-ai/diagnostics/<query_id>`` endpoint.
@@ -424,6 +425,16 @@ def compute_retrieval_diag(
     the embedding model id, and a bounded list of the top-K record
     summaries. Always returns a dict; the worst case is
     ``{"method": "unavailable"}`` so the endpoint still serialises.
+
+    Round 68 / Build 42 (C1): ``precomputed_ranked`` lets the caller
+    supply a ranking already computed by ``build_evidence_context``
+    (or its 4-tuple sibling
+    :func:`build_evidence_context_with_ranking`).  Without this kwarg
+    the portfolio path was double-ranking every evidence-bearing query
+    -- once during context construction, then again to compute the
+    diag block -- which doubled the BM25+dense+RRF cost on every call.
+    The kwarg short-circuits the second pass while preserving the
+    cold-callable behavior for callers that only want diagnostics.
     """
     method = "hybrid"
     model_id: Optional[str] = None
@@ -433,7 +444,10 @@ def compute_retrieval_diag(
         model_id = str(getattr(Config, "ASK_AI_EMBEDDING_MODEL", "") or "") or None
     except Exception:  # noqa: BLE001
         pass
-    ranked = rank_evidence(records, question, domains)
+    if precomputed_ranked is not None:
+        ranked = list(precomputed_ranked)
+    else:
+        ranked = rank_evidence(records, question, domains)
     if not ranked:
         return {
             "method": method,
@@ -485,13 +499,24 @@ def compute_retrieval_diag(
     }
 
 
-def build_evidence_context(
+def build_evidence_context_with_ranking(
     records: Sequence[EvidenceRecord],
     question: str,
     domains: Sequence[str],
     char_budget: int = 42000,
     max_records: int = 220,
-) -> Tuple[str, Set[str], int]:
+) -> Tuple[str, Set[str], int, List[EvidenceRecord]]:
+    """Round 68 / Build 42 (C1): ranking-aware sibling of
+    :func:`build_evidence_context`.  Returns a 4-tuple
+    ``(context_text, allowed_ids, used_records, ranked)`` so the caller
+    can pass ``ranked`` straight into
+    :func:`compute_retrieval_diag(precomputed_ranked=ranked)` to skip
+    the second BM25+dense+RRF pass.
+
+    The legacy 3-tuple ``build_evidence_context`` is preserved as a
+    thin back-compat wrapper that drops the ranked list -- callers
+    that don't need diagnostics keep working unchanged.
+    """
     ranked = rank_evidence(records, question, domains)
     kept: List[str] = []
     allowed_ids: Set[str] = set()
@@ -514,7 +539,7 @@ def build_evidence_context(
         allowed_ids.add(_normalize_claim_id(record.source_id))
         allowed_ids.update(_extract_ids_from_text(record.text))
     if not kept:
-        return "No evidence records were available for this question.", set(), 0
+        return "No evidence records were available for this question.", set(), 0, list(ranked)
     # Round 4: when ``max_records`` or ``char_budget`` clip the evidence,
     # append an explicit truncation marker so the LLM knows it is seeing
     # a sample and cannot describe partial coverage as exhaustive.
@@ -535,7 +560,26 @@ def build_evidence_context(
             f"[EVIDENCE CAP] [Evidence truncated: included {used_records} of {total_candidates} ranked records "
             f"due to context budget (rank-cap dropped {rank_dropped}, char-budget dropped {budget_dropped}).]"
         )
-    return "\n".join(kept), allowed_ids, used_records
+    return "\n".join(kept), allowed_ids, used_records, list(ranked)
+
+
+def build_evidence_context(
+    records: Sequence[EvidenceRecord],
+    question: str,
+    domains: Sequence[str],
+    char_budget: int = 42000,
+    max_records: int = 220,
+) -> Tuple[str, Set[str], int]:
+    """Back-compat 3-tuple wrapper over
+    :func:`build_evidence_context_with_ranking`.  Existing callers
+    keep their unchanged 3-tuple unpacking; new code that wants to
+    avoid the double-rank should call the ``_with_ranking`` variant
+    directly and pass ``ranked`` to ``compute_retrieval_diag``.
+    """
+    text, allowed_ids, used, _ranked = build_evidence_context_with_ranking(
+        records, question, domains, char_budget=char_budget, max_records=max_records,
+    )
+    return text, allowed_ids, used
 
 
 def _extract_json_object(raw: str) -> Optional[Dict[str, Any]]:
@@ -1091,8 +1135,12 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         # Phase 2.5: build_evidence_context returns ``used_records`` so we
         # can disclose the cap downstream; capture an explicit
         # ``evidence_truncated`` flag too.
+        # Round 68 / Build 42 (C1): use the 4-tuple ``_with_ranking``
+        # variant so we can hand the same ranking to
+        # ``compute_retrieval_diag`` below (avoiding the pre-R68
+        # double-rank cost on every portfolio query).
         _evidence_record_cap = int(os.environ.get("ASK_AI_MAX_EVIDENCE_RECORDS", "200"))
-        context_text, allowed_ids, used_records = build_evidence_context(
+        context_text, allowed_ids, used_records, _ranked_for_diag = build_evidence_context_with_ranking(
             records=records,
             question=req.question,
             domains=retrieval_plan["domains"],
@@ -1209,37 +1257,82 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                 _risk_profiles_canon: Dict[str, Dict[str, Any]] = {}
                 _pulse_for_canon = bundle.get("csconsole_customer_pulse")
                 _ap_for_canon = bundle.get("csconsole_action_plans")
-                for _cust in list(_customer_universe)[:200]:
-                    try:
-                        _cust_ab = (
-                            _ab_for_canon[_ab_for_canon[_customer_col_canon] == _cust]
-                            if _customer_col_canon and isinstance(_ab_for_canon, pd.DataFrame)
-                            else pd.DataFrame()
-                        )
-                        _cust_cs = (
-                            _csone_for_canon[_csone_for_canon[_csone_customer_col_canon] == _cust]
-                            if _csone_customer_col_canon and isinstance(_csone_for_canon, pd.DataFrame)
-                            else pd.DataFrame()
-                        )
-                        _risk_profiles_canon[_cust] = _ccrp(
-                            customer_name=_cust,
-                            customer_ab=_cust_ab,
-                            customer_csone=_cust_cs,
-                            customer_pulse=_pulse_for_canon if isinstance(_pulse_for_canon, pd.DataFrame) else None,
-                            customer_action_plans=_ap_for_canon if isinstance(_ap_for_canon, pd.DataFrame) else None,
-                            recent_window_days=int(getattr(req, "days", 30) or 30),
-                        )
-                    except Exception as _per_cust_err:
-                        logger.debug(
-                            "ask_ai canonical risk_profile for %s failed: %s",
-                            _cust, _per_cust_err,
-                        )
+                # Round 68 / Build 42 (C4): raise per-request scoring
+                # cap from 200 to 500.  At 500 customers the per-
+                # customer scoring loop runs ~5x longer (~3-5s wall on
+                # the typical leader portfolio) but stays bounded for
+                # the 95th-percentile request.  Above 500 we degrade
+                # to a streaming mode that skips the per-customer
+                # loop entirely (see ``_streaming_mode`` below) so a
+                # truly huge portfolio (a director-level rollup, etc.)
+                # cannot wedge the request thread for >30s.
+                #
+                # The cap is configurable via env var so an operator
+                # can dial it down for a slow Snowflake without
+                # touching code.
+                _RISK_PROFILE_CAP = int(os.environ.get(
+                    "ADOPTIQ_ASK_AI_RISK_PROFILE_CAP", "500"
+                ))
+                _universe_size_pre = len(_customer_universe)
+                _streaming_mode = _universe_size_pre > _RISK_PROFILE_CAP
+                if _streaming_mode:
+                    # Skip per-customer scoring entirely so
+                    # ``build_portfolio_metrics`` runs with
+                    # ``risk_profiles=None`` -- it'll publish
+                    # the headline counts (customers, barriers,
+                    # cases) but suppress the risk-band
+                    # breakdown.  This keeps the LLM from
+                    # quoting a partial-coverage risk metric as
+                    # if it were authoritative.  We log the
+                    # decision so the operator can see why
+                    # the band counts are missing.
+                    logger.info(
+                        "ask_ai canonical risk_profiles streaming mode: "
+                        "%d customers > cap %d; skipping per-customer scoring",
+                        _universe_size_pre, _RISK_PROFILE_CAP,
+                    )
+                else:
+                    for _cust in list(_customer_universe)[:_RISK_PROFILE_CAP]:
+                        try:
+                            _cust_ab = (
+                                _ab_for_canon[_ab_for_canon[_customer_col_canon] == _cust]
+                                if _customer_col_canon and isinstance(_ab_for_canon, pd.DataFrame)
+                                else pd.DataFrame()
+                            )
+                            _cust_cs = (
+                                _csone_for_canon[_csone_for_canon[_csone_customer_col_canon] == _cust]
+                                if _csone_customer_col_canon and isinstance(_csone_for_canon, pd.DataFrame)
+                                else pd.DataFrame()
+                            )
+                            _risk_profiles_canon[_cust] = _ccrp(
+                                customer_name=_cust,
+                                customer_ab=_cust_ab,
+                                customer_csone=_cust_cs,
+                                customer_pulse=_pulse_for_canon if isinstance(_pulse_for_canon, pd.DataFrame) else None,
+                                customer_action_plans=_ap_for_canon if isinstance(_ap_for_canon, pd.DataFrame) else None,
+                                recent_window_days=int(getattr(req, "days", 30) or 30),
+                            )
+                        except Exception as _per_cust_err:
+                            logger.debug(
+                                "ask_ai canonical risk_profile for %s failed: %s",
+                                _cust, _per_cust_err,
+                            )
             except Exception as _rp_err:
                 logger.warning(
                     "ask_ai canonical risk_profiles unavailable: %s", _rp_err
                 )
                 _risk_profiles_canon = {}
+                _streaming_mode = False  # treat as failure, not streaming
+                _RISK_PROFILE_CAP = int(os.environ.get(
+                    "ADOPTIQ_ASK_AI_RISK_PROFILE_CAP", "500"
+                ))
 
+            # Round 68 / Build 42 (C4): pass ``risk_profiles=None`` in
+            # streaming mode so ``build_portfolio_metrics`` suppresses
+            # ``high_risk_customers`` / band counts entirely (rather
+            # than publishing a partial-coverage value the LLM would
+            # then quote as authoritative).  The streaming-mode
+            # disclosure block below makes the omission explicit.
             canonical_headline = cm.build_portfolio_metrics(
                 ab_df=_ab_for_canon if isinstance(_ab_for_canon, pd.DataFrame) else pd.DataFrame(),
                 csone_df=_csone_for_canon if isinstance(_csone_for_canon, pd.DataFrame) else pd.DataFrame(),
@@ -1250,6 +1343,10 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         except Exception as _canon_err:
             logger.warning("Canonical headline build failed: %s", _canon_err)
             canonical_headline = {}
+            _streaming_mode = False
+            _RISK_PROFILE_CAP = int(os.environ.get(
+                "ADOPTIQ_ASK_AI_RISK_PROFILE_CAP", "500"
+            ))
 
         # Render an authoritative CANONICAL_HEADLINE table that the prompt
         # tells the model is non-negotiable. Using a fixed key=value block
@@ -1275,7 +1372,31 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                 _scored_size = int(len(_risk_profiles_canon or {}))
             except Exception:
                 _scored_size = 0
-            if _scored_size and _universe_size and _scored_size < _universe_size:
+            # Round 68 / Build 42 (C4): four-state coverage disclosure
+            # so the LLM can never quote a risk-derived count without
+            # explicit knowledge of how complete the underlying scoring
+            # was.  The four states are FULL (all scored), PARTIAL
+            # (scored < universe but > 0 -- means the per-customer
+            # loop hit an exception on a subset), STREAMING (>= cap;
+            # the per-customer loop was deliberately skipped to keep
+            # latency bounded), and NONE (loop crashed entirely).
+            try:
+                _streaming = bool(_streaming_mode)
+            except NameError:
+                _streaming = False
+            try:
+                _cap = int(_RISK_PROFILE_CAP)
+            except (NameError, TypeError, ValueError):
+                _cap = 500
+            if _streaming and _universe_size:
+                _headline_lines.append(
+                    f"  - risk_profiles_coverage: STREAMING ({_universe_size} customers > cap {_cap}; "
+                    f"per-customer scoring deliberately skipped to keep request bounded; "
+                    f"the high_risk_customers / critical_risk_customers / band counts above are NOT published "
+                    f"for this run -- treat all risk-derived metrics as unavailable, "
+                    f"answer only with the headline counts (total_customers, total_barriers, total_cases))"
+                )
+            elif _scored_size and _universe_size and _scored_size < _universe_size:
                 _headline_lines.append(
                     f"  - risk_profiles_coverage: PARTIAL ({_scored_size} of {_universe_size} customers scored; "
                     f"any risk-derived count above is a lower bound)"
@@ -1596,12 +1717,64 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         # so the diag block reflects the actual ranking applied to
         # this query (not a re-rank from cold).
         try:
+            # Round 68 / Build 42 (C1): hand the precomputed ranking
+            # in so the diag block reuses the BM25+dense+RRF work
+            # done by ``build_evidence_context_with_ranking`` above.
             retrieval_diag = compute_retrieval_diag(
-                records, req.question, retrieval_plan["domains"], top_k=10
+                records, req.question, retrieval_plan["domains"],
+                top_k=10, precomputed_ranked=_ranked_for_diag,
             )
         except Exception as _diag_err:  # noqa: BLE001
             logger.debug("Round 66 / Pass 5: compute_retrieval_diag failed: %s", _diag_err)
             retrieval_diag = {"method": "unavailable"}
+
+        # Round 68 / Build 42 (C7): build a compact ``evidence_index``
+        # that the UI renders as clickable badges on every
+        # ``[Source: <ID>]`` citation in the answer text.  The index
+        # is ONLY built for the ranked records that actually fed the
+        # context (``_ranked_for_diag``) -- including evidence the LLM
+        # didn't see would be misleading.  Each entry is bounded
+        # (~280 char snippet, ~80 char customer) so the payload stays
+        # well under any normal response budget.  Pre-R68 the only
+        # reference operators had was the inline ``[Source: ID]``
+        # marker, which was opaque -- they had no way to read the
+        # underlying record without filing a ticket.
+        evidence_index: list[dict] = []
+        try:
+            _seen_ids: set = set()
+            for rec in (_ranked_for_diag or [])[: int(used_records or 0)]:
+                try:
+                    sid = str(getattr(rec, "source_id", "")).strip()
+                    if not sid or sid in _seen_ids:
+                        continue
+                    _seen_ids.add(sid)
+                    snippet_text = str(getattr(rec, "text", "") or "").strip()
+                    # Bound snippet length; preserve full sentences
+                    # at the cap when possible.
+                    if len(snippet_text) > 280:
+                        snippet_text = snippet_text[:277].rstrip() + "..."
+                    customer = str(getattr(rec, "customer", "") or "").strip()
+                    if len(customer) > 80:
+                        customer = customer[:77] + "..."
+                    evidence_index.append({
+                        "source_id": sid,
+                        "source_type": str(getattr(rec, "source_type", "") or ""),
+                        "customer": customer,
+                        "timestamp": str(getattr(rec, "timestamp", "") or ""),
+                        "snippet": snippet_text,
+                    })
+                    # Defensive cap: never inflate the payload past
+                    # 200 entries even if used_records grows.
+                    if len(evidence_index) >= 200:
+                        break
+                except Exception:  # noqa: BLE001 - skip malformed rec
+                    continue
+        except Exception as _eidx_err:  # noqa: BLE001
+            logger.debug(
+                "Round 68 / C7: evidence_index build failed: %s", _eidx_err,
+            )
+            evidence_index = []
+
         return {
             "ok": True,
             "answer": answer,
@@ -1616,6 +1789,8 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             "canonical_headline": canonical_headline,
             "corpus": _corpus_payload,
             "retrieval_diag": retrieval_diag,
+            # Round 68 / Build 42 (C7): see comment block above.
+            "evidence_index": evidence_index,
         }
     except Exception as exc:
         logger.error("Grounded Ask AI portfolio pipeline failed: %s", exc, exc_info=True)

@@ -239,11 +239,21 @@ def _check_onedrive_sync_status() -> tuple[str, int, Optional[str]]:
                         ``"unknown"``    when ``Config.CSONE_ONEDRIVE_FOLDER``
                         is not configured.
     * ``file_count`` -- number of real (size > 0) files seen at the
-                        top level + immediate children.  Bounded
-                        scan -- we stop after seeing 1 real file
-                        when only deciding ``synced`` vs
-                        ``not_synced`` so a huge folder does not
-                        wedge boot.
+                        top level of the OneDrive folder (no
+                        recursion into immediate children -- a
+                        recursive walk would wedge boot on large
+                        sync mirrors).  Bounded scan -- we stop
+                        after the first real file when only
+                        deciding ``synced`` vs ``not_synced``,
+                        so the returned count is always either
+                        ``0`` (not_synced) or ``1`` (synced; not
+                        a true total).  The full count is
+                        computed by ``corpus_indexer`` on the
+                        next refresh pass.  Round 68 / Build 42
+                        (B4): docstring previously claimed
+                        "top level + immediate children" but the
+                        implementation only walks ``root.iterdir()``
+                        (top level only) -- updated to match.
     * ``path``       -- the configured folder path (str), or ``None``
                         when not configured.
 
@@ -276,6 +286,50 @@ def _check_onedrive_sync_status() -> tuple[str, int, Optional[str]]:
         return "not_synced", 0, path_str
     except OSError:
         return "not_synced", 0, path_str
+
+
+def _r68_onedrive_sentinel_present() -> bool:
+    """Round 68 / Build 42 (B5): probe whether the canonical OneDrive
+    sentinel file (``adoptiq_corpus_sentinel.json`` by default; env
+    override ``ADOPTIQ_CORPUS_SENTINEL``) is present and non-empty
+    in the configured ``CSONE_ONEDRIVE_FOLDER``.
+
+    Used by the daily refresh worker to defer the
+    blocked-to-synced transition refresh trigger until the sentinel
+    has actually landed on disk.  Without this gate, the worker
+    fires ``request_refresh()`` as soon as the folder reports
+    ``synced`` (any non-empty file), which can happen several ticks
+    before OneDrive finishes pulling the sentinel itself, producing
+    a fail-loud ``CorpusCryptoError`` that the operator sees as
+    ``Last refresh failed``.
+
+    Returns ``False`` (rather than raising) on:
+
+    * ``CSONE_ONEDRIVE_FOLDER`` unset.
+    * Folder missing / not a directory.
+    * Sentinel filename traversal block (env override smuggled "..").
+    * Sentinel missing or zero-byte (Files-On-Demand stub).
+    * Any ``OSError`` during stat.
+
+    Returns ``True`` only when the sentinel exists, is a regular
+    file, AND has size > 0 bytes.
+    """
+    onedrive_root = getattr(Config, "CSONE_ONEDRIVE_FOLDER", None)
+    if not onedrive_root:
+        return False
+    try:
+        from corpus_crypto import resolve_sentinel_path  # local import: avoid bootstrap import order issues
+        sentinel = resolve_sentinel_path(Path(str(onedrive_root)))
+    except Exception:  # noqa: BLE001 - defensive
+        return False
+    if sentinel is None:
+        return False
+    try:
+        if not sentinel.exists() or not sentinel.is_file():
+            return False
+        return sentinel.stat().st_size > 0
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -815,7 +869,32 @@ def _daily_refresh_loop() -> None:
             # unlocks promptly.  ``_should_refresh()`` would otherwise
             # gate this for fresh installs whose
             # ``last_successful_refresh_ts`` is still None.
-            transition_unblocked = blocked_now and od_status == "synced"
+            #
+            # Round 68 / Build 42 (B5): the OneDrive folder can flip
+            # to ``synced`` (folder exists + >=1 non-zero file) several
+            # ticks BEFORE the canonical sentinel finishes downloading
+            # to disk.  Pre-R68 we'd happily fire ``request_refresh``
+            # at that window, ``open_corpus_for_user`` would raise
+            # ``CorpusCryptoError("corpus sentinel not found ...")``,
+            # and the operator would see ``Last refresh failed`` for
+            # ~24h until the daily worker's window-based refresh
+            # naturally re-fired.  Mitigation: when the OneDrive folder
+            # is synced but the sentinel has not landed yet, treat the
+            # tick as still-blocked so we keep the accelerated 5s
+            # cadence and re-check on the next tick.
+            sentinel_present = _r68_onedrive_sentinel_present()
+            transition_unblocked = (
+                blocked_now and od_status == "synced" and sentinel_present
+            )
+            if blocked_now and od_status == "synced" and not sentinel_present:
+                blocked_streak += 1
+                logger.debug(
+                    "Round 68 / Build 42 (B5): OneDrive folder is synced "
+                    "but sentinel has not landed yet -- keeping the "
+                    "accelerated tick cadence (blocked_streak=%d)",
+                    blocked_streak,
+                )
+                continue
             if blocked_now and not transition_unblocked:
                 blocked_streak += 1
                 # While still blocked we only need to keep ticking;
@@ -838,8 +917,8 @@ def _daily_refresh_loop() -> None:
             _safe_log_info(
                 "Round 53 / corpus_bootstrap: triggering refresh "
                 "(last_successful=%s onedrive_files=%s "
-                "transition_unblocked=%s)",
-                last_ts, od_count, transition_unblocked,
+                "transition_unblocked=%s sentinel_present=%s)",
+                last_ts, od_count, transition_unblocked, sentinel_present,
             )
             with _BOOT_LOCK:
                 _STATE.last_refresh_attempt_ts = time.time()

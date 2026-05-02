@@ -64,6 +64,15 @@ def _post_leader(
         "get_latest_csone_from_folder",
         lambda: autopicked_path,
     )
+    # Round 68 / Build 42 (B1): the leader endpoint now calls the
+    # diag-aware helper directly so it can record an honest
+    # partial_data_warning when the OneDrive sync isn't healthy.
+    # Stub it too so the test isn't probing the real OneDrive folder.
+    monkeypatch.setattr(
+        app_simple,
+        "get_latest_csone_from_folder_diag",
+        lambda: (autopicked_path, "synced" if autopicked_path else "unknown", 1 if autopicked_path else 0),
+    )
 
     # Stub validate_file_upload so the in-memory bytes pass through.
     monkeypatch.setattr(
