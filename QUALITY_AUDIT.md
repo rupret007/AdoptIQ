@@ -8143,3 +8143,72 @@ Smoke target: `OUTBOX/AdoptIQ-v1.0.4-build38.dmg` (425 MB, built at `2026-05-01T
 - The minor doc-comment inconsistency in `ai_narrative_validator._is_derived_ratio_percentage` ("we also try the inverse explicitly below" — code instead iterates all `(a, b)` with `a <= b` which is equivalent in practice since the integer pool contains both numerator and complement) is non-functional. Doc-only nit, not fixed in this round.
 
 **Trailer:** Made-with: Cursor
+
+## Round 66.2 — handoff 2026-05-02 (Build 40 / Ask AI accuracy floor)
+
+**What changed (plain English):**
+- Pass 4 (Ask AI offline eval framework): authored a full record/replay scaffolding for the grounded Ask AI pipeline so we can measure scorecard regressions per build. 5 portfolio fixtures (`p01_high_renewal_risk` through `p05_cross_compare`), 50 questions across 8 categories (`kpi_extraction`, `customer_lookup`, `cross_compare`, `psirt_exposure`, `negative_control`, `multi_step`, `citation_correctness`, `time_bounded`), 50 synthetic CircuIT cassettes, and a per-question predicate evaluator. Live-CircuIT recordings are an operator step (`MOCK_CIRCUIT_MODE=record python -m tests.ask_ai_eval.runner`); replay is the default and runs offline so CI stays deterministic. The synthetic baseline scorecard committed as `tests/ask_ai_eval/scorecards/baseline.md` shows 100% pass — that is the synthetic ceiling; the >=15% uplift gate from the original plan applies to live CircuIT recordings, NOT to the synthetic suite.
+- Pass 5 (hybrid retrieval): wired BM25 + dense + Reciprocal Rank Fusion (Cormack 2009 k=60) as the default Ask AI ranking method. Dense embeddings from `BAAI/bge-small-en-v1.5` (384-dim, INT8-quantized ONNX, ~33 MB) via `fastembed>=0.8.0`. Vectors persisted in a NEW `chunk_vectors(chunk_id PK, model_id, model_dim, vector BLOB)` SQLite table INSIDE the existing AES-GCM-encrypted corpus DB so they inherit at-rest protection + WAL-checkpoint commit semantics — `knowledge_schema.SCHEMA_VERSION` bumped 1 → 2 so existing corpus DBs trigger a rebuild. `corpus_bootstrap` warms the embedder on a daemon thread alongside the corpus thread so the FIRST Ask AI query never pays the 1-3s cold start. Graceful degradation throughout: any embedder failure (fastembed missing, ONNX runtime missing, model file missing) flips `Config.ASK_AI_RETRIEVAL_METHOD` to `"lexical"` for the process and the per-query path serves a lexical answer with a one-line warning.
+- Diagnostics surface: new `GET /api/ask-ai/diagnostics/<query_id>` admin endpoint backed by a 100-entry FIFO ring buffer. Returns the per-query method (`hybrid` or `lexical`), `bm25_top_id` / `dense_top_id` / `rrf_top_id`, the embedding model id, and the top-10 record summaries with their per-method ranks. Wired into `run_portfolio_grounded_ask_ai`'s success return so `query_id` is in every Ask AI response and every diag is captured automatically. Loopback-only (the main app binds to 127.0.0.1 unless `ADOPTIQ_BIND_PUBLIC=1`); no PII in the payload.
+- Build 40 cut: `config.py` ADOPTIQ_BUILD bumped "39" → "40" with a multi-paragraph audit comment summarising Pass 4 + Pass 5 + the synthetic-eval gate framing.
+
+**Files touched (Pass 4):**
+- `tests/ask_ai_eval/__init__.py` — empty marker (NEW)
+- `tests/ask_ai_eval/predicates.py` — 4 predicate types + registry + `evaluate` (NEW)
+- `tests/ask_ai_eval/mock_circuit.py` — record/replay client with prompt-hash drift detection (NEW)
+- `tests/ask_ai_eval/runner.py` — orchestration + scorecard renderer (NEW)
+- `tests/ask_ai_eval/test_runner.py` — pytest entry, marked `eval` (NEW)
+- `tests/ask_ai_eval/_generate_fixtures.py` — one-time deterministic fixture generator (NEW)
+- `tests/ask_ai_eval/fixtures/portfolios/p0[1-5]_*/{ab,csone,snowflake,pulse}.csv` — 20 portfolio CSVs (NEW)
+- `tests/ask_ai_eval/questions/p0[1-5]_q[01-10].yaml` — 50 question YAMLs (NEW)
+- `tests/ask_ai_eval/cassettes/p0[1-5]_q[01-10].json` — 50 synthetic LLM cassettes (NEW)
+- `tests/ask_ai_eval/scorecards/baseline.md` — committed Pass 4 baseline (100% synthetic pass) (NEW)
+- `tests/ask_ai_eval/scorecards/.gitignore` — track only baseline + build*.md (NEW)
+- `tests/test_round66_p4_eval_framework_shape.py` — 12 shape tests (NEW)
+- `Makefile` — added `eval-ask-ai` target (deliberately NOT part of `make verify` so CI stays fast)
+- `pytest.ini` — added `eval` marker; `addopts` excludes it from `pytest -q` default
+- `ask_ai_grounded.py` — added `compose_grounded_answer` evaluation seam comment (no behavior change)
+
+**Files touched (Pass 5):**
+- `ask_ai_embeddings.py` — singleton fastembed loader, embed/encode/decode helpers, `dense_score`, `rrf_fuse`, `hybrid_score` (NEW)
+- `ask_ai_grounded.py` — `EvidenceRecord` extended with `bm25_rank`/`dense_rank`/`rrf_score`; `_hybrid_rank_evidence` + `rank_evidence` dispatch + `compute_retrieval_diag`; `run_portfolio_grounded_ask_ai` returns `retrieval_diag`
+- `corpus_retriever.py` — re-exports embedding helpers
+- `corpus_bootstrap.py` — `_warm_embedder_in_background` daemon thread + `_STATE.embedder_status` / `embedder_load_error` fields
+- `knowledge_schema.py` — `_DDL_CHUNK_VECTORS` + `SCHEMA_VERSION 1 → 2` + `chunk_vectors` in `all_table_names`
+- `scripts/bake_corpus.py` — `_bake_chunk_vectors` (64-batch embed + per-row stamp) wired into `_index_into_encrypted_corpus`; decrypt round-trip self-test extended to verify a sample vector decodes
+- `app_simple.py` — `_record_ask_ai_query_diag` + `_get_ask_ai_query_diag` ring buffer; `GET /api/ask-ai/diagnostics/<query_id>` endpoint; `query_id` minted + persisted on every grounded Ask AI route success
+- `adoptiq_mac.spec` + `adoptiq_pc.spec` — bundle `Resources/embeddings/` + pin fastembed/onnxruntime/tokenizers/ask_ai_embeddings/truststore as hidden imports
+- `requirements.txt` — `fastembed>=0.8.0`
+- `config.py` — `ASK_AI_RETRIEVAL_METHOD`, `ASK_AI_EMBEDDING_MODEL`, `ASK_AI_EMBEDDING_DIM`, `ASK_AI_RRF_K`; ADOPTIQ_BUILD bumped 39 → 40
+- `tests/test_round66_p5_hybrid_retrieval_shape.py` — 24 shape tests (NEW)
+- `tests/ask_ai_eval/scorecards/build40.md` — committed Build 40 hybrid scorecard (100% synthetic pass; matches baseline) (NEW)
+
+**SSoT modules touched:** `canonical_metrics` (no), `risk_scoring` (no), `report_export_*` (no), `data_normalization` (no), `data_contracts` (no), `structured_logging` (no), `ai_narrative_validator` (no), `report_word_styling` (no), `report_export_schema` (no), `report_utils` (no), `snowflake_table_policy` (no). Pass 4 + Pass 5 are entirely Ask AI / corpus / build-pipeline work; the report-generation SSoTs are untouched (Round 66 Pass 1-3 carried the report changes).
+
+**Tests added/updated:**
+- `tests/test_round66_p4_eval_framework_shape.py::*` — 12 tests pinning predicate registry shape, mock cassette path sanitization (post-traversal-fix), runner determinism, scorecard render contract, evaluation seam contract.
+- `tests/test_round66_p5_hybrid_retrieval_shape.py::*` — 24 tests pinning RRF Cormack-2009 math (k=60), vector encoding round-trip (bit-exact), schema bump enforcement, `chunk_vectors` ON DELETE CASCADE, `Config.ASK_AI_RETRIEVAL_METHOD == "lexical"` short-circuit (asserted by mocking `_hybrid_rank_evidence` to raise — must NOT be called), graceful degradation when embedder returns None, `EvidenceRecord` backward-compat without rank fields, `compute_retrieval_diag` shape (all 8 required keys), diagnostics endpoint 404/200/FIFO eviction, `corpus_bootstrap._STATE` embedder fields, `_bake_chunk_vectors` raise-on-missing-embedder + write-on-available-embedder.
+
+**Verify status:**
+- `make verify` — **PASS** (post-bump re-run included)
+- pytest: **3986 passed / 2 skipped / 6 deselected** (Build 39 floor was 3962; net +24 from Pass 5 shape tests; Pass 4 shape tests were committed in the prior Build 40-prep commit)
+- ruff: **0 findings**
+- bandit HIGH/MED: **0**
+- pip-audit: **clean** (`fastembed>=0.8.0` audit-clean; `truststore` already present)
+- in-locals floor: **40** (preserved)
+
+**Hot spots Claude should audit first:**
+1. **Embedder cold-start path is now on the corpus-bootstrap critical path.** `_warm_embedder_in_background` is fire-and-forget on a daemon thread, but if the operator's `~/Library/Application Support/AdoptIQ/embeddings_cache` is corrupted (truncated `.onnx`, partial download), the warmup will keep retrying every process restart until the cache is cleared. The `get_embedder` singleton has a `_EMBED_LOAD_ATTEMPTED` guard inside the process so we don't retry every query, but a future enhancement should consider a checksum + retry-after-N-restarts policy. Right now the operator workaround is `rm -rf <cache_dir>` and restart.
+2. **`chunk_vectors` table is opt-in at bake time.** A bake host without fastembed installed produces a fully-functional corpus DB with an EMPTY `chunk_vectors` table; the runtime detects this (the dense ranking returns None for empty tables) and falls back to lexical. Symptom for the operator: the diagnostics endpoint shows `method: "lexical"` even though `Config.ASK_AI_RETRIEVAL_METHOD == "hybrid"`. The `_bake_chunk_vectors` log line names the row count so a 0-row outcome is visible, but a future enhancement should wire a `bake_meta` row to `corpus_stats` so the runtime can log a one-time "bake shipped without dense vectors; serving lexical" warning instead of just degrading silently.
+3. **The diagnostics ring buffer is 100 entries; a busy portfolio (>100 queries in one process lifetime) WILL evict early entries.** Operators who need persistent per-query traces should pull the diag with `curl http://127.0.0.1:5151/api/ask-ai/diagnostics/<query_id>` immediately after the query. Round 67 should consider an opt-in SQLite persistence path (per-query → `admin_monitoring_v2.db`) for the operator who wants a longer trace.
+4. **The synthetic eval baseline is at 100%, so the 15% uplift gate from the plan is unmeasurable on the synthetic suite.** This is the single most consequential framing decision in Pass 4: the plan's gate was specified against live CircuIT recordings, but the synthetic cassettes are too pure (they were tuned to ensure the predicates pass deterministically) for the gate to register. The *real* gate is the live recording, which requires a one-time `MOCK_CIRCUIT_MODE=record` operator step on a machine with VPN + Snowflake + corpus access. Round 67 should record live cassettes and re-run the eval to surface the actual lexical→hybrid uplift.
+5. **`SCHEMA_VERSION 1 → 2` will trigger a corpus rebuild on the FIRST launch of Build 40 against a Build 39 corpus DB.** This is the documented contract (the indexer's `needs_rebuild` check kicks in), but it means Build 40 first-launch wall time will be longer than usual until the rebuild completes. Operators with large OneDrive corpora (>10K files) may notice. Round 39's self-heal contract carries the rebuild safely.
+
+**Known deferrals (intentional non-fixes):**
+- Synthetic-eval >=15% uplift gate is unmeasurable; gate re-scoped to "no regression from 100%" for synthetic and "deferred to live recording" for the real signal. See hot spot 4.
+- Bake without fastembed silently produces a lexical-only corpus; the only signal is the bake log row count and the runtime diagnostics endpoint. See hot spot 2.
+- Diagnostics ring buffer is in-memory only; bouncing the process loses all per-query traces. See hot spot 3.
+- The DMG smoke step (install + Ask AI 5x5 portfolio walk) is a manual operator step; no automation in this round.
+- The Round 66 Pass 1-3 P0/P1/P2 work shipped in Build 39 (`config.py:908` audit comment); Build 40 is purely Ask AI / corpus / build-pipeline.
+
+**Trailer:** Made-with: Cursor

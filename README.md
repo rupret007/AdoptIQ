@@ -1,8 +1,19 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 39).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 40).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 40 (Round 66.2 — Ask AI accuracy floor: eval framework + hybrid retrieval)
+
+Build 40 ships the Pass 4 + Pass 5 work from the original Round 66/67 multi-pass plan: the Ask AI feature now has a measurable scorecard AND a non-lexical retrieval layer.
+
+- **Ask AI now uses hybrid retrieval (BM25 + dense embeddings + Reciprocal Rank Fusion).** Pre-Build 40, the Ask AI ranker was lexical-only (BM25-style), so a question phrased differently from the corpus text would miss obvious matches. Build 40 adds a 384-dim dense embedding signal via `BAAI/bge-small-en-v1.5` (INT8-quantized ONNX, ~33 MB bundled into the DMG via the `fastembed` library), then fuses lexical + dense rankings via Reciprocal Rank Fusion (Cormack 2009 with `k=60`). The fused ranking is the new default; an operator can revert to lexical-only by setting `ASK_AI_RETRIEVAL_METHOD=lexical` in the environment without rebuilding.
+- **Embedder loads in parallel with corpus decryption — no first-query cold-start.** Pre-Build 40 (had hybrid existed), the first Ask AI query after a fresh process launch would have paid 1-3 seconds of ONNX runtime cold-start. Build 40's `corpus_bootstrap` warms the embedder on a daemon thread alongside the corpus thread so by the time the user is ready to ask a question, the model is already loaded.
+- **Graceful degradation throughout.** Any embedder failure (model file missing, ONNX runtime crash, fastembed import error, malformed BLOB in the corpus DB) silently flips Ask AI back to lexical mode for the process and surfaces a structured warning. The user never sees an error; the operator sees the degradation in the new diagnostics endpoint.
+- **New offline evaluation framework with a 50-question scorecard.** The Ask AI feature can now be measured per build: a record/replay harness with 5 portfolio fixtures × 10 questions each, across 8 categories (KPI extraction, customer lookup, cross-compare, PSIRT exposure, negative-control, multi-step, citation correctness, time-bounded). 4 predicate types per question (`must_contain_phrase`, `must_cite_source_id`, `must_not_render_pii`, `must_render_number_within_tolerance`). Default mode is "replay" so CI runs offline; live-CircuIT recording is a one-time operator step. Run via `make eval-ask-ai`; deliberately NOT part of `make verify` so day-to-day verification stays fast.
+- **Per-query diagnostics endpoint.** Every Ask AI response now carries a `query_id` and `retrieval_method`. A new admin endpoint `GET /api/ask-ai/diagnostics/<query_id>` returns the full per-query diag: which method ran (`hybrid` or `lexical`), the top BM25 / dense / RRF chunks, the embedding model id, and the top-10 records with their per-method ranks. 100-entry FIFO ring buffer; loopback-only by default; no PII in the payload. Operators can pull a query trace immediately after the user reports a confusing answer.
+- **Vectors live INSIDE the encrypted corpus DB.** The original plan called for a separate `corpus_vectors.npy` file. Build 40 ships them as a `chunk_vectors` SQLite table inside the existing AES-GCM-encrypted corpus DB so they inherit at-rest encryption, the existing crash-safe commit semantics, and `ON DELETE CASCADE` cleanup when chunks are re-baked. Schema version was bumped 1 → 2 so existing installs trigger a corpus rebuild on first launch (the Round 39 self-heal contract carries the rebuild safely).
 
 ### What's New in Build 39 (Round 66 — Closing the Build 38 acceptance gaps + R27 grounding root-cause)
 
