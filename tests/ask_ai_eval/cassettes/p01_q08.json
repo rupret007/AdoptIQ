@@ -1,0 +1,20 @@
+{
+  "prompt_hash": "",
+  "question_id": "p01_q08",
+  "recorded_at": "synthetic-2026-05-02",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "AB-EVAL-002",
+          "AB-EVAL-004",
+          "AB-EVAL-006"
+        ],
+        "statement": "Records matching the requested time window are listed below."
+      }
+    ],
+    "executive_summary": "Records matching the requested time window are listed below.",
+    "unknowns": []
+  }
+}

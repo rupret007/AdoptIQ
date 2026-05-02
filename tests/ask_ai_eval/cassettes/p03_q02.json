@@ -1,0 +1,18 @@
+{
+  "prompt_hash": "",
+  "question_id": "p03_q02",
+  "recorded_at": "synthetic-2026-05-02",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "AB-EVAL-302"
+        ],
+        "statement": "Based on the available evidence, AdoptEvalCust is the customer matching the query: Which customer has a Webex Calling pilot stalled?"
+      }
+    ],
+    "executive_summary": "Based on the available evidence, AdoptEvalCust is the customer matching the query: Which customer has a Webex Calling pilot stalled?",
+    "unknowns": []
+  }
+}

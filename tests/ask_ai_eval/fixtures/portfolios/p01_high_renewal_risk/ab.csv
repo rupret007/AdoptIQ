@@ -1,0 +1,13 @@
+ID,BU_NAME,SUBJECT_C,SEVERITY_C,STATUS_C,OPEN_DATE_C
+AB-EVAL-001,AcmeEvalCorp,Contract renewal at risk - low engagement,High,Open,2026-01-15
+AB-EVAL-002,AcmeEvalCorp,Webex Meetings adoption stalled,Medium,Open,2026-02-01
+AB-EVAL-003,BetaEvalInc,Renewal cycle blocked by procurement,Critical,Open,2026-01-22
+AB-EVAL-004,GammaEvalCo,Customer pulse trending negative,High,Open,2026-02-10
+AB-EVAL-005,DeltaEvalLLC,Active renewal negotiation,Medium,InProgress,2025-12-05
+AB-EVAL-006,EpsilonEvalGroup,Churn risk - competitor evaluation,Critical,Open,2026-01-30
+AB-EVAL-007,ZetaEvalPartners,Adoption metrics below threshold,Medium,Open,2026-02-14
+AB-EVAL-008,EtaEvalCorp,Renewal pricing dispute,High,Open,2026-02-18
+AB-EVAL-009,ThetaEvalIndustries,Champion changed roles,Medium,Open,2026-02-20
+AB-EVAL-010,AcmeEvalCorp,Executive sponsor disengaged,High,Open,2026-02-22
+AB-EVAL-011,BetaEvalInc,Webex Calling rollout delayed,Medium,Open,2026-02-25
+AB-EVAL-012,GammaEvalCo,Renewal forecast revised down,High,Open,2026-03-01

@@ -1,0 +1,10 @@
+id: p02_q04
+portfolio: p02_heavy_psirt
+category: kpi_extraction
+question: How many adoption barriers are open in this portfolio?
+predicates:
+  - type: must_render_number_within_tolerance
+    value: 6
+    tolerance_pct: 20
+expected_evidence_ids:
+  - AB-EVAL-201

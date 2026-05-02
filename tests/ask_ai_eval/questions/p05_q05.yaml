@@ -1,0 +1,11 @@
+id: p05_q05
+portfolio: p05_cross_compare
+category: customer_lookup
+question: Which customer has the lowest pulse score?
+predicates:
+  - type: must_contain_phrase
+    phrase: CmpEvalDelta
+  - type: must_cite_source_id
+    expected_id: PULSE-EVAL-504
+expected_evidence_ids:
+  - PULSE-EVAL-504

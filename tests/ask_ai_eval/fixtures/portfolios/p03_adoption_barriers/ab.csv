@@ -1,0 +1,31 @@
+ID,BU_NAME,SUBJECT_C,SEVERITY_C,STATUS_C,OPEN_DATE_C
+AB-EVAL-301,AdoptEvalCust01,Meeting room device adoption,Medium,Open,2026-01-05
+AB-EVAL-302,AdoptEvalCust01,Webex Calling pilot stalled,High,InProgress,2026-01-06
+AB-EVAL-303,AdoptEvalCust01,User training backlog,Critical,Open,2026-01-07
+AB-EVAL-304,AdoptEvalCust02,Webex Calling pilot stalled,Medium,Open,2026-02-05
+AB-EVAL-305,AdoptEvalCust02,User training backlog,High,InProgress,2026-02-06
+AB-EVAL-306,AdoptEvalCust02,Champion turnover,Critical,Open,2026-02-07
+AB-EVAL-307,AdoptEvalCust03,User training backlog,Medium,Open,2026-03-05
+AB-EVAL-308,AdoptEvalCust03,Champion turnover,High,InProgress,2026-03-06
+AB-EVAL-309,AdoptEvalCust03,Mobile app rollout pending,Critical,Open,2026-03-07
+AB-EVAL-310,AdoptEvalCust04,Champion turnover,Medium,Open,2026-01-05
+AB-EVAL-311,AdoptEvalCust04,Mobile app rollout pending,High,InProgress,2026-01-06
+AB-EVAL-312,AdoptEvalCust04,License utilization low,Critical,Open,2026-01-07
+AB-EVAL-313,AdoptEvalCust05,Mobile app rollout pending,Medium,Open,2026-02-05
+AB-EVAL-314,AdoptEvalCust05,License utilization low,High,InProgress,2026-02-06
+AB-EVAL-315,AdoptEvalCust05,Integration with Teams blocked,Critical,Open,2026-02-07
+AB-EVAL-316,AdoptEvalCust06,License utilization low,Medium,Open,2026-03-05
+AB-EVAL-317,AdoptEvalCust06,Integration with Teams blocked,High,InProgress,2026-03-06
+AB-EVAL-318,AdoptEvalCust06,Recording compliance gap,Critical,Open,2026-03-07
+AB-EVAL-319,AdoptEvalCust07,Integration with Teams blocked,Medium,Open,2026-01-05
+AB-EVAL-320,AdoptEvalCust07,Recording compliance gap,High,InProgress,2026-01-06
+AB-EVAL-321,AdoptEvalCust07,SSO migration in flight,Critical,Open,2026-01-07
+AB-EVAL-322,AdoptEvalCust08,Recording compliance gap,Medium,Open,2026-02-05
+AB-EVAL-323,AdoptEvalCust08,SSO migration in flight,High,InProgress,2026-02-06
+AB-EVAL-324,AdoptEvalCust08,Webex Board procurement delay,Critical,Open,2026-02-07
+AB-EVAL-325,AdoptEvalCust09,SSO migration in flight,Medium,Open,2026-03-05
+AB-EVAL-326,AdoptEvalCust09,Webex Board procurement delay,High,InProgress,2026-03-06
+AB-EVAL-327,AdoptEvalCust09,Meeting room device adoption,Critical,Open,2026-03-07
+AB-EVAL-328,AdoptEvalCust10,Webex Board procurement delay,Medium,Open,2026-01-05
+AB-EVAL-329,AdoptEvalCust10,Meeting room device adoption,High,InProgress,2026-01-06
+AB-EVAL-330,AdoptEvalCust10,Webex Calling pilot stalled,Critical,Open,2026-01-07

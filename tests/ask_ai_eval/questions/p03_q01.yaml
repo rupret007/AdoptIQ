@@ -1,0 +1,12 @@
+id: p03_q01
+portfolio: p03_adoption_barriers
+category: kpi_extraction
+question: How many adoption barriers are open in this portfolio?
+predicates:
+  - type: must_render_number_within_tolerance
+    value: 30
+    tolerance_pct: 20
+  - type: must_cite_source_id
+    expected_id: any
+expected_evidence_ids:
+  - AB-EVAL-301

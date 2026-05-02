@@ -1,0 +1,19 @@
+{
+  "prompt_hash": "",
+  "question_id": "p03_q05",
+  "recorded_at": "synthetic-2026-05-02",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "AB-EVAL-301",
+          "AB-EVAL-313"
+        ],
+        "statement": "Comparison across AdoptEvalCust01, AdoptEvalCust05 based on the retrieved evidence."
+      }
+    ],
+    "executive_summary": "Comparison across AdoptEvalCust01, AdoptEvalCust05 based on the retrieved evidence.",
+    "unknowns": []
+  }
+}

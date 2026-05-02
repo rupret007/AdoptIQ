@@ -1,0 +1,25 @@
+{
+  "prompt_hash": "",
+  "question_id": "p01_q06",
+  "recorded_at": "synthetic-2026-05-02",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "PULSE-EVAL-001",
+          "PULSE-EVAL-005"
+        ],
+        "statement": "Analysis based on the retrieved evidence."
+      },
+      {
+        "citations": [
+          "PULSE-EVAL-001"
+        ],
+        "statement": "Total of 2 relevant records identified."
+      }
+    ],
+    "executive_summary": "Analysis based on the retrieved evidence.",
+    "unknowns": []
+  }
+}

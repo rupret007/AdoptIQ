@@ -1,0 +1,16 @@
+id: p01_q05
+portfolio: p01_high_renewal_risk
+category: cross_compare
+question: Compare BetaEvalInc and GammaEvalCo by AB count.
+predicates:
+  - type: must_contain_phrase
+    phrase: BetaEvalInc
+  - type: must_contain_phrase
+    phrase: GammaEvalCo
+  - type: must_cite_source_id
+    expected_id: any
+expected_evidence_ids:
+  - AB-EVAL-003
+  - AB-EVAL-004
+  - AB-EVAL-011
+  - AB-EVAL-012

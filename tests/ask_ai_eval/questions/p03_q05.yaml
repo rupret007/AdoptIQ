@@ -1,0 +1,12 @@
+id: p03_q05
+portfolio: p03_adoption_barriers
+category: cross_compare
+question: Compare AdoptEvalCust01 and AdoptEvalCust05 by AB count.
+predicates:
+  - type: must_contain_phrase
+    phrase: AdoptEvalCust01
+  - type: must_contain_phrase
+    phrase: AdoptEvalCust05
+expected_evidence_ids:
+  - AB-EVAL-301
+  - AB-EVAL-313

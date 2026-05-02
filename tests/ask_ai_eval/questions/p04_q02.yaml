@@ -1,0 +1,7 @@
+id: p04_q02
+portfolio: p04_quiet_portfolio
+category: negative_control
+question: How many support cases are open?
+predicates:
+  - type: must_contain_phrase
+    phrase: Insufficient

@@ -1,0 +1,11 @@
+ID,CUSTOMER_NAME__C,SCORE__C,COMMENTS__C,LAST_MODIFIED_DATE
+PULSE-EVAL-301,AdoptEvalCust01,3.0,Adoption velocity moderate for AdoptEvalCust01,2026-02-11
+PULSE-EVAL-302,AdoptEvalCust02,2.5,Adoption velocity moderate for AdoptEvalCust02,2026-02-12
+PULSE-EVAL-303,AdoptEvalCust03,3.5,Adoption velocity moderate for AdoptEvalCust03,2026-02-13
+PULSE-EVAL-304,AdoptEvalCust04,2.0,Adoption velocity moderate for AdoptEvalCust04,2026-02-14
+PULSE-EVAL-305,AdoptEvalCust05,2.5,Adoption velocity moderate for AdoptEvalCust05,2026-02-15
+PULSE-EVAL-306,AdoptEvalCust06,3.0,Adoption velocity moderate for AdoptEvalCust06,2026-02-16
+PULSE-EVAL-307,AdoptEvalCust07,2.0,Adoption velocity moderate for AdoptEvalCust07,2026-02-17
+PULSE-EVAL-308,AdoptEvalCust08,3.5,Adoption velocity moderate for AdoptEvalCust08,2026-02-18
+PULSE-EVAL-309,AdoptEvalCust09,2.5,Adoption velocity moderate for AdoptEvalCust09,2026-02-19
+PULSE-EVAL-310,AdoptEvalCust10,3.0,Adoption velocity moderate for AdoptEvalCust10,2026-02-20

@@ -1,0 +1,13 @@
+id: p01_q04
+portfolio: p01_high_renewal_risk
+category: kpi_extraction
+question: How many P1 cases are open in this portfolio?
+predicates:
+  - type: must_render_number_within_tolerance
+    value: 2
+    tolerance_pct: 50
+  - type: must_not_render_pii
+    pii_patterns: [@cisco.com]
+expected_evidence_ids:
+  - CASE-EVAL-102
+  - CASE-EVAL-105

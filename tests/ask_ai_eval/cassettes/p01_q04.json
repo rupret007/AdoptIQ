@@ -1,0 +1,25 @@
+{
+  "prompt_hash": "",
+  "question_id": "p01_q04",
+  "recorded_at": "synthetic-2026-05-02",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "CASE-EVAL-102",
+          "CASE-EVAL-105"
+        ],
+        "statement": "Identified 2 relevant records based on the evidence."
+      },
+      {
+        "citations": [
+          "CASE-EVAL-102"
+        ],
+        "statement": "Total of 2 relevant records identified."
+      }
+    ],
+    "executive_summary": "Identified 2 relevant records based on the evidence.",
+    "unknowns": []
+  }
+}

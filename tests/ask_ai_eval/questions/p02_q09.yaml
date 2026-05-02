@@ -1,0 +1,11 @@
+id: p02_q09
+portfolio: p02_heavy_psirt
+category: customer_lookup
+question: Which customer's case mentions cisco-sa-2026-001?
+predicates:
+  - type: must_contain_phrase
+    phrase: LockEvalSystems
+  - type: must_cite_source_id
+    expected_id: CASE-EVAL-204
+expected_evidence_ids:
+  - CASE-EVAL-204

@@ -1,0 +1,13 @@
+id: p01_q01
+portfolio: p01_high_renewal_risk
+category: kpi_extraction
+question: How many adoption barriers are open in this portfolio?
+predicates:
+  - type: must_render_number_within_tolerance
+    value: 12
+    tolerance_pct: 10
+  - type: must_cite_source_id
+    expected_id: any
+expected_evidence_ids:
+  - AB-EVAL-001
+  - AB-EVAL-003

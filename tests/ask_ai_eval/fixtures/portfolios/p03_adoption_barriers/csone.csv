@@ -1,0 +1,6 @@
+CASE_ID,BU_NAME,SUBJECT,SEVERITY,STATUS,OPEN_DATE
+CASE-EVAL-301,AdoptEvalCust01,Provisioning question,P3,Open,2026-02-10
+CASE-EVAL-302,AdoptEvalCust03,License audit,P3,Open,2026-02-12
+CASE-EVAL-303,AdoptEvalCust05,Training escalation,P2,Open,2026-02-14
+CASE-EVAL-304,AdoptEvalCust07,Webex Calling registration,P2,Open,2026-02-16
+CASE-EVAL-305,AdoptEvalCust09,Adoption dashboard request,P3,Open,2026-02-18

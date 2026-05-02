@@ -1,0 +1,18 @@
+{
+  "prompt_hash": "",
+  "question_id": "p03_q08",
+  "recorded_at": "synthetic-2026-05-02",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "AB-EVAL-001"
+        ],
+        "statement": "Total of 0 relevant records identified."
+      }
+    ],
+    "executive_summary": "There are 0 matching records in this portfolio.",
+    "unknowns": []
+  }
+}

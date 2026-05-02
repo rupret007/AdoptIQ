@@ -1,0 +1,9 @@
+id: p04_q04
+portfolio: p04_quiet_portfolio
+category: customer_lookup
+question: Which customer has the only open barrier?
+predicates:
+  - type: must_contain_phrase
+    phrase: SilentEvalCorp
+expected_evidence_ids:
+  - AB-EVAL-401

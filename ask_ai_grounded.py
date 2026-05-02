@@ -617,6 +617,20 @@ def compose_grounded_answer(
     allowed_ids: Set[str],
     canonical_numbers: Optional[Set[str]] = None,
 ) -> Tuple[str, int]:
+    # Round 66 / Pass 4 - ASK AI EVAL SEAM. The eval framework
+    # (tests/ask_ai_eval/runner.py) calls this function directly with a
+    # cassette-supplied ``payload`` (the mock LLM's structured JSON
+    # response). The contract pinned here:
+    #   - ``payload`` shape: {executive_summary: str, claims:
+    #     [{statement, citations: [str]}], actions: [str], unknowns:
+    #     [str]}
+    #   - ``allowed_ids`` is the set of source IDs that survived
+    #     evidence retrieval; only claims citing IDs in this set make
+    #     it into the rendered answer.
+    #   - Return tuple: (rendered_answer_str, rejected_claim_count).
+    # If the signature changes, the eval cassettes will fail loud via
+    # MockCircuitClient's strict_hash check (re-record by running
+    # ``MOCK_CIRCUIT_MODE=record python -m tests.ask_ai_eval.runner``).
     summary = str(payload.get("executive_summary") or "").strip()
     actions = [str(a).strip() for a in (payload.get("actions") or []) if str(a).strip()]
     model_unknowns = [str(u).strip() for u in (payload.get("unknowns") or []) if str(u).strip()]

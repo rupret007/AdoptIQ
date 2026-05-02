@@ -1,0 +1,11 @@
+id: p01_q06
+portfolio: p01_high_renewal_risk
+category: multi_step
+question: What is the average pulse score across all customers?
+predicates:
+  - type: must_render_number_within_tolerance
+    value: 2.25
+    tolerance_pct: 25
+expected_evidence_ids:
+  - PULSE-EVAL-001
+  - PULSE-EVAL-005

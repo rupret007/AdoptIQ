@@ -1,0 +1,12 @@
+id: p05_q02
+portfolio: p05_cross_compare
+category: kpi_extraction
+question: How many adoption barriers are open across the comparable cohort?
+predicates:
+  - type: must_render_number_within_tolerance
+    value: 16
+    tolerance_pct: 20
+  - type: must_cite_source_id
+    expected_id: any
+expected_evidence_ids:
+  - AB-EVAL-501

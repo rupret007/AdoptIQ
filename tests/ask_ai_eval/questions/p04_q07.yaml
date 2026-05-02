@@ -1,0 +1,9 @@
+id: p04_q07
+portfolio: p04_quiet_portfolio
+category: citation_correctness
+question: What is the source ID for the SilentEvalCorp barrier?
+predicates:
+  - type: must_cite_source_id
+    expected_id: AB-EVAL-401
+expected_evidence_ids:
+  - AB-EVAL-401

@@ -1,0 +1,11 @@
+id: p05_q07
+portfolio: p05_cross_compare
+category: citation_correctness
+question: What is the source ID for the CmpEvalDelta deployment escalation?
+predicates:
+  - type: must_cite_source_id
+    expected_id: CASE-EVAL-510
+  - type: must_contain_phrase
+    phrase: CASE-EVAL-510
+expected_evidence_ids:
+  - CASE-EVAL-510

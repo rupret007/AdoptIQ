@@ -1,0 +1,11 @@
+id: p03_q02
+portfolio: p03_adoption_barriers
+category: customer_lookup
+question: Which customer has a Webex Calling pilot stalled?
+predicates:
+  - type: must_contain_phrase
+    phrase: AdoptEvalCust
+  - type: must_cite_source_id
+    expected_id: any
+expected_evidence_ids:
+  - AB-EVAL-302

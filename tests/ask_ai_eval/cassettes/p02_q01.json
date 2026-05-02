@@ -1,0 +1,26 @@
+{
+  "prompt_hash": "",
+  "question_id": "p02_q01",
+  "recorded_at": "synthetic-2026-05-02",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "CASE-EVAL-201",
+          "CASE-EVAL-202",
+          "CASE-EVAL-204"
+        ],
+        "statement": "PSIRT-related records identified in the retrieved evidence."
+      },
+      {
+        "citations": [
+          "CASE-EVAL-201"
+        ],
+        "statement": "Total of 4 relevant records identified."
+      }
+    ],
+    "executive_summary": "PSIRT-related records identified in the retrieved evidence.",
+    "unknowns": []
+  }
+}

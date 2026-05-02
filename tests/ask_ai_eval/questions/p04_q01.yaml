@@ -1,0 +1,12 @@
+id: p04_q01
+portfolio: p04_quiet_portfolio
+category: kpi_extraction
+question: How many adoption barriers are open in this portfolio?
+predicates:
+  - type: must_render_number_within_tolerance
+    value: 1
+    tolerance_pct: 50
+  - type: must_cite_source_id
+    expected_id: AB-EVAL-401
+expected_evidence_ids:
+  - AB-EVAL-401

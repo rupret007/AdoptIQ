@@ -1,0 +1,7 @@
+id: p04_q03
+portfolio: p04_quiet_portfolio
+category: negative_control
+question: What is the average pulse score?
+predicates:
+  - type: must_contain_phrase
+    phrase: Insufficient

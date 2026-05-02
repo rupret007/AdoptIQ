@@ -1,0 +1,12 @@
+id: p02_q10
+portfolio: p02_heavy_psirt
+category: cross_compare
+question: Compare SecureEvalCorp vs ShieldEvalInc by case volume.
+predicates:
+  - type: must_contain_phrase
+    phrase: SecureEvalCorp
+  - type: must_contain_phrase
+    phrase: ShieldEvalInc
+expected_evidence_ids:
+  - CASE-EVAL-201
+  - CASE-EVAL-203
