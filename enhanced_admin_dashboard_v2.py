@@ -2349,6 +2349,8 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                         <th>ETA</th>
                         <th>Started</th>
                         <th>IP Address</th>
+                        {# Round 66 / Pass 3 (B14): grounding diagnostics column. #}
+                        <th title="R27 grounding validator rejection rate (rejected / total narrative calls)">Grounding</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -2362,6 +2364,32 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                         <td>{{ report.eta_display or 'Calculating...' }}</td>
                         <td>{{ report.start_time }}</td>
                         <td>{{ report.ip_address or 'N/A' }}</td>
+                        {# Round 66 / Pass 3 (B14): pill colored by rate.
+                           - <=10% -> green (passing the post-R66/B11 acceptance bar)
+                           - 10-25% -> yellow (degradation -- inspect rejection_records via /api/grounding-diagnostics)
+                           - >25% -> red (R27 validator regression -- root-cause required)
+                           Pre-R66 the admin had no per-report grounding signal; a 34% rate (Build 38 acceptance) had to be back-derived from the structured log. #}
+                        <td>
+                            {% set _r66_rate = report.grounding_rejection_rate %}
+                            {% set _r66_total = report.grounding_total_count or 0 %}
+                            {% set _r66_rej = report.grounding_rejection_count or 0 %}
+                            {% if _r66_total > 0 %}
+                                {% set _r66_pct = (_r66_rate * 100)|round(1) %}
+                                {% if _r66_rate <= 0.10 %}
+                                    {% set _r66_color = '#16a34a' %}
+                                {% elif _r66_rate <= 0.25 %}
+                                    {% set _r66_color = '#eab308' %}
+                                {% else %}
+                                    {% set _r66_color = '#dc2626' %}
+                                {% endif %}
+                                <span title="Rejected {{ _r66_rej }} of {{ _r66_total }} narrative calls"
+                                      style="display:inline-block;padding:2px 8px;border-radius:10px;background-color:{{ _r66_color }};color:#ffffff;font-size:0.85em;font-weight:600;">
+                                    {{ _r66_pct }}%
+                                </span>
+                            {% else %}
+                                <span style="color:#6b7280;font-size:0.85em;">N/A</span>
+                            {% endif %}
+                        </td>
                     </tr>
                     {% endfor %}
                 </tbody>

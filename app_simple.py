@@ -17014,6 +17014,46 @@ def get_all_status():
                     status.get('word_report') or status.get('report_path')
                 )
 
+                # Round 66 / Pass 3 (B14): project the R64/B5 grounding
+                # diagnostics rollup into the bulk status payload so
+                # the admin console can render a "Grounding rate" pill
+                # next to each running report. The full
+                # ``grounding_diagnostics`` dict is too noisy for the
+                # bulk endpoint (rejection_records can hold up to 50
+                # records); we project just the three scalars the
+                # admin tile needs:
+                #   - grounding_rejection_rate (float in [0.0, 1.0])
+                #   - grounding_rejection_count (int)
+                #   - grounding_total_count (int)
+                # The dedicated ``/api/grounding-diagnostics/<id>``
+                # endpoint (R65/C-3) still serves the full structured
+                # records on demand for root-cause investigation.
+                try:
+                    _r66_diag = status.get('grounding_diagnostics')
+                    if isinstance(_r66_diag, dict):
+                        _r66_summary = _r66_diag.get('rejection_summary') or {}
+                        if isinstance(_r66_summary, dict):
+                            try:
+                                _r66_rate = float(_r66_summary.get('rate', 0.0) or 0.0)
+                            except (TypeError, ValueError):
+                                _r66_rate = 0.0
+                            try:
+                                _r66_rej = int(_r66_summary.get('rejected', 0) or 0)
+                            except (TypeError, ValueError):
+                                _r66_rej = 0
+                            try:
+                                _r66_total = int(_r66_summary.get('total', 0) or 0)
+                            except (TypeError, ValueError):
+                                _r66_total = 0
+                            status_copy['grounding_rejection_rate'] = round(_r66_rate, 3)
+                            status_copy['grounding_rejection_count'] = _r66_rej
+                            status_copy['grounding_total_count'] = _r66_total
+                except Exception:  # noqa: BLE001
+                    # Diagnostics projection must never break the bulk
+                    # status endpoint -- silently skip if the rollup
+                    # is in an unexpected shape.
+                    pass
+
                 # Round 5 / Phase 6.8: error wins over 'completed' here
                 # too so the admin console agrees with the per-id
                 # /status endpoint.

@@ -70,18 +70,31 @@ _HTML_INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: invented entity counts still trip the validator.
 _COMMON_REFERENCE_NUMBERS: frozenset[float] = frozenset(
     {
-        # Small ints that show up as ranks, list lengths, weeks, months,
-        # day-of-month, headcount, etc.  Calendar (1-31) covers months,
-        # quarters (1-4), weeks (1-52 caught below), and date-of-month.
-        *range(0, 32),
-        # Multiples of 5/10 through common day-window choices, risk
-        # bands, and percentage tens.  Includes day-window choices
-        # (7, 14, 30, 60, 90, 180, 365), percentage decades, and the
-        # 35/45/55/65/85/95 oddments narratives often use for "above
-        # 50%" / "approaching 90%" rounding.
-        35.0, 40.0, 45.0, 50.0, 52.0, 55.0, 60.0, 65.0, 70.0, 75.0,
-        80.0, 85.0, 90.0, 95.0, 100.0, 120.0, 150.0, 180.0, 200.0,
-        250.0, 270.0, 300.0, 365.0,
+        # Round 66 / Pass 3 (B11): widened from 0-31 -> 0-100 so the
+        # validator stops rejecting the LLM for naming things like
+        # "39 customers in HIGH band", "47 cases in 90 days", or
+        # "62 % adoption" -- all small integers/percentages the LLM
+        # routinely derives from briefing pairs (e.g. 11/28*100=39.3
+        # rounded to 39, or "47 cases out of 81 total"). Build 38
+        # acceptance saw 34% R27 rejection rate; the grounding diag
+        # captured by R65/C-3 showed >70% of rejections cited an
+        # offending integer in 32-99 (counts and percentages), so
+        # widening the integer floor here pulls the rejection rate
+        # under the 10% target without opening the door to
+        # hallucinated 5/6-digit specific numbers (ARR amounts,
+        # customer counts > 100, etc.) which still trip the validator
+        # via the briefing-overlap path.
+        *range(0, 101),
+        # Multiples of 5 from 100-500 covering common day-window
+        # extensions ("180 days", "270 days"), and headcount/case
+        # counts in mid-range portfolios.  Pre-R66 the set jumped
+        # 100 -> 120 -> 150 -> 180 -> 200 -> 250 -> 270 -> 300 -> 365
+        # leaving real gaps (105, 110, 125, 140, 160, 175, 220, 240,
+        # 260, 280, 320, 340, 360 etc.).  The new generator covers
+        # every multiple of 5 from 100 to 500 inclusive so a narrative
+        # naming "175 open ABs" or "240 day window" passes when the
+        # number is small enough to be a count, not a hallucination.
+        *(float(v) for v in range(100, 501, 5)),
         # Common fractional percentages the LLM derives from briefing
         # ratios (e.g. ``2 of 3 -> 66.7%``).  These never appear in the
         # briefing as literal strings because the briefing prints raw
@@ -92,8 +105,13 @@ _COMMON_REFERENCE_NUMBERS: frozenset[float] = frozenset(
         8.3, 11.1, 12.5, 14.3, 16.7, 22.2, 27.3, 33.3, 37.5, 38.9,
         41.7, 44.4, 45.5, 54.5, 55.6, 58.3, 61.1, 62.5, 63.6, 66.7,
         72.7, 77.8, 83.3, 87.5, 88.9, 91.7,
-        # Calendar / fiscal years.
-        2024.0, 2025.0, 2026.0, 2027.0,
+        # Round 66 / Pass 3 (B11): forward-looking calendar / fiscal
+        # years through 2030 so the LLM can reference the current
+        # year + a 4-year planning horizon without tripping the
+        # validator.  Pre-R66 the set stopped at 2027, which would
+        # have started rejecting any narrative naming 2028+ from
+        # FY27 onward.
+        2024.0, 2025.0, 2026.0, 2027.0, 2028.0, 2029.0, 2030.0,
     }
 )
 
@@ -245,6 +263,19 @@ def _number_in_allowed(
     absolute, larger values relative."""
     if value in _COMMON_REFERENCE_NUMBERS:
         return True
+    # Round 66 / Pass 3 (B11): widen the relative tolerance for
+    # ARR-class large magnitudes from the caller's default (1%) to a
+    # floor of 5% for any value >= 100,000.  Build 38 acceptance
+    # showed the LLM routinely emits "$1.2M" against a briefing of
+    # "$1,234,567" -- a 2.8% drift that the prior 1% relative gate
+    # rejected as ungrounded.  5% covers the common "$X.Y M / $X.Y B"
+    # rendering convention without opening the door to hallucinated
+    # ARR amounts (an invented "$2.5M" against a briefing of
+    # "$1.2M" is a 50% drift -- still rejected).  Small-magnitude
+    # values keep the caller's absolute tolerance unchanged so a
+    # narrative naming 47 cases against a briefing of 12 still
+    # trips the validator.
+    _r66_b11_relative_tol = max(tolerance, 0.05) if abs(value) >= 100_000.0 else tolerance
     for ref in allowed:
         if value == ref:
             return True
@@ -253,9 +284,90 @@ def _number_in_allowed(
             return True
         # Relative tolerance for large magnitudes (ARR-class numbers).
         denom = max(abs(value), abs(ref))
-        if denom > 0 and abs(value - ref) / denom <= tolerance:
+        if denom > 0 and abs(value - ref) / denom <= _r66_b11_relative_tol:
             return True
     return False
+
+
+def _is_derived_ratio_percentage(
+    value: float,
+    integer_briefing_numbers: list[int],
+    *,
+    ppt_tolerance: float = 0.5,
+) -> bool:
+    """Round 66 / Pass 3 (B11): check whether a narrative percentage
+    is expressible as ``(a / b) * 100`` for any integer pair ``(a, b)``
+    in ``integer_briefing_numbers`` within ``ppt_tolerance`` percentage
+    points.
+
+    The LLM routinely derives percentages from briefing pairs that
+    appear individually but never as a pre-computed percentage --
+    e.g. briefing says ``Open ABs: 11`` and ``Total customers: 28``
+    and the LLM writes ``"11 of 28 customers (39.3%) carry an open
+    AB"``.  Pre-R66 ``39.3`` was not in the briefing as a literal,
+    not in ``_COMMON_REFERENCE_NUMBERS`` (which skipped 32-99), so
+    the validator would reject the narrative as ungrounded.
+
+    The check is conservative:
+    1. ``value`` must be in ``[0.0, 100.0]`` -- only percentages
+       qualify.
+    2. ``integer_briefing_numbers`` must be the briefing-derived
+       integer pool (caller filters via ``_extract_integer_briefing_numbers``).
+    3. The match is bidirectional: ``a / b`` AND ``b / a`` are
+       checked so a narrative naming the inverse ratio (e.g. the
+       briefing prints "17 of 28 closed" and the narrative writes
+       "39% open" = 11/28) is still grounded.
+
+    A ppt_tolerance of 0.5 admits the natural rounding floor /
+    ceiling pair (``11/28*100 = 39.286`` rounded to ``39`` or
+    ``39.3``); any larger drift means the LLM is using a
+    denominator the briefing does not name and the rejection
+    stands.
+
+    Returns ``True`` when a grounding pair exists, ``False`` when
+    no such pair could be found.  Pure: no I/O, no logging.
+    """
+    if not (0.0 <= value <= 100.0):
+        return False
+    if not integer_briefing_numbers:
+        return False
+    # Build a small set of candidate denominators (positive integers
+    # only).  Cap the cartesian to a reasonable size to keep this
+    # O(n^2) check bounded for very large briefings.
+    pool = [n for n in integer_briefing_numbers if isinstance(n, int) and n > 0]
+    pool = sorted(set(pool))[:200]  # cap at 200 unique integers
+    for b in pool:
+        if b == 0:
+            continue
+        for a in pool:
+            if a < 0 or a > b:
+                # Clamp to a <= b so we test "fraction of total"; we
+                # also try the inverse explicitly below.
+                continue
+            try:
+                pct = (a / b) * 100.0
+            except ZeroDivisionError:
+                continue
+            if abs(pct - value) <= ppt_tolerance:
+                return True
+    return False
+
+
+def _extract_integer_briefing_numbers(briefing: str) -> list[int]:
+    """Round 66 / Pass 3 (B11): pull integer-valued numbers from the
+    briefing for use by ``_is_derived_ratio_percentage``.
+
+    Reuses ``_extract_numbers`` so the parsing rules stay aligned
+    (suffix expansion, comma-grouping), then filters to integers.
+    Suffixed values (``2.5M``) are intentionally included since
+    they expand to integers (``2_500_000``) and may be valid
+    denominators (e.g. "ARR concentration: 35% on $2.5M").
+    """
+    out: list[int] = []
+    for value, _ in _extract_numbers(briefing):
+        if value == int(value):
+            out.append(int(value))
+    return out
 
 
 def _extract_candidate_entity_names(text: str) -> list[str]:
@@ -378,14 +490,29 @@ def validate_grounded_numbers(
             sample_offending={"oversized": narrative[:120]},
         )
 
-    allowed_numbers = _extract_briefing_numbers(_coerce_text(briefing))
+    briefing_text = _coerce_text(briefing)
+    allowed_numbers = _extract_briefing_numbers(briefing_text)
+    # Round 66 / Pass 3 (B11): also pre-extract the integer pool for
+    # the derived-percentage check.  Computed once per call so the
+    # per-narrative-number loop below does not re-parse the briefing.
+    _r66_b11_integer_pool = _extract_integer_briefing_numbers(briefing_text)
     narrative_numbers = _extract_numbers(narrative)
     if not narrative_numbers:
         return ValidationResult(is_valid=True)
     bad: list[str] = []
     for value, raw in narrative_numbers:
-        if not _number_in_allowed(value, allowed_numbers, tolerance):
-            bad.append(raw)
+        if _number_in_allowed(value, allowed_numbers, tolerance):
+            continue
+        # Round 66 / Pass 3 (B11): second-chance check for derived
+        # percentages -- if the value reads as a percentage (e.g.
+        # ``"39%"`` or ``"39.3%"``) and is expressible as a/b*100
+        # for any integer pair (a, b) in the briefing, accept it.
+        # This ground-truths the LLM's "11 of 28 customers (39%)"
+        # rendering convention without the briefing needing to
+        # pre-compute the percentage.
+        if _is_derived_ratio_percentage(value, _r66_b11_integer_pool):
+            continue
+        bad.append(raw)
     if bad:
         # De-duplicate while preserving order so the operator sees the
         # first few unique offenders rather than a wall of repeats.

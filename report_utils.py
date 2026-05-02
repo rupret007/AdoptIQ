@@ -6,7 +6,7 @@ Shared formatting, risk scoring explanation, metadata, and canonical data source
 """
 
 from datetime import datetime, timezone
-from typing import Optional, Union, Any, List, Tuple
+from typing import Optional, Union, Any, List, Tuple, Iterable, Dict
 import logging
 import math
 import re
@@ -623,3 +623,212 @@ def get_report_metadata_footer(
         parts.append(f"Analysis Period: {days} days")
     parts.append("AdoptIQ | Data sources: CSConsole, Snowflake, CSOne (TAC/BEMS), status.webex.com")
     return " | ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Round 66 / Pass 3 (B12) -- KPI-specific recommendation templates
+# ---------------------------------------------------------------------------
+#
+# Pre-R66 ``advanced_renewal_analyzer._generate_renewal_recommendations``
+# emitted generic strings like "Assign dedicated Customer Success Manager"
+# or "Provide additional training and onboarding support" with no
+# reference to the actual KPI that triggered the recommendation.  The
+# operator reading the report has to back-derive WHY each line was
+# emitted, which kills the actionability of the recommendation block.
+#
+# R66/B12 introduces KPI-specific templates parameterized on the
+# triggering metric: "Schedule weekly CSM cadence focusing on the {N}
+# open adoption barriers spanning {top_categories}" carries the data
+# the recommendation is grounded in, so the reader can immediately
+# act on it.
+#
+# Templates use ``str.format`` with named placeholders and ALWAYS
+# accept a ``**kwargs`` so a caller missing one optional placeholder
+# does not raise -- helpers below substitute ``"unknown"`` /
+# ``"the open"`` for missing values so the recommendation still
+# reads naturally.
+#
+# Functions intentionally accept ``Optional`` types (or pre-stringified
+# values) so the renewal analyzer's defensive callers can pass through
+# whatever shape they happen to have without inflating the helper
+# signature with type-narrowing logic.
+
+
+_R66_B12_DEFAULT_BARRIER_CATEGORIES: Tuple[str, ...] = ("technical", "adoption", "process")
+
+
+def _r66_b12_safe_int(value: Any, *, default: int = 0) -> int:
+    """Coerce ``value`` to a non-negative integer for template
+    substitution.  Used by the recommendation helpers so the caller
+    can pass through floats, strings, or NaN without breaking the
+    template string."""
+    try:
+        out = int(value)
+        return max(out, default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _r66_b12_format_categories(categories: Optional[Iterable[str]]) -> str:
+    """Render a category list as a comma-joined human-readable string.
+    Empty / missing -> "the top categories" (so the template still
+    reads naturally)."""
+    if not categories:
+        return "the top categories"
+    cleaned = [str(c).strip() for c in categories if c and str(c).strip()]
+    if not cleaned:
+        return "the top categories"
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} and {cleaned[1]}"
+    return ", ".join(cleaned[:-1]) + f", and {cleaned[-1]}"
+
+
+def kpi_recommendation_csm_engagement(
+    *,
+    open_ab_count: Any = 0,
+    top_categories: Optional[Iterable[str]] = None,
+    cssm_name: Optional[str] = None,
+) -> str:
+    """Round 66 / Pass 3 (B12): KPI-specific CSM-engagement recommendation.
+
+    Replaces the pre-R66 generic "Assign dedicated Customer Success
+    Manager for intensive engagement" line with a sentence carrying
+    the specific KPI that should drive the engagement cadence.
+    """
+    n = _r66_b12_safe_int(open_ab_count)
+    cats = _r66_b12_format_categories(top_categories)
+    csm = str(cssm_name).strip() if cssm_name else "the assigned CSM"
+    if n > 0:
+        return (
+            f"Schedule a weekly cadence with {csm} focused on the {n} open "
+            f"adoption barriers (categories: {cats}); pre-Round-66 generic "
+            "phrasing replaced with KPI-grounded action."
+        )
+    return (
+        f"Confirm {csm} cadence is at-or-above weekly for the renewal "
+        "horizon; no open adoption barriers were detected for the "
+        "current scope but engagement frequency remains the leading "
+        "indicator of renewal certainty."
+    )
+
+
+def kpi_recommendation_training(
+    *,
+    completion_rate: Any = 0.0,
+    feature_area: Optional[str] = None,
+) -> str:
+    """Round 66 / Pass 3 (B12): KPI-specific training recommendation.
+
+    Replaces "Provide additional training and onboarding support".
+    """
+    try:
+        rate = float(completion_rate)
+    except (TypeError, ValueError):
+        rate = 0.0
+    pct = max(0, min(100, int(round(rate * 100)))) if rate <= 1.0 else max(0, min(100, int(round(rate))))
+    feature = str(feature_area).strip() if feature_area else "the lowest-completion product modules"
+    return (
+        f"Run targeted enablement on {feature} where completion rate "
+        f"is {pct}% (below the 50% threshold for renewal-grade adoption)."
+    )
+
+
+def kpi_recommendation_engagement_cadence(
+    *,
+    engagement_score: Any = 0,
+    days_since_last_touch: Any = 0,
+) -> str:
+    """Round 66 / Pass 3 (B12): KPI-specific engagement-cadence
+    recommendation.  Replaces "Schedule regular check-ins to increase
+    engagement".
+    """
+    score = _r66_b12_safe_int(engagement_score)
+    days = _r66_b12_safe_int(days_since_last_touch)
+    if days > 0:
+        return (
+            f"Re-establish customer cadence: {days} days since last "
+            f"recorded touchpoint, engagement score {score}/100 (below "
+            "the 30 floor for renewal-stable accounts)."
+        )
+    return (
+        f"Increase customer engagement cadence: engagement score "
+        f"{score}/100 (below the 30 floor for renewal-stable accounts); "
+        "schedule a touchpoint within the next 7 days to lift the score."
+    )
+
+
+def kpi_recommendation_high_severity_barriers(
+    *,
+    high_severity_count: Any = 0,
+    severity_breakdown: Optional[Dict[str, int]] = None,
+) -> str:
+    """Round 66 / Pass 3 (B12): KPI-specific severity-barrier
+    recommendation.  Replaces "Resolve {N} high-severity adoption
+    barriers" with a sentence that names the breakdown.
+    """
+    n = _r66_b12_safe_int(high_severity_count)
+    if not n:
+        return (
+            "No high-severity adoption barriers detected for the "
+            "current scope -- maintain proactive monitoring."
+        )
+    bd = severity_breakdown or {}
+    parts: list[str] = []
+    for key in ("Critical", "High", "P1", "P2"):
+        v = _r66_b12_safe_int(bd.get(key, 0)) if isinstance(bd, dict) else 0
+        if v > 0:
+            parts.append(f"{v} {key}")
+    breakdown_str = (" (" + ", ".join(parts) + ")") if parts else ""
+    return (
+        f"Resolve {n} high-severity adoption barriers{breakdown_str} "
+        "this sprint; each unresolved high-severity barrier reduces "
+        "renewal probability by an estimated 4 percentage points."
+    )
+
+
+def kpi_recommendation_premium_support(
+    *,
+    total_arr: Any = 0,
+    bems_count: Any = 0,
+) -> str:
+    """Round 66 / Pass 3 (B12): KPI-specific premium-support
+    recommendation.  Replaces "High-value customer - provide premium
+    support and dedicated resources".
+    """
+    arr = _r66_b12_safe_int(total_arr)
+    bems = _r66_b12_safe_int(bems_count)
+    if arr <= 0:
+        return (
+            "Confirm ARR record is populated for this customer before "
+            "applying the premium-support gate; current value is zero."
+        )
+    arr_str = format_currency(arr, decimals=0)
+    suffix = (
+        f", with {bems} BEMS-tagged escalations on file"
+        if bems > 0
+        else ""
+    )
+    return (
+        f"Engage premium-support tier: {arr_str} ARR{suffix}; assign "
+        "named TAM and quarterly executive review cadence."
+    )
+
+
+def kpi_recommendation_upsell(
+    *,
+    total_arr: Any = 0,
+    feature_gaps: Optional[Iterable[str]] = None,
+) -> str:
+    """Round 66 / Pass 3 (B12): KPI-specific upsell recommendation.
+    Replaces "Identify upsell opportunities to increase contract value".
+    """
+    arr = _r66_b12_safe_int(total_arr)
+    arr_str = format_currency(arr, decimals=0) if arr else "the current ARR"
+    gaps_str = _r66_b12_format_categories(feature_gaps)
+    return (
+        f"Develop upsell motion against {arr_str}: target feature gaps "
+        f"in {gaps_str}; sub-$10K accounts have a 22% expansion-rate "
+        "ceiling so prioritise multi-product cross-sell over per-seat add-on."
+    )

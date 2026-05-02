@@ -154,28 +154,29 @@ def test_phase_4_2_year_allow_list_2027_passes_without_briefing() -> None:
 
 
 def test_phase_4_2_year_2028_fails_when_not_in_briefing() -> None:
-    """Round 18 / Phase 4.2 -- the upper edge: 2028 is **not** on
-    the auto-allow list, so it must surface as ungrounded if the
-    briefing doesn't mention it.  This is the narrowest behavior
-    pin that catches a future "extend to 2028+" change without
-    accompanying briefing content.
+    """Round 18 / Phase 4.2 -- the upper edge year that should NOT
+    auto-pass.  Round 66 / Pass 3 (B11): widened the
+    auto-allow set to cover 2024-2030, so 2028 now passes by
+    default; we update the upper-edge year to 2031 (still outside
+    the FY27 + 4-year horizon) to keep the failing-when-not-in-briefing
+    contract pinned.
 
-    A maintainer who extends the allow-list to 2028 should
-    consciously update this test (and the audit) rather than
-    silently breaking the contract.
+    The maintainer who needs to extend the year list further in a
+    future round should update both the validator constants AND
+    this test together (per the existing contract).
 
     Note: ``_extract_numbers`` deliberately rejects digits embedded
-    in tokens (so ``FY2028`` -> no extraction, same as ``RFC2119``),
+    in tokens (so ``FY2031`` -> no extraction, same as ``RFC2119``),
     so this fixture uses a bare year token in standard prose.
     """
 
-    narrative = "By 2028 the renewal forecast is uncertain."
+    narrative = "By 2031 the renewal forecast is uncertain."
     briefing = "Portfolio summary: 12 customers."
     result = anv.validate_narrative(narrative, briefing, allowed_entities=())
     assert not result.is_valid
     joined = ",".join(result.failures)
     assert "ungrounded_number" in joined, (
-        f"Expected ungrounded_number failure for 2028; got {result.failures}"
+        f"Expected ungrounded_number failure for 2031; got {result.failures}"
     )
 
 
@@ -282,12 +283,18 @@ def test_phase_4_4_common_window_choices_auto_allowed() -> None:
 
 def test_phase_4_4_uncommon_window_must_be_grounded() -> None:
     """Round 18 / Phase 4.4 -- the negative control: an uncommon
-    window like 73 days, when not in the briefing, must surface as
-    ungrounded.  Catches a future "promote 73 to common-reference"
-    drift that would erode grounding precision.
+    window, when not in the briefing, must surface as ungrounded.
+    Catches a future "promote N to common-reference" drift that
+    would erode grounding precision.
+
+    Round 66 / Pass 3 (B11): widened the integer floor to 0-100 (so
+    73 now passes by default).  Move the negative-control to a
+    larger window outside the new common-set band: 547 is not in
+    0-100, not in the multiples-of-5 100-500 range, and not in the
+    briefing -> still rejected.
     """
 
-    narrative = "Reviewed activity over the last 73 days."
+    narrative = "Reviewed activity over the last 547 days."
     briefing = "Portfolio summary: 12 customers."
     result = anv.validate_narrative(narrative, briefing, allowed_entities=())
     assert not result.is_valid

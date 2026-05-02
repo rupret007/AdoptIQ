@@ -1462,42 +1462,109 @@ class AdvancedRenewalAnalyzer:
         }
     
     def _generate_renewal_recommendations(self, analysis_results: Dict) -> List[str]:
-        """Generate actionable renewal recommendations"""
+        """Generate actionable renewal recommendations.
+
+        Round 66 / Pass 3 (B12): pre-R66 the recommendations were
+        generic ("Assign dedicated Customer Success Manager",
+        "Provide additional training and onboarding support") with no
+        link back to the actual KPI that triggered them.  R66/B12
+        routes the high-volume recommendation lines through the new
+        ``report_utils.kpi_recommendation_*`` helpers which embed the
+        triggering KPI value in the recommendation string itself, so
+        the operator can act on the line without back-deriving WHY it
+        was emitted.  The legacy generic lines (e.g. the "executive
+        renewal discussion" line for CRITICAL band) are preserved
+        because they don't have a single dominant KPI driver.
+        """
         recommendations = []
-        
+
+        # Round 66 / Pass 3 (B12): import the KPI-specific templates
+        # lazily so a missing report_utils import (broken dev tree)
+        # does not block report generation -- fall back to the legacy
+        # generic strings if the helpers are unavailable.
+        try:
+            from report_utils import (  # noqa: WPS433 (intentional local import)
+                kpi_recommendation_csm_engagement,
+                kpi_recommendation_engagement_cadence,
+                kpi_recommendation_high_severity_barriers,
+                kpi_recommendation_premium_support,
+                kpi_recommendation_training,
+                kpi_recommendation_upsell,
+            )
+            _r66_b12_helpers_available = True
+        except Exception as _r66_b12_imp:  # noqa: BLE001
+            logger.debug(
+                "Round 66 / B12: kpi_recommendation_* helpers unavailable, "
+                "falling back to legacy strings: %s",
+                _r66_b12_imp,
+            )
+            _r66_b12_helpers_available = False
+
         risk_category = analysis_results.get('renewal_risk_category', 'UNKNOWN')
-        risk_score = analysis_results.get('renewal_risk_score', 50)
-        
+
         # High-level recommendations based on risk category
         if risk_category in ['CRITICAL', 'HIGH']:
             recommendations.append("🚨 IMMEDIATE ACTION REQUIRED: Schedule executive-level renewal discussion")
-            recommendations.append("📞 Assign dedicated Customer Success Manager for intensive engagement")
+            # Round 66 / Pass 3 (B12): KPI-grounded CSM cadence
+            # replaces the generic "Assign dedicated CSM" line.
+            adoption_metrics_for_csm = analysis_results.get('adoption_metrics', {}) or {}
+            _open_ab = adoption_metrics_for_csm.get('open_adoption_barriers', 0)
+            _top_cats = adoption_metrics_for_csm.get('top_barrier_categories')
+            _cssm = analysis_results.get('cssm_name') or analysis_results.get('manager')
+            if _r66_b12_helpers_available:
+                recommendations.append(
+                    "📞 " + kpi_recommendation_csm_engagement(
+                        open_ab_count=_open_ab,
+                        top_categories=_top_cats,
+                        cssm_name=_cssm,
+                    )
+                )
+            else:
+                recommendations.append("📞 Assign dedicated Customer Success Manager for intensive engagement")
             recommendations.append("💰 Consider discount or value-add offers to improve renewal probability")
-        
+
         # Contract-specific recommendations
         contract_info = analysis_results.get('contract_information', {})
         if contract_info:
             expiring_contracts = len(contract_info.get('contracts_expiring_soon', []))
             if expiring_contracts > 0:
                 recommendations.append(f"⏰ {expiring_contracts} contracts expiring soon - start renewal process immediately")
-            
+
             manual_renewal = contract_info.get('manual_renewal_contracts', 0)
             if manual_renewal > 0:
                 recommendations.append("🔄 Consider converting manual renewal contracts to auto-renewal")
-        
+
         # Usage and adoption recommendations
         usage_metrics = analysis_results.get('usage_metrics', {})
         if usage_metrics:
             completion_rate = _safe_num(usage_metrics.get('overall_completion_rate', 0))
             if completion_rate < 0.5:
-                recommendations.append("📚 Provide additional training and onboarding support")
+                # Round 66 / Pass 3 (B12): KPI-grounded training rec.
+                if _r66_b12_helpers_available:
+                    recommendations.append(
+                        "📚 " + kpi_recommendation_training(
+                            completion_rate=completion_rate,
+                            feature_area=usage_metrics.get('lowest_completion_feature'),
+                        )
+                    )
+                else:
+                    recommendations.append("📚 Provide additional training and onboarding support")
                 recommendations.append("🎯 Focus on completing existing action plans and adoption barriers")
-            
+
             recent_engagement = _safe_num(usage_metrics.get('recent_engagement_score', 0))
             if recent_engagement < 30:
-                recommendations.append("📞 Schedule regular check-ins to increase engagement")
+                # Round 66 / Pass 3 (B12): KPI-grounded engagement rec.
+                if _r66_b12_helpers_available:
+                    recommendations.append(
+                        "📞 " + kpi_recommendation_engagement_cadence(
+                            engagement_score=recent_engagement,
+                            days_since_last_touch=usage_metrics.get('days_since_last_touch', 0),
+                        )
+                    )
+                else:
+                    recommendations.append("📞 Schedule regular check-ins to increase engagement")
                 recommendations.append("🎪 Organize user community events or webinars")
-        
+
         # Support and engagement recommendations
         support_metrics = analysis_results.get('support_metrics', {})
         if support_metrics:
@@ -1505,7 +1572,7 @@ class AdvancedRenewalAnalyzer:
             if engagement_level == 'LOW':
                 recommendations.append("🤝 Increase proactive support and success planning")
                 recommendations.append("INFO: Create success priorities and track completion")
-        
+
         # Adoption health recommendations
         adoption_metrics = analysis_results.get('adoption_metrics', {})
         if adoption_metrics:
@@ -1513,11 +1580,20 @@ class AdvancedRenewalAnalyzer:
             if health_score < 50:
                 recommendations.append("🔧 Address unresolved adoption barriers immediately")
                 recommendations.append("📊 Implement adoption health monitoring and reporting")
-            
+
             high_severity_barriers = _safe_num(adoption_metrics.get('high_severity_barriers', 0))
             if high_severity_barriers > 0:
-                recommendations.append(f"⚠️ Resolve {int(high_severity_barriers)} high-severity adoption barriers")
-        
+                # Round 66 / Pass 3 (B12): KPI-grounded high-severity rec.
+                if _r66_b12_helpers_available:
+                    recommendations.append(
+                        "⚠️ " + kpi_recommendation_high_severity_barriers(
+                            high_severity_count=high_severity_barriers,
+                            severity_breakdown=adoption_metrics.get('severity_breakdown'),
+                        )
+                    )
+                else:
+                    recommendations.append(f"⚠️ Resolve {int(high_severity_barriers)} high-severity adoption barriers")
+
         # Financial recommendations
         financial_metrics = analysis_results.get('financial_metrics', {})
         if financial_metrics:
@@ -1538,10 +1614,28 @@ class AdvancedRenewalAnalyzer:
             else:
                 total_arr = financial_metrics.get('total_arr', 0)
                 if total_arr > 100000:
-                    recommendations.append("👑 High-value customer - provide premium support and dedicated resources")
+                    # Round 66 / Pass 3 (B12): KPI-grounded premium-support rec.
+                    if _r66_b12_helpers_available:
+                        recommendations.append(
+                            "👑 " + kpi_recommendation_premium_support(
+                                total_arr=total_arr,
+                                bems_count=financial_metrics.get('bems_count', 0),
+                            )
+                        )
+                    else:
+                        recommendations.append("👑 High-value customer - provide premium support and dedicated resources")
                 elif total_arr < 10000:
-                    recommendations.append("💡 Identify upsell opportunities to increase contract value")
-        
+                    # Round 66 / Pass 3 (B12): KPI-grounded upsell rec.
+                    if _r66_b12_helpers_available:
+                        recommendations.append(
+                            "💡 " + kpi_recommendation_upsell(
+                                total_arr=total_arr,
+                                feature_gaps=financial_metrics.get('feature_gaps'),
+                            )
+                        )
+                    else:
+                        recommendations.append("💡 Identify upsell opportunities to increase contract value")
+
         return recommendations
     
     def generate_renewal_report(self, customer_name: str, days: int = 90) -> Tuple[str, str]:

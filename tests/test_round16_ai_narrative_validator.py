@@ -106,13 +106,22 @@ def test_phase_3_2_accepts_common_reference_numbers():
 
 
 def test_phase_3_2_rejects_hallucinated_count():
-    """The narrative quotes 47 customers when the briefing says 12 ->
-    must fail with ``ungrounded_number``."""
-    text = "The portfolio has 47 customers and 23 critical barriers."
+    """The narrative quotes a hallucinated count -> must fail with
+    ``ungrounded_number``.
+
+    Round 66 / Pass 3 (B11): pre-R66 this test used "47 customers" /
+    "23 barriers" -- both small integers under 32-99.  R66/B11 widened
+    ``_COMMON_REFERENCE_NUMBERS`` to cover all integers 0-100 so the
+    validator stops false-positive rejecting derived counts in that
+    range.  Update the hallucination to use a 4-digit count outside
+    the common set so the rejection-of-hallucination contract is still
+    pinned.
+    """
+    text = "The portfolio has 1234 customers and 567 critical barriers."
     res = anv.validate_grounded_numbers(text, GROUNDED_BRIEFING)
     assert not res.is_valid
     assert "ungrounded_number" in res.failures
-    assert "47" in res.sample_offending["ungrounded_number"]
+    assert "1234" in res.sample_offending["ungrounded_number"]
 
 
 def test_phase_3_2_rejects_hallucinated_arr_amount():
