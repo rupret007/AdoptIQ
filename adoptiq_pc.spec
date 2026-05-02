@@ -23,6 +23,15 @@ def _datas():
             datas.append((cert_path, 'certifi'))
     except Exception:
         pass
+
+    # Round 66 / Pass 5 - bundle the fastembed model cache (mirrors
+    # adoptiq_mac.spec).  The ONNX INT8 model is ~33 MB and lets the
+    # first Ask AI query in a fresh install skip the HuggingFace
+    # download entirely (corporate Windows installs rarely have egress
+    # to huggingface.co without explicit allow-listing).
+    embeddings_dir = os.path.join(root, 'embeddings')
+    if os.path.isdir(embeddings_dir):
+        datas.append((embeddings_dir, 'Resources/embeddings'))
     return datas
 
 # Local Python modules that may be imported directly or dynamically
@@ -42,6 +51,18 @@ hidden_imports = [
     'incident_storage',
     'cisco_internal_integrations',
     '_bundled_secrets',
+    # Round 66 / Pass 5 - hybrid retrieval (BM25 + dense + RRF) via
+    # fastembed.  fastembed lazy-loads onnxruntime + tokenizers; pin
+    # all three so the frozen build can warm the embedder on
+    # corpus-bootstrap without a runtime ImportError that silently
+    # forces lexical-only retrieval.
+    'ask_ai_embeddings',
+    'fastembed',
+    'fastembed.text',
+    'fastembed.text.text_embedding',
+    'onnxruntime',
+    'tokenizers',
+    'truststore',
 ]
 
 a = Analysis(

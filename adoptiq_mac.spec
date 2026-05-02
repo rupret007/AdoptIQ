@@ -58,6 +58,17 @@ def _datas():
         if os.path.exists(candidate):
             datas.append((candidate, 'baked_corpus'))
 
+    # Round 66 / Pass 5 - bundle the fastembed model cache produced
+    # by ``scripts/bake_corpus.py`` (or pre-staged by the build
+    # operator) so the FIRST Ask AI query in a fresh install does not
+    # need a HuggingFace fetch.  The fastembed cache layout is
+    # ``Resources/embeddings/<provider>/<model>/...``; ship the whole
+    # directory if it exists.  When absent, the runtime falls back to
+    # an on-demand HuggingFace download (still requires network).
+    embeddings_dir = os.path.join(root, 'embeddings')
+    if os.path.isdir(embeddings_dir):
+        datas.append((embeddings_dir, 'Resources/embeddings'))
+
     return datas
 
 
@@ -100,6 +111,17 @@ hidden_imports = [
     'ask_ai_corpus',
     'report_corpus_context',
     'adoptiq_settings',
+    # Round 66 / Pass 5 - hybrid retrieval (BM25 + dense + RRF) via
+    # fastembed.  fastembed lazy-loads onnxruntime + tokenizers; pin
+    # all three so the frozen build can warm the embedder on
+    # corpus-bootstrap without a runtime ImportError that silently
+    # forces lexical-only retrieval.
+    'ask_ai_embeddings',
+    'fastembed',
+    'fastembed.text',
+    'fastembed.text.text_embedding',
+    'onnxruntime',
+    'tokenizers',
     # Round 17.2 -> Round 36: SharePoint Microsoft Graph pull retired.
     # The MSAL/Graph runtime path was blocked by Cisco tenant admin-
     # consent on the default Microsoft Graph PowerShell client ID.

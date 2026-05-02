@@ -657,6 +657,27 @@ def is_configured() -> bool:
         return _CONN is not None
 
 
+# ---------------------------------------------------------------------------
+# Round 66 / Pass 5 - Hybrid retrieval re-exports
+# ---------------------------------------------------------------------------
+#
+# embed_query / dense_score / hybrid_score live in ``ask_ai_embeddings``
+# (single source of truth for the embedding lifecycle), but the plan
+# asked for them to be addressable through corpus_retriever too because
+# both the chunk-search path (search_playbook) and the evidence-record
+# path (ask_ai_grounded.rank_evidence) consume them. Re-exporting keeps
+# the import surface tidy without duplicating the implementation.
+from ask_ai_embeddings import (  # noqa: E402 - intentional bottom-of-file import
+    decode_vector,
+    dense_score,
+    embed_query,
+    embed_texts,
+    encode_vector,
+    hybrid_score,
+    rrf_fuse,
+)
+
+
 __all__ = [
     "BarrierRecord",
     "CaseRecord",
@@ -667,6 +688,14 @@ __all__ = [
     "ResolutionRecord",
     "SentimentSnapshot",
     "Theme",
+    # Round 66 / Pass 5 hybrid retrieval (re-exported from ask_ai_embeddings)
+    "decode_vector",
+    "dense_score",
+    "embed_query",
+    "embed_texts",
+    "encode_vector",
+    "hybrid_score",
+    "rrf_fuse",
     "configure_connection",
     "get_customer_history",
     "get_recurring_themes",

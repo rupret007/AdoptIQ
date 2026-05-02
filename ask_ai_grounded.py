@@ -83,6 +83,15 @@ class EvidenceRecord:
     timestamp: str
     text: str
     confidence: float = 0.8
+    # Round 66 / Pass 5 - hybrid retrieval diagnostics. ``bm25_rank``
+    # and ``dense_rank`` are 1-indexed positions in their respective
+    # rankings (0 means "not in this ranking"); ``rrf_score`` is the
+    # Reciprocal Rank Fusion score used to order the final list. All
+    # default to None so existing call sites that construct an
+    # EvidenceRecord with positional args remain valid.
+    bm25_rank: Optional[int] = None
+    dense_rank: Optional[int] = None
+    rrf_score: Optional[float] = None
 
 
 def is_grounded_ask_ai_enabled() -> bool:
@@ -274,7 +283,12 @@ def _records_from_dataframe(
     return records, citation_ids
 
 
-def rank_evidence(records: Sequence[EvidenceRecord], question: str, domains: Sequence[str]) -> List[EvidenceRecord]:
+def _lexical_rank_evidence(
+    records: Sequence[EvidenceRecord],
+    question: str,
+    domains: Sequence[str],
+) -> List[EvidenceRecord]:
+    """Pre-Round-66 lexical ranking (bag-of-words term hits + bonuses)."""
     terms = _question_terms(question)
     domain_text = " ".join(domains).lower()
 
@@ -287,6 +301,188 @@ def rank_evidence(records: Sequence[EvidenceRecord], question: str, domains: Seq
         return (term_hits * 1.5) + domain_bonus + id_bonus + customer_bonus + max(min(record.confidence, 1.0), 0.0)
 
     return sorted(records, key=_score, reverse=True)
+
+
+def _hybrid_rank_evidence(
+    records: Sequence[EvidenceRecord],
+    question: str,
+    domains: Sequence[str],
+) -> Optional[List[EvidenceRecord]]:
+    """Round 66 / Pass 5 - Hybrid (BM25 + dense) ranking via RRF.
+
+    Returns ``None`` (NOT raise) when the embedding path is unavailable;
+    caller should fall back to lexical. The ranks are stamped onto the
+    returned records via ``dataclasses.replace`` so downstream
+    consumers (diagnostics endpoint, eval scorecard) can introspect
+    why each record made the cut.
+    """
+    try:
+        from ask_ai_embeddings import (
+            embed_query,
+            embed_texts,
+            dense_score,
+            hybrid_score,
+        )
+    except Exception as e:  # noqa: BLE001 - import-time defense
+        logger.warning("Round 66 / Pass 5: ask_ai_embeddings unavailable: %s", e)
+        return None
+    if not records:
+        return []
+    qvec = embed_query(question)
+    if qvec is None:
+        # Embedder not available; caller falls back.
+        return None
+    record_texts = [
+        f"{r.source_type} {r.customer} {r.text}".strip() for r in records
+    ]
+    dvecs = embed_texts(record_texts)
+    if dvecs is None or dvecs.shape[0] != len(records):
+        return None
+    # Per-record dense score (cosine; vectors already normalized).
+    dense_pairs: List[Tuple[int, float]] = []
+    for i in range(len(records)):
+        dense_pairs.append((i, dense_score(qvec, dvecs[i])))
+    dense_ranking = [
+        i for i, _ in sorted(dense_pairs, key=lambda kv: -kv[1])
+    ]
+    # BM25 ranking is the existing lexical scorer; we use indices into
+    # ``records`` as the doc IDs for both rankings so RRF fuses them.
+    lexical_ordered = _lexical_rank_evidence(records, question, domains)
+    bm25_ranking: List[int] = []
+    seen: Set[int] = set()
+    for r in lexical_ordered:
+        # Match-by-identity: the lexical ranker returns the same
+        # EvidenceRecord instances reordered, so id() works as the
+        # mapping key without us needing record-level keys.
+        for idx, original in enumerate(records):
+            if original is r and idx not in seen:
+                bm25_ranking.append(idx)
+                seen.add(idx)
+                break
+    fused = hybrid_score(
+        bm25_ranking=bm25_ranking,
+        dense_ranking=dense_ranking,
+    )
+    # Stamp ranks onto the returned records via dataclasses.replace.
+    from dataclasses import replace as _dc_replace
+    out: List[EvidenceRecord] = []
+    for idx, rrf_score, bm25_rank, dense_rank in fused:
+        if 0 <= idx < len(records):
+            out.append(_dc_replace(
+                records[idx],
+                bm25_rank=int(bm25_rank) if bm25_rank else None,
+                dense_rank=int(dense_rank) if dense_rank else None,
+                rrf_score=float(rrf_score),
+            ))
+    return out
+
+
+def rank_evidence(
+    records: Sequence[EvidenceRecord],
+    question: str,
+    domains: Sequence[str],
+) -> List[EvidenceRecord]:
+    """Rank evidence records for the prompt context.
+
+    Round 66 / Pass 5 - method dispatch:
+      - ``Config.ASK_AI_RETRIEVAL_METHOD == "hybrid"`` (default): try
+        BM25 + dense + RRF. Falls through to lexical when fastembed
+        or the model is unavailable so a degraded environment still
+        produces an answer.
+      - ``"lexical"``: original bag-of-words ranking only.
+    """
+    method = "hybrid"
+    try:
+        from config import Config  # type: ignore
+        method = str(getattr(Config, "ASK_AI_RETRIEVAL_METHOD", "hybrid")).strip().lower()
+    except Exception:  # noqa: BLE001
+        pass
+    if method == "hybrid":
+        out = _hybrid_rank_evidence(records, question, domains)
+        if out is not None:
+            return out
+        # Fall through to lexical - log once per request so the
+        # operator can correlate degraded answers with the env state.
+        logger.info(
+            "Round 66 / Pass 5: hybrid retrieval unavailable; serving lexical for this query"
+        )
+    return _lexical_rank_evidence(records, question, domains)
+
+
+def compute_retrieval_diag(
+    records: Sequence[EvidenceRecord],
+    question: str,
+    domains: Sequence[str],
+    *,
+    top_k: int = 10,
+) -> Dict[str, Any]:
+    """Round 66 / Pass 5 - build a JSON-serialisable retrieval diag
+    block for the ``GET /api/ask-ai/diagnostics/<query_id>`` endpoint.
+
+    The block reports the fused ranking method, the per-method top
+    record (so an operator can see whether dense and BM25 agreed),
+    the embedding model id, and a bounded list of the top-K record
+    summaries. Always returns a dict; the worst case is
+    ``{"method": "unavailable"}`` so the endpoint still serialises.
+    """
+    method = "hybrid"
+    model_id: Optional[str] = None
+    try:
+        from config import Config  # type: ignore
+        method = str(getattr(Config, "ASK_AI_RETRIEVAL_METHOD", "hybrid")).strip().lower()
+        model_id = str(getattr(Config, "ASK_AI_EMBEDDING_MODEL", "") or "") or None
+    except Exception:  # noqa: BLE001
+        pass
+    ranked = rank_evidence(records, question, domains)
+    if not ranked:
+        return {
+            "method": method,
+            "top_k": int(top_k),
+            "model": model_id,
+            "bm25_top_id": None,
+            "dense_top_id": None,
+            "rrf_top_id": None,
+            "records": [],
+        }
+    actual_method = "lexical"
+    if any(getattr(r, "rrf_score", None) is not None for r in ranked):
+        actual_method = "hybrid"
+    bm25_top: Optional[str] = None
+    dense_top: Optional[str] = None
+    if actual_method == "hybrid":
+        bm25_sorted = sorted(
+            [r for r in ranked if getattr(r, "bm25_rank", None)],
+            key=lambda r: r.bm25_rank or 10**9,
+        )
+        dense_sorted = sorted(
+            [r for r in ranked if getattr(r, "dense_rank", None)],
+            key=lambda r: r.dense_rank or 10**9,
+        )
+        if bm25_sorted:
+            bm25_top = bm25_sorted[0].source_id
+        if dense_sorted:
+            dense_top = dense_sorted[0].source_id
+    rrf_top = ranked[0].source_id if ranked else None
+    out_records: List[Dict[str, Any]] = []
+    for r in ranked[: max(1, int(top_k))]:
+        out_records.append({
+            "source_id": str(r.source_id or ""),
+            "source_type": str(r.source_type or ""),
+            "customer": str(r.customer or ""),
+            "bm25_rank": int(r.bm25_rank) if getattr(r, "bm25_rank", None) else None,
+            "dense_rank": int(r.dense_rank) if getattr(r, "dense_rank", None) else None,
+            "rrf_score": float(r.rrf_score) if getattr(r, "rrf_score", None) is not None else None,
+        })
+    return {
+        "method": actual_method,
+        "configured_method": method,
+        "top_k": int(top_k),
+        "model": model_id,
+        "bm25_top_id": bm25_top,
+        "dense_top_id": dense_top,
+        "rrf_top_id": rrf_top,
+        "records": out_records,
+    }
 
 
 def build_evidence_context(
@@ -1394,6 +1590,18 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             "banner": getattr(_corpus_ctx, "banner", "") or "",
             "stats": dict(getattr(_corpus_ctx, "stats", {}) or {}),
         }
+        # Round 66 / Pass 5 - retrieval diagnostics for the
+        # ``GET /api/ask-ai/diagnostics/<query_id>`` endpoint. Built
+        # off the same record set that fed ``build_evidence_context``
+        # so the diag block reflects the actual ranking applied to
+        # this query (not a re-rank from cold).
+        try:
+            retrieval_diag = compute_retrieval_diag(
+                records, req.question, retrieval_plan["domains"], top_k=10
+            )
+        except Exception as _diag_err:  # noqa: BLE001
+            logger.debug("Round 66 / Pass 5: compute_retrieval_diag failed: %s", _diag_err)
+            retrieval_diag = {"method": "unavailable"}
         return {
             "ok": True,
             "answer": answer,
@@ -1407,6 +1615,7 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             "partial_data_warnings": partial_warnings,
             "canonical_headline": canonical_headline,
             "corpus": _corpus_payload,
+            "retrieval_diag": retrieval_diag,
         }
     except Exception as exc:
         logger.error("Grounded Ask AI portfolio pipeline failed: %s", exc, exc_info=True)

@@ -363,6 +363,69 @@ def _resolve_onedrive_sentinel_root(args: argparse.Namespace) -> Optional[Path]:
     return onedrive_root
 
 
+def _bake_chunk_vectors(conn) -> tuple[int, str, int]:
+    """Round 66 / Pass 5 - compute one dense embedding per row in
+    ``playbook_chunks`` and persist into ``chunk_vectors``.
+
+    Returns ``(rows_written, model_id, model_dim)``.  Raises on hard
+    failures so the caller can downgrade to a lexical-only bake; the
+    caller catches and logs.
+
+    Notes
+    -----
+    * The bake host is the only machine that needs ``fastembed``
+      installed; runtime installs ship the precomputed vectors in
+      the encrypted snapshot, so the .app does not require fastembed
+      to read the vectors back.
+    * Batched 64 chunks at a time so a 10K-chunk corpus does not
+      build a single 384KB-dense matrix in one allocation.
+    * Idempotent: ``INSERT OR REPLACE`` so re-running the bake does
+      not fail on existing rows.
+    """
+    from ask_ai_embeddings import (
+        embed_texts,
+        encode_vector,
+        get_embedder,
+    )
+    embedder = get_embedder()
+    if embedder is None:
+        raise RuntimeError("fastembed embedder unavailable on bake host")
+    try:
+        from config import Config  # type: ignore
+        model_id = str(getattr(Config, "ASK_AI_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5"))
+        model_dim = int(getattr(Config, "ASK_AI_EMBEDDING_DIM", 384))
+    except Exception:  # noqa: BLE001
+        model_id = "BAAI/bge-small-en-v1.5"
+        model_dim = 384
+    cur = conn.cursor()
+    rows = cur.execute(
+        'SELECT "id", "text" FROM "playbook_chunks" ORDER BY "id" ASC;'
+    ).fetchall()
+    if not rows:
+        return (0, model_id, model_dim)
+    written = 0
+    batch_size = 64
+    for start in range(0, len(rows), batch_size):
+        batch = rows[start : start + batch_size]
+        texts = [str(r[1] or "") for r in batch]
+        vecs = embed_texts(texts)
+        if vecs is None or vecs.shape[0] != len(batch):
+            raise RuntimeError(
+                f"embed_texts returned unexpected shape for batch starting at {start}"
+            )
+        for (chunk_id, _text), vec in zip(batch, vecs):
+            blob = encode_vector(vec)
+            cur.execute(
+                'INSERT OR REPLACE INTO "chunk_vectors" '
+                '("chunk_id", "model_id", "model_dim", "vector") '
+                'VALUES (?, ?, ?, ?);',
+                (int(chunk_id), model_id, model_dim, blob),
+            )
+            written += 1
+    conn.commit()
+    return (written, model_id, model_dim)
+
+
 def _index_into_encrypted_corpus(
     downloads_dir: Path,
     bake_dir: Path,
@@ -464,6 +527,27 @@ def _index_into_encrypted_corpus(
             )
             handle.close(persist=False)
             return 4
+        # Round 66 / Pass 5 - compute dense embeddings per chunk and
+        # store them in the chunk_vectors table BEFORE
+        # commit_to_disk so the WAL checkpoint sweeps the vector
+        # pages along with the BM25 pages into a single
+        # internally-consistent .enc snapshot.  Failure here is
+        # NON-fatal: the chunk_vectors table simply stays empty and
+        # the runtime degrades to lexical-only retrieval (the same
+        # behaviour as a build operator without fastembed installed).
+        try:
+            vectors_added, model_id, model_dim = _bake_chunk_vectors(handle.conn)
+            logger.info(
+                "Round 66 / Pass 5: chunk_vectors written: rows=%d model=%s dim=%d",
+                vectors_added, model_id, model_dim,
+            )
+        except Exception as vec_err:  # noqa: BLE001 - degrade not fail
+            logger.warning(
+                "Round 66 / Pass 5: chunk-vector bake failed (%s); "
+                "shipping a lexical-only corpus.  Hybrid retrieval will "
+                "fall back to lexical at runtime until the next bake.",
+                vec_err,
+            )
         handle.commit_to_disk()
     finally:
         try:
@@ -535,6 +619,43 @@ def _index_into_encrypted_corpus(
         cur = selftest_handle.conn.cursor()
         cur.execute("SELECT count(*) FROM sqlite_master")
         _ = cur.fetchone()
+        # Round 66 / Pass 5 - verify the chunk_vectors table is
+        # readable and (when populated) that a sample vector decodes
+        # to the expected dimension.  An unreadable table is
+        # tolerable (lexical fallback engages at runtime); a malformed
+        # vector blob is fail-loud because it would silently degrade
+        # every Ask AI query for the lifetime of the install.
+        try:
+            vec_row = cur.execute(
+                'SELECT "model_id", "model_dim", "vector" '
+                'FROM "chunk_vectors" LIMIT 1;'
+            ).fetchone()
+        except Exception as table_err:  # noqa: BLE001
+            logger.info(
+                "Round 66 / Pass 5: chunk_vectors not present in self-test "
+                "(this is OK when the bake host has no fastembed): %s",
+                table_err,
+            )
+            vec_row = None
+        if vec_row is not None:
+            try:
+                from ask_ai_embeddings import decode_vector
+                decoded = decode_vector(vec_row[2], dim=int(vec_row[1]))
+            except Exception as dec_err:  # noqa: BLE001
+                raise RuntimeError(
+                    f"chunk_vectors blob failed to decode: {dec_err}"
+                ) from dec_err
+            if decoded is None or decoded.shape[0] != int(vec_row[1]):
+                raise RuntimeError(
+                    "chunk_vectors blob decoded to wrong shape "
+                    f"(expected dim={vec_row[1]}, got "
+                    f"{None if decoded is None else decoded.shape})"
+                )
+            logger.info(
+                "Round 66 / Pass 5: chunk_vectors self-test ok "
+                "(model=%s dim=%d, sample decoded to shape %s)",
+                vec_row[0], vec_row[1], decoded.shape,
+            )
     except Exception as selftest_err:  # noqa: BLE001 - we want fail-loud here
         logger.error(
             "Round 53 / bake positive decrypt self-test failed "

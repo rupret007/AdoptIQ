@@ -151,6 +151,15 @@ class CorpusBootState:
     # last check (0 when not_synced).
     onedrive_status: Optional[str] = None
     onedrive_file_count: Optional[int] = None
+    # Round 66 / Pass 5 - hybrid retrieval bootstrap state.
+    #   * ``embedder_status``: "ready" | "unavailable" | None (untried).
+    #   * ``embedder_load_error``: short human-readable error from the
+    #     fastembed load attempt; None when ``ready`` or untried.
+    # When ``unavailable``, ``Config.ASK_AI_RETRIEVAL_METHOD`` is
+    # forced to ``"lexical"`` for this process so the rank_evidence
+    # fallback path engages without per-query churn.
+    embedder_status: Optional[str] = None
+    embedder_load_error: Optional[str] = None
 
 
 _STATE: CorpusBootState = CorpusBootState()
@@ -1420,6 +1429,51 @@ def _run_index_pass(*, rebuild: bool) -> None:
         logger.exception("Round 17 / corpus_bootstrap: bootstrap raised")
 
 
+def _warm_embedder_in_background() -> None:
+    """Round 66 / Pass 5 - eagerly load the fastembed model on a daemon
+    thread so the FIRST Ask AI query is not the one that pays the
+    1-3s cold start. Idempotent (singleton inside ask_ai_embeddings)
+    and graceful: any failure flips the runtime to lexical mode and
+    records the error on ``_STATE.embedder_load_error`` for the
+    diagnostics endpoint to surface.
+    """
+
+    def _warm() -> None:
+        try:
+            from ask_ai_embeddings import get_embedder, embedder_load_error
+        except Exception as e:  # noqa: BLE001
+            with _BOOT_LOCK:
+                _STATE.embedder_status = "unavailable"
+                _STATE.embedder_load_error = (
+                    f"ask_ai_embeddings import failed: {type(e).__name__}: {e}"
+                )
+            try:
+                from config import Config  # type: ignore
+                Config.ASK_AI_RETRIEVAL_METHOD = "lexical"
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        embedder = get_embedder()
+        with _BOOT_LOCK:
+            if embedder is None:
+                _STATE.embedder_status = "unavailable"
+                _STATE.embedder_load_error = embedder_load_error()
+                try:
+                    from config import Config  # type: ignore
+                    Config.ASK_AI_RETRIEVAL_METHOD = "lexical"
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                _STATE.embedder_status = "ready"
+                _STATE.embedder_load_error = None
+
+    threading.Thread(
+        target=_warm,
+        name="adoptiq-embedder-warmup",
+        daemon=True,
+    ).start()
+
+
 def start_background(*, rebuild: bool = False) -> bool:
     """Spawn the bootstrap thread if it is not already running.
     Returns ``True`` when a new thread was started, ``False`` when the
@@ -1444,6 +1498,16 @@ def start_background(*, rebuild: bool = False) -> bool:
         )
         _THREAD = thread
         thread.start()
+    # Round 66 / Pass 5 - kick off the embedder warmup in parallel so
+    # the FIRST Ask AI query does not pay the cold start. Spawned
+    # outside the corpus lock; failures here never block corpus boot.
+    try:
+        _warm_embedder_in_background()
+    except Exception as warm_err:  # noqa: BLE001
+        logger.warning(
+            "Round 66 / Pass 5: embedder warmup failed to start: %s",
+            type(warm_err).__name__,
+        )
     # Round 35 / native-corpus: also kick off the daily-refresh
     # worker.  Idempotent -- ``start_daily_refresh_worker`` no-ops
     # when the daemon is already alive.  Spawned outside the lock so

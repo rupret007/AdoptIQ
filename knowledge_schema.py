@@ -38,7 +38,12 @@ logger = logging.getLogger(__name__)
 #: Bump when adding columns / tables.  Stored in ``schema_meta``; the
 #: indexer compares on startup and triggers a full rebuild if the
 #: persisted value is older than the code expects.
-SCHEMA_VERSION: int = 1
+#:
+#: Round 66 / Pass 5 -- bumped 1 -> 2 when the ``chunk_vectors`` table
+#: was added for hybrid retrieval.  An older corpus DB on disk is
+#: rebuilt from the indexer source of truth so the new table exists
+#: without leaking pre-Round-66 vectors.
+SCHEMA_VERSION: int = 2
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +218,28 @@ CREATE TABLE IF NOT EXISTS "corpus_stats" (
 """
 
 
+#: Round 66 / Pass 5 -- ``chunk_vectors`` carries the dense embedding
+#: per playbook chunk for hybrid retrieval (BM25 + dense + RRF).
+#: ``vector`` is a packed float32 BLOB (``np.tobytes()`` of a 384-dim
+#: vector for ``BAAI/bge-small-en-v1.5``).  ``model_id`` is stamped
+#: per-row so a corpus that survives a model upgrade can be detected
+#: at runtime (mismatched rows are ignored and trigger a re-bake).
+#:
+#: Stored INSIDE the encrypted corpus DB (NOT a parallel ``.npy``)
+#: so it inherits the existing AES-GCM at-rest protection + the
+#: WAL-checkpoint commit contract; a parallel artifact would have
+#: introduced a new commit-order coupling and a new encryption channel.
+_DDL_CHUNK_VECTORS: str = """
+CREATE TABLE IF NOT EXISTS "chunk_vectors" (
+    "chunk_id"      INTEGER PRIMARY KEY,
+    "model_id"      TEXT    NOT NULL,
+    "model_dim"     INTEGER NOT NULL,
+    "vector"        BLOB    NOT NULL,
+    FOREIGN KEY ("chunk_id") REFERENCES "playbook_chunks" ("id") ON DELETE CASCADE
+);
+"""
+
+
 #: All DDL fragments in dependency order.  The schema_meta table is
 #: created last so a partial migration leaves the version row absent
 #: and the next start-up rebuilds.
@@ -226,6 +253,7 @@ _DDL_TABLES: tuple[str, ...] = (
     _DDL_PLAYBOOK_CHUNKS,
     _DDL_TERM_STATS,
     _DDL_CORPUS_STATS,
+    _DDL_CHUNK_VECTORS,
     _DDL_SCHEMA_META,
 )
 
@@ -338,6 +366,12 @@ def all_table_names() -> Iterable[str]:
     yield "playbook_chunks"
     yield "term_stats"
     yield "corpus_stats"
+    # Round 66 / Pass 5 - chunk_vectors is dropped first when a
+    # schema version bump triggers a rebuild because its FK points
+    # at playbook_chunks; ON DELETE CASCADE handles row-level
+    # deletes but a DROP TABLE still requires the dependent table
+    # to be dropped before its parent.
+    yield "chunk_vectors"
 
 
 __all__ = [

@@ -8,6 +8,7 @@ Uses EXACT CircuIT AI logic from working script with simple HTML forms
 import os
 import sys
 import atexit
+import collections  # Round 66 / Pass 5 - bounded ring buffer for Ask AI diagnostics
 import json
 import logging
 import math
@@ -16832,6 +16833,84 @@ def get_status(analysis_id):
 
     return jsonify(status_copy)
 
+# Round 66 / Pass 5 - in-memory ring buffer for per-query Ask AI
+# retrieval diagnostics. Bounded so a busy portfolio cannot OOM the
+# process; entries are evicted FIFO past the cap. Loopback-only
+# admin endpoint reads from this buffer; it is intentionally NOT
+# persisted (per-query trace; persisting would invite PII risks
+# without a redaction layer the rest of the diagnostic surface
+# already carries via _id_digest).
+_ASK_AI_DIAG_LOCK = threading.Lock()
+_ASK_AI_DIAG_BUFFER: "collections.OrderedDict[str, dict]" = collections.OrderedDict()
+_ASK_AI_DIAG_BUFFER_MAX = 100
+
+
+def _record_ask_ai_query_diag(query_id: str, payload: dict) -> None:
+    """Round 66 / Pass 5 - record per-query retrieval diagnostics for
+    the ``GET /api/ask-ai/diagnostics/<query_id>`` endpoint. Bounded
+    via FIFO eviction; never raises (the diagnostic surface must not
+    be allowed to break the user-facing Ask AI flow).
+    """
+    if not query_id or not isinstance(payload, dict):
+        return
+    try:
+        with _ASK_AI_DIAG_LOCK:
+            _ASK_AI_DIAG_BUFFER[str(query_id)] = dict(payload)
+            while len(_ASK_AI_DIAG_BUFFER) > _ASK_AI_DIAG_BUFFER_MAX:
+                _ASK_AI_DIAG_BUFFER.popitem(last=False)
+    except Exception:  # noqa: BLE001 - never raise from diagnostic write
+        pass
+
+
+def _get_ask_ai_query_diag(query_id: str) -> Optional[dict]:
+    """Round 66 / Pass 5 - read-only accessor for the ring buffer.
+    Returns ``None`` for unknown ids so the endpoint can return 404."""
+    if not query_id:
+        return None
+    try:
+        with _ASK_AI_DIAG_LOCK:
+            entry = _ASK_AI_DIAG_BUFFER.get(str(query_id))
+            return dict(entry) if entry is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@app.route('/api/ask-ai/diagnostics/<query_id>')
+def get_ask_ai_diagnostics(query_id):
+    """Round 66 / Pass 5 - read-only diagnostic for a specific Ask AI
+    query's retrieval pipeline.
+
+    Returns the ``retrieval_diag`` block recorded by the portfolio
+    grounded path: the active ranking method (``hybrid`` or
+    ``lexical``), the bm25/dense/RRF top-record ids (for ranking
+    agreement inspection), the embedding model id, and a bounded
+    list of the top-K record summaries. Returns 404 for an unknown
+    query id (e.g. ring-buffer evicted, or the operator pasted an
+    id from a different process lifetime).
+
+    Loopback-only by default (the main app binds to 127.0.0.1
+    unless ``ADOPTIQ_BIND_PUBLIC=1``); no auth wrapper is added
+    here because the endpoint is strictly read-only and surfaces
+    only ranking metadata + source ids (no PII, no narrative
+    excerpts).
+    """
+    try:
+        entry = _get_ask_ai_query_diag(query_id)
+        if entry is None:
+            return jsonify({"ok": False, "error": "query_not_found"}), 404
+        return jsonify({
+            "ok": True,
+            "query_id": str(query_id),
+            "retrieval_diag": entry,
+        })
+    except Exception as _diag_err:  # noqa: BLE001
+        logger.warning(
+            "[R66 / P5] /api/ask-ai/diagnostics failed for %s: %s",
+            query_id, _diag_err,
+        )
+        return jsonify({"ok": False, "error": "internal_error"}), 500
+
+
 @app.route('/api/grounding-diagnostics/<analysis_id>')
 def get_grounding_diagnostics(analysis_id):
     """Round 65 / C-3: read-only diagnostic for the per-customer
@@ -18902,6 +18981,14 @@ def ask_ai_portfolio():
                 )
             )
             if grounded_result.get('ok'):
+                # Round 66 / Pass 5 - mint a per-query id, persist the
+                # retrieval diag in the ring buffer, and surface the id
+                # so the operator can pull the diag from
+                # /api/ask-ai/diagnostics/<query_id>.
+                _query_id = secrets.token_urlsafe(12)
+                _retrieval_diag = grounded_result.get('retrieval_diag') or {}
+                if isinstance(_retrieval_diag, dict) and _retrieval_diag:
+                    _record_ask_ai_query_diag(_query_id, _retrieval_diag)
                 return jsonify({
                     'ok': True,
                     'answer': grounded_result.get('answer') or 'No response generated.',
@@ -18917,6 +19004,8 @@ def ask_ai_portfolio():
                     'canonical_headline': grounded_result.get('canonical_headline') or {},
                     # Round 17 / Phase D.1: surface corpus availability to the UI.
                     'corpus': grounded_result.get('corpus') or {},
+                    'query_id': _query_id,
+                    'retrieval_method': str((_retrieval_diag or {}).get('method') or 'unknown'),
                 })
             # Phase 2.4: only fall back to the legacy ungrounded LLM when
             # the caller explicitly opts in (request flag or env var).
