@@ -8739,6 +8739,27 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                 # primary, regex fallback) the other AB / AP sheets
                 # already use.
                 "CSOne_Detail_All",
+                # Round 70 / Phase 3 (#10): Build 43 acceptance audit
+                # surfaced HTML markup leaking into 4 additional sheets
+                # that R67/B4 missed:
+                #   * ``All_Support_Cases`` (Compact) -- 4 cells with
+                #     ``persona : Admin\nOrgType : Customer ...``
+                #     entity-encoded rich-text from CSOne.
+                #   * ``Customer_Support_Cases`` (Renewal) -- same shape,
+                #     4 cells.
+                #   * ``External_Incidents`` (Comprehensive + Leader) --
+                #     1 cell with
+                #     ``<font size="3"><strong>...</strong></font><br />``
+                #     from the Webex Status incident description field
+                #     when the upstream HTML normalizer skipped it.
+                #   * ``TAC_Cases`` (Leader) -- 1 cell with the same
+                #     rich-text leakage as CSOne_Detail_All.
+                # All four pass through the same ``_strip_html_safe``
+                # path the other allow-listed sheets use.
+                "All_Support_Cases",
+                "Customer_Support_Cases",
+                "External_Incidents",
+                "TAC_Cases",
             )
             if _r25f_strip_html is not None and name in _R66_HTML_STRIP_SHEETS:
                 try:

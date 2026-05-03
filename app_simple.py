@@ -5461,7 +5461,14 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         # ``round(float(risk_score_raw), 1)``. ``int()`` previously truncated
         # 73.7 to "73", so the gauge and the textual "Renewal Risk Score:
         # 73.7/100" disagreed for the same customer.
-        ax.text(0, 0, f'{float(risk_score):.1f}/100\n{risk_category}',
+        # Round 70 / Phase 3 (#11): the gauge text was rendering
+        # ``risk_category`` raw -- which surfaced ``MEDIUM`` in the
+        # PNG embedded in the renewal Word doc.  Apply the user-facing
+        # MODERATE remap so the chart label matches the rest of the
+        # narrative vocabulary.
+        _r70_gauge_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
+        _r70_gauge_label = _r70_gauge_LABEL_REMAP.get(risk_category, risk_category)
+        ax.text(0, 0, f'{float(risk_score):.1f}/100\n{_r70_gauge_label}',
                 ha='center', va='center', fontsize=24, fontweight='bold',
                 color=colors[0])
 
@@ -5742,8 +5749,16 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         # to one decimal place ("82.5/100") while panel 2 truncated
         # to ``int`` and lost the same precision.  Format consistently.
         # Round 11 / Phase 8.4: shared autopct.
+        # Round 70 / Phase 3 (#11): apply the user-facing
+        # MODERATE remap to the panel-2 gauge label so the
+        # 2x2 portfolio chart vocabulary matches the rest of
+        # the renewal narrative.  ``risk_cat`` is preserved as
+        # the canonical band key so the color lookup
+        # ``risk_colors.get(risk_cat, ...)`` keeps working.
+        _r70_panel2_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
+        _r70_panel2_label = _r70_panel2_LABEL_REMAP.get(risk_cat, risk_cat)
         ax2.pie([risk_score, 100-risk_score],
-                labels=[f'{risk_cat} ({float(risk_score):.1f}/100)', 'Remaining'],
+                labels=[f'{_r70_panel2_label} ({float(risk_score):.1f}/100)', 'Remaining'],
                 autopct=_r10_autopct,
                 colors=[risk_colors.get(risk_cat, _risk_default_color), '#f0f0f0'],
                 startangle=90)
@@ -7471,6 +7486,17 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             )
     except Exception as _ecerr:
         logger.warning(f"[[CONSISTENCY]] Enhanced compact consistency check skipped: {_ecerr}")
+
+    # Round 70 / Phase 1 (#1): the enhanced compact fallback path is
+    # exercised whenever ``compact_report_formatter._save`` is unavailable
+    # or raises -- pre-R70 it was the only Compact docx produced on that
+    # branch and it shipped without the v{VER} build {N} stamp. Defensive
+    # helper (never raises).
+    try:
+        from _r68_build_label import apply_word_footer as _r68_apply_word_footer
+        _r68_apply_word_footer(doc)
+    except Exception as _r68_err:
+        logger.debug("Round 70 / Phase 1: Compact enhanced fallback word footer skipped: %s", _r68_err)
 
     # Save
     output_path = f"{base_path}_enhanced.docx"
@@ -9751,12 +9777,23 @@ def run_compact_analysis(analysis_id):
             # Round 67 / Build 41 (B1, vocab parity): re-map MEDIUM
             # -> MODERATE on the user-facing ``Risk_Level`` column so
             # the Compact and Renewal labels read the same word.
-            # ``Risk_Band`` keeps the canonical band key (CRITICAL /
-            # HIGH / MEDIUM / LOW / HEALTHY) so existing band-based
-            # filters and color lookups still match.
+            # Round 70 / Phase 3 (#11): the Build 43 acceptance audit
+            # found 6 ``Risk_Band='MEDIUM'`` rows leaking into the
+            # Compact ``Risk_Summary`` sheet.  R67/B6 originally kept
+            # ``Risk_Band`` as the canonical band key on the argument
+            # that band-based filters / color lookups elsewhere in the
+            # workbook still expected ``MEDIUM`` -- but the operator's
+            # eyes are on the *artifact*, so MEDIUM in the user-facing
+            # cell is a vocabulary regression regardless of the
+            # internal lookup contract.  Remap ``Risk_Band`` to
+            # MODERATE here too; downstream color/format lookups in
+            # the same writer block use the local ``band`` variable
+            # (still CRITICAL/HIGH/MEDIUM/LOW/HEALTHY), not the
+            # post-remap value, so internal filters keep working.
             _r67_b6_score = round(score, 1)
             _r67_b6_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
             _r67_b6_risk_level = _r67_b6_LABEL_REMAP.get(risk_level, risk_level)
+            _r70_risk_band_user = _r67_b6_LABEL_REMAP.get(band, band)
             risk_summary_data.append({
                 # Round 49 / F-RP-COMPOSITE-KEY-BLEED: collapse merged
                 # Snowflake composite keys (``MARUBENI CORPORATION__
@@ -9768,11 +9805,21 @@ def run_compact_analysis(analysis_id):
                 'Overall_Risk_Score': _r67_b6_score,
                 'Risk_Score': _r67_b6_score,
                 'Risk_Level': _r67_b6_risk_level,
-                'Risk_Band': band,
+                'Risk_Band': _r70_risk_band_user,
                 'Adoption_Barriers': ab_count,
                 'Support_Cases': cs_count,
             })
 
+        # Round 70 / Phase 2 (#4): the column list explicitly carries
+        # BOTH ``Overall_Risk_Score`` (canonical, R67/B6) AND
+        # ``Risk_Score`` (legacy back-compat alias). Build 43 acceptance
+        # audit found ``Overall_Risk_Score`` had silently disappeared
+        # from the produced workbook -- pinning the column order in
+        # the explicit ``columns=`` arg defends against any future
+        # column-order regression that pandas might introduce when
+        # rows include extra keys (the loop's append shape adds keys
+        # in dict-insertion order, but the explicit ``columns=``
+        # contract here is the source of truth for the artifact).
         risk_summary_df = pd.DataFrame(
             risk_summary_data,
             columns=['Customer', 'Overall_Risk_Score', 'Risk_Score', 'Risk_Level', 'Risk_Band', 'Adoption_Barriers', 'Support_Cases']
@@ -10468,6 +10515,42 @@ def run_compact_analysis(analysis_id):
                             'Status': ['Error']
                         })
                         fallback_df.to_excel(writer, sheet_name=dashboard_sheet_name, index=False)
+
+                # Round 70 / Phase 3 (#10): HTML strip sheets that
+                # carry rich-text Snowflake / CSOne markup before they
+                # land in the workbook. The Comprehensive XLSX gets
+                # this via ``write_excel_workbook``'s
+                # ``_R66_HTML_STRIP_SHEETS`` allow-list; the Compact
+                # inline writer needs the same defense for parity.
+                # Build 43 acceptance found 4 ``All_Support_Cases``
+                # cells with raw ``persona : Admin\nOrgType :
+                # Customer ...`` HTML-encoded entities.
+                _r70_compact_html_sheets = (
+                    "All_Support_Cases",
+                    "Customer_Support_Cases",
+                    "External_Incidents",
+                    "TAC_Cases",
+                    "Critical_Adoption_Barriers",
+                    "Action_Plans",
+                    "Customer_Pulse",
+                    "Success_Priorities",
+                    "Adoption_Barriers",
+                    "All_Adoption_Barriers",
+                )
+                try:
+                    from data_normalization import strip_html_from_dataframe as _r70_strip_html
+                    for _r70_sn, _r70_sdf in list(sheets.items()):
+                        if _r70_sn in _r70_compact_html_sheets and isinstance(_r70_sdf, pd.DataFrame) and not _r70_sdf.empty:
+                            try:
+                                sheets[_r70_sn] = _r70_strip_html(_r70_sdf)
+                            except Exception as _r70_strip_err:
+                                logger.debug(
+                                    "Round 70 / #10: HTML strip skipped for compact sheet %s: %s",
+                                    _r70_sn,
+                                    _r70_strip_err,
+                                )
+                except Exception as _r70_strip_import_err:
+                    logger.debug("Round 70 / #10: HTML strip helper unavailable: %s", _r70_strip_import_err)
 
                 # Write other sheets
                 for sheet_name, df in sheets.items():
@@ -11605,7 +11688,14 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     else:
         color = RGBColor(34, 139, 34)
 
-    score_run = summary.add_run(f'{risk_score:.1f}/100 ({risk_category})')
+    # Round 70 / Phase 3 (#11): the Risk Score box was rendering
+    # ``({risk_category})`` raw -- which surfaced ``MEDIUM`` in the
+    # user-facing label.  Reuse the same MODERATE remap the executive
+    # summary block applied so the box label matches the rest of the
+    # renewal narrative vocabulary.
+    _r70_rsbox_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
+    _r70_rsbox_label = _r70_rsbox_LABEL_REMAP.get(risk_category, risk_category)
+    score_run = summary.add_run(f'{risk_score:.1f}/100 ({_r70_rsbox_label})')
     score_run.bold = True
     score_run.font.color.rgb = color
     score_run.font.size = Pt(14)
@@ -11712,12 +11802,21 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             for para in hdr[i].paragraphs:
                 for run in para.runs:
                     run.bold = True
+        # Round 70 / Phase 3 (#11): the Top-10 Focus Accounts table
+        # in the Renewal Word doc was painting cells from
+        # ``ana.get('renewal_risk_category', 'N/A')`` raw -- which
+        # surfaced ``MEDIUM`` in 8 cells across Build 43. Apply the
+        # same MODERATE remap that the executive summary / dashboard
+        # blocks use above so the user-facing vocabulary stays
+        # consistent across the entire renewal report.
+        _r70_focus_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
         for idx, (cust, ana) in enumerate(sorted_by_risk, 1):
             row = focus_table.rows[idx].cells
             row[0].text = str(idx)
             row[1].text = str(cust)
             row[2].text = f"{ana.get('renewal_risk_score', ana.get('overall_risk_score', 0)):.1f}/100"
-            row[3].text = str(ana.get('renewal_risk_category', 'N/A'))
+            _r70_cat = str(ana.get('renewal_risk_category', 'N/A'))
+            row[3].text = _r70_focus_LABEL_REMAP.get(_r70_cat, _r70_cat)
         # Round 13 / Phase 6.3: emit a "+M more" footnote whenever the
         # full population is larger than the cap so readers know the
         # focus list is a clipped view of a longer tail.
@@ -12685,6 +12784,21 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     )
     footer_para = doc.add_paragraph()
     footer_para.add_run(footer_text).font.size = Pt(8)
+
+    # Round 70 / Phase 1 (#1): the simple renewal Word writer was the
+    # *primary* renewal path on the Build 43 acceptance machine but the
+    # ``apply_word_footer`` invocation lived only in the
+    # ``advanced_renewal_analyzer`` (R68/A1) branch, so every renewal
+    # docx shipped without the v{VER} build {N} stamp -- the entire
+    # stale-binary trap detection mechanism was unreachable for the
+    # Renewal report. The helper is internally defensive (logs at debug
+    # on failure, never raises) so a missing label cannot brick the
+    # save.
+    try:
+        from _r68_build_label import apply_word_footer as _r68_apply_word_footer
+        _r68_apply_word_footer(doc)
+    except Exception as _r68_err:
+        logger.debug("Round 70 / Phase 1: Renewal simple word footer skipped: %s", _r68_err)
 
     # Save
     word_path = f"{base_path}_Renewal_Report.docx"
@@ -13912,6 +14026,16 @@ def run_customer_renewal_analysis(analysis_id):
         # HEALTHY) untouched so existing band-based filters still work;
         # Risk_Level is the user-facing label that flips MEDIUM ->
         # MODERATE per the operator-confirmed vocabulary.
+        # Round 70 / Phase 2 (#5): Build 43 acceptance audit found that
+        # ``Risk_Score_0_100`` and ``Risk_Band`` were MISSING from the
+        # Renewal_Summary headers because the R67/B1 loop only added
+        # them on certain branches (None Overall_Risk_Score skipped
+        # Risk_Band; non-string Risk_Level skipped both). Pre-R70 the
+        # downstream consumer was therefore unable to read the
+        # back-compat 0-100 score. Fix: ALWAYS set both columns on
+        # EVERY row -- a missing input still produces an explicit None
+        # cell so the column survives DataFrame construction and the
+        # contract is honored regardless of upstream data shape.
         try:
             _r67_RISK_LEVEL_REMAP = {
                 'MEDIUM': 'MODERATE',
@@ -13926,25 +14050,59 @@ def run_customer_renewal_analysis(analysis_id):
                     _r67_orig_f = float(_r67_orig) if _r67_orig is not None else None
                 except (TypeError, ValueError):
                     _r67_orig_f = None
+                # Round 70 / Phase 2 (#5): ALWAYS-PRESENT contract for
+                # ``Risk_Score_0_100`` AND ``Risk_Band`` -- set them
+                # FIRST so any early-continue path still leaves the
+                # columns populated.
                 if _r67_orig_f is None:
-                    _r67_row.setdefault('Risk_Score_0_100', _r67_orig)
-                    continue
-                if _r67_orig_f > 10.0:
-                    _r67_row['Risk_Score_0_100'] = round(_r67_orig_f, 1)
-                    _r67_row['Overall_Risk_Score'] = round(_r67_orig_f / 10.0, 2)
+                    _r67_row['Risk_Score_0_100'] = _r67_orig
                 else:
-                    _r67_row.setdefault('Risk_Score_0_100', round(_r67_orig_f * 10.0, 1))
-                    _r67_row['Overall_Risk_Score'] = round(_r67_orig_f, 2)
+                    if _r67_orig_f > 10.0:
+                        _r67_row['Risk_Score_0_100'] = round(_r67_orig_f, 1)
+                        _r67_row['Overall_Risk_Score'] = round(_r67_orig_f / 10.0, 2)
+                    else:
+                        _r67_row['Risk_Score_0_100'] = round(_r67_orig_f * 10.0, 1)
+                        _r67_row['Overall_Risk_Score'] = round(_r67_orig_f, 2)
                 _r67_lvl = _r67_row.get('Risk_Level')
-                if isinstance(_r67_lvl, str):
-                    _r67_row['Risk_Band'] = _r67_lvl.upper() if _r67_lvl else _r67_lvl
+                if isinstance(_r67_lvl, str) and _r67_lvl:
+                    _r67_row['Risk_Band'] = _r67_lvl.upper()
                     _r67_row['Risk_Level'] = _r67_RISK_LEVEL_REMAP.get(_r67_lvl, _r67_lvl)
+                else:
+                    # Round 70 / Phase 2 (#5): even when Risk_Level is
+                    # None / empty / non-str, write an explicit empty
+                    # Risk_Band cell so the column still appears in
+                    # the produced workbook header.
+                    _r67_row['Risk_Band'] = ''
         except Exception as _r67_norm_err:  # noqa: BLE001
             logger.debug(
                 "[RENEWAL] Round 67 / B1: scale/label normalization failed (%s); "
                 "leaving Renewal_Summary as-is",
                 _r67_norm_err,
             )
+
+        # Round 70 / Phase 2 (#5): pin a stable column projection so
+        # the Renewal_Summary sheet always emits the canonical column
+        # set even when individual upstream rows are missing fields.
+        # Without this, ``pd.DataFrame(renewal_summary_data)`` would
+        # only include columns that appear in at least one dict --
+        # leaving consumers unable to rely on the schema for queries
+        # / pivots that pre-R70 worked because the rows happened to
+        # carry the columns explicitly. The list mirrors the contract
+        # documented in CLAUDE.md and pinned by R70 artifact tests.
+        _r70_renewal_canonical_cols: tuple[str, ...] = (
+            'Customer',
+            'Overall_Risk_Score',
+            'Risk_Score_0_100',
+            'Risk_Level',
+            'Risk_Band',
+            'Analysis_Date',
+            'Next_Review_Date',
+        )
+        for _r70_row in renewal_summary_data:
+            if not isinstance(_r70_row, dict):
+                continue
+            for _r70_col in _r70_renewal_canonical_cols:
+                _r70_row.setdefault(_r70_col, '')
 
         # Add risk component details (handle missing/empty risk_components gracefully)
         risk_components_data = []
@@ -14160,9 +14318,22 @@ def run_customer_renewal_analysis(analysis_id):
                 'Value': f"{_ren_sn.replace('_', ' ')} - {customer_name_for_report} Renewal Analysis",
             })
         report_info_df = pd.DataFrame(_report_info_rows)
+        # Round 70 / Phase 2 (#5): pin the column projection on the
+        # Renewal_Summary DataFrame so the produced workbook always
+        # carries the canonical 7-column schema even when individual
+        # rows happened to be missing fields. The setdefault loop above
+        # ensures every dict has every key; the explicit ``columns=``
+        # arg here ensures the COLUMN ORDER is stable across runs.
+        try:
+            _r70_renewal_summary_df = pd.DataFrame(
+                renewal_summary_data,
+                columns=list(_r70_renewal_canonical_cols),
+            )
+        except Exception:
+            _r70_renewal_summary_df = pd.DataFrame(renewal_summary_data)
         sheets = {
             "Report_Info": report_info_df,
-            "Renewal_Summary": pd.DataFrame(renewal_summary_data),
+            "Renewal_Summary": _r70_renewal_summary_df,
             # Round 4 / Phase 1.6: if the analyzer did not produce
             # per-component risk scores, render a single
             # ``Data_Unavailable`` row instead of inventing an
@@ -14191,6 +14362,36 @@ def run_customer_renewal_analysis(analysis_id):
             "Customer_Success_Priorities": customer_success_priorities if not customer_success_priorities.empty else pd.DataFrame(),
             "Key_Metrics": pd.DataFrame([key_metrics])
         }
+
+        # Round 70 / Phase 3 (#10): HTML strip the rich-text Snowflake /
+        # CSOne sheets BEFORE the writer iterates them. Build 43
+        # acceptance audit found 4 ``Customer_Support_Cases`` cells in
+        # the Renewal XLSX leaking the same ``persona : Admin\nOrgType
+        # : Customer ...`` markup the Compact ``All_Support_Cases``
+        # sheet leaks. The Comprehensive XLSX gets HTML stripping via
+        # ``write_excel_workbook``'s allow-list; the Renewal inline
+        # writer needs the same defense.
+        _r70_renewal_html_sheets = (
+            "Customer_Support_Cases",
+            "Customer_Adoption_Barriers",
+            "Customer_Action_Plans",
+            "Customer_Customer_Pulse",
+            "Customer_Success_Priorities",
+        )
+        try:
+            from data_normalization import strip_html_from_dataframe as _r70_strip_html_ren
+            for _r70_sn, _r70_sdf in list(sheets.items()):
+                if _r70_sn in _r70_renewal_html_sheets and isinstance(_r70_sdf, pd.DataFrame) and not _r70_sdf.empty:
+                    try:
+                        sheets[_r70_sn] = _r70_strip_html_ren(_r70_sdf)
+                    except Exception as _r70_strip_err:
+                        logger.debug(
+                            "Round 70 / #10: HTML strip skipped for renewal sheet %s: %s",
+                            _r70_sn,
+                            _r70_strip_err,
+                        )
+        except Exception as _r70_strip_import_err:
+            logger.debug("Round 70 / #10: renewal HTML strip helper unavailable: %s", _r70_strip_import_err)
 
         # Create Excel file directly for renewal analysis
         try:
@@ -16863,6 +17064,15 @@ def run_comprehensive_analysis(analysis_id):
             # by tests/test_round67_comprehensive_risk_components_always_present.py
             # -- the sheet must be in ``all_sheets`` BEFORE the writer
             # call regardless of which branch ran.
+            # Round 70 / Phase 2 (#6): re-confirm the always-assignment
+            # contract since Build 43 acceptance found ``Risk_Components``
+            # missing from the produced workbook. The R67/B2 hoist had
+            # not regressed in source, but the artifact-level pin in
+            # tests/test_round70_comprehensive_risk_components_present.py
+            # closes the gap by verifying the produced XLSX bytes
+            # contain the sheet (catches any future regression where a
+            # downstream filter step strips the sheet from all_sheets
+            # between assignment and write_excel_workbook).
             if _r66_risk_rows:
                 _r66_risk_rows.sort(
                     key=lambda r: (
@@ -23121,6 +23331,15 @@ def run_subscription_analysis(analysis_id):
             except Exception as _scerr:
                 logger.warning(f"[[CONSISTENCY]] Subscription consistency check skipped: {_scerr}")
 
+            # Round 70 / Phase 1 (#1): subscription analysis Word writer
+            # also missed the v{VER} build {N} stamp (R68/A1 only wired the
+            # four primary report writers).
+            try:
+                from _r68_build_label import apply_word_footer as _r68_apply_word_footer
+                _r68_apply_word_footer(doc)
+            except Exception as _r68_err:
+                logger.debug("Round 70 / Phase 1: Subscription word footer skipped: %s", _r68_err)
+
             doc.save(word_path)
 
         except Exception as e:
@@ -24848,6 +25067,39 @@ def run_leader_report_generation(analysis_id):
                 # and silently dropped the partial-completion
                 # ledger.
                 _failed_sheets: list = []
+                # Round 70 / Phase 3 (#10): HTML strip the rich-text
+                # Snowflake / CSOne sheets BEFORE the writer iterates
+                # them. Build 43 acceptance audit found 1 cell in
+                # ``External_Incidents`` with raw
+                # ``<font size="3"><strong>...</strong></font><br />``
+                # markup AND 1 cell in ``TAC_Cases`` with the same
+                # ``persona : Admin\nOrgType : Customer ...`` HTML
+                # entity leakage as CSOne_Detail_All. Mirror the
+                # Comprehensive ``write_excel_workbook`` allow-list
+                # behavior here so the Leader XLSX gets parity.
+                _r70_leader_html_sheets = (
+                    "TAC_Cases",
+                    "External_Incidents",
+                    "Adoption_Barriers",
+                    "Customer_Pulse",
+                    "Success_Priorities",
+                    "Action_Plans",
+                )
+                try:
+                    from data_normalization import strip_html_from_dataframe as _r70_strip_html_lead
+                    for _r70_sn, _r70_sdf in list(sheets.items()):
+                        if _r70_sn in _r70_leader_html_sheets and isinstance(_r70_sdf, pd.DataFrame) and not _r70_sdf.empty:
+                            try:
+                                sheets[_r70_sn] = _r70_strip_html_lead(_r70_sdf)
+                            except Exception as _r70_strip_err:
+                                logger.debug(
+                                    "Round 70 / #10: HTML strip skipped for leader sheet %s: %s",
+                                    _r70_sn,
+                                    _r70_strip_err,
+                                )
+                except Exception as _r70_strip_import_err:
+                    logger.debug("Round 70 / #10: leader HTML strip helper unavailable: %s", _r70_strip_import_err)
+
                 with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
                     workbook = writer.book
                     # Round 16 / Phase 5.1: shared Table-name registry for

@@ -220,6 +220,18 @@ class ExecutiveReportBuilder:
                 _r25e_err,
             )
 
+        # Round 70 / Phase 1 (#1): the ExecutiveReportBuilder.save path is
+        # exercised by the Comprehensive report's CLI smoke harness and by
+        # any future test that swaps in this thin builder for the
+        # executive_intelligence_formatter. R68/A1 only wired the
+        # formatter.save(); without this hook the same comprehensive
+        # report from the alternate writer ships unstamped.
+        try:
+            from _r68_build_label import apply_word_footer as _r68_apply_word_footer
+            _r68_apply_word_footer(self.doc)
+        except Exception as _r68_err:
+            logger.debug("Round 70 / Phase 1: ExecutiveReportBuilder word footer skipped: %s", _r68_err)
+
         self.doc.save(path)
 
     def parse_ai_output_and_add(self, ai_output: str):

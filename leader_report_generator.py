@@ -7709,6 +7709,20 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                     _r30_pdw_err,
                 )
             generator._create_summary_table(team_data, days)
+            # Round 70 / Phase 4 (#12): the post-TAC regen path was
+            # rebuilding a fresh ``Document()`` and replaying most of the
+            # initial-pass section list, but was silently dropping
+            # ``_add_team_insights_section`` (aging / leaderboard / coverage
+            # rollups) AND ``_add_overall_individual_summary`` (per-CSSM
+            # individual summaries) AND ``apply_word_footer``. Build 43
+            # acceptance confirmed both rollup sections were missing AND
+            # the v{VER} build {N} footer stamp was unreachable on this
+            # branch. Mirror the initial-pass section list around L867-901
+            # exactly so the post-TAC regen produces a byte-equivalent
+            # document modulo the TAC integration.
+            generator._add_section_separator()
+            generator._add_team_insights_section(team_data, days)
+            generator._add_section_separator()
             generator._create_adoptiq_summaries_per_person(team_data, days)
             generator._create_detailed_ab_list(team_data)
             generator._add_section_separator()
@@ -7719,6 +7733,8 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                 intel_truncated=intel_truncated,
                 intel_fetch_limit=intel_fetch_limit,
             )
+            generator._add_section_separator()
+            generator._add_overall_individual_summary(team_data, manager_name, days)
             generator._add_section_separator()
             generator._add_validation_section(validation_results)
             # Round 39 / Phase 2.3: surface body-time section_errors
@@ -7762,6 +7778,17 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                     type(_r17_err).__name__,
                 )
             _cb(87, 'Saving final Word document...', 'Document Finalization')
+            # Round 70 / Phase 4 (#12): the post-TAC regen branch wiped
+            # the document and rebuilt it but never re-applied the R68/A1
+            # build label footer (only the initial generate_leader_report
+            # save site at L924 did). Fix means EVERY leader docx the user
+            # sees -- including the post-TAC regen which is the common
+            # case -- now carries the v{VER} build {N} stamp.
+            try:
+                from _r68_build_label import apply_word_footer as _r68_apply_word_footer
+                _r68_apply_word_footer(generator.doc)
+            except Exception as _r68_err:
+                logger.debug("Round 70 / Phase 4: post-TAC leader word footer skipped: %s", _r68_err)
             generator.doc.save(filepath)
 
             logger.info(f"Leader report regenerated with TAC cases and validation (filtered to last {days} days)")
@@ -7806,6 +7833,19 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                     type(_r17_err2).__name__,
                 )
             _cb(86, 'Saving final Word document...', 'Document Finalization')
+            # Round 70 / Phase 4 (#12): no-TAC branch -- the original
+            # ``generate_leader_report`` doc already carried the R68/A1
+            # footer, but the ``_add_validation_section`` and
+            # ``_r17_append_historical_context`` calls above append new
+            # paragraphs that may push a second section break in. Re-apply
+            # the footer (idempotent: skips sections that already carry
+            # the AdoptIQ build label) so a downstream section break
+            # cannot strip the stamp.
+            try:
+                from _r68_build_label import apply_word_footer as _r68_apply_word_footer
+                _r68_apply_word_footer(generator.doc)
+            except Exception as _r68_err:
+                logger.debug("Round 70 / Phase 4: no-TAC leader word footer skipped: %s", _r68_err)
             generator.doc.save(filepath)
 
             logger.info(f"Leader report updated with validation section")
