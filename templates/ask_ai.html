@@ -251,6 +251,12 @@
                              class="mt-2 d-flex align-items-center gap-2 small text-muted">
                             <span class="badge bg-light text-secondary border"
                                   id="r68DebugChipMethod">retrieval: -</span>
+                            {# Round 69 / Build 43: model-name pill so the
+                               operator knows which CircuIT model answered.
+                               Hidden when the server payload omits
+                               ``model_name`` (e.g. older builds). #}
+                            <span class="badge bg-light text-secondary border font-monospace"
+                                  id="r69DebugChipModel" style="display:none;">model: -</span>
                             <span class="badge bg-light text-secondary border font-monospace"
                                   id="r68DebugChipId">debug: -</span>
                             <button type="button"
@@ -291,6 +297,59 @@
                         </div>
                     </div>
                     <ul id="r68ChatHistoryList" class="list-group list-group-flush small"></ul>
+                </div>
+            </div>
+
+            {# Round 69 / Build 43: operator-flippable Ask AI model
+               preferences card.  The "Test" button MUST succeed
+               (server-side ping returns ``ok: true``) before the
+               "Save" button is enabled, so a typo'd model name or an
+               unprovisioned model cannot land in settings.json.  The
+               persisted value is loaded on page load and the active
+               value (after applying env / config defaults) is shown
+               so the operator knows WHICH layer of the precedence
+               chain is currently in effect. #}
+            <div id="r69AskAiModelCard"
+                 class="card fade-in shadow-cisco mb-4"
+                 data-r69-model-card="ask_ai">
+                <div class="card-body">
+                    <div class="d-flex align-items-center justify-content-between mb-3">
+                        <h6 class="mb-0">
+                            <i class="fas fa-microchip text-primary me-2"></i>
+                            Ask AI model preference
+                        </h6>
+                        <span class="badge bg-light text-secondary border small"
+                              data-r69-active-badge>active: -</span>
+                    </div>
+                    <p class="small text-muted mb-2">
+                        Choose which CircuIT model answers Ask AI questions.  Defaults to
+                        <code>gpt-5-nano</code>.  Your tenant must have the model provisioned --
+                        click <strong>Test</strong> to verify before saving.  Empty value clears
+                        the override and falls back to the env / config default.
+                    </p>
+                    <div class="input-group input-group-sm mb-2">
+                        <span class="input-group-text">model</span>
+                        <input type="text"
+                               class="form-control font-monospace"
+                               placeholder="e.g. gpt-5-nano, gemini-3.1-flash-lite"
+                               maxlength="128"
+                               data-r69-model-input
+                               aria-label="Ask AI model name">
+                        <button type="button"
+                                class="btn btn-outline-primary"
+                                data-r69-test-btn>
+                            <i class="fas fa-vial me-1"></i>Test
+                        </button>
+                        <button type="button"
+                                class="btn btn-primary"
+                                data-r69-save-btn
+                                disabled>
+                            <i class="fas fa-save me-1"></i>Save
+                        </button>
+                    </div>
+                    <div class="small mt-1"
+                         data-r69-result
+                         aria-live="polite"></div>
                 </div>
             </div>
 
@@ -342,4 +401,8 @@
    asset so it executes under ``script-src 'self'`` without needing
    the unsafe-inline relaxation. #}
 <script src="{{ url_for('static', filename='js/ask_ai.js') }}"></script>
+{# Round 69 / Build 43: shared model-preferences UI module.  Wires up
+   the [data-r69-model-card] container above with a Test-gates-Save
+   contract so a typo'd model name cannot land in settings.json. #}
+<script src="{{ url_for('static', filename='js/r69_model_preferences.js') }}"></script>
 {% endblock %}

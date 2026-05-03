@@ -11068,23 +11068,47 @@ def _r45_clean_llm_chrome(text: str) -> str:
         return text
 
 
-def generate_llm_response(system_prompt: str, briefing_book: str) -> str:
-    """Generic function to call the CircuIT client with timeout and fallback."""
+def generate_llm_response(
+    system_prompt: str,
+    briefing_book: str,
+    *,
+    model_name: Optional[str] = None,
+) -> str:
+    """Generic function to call the CircuIT client with timeout and fallback.
+
+    Round 69 / Build 43: ``model_name`` is now keyword-only and
+    optional.  When supplied (non-empty), it overrides
+    ``CIRCUIT_CONFIG['model_name']`` for THIS call only -- the global
+    is not mutated, so the per-request model resolved by
+    ``model_resolver.get_active_*_model()`` cleanly threads through
+    without contaminating sibling call sites.  When omitted/None/empty,
+    behaviour is byte-identical to the pre-R69 path so no existing
+    test or call site needs to change.
+    """
     import signal
     import time
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+
+    # Round 69 / Build 43: resolve the effective model name once, BEFORE
+    # entering the worker thread so the log line below can name it.
+    # Empty string is treated the same as None (= fall back to global).
+    _effective_model_name = (
+        str(model_name).strip()
+        if (model_name and isinstance(model_name, str) and str(model_name).strip())
+        else CIRCUIT_CONFIG.get("model_name", "")
+    )
 
     def call_circuit_ai():
         """Call CircuIT AI in a separate thread with proper error handling."""
         try:
             if not (CIRCUIT_CONFIG.get("client_id") and CIRCUIT_CONFIG.get("client_secret") and CIRCUIT_CONFIG.get("app_key")):
                 return "ERROR: CircuIT credentials not set. Add CIRCUIT_CLIENT_ID, CIRCUIT_CLIENT_SECRET, and CIRCUIT_APP_KEY to your .env file (see .env.template)."
-            logger.info(f"[[AI]] Creating CircuIT AI client...")
+            logger.info(f"[[AI]] Creating CircuIT AI client (model=%s)...", _effective_model_name)
             client = CircuitChatClient(
                 client_id=CIRCUIT_CONFIG["client_id"],
                 client_secret=CIRCUIT_CONFIG["client_secret"],
                 app_key=CIRCUIT_CONFIG["app_key"],
-                model_name=CIRCUIT_CONFIG["model_name"]
+                model_name=_effective_model_name,  # Round 69 / Build 43
             )
 
             # Round 6 / Phase 3.7: log using the shared timeout
@@ -11202,10 +11226,20 @@ def generate_llm_response(system_prompt: str, briefing_book: str) -> str:
         return f"ERROR: llm.wrapped: {_e_msg}"
 
 
-def generate_llm_json_response(system_prompt: str, briefing_book: str, schema: Dict[str, Any]) -> Dict[str, Any]:
+def generate_llm_json_response(
+    system_prompt: str,
+    briefing_book: str,
+    schema: Dict[str, Any],
+    *,
+    model_name: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Request JSON-only LLM output and parse it with strict key checks.
     Falls back gracefully when the model returns wrapped markdown.
+
+    Round 69 / Build 43: ``model_name`` is keyword-only and optional;
+    when supplied it threads through to ``generate_llm_response`` for
+    this call only, leaving sibling call sites unaffected.
     """
     schema_keys = sorted((schema or {}).get("properties", {}).keys())
     required_keys = sorted((schema or {}).get("required", []))
@@ -11217,7 +11251,14 @@ def generate_llm_json_response(system_prompt: str, briefing_book: str, schema: D
         f"Required keys: {', '.join(required_keys)}\n"
         f"JSON schema: {schema_hint}\n"
     )
-    raw = generate_llm_response(system_prompt, constrained_prompt)
+    # Round 69 / Build 43: only thread ``model_name`` when explicitly
+    # supplied so legacy test patches that mock ``generate_llm_response``
+    # with a 2-arg lambda (no ``**kwargs``) still work.  ``None`` falls
+    # through to the resolver inside ``generate_llm_response`` anyway.
+    if model_name:
+        raw = generate_llm_response(system_prompt, constrained_prompt, model_name=model_name)
+    else:
+        raw = generate_llm_response(system_prompt, constrained_prompt)
     if not raw or str(raw).startswith("ERROR:"):
         return {"ok": False, "error": raw or "ERROR: empty response", "raw": raw}
 
@@ -12508,7 +12549,15 @@ def main():
             P2_CASES=_r25b_p2,
             BEMS_ESCALATIONS=_r25b_bems,
         )
-        portfolio_summary = generate_llm_response(portfolio_prompt, portfolio_briefing)
+        # Round 69 / Build 43: thread the operator-selected report model
+        # into the CLI portfolio-summary path.  Lazy import so a missing
+        # ``model_resolver`` cannot break the CLI path.
+        try:
+            from model_resolver import get_active_report_model as _r69_get_report_model
+            _r69_report_model = _r69_get_report_model()
+        except Exception:  # noqa: BLE001
+            _r69_report_model = None
+        portfolio_summary = generate_llm_response(portfolio_prompt, portfolio_briefing, model_name=_r69_report_model)
         # Round 25 / Phase B: post-render numeric drift validator.  See
         # the matching block in ``app_simple.py`` for the full rationale.
         # The validator scans the LLM-rendered ``portfolio_summary``
@@ -12688,7 +12737,16 @@ def main():
                 MANAGER=manager,
             )
 
-            customer_storyboard = generate_llm_response(customer_prompt, customer_briefing)
+            # Round 69 / Build 43: thread the operator-selected report
+            # model into the CLI per-customer storyboard path.  Resolve
+            # once per customer so a UI flip mid-run takes effect on the
+            # next customer narrative without restarting the analysis.
+            try:
+                from model_resolver import get_active_report_model as _r69_get_report_model
+                _r69_report_model = _r69_get_report_model()
+            except Exception:  # noqa: BLE001
+                _r69_report_model = None
+            customer_storyboard = generate_llm_response(customer_prompt, customer_briefing, model_name=_r69_report_model)
             append_to_word_report(doc, customer_storyboard)
 
         # Save Word document

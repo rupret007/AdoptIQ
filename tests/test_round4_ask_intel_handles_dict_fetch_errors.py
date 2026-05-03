@@ -46,7 +46,9 @@ def test_intel_grounded_ask_ai_accepts_dict_fetch_errors(monkeypatch):
             "list_truncated": {},
         }
 
-    def fake_llm(sys_prompt, user_prompt, schema):
+    def fake_llm(sys_prompt, user_prompt, schema, **kwargs):
+        # Round 69 / Build 43: ``**kwargs`` accepts the new
+        # ``model_name=`` keyword that production threads through.
         captured["user"] = user_prompt
         return {
             "ok": True,

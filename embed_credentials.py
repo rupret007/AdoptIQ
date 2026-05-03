@@ -29,6 +29,8 @@ ENV_KEYS = [
     "CIRCUIT_CLIENT_ID",     # config.py
     "CIRCUIT_CLIENT_SECRET", # config.py
     "CIRCUIT_MODEL_NAME",    # config.py
+    "CIRCUIT_MODEL_NAME_ASK_AI",   # Round 69 / Build 43 -- per-call-site override for Ask AI
+    "CIRCUIT_MODEL_NAME_REPORT",   # Round 69 / Build 43 -- per-call-site override for report narratives
     "KEEPER_NAMESPACE",      # config.py
     "KEEPER_ROLE_ID",        # config.py
     "KEEPER_SECRET_ID",      # config.py

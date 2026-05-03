@@ -1042,6 +1042,14 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         scan_historical_reports,
     )
     from incident_storage import get_all_external_intel
+    # Round 69 / Build 43: per-call-site model resolution.  ``model_resolver``
+    # is imported lazily so a missing module in some test fixture cannot
+    # break the grounded path -- it falls through to None which the
+    # backend interprets as "use CIRCUIT_CONFIG default".
+    try:
+        from model_resolver import get_active_ask_ai_model as _get_ask_ai_model
+    except Exception:  # noqa: BLE001
+        _get_ask_ai_model = lambda: None  # noqa: E731 - safe default
 
     retrieval_plan = build_retrieval_plan(req.question)
     cssm_emails = [email for mgr, _, email in TEAM_ROSTER if mgr == req.manager or req.manager == "All Managers"]
@@ -1643,7 +1651,21 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                 "unknowns": {"type": "array", "items": {"type": "string"}},
             },
         }
-        llm_result = generate_llm_json_response(system_prompt, user_prompt, schema)
+        # Round 69 / Build 43: thread the operator-selected Ask AI model
+        # through to ``CircuitChatClient`` for this request only.  Pass
+        # the kwarg ONLY when the resolver returns a non-empty value so
+        # legacy test patches that mock ``generate_llm_json_response``
+        # with a 3-arg signature (no ``**kwargs``) still work.
+        _r69_ask_ai_model = _get_ask_ai_model()
+        if _r69_ask_ai_model:
+            llm_result = generate_llm_json_response(
+                system_prompt, user_prompt, schema,
+                model_name=_r69_ask_ai_model,
+            )
+        else:
+            llm_result = generate_llm_json_response(
+                system_prompt, user_prompt, schema,
+            )
         if not llm_result.get("ok"):
             return {"ok": False, "fallback_to_legacy": True, "reason": llm_result.get("error", "LLM JSON mode failed")}
         payload = llm_result.get("data") or {}
@@ -1810,6 +1832,12 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
     """
     from adoptiq_backend import generate_llm_json_response
     from incident_storage import get_all_external_intel
+    # Round 69 / Build 43: per-call-site model resolution (same lazy
+    # import pattern as ``run_portfolio_grounded_ask_ai`` above).
+    try:
+        from model_resolver import get_active_ask_ai_model as _get_ask_ai_model
+    except Exception:  # noqa: BLE001
+        _get_ask_ai_model = lambda: None  # noqa: E731 - safe default
 
     try:
         _intel_days = int(days or 365)
@@ -2066,7 +2094,21 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
             "unknowns": {"type": "array", "items": {"type": "string"}},
         },
     }
-    llm_result = generate_llm_json_response(system_prompt, user_prompt, schema)
+    # Round 69 / Build 43: thread the operator-selected Ask AI model
+    # through to ``CircuitChatClient`` for this request only.  Pass the
+    # kwarg ONLY when the resolver returns a non-empty value so legacy
+    # test patches that mock ``generate_llm_json_response`` with a
+    # 3-arg signature (no ``**kwargs``) still work.
+    _r69_ask_ai_model = _get_ask_ai_model()
+    if _r69_ask_ai_model:
+        llm_result = generate_llm_json_response(
+            system_prompt, user_prompt, schema,
+            model_name=_r69_ask_ai_model,
+        )
+    else:
+        llm_result = generate_llm_json_response(
+            system_prompt, user_prompt, schema,
+        )
     if not llm_result.get("ok"):
         return {"ok": False, "fallback_to_legacy": True, "reason": llm_result.get("error", "LLM JSON mode failed")}
     payload = llm_result.get("data") or {}

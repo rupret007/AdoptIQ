@@ -45,7 +45,9 @@ def test_run_intel_grounded_ask_ai_emits_intel_data_warnings(monkeypatch):
             "list_truncated": {"bugs": True},
         }
 
-    def fake_llm(sys_prompt, user_prompt, schema):
+    def fake_llm(sys_prompt, user_prompt, schema, **kwargs):
+        # Round 69 / Build 43: ``**kwargs`` accepts the new
+        # ``model_name=`` keyword that production threads through.
         captured["system"] = sys_prompt
         captured["user"] = user_prompt
         return {

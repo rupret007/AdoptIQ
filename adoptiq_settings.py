@@ -59,8 +59,20 @@ logger = logging.getLogger(__name__)
 # and stripped on save.  ``is_valid_sharepoint_url`` is still exported
 # as a defense-in-depth helper for any caller that wants to validate a
 # SharePoint URL before handing it to the Graph fetcher.
+#
+# Round 69 / Build 43 adds ``ask_ai_model_name`` and
+# ``report_model_name`` so the operator can flip the per-call-site
+# CircuIT model from the UI without a rebuild or env edit.  Empty
+# string is the canonical "unset" sentinel and means "fall back to
+# CIRCUIT_MODEL_NAME_ASK_AI / _REPORT env, then CIRCUIT_MODEL_NAME
+# env, then the config.py default".  Validation is enforced via
+# ``_is_valid_model_name`` (allow-list ``[A-Za-z0-9._-]`` only,
+# 1-128 chars) so a typo or shell-injection attempt cannot land
+# in the on-disk settings file or be passed to ``CircuitChatClient``.
 _SCHEMA: Dict[str, tuple] = {
     "corpus_knowledge_enabled": (bool, False),
+    "ask_ai_model_name": (str, ""),  # Round 69 / Build 43
+    "report_model_name": (str, ""),  # Round 69 / Build 43
 }
 
 SETTINGS_FILENAME = "settings.json"
@@ -95,6 +107,34 @@ def _is_valid_sharepoint_url(value: Any) -> bool:
     return bool(_SHAREPOINT_URL_RE.match(value))
 
 
+# Round 69 / Build 43: model-name allow-list.  CircuIT model ids in
+# the wild are conservative -- letters, digits, dot, dash, underscore
+# (e.g. ``gpt-5-nano``, ``gemini-3.1-flash-lite``, ``gpt-4o-mini``).
+# Restricting to that allow-list rejects shell metacharacters,
+# whitespace, and high-bit / RTL characters BEFORE the value reaches
+# ``CircuitChatClient`` or the on-disk settings file.  Empty string
+# is the sentinel for "unset -- fall back to env / config default"
+# and is accepted unchanged.
+_MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def _is_valid_model_name(value: Any) -> bool:
+    """Return True if ``value`` is empty (= unset) or matches the
+    ``[A-Za-z0-9._-]{1,128}`` allow-list.
+
+    Empty string is the canonical sentinel for "no operator override
+    -- the resolver will fall back to env / config default".  Anything
+    else MUST be 1-128 chars and contain only allow-listed characters
+    so a typo or shell-injection payload cannot land in the on-disk
+    settings file or be passed to ``CircuitChatClient.model_name``.
+    """
+    if value is None or value == "":
+        return True
+    if not isinstance(value, str):
+        return False
+    return bool(_MODEL_NAME_RE.match(value))
+
+
 # Per-key validators.  A validator returning False causes the key to
 # be dropped (with a warning) on both load and save.  Keys without a
 # validator entry pass through after type coercion.
@@ -103,7 +143,15 @@ def _is_valid_sharepoint_url(value: Any) -> bool:
 # its validator entry is no longer needed.  ``_is_valid_sharepoint_url``
 # is still exposed below for callers that want to vet a SharePoint URL
 # (e.g., bake script's env-override sanity check).
-_VALIDATORS: Dict[str, Callable[[Any], bool]] = {}
+#
+# Round 69 / Build 43: ``ask_ai_model_name`` and ``report_model_name``
+# are gated on the strict ``_is_valid_model_name`` allow-list so the
+# operator-flippable model seam cannot silently accept a malformed
+# value via either the UI POST or a hand-edited ``settings.json``.
+_VALIDATORS: Dict[str, Callable[[Any], bool]] = {
+    "ask_ai_model_name": _is_valid_model_name,  # Round 69 / Build 43
+    "report_model_name": _is_valid_model_name,  # Round 69 / Build 43
+}
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +338,18 @@ def is_valid_sharepoint_url(value: Any) -> bool:
     return _is_valid_sharepoint_url(value)
 
 
+def is_valid_model_name(value: Any) -> bool:
+    """Round 69 / Build 43: public alias for the model-name allow-list.
+
+    Used by ``app_simple.py``'s ``POST /api/settings/{ask-ai,report}-model``
+    handlers to vet operator input BEFORE it reaches ``save_settings``
+    AND by ``model_resolver.get_active_*_model`` to defensively re-vet
+    env-supplied values so a malformed env var cannot bypass the UI
+    allow-list.
+    """
+    return _is_valid_model_name(value)
+
+
 __all__ = [
     "SETTINGS_FILENAME",
     "load_settings",
@@ -298,4 +358,5 @@ __all__ = [
     "set",
     "schema_keys",
     "is_valid_sharepoint_url",
+    "is_valid_model_name",  # Round 69 / Build 43
 ]

@@ -32,7 +32,7 @@ import socket
 import uuid
 import hashlib
 import re
-from typing import Any  # Round 14 / Phase 2.2: needed by `_utc_iso_z(value: Any)`.
+from typing import Any, Dict, Tuple  # Round 14 / Phase 2.2: needed by `_utc_iso_z(value: Any)`.  Round 69 / Build 43: Dict + Tuple for ``_r69_admin_proxy_post`` signature.
 
 # Round 14 / Phase 2.2: previously `_utc_iso_z` and `_tz` lived inside
 # `record_report_completion` only.  `get_report_history` and `get_analytics`
@@ -2885,6 +2885,68 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
             </form>
         </div>
 
+        {# Round 69 / Build 43: admin-side mirror of the operator-flippable
+           CircuIT model preferences.  Same Test-gates-Save UX as the
+           Ask AI page + analyze page; submits via the
+           /admin_settings/{ask_ai,report,llm_ping} proxy routes which
+           validate the admin CSRF and forward to the main app's
+           /api/settings/* endpoints with X-AdoptIQ-Internal. #}
+        <div class="table-container" id="r69AdminModelPrefs">
+            <h3>LLM Model Preferences (Round 69 / Build 43)</h3>
+            <p style="color:#6c757d; margin-bottom:1rem;">
+                Per-call-site CircuIT model overrides.  Empty value clears the override
+                and falls back to <code>CIRCUIT_MODEL_NAME</code> (default <code>gpt-5-nano</code>).
+                <strong>Test</strong> must succeed before <strong>Save</strong> is enabled
+                so a typo or unprovisioned model cannot land in <code>settings.json</code>.
+            </p>
+
+            <form id="r69AdminAskAiForm" data-r69-admin-card="ask_ai"
+                  style="border-left:4px solid #0d6efd; padding:0.75rem 1rem; margin-bottom:1rem; background:#f8f9fa;">
+                <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.4rem;">
+                    <strong>Ask AI model</strong>
+                    <span class="badge bg-secondary" data-r69-admin-active>active: -</span>
+                </div>
+                <div style="display:flex; gap:0.4rem; align-items:center;">
+                    <input type="text" name="model_name" maxlength="128"
+                           class="form-control" data-r69-admin-input
+                           placeholder="e.g. gpt-5-nano, gemini-3.1-flash-lite"
+                           style="font-family:monospace; flex-grow:1;">
+                    <button type="button" class="btn btn-outline-primary"
+                            data-r69-admin-test-btn>Test</button>
+                    <button type="button" class="btn btn-primary"
+                            data-r69-admin-save-btn disabled>Save</button>
+                </div>
+                <div class="small mt-1" data-r69-admin-result aria-live="polite"
+                     style="min-height:1.2em; color:#6c757d;"></div>
+            </form>
+
+            <form id="r69AdminReportForm" data-r69-admin-card="report"
+                  style="border-left:4px solid #198754; padding:0.75rem 1rem; background:#f8f9fa;">
+                <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.4rem;">
+                    <strong>Report narrative model</strong>
+                    <span class="badge bg-secondary" data-r69-admin-active>active: -</span>
+                </div>
+                <div style="display:flex; gap:0.4rem; align-items:center;">
+                    <input type="text" name="model_name" maxlength="128"
+                           class="form-control" data-r69-admin-input
+                           placeholder="e.g. gpt-5-nano, gemini-3.1-flash-lite"
+                           style="font-family:monospace; flex-grow:1;">
+                    <button type="button" class="btn btn-outline-primary"
+                            data-r69-admin-test-btn>Test</button>
+                    <button type="button" class="btn btn-primary"
+                            data-r69-admin-save-btn disabled>Save</button>
+                </div>
+                <div class="small mt-1" data-r69-admin-result aria-live="polite"
+                     style="min-height:1.2em; color:#6c757d;"></div>
+                <div class="small mt-1" style="color:#856404;">
+                    <i>Warning: changing this affects the R27 grounding-rejection rate;
+                    re-run a sample report after Save and watch the per-customer fallback log.</i>
+                </div>
+            </form>
+        </div>
+
         <div class="table-container">
             <h3>Debug Controls</h3>
             <p><strong>Verbose Debug:</strong> {{ 'ON' if verbose_debug else 'OFF' }}</p>
@@ -2964,6 +3026,134 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 alert('Failed to reset Snowflake query metrics.');
             }
         }
+
+        /*
+         * Round 69 / Build 43: admin-side LLM model preferences UI.
+         * Self-contained ES5 (the admin template renders inline, no
+         * static asset chain) that wires both forms with a Test-gates-
+         * Save contract.  POST targets are the /admin_settings/* proxy
+         * routes which validate the admin CSRF and forward to the main
+         * app's /api/settings/* endpoints with X-AdoptIQ-Internal.
+         *
+         * Pre-vetting: an input change MUST disable Save (so the cached
+         * "passed test" result cannot promote a typo'd model).  Save is
+         * re-enabled only by a successful Test response.
+         */
+        (function () {
+            var R69_FORMS = [
+                {key: 'ask_ai', getUrl: '/api/settings/ask-ai-model', postUrl: '/admin_settings/ask_ai_model'},
+                {key: 'report', getUrl: '/api/settings/report-model', postUrl: '/admin_settings/report_model'}
+            ];
+            var R69_PING_URL = '/admin_settings/llm_ping';
+
+            function r69QSAll(form, sel) { return form.querySelectorAll(sel); }
+            function r69Get(form, sel) { return form.querySelector(sel); }
+
+            function r69SetResult(form, msg, kind) {
+                var el = r69Get(form, '[data-r69-admin-result]');
+                if (!el) return;
+                el.textContent = String(msg || '');
+                el.style.color = kind === 'ok' ? '#198754' : (kind === 'err' ? '#dc3545' : '#6c757d');
+            }
+
+            function r69SetActive(form, value) {
+                var badge = r69Get(form, '[data-r69-admin-active]');
+                if (!badge) return;
+                badge.textContent = 'active: ' + (value || '-');
+            }
+
+            function r69LoadActive(form, getUrl) {
+                fetch(getUrl, {method: 'GET', headers: {'Accept': 'application/json'}})
+                    .then(function (r) { return r.ok ? r.json() : null; })
+                    .then(function (j) {
+                        if (!j || !j.ok) return;
+                        var input = r69Get(form, '[data-r69-admin-input]');
+                        if (input) input.value = j.persisted_value || '';
+                        r69SetActive(form, j.active_value);
+                    })
+                    .catch(function () { /* silent -- read-only path */ });
+            }
+
+            function r69BindForm(form, conf) {
+                var input = r69Get(form, '[data-r69-admin-input]');
+                var testBtn = r69Get(form, '[data-r69-admin-test-btn]');
+                var saveBtn = r69Get(form, '[data-r69-admin-save-btn]');
+                if (!input || !testBtn || !saveBtn) return;
+
+                // Any input change locks Save until next successful Test.
+                input.addEventListener('input', function () {
+                    saveBtn.disabled = true;
+                    r69SetResult(form, '', 'neutral');
+                });
+
+                testBtn.addEventListener('click', function () {
+                    var value = (input.value || '').trim();
+                    if (!value) {
+                        // Empty == clear override; allow Save without ping.
+                        saveBtn.disabled = false;
+                        r69SetResult(form, 'Empty value will clear the override (falls back to env / config default). Click Save to confirm.', 'neutral');
+                        return;
+                    }
+                    r69SetResult(form, 'Pinging CircuIT...', 'neutral');
+                    var fd = new FormData();
+                    fd.append('_admin_csrf', '{{ admin_csrf_token }}');
+                    fd.append('model_name', value);
+                    fetch(R69_PING_URL, {method: 'POST', body: fd})
+                        .then(function (r) { return r.json().then(function (j) { return [r.status, j]; }); })
+                        .then(function (pair) {
+                            var status = pair[0]; var j = pair[1] || {};
+                            if (status === 200 && j.ok) {
+                                saveBtn.disabled = false;
+                                r69SetResult(form, 'OK (' + (j.latency_ms || '?') + 'ms). You may save.', 'ok');
+                            } else {
+                                saveBtn.disabled = true;
+                                r69SetResult(form, 'Test failed: ' + (j.error || ('HTTP ' + status)), 'err');
+                            }
+                        })
+                        .catch(function (e) {
+                            saveBtn.disabled = true;
+                            r69SetResult(form, 'Test failed: network error', 'err');
+                        });
+                });
+
+                saveBtn.addEventListener('click', function () {
+                    var value = (input.value || '').trim();
+                    var fd = new FormData();
+                    fd.append('_admin_csrf', '{{ admin_csrf_token }}');
+                    fd.append('model_name', value);
+                    fetch(conf.postUrl, {method: 'POST', body: fd})
+                        .then(function (r) { return r.json().then(function (j) { return [r.status, j]; }); })
+                        .then(function (pair) {
+                            var status = pair[0]; var j = pair[1] || {};
+                            if (status === 200 && j.ok) {
+                                r69SetActive(form, j.active_value);
+                                r69SetResult(form, 'Saved. Active model: ' + (j.active_value || '-'), 'ok');
+                                saveBtn.disabled = true;
+                            } else {
+                                r69SetResult(form, 'Save failed: ' + (j.error || ('HTTP ' + status)), 'err');
+                            }
+                        })
+                        .catch(function () {
+                            r69SetResult(form, 'Save failed: network error', 'err');
+                        });
+                });
+
+                r69LoadActive(form, conf.getUrl);
+            }
+
+            function r69Init() {
+                R69_FORMS.forEach(function (conf) {
+                    var form = document.querySelector('[data-r69-admin-card="' + conf.key + '"]');
+                    if (form) r69BindForm(form, conf);
+                });
+            }
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', r69Init);
+            } else {
+                r69Init();
+            }
+        })();
 
         /*
          * Round 17.4 / Phase 6.6: theme toggle wiring.  This is a
@@ -3681,6 +3871,90 @@ def admin_quit_route():
             'error': 'main app unreachable',
             'detail': type(err).__name__,
         }), 502
+
+
+# ---------------------------------------------------------------------------
+# Round 69 / Build 43: admin-side proxies for the operator-flippable
+# CircuIT model preferences.  Mirrors the auth + transport pattern of
+# :func:`corpus_refresh_route` / :func:`corpus_reset_route` /
+# :func:`admin_quit_route`: validate the admin CSRF token first, then
+# server-to-server HTTP call to the main app with the
+# ``X-AdoptIQ-Internal`` header so the main app can authorize without
+# us holding its CSRF token.  Returns the main app's JSON response
+# verbatim so the admin's JS can branch on success/failure the same
+# way the analyze-page panel does.
+# ---------------------------------------------------------------------------
+
+
+def _r69_admin_proxy_post(upstream_path: str, body: Dict[str, Any], timeout: int = 12) -> Tuple[Any, int]:
+    """Round 69 / Build 43: shared HTTP proxy helper for the model
+    preference + ping admin routes.  ``timeout`` defaults to 12s so it
+    sits comfortably above the main app's own 10s ping budget.
+    """
+    try:
+        import requests as _r69_req
+        headers = {'Content-Type': 'application/json'}
+        _internal_tok = os.environ.get('ADOPTIQ_INTERNAL_TOKEN')
+        if _internal_tok:
+            headers['X-AdoptIQ-Internal'] = _internal_tok
+        resp = _r69_req.post(
+            f'{MAIN_APP_URL.rstrip("/")}{upstream_path}',
+            json=body or {},
+            headers=headers,
+            timeout=timeout,
+        )
+        try:
+            payload = resp.json()
+        except Exception:  # noqa: BLE001
+            payload = {'ok': False, 'error': f'main app returned non-JSON HTTP {resp.status_code}'}
+        return payload, resp.status_code
+    except Exception as err:  # noqa: BLE001
+        log_error(
+            'WARNING',
+            f'Round 69 admin proxy {upstream_path} failed: {type(err).__name__}',
+            '_r69_admin_proxy_post',
+        )
+        return ({'ok': False, 'error': 'main app unreachable', 'detail': type(err).__name__}, 502)
+
+
+@admin_app.route('/admin_settings/ask_ai_model', methods=['POST'])
+def admin_settings_ask_ai_model_route():
+    """Round 69 / Build 43: persist the Ask AI model preference via the
+    main app's ``POST /api/settings/ask-ai-model``."""
+    _require_admin_csrf()
+    raw_value = request.form.get('model_name', '') or ''
+    payload, status_code = _r69_admin_proxy_post(
+        '/api/settings/ask-ai-model',
+        {'model_name': str(raw_value).strip()},
+    )
+    return jsonify(payload), status_code
+
+
+@admin_app.route('/admin_settings/report_model', methods=['POST'])
+def admin_settings_report_model_route():
+    """Round 69 / Build 43: persist the report-narrative model
+    preference via the main app's ``POST /api/settings/report-model``."""
+    _require_admin_csrf()
+    raw_value = request.form.get('model_name', '') or ''
+    payload, status_code = _r69_admin_proxy_post(
+        '/api/settings/report-model',
+        {'model_name': str(raw_value).strip()},
+    )
+    return jsonify(payload), status_code
+
+
+@admin_app.route('/admin_settings/llm_ping', methods=['POST'])
+def admin_settings_llm_ping_route():
+    """Round 69 / Build 43: ping a CircuIT model via the main app's
+    ``POST /api/llm/ping``.  Used by the admin "Test" button so the
+    operator cannot save a typo or an unprovisioned model."""
+    _require_admin_csrf()
+    raw_value = request.form.get('model_name', '') or ''
+    payload, status_code = _r69_admin_proxy_post(
+        '/api/llm/ping',
+        {'model_name': str(raw_value).strip()},
+    )
+    return jsonify(payload), status_code
 
 
 @admin_app.route('/start_server', methods=['POST'])

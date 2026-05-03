@@ -8426,3 +8426,80 @@ first confirm the App_Build row / footer matches the DMG name.
 - `OUTBOX/build_info.txt` — `AdoptIQ v1.0.4 build 42 / Built: <utc>`.
 
 **Trailer:** Made-with: Cursor
+
+## Round 69 — handoff 2026-05-02 (Build 43 / Operator-flippable LLM model preferences)
+
+**What changed (plain English):**
+- Added a single seam (`model_resolver.get_active_ask_ai_model()` / `get_active_report_model()` + a keyword-only `model_name` kwarg on `adoptiq_backend.generate_llm_response` and `generate_llm_json_response`) so the operator can flip the LLM model used for Ask AI AND/OR report narratives without rebuilding. Settings precedence: `settings.json` > per-feature env (`CIRCUIT_MODEL_NAME_ASK_AI` / `CIRCUIT_MODEL_NAME_REPORT`) > general env (`CIRCUIT_MODEL_NAME`) > hardcoded default `gpt-5-nano`. Resolver does NOT cache so a UI flip takes effect on the very next call (`model_resolver.py:43-83`).
+- Threading is intentionally asymmetric so Ask AI and Report can be flipped independently. Ask AI sites use the Ask AI resolver (`ask_ai_grounded.py:1656-1670` + `:2089-2103`, `app_simple.py:21155` + `:21622`); report sites use the Report resolver (`adoptiq_backend.py:12545` + `:12733`, `app_simple.py:8701` + `:16420` + `:22507`). Wires-don't-cross is pinned by `tests/test_round69_model_preferences.py::test_r69_ask_ai_sites_use_ask_ai_resolver_not_report` and `::test_r69_report_sites_use_report_resolver_not_ask_ai`.
+- Three new endpoints on the main app (`GET/POST /api/settings/ask-ai-model`, `GET/POST /api/settings/report-model`, `POST /api/llm/ping`) under the same dual-path auth as `/api/corpus/refresh` (CSRF token OR `X-AdoptIQ-Internal`). Three matching admin proxy routes (`/admin_settings/ask_ai_model`, `/admin_settings/report_model`, `/admin_settings/llm_ping`) forward through `_r69_admin_proxy_post`. Validation is allow-list `^[A-Za-z0-9._-]{1,128}$` (`adoptiq_settings._is_valid_model_name`, empty string accepted as a "clear override" sentinel). Upstream CircuIT errors echoed by `/api/llm/ping` flow through `_r69_sanitize_llm_error` (Bearer/JWT/api_key/Authorization redacted, message capped at 200 chars).
+- Test-before-save UX in the shared `static/js/r69_model_preferences.js` module: Save stays disabled until Test returns `ok=true` for the proposed model name (empty input always enables Save = clears the override). Card lives on three surfaces: `templates/analyze.html` ("Report narrative model preference"), `templates/ask_ai.html` ("Ask AI model preference"), and the inline admin template in `enhanced_admin_dashboard_v2.py` ("LLM Model Preferences").
+- Diagnostic transparency: active model name stamped onto every Ask AI diag record (`_ASK_AI_DIAG_BUFFER` payload) AND surfaced in `/api/ask-ai-portfolio` JSON responses + the R68 debug chip footer (new `#r69DebugChipModel` span in `static/js/ask_ai.js`).
+- Build pipeline: `CIRCUIT_MODEL_NAME_ASK_AI` + `CIRCUIT_MODEL_NAME_REPORT` added to `embed_credentials.ENV_KEYS` and documented in `secrets.env.template` with a deliberate warning that flipping the report model is higher-risk than Ask AI (touches R27 grounding-rejection rate validation surface).
+- Two existing test fixtures updated to accept the new `**kwargs` on `generate_llm_json_response` mocks (`test_round4_ask_intel_handles_dict_fetch_errors.py`, `test_ask_intel_prompt_includes_fetch_errors.py`). Legacy 2-arg `generate_llm_response` mocks (`test_llm_json_response.py`, `test_round4_generate_llm_json_response_validates_claim_shape.py`) keep working because the JSON-response wrapper conditionally passes `model_name=` only when explicitly supplied.
+
+**Files touched:**
+- `adoptiq_settings.py` — extended `_SCHEMA` + `_VALIDATORS` with `ask_ai_model_name` / `report_model_name`; added `_MODEL_NAME_RE` allow-list regex; exposed `is_valid_model_name`.
+- `config.py` — extended `CIRCUIT_CONFIG` with `model_name_ask_ai` + `model_name_report` (env-overridable, default to `model_name`); bumped `ADOPTIQ_BUILD = "43"` with full Round 69 audit comment.
+- `model_resolver.py` — NEW. `get_active_ask_ai_model()` + `get_active_report_model()` + helpers; defensive validation; no caching.
+- `adoptiq_backend.py` — added keyword-only `model_name=None` to `generate_llm_response` + `generate_llm_json_response`; threaded `_r69_get_report_model()` into the CLI portfolio summary + per-customer storyboard call sites.
+- `app_simple.py` — `_r69_get_ask_ai_model` / `_r69_get_report_model` lazy-import wrappers; threaded into legacy Ask AI fallback + `/api/ask-intel` (Ask AI sites) and compact AI insights + per-customer storyboard fallback + subscription analysis (Report sites). New endpoints `/api/settings/ask-ai-model`, `/api/settings/report-model`, `/api/llm/ping` + the `_r69_handle_model_setting` shared handler + `_r69_sanitize_llm_error`. `_record_ask_ai_query_diag` now stamps `model_name`; both grounded and legacy Ask AI JSON responses surface the active model.
+- `enhanced_admin_dashboard_v2.py` — `_r69_admin_proxy_post` helper + three admin proxy routes; inline "LLM Model Preferences" card + per-card JS in `ENHANCED_ADMIN_TEMPLATE_V2`.
+- `templates/ask_ai.html` — added Ask AI model-preference card + included `static/js/r69_model_preferences.js`; new `r69DebugChipModel` span.
+- `templates/analyze.html` — added Report narrative model-preference card + included `static/js/r69_model_preferences.js`.
+- `static/js/r69_model_preferences.js` — NEW. Shared `bindCard` UX (load active, Test gates Save, sanitised result rendering).
+- `static/js/ask_ai.js` — `_r68RenderDebugChip` extended to read `model_name` from server response and render in `r69DebugChipModel`.
+- `ask_ai_grounded.py` — both grounded paths now lazy-import `get_active_ask_ai_model` and conditionally pass `model_name=` to `generate_llm_json_response` (preserves legacy 3-arg mocks).
+- `embed_credentials.py` — `ENV_KEYS` += `CIRCUIT_MODEL_NAME_ASK_AI` + `CIRCUIT_MODEL_NAME_REPORT`.
+- `secrets.env.template` — documented all three env vars + the per-feature override + the report-vs-Ask-AI risk asymmetry.
+- `tests/test_round69_model_preferences.py` — NEW. 43 tests across settings/validation/precedence/threading/endpoints/admin proxy/UI source-shape/diag surface/build metadata + the wires-don't-cross regression guard.
+- `tests/test_round4_ask_intel_handles_dict_fetch_errors.py` + `tests/test_ask_intel_prompt_includes_fetch_errors.py` — added `**kwargs` to the `fake_llm` mocks so the new `model_name=` kwarg is accepted (legacy contract preserved otherwise).
+- `CLAUDE.md` — added the Round 69 critical rule + bumped pytest floor reference (4227 → 4270).
+- `.cursor/rules/adoptiq.mdc` — added the Round 69 / Build 43 Tier-1 entry under the Critical Rules block (operator-flippable model + test-before-save contract + future-endpoint validation requirement).
+- `version_info.txt` — bumped to `1.0.4 / 43`.
+
+**SSoT modules touched:** config, ai_narrative_validator (no change — verified that `model_name` threading does NOT bypass the R27 grounding gate), structured_logging (no change — Ask AI diag continues to use the existing helper)
+
+Eligible names: canonical_metrics, risk_scoring, report_export_schema, report_export_styling, report_word_styling, ai_narrative_validator, data_contracts, data_normalization, structured_logging, config, report_utils, snowflake_table_policy
+
+**Tests added/updated:**
+- `tests/test_round69_model_preferences.py::test_r69_settings_schema_carries_both_model_keys` — pins the new schema entries.
+- `tests/test_round69_model_preferences.py::test_r69_is_valid_model_name_*` (3 tests) — pins the allow-list regex behaviour (empty string OK, valid names OK, `;`/`/`/`<`/whitespace/oversize rejected).
+- `tests/test_round69_model_preferences.py::test_r69_circuit_config_*` (2 tests) — pins the per-site key precedence (default + env override).
+- `tests/test_round69_model_preferences.py::test_r69_resolver_*` (5 tests) — pins the four-layer precedence chain + the no-cache guarantee + defensive fallback on malformed env.
+- `tests/test_round69_model_preferences.py::test_r69_generate_llm_response_*` (2 tests) + `::test_r69_generate_llm_json_response_threads_model_name` — pins the keyword-only kwarg threading at the backend layer.
+- `tests/test_round69_model_preferences.py::test_r69_ask_ai_sites_use_ask_ai_resolver_not_report` + `::test_r69_report_sites_use_report_resolver_not_ask_ai` — wires-don't-cross regression guard (asymmetric threading is intentional).
+- `tests/test_round69_model_preferences.py::test_r69_settings_*_endpoint_*` (6 tests) + `::test_r69_llm_ping_*` (5 tests) — pin endpoint behaviour (success / validation / sanitisation / dual-auth / credentials-not-configured branch).
+- `tests/test_round69_model_preferences.py::test_r69_admin_proxy_*` (3 tests) — pin admin proxy routes forward correctly with the `X-AdoptIQ-Internal` marker.
+- `tests/test_round69_model_preferences.py::test_r69_ui_*` (5 tests) — pin source-shape for `templates/ask_ai.html`, `templates/analyze.html`, `enhanced_admin_dashboard_v2.py` admin template, `static/js/r69_model_preferences.js`, `static/js/ask_ai.js` debug chip.
+- `tests/test_round69_model_preferences.py::test_r69_diag_*` (3 tests) — pin `model_name` stamping on the `_ASK_AI_DIAG_BUFFER` payload.
+- `tests/test_round69_model_preferences.py::test_r69_build_metadata_*` (3 tests) — pin env-vars in `embed_credentials.ENV_KEYS` + `secrets.env.template` + the build_info pipeline.
+- `tests/test_round69_model_preferences.py::test_r69_sanitize_llm_error_*` (4 tests) — pin Bearer/JWT/api_key/Authorization redaction behaviour.
+
+**Verify status:**
+- `make verify` — pass.
+- pytest: `4270 passed, 3 skipped, 6 deselected` (Build 42 floor was 4227, +43 net for Round 69).
+- ruff: `0 findings`.
+- bandit HIGH/MED: `0 findings`.
+- pip-audit: clean.
+
+**Hot spots Claude should audit first:**
+1. `model_resolver.py:48-83` — confirm the silent fallback on a malformed env var (`CIRCUIT_MODEL_NAME_ASK_AI=foo bar` with a space) is the right call vs raising; pre-R69 a malformed env var would not have crashed the app but would have silently degraded the active model. The resolver currently logs at WARNING level via the project logger and continues — confirm the logger is wired correctly so the operator gets a signal rather than a silent fallback.
+2. `app_simple.py` `_r69_handle_model_setting` — confirm the dual-path auth chain matches the Round 68 / Quit endpoint's contract exactly (CSRF token OR `X-AdoptIQ-Internal`); the failure mode if these drift is silent acceptance of unauthenticated POSTs.
+3. `static/js/r69_model_preferences.js::bindCard` — confirm the Test → Save flow correctly handles the case where the user types a new model name AFTER a successful Test (the Save button should disable again until they re-Test the new value). Manual smoke test recommended.
+4. The asymmetric threading (Ask AI sites + Report sites use DIFFERENT resolvers) is intentional but easy to break; any future LLM call site MUST decide which surface it lives on and import the matching resolver. The wires-don't-cross test pins this but only at the source-shape level — a runtime regression that wires the wrong resolver into a new call site would still pass the test.
+5. `enhanced_admin_dashboard_v2.py` admin proxy routes — confirm they handle both `application/json` and `application/x-www-form-urlencoded` payloads since the admin form posts as form-encoded but the main app's endpoints accept both. The `_r69_admin_proxy_post` helper currently passes the request body through unchanged.
+
+**Known deferrals (intentional non-fixes):**
+- The default model is still `gpt-5-nano` (the existing `CIRCUIT_MODEL_NAME` value); this round only adds the seam, it does not change the default. A separate round can flip the default once the operator has validated `gemini-3.1-flash-lite` against the Ask AI eval scorecard + R27 grounding-rejection rate baseline.
+- `model_resolver` does NOT validate that the resolved model name is reachable via `/api/llm/ping` at resolution time — the test-before-save UX gates this at the persist boundary, but a malformed env var or a manually-edited `settings.json` could still inject an unprovisioned name into the runtime. Future hardening could add a startup validation pass that warns the operator if the persisted/env-set model fails a ping test on app boot.
+- The `CircuIT` library's `CircuitChatClient` constructor accepts the `model_name` kwarg unchanged; we did not patch the upstream library. If the model name is invalid, the failure surfaces on the first API call (not at construction time) — the test-before-save UX is the operator's primary defence here.
+- Mid-stream model switching (changing the model while a long-running report is in flight) is NOT supported — the active model is captured at LLM-call time, NOT at report-start time. A multi-call narrative could theoretically span a model flip; this is acceptable for now but should be documented in the operator handbook.
+- The admin "LLM Model Preferences" card in `ENHANCED_ADMIN_TEMPLATE_V2` is rendered inline in the Python module rather than extracted to a Jinja2 template file — this matches the existing admin template pattern but makes the JS harder to lint. A future refactor could extract the entire admin template to `templates/admin/`; that is a Round 70+ concern.
+- The DMG smoke step (install DMG, flip both toggles, confirm Test gates Save in main app + admin console, generate a report with each model, verify the active model name in the debug chip + diag endpoint) is operator-only; no automation in this round. The build43 commit-tag step depends on this.
+
+**Build artifact (verified):**
+- `OUTBOX/AdoptIQ-v1.0.4-build43.dmg` — 432 MB, built `2026-05-03T01:35:26Z`.
+- `OUTBOX/build_info.txt` — `AdoptIQ v1.0.4 build 43 / Built: 2026-05-03T01:35:26Z`.
+
+**Trailer:** Made-with: Cursor

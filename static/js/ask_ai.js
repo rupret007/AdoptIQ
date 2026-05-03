@@ -237,6 +237,9 @@ document.addEventListener('DOMContentLoaded', function() {
     var r68DebugChipMethod = document.getElementById('r68DebugChipMethod');
     var r68DebugChipId = document.getElementById('r68DebugChipId');
     var r68DebugChipCopyBtn = document.getElementById('r68DebugChipCopyBtn');
+    // Round 69 / Build 43: model-name pill (may be null on older
+    // ask_ai.html bundles -- handle gracefully like the rest of the chip).
+    var r69DebugChipModel = document.getElementById('r69DebugChipModel');
     var r68LastQueryId = '';
     var lastAskedQuestion = '';
 
@@ -274,6 +277,20 @@ document.addEventListener('DOMContentLoaded', function() {
         var displayId = qid.length > 18 ? (qid.slice(0, 8) + '...' + qid.slice(-6)) : qid;
         r68DebugChipId.textContent = 'debug: ' + (displayId || '-');
         r68DebugChipId.title = qid || '';
+        // Round 69 / Build 43: surface the active Ask AI model name.
+        // ``model_name`` is populated by the server (Round 69 / Build 43);
+        // when missing (older server builds) the pill stays hidden.
+        if (r69DebugChipModel) {
+            var modelName = (data && typeof data.model_name === 'string')
+                ? data.model_name : '';
+            if (modelName) {
+                r69DebugChipModel.textContent = 'model: ' + modelName;
+                r69DebugChipModel.title = modelName;
+                r69DebugChipModel.style.display = '';
+            } else {
+                r69DebugChipModel.style.display = 'none';
+            }
+        }
         r68DebugChip.style.display = '';
     }
 
