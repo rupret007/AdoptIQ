@@ -114,16 +114,20 @@ def test_round48_harvest_persists_to_analysis_status(app_simple_source: str):
 def test_round48_excel_writer_reads_persisted_pdw(app_simple_source: str):
     """The renewal ``Report_Info`` builder must read its
     ``Partial_Data_Warning_Count`` value from the persisted list,
-    not from a hardcoded zero.  Preserve the existing
-    ``Field: Partial_Data_Warning_Count`` row anchor.
+    not from a hardcoded zero.
+
+    Round 73 / F6: the column key migrated from ``Field`` to ``Item``
+    as part of the Item/Value canonical schema standardisation.  The
+    harvest semantics are unchanged -- only the column name moved.
     """
 
     assert (
-        "{'Field': 'Partial_Data_Warning_Count', 'Value': str(len(_ren_pdw))}"
+        "{'Item': 'Partial_Data_Warning_Count', 'Value': str(len(_ren_pdw))}"
         in app_simple_source
     ), (
         "Renewal Report_Info Partial_Data_Warning_Count row no longer "
-        "uses len(_ren_pdw); the harvest fix is unwired"
+        "uses len(_ren_pdw); the R48 harvest fix is unwired (or the R73/F6 "
+        "Item key migration was reverted)"
     )
 
 

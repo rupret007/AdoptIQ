@@ -733,11 +733,13 @@ _HTML_DANGEROUS_BLOCK_RE = re.compile(
 def strip_html_from_string(value: Any) -> Any:
     """Strip HTML tags and unescape entities from a single cell value.
 
-    Non-string values are returned unchanged.  Strings that don't
-    contain ``<`` are returned unchanged (so we don't rewrite their
-    storage in the underlying frame).  Strings with ``<`` are passed
-    through ``re.sub`` to drop tags and ``html.unescape`` to convert
-    ``&amp;`` -> ``&``, ``&nbsp;`` -> non-breaking space, etc.
+    Non-string values are returned unchanged.  Strings that contain
+    NEITHER ``<`` NOR ``&`` are returned unchanged (cheap fast-path --
+    no markup, no entities, nothing to do).  Strings with ``<`` are
+    passed through ``re.sub`` to drop tags and ``html.unescape`` to
+    convert ``&amp;`` -> ``&``, ``&nbsp;`` -> non-breaking space, etc.
+    Strings with ``&`` but no ``<`` skip the regex pass and only run
+    ``html.unescape`` -- this is the entity-only path.
 
     Round 25 / Phase F.2: applied to Excel object columns immediately
     before ``df.to_excel(...)`` so generated workbooks no longer leak
@@ -748,19 +750,39 @@ def strip_html_from_string(value: Any) -> Any:
     block elements (``<script>`` / ``<style>``) which the naive regex
     would leave their body text behind. The block-strip pre-pass runs
     BEFORE the generic tag pass.
+
+    Round 73 / Phase 3 (F7): widens the early-out to include strings
+    with HTML entities but no tags -- pre-R73 the regex helper bailed
+    on any string without ``<``, so a Snowflake URL column carrying
+    ``"https://example.com/?a=1&amp;b=2"`` (or a customer name like
+    ``"Acme &amp; Beta"``) leaked into Excel with literal ``&amp;``.
+    The ``_strip_html_safe`` BS4-primary path already handled this
+    case correctly (its fast-path probed for both ``<`` and ``&``);
+    this fix brings the regex fallback into parity so the column-level
+    ``strip_html_from_dataframe`` route -- which calls
+    ``strip_html_from_string`` directly via ``series.map(...)`` -- no
+    longer skips entity-only strings.
     """
 
     if not isinstance(value, str):
         return value
-    if "<" not in value:
+    has_tag = "<" in value
+    has_entity = "&" in value
+    if not has_tag and not has_entity:
         return value
     try:
-        # R66/B4: drop entire <script>...</script> and <style>...</style>
-        # blocks (tag + body + closing tag) before the generic pass so
-        # the body text doesn't survive into the cleaned output.
-        cleaned = _HTML_DANGEROUS_BLOCK_RE.sub("", value)
-        stripped = _HTML_TAG_RE.sub("", cleaned)
-        return _html_module.unescape(stripped)
+        if has_tag:
+            # R66/B4: drop entire <script>...</script> and <style>...</style>
+            # blocks (tag + body + closing tag) before the generic pass so
+            # the body text doesn't survive into the cleaned output.
+            cleaned = _HTML_DANGEROUS_BLOCK_RE.sub("", value)
+            stripped = _HTML_TAG_RE.sub("", cleaned)
+            return _html_module.unescape(stripped)
+        # R73 / F7: entity-only path -- skip the regex passes and just
+        # decode the entities. ``html.unescape`` is a stdlib function
+        # so the only failure mode is a non-string input which the
+        # ``isinstance`` guard above already filters out.
+        return _html_module.unescape(value)
     except Exception:
         # Defensive: a regex / unescape failure should not lose data.
         return value
@@ -861,13 +883,26 @@ def strip_html_from_dataframe(df: "pd.DataFrame") -> "pd.DataFrame":
             series = out[col]
         except Exception:
             continue
-        # Cheap fast-path: skip the column entirely if no cell has a
-        # ``<`` character -- avoids the regex apply on big text columns.
+        # Cheap fast-path: skip the column entirely if NO cell has
+        # either a ``<`` (tag) OR ``&`` (entity) character -- avoids
+        # the regex/unescape apply on big text columns.
+        #
+        # Round 73 / Phase 3 (F7): pre-R73 this only probed for ``<``,
+        # so a column whose only HTML-ish content was ``&amp;`` /
+        # ``&lt;`` / ``&gt;`` / ``&nbsp;`` (URL columns, customer-name
+        # columns) was skipped entirely and the entities leaked into
+        # Excel. The ``&`` half of the probe brings the column-level
+        # fast-path into parity with ``strip_html_from_string``'s
+        # cell-level fast-path so entity-only columns now flow
+        # through ``html.unescape``.
         try:
-            has_tag = series.astype(str).str.contains("<", regex=False, na=False).any()
+            astr = series.astype(str)
+            has_tag = astr.str.contains("<", regex=False, na=False).any()
+            has_entity = astr.str.contains("&", regex=False, na=False).any()
         except Exception:
             has_tag = True
-        if not has_tag:
+            has_entity = False
+        if not has_tag and not has_entity:
             continue
         try:
             out[col] = series.map(strip_html_from_string)

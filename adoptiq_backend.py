@@ -8406,7 +8406,10 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
             from _r68_build_label import apply_word_footer as _r68_apply_word_footer  # noqa: PLC0415
             _r68_apply_word_footer(doc)
         except Exception as _r68_err:  # noqa: BLE001
-            logger.debug("Round 68 / A1: append_to_word_report footer skipped: %s", _r68_err)
+            # Round 73 / Phase 1 (F1): promoted to warning so the next
+            # missing-footer regression surfaces in the admin error log
+            # instead of hiding under the default debug threshold.
+            logger.warning("Round 68 / A1: append_to_word_report footer skipped: %s", _r68_err)
         doc.save(file_path)
         return file_path
 
@@ -8575,6 +8578,27 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
             logger.debug("Round 68 / A1: build label append skipped: %s", _r68_err)
         try:
             _r66_b5_data_sheet_names: list[str] = []
+            # Round 73 / Phase 3 (F8): pre-R73 the Sheet_Title row generator
+            # iterated ONLY ``(sheets or {}).keys()`` and explicitly excluded
+            # ``Summary`` -- but the Comprehensive writer ALSO writes the R15
+            # ``Summary`` sheet via ``_r15_write_summary_sheet`` (above) and
+            # the CSConsole sheets (``CSConsole_Action_Plans`` /
+            # ``CSConsole_Customer_Pulse`` / ``CSConsole_Success_Priorities`` /
+            # ``CSConsole_Adoption_Barriers``) via the separate
+            # ``csconsole_sheet_names`` write loop below. Neither set was
+            # represented in ``sheets`` at this point, so Report_Info shipped
+            # without ``Sheet_Title:Summary`` or any ``Sheet_Title:CSConsole_*``
+            # rows. Build 46 audit found this as a parity gap with the R65/R-1
+            # Compact / Renewal / Leader writers (which DO carry
+            # ``Sheet_Title:Summary``). The fix below stamps both sets up
+            # front so the operator's ``pd.read_excel`` consumer recovers the
+            # title for every written sheet.
+            #
+            # Always backfill ``Summary`` -- ``_r15_write_summary_sheet`` is
+            # called unconditionally above. ``Report_Info`` itself stays
+            # excluded (it would be self-referential and the operator would
+            # never need a title for it).
+            _r66_b5_data_sheet_names.append("Summary")
             for _sheet_name in (sheets or {}).keys():
                 try:
                     _safe_name = str(_sheet_name) if _sheet_name is not None else ""
@@ -8582,6 +8606,34 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                     _safe_name = ""
                 if _safe_name and _safe_name not in {"Summary", "Report_Info"}:
                     _r66_b5_data_sheet_names.append(_safe_name)
+            # R73 / F8: also iterate the csconsole_sheet_names mapping and
+            # pre-stamp a title row for any sheet whose source DataFrame is
+            # non-empty (matches the same gating the actual writer below
+            # uses at L8862: ``if df is not None and ... and not df.empty``).
+            # This is intentionally separate from the ``sheets`` loop so a
+            # future refactor that moves CSConsole writes elsewhere does
+            # not silently re-introduce the parity gap.
+            try:
+                if csconsole_data:
+                    for _ck, _csname in csconsole_sheet_names.items():
+                        try:
+                            _cdf = csconsole_data.get(_ck)
+                        except Exception:
+                            _cdf = None
+                        if (
+                            _cdf is not None
+                            and hasattr(_cdf, "empty")
+                            and not _cdf.empty
+                            and _csname
+                            and _csname not in {"Summary", "Report_Info"}
+                            and _csname not in _r66_b5_data_sheet_names
+                        ):
+                            _r66_b5_data_sheet_names.append(_csname)
+            except Exception as _r73_f8_err:  # noqa: BLE001
+                logger.debug(
+                    "Round 73 / F8: csconsole Sheet_Title backfill skipped: %s",
+                    _r73_f8_err,
+                )
             for _safe_name in _r66_b5_data_sheet_names:
                 # Title format mirrors the R65/R-1 Compact pattern:
                 # ``"<Sheet Name> - <Manager> Portfolio Analysis"``.
@@ -12877,7 +12929,10 @@ def main():
             from _r68_build_label import apply_word_footer as _r68_apply_word_footer  # noqa: PLC0415
             _r68_apply_word_footer(doc)
         except Exception as _r68_err:  # noqa: BLE001
-            logger.debug("Round 68 / A1: legacy comprehensive footer skipped: %s", _r68_err)
+            # Round 73 / Phase 1 (F1): promoted to warning so the next
+            # missing-footer regression surfaces in the admin error log
+            # instead of hiding under the default debug threshold.
+            logger.warning("Round 68 / A1: legacy comprehensive footer skipped: %s", _r68_err)
         doc.save(docx_path)
 
         # Create enhanced Word report

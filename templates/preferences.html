@@ -1,0 +1,277 @@
+{# Round 73 / Phase 4 (UX-1): dedicated /preferences page.
+
+   Consolidates AdoptIQ user-settable application settings under one
+   hub.  Pre-R73 the LLM model pickers lived inline on /analyze (report
+   model) and /ask-ai (Ask AI model), forcing the operator to remember
+   which surface owned which knob.  The Intelligence on/off toggle
+   continues to live on the analyze-page banner because it is
+   inseparable from the live status pill there, but is mirrored here
+   for discoverability.
+
+   UX-1 stages this page with the existing r69_model_preferences.js
+   data-r69-model-card text-input scaffolding so the existing
+   Test-gates-Save contract keeps working unchanged.  UX-3 (planned in
+   the same Round 73) will replace the text inputs with strict 2-
+   option dropdowns once the allow-list seam (`_R73_ALLOWED_MODEL_IDS`)
+   lands in `app_simple.py`.
+#}
+{% extends "base.html" %}
+{% block title %}Preferences - AdoptIQ Portfolio Analyzer{% endblock %}
+
+{% block head %}
+{# CSRF meta is already on base.html for site-wide use; the
+   r69_model_preferences.js + intel_status.js modules read it via
+   `meta[name="csrf-token"]`.  Keeping the duplicate here defends
+   against a future base.html refactor that drops the meta. #}
+<meta name="csrf-token" content="{{ csrf_token() }}">
+{% endblock %}
+
+{% block content %}
+<a class="visually-hidden-focusable btn btn-primary position-absolute top-0 start-0 m-2"
+   href="#preferences-main" style="z-index: 10000;">
+    Skip to main content
+</a>
+
+<div class="container py-5" id="preferences-main">
+    <div class="row justify-content-center">
+        <div class="col-lg-9">
+
+            <header class="text-center mb-5 fade-in">
+                <h1 class="display-4 fw-bold text-primary mb-3">
+                    <i class="fas fa-sliders-h me-2" aria-hidden="true"></i>
+                    Preferences
+                </h1>
+                <p class="lead text-muted mb-0">
+                    Tune AdoptIQ to your workflow.  Changes persist to
+                    <code>~/Library/Application Support/AdoptIQ/settings.json</code>
+                    and survive .app restarts &mdash; no env var or rebuild required.
+                </p>
+            </header>
+
+            {# ----- Section: AI model selection ---------------------- #}
+            <section class="card shadow-cisco fade-in mb-4"
+                     style="animation-delay: 0.1s;"
+                     aria-labelledby="prefs-models-heading">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-models-heading">
+                        <i class="fas fa-microchip me-2" aria-hidden="true"></i>
+                        AI Model Selection
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-4">
+                        AdoptIQ routes two distinct LLM call sites through CircuIT:
+                        <strong>Ask AI</strong> (interactive Q&amp;A) and
+                        <strong>Report narratives</strong> (per-customer storyboards,
+                        portfolio summary, subscription analysis, compact AI insights).
+                        Pick the model your tenant has provisioned for each.
+                    </p>
+
+                    {# Round 73 / UX-3: Report-narrative model card.
+                       Reuses the data-r69-model-card="report" hooks so
+                       the existing static/js/r69_model_preferences.js
+                       Test-gates-Save contract works unchanged.  The
+                       picker is a strict 2-option <select> rather
+                       than a free-text <input> so a typo or unlisted
+                       model id cannot land in settings.json.  When the
+                       supported model list grows, expand
+                       ``_R73_ALLOWED_MODEL_IDS`` in app_simple.py AND
+                       add matching <option> rows here AND in the
+                       admin picker (enhanced_admin_dashboard_v2.py)
+                       together. #}
+                    <div id="r69ReportModelCard"
+                         class="border rounded-3 p-3 mb-4"
+                         data-r69-model-card="report">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <h3 class="h6 mb-0">
+                                <i class="fas fa-file-alt me-2 text-primary" aria-hidden="true"></i>
+                                Report narrative model
+                            </h3>
+                            <span class="badge bg-light text-secondary border small"
+                                  data-r69-active-badge>active: -</span>
+                        </div>
+                        <p class="small text-muted mb-2">
+                            Drives report storyboards, portfolio summaries, subscription
+                            analyses, and compact AI insights.  Defaults to
+                            <code>gpt-5-nano</code>.  <strong>Changing this affects the
+                            R27 grounding-rejection rate</strong> &mdash; click
+                            <strong>Test</strong> to verify provisioning before saving.
+                        </p>
+                        <div class="input-group input-group-sm mb-2">
+                            <span class="input-group-text">model</span>
+                            <select class="form-select font-monospace"
+                                    data-r69-model-input
+                                    aria-label="Report narrative model name">
+                                <option value="gpt-5-nano">gpt-5-nano</option>
+                                <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
+                            </select>
+                            <button type="button"
+                                    class="btn btn-outline-primary"
+                                    data-r69-test-btn>
+                                <i class="fas fa-vial me-1"></i>Test
+                            </button>
+                            <button type="button"
+                                    class="btn btn-primary"
+                                    data-r69-save-btn
+                                    disabled>
+                                <i class="fas fa-save me-1"></i>Save
+                            </button>
+                        </div>
+                        <div class="small mt-1"
+                             data-r69-result
+                             aria-live="polite"></div>
+                    </div>
+
+                    {# Round 73 / UX-3: Ask AI model card.  Same
+                       2-option contract as the Report card above. #}
+                    <div id="r69AskAiModelCard"
+                         class="border rounded-3 p-3"
+                         data-r69-model-card="ask_ai">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <h3 class="h6 mb-0">
+                                <i class="fas fa-robot me-2 text-primary" aria-hidden="true"></i>
+                                Ask AI model
+                            </h3>
+                            <span class="badge bg-light text-secondary border small"
+                                  data-r69-active-badge>active: -</span>
+                        </div>
+                        <p class="small text-muted mb-2">
+                            Drives the interactive Ask AI page and grounded portfolio
+                            queries.  Defaults to <code>gpt-5-nano</code>.  Your tenant
+                            must have the model provisioned &mdash; click
+                            <strong>Test</strong> to verify before saving.
+                        </p>
+                        <div class="input-group input-group-sm mb-2">
+                            <span class="input-group-text">model</span>
+                            <select class="form-select font-monospace"
+                                    data-r69-model-input
+                                    aria-label="Ask AI model name">
+                                <option value="gpt-5-nano">gpt-5-nano</option>
+                                <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
+                            </select>
+                            <button type="button"
+                                    class="btn btn-outline-primary"
+                                    data-r69-test-btn>
+                                <i class="fas fa-vial me-1"></i>Test
+                            </button>
+                            <button type="button"
+                                    class="btn btn-primary"
+                                    data-r69-save-btn
+                                    disabled>
+                                <i class="fas fa-save me-1"></i>Save
+                            </button>
+                        </div>
+                        <div class="small mt-1"
+                             data-r69-result
+                             aria-live="polite"></div>
+                    </div>
+                </div>
+            </section>
+
+            {# ----- Section: Intelligence ---------------------------- #}
+            <section class="card shadow-cisco fade-in mb-4"
+                     style="animation-delay: 0.2s;"
+                     aria-labelledby="prefs-intel-heading">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-intel-heading">
+                        <i class="fas fa-brain me-2" aria-hidden="true"></i>
+                        AdoptIQ Intelligence
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-3">
+                        The AdoptIQ Knowledge Corpus powers grounded Ask AI answers and
+                        report narrative validation.  Disable to skip indexing on launch
+                        and to suppress the navbar Intelligence badge.  The full state
+                        machine (idle / indexing / refreshing / errored / blocked) is
+                        surfaced on the
+                        <a href="{{ url_for('index') }}#adoptiq-intel-banner">analyze page banner</a>.
+                    </p>
+                    <div class="form-check form-switch mb-2"
+                         title="Enable/disable AdoptIQ Intelligence">
+                        <input class="form-check-input"
+                               type="checkbox"
+                               role="switch"
+                               id="r73-intel-enable-toggle"
+                               data-intel-enable-toggle
+                               {% if intel_status and intel_status.enabled %}checked{% endif %}>
+                        <label class="form-check-label"
+                               for="r73-intel-enable-toggle">
+                            Enable AdoptIQ Intelligence
+                        </label>
+                    </div>
+                    <div class="small text-muted">
+                        Persists to <code>settings.json</code> via
+                        <code>POST /api/settings/intelligence</code>.  Same control as
+                        the analyze-page banner; both stay in sync.
+                    </div>
+                </div>
+            </section>
+
+            {# ----- Section: Theme (informational) ------------------- #}
+            <section class="card shadow-cisco fade-in mb-4"
+                     style="animation-delay: 0.3s;"
+                     aria-labelledby="prefs-theme-heading">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-theme-heading">
+                        <i class="fas fa-palette me-2" aria-hidden="true"></i>
+                        Appearance
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-0">
+                        Use the sun / moon button in the top-right of the navbar to flip
+                        between light and dark themes.  Your choice persists across
+                        sessions in <code>localStorage</code>.
+                    </p>
+                </div>
+            </section>
+
+            {# ----- Section: Storage (informational) ----------------- #}
+            <section class="card shadow-cisco fade-in mb-4"
+                     style="animation-delay: 0.4s;"
+                     aria-labelledby="prefs-storage-heading">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-storage-heading">
+                        <i class="fas fa-database me-2" aria-hidden="true"></i>
+                        Local Storage
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <ul class="mb-0 small text-muted">
+                        <li>
+                            <strong>Settings:</strong>
+                            <code>{{ settings_path }}</code>
+                            (mode <code>0600</code>, parent dir <code>0700</code>).
+                        </li>
+                        <li>
+                            <strong>Reports / uploads:</strong>
+                            <code>{{ outputs_dir }}</code>
+                        </li>
+                        <li>
+                            <strong>Knowledge Corpus:</strong>
+                            <code>{{ corpus_dir }}</code>
+                        </li>
+                    </ul>
+                </div>
+            </section>
+
+            <div class="text-center mt-4 fade-in">
+                <a href="{{ url_for('index') }}" class="btn btn-outline-primary">
+                    <i class="fas fa-arrow-left me-2" aria-hidden="true"></i>
+                    Back to Dashboard
+                </a>
+            </div>
+
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{# Round 73 / Phase 4 (UX-1): the shared model-preferences UI module
+   wires up both [data-r69-model-card] cards above with a Test-gates-
+   Save contract so a typo'd model name or unprovisioned model cannot
+   land in settings.json. #}
+<script src="{{ url_for('static', filename='js/r69_model_preferences.js') }}"></script>
+{% endblock %}

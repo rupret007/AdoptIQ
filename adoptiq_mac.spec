@@ -111,6 +111,16 @@ hidden_imports = [
     'ask_ai_corpus',
     'report_corpus_context',
     'adoptiq_settings',
+    # Round 73 / Phase 1 (F1): every Word writer pulls
+    # ``apply_word_footer`` from ``_r68_build_label`` via a lazy
+    # ``from _r68_build_label import ...`` inside a try/except block.
+    # PyInstaller's static analyser does NOT follow lazy imports inside
+    # function bodies, so without this pin the frozen build silently
+    # ships every report .docx WITHOUT the v{VER} build {N} stamp -- the
+    # entire stale-binary trap detection mechanism (R68 / A1) is
+    # unreachable.  Build 46 acceptance found 0/4 docx artifacts carried
+    # ``word/footer1.xml``; this pin closes that regression.
+    '_r68_build_label',
     # Round 69 / Build 43 + Round 71 / Phase 7 #34: operator-flippable
     # LLM model selection -- model_resolver is imported lazily by both
     # Ask AI and report-narrative paths so PyInstaller's analyser misses

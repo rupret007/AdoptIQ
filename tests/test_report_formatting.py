@@ -137,7 +137,15 @@ class TestRiskScoringExplanation:
         assert "BEMS" in expl
         assert "CRITICAL" in expl
         assert "HIGH" in expl
-        assert "MEDIUM" in expl
+        # Round 73 / Phase 3 (F9): the rendered band label is now
+        # ``MODERATE`` (was ``MEDIUM`` pre-R73) so the methodology
+        # paragraph agrees byte-for-byte with the user-facing
+        # vocabulary on every other Renewal surface (R67/B1, R67/B6,
+        # R70/Phase 3 #11). The internal RISK_BAND_THRESHOLDS dict
+        # KEY stays ``MEDIUM`` for cross-sheet parity (Comprehensive
+        # ``Risk_Components.risk_band``) -- only the rendered string
+        # was remapped.
+        assert "MODERATE" in expl
         assert "LOW" in expl
 
     def test_not_empty(self):

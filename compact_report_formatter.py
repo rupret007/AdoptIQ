@@ -1456,7 +1456,11 @@ class CompactReportFormatter:
 
                 _r68_apply_word_footer(self.doc)
             except Exception as _r68_err:  # noqa: BLE001
-                logger.debug("Round 68 / A1: Compact word footer skipped: %s", _r68_err)
+                # Round 73 / Phase 1 (F1): promoted to warning so the
+                # next missing-footer regression surfaces in the admin
+                # error log instead of hiding under the default debug
+                # threshold.
+                logger.warning("Round 68 / A1: Compact word footer skipped: %s", _r68_err)
 
             self.doc.save(file_path)
             logger.info(f"Compact report saved: {file_path}")

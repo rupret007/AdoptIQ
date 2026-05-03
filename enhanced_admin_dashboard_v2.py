@@ -2900,6 +2900,16 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 so a typo or unprovisioned model cannot land in <code>settings.json</code>.
             </p>
 
+            <!-- Round 73 / Phase 4 (UX-3): admin model pickers are now
+                 strict 2-option <select> dropdowns matching the
+                 /preferences hub.  ``_R73_ALLOWED_MODEL_IDS`` in
+                 app_simple.py is the server-side source of truth; when
+                 it grows, expand the <option> rows here AND on
+                 templates/preferences.html together.  The admin proxy
+                 routes (/admin_settings/{ask_ai,report}_model) forward
+                 to the same /api/settings/* endpoints so the allow-list
+                 enforcement holds at the API layer regardless of
+                 origin.  Pinned by tests/test_round73_model_dropdown_allowlist.py. -->
             <form id="r69AdminAskAiForm" data-r69-admin-card="ask_ai"
                   style="border-left:4px solid #0d6efd; padding:0.75rem 1rem; margin-bottom:1rem; background:#f8f9fa;">
                 <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
@@ -2908,10 +2918,13 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                     <span class="badge bg-secondary" data-r69-admin-active>active: -</span>
                 </div>
                 <div style="display:flex; gap:0.4rem; align-items:center;">
-                    <input type="text" name="model_name" maxlength="128"
-                           class="form-control" data-r69-admin-input
-                           placeholder="e.g. gpt-5-nano, gemini-3.1-flash-lite"
-                           style="font-family:monospace; flex-grow:1;">
+                    <select name="model_name"
+                            class="form-control form-select" data-r69-admin-input
+                            aria-label="Ask AI model name"
+                            style="font-family:monospace; flex-grow:1;">
+                        <option value="gpt-5-nano">gpt-5-nano</option>
+                        <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
+                    </select>
                     <button type="button" class="btn btn-outline-primary"
                             data-r69-admin-test-btn>Test</button>
                     <button type="button" class="btn btn-primary"
@@ -2929,10 +2942,13 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                     <span class="badge bg-secondary" data-r69-admin-active>active: -</span>
                 </div>
                 <div style="display:flex; gap:0.4rem; align-items:center;">
-                    <input type="text" name="model_name" maxlength="128"
-                           class="form-control" data-r69-admin-input
-                           placeholder="e.g. gpt-5-nano, gemini-3.1-flash-lite"
-                           style="font-family:monospace; flex-grow:1;">
+                    <select name="model_name"
+                            class="form-control form-select" data-r69-admin-input
+                            aria-label="Report narrative model name"
+                            style="font-family:monospace; flex-grow:1;">
+                        <option value="gpt-5-nano">gpt-5-nano</option>
+                        <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
+                    </select>
                     <button type="button" class="btn btn-outline-primary"
                             data-r69-admin-test-btn>Test</button>
                     <button type="button" class="btn btn-primary"
@@ -3068,7 +3084,30 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                     .then(function (j) {
                         if (!j || !j.ok) return;
                         var input = r69Get(form, '[data-r69-admin-input]');
-                        if (input) input.value = j.persisted_value || '';
+                        if (input) {
+                            var persisted = j.persisted_value || '';
+                            /* Round 73 / UX-3: <select> assignment for
+                               an unmatched value is a silent no-op
+                               which would mislead the operator.  Only
+                               reflect the persisted value on the
+                               control if it's selectable; the active
+                               badge below carries the truth in any
+                               case. */
+                            if (input.tagName === 'SELECT') {
+                                var matched = false;
+                                for (var i = 0; i < input.options.length; i++) {
+                                    if (input.options[i].value === persisted) {
+                                        matched = true;
+                                        break;
+                                    }
+                                }
+                                if (matched || persisted === '') {
+                                    input.value = persisted;
+                                }
+                            } else {
+                                input.value = persisted;
+                            }
+                        }
                         r69SetActive(form, j.active_value);
                     })
                     .catch(function () { /* silent -- read-only path */ });
@@ -3080,11 +3119,16 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 var saveBtn = r69Get(form, '[data-r69-admin-save-btn]');
                 if (!input || !testBtn || !saveBtn) return;
 
-                // Any input change locks Save until next successful Test.
-                input.addEventListener('input', function () {
+                // Any input/selection change locks Save until next
+                // successful Test.  Round 73 / UX-3 swapped the input
+                // for a <select>; bind both ``input`` and ``change``
+                // so the contract holds for either form.
+                var lockSave = function () {
                     saveBtn.disabled = true;
                     r69SetResult(form, '', 'neutral');
-                });
+                };
+                input.addEventListener('input', lockSave);
+                input.addEventListener('change', lockSave);
 
                 testBtn.addEventListener('click', function () {
                     var value = (input.value || '').trim();

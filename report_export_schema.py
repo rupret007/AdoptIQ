@@ -698,6 +698,19 @@ CURATED_COLUMNS: Mapping[str, tuple[str, ...]] = {
     # Snowflake columns down to ~60 customer-facing ones).
     "Critical_Adoption_Barriers": _CURATED_AB_DETAIL_ALL,
     "CSOne_Detail_All": _CURATED_CSONE_DETAIL_ALL,
+    # Round 73 / Phase 2 (F4): Compact ``All_Support_Cases`` and
+    # Renewal ``Customer_Support_Cases`` are CSOne-shaped subsets
+    # (case rows projected from the same Snowflake views ``CSOne_Detail_All``
+    # comes from).  Pre-R73 they fell through to denylist-only
+    # filtering, so the Compact / Renewal XLSXs leaked the full raw
+    # Snowflake projection (~50+ cols including SF audit columns,
+    # internal pipeline markers, and rich-text fields the
+    # ``CSOne_Detail_All`` curation already drops).  Map both sheet
+    # names to the same canonical CSOne curated set so the projected
+    # column count matches the comprehensive ``CSOne_Detail_All``
+    # sheet (~42 cols) instead of leaking the full raw view.
+    "All_Support_Cases": _CURATED_CSONE_DETAIL_ALL,
+    "Customer_Support_Cases": _CURATED_CSONE_DETAIL_ALL,
     "External_Bugs": _CURATED_EXTERNAL_BUGS,
     "External_Incidents": _CURATED_EXTERNAL_INCIDENTS,
     "CSConsole_Customer_Pulse": _CURATED_CSCONSOLE_CUSTOMER_PULSE,
@@ -705,6 +718,14 @@ CURATED_COLUMNS: Mapping[str, tuple[str, ...]] = {
     # ``Action_Plans`` curation (drops 243-col Snowflake dump down
     # to ~30 customer-facing columns).
     "Action_Plans": _CURATED_ACTION_PLANS,
+    # Round 73 / Phase 2 (F3): Renewal ``Customer_Action_Plans`` was
+    # missing from this map -- pre-R73 the Renewal XLSX leaked the
+    # full 243-col Snowflake dump (per Build 46 audit) while the
+    # Compact ``Action_Plans`` sheet (which IS in this map) shipped
+    # at the canonical ~30 customer-facing cols.  Map the Renewal
+    # sheet name to the same curated set so the projected schema
+    # matches the Compact sibling.
+    "Customer_Action_Plans": _CURATED_ACTION_PLANS,
 }
 
 
@@ -778,6 +799,32 @@ def apply_export_schema(df, sheet_name: str | None = None):
             return df
 
     out = df
+
+    # Round 73 / Phase 1 (F2): short-circuit the column projection when
+    # the DataFrame carries the R64/B2 provenance marker
+    # (``_adoptiq_provenance_row``). The R65 fallback in the
+    # Comprehensive writer constructs single-row "EMPTY" sheets whose
+    # columns (``_adoptiq_provenance_row``, ``AdoptIQ_Status``,
+    # ``AdoptIQ_Source``, ``AdoptIQ_Provenance``, ``AdoptIQ_Message``)
+    # are intentionally meta -- none of them appear in
+    # ``CURATED_COLUMNS``. Pre-R73 the projection silently reduced these
+    # frames to ``df.iloc[:, 0:0]`` (1 row, 0 cols), which xlsxwriter
+    # rendered as a single empty cell -- the operator opened the
+    # ``Action_Plans`` sheet, saw "1 row x 1 col with A1=None", and
+    # had no way to distinguish "no APs in scope" from "writer
+    # bug". The provenance row's whole purpose is to carry honest
+    # diagnostic state through to the workbook; bypass the customer-
+    # facing column SSoT for these rows so the marker columns survive.
+    # Build 46 acceptance audit pinned this as the F2 finding for
+    # Comprehensive's Action_Plans sheet; the same protection covers
+    # Risk_Components and any future R64/B2-style fallback sheet.
+    try:
+        if "_adoptiq_provenance_row" in out.columns:
+            return out
+    except Exception:  # noqa: BLE001
+        # Defensive -- a non-pandas-like .columns access must not abort
+        # the rest of the projection pipeline.
+        pass
 
     rename_map = SHEET_HEADER_RENAMES.get(sheet_name or "", {})
     if rename_map:

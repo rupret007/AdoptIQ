@@ -376,10 +376,30 @@ def _render_risk_scoring_explanation() -> str:
     def _fmt(v: float) -> str:
         return f"{v:.0f}" if float(v).is_integer() else f"{v:g}"
 
+    # Round 73 / Phase 3 (F9): the user-facing band label MUST be
+    # ``MODERATE`` (not ``MEDIUM``) so the methodology paragraph agrees
+    # byte-for-byte with the per-customer Risk_Level column the operator
+    # sees in the Compact / Renewal XLSX (R67 / B1 + R67 / B6) AND with
+    # the Top-N table cell paint / Risk Score box / donut gauge / 2x2
+    # panel labels in the Renewal Word narrative (R70 / Phase 3 #11).
+    # Pre-R73 the methodology paragraph was the SINGLE remaining
+    # user-facing surface still rendering the canonical band key
+    # (``MEDIUM``); the R70 vocabulary lint
+    # (``test_round70_no_medium_in_user_facing.py``) explicitly
+    # whitelisted it (the docstring noted "1 of 9 hits is in the
+    # deliberate Risk Score Methodology paragraph; that single instance
+    # is fine").  Build 46 audit found this remaining MEDIUM was
+    # inconsistent with the rest of the document and confused operators
+    # who saw "MODERATE" everywhere ELSE.  R73 / F9 closes the gap.
+    # The internal ``RISK_BAND_THRESHOLDS`` dict KEY stays ``MEDIUM``
+    # for cross-sheet parity (Comprehensive ``Risk_Components.risk_band``
+    # agrees byte-for-byte) and so internal filter / color lookups
+    # still resolve correctly -- only the rendered user-facing string
+    # is remapped here.
     bands = (
         f"Categories: CRITICAL (>={_fmt(crit)}), "
         f"HIGH ({_fmt(high)}-{_fmt(crit - 1)}), "
-        f"MEDIUM ({_fmt(med)}-{_fmt(high - 1)}), "
+        f"MODERATE ({_fmt(med)}-{_fmt(high - 1)}), "
         f"LOW ({_fmt(low)}-{_fmt(med - 1)}), "
         f"HEALTHY (<{_fmt(low)})."
     )

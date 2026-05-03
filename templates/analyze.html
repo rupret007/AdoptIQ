@@ -10,12 +10,13 @@
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <!-- Subscription Search Script -->
 <script src="{{ url_for('static', filename='js/subscription-search.js') }}"></script>
-{# Round 69 / Build 43: shared model-preferences UI module powers the
-   [data-r69-model-card="report"] card injected above the analysis
-   form.  The Test-gates-Save contract is identical to the Ask AI
-   page so the operator's mental model is consistent across both
-   surfaces. #}
-<script src="{{ url_for('static', filename='js/r69_model_preferences.js') }}"></script>
+{# Round 73 / Phase 4 (UX-2): the inline report-narrative model
+   picker that lived here pre-R73 has moved to the dedicated
+   /preferences page.  The shared static/js/r69_model_preferences.js
+   module is no longer loaded on analyze.html because there is no
+   ``[data-r69-model-card]`` container on this page.  Loading it on
+   /preferences (where both pickers live) keeps the bundle from
+   being shipped on every page that has nothing to wire up. #}
 {% endblock %}
 
 {% block content %}
@@ -343,58 +344,15 @@
                 </div>
             </section>
 
-            {# Round 69 / Build 43: operator-flippable report-narrative
-               model preferences card.  Independent of the Ask AI card
-               on the Ask AI page so the operator can tune them
-               separately (different validation surfaces, different
-               R27/R65 grounding contracts).  Test-gates-Save same as
-               the Ask AI card: a typo'd model name or unprovisioned
-               model cannot land in settings.json. #}
-            <section id="r69ReportModelCard"
-                     class="card shadow-cisco fade-in mb-4"
-                     data-r69-model-card="report"
-                     style="animation-delay: 0.28s;">
-                <div class="card-body py-3">
-                    <div class="d-flex align-items-center justify-content-between mb-2">
-                        <h2 class="h6 mb-0">
-                            <i class="fas fa-microchip me-2 text-primary" aria-hidden="true"></i>
-                            Report narrative model preference
-                        </h2>
-                        <span class="badge bg-light text-secondary border small"
-                              data-r69-active-badge>active: -</span>
-                    </div>
-                    <p class="small text-muted mb-2">
-                        Choose which CircuIT model writes report narratives (per-customer storyboards,
-                        portfolio summary, subscription analysis, compact AI insights).  Defaults to
-                        <code>gpt-5-nano</code>.  <strong>Changing this affects the R27 grounding-rejection
-                        rate</strong> -- click <strong>Test</strong> to verify provisioning before saving.
-                        Empty value clears the override and falls back to the env / config default.
-                    </p>
-                    <div class="input-group input-group-sm mb-2">
-                        <span class="input-group-text">model</span>
-                        <input type="text"
-                               class="form-control font-monospace"
-                               placeholder="e.g. gpt-5-nano, gemini-3.1-flash-lite"
-                               maxlength="128"
-                               data-r69-model-input
-                               aria-label="Report narrative model name">
-                        <button type="button"
-                                class="btn btn-outline-primary"
-                                data-r69-test-btn>
-                            <i class="fas fa-vial me-1"></i>Test
-                        </button>
-                        <button type="button"
-                                class="btn btn-primary"
-                                data-r69-save-btn
-                                disabled>
-                            <i class="fas fa-save me-1"></i>Save
-                        </button>
-                    </div>
-                    <div class="small mt-1"
-                         data-r69-result
-                         aria-live="polite"></div>
-                </div>
-            </section>
+            {# Round 73 / Phase 4 (UX-2): the inline report-narrative
+               model picker card that lived here pre-R73 has moved to
+               the dedicated /preferences hub.  The analyze surface
+               stays focused on the analysis form; operators tune the
+               report model from
+               ``{{ url_for('preferences') }}`` (also reachable from
+               the navbar).  This comment block intentionally remains
+               so a future R69-style "we already wired the picker
+               here" mistake fails this template grep. #}
 
             <!-- Analysis Form -->
             <div class="card shadow-cisco fade-in" style="animation-delay: 0.3s;" role="main">

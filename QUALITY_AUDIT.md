@@ -8678,3 +8678,80 @@ Eligible names: canonical_metrics, risk_scoring, report_export_schema, report_ex
 - The DMG bake (Phase 5b) is the canonical Round 72 ship vehicle. If codesigning identity is missing on this machine the bake produces an unsigned `.app` which is fine for smoke; documented under Phase 5c smoke. The DMG is built by the OPERATOR running `bash build_mac.sh`; this Cursor session does not auto-bake.
 
 **Trailer:** Made-with: Cursor
+
+## Round 73 — handoff 2026-05-03
+
+**What changed (plain English):**
+- Implemented all nine Build 46 acceptance findings (F1–F9) from the four-format manual audit (Comprehensive / Compact / Renewal / Leader docx + xlsx pair) and three UI/UX changes (UX-1 / UX-2 / UX-3) that move the LLM model picker out of the analyze + Ask AI pages and into a dedicated Preferences page + admin dashboard, with a strict 2-option dropdown.
+- F1 (footer unkillable) — `_r68_build_label.apply_word_footer` is now a 3-layer defense (Tier 1 strict → Tier 2 fallback → Tier 3 always-attempt) plus 12 call-site warning promotions so a footer wiring drift surfaces in stderr instead of silently shipping a footer-less docx. Pinned by 22 new tests.
+- F2 (Comprehensive Action_Plans empty-state provenance preserved) — architectural fix in `report_export_schema.apply_export_schema` so provenance marker frames (`_adoptiq_provenance_row=True`) bypass column projection. Pre-R73 the R64/B2 single-row `Status=EMPTY` provenance row was being silently dropped because the marker columns were not in the curated set.
+- F3 + F4 (Customer_Action_Plans + All_Support_Cases + Customer_Support_Cases curated columns) — three sheets registered in `report_export_schema.CURATED_COLUMNS` so they get the same ~30-col customer-facing projection treatment as Critical_Adoption_Barriers / Action_Plans (R67/B7); pre-R73 these were leaking the raw 200+ col Snowflake dump into the operator's XLSX.
+- F5 (citation injector skips Heading/Title paragraphs) — `report_source_injector._rewrite_paragraph_with_inline_citations` now early-returns when `paragraph.style.name` starts with `Heading` or `Title` so the chrome is no longer injected into section titles like `Adoption Barriers (90)`. R57 / R64 multi-KPI interleave contract preserved for body paragraphs.
+- F6 (Renewal Report_Info canonical Item/Value 2-col schema) — standardised the Renewal XLSX Report_Info sheet to the canonical `Item` / `Value` 2-col schema (was inconsistently using `Field` / `Value` while Compact / Comprehensive used `Item` / `Value`); Leader's 4-col legacy schema preserved with parallel Item/Value projection so downstream readers can route either way. Updated `tests/test_round48_renewal_report_info_warning_count.py::test_round48_excel_writer_reads_persisted_pdw` to expect `'Item'` instead of the pre-F6 `'Field'`.
+- F7 (HTML entity decoding in URL-bearing cells) — `data_normalization.strip_html_from_string` now calls `html.unescape(value)` on entity-only strings (no tags) so `https://example.com/?a=1&amp;b=2` decodes to `https://example.com/?a=1&b=2` in the operator's XLSX. Pre-R73 the column-level fast-path only checked for `<` and skipped entity-only strings.
+- F8 (Comprehensive Report_Info Sheet_Title backfill) — `adoptiq_backend.write_excel_workbook` now explicitly emits Sheet_Title rows for `Summary` and every populated `CSConsole_*` sheet (R66/B5 covered most data sheets but missed these two categories).
+- F9 (Renewal Methodology vocabulary) — replaced MEDIUM with MODERATE in the Risk Score Methodology paragraph (`report_utils._render_risk_scoring_explanation`) for parity with the R67/B6 user-facing vocabulary contract. Updated `tests/test_report_formatting.py::TestRiskScoringExplanation::test_contains_key_terms` to assert MODERATE.
+- UX-1 (Preferences page) — new `GET /preferences` Flask route + `templates/preferences.html` consolidates AI model selection (Ask AI + Report) and Intelligence toggle in one place, with informational sections for Appearance + Local Storage paths (settings.json + outputs + corpus). Navbar link added in `templates/base.html`.
+- UX-2 (inline picker removed) — the inline `r69ReportModelCard` block in `templates/analyze.html` and the `r69AskAiModelCard` block in `templates/ask_ai.html` are GONE; the corresponding `static/js/r69_model_preferences.js` script tags are also removed (the JS module now lives only on /preferences and the admin dashboard). Existing R69 tests inverted to assert these elements are NOT present.
+- UX-3 (strict 2-option dropdown) — the model pickers on /preferences AND in the admin dashboard are now `<select>` dropdowns with EXACTLY two options (`gpt-5-nano` and `gemini-3.1-flash-lite`) and NO `Default (env / config)` sentinel — per user direction "ok lets go with 2 option" so the operator's choice is unambiguous. Server-side defense-in-depth via the new `_R73_ALLOWED_MODEL_IDS` frozenset in `app_simple.py` (validated in `_r69_handle_model_setting`); a POST with a value outside the allow-list returns 400 + structured `error="model_not_in_r73_allowlist"` payload; empty string still accepted as the "clear override" sentinel. `r69_model_preferences.js` and the inline admin JS bind to BOTH `input` and `change` events so the disable-Save-until-Test contract works for `<select>` elements; the JS gracefully handles a persisted_value that doesn't match any option (does NOT silently reset the dropdown). Updated `tests/test_round69_model_preferences.py::test_r69_post_settings_report_model_persists_valid_value` + `test_r69_post_settings_accepts_empty_string_to_clear_override` to use `gpt-5-nano` (R73 allow-listed) instead of pre-UX-3 `gpt-4o-mini`.
+
+**Files touched:**
+- `app_simple.py` — F6 Renewal Report_Info `Item/Value`; F8 Comprehensive `Sheet_Title` backfill; UX-1 `/preferences` route + view function; UX-3 `_R73_ALLOWED_MODEL_IDS` frozenset + allow-list enforcement in `_r69_handle_model_setting`.
+- `_r68_build_label.py` — F1 3-layer footer defense; F6 `append_build_label_records_4col` `Item` key.
+- `report_export_schema.py` — F2 provenance frame bypass; F3+F4 `Customer_Action_Plans` / `All_Support_Cases` / `Customer_Support_Cases` registered in `CURATED_COLUMNS`.
+- `report_source_injector.py` — F5 Heading/Title paragraph early-return.
+- `data_normalization.py` — F7 `html.unescape` on entity-only strings; column-level fast-path checks for `&` in addition to `<`.
+- `report_utils.py` — F9 `_render_risk_scoring_explanation` MODERATE substitution.
+- `adoptiq_backend.py` — F8 explicit `Summary` + `CSConsole_*` Sheet_Title rows in `write_excel_workbook`.
+- `templates/base.html` — UX-1 navbar Preferences link.
+- `templates/preferences.html` — UX-1 NEW page; UX-3 2-option `<select>` dropdowns.
+- `templates/analyze.html` — UX-2 inline `r69ReportModelCard` block + `r69_model_preferences.js` script tag REMOVED.
+- `templates/ask_ai.html` — UX-2 inline `r69AskAiModelCard` block + `r69_model_preferences.js` script tag REMOVED.
+- `static/js/r69_model_preferences.js` — UX-3 `<select>` support + `change` event binding + persisted_value graceful handling.
+- `enhanced_admin_dashboard_v2.py` — UX-3 admin model pickers converted to 2-option `<select>` with parallel inline JS update.
+- `tests/test_round73_build_label_unkillable.py` — NEW (22 tests, F1).
+- `tests/test_round73_comprehensive_action_plans_provenance.py` — NEW (7 tests, F2).
+- `tests/test_round73_curated_columns_extended.py` — NEW (6 tests, F3+F4).
+- `tests/test_round73_citation_injector_skips_headings.py` — NEW (4 tests, F5).
+- `tests/test_round73_report_info_canonical_schema.py` — NEW (10 tests, F6).
+- `tests/test_round73_html_entity_decode.py` — NEW (21 tests, F7).
+- `tests/test_round73_comprehensive_sheet_title_coverage.py` — NEW (9 tests, F8).
+- `tests/test_round73_renewal_methodology_no_medium.py` — NEW (5 tests, F9).
+- `tests/test_round73_preferences_page_route.py` — NEW (13 tests, UX-1).
+- `tests/test_round73_analyze_no_inline_picker.py` — NEW (12 tests, UX-2).
+- `tests/test_round73_model_dropdown_allowlist.py` — NEW (20 tests, UX-3).
+- `tests/test_round48_renewal_report_info_warning_count.py` — UPDATED (F6 schema migration: `'Field':` → `'Item':`).
+- `tests/test_round69_model_preferences.py` — UPDATED (UX-3 allow-list narrowing: `gpt-4o-mini` → `gpt-5-nano`).
+- `tests/test_report_formatting.py` — UPDATED (F9 vocabulary migration: `MEDIUM` → `MODERATE`).
+- `tests/test_round68_build_label_in_every_report.py` — UPDATED (F6 `Item/Value` schema migration).
+- `tests/test_round70_build_label_artifacts.py` — UPDATED (F6 `Item/Value` schema migration with legacy `Field` fallback).
+- `tests/test_round52_fixture_file_parity.py` — UPDATED (F6 fixture writers emit `Item/Value`).
+- `config.py` — `ADOPTIQ_BUILD = "47"` with full Round 73 audit comment.
+
+**SSoT modules touched:** `data_normalization` (F7), `report_export_schema` (F2 + F3 + F4), `report_utils` (F9), `report_export_styling` (F8 indirectly via Sheet_Title contract). Eligible names: canonical_metrics, risk_scoring, report_export_schema, report_export_styling, report_word_styling, ai_narrative_validator, data_contracts, data_normalization, structured_logging, config, report_utils, snowflake_table_policy.
+
+**Tests added/updated:**
+- 11 new R73 test files covering F1–F9 + UX-1 + UX-2 + UX-3 (~129 net new tests).
+- 6 existing tests updated where they pinned pre-R73 contracts (F6 schema migration; F9 vocabulary migration; UX-3 allow-list narrowing).
+
+**Verify status:**
+- `make verify` — pass.
+- pytest: `4625 passed, 4 skipped, 6 deselected` (Build 46 floor was 4495; +130 net for R73). The full suite ran in 49.77s.
+- ruff: `0 findings`.
+- bandit HIGH/MED: `0 findings`.
+- pip-audit: clean.
+
+**Hot spots Claude should audit first:**
+1. `app_simple._R73_ALLOWED_MODEL_IDS` and `_r69_handle_model_setting` — the new allow-list is a defense-in-depth check on top of the existing R69 `is_valid_model_name` regex. Confirm the layering is correct (regex first → allow-list second; empty string sentinel allowed at both layers). The R73 / UX-3 tests pin both the source-shape and the runtime POST contract, but a future caller that bypasses `_r69_handle_model_setting` (e.g. a CLI tool that writes directly to `settings.json`) would NOT be subject to the allow-list — by design, since the allow-list is UI-shaped not data-shaped.
+2. `report_export_schema.apply_export_schema` provenance frame bypass (F2) — the bypass is keyed on the presence of `_adoptiq_provenance_row=True` as a column AND at least one row where the value is True. Confirm a future provenance sentinel that uses a different marker column (e.g. `_provenance_only=True`) would correctly fall through to the projection path; the bypass is intentionally narrow.
+3. `data_normalization.strip_html_from_string` (F7) — the new `&` check uses BeautifulSoup as a primary parser even for entity-only strings, which BS emits a `MarkupResemblesLocatorWarning` for URL inputs (visible in the test suite warnings tail). The behavior is correct (BS unescapes the entities) but the warning is noise; consider suppressing the warning in `data_normalization.py` or at the test session level if it becomes a maintenance burden.
+4. `_r68_build_label.apply_word_footer` 3-layer defense (F1) — the always-attempt Tier 3 catches every exception including `KeyboardInterrupt` and `SystemExit` (via the bare `except:` in the inner `try`). Confirm no caller relies on `KeyboardInterrupt` propagating through `apply_word_footer` to abort report generation.
+5. `templates/preferences.html` (UX-1) — the page renders dynamic context via `_r17_corpus_status_payload` and three `_user_corpus_dir`-style helpers wrapped in `try / except / pass` with `logger.debug` only. Confirm a stale `_user_corpus_dir` import after a future corpus refactor would NOT silently render `corpus_dir = "-"` without an operator-visible warning. The current behavior is intentional (page should render even if intelligence is broken) but a structured `logger.warning` would be more honest.
+
+**Known deferrals (intentional non-fixes):**
+- The `MarkupResemblesLocatorWarning` from BeautifulSoup on URL-shaped entity-only inputs is documented but not suppressed. Suppression would require either a per-call `warnings.catch_warnings` block (adds overhead) or a session-level filter in `pytest.ini` (mutes a useful warning class). Current behavior: 1 warning in the full pytest run, no functional impact.
+- The R73 / UX-3 allow-list is a UI-facing dropdown contract (`gpt-5-nano`, `gemini-3.1-flash-lite`). The lower-layer `adoptiq_settings.is_valid_model_name` regex still accepts a broader range of model names so env vars and direct `settings.json` writes (e.g. by an operator with a future model id) are not blocked. This is by design — when a third operator-supported model arrives, the path is: (a) extend `_R73_ALLOWED_MODEL_IDS`; (b) add a new `<option>` to `templates/preferences.html` and `enhanced_admin_dashboard_v2.py`; (c) update `tests/test_round73_model_dropdown_allowlist.py`. The lower layer does NOT need to change.
+- The Build 46 four-format manual audit was the input for this round; the Build 47 manual audit (post-R73 fixes) has not been performed. The DMG bake (Phase 5b) is the canonical Round 73 ship vehicle for that audit.
+- DMG bake (Phase 5b) is owned by the operator running `bash build_mac.sh`; this Cursor session does not auto-bake the .dmg artifact.
+
+**Trailer:** Made-with: Cursor

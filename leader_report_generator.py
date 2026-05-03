@@ -935,7 +935,10 @@ class LeaderReportGenerator:
             from _r68_build_label import apply_word_footer as _r68_apply_word_footer  # noqa: PLC0415
             _r68_apply_word_footer(self.doc)
         except Exception as _r68_err:  # noqa: BLE001
-            logger.debug("Round 68 / A1: Leader word footer skipped: %s", _r68_err)
+            # Round 73 / Phase 1 (F1): promoted to warning so the next
+            # missing-footer regression surfaces in the admin error log
+            # instead of hiding under the default debug threshold.
+            logger.warning("Round 68 / A1: Leader word footer skipped: %s", _r68_err)
         self.doc.save(str(filepath))
         logger.info(f"Leader report saved to: {filepath}")
         return self.doc, str(filepath), team_data, direct_reports
@@ -7854,7 +7857,11 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                 from _r68_build_label import apply_word_footer as _r68_apply_word_footer
                 _r68_apply_word_footer(generator.doc)
             except Exception as _r68_err:
-                logger.debug("Round 70 / Phase 4: post-TAC leader word footer skipped: %s", _r68_err)
+                # Round 73 / Phase 1 (F1): promoted to warning so the
+                # next missing-footer regression surfaces in the admin
+                # error log instead of hiding under the default debug
+                # threshold.
+                logger.warning("Round 70 / Phase 4: post-TAC leader word footer skipped: %s", _r68_err)
             generator.doc.save(filepath)
 
             logger.info(f"Leader report regenerated with TAC cases and validation (filtered to last {days} days)")
@@ -7911,7 +7918,11 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                 from _r68_build_label import apply_word_footer as _r68_apply_word_footer
                 _r68_apply_word_footer(generator.doc)
             except Exception as _r68_err:
-                logger.debug("Round 70 / Phase 4: no-TAC leader word footer skipped: %s", _r68_err)
+                # Round 73 / Phase 1 (F1): promoted to warning so the
+                # next missing-footer regression surfaces in the admin
+                # error log instead of hiding under the default debug
+                # threshold.
+                logger.warning("Round 70 / Phase 4: no-TAC leader word footer skipped: %s", _r68_err)
             generator.doc.save(filepath)
 
             logger.info(f"Leader report updated with validation section")

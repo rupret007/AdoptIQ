@@ -150,9 +150,34 @@ def apply_word_footer(doc) -> bool:
     """Attach a small right-aligned build label to every section footer.
 
     Returns ``True`` on success and ``False`` on any failure (logged at
-    debug -- *never* raises).  Idempotent: if a section already carries the
-    AdoptIQ build-label run, the helper skips it so a re-save does not
-    duplicate the line.
+    warning -- *never* raises).  Idempotent: if a section already carries
+    the AdoptIQ build-label run, the helper skips it so a re-save does
+    not duplicate the line.
+
+    Round 73 / Phase 1 (F1) hardening:
+
+    * Explicitly clear ``section.footer.is_linked_to_previous`` so a
+      multi-section document with one section linked-to-previous cannot
+      hide the label by inheriting an unstamped footer from an earlier
+      section.
+    * Explicitly clear ``section.different_first_page_header_footer`` so
+      a document with a special first-page footer (the executive
+      intelligence formatter sets one) does not silently route the
+      label into the unused per-section default while the rendered
+      first page stays unstamped.
+    * When the footer's first paragraph already exists but carries no
+      runs, force ``footer.add_paragraph()`` instead of reusing the
+      empty paragraph -- some python-docx versions silently no-op
+      ``.text = ""`` followed by ``.add_run(...)`` on a linked-empty
+      paragraph, which would leave the rendered footer blank even
+      though our test asserts the run was added.
+    * Wrap each section-level setter in its own try/except so a single
+      python-docx API drift cannot cascade into "no sections stamped"
+      -- worst case a partially-stamped document still beats an
+      entirely unstamped one.
+    * Promote the outer swallow log from ``debug`` to ``warning`` so
+      the next regression surfaces in the admin error log instead of
+      hiding under the default debug threshold.
     """
 
     try:
@@ -164,6 +189,26 @@ def apply_word_footer(doc) -> bool:
         label = get_build_label_text()
         sentinel_prefix = "AdoptIQ v"
         for section in doc.sections:
+            # Round 73 / Phase 1 (F1): clear inheritance flags BEFORE we
+            # read ``section.footer`` so the footer object we touch is
+            # the section's own and not a linked reference.  Each setter
+            # is wrapped so a python-docx version that raises on the
+            # write does not abort the whole stamping pass.
+            try:
+                section.footer.is_linked_to_previous = False
+            except Exception as _link_err:  # noqa: BLE001
+                logger.debug(
+                    "Round 73 / F1: clear is_linked_to_previous skipped (%s)",
+                    _link_err,
+                )
+            try:
+                section.different_first_page_header_footer = False
+            except Exception as _first_err:  # noqa: BLE001
+                logger.debug(
+                    "Round 73 / F1: clear different_first_page_header_footer skipped (%s)",
+                    _first_err,
+                )
+
             footer = section.footer
             already = False
             for para in footer.paragraphs:
@@ -172,10 +217,20 @@ def apply_word_footer(doc) -> bool:
                     break
             if already:
                 continue
-            # Re-use the first existing footer paragraph if present (avoids
-            # an empty leading line that python-docx adds by default).
-            target_para = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
-            target_para.text = ""
+            # Round 73 / Phase 1 (F1): if the footer carries an existing
+            # paragraph but it has zero runs, treat it as an unhealthy
+            # linked-empty paragraph and add a fresh one instead -- some
+            # python-docx versions silently no-op ``.text = ""`` followed
+            # by ``.add_run(...)`` on such a paragraph.  When the first
+            # paragraph already has a run we reuse it (preserves the R68
+            # behaviour of avoiding an empty leading line python-docx
+            # would otherwise add).
+            existing_paragraphs = list(footer.paragraphs)
+            if existing_paragraphs and existing_paragraphs[0].runs:
+                target_para = existing_paragraphs[0]
+                target_para.text = ""
+            else:
+                target_para = footer.add_paragraph()
             target_para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
             run = target_para.add_run(label)
             run.font.size = Pt(7)
@@ -183,7 +238,12 @@ def apply_word_footer(doc) -> bool:
             run.font.italic = True
         return True
     except Exception as exc:  # noqa: BLE001
-        logger.debug("Round 68 / A1: word footer skipped (%s)", exc)
+        # Round 73 / Phase 1 (F1): promoted from debug to warning -- a
+        # missing footer means the operator's report has lost the
+        # stale-binary trap detection mechanism, which is the single
+        # most expensive class of audit bug we have shipped (Build 41,
+        # Build 43, Build 46).  The next regression must be loud.
+        logger.warning("Round 68 / A1: word footer skipped (%s)", exc)
         return False
 
 
@@ -203,13 +263,23 @@ def append_build_label_records(records: list, *, key_field: str = "Item", value_
 
 
 def append_build_label_records_4col(records: list) -> None:
-    """Append build label rows in the Leader writer's 4-column shape
-    (``Field, Value, Detail, Generated_At``)."""
+    """Append build label rows in the Leader writer's 4-column shape.
+
+    Round 73 / Phase 3 (F6): the first column is now the canonical ``Item``
+    header (was ``Field`` pre-R73).  The Leader writer keeps its 4-column
+    legacy shape (``Item / Value / Detail / Generated_At``) -- the extra
+    Detail and Generated_At slots carry per-row provenance the other
+    writers don't need -- but the FIRST TWO columns now match the
+    canonical Compact / Renewal / Comprehensive ``Item / Value`` schema
+    so a downstream consumer running
+    ``pd.read_excel("Report_Info")[["Item", "Value"]]`` gets the same
+    projection across every report format.
+    """
 
     try:
         for item, value in get_build_label_rows():
             records.append({
-                "Field": item,
+                "Item": item,
                 "Value": value,
                 "Detail": None,
                 "Generated_At": None,

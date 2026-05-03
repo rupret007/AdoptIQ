@@ -95,8 +95,12 @@ def test_append_records_uses_item_value_keys(label_helper):
         assert set(r.keys()) == {"Item", "Value"}
 
 
-def test_append_records_supports_field_value_keys(label_helper):
-    """The Renewal writer uses ``Field, Value`` instead of ``Item, Value``."""
+def test_append_records_supports_custom_key_value_field_names(label_helper):
+    """The helper accepts custom key/value field names for back-compat with
+    legacy callers.  Round 73 / Phase 3 (F6) standardized ALL writers on
+    the canonical ``Item / Value`` schema, but the helper still honours an
+    explicit ``key_field=`` override so a downstream consumer can pin a
+    custom shape if needed."""
 
     records: list = []
     label_helper.append_build_label_records(
@@ -108,11 +112,19 @@ def test_append_records_supports_field_value_keys(label_helper):
 
 
 def test_append_records_4col_matches_leader_schema(label_helper):
+    """Round 73 / Phase 3 (F6): the Leader writer's 4-col Report_Info
+    schema now uses the canonical ``Item`` first-column header (was
+    ``Field`` pre-R73) so a downstream consumer running
+    ``pd.read_excel("Report_Info")[["Item", "Value"]]`` gets the same
+    projection across Compact / Renewal / Comprehensive / Leader.  The
+    extra ``Detail`` and ``Generated_At`` columns carry per-row
+    provenance the Leader writer needs but the other formats don't."""
+
     records: list = []
     label_helper.append_build_label_records_4col(records)
     assert len(records) == 4
     for r in records:
-        assert set(r.keys()) == {"Field", "Value", "Detail", "Generated_At"}
+        assert set(r.keys()) == {"Item", "Value", "Detail", "Generated_At"}
         # Detail / Generated_At are placeholders (None) so they don't
         # collide with the per-row content the leader writer emits.
         assert r["Detail"] is None
@@ -210,8 +222,9 @@ def test_compact_xlsx_writer_calls_build_label_helper():
 def test_renewal_xlsx_writer_calls_build_label_helper():
     body = _read_text("app_simple.py")
     assert "Renewal build label skipped" in body
-    # Renewal uses the ``Field, Value`` schema.
-    assert "key_field='Field'" in body or 'key_field="Field"' in body
+    # Round 73 / Phase 3 (F6): Renewal Report_Info now uses the canonical
+    # ``Item, Value`` schema (was ``Field, Value`` pre-R73).
+    assert "key_field='Item'" in body or 'key_field="Item"' in body
 
 
 def test_leader_xlsx_writer_calls_build_label_helper():

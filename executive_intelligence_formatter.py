@@ -1503,7 +1503,11 @@ class ExecutiveIntelligenceFormatter:
                 _r68_apply_word_footer(self.doc)
             except Exception as _r68_err:  # noqa: BLE001
                 import logging as _r68_logging
-                _r68_logging.getLogger(__name__).debug(
+                # Round 73 / Phase 1 (F1): promoted to warning so the
+                # next missing-footer regression surfaces in the admin
+                # error log instead of hiding under the default debug
+                # threshold.
+                _r68_logging.getLogger(__name__).warning(
                     "Round 68 / A1: executive_intelligence word footer skipped: %s", _r68_err,
                 )
             self.doc.save(save_path)

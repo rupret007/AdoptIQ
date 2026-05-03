@@ -256,7 +256,8 @@ def _write_renewal_xlsx_fixture(path: Path) -> None:
     key_metrics.append([15, "High", 90, "Sample"])
 
     info = workbook.create_sheet("Report_Info")
-    info.append(["Field", "Value"])
+    # Round 73 / Phase 3 (F6): canonical Item/Value header (was Field/Value pre-R73).
+    info.append(["Item", "Value"])
     info.append(["Report_Type", "renewal_portfolio"])
     info.append(["Customer_Name", "Portfolio Wide"])
     info.append(["Technology", "All Contact Center"])
@@ -347,7 +348,9 @@ def _write_leader_xlsx_fixture(path: Path) -> None:
         sheet.append(list(row))
 
     info = workbook.create_sheet("Report_Info")
-    info.append(["Field", "Value", "Detail", "Generated_At"])
+    # Round 73 / Phase 3 (F6): canonical Item/Value/Detail/Generated_At header
+    # (was Field/Value/Detail/Generated_At pre-R73).
+    info.append(["Item", "Value", "Detail", "Generated_At"])
     info.append(["Status", "completed", "", "2026-04-29T00:00:00Z"])
     info.append(["Manager", "Brian Frazier", "", ""])
     info.append(["Days", 90, "", ""])

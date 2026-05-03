@@ -566,6 +566,27 @@ def inject_source_citations_into_docx(
         text = (paragraph.text or "").strip()
         if not text:
             continue
+        # Round 73 / Phase 2 (F5): never inject ``[Source: ...]`` chrome
+        # into Heading / Title style paragraphs.  Build 46 acceptance
+        # surfaced two real Comprehensive headings whose text matched
+        # the canonical KPI regex -- e.g. ``"Top 10 Customer Risk
+        # Profiles"`` -- and the injector appended a trailing
+        # ``[Source: AdoptIQ Report Data Sources]`` after the heading,
+        # producing a deeply ugly section title in the rendered Word
+        # report.  Citations belong in body paragraphs only; the heading
+        # establishes the section context, the body carries the
+        # numeric claims that need source-backing.  Defensive against
+        # python-docx versions that don't expose ``.style.name`` (older
+        # API surface) -- failure to introspect is treated as a body
+        # paragraph (preserves the pre-R73 behaviour for unknown
+        # paragraph types).
+        try:
+            style_name = (paragraph.style.name if paragraph.style else "") or ""
+        except Exception:  # noqa: BLE001
+            style_name = ""
+        if style_name.startswith("Heading") or style_name == "Title":
+            counts["skipped_no_numeric"] += 1
+            continue
         if _SOURCE_TOKEN_RE.search(text):
             counts["skipped_already_cited"] += 1
             continue

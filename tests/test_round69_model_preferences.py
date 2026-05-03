@@ -364,16 +364,22 @@ def test_r69_post_settings_ask_ai_model_persists_valid_value(client, monkeypatch
 
 
 def test_r69_post_settings_report_model_persists_valid_value(client, monkeypatch, tmp_path):
-    """Mirror test for the report endpoint."""
+    """Mirror test for the report endpoint.
+
+    Round 73 / UX-3: the POST endpoint now enforces a strict 2-entry
+    allow-list (``gpt-5-nano`` and ``gemini-3.1-flash-lite``).  The
+    pre-R73 value ``gpt-4o-mini`` -- which was a free-form-ish R69 fixture
+    -- is no longer accepted.  Updated to a R73-allowed value.
+    """
     import adoptiq_settings as _s
     monkeypatch.setattr(_s, "_app_support_dir", lambda: tmp_path)
     rv = client.post("/api/settings/report-model",
-                     json={"model_name": "gpt-4o-mini"})
+                     json={"model_name": "gpt-5-nano"})
     assert rv.status_code == 200
     data = rv.get_json()
-    assert data["persisted_value"] == "gpt-4o-mini"
+    assert data["persisted_value"] == "gpt-5-nano"
     on_disk = json.loads((tmp_path / "settings.json").read_text())
-    assert on_disk["report_model_name"] == "gpt-4o-mini"
+    assert on_disk["report_model_name"] == "gpt-5-nano"
 
 
 def test_r69_post_settings_rejects_invalid_model_name_with_400(client, monkeypatch, tmp_path):
@@ -386,11 +392,15 @@ def test_r69_post_settings_rejects_invalid_model_name_with_400(client, monkeypat
 
 
 def test_r69_post_settings_accepts_empty_string_to_clear_override(client, monkeypatch, tmp_path):
+    """Round 73 / UX-3: persist via a R73-allow-listed value, then clear."""
     import adoptiq_settings as _s
     monkeypatch.setattr(_s, "_app_support_dir", lambda: tmp_path)
-    # First persist a value
-    client.post("/api/settings/ask-ai-model", json={"model_name": "gpt-4o-mini"})
-    # Then clear it
+    persisted = client.post("/api/settings/ask-ai-model",
+                            json={"model_name": "gpt-5-nano"})
+    assert persisted.status_code == 200, (
+        "Round 73 / UX-3: persist with allow-listed model must succeed; "
+        f"got {persisted.status_code}"
+    )
     rv = client.post("/api/settings/ask-ai-model", json={"model_name": ""})
     assert rv.status_code == 200
     assert rv.get_json()["persisted_value"] == ""
@@ -493,15 +503,46 @@ def test_r69_admin_proxy_routes_register():
 
 
 def test_r69_ask_ai_template_carries_model_card_and_js_hook():
+    """Round 73 / Phase 4 (UX-2): the inline Ask AI model picker card
+    that R69 originally pinned on /ask-ai has been moved to the
+    dedicated /preferences hub.  This test now pins the OPPOSITE
+    contract -- the inline card MUST NOT live on /ask-ai any more --
+    so a future revert that re-introduces the inline picker fails the
+    R73 / UX-2 source-shape contract.  The R69 functional contract
+    (Test-gates-Save, /api/settings/ask-ai-model persistence) still
+    holds; it is now exercised on /preferences instead and pinned
+    by tests/test_round73_preferences_page_route.py."""
     src = (PROJECT_ROOT / "templates" / "ask_ai.html").read_text()
-    assert 'data-r69-model-card="ask_ai"' in src
-    assert "r69_model_preferences.js" in src
+    assert 'data-r69-model-card="ask_ai"' not in src, (
+        "Round 73 / UX-2: inline Ask AI model card still on ask_ai.html "
+        "-- it must live only on the /preferences hub"
+    )
+    # The shared JS module is no longer loaded on the ask-ai page
+    # (no card to wire); pin the actual url_for('static', filename=...)
+    # load gone rather than the substring (the explanatory comment
+    # block intentionally names the dropped file once for grep
+    # discoverability).
+    assert "filename='js/r69_model_preferences.js'" not in src, (
+        "Round 73 / UX-2: stale r69_model_preferences.js script tag on "
+        "ask_ai.html -- the page no longer carries any model picker"
+    )
 
 
 def test_r69_analyze_template_carries_model_card_and_js_hook():
+    """Round 73 / Phase 4 (UX-2): same contract as the ask-ai test
+    above, applied to the /analyze (index) page.  Pre-R73 the inline
+    report-narrative model picker lived above the analysis form;
+    R73 / UX-2 lifts it to /preferences so the analyze surface stays
+    focused on the analysis workflow."""
     src = (PROJECT_ROOT / "templates" / "analyze.html").read_text()
-    assert 'data-r69-model-card="report"' in src
-    assert "r69_model_preferences.js" in src
+    assert 'data-r69-model-card="report"' not in src, (
+        "Round 73 / UX-2: inline report-narrative model card still on "
+        "analyze.html -- it must live only on the /preferences hub"
+    )
+    assert "filename='js/r69_model_preferences.js'" not in src, (
+        "Round 73 / UX-2: stale r69_model_preferences.js script tag on "
+        "analyze.html -- the page no longer carries any model picker"
+    )
 
 
 def test_r69_shared_js_module_exists_and_wires_test_gates_save():

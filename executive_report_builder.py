@@ -230,7 +230,10 @@ class ExecutiveReportBuilder:
             from _r68_build_label import apply_word_footer as _r68_apply_word_footer
             _r68_apply_word_footer(self.doc)
         except Exception as _r68_err:
-            logger.debug("Round 70 / Phase 1: ExecutiveReportBuilder word footer skipped: %s", _r68_err)
+            # Round 73 / Phase 1 (F1): promoted to warning so the next
+            # missing-footer regression surfaces in the admin error log
+            # instead of hiding under the default debug threshold.
+            logger.warning("Round 70 / Phase 1: ExecutiveReportBuilder word footer skipped: %s", _r68_err)
 
         self.doc.save(path)
 

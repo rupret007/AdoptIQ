@@ -6,7 +6,10 @@
  * settings.json.
  *
  * Required descendants of the card element:
- *   * [data-r69-model-input]   - text input for the model name
+ *   * [data-r69-model-input]   - <input type="text"> OR <select>
+ *                                 carrying the model name (Round 73
+ *                                 UX-3 introduced the <select> form
+ *                                 with a strict 2-option allow-list)
  *   * [data-r69-test-btn]      - "Test" button (clicks /api/llm/ping)
  *   * [data-r69-save-btn]      - "Save" button (clicks /api/settings/{ask-ai,report}-model)
  *   * [data-r69-result]        - aria-live region for status messages
@@ -14,19 +17,21 @@
  *
  * Contract:
  *   * Save is initially disabled.
- *   * Any input change locks Save again so a previously-passed Test
- *     cannot be promoted with a new (untested) value.
- *   * Test enables Save IFF the server returns {ok: true} OR the input
- *     is empty (empty == clear override).
- *   * Save POSTs the trimmed value and refreshes the active badge from
- *     the server's response so the operator sees which precedence
+ *   * Any input/selection change locks Save again so a previously-
+ *     passed Test cannot be promoted with a new (untested) value.
+ *     Both ``input`` and ``change`` are bound so the contract holds
+ *     for the legacy <input> AND the R73 <select> form.
+ *   * Test enables Save IFF the server returns {ok: true} OR the
+ *     value is empty (empty == clear override).
+ *   * Save POSTs the trimmed value and refreshes the active badge
+ *     from the server's response so the operator sees which precedence
  *     layer is currently winning (settings > env > config default).
  *
- * Loaded by templates/ask_ai.html (Ask AI surface) and
- * templates/analyze.html (Report surface).  The admin console
- * (enhanced_admin_dashboard_v2.py) carries its own inline copy of the
- * same logic because the admin template renders inline (no static
- * asset chain).
+ * Loaded by templates/preferences.html (Round 73 / UX-1 -- both
+ * Ask AI and Report cards live there now).  The admin console
+ * (enhanced_admin_dashboard_v2.py) carries its own inline copy of
+ * the same logic because the admin template renders inline (no
+ * static asset chain).
  */
 
 (function () {
@@ -70,7 +75,34 @@
             .then(function (j) {
                 if (!j || !j.ok) return;
                 var input = card.querySelector('[data-r69-model-input]');
-                if (input) input.value = j.persisted_value || '';
+                if (input) {
+                    var persisted = j.persisted_value || '';
+                    /* Round 73 / UX-3: when the input is a <select>
+                       and the persisted value is not one of the
+                       declared options, assigning .value is a silent
+                       no-op (the dropdown stays on its first option)
+                       which would mislead the operator.  Detect that
+                       case and leave the dropdown unchanged but log
+                       so the active-badge below still surfaces the
+                       truth from j.active_value. */
+                    if (input.tagName === 'SELECT') {
+                        var matched = false;
+                        for (var i = 0; i < input.options.length; i++) {
+                            if (input.options[i].value === persisted) {
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if (matched || persisted === '') {
+                            input.value = persisted;
+                        }
+                        /* If unmatched: leave selection alone; the
+                           active badge will display the persisted
+                           legacy value. */
+                    } else {
+                        input.value = persisted;
+                    }
+                }
                 setActiveBadge(card, j.active_value);
             })
             .catch(function () { /* silent: read path is best-effort */ });
@@ -86,13 +118,19 @@
         var saveBtn = card.querySelector('[data-r69-save-btn]');
         if (!input || !testBtn || !saveBtn) return;
 
-        // Any input change locks Save until next successful Test.  This is
-        // the regression guard against "tested 'gpt-5-nano' then typo'd
-        // and saved" scenarios.
-        input.addEventListener('input', function () {
+        // Any input/selection change locks Save until next successful
+        // Test.  This is the regression guard against "tested
+        // 'gpt-5-nano' then typo'd and saved" scenarios.  Both
+        // ``input`` and ``change`` are bound so the contract holds for
+        // the legacy <input type="text"> form AND the Round 73 / UX-3
+        // <select> form (some browsers fire only ``change`` on a
+        // <select> selection, not ``input``).
+        var lockSave = function () {
             saveBtn.disabled = true;
             setResult(card, '', 'neutral');
-        });
+        };
+        input.addEventListener('input', lockSave);
+        input.addEventListener('change', lockSave);
 
         testBtn.addEventListener('click', function () {
             var value = (input.value || '').trim();

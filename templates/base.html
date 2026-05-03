@@ -1242,6 +1242,20 @@
                             <i class="fas fa-question-circle me-1"></i>Help
                         </a>
                     </li>
+                    {# Round 73 / Phase 4 (UX-1): dedicated /preferences
+                       hub.  Pre-R73 the LLM model pickers lived inline
+                       on /analyze and /ask-ai; the new page consolidates
+                       both pickers + the Intelligence toggle.  Same
+                       endpoint name as the Flask route so the
+                       ``request.endpoint == 'preferences'`` highlight
+                       lights up when the user is on the page. #}
+                    <li class="nav-item">
+                        <a class="nav-link{% if request.endpoint == 'preferences' %} active{% endif %}"
+                           href="{{ url_for('preferences') }}"
+                           title="AdoptIQ application preferences (AI model selection, Intelligence toggle, theme)">
+                            <i class="fas fa-sliders-h me-1"></i>Preferences
+                        </a>
+                    </li>
                     {# Round 32 / Phase 2.D: link to the in-process Admin
                        Console (Flask app on 127.0.0.1:5152, started by
                        app_simple._start_admin_server_in_thread()).

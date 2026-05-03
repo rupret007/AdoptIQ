@@ -475,6 +475,21 @@ from report_export_styling import apply_excel_polish as _r16_apply_excel_polish
 # the full algorithm + idempotency guarantees.
 from report_source_injector import inject_source_citations_into_docx as _r57_inject_source_citations
 
+# Round 73 / Phase 1 (F1): top-level import of the build-label helper
+# module so PyInstaller's static analyser sees it (defense layer 2 on
+# top of the explicit ``hidden_imports`` pin in ``adoptiq_mac.spec`` /
+# ``adoptiq_pc.spec``).  Every Word writer in the codebase loads
+# ``apply_word_footer`` via a lazy ``from _r68_build_label import ...``
+# inside a try/except block; PyInstaller does NOT follow lazy imports
+# inside function bodies so a missing top-level reference + missing
+# ``hidden_imports`` pin produces a frozen build that silently ships
+# every .docx without the v{VER} build {N} footer (Build 46 acceptance:
+# 0/4 docx artifacts carried ``word/footer1.xml``).  This import is
+# intentionally a side-effect-only reference; the actual call sites
+# keep their lazy import pattern to preserve their defensive try/except
+# behaviour around python-docx API drift.
+import _r68_build_label as _r73_build_label_pyinstaller_pin  # noqa: F401
+
 
 def _r57_inject_citations_safe(docx_path: Optional[str], scenario_key: str) -> None:
     """Best-effort wrapper around ``inject_source_citations_into_docx``.
@@ -7612,7 +7627,10 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         from _r68_build_label import apply_word_footer as _r68_apply_word_footer
         _r68_apply_word_footer(doc)
     except Exception as _r68_err:
-        logger.debug("Round 70 / Phase 1: Compact enhanced fallback word footer skipped: %s", _r68_err)
+        # Round 73 / Phase 1 (F1): promoted to warning so the next
+        # missing-footer regression surfaces in the admin error log
+        # instead of hiding under the default debug threshold.
+        logger.warning("Round 70 / Phase 1: Compact enhanced fallback word footer skipped: %s", _r68_err)
 
     # Save
     output_path = f"{base_path}_enhanced.docx"
@@ -12966,7 +12984,10 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         from _r68_build_label import apply_word_footer as _r68_apply_word_footer
         _r68_apply_word_footer(doc)
     except Exception as _r68_err:
-        logger.debug("Round 70 / Phase 1: Renewal simple word footer skipped: %s", _r68_err)
+        # Round 73 / Phase 1 (F1): promoted to warning so the next
+        # missing-footer regression surfaces in the admin error log
+        # instead of hiding under the default debug threshold.
+        logger.warning("Round 70 / Phase 1: Renewal simple word footer skipped: %s", _r68_err)
 
     # Save
     word_path = f"{base_path}_Renewal_Report.docx"
@@ -14471,22 +14492,33 @@ def run_customer_renewal_analysis(analysis_id):
                 _ren_pdw = _pdw_src
         except Exception:
             _ren_pdw = []
+        # Round 73 / Phase 3 (F6): standardize Renewal Report_Info on the
+        # canonical ``Item/Value`` 2-col schema (was ``Field/Value`` pre-R73).
+        # Comprehensive already used Item/Value via
+        # ``adoptiq_backend.write_excel_workbook`` (R66/B5); Compact already
+        # used Item/Value (R65/R-1).  Renewal was the lone holdout, which
+        # broke downstream consumers (and the Build 46 audit harness) that
+        # ran ``pd.read_excel(name)['Item']`` and got a KeyError on the
+        # Renewal workbook.  Migration is silent (no admin/UI surface
+        # changed) and the build-label helper invocation below switches
+        # in lockstep.
         _report_info_rows = [
-            {'Field': 'Report_Type', 'Value': str(renewal_type or 'renewal')},
-            {'Field': 'Customer_Name', 'Value': str(customer_name_for_report)},
-            {'Field': 'Technology', 'Value': str(technology or 'n/a')},
-            {'Field': 'Manager', 'Value': str(manager or 'n/a')},
-            {'Field': 'Days', 'Value': str(days)},
-            {'Field': 'Analysis_Id', 'Value': str(analysis_id)},
-            {'Field': 'Generated_At_UTC', 'Value': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')},
-            {'Field': 'Partial_Data_Warning_Count', 'Value': str(len(_ren_pdw))},
+            {'Item': 'Report_Type', 'Value': str(renewal_type or 'renewal')},
+            {'Item': 'Customer_Name', 'Value': str(customer_name_for_report)},
+            {'Item': 'Technology', 'Value': str(technology or 'n/a')},
+            {'Item': 'Manager', 'Value': str(manager or 'n/a')},
+            {'Item': 'Days', 'Value': str(days)},
+            {'Item': 'Analysis_Id', 'Value': str(analysis_id)},
+            {'Item': 'Generated_At_UTC', 'Value': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')},
+            {'Item': 'Partial_Data_Warning_Count', 'Value': str(len(_ren_pdw))},
         ]
-        # Round 68 / Build 42 (A1): build label so the Renewal XLSX
-        # carries App_Version / App_Build / Process_Started_At_UTC /
-        # Report_Generated_At_UTC -- closes the stale-binary trap.
+        # Round 68 / Build 42 (A1) + Round 73 / Phase 3 (F6): build label
+        # rows now use the canonical ``Item/Value`` keys -- the Renewal
+        # XLSX still carries App_Version / App_Build / Process_Started_At_UTC
+        # / Report_Generated_At_UTC, just under the standardized header.
         try:
             from _r68_build_label import append_build_label_records as _r68_append_records  # noqa: PLC0415
-            _r68_append_records(_report_info_rows, key_field='Field', value_field='Value')
+            _r68_append_records(_report_info_rows, key_field='Item', value_field='Value')
         except Exception as _r68_err:  # noqa: BLE001
             logger.debug("Round 68 / A1: Renewal build label skipped: %s", _r68_err)
         if _ren_pdw:
@@ -14496,7 +14528,7 @@ def run_customer_renewal_analysis(analysis_id):
                     _kind = (_w.get('kind') if isinstance(_w, dict) else None) or 'n/a'
                     _err = (_w.get('error') if isinstance(_w, dict) else str(_w))
                     _report_info_rows.append({
-                        'Field': f'Partial_Data_Warning_{_i}',
+                        'Item': f'Partial_Data_Warning_{_i}',
                         'Value': f'{_ds} | {_kind} | {str(_err)[:200]}'
                     })
                 except Exception:
@@ -14518,7 +14550,7 @@ def run_customer_renewal_analysis(analysis_id):
             'Key_Metrics',
         ):
             _report_info_rows.append({
-                'Field': f'Sheet_Title:{_ren_sn}',
+                'Item': f'Sheet_Title:{_ren_sn}',
                 'Value': f"{_ren_sn.replace('_', ' ')} - {customer_name_for_report} Renewal Analysis",
             })
         report_info_df = pd.DataFrame(_report_info_rows)
@@ -19153,6 +19185,98 @@ def help():
     """Help page"""
     return render_template('help.html')
 
+
+# ---------------------------------------------------------------------------
+# Round 73 / Phase 4 (UX-1): dedicated /preferences page
+# ---------------------------------------------------------------------------
+#
+# Pre-R73 the LLM model pickers lived inline on /analyze (report
+# narrative model card) and /ask-ai (Ask AI model card), forcing the
+# operator to remember which surface owned which knob.  This route
+# consolidates both pickers + the Intelligence enable toggle on a
+# single dedicated settings hub so the analyze and ask-ai surfaces
+# can stay focused on their primary task.
+#
+# Read-only GET; persistence still flows through the existing
+# /api/settings/{intelligence,ask-ai-model,report-model} POST handlers
+# (which already enforce CSRF + the strict allow-list contract).
+# Locale-of-truth values for the storage paths block are sourced from
+# adoptiq_settings + corpus_bootstrap so the displayed paths track the
+# actual on-disk locations rather than baking a literal copy of the
+# resolution rule.
+
+@app.route('/preferences', methods=['GET'])
+def preferences():
+    """Render the AdoptIQ Preferences page (Round 73 / UX-1).
+
+    Consolidates the operator-flippable settings surfaces:
+      * Report narrative model preference (``report_model_name``)
+      * Ask AI model preference (``ask_ai_model_name``)
+      * Intelligence enable toggle (``corpus_knowledge_enabled``)
+
+    Mirrors the read-only context shape used by ``index()`` so the
+    intel-banner toggle on this page stays in sync with the analyze-
+    page banner without round-tripping through /api/intel/status.
+    """
+    # Mirror the analyze-page intel_status seed so the Intelligence
+    # toggle on this page renders with the correct checked/unchecked
+    # state on first paint.  Failures here MUST never break the page;
+    # the template's `{% if intel_status and intel_status.enabled %}`
+    # branch handles missing context.
+    intel_status_ctx: Optional[Dict[str, Any]] = None
+    try:
+        intel_status_ctx = _r17_corpus_status_payload()
+    except Exception as _intel_err:  # noqa: BLE001 - never break / on render
+        logger.debug(
+            "Round 73 / UX-1: intel_status seed failed: %s",
+            type(_intel_err).__name__,
+        )
+        intel_status_ctx = None
+
+    # Resolve the on-disk paths the page surfaces in the "Local
+    # Storage" section so the operator knows exactly which file to
+    # edit (or ask support to inspect) when something looks wrong.
+    # Each lookup is wrapped so a missing module / path resolution
+    # failure never breaks the page -- the template renders ``-`` for
+    # any path we cannot resolve.
+    settings_path_str = "-"
+    try:
+        import adoptiq_settings as _settings
+        settings_path_str = str(_settings._settings_path())
+    except Exception as _set_err:  # noqa: BLE001
+        logger.debug(
+            "Round 73 / UX-1: settings path resolution failed: %s",
+            type(_set_err).__name__,
+        )
+
+    outputs_dir_str = "-"
+    try:
+        outputs_dir_str = str(_APP_SUPPORT / "outputs")
+    except Exception as _out_err:  # noqa: BLE001
+        logger.debug(
+            "Round 73 / UX-1: outputs dir resolution failed: %s",
+            type(_out_err).__name__,
+        )
+
+    corpus_dir_str = "-"
+    try:
+        from corpus_bootstrap import _user_corpus_dir as _r73_user_corpus_dir
+        corpus_dir_str = str(_r73_user_corpus_dir())
+    except Exception as _corpus_err:  # noqa: BLE001
+        logger.debug(
+            "Round 73 / UX-1: corpus dir resolution failed: %s",
+            type(_corpus_err).__name__,
+        )
+
+    return render_template(
+        'preferences.html',
+        intel_status=intel_status_ctx,
+        settings_path=settings_path_str,
+        outputs_dir=outputs_dir_str,
+        corpus_dir=corpus_dir_str,
+    )
+
+
 @app.route('/history')
 def history():
     """Analysis history page — shows report history from audit DB when available."""
@@ -20620,6 +20744,43 @@ def api_settings_intelligence():
 # code path.
 # ---------------------------------------------------------------------------
 
+# Round 73 / Phase 4 (UX-3): strict 2-option allow-list for the UI
+# model pickers.  Pre-R73 the UI accepted any string that passed the
+# loose ``adoptiq_settings.is_valid_model_name`` regex
+# (``[A-Za-z0-9._-]{1,128}``), which let the operator paste literally
+# any CircuIT model id -- including ones their tenant had never
+# provisioned, which then failed at first ``CircuitChatClient`` call.
+# UX-3 narrows the API surface to the two models AdoptIQ is intentionally
+# tested against.  Empty string is intentionally still accepted as the
+# legacy "clear override / fall back to env / config default" sentinel
+# so:
+#   * a hand-edited ``settings.json`` that already carries an
+#     out-of-allow-list value is still loadable (the UI just won't
+#     reflect it as a selected option);
+#   * a power user can still set ``CIRCUIT_MODEL_NAME=...`` in the env
+#     for an unlisted model and the resolver will pick it up -- the
+#     allow-list only constrains the persisted UI value.
+# Future expansion: extend ``_R73_ALLOWED_MODEL_IDS`` with new ids
+# AND add matching ``<option value="...">`` entries on /preferences
+# AND in ``enhanced_admin_dashboard_v2.py``'s admin picker.  All three
+# are pinned by ``tests/test_round73_model_dropdown_allowlist.py``.
+_R73_ALLOWED_MODEL_IDS: frozenset[str] = frozenset({
+    "gpt-5-nano",
+    "gemini-3.1-flash-lite",
+})
+
+
+def _r73_is_in_allowed_model_ids(value: str) -> bool:
+    """Round 73 / Phase 4 (UX-3): True when ``value`` is one of the
+    canonical model ids the UI dropdown exposes.  Empty string is the
+    legacy "unset / clear override" sentinel and is intentionally NOT
+    in the set -- callers MUST short-circuit empty BEFORE calling this
+    helper.  Whitespace is stripped at the call site (in
+    ``_r69_handle_model_setting``) so a value like ``" gpt-5-nano "``
+    still matches; we do NOT strip here so a misuse from a future
+    caller is loud."""
+    return isinstance(value, str) and value in _R73_ALLOWED_MODEL_IDS
+
 
 def _r69_sanitize_llm_error(raw: Any, *, max_len: int = 200) -> str:
     """Round 69 / Build 43: sanitize a CircuIT/LLM error string for echo
@@ -20736,6 +20897,27 @@ def _r69_handle_model_setting(setting_key: str, env_var: str) -> Any:
             "ok": False,
             "error": "invalid_model_name",
             "detail": "Allowed: 1-128 chars, [A-Za-z0-9._-] only.  Empty string clears the override.",
+        }), 400
+
+    # Round 73 / Phase 4 (UX-3): narrow the persisted-via-API surface to
+    # the canonical 2-option dropdown contract.  Empty string is still
+    # accepted as the legacy "clear override / fall back to env /
+    # config default" sentinel (see comment on ``_R73_ALLOWED_MODEL_IDS``
+    # for back-compat rationale).  Anything else MUST be in the
+    # frozenset so the UI dropdown and the API stay in lockstep -- a
+    # future expansion to support more models updates the frozenset
+    # AND the dropdown ``<option>`` list AND
+    # ``tests/test_round73_model_dropdown_allowlist.py`` together.
+    if candidate and not _r73_is_in_allowed_model_ids(candidate):
+        return jsonify({
+            "ok": False,
+            "error": "model_not_in_r73_allowlist",
+            "detail": (
+                "Model id is not in the R73 UI dropdown allow-list.  "
+                "Currently supported: " + ", ".join(sorted(_R73_ALLOWED_MODEL_IDS)) + ".  "
+                "Empty string clears the override and falls back to env / config default."
+            ),
+            "allowed_model_ids": sorted(_R73_ALLOWED_MODEL_IDS),
         }), 400
 
     try:
@@ -23813,7 +23995,11 @@ def run_subscription_analysis(analysis_id):
                 from _r68_build_label import apply_word_footer as _r68_apply_word_footer
                 _r68_apply_word_footer(doc)
             except Exception as _r68_err:
-                logger.debug("Round 70 / Phase 1: Subscription word footer skipped: %s", _r68_err)
+                # Round 73 / Phase 1 (F1): promoted to warning so the
+                # next missing-footer regression surfaces in the admin
+                # error log instead of hiding under the default debug
+                # threshold.
+                logger.warning("Round 70 / Phase 1: Subscription word footer skipped: %s", _r68_err)
 
             doc.save(word_path)
 
@@ -25737,14 +25923,23 @@ def run_leader_report_generation(analysis_id):
                                 _leader_pdw = _src
                         except Exception:
                             _leader_pdw = []
+                        # Round 73 / Phase 3 (F6): standardize Leader Report_Info on
+                        # the canonical ``Item`` first-column header (was ``Field`` pre-R73).
+                        # Leader keeps its 4-column legacy schema (``Item / Value / Detail
+                        # / Generated_At``) -- the 4-col shape carries per-row Detail and
+                        # Generated_At slots the other writers don't need -- but the
+                        # FIRST TWO columns are now the canonical ``Item / Value``
+                        # subset so a downstream consumer running
+                        # ``pd.read_excel("Report_Info")[["Item", "Value"]]`` gets the
+                        # same projection as Compact / Renewal / Comprehensive.
                         _info_rows = [
-                            {'Field': 'Status', 'Value': 'PARTIAL' if _failed_sheets else 'OK',
+                            {'Item': 'Status', 'Value': 'PARTIAL' if _failed_sheets else 'OK',
                              'Detail': '', 'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')},
-                            {'Field': 'Manager', 'Value': str(manager or 'n/a'),
+                            {'Item': 'Manager', 'Value': str(manager or 'n/a'),
                              'Detail': '', 'Generated_At': ''},
-                            {'Field': 'Days', 'Value': str(days),
+                            {'Item': 'Days', 'Value': str(days),
                              'Detail': '', 'Generated_At': ''},
-                            {'Field': 'Analysis_Id', 'Value': str(analysis_id),
+                            {'Item': 'Analysis_Id', 'Value': str(analysis_id),
                              'Detail': '', 'Generated_At': ''},
                             # Round 39 / Phase 4.5: count Report_Info
                             # itself as a written sheet so this field
@@ -25753,9 +25948,9 @@ def run_leader_report_generation(analysis_id):
                             # data sheets BEFORE Report_Info was
                             # written, so a workbook with 11 tabs
                             # advertised "Sheets_Written = 10".
-                            {'Field': 'Sheets_Written', 'Value': str(sheets_written + 1),
+                            {'Item': 'Sheets_Written', 'Value': str(sheets_written + 1),
                              'Detail': '', 'Generated_At': ''},
-                            {'Field': 'Partial_Data_Warning_Count', 'Value': str(len(_leader_pdw)),
+                            {'Item': 'Partial_Data_Warning_Count', 'Value': str(len(_leader_pdw)),
                              'Detail': '', 'Generated_At': ''},
                         ]
                         # Round 68 / Build 42 (A1): build label so the
@@ -25793,7 +25988,7 @@ def run_leader_report_generation(analysis_id):
                         # row 0 (consumable via pd.read_excel).
                         for _ldr_sn, _ldr_tt in _r65_leader_sheet_titles:
                             _info_rows.append({
-                                'Field': f'Sheet_Title:{_ldr_sn}',
+                                'Item': f'Sheet_Title:{_ldr_sn}',
                                 'Value': _ldr_tt,
                                 'Detail': '',
                                 'Generated_At': '',

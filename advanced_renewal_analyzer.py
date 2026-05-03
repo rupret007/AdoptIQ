@@ -1699,7 +1699,10 @@ class AdvancedRenewalAnalyzer:
             from _r68_build_label import apply_word_footer as _r68_apply_word_footer  # noqa: PLC0415
             _r68_apply_word_footer(doc)
         except Exception as _r68_err:  # noqa: BLE001
-            logger.debug("Round 68 / A1: Renewal word footer skipped: %s", _r68_err)
+            # Round 73 / Phase 1 (F1): promoted to warning so the next
+            # missing-footer regression surfaces in the admin error log
+            # instead of hiding under the default debug threshold.
+            logger.warning("Round 68 / A1: Renewal word footer skipped: %s", _r68_err)
 
         doc.save(str(filepath))
         logger.info(f"Renewal report saved to: {filepath}")

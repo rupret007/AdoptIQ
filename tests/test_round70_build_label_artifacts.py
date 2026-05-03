@@ -64,12 +64,18 @@ def _word_footer_text(doc) -> str:
 
 
 def _xlsx_report_info_items(out_path: Path, item_col: str = "Item") -> set[str]:
-    """Read the Report_Info sheet and return the set of item-column values."""
+    """Read the Report_Info sheet and return the set of item-column values.
+
+    Round 73 / Phase 3 (F6): Renewal + Leader Report_Info now use the
+    canonical ``Item`` first-column header (was ``Field`` pre-R73).  The
+    legacy ``Field`` fallback is preserved so this helper can still read
+    XLSX artifacts produced by older builds in the OUTBOX.
+    """
 
     pd = pytest.importorskip("pandas")
     df = pd.read_excel(out_path, sheet_name="Report_Info")
     if item_col not in df.columns:
-        # Fallback: the Renewal / Leader writers use ``Field`` instead.
+        # Legacy fallback for pre-R73 XLSX artifacts that used ``Field``.
         for alt in ("Field", "Item"):
             if alt in df.columns:
                 item_col = alt
@@ -261,19 +267,22 @@ def test_compact_xlsx_writer_source_carries_build_label_wiring():
 
 
 def test_renewal_xlsx_writer_source_carries_build_label_wiring():
-    """Renewal xlsx writer uses Field/Value schema."""
+    """Round 73 / Phase 3 (F6): Renewal xlsx Report_Info uses the
+    canonical ``Item / Value`` schema (was ``Field / Value`` pre-R73)."""
 
     body = (PROJECT_ROOT / "app_simple.py").read_text(encoding="utf-8")
     assert "Renewal build label skipped" in body, (
         "Round 70 / #3: Renewal build label wiring missing"
     )
-    assert "key_field='Field', value_field='Value'" in body or "key_field=\"Field\"" in body, (
-        "Round 70 / #3: Renewal build label call must use Field/Value keys"
+    assert "key_field='Item', value_field='Value'" in body or "key_field=\"Item\"" in body, (
+        "Round 73 / F6: Renewal build label call must use Item/Value keys"
     )
 
 
 def test_leader_xlsx_writer_source_carries_build_label_wiring():
-    """Leader xlsx uses the 4-col Field/Value/Detail/Generated_At shape."""
+    """Round 73 / Phase 3 (F6): Leader xlsx keeps the 4-col legacy shape
+    but the FIRST TWO columns are now the canonical ``Item / Value``
+    subset (was ``Field / Value / Detail / Generated_At`` pre-R73)."""
 
     body = (PROJECT_ROOT / "app_simple.py").read_text(encoding="utf-8")
     assert "Leader build label skipped" in body
