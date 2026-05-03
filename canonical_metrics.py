@@ -47,9 +47,17 @@ the table.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import pandas as pd
+
+# Round 71 / Phase 4 (#20): module-local logger for provenance / diagnostic
+# warnings emitted from canonical metric helpers.  Pure functions never
+# do I/O, but we DO log at WARN when a defensive fallback is taken so the
+# operator can correlate the report's surfaced count with WHY it landed
+# on a non-obvious value.
+logger = logging.getLogger(__name__)
 
 from data_normalization import (
     add_case_lifecycle_fields,
@@ -1035,13 +1043,35 @@ def count_open_action_plans(
             None,
         )
         if status_col is None:
-            # No recognizable status column: every row counts as
-            # "currently represented" (we cannot reason about open vs
-            # closed). Same fallback as Compact's pre-Round-30 behavior.
+            # Round 71 / Phase 4 (#20): NO recognizable status column.
+            # Pre-R71 the helper returned ``int(len(ap_df))``, which
+            # over-counted every row as "open" -- a Snowflake export
+            # that had stripped the STATUS_C projection (or a bare
+            # CSConsole sheet missing every status candidate column)
+            # silently inflated the headline KPI to the row total.
+            # Return 0 instead and emit a WARN so the operator can
+            # see the missing-column condition in the analysis log.
+            # The pre-R71 behaviour was a leftover of "Compact's
+            # pre-Round-30 fallback"; with R64/B2 wiring the
+            # ``Action_Plans`` sheet through this helper, the
+            # missing-column condition is now an honest data-quality
+            # signal we should not paper over.
             try:
-                return int(len(ap_df))
+                _r71_known_cols = list(ap_df.columns)[:8]
             except Exception:  # noqa: BLE001
-                return 0
+                _r71_known_cols = []
+            try:
+                logger.warning(
+                    "Round 71 / Phase 4 (#20): count_open_action_plans "
+                    "received a non-empty ap_df with no recognized "
+                    "status column (candidates=%s). Returning 0 to "
+                    "avoid over-counting; first columns=%s",
+                    list(_AP_STATUS_COLUMN_CANDIDATES),
+                    _r71_known_cols,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return 0
         try:
             series = ap_df[status_col].apply(_normalize_ap_status_for_open_check)
         except Exception:  # noqa: BLE001 - defensive against weird mixed dtypes

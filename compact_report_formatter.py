@@ -735,7 +735,15 @@ class CompactReportFormatter:
             if actions:
                 # FIXED: Show ALL actions with appropriate priority
                 for i, action in enumerate(actions, 1):
-                    priority = "🔴 HIGH" if i <= 2 else "🟡 MEDIUM" if i <= 4 else "🟢 LOW"
+                    # Round 71 / Phase 6 (#31): rename the priority
+                    # label MEDIUM -> MODERATE so the Compact
+                    # "Immediate Actions" paragraph carries the same
+                    # user-facing vocabulary contract as the
+                    # ``Risk_Level`` column (R67/B1) and the renewal
+                    # narrative band labels (R70/Phase 3).  The
+                    # internal canonical band key remains MEDIUM in
+                    # ``Risk_Band`` for cross-sheet parity (R67/B6).
+                    priority = "🔴 HIGH" if i <= 2 else "🟡 MODERATE" if i <= 4 else "🟢 LOW"
                     actions_p.add_run(
                         f"{priority} Priority: {_ensure_inline_source_claim(action, 'Derived Metric', fields=['risk_score', 'customer_name'])}\n"
                     )

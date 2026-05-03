@@ -355,7 +355,22 @@ def fetch_action_plans_snowflake(
 
     cur = None
     try:
-        cur = ctx.cursor()
+        # Round 71 / Phase 4 (#21): wrap the raw cursor in the
+        # policy-enforcing proxy so SQL routed through this helper
+        # gets the SAME guard_sql() check as
+        # ``enhanced_snowflake_insights``.  Pre-R71 the helper called
+        # ``ctx.cursor()`` directly and bypassed the table allow-list,
+        # so a future query change here would silently land any
+        # blocked or off-list table at Snowflake without raising
+        # TablePolicyViolation.  Falling back to the raw cursor on
+        # ImportError keeps behaviour identical for any older
+        # deployment that ships without the proxy module.
+        _r71_raw_cur = ctx.cursor()
+        try:
+            from enhanced_snowflake_insights import _PolicyEnforcingCursor as _R71_PolicyCursor
+            cur = _R71_PolicyCursor(_r71_raw_cur, context="leader_fetch_action_plans")
+        except Exception:  # noqa: BLE001
+            cur = _r71_raw_cur
         # Build owner clause via the same helpers the leader generator uses.
         try:
             from adoptiq_backend import (

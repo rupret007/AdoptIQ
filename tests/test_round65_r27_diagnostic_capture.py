@@ -131,9 +131,24 @@ def test_record_grounding_rejection_captures_briefing_and_narrative_excerpts(
     )
     rec = fresh_status["grounding_diagnostics"]["rejection_records"][0]
     assert rec.get("briefing_excerpt"), "briefing_excerpt must be persisted"
-    assert "Acme Corp" in rec["briefing_excerpt"]
+    # Round 71 / Phase 5 (#25): customer names are now redacted from the
+    # excerpt before persistence so the on-disk ``analysis_status.json``
+    # does not echo PII.  The placeholder ``<CUSTOMER>`` token replaces
+    # the raw customer name.  The non-customer briefing payload (ARR,
+    # subscription id, risk score) MUST still be present so Round 66 can
+    # root-cause the rejection rate.
+    assert "Acme Corp" not in rec["briefing_excerpt"], (
+        "Round 71 / Phase 5 (#25): customer name must be redacted from "
+        "briefing_excerpt before persisting to analysis_status.json"
+    )
+    assert "<CUSTOMER>" in rec["briefing_excerpt"]
+    assert "ACME-CCAI-12345" in rec["briefing_excerpt"]  # subscription id retained
     assert rec.get("narrative_excerpt"), "narrative_excerpt must be persisted"
     assert "97%" in rec["narrative_excerpt"]
+    assert "Acme Corp" not in rec["narrative_excerpt"], (
+        "Round 71 / Phase 5 (#25): customer name must be redacted from "
+        "narrative_excerpt before persisting to analysis_status.json"
+    )
     assert len(rec["briefing_excerpt"]) <= 200
     assert len(rec["narrative_excerpt"]) <= 200
 

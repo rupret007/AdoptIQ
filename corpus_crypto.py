@@ -247,6 +247,23 @@ def get_or_create_salt(db_path: Path | str) -> bytes:
                 f"the encrypted corpus to start over."
             )
         # No corpus to brick -- safe to regenerate.
+    # Round 71 / Phase 2 (#13): apply the same fail-loud contract
+    # when the salt file is MISSING but the encrypted corpus DB
+    # already exists on disk.  Pre-R71 a missing salt was silently
+    # regenerated; HKDF over the new salt produces a different AES
+    # key and the existing ``corpus.db.enc`` decrypts to gibberish
+    # (InvalidTag), bricking the install.  This complements the R34/A2
+    # corrupt-salt branch above by closing the missing-salt corner.
+    elif db_p.exists():
+        raise CorpusCryptoError(
+            f"corpus salt at {salt_path} is missing but the encrypted "
+            f"corpus at {db_p} exists; silently regenerating the salt "
+            f"would brick the encrypted corpus (HKDF over a fresh salt "
+            f"produces a different AES key).  Restore the original salt "
+            f"from a backup, or delete BOTH the salt and the encrypted "
+            f"corpus to start over.  The R39 self-heal path on "
+            f"corpus_bootstrap will then reinstall the bake snapshot."
+        )
     salt_path.parent.mkdir(parents=True, exist_ok=True)
     new_salt = secrets.token_bytes(_SALT_BYTES)
     fd = os.open(str(salt_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -358,13 +375,28 @@ class EncryptedCorpusHandle:
         if self._closed:
             raise CorpusCryptoError("handle is closed")
         self.conn.commit()
+        # Round 71 / Phase 2 (#11): the WAL checkpoint failure path
+        # USED to swallow the error and continue with ``read_bytes``,
+        # producing an encrypted artifact that contained only the
+        # 4096-byte SQLite header (because the actual schema + data
+        # pages still lived in the WAL sibling file).  That was the
+        # exact failure mode Round 35 introduced the checkpoint to
+        # close, but the swallow made the failure invisible -- the
+        # operator would see "corpus refresh succeeded" while the
+        # encrypted DB on disk was effectively empty.  Raise
+        # ``CorpusCryptoError`` instead so the caller knows the
+        # snapshot is bad and can preserve the prior good corpus.
         try:
             self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-        except sqlite3.DatabaseError as ckpt_err:  # pragma: no cover
-            logger.debug(
-                "wal_checkpoint failed (%s); main DB may be missing pages",
+        except sqlite3.DatabaseError as ckpt_err:
+            logger.error(
+                "Round 71 / Phase 2 (#11): wal_checkpoint failed (%s); "
+                "refusing to seal a potentially-empty encrypted DB",
                 ckpt_err,
             )
+            raise CorpusCryptoError(
+                f"wal_checkpoint failed: {ckpt_err!s}"
+            ) from ckpt_err
         plaintext = self.plaintext_path.read_bytes()
         sealed = encrypt_bytes(self.key, plaintext)
         # Write to sibling tmp + os.replace for atomicity.

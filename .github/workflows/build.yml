@@ -4,20 +4,27 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version (e.g. 1.0.3)"
+        description: "Version (e.g. 1.0.4); leave blank to use config.py SSoT"
         required: false
-        default: "1.0.3"
+        default: ""
       build_number:
-        description: "Build number"
+        description: "Build number; leave blank to use config.py SSoT"
         required: false
-        default: "1"
+        default: ""
   push:
     tags:
       - "v*"
 
+# Round 71 / Phase 1 (#4): the previous version defaults
+# (``ADOPTIQ_VERSION='1.0.3'`` / ``ADOPTIQ_BUILD='1'``) silently
+# overrode the ``config.py`` SSoT every CI run -- so a 1.0.4/45 build
+# would have shipped DMGs / artifact names labeled ``v1.0.3-build1``.
+# Leave the env empty when the operator did not pass an explicit input;
+# ``update_version_pc.py`` will then preserve whatever ``config.py``
+# already declares (it only rewrites when both env vars are non-empty).
 env:
-  ADOPTIQ_VERSION: ${{ github.event.inputs.version || '1.0.3' }}
-  ADOPTIQ_BUILD: ${{ github.event.inputs.build_number || '1' }}
+  ADOPTIQ_VERSION: ${{ github.event.inputs.version || '' }}
+  ADOPTIQ_BUILD: ${{ github.event.inputs.build_number || '' }}
 
 jobs:
   quality-checks:
@@ -82,10 +89,22 @@ jobs:
           chmod +x build_mac.sh build_mac_dmg.sh
           bash build_mac_dmg.sh
 
+      # Round 71 / Phase 1 (#4): read the resolved version + build out
+      # of config.py SSoT (post-build) so the artifact name reflects
+      # whatever the build actually shipped, regardless of whether the
+      # operator passed explicit env inputs.
+      - name: Resolve build label
+        id: label
+        run: |
+          VERSION=$(python -c "import re; print(re.search(r'ADOPTIQ_VERSION\s*=\s*\"([^\"]+)\"', open('config.py').read()).group(1))")
+          BUILD=$(python -c "import re; print(re.search(r'ADOPTIQ_BUILD\s*=\s*\"([^\"]+)\"', open('config.py').read()).group(1))")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
-          name: AdoptIQ-macOS-v${{ env.ADOPTIQ_VERSION }}-build${{ env.ADOPTIQ_BUILD }}
+          name: AdoptIQ-macOS-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}
           path: OUTBOX/*.dmg
           if-no-files-found: error
 
@@ -136,6 +155,20 @@ jobs:
       - name: Build EXE with PyInstaller
         run: python -m PyInstaller --clean --noconfirm adoptiq_pc.spec
 
+      # Round 71 / Phase 1 (#4): same SSoT-from-config.py read as the
+      # macOS lane (the env vars may be empty if the operator did not
+      # pass explicit inputs; update_version_pc.py preserved config.py
+      # in that case).
+      - name: Resolve build label
+        id: label
+        shell: pwsh
+        run: |
+          $cfg = Get-Content config.py -Raw
+          $version = ($cfg | Select-String -Pattern 'ADOPTIQ_VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $build = ($cfg | Select-String -Pattern 'ADOPTIQ_BUILD\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "build=$build" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       - name: Package OUTBOX
         shell: pwsh
         run: |
@@ -145,14 +178,14 @@ jobs:
           Copy-Item Unblock_AdoptIQ.bat OUTBOX\
           Copy-Item scripts\win\READ_ME_FIRST.txt OUTBOX\
           Copy-Item README.md OUTBOX\
-          "AdoptIQ v${{ env.ADOPTIQ_VERSION }} build ${{ env.ADOPTIQ_BUILD }}" | Set-Content OUTBOX\build_info.txt
+          "AdoptIQ v${{ steps.label.outputs.version }} build ${{ steps.label.outputs.build }}" | Set-Content OUTBOX\build_info.txt
           "Built: $(Get-Date)" | Add-Content OUTBOX\build_info.txt
           Get-ChildItem -Path OUTBOX -File | Unblock-File -ErrorAction SilentlyContinue
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
-          name: AdoptIQ-Windows-v${{ env.ADOPTIQ_VERSION }}-build${{ env.ADOPTIQ_BUILD }}
+          name: AdoptIQ-Windows-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}
           path: |
             OUTBOX/AdoptIQ.exe
             OUTBOX/Run_AdoptIQ.bat

@@ -1421,11 +1421,45 @@ def _run_index_pass(*, rebuild: bool) -> None:
                     rebuild=bool(rebuild) if first else False,
                 )
             except Exception as index_err:  # noqa: BLE001 - defensive; never bubble
+                # Round 71 / Phase 2 (#12): pre-R71 the indexer error
+                # branch updated state + returned, leaving:
+                #   - the encrypted handle open on a partially-written
+                #     plaintext temp file (next refresh would inherit
+                #     its sqlite cursor state).
+                #   - ``configure_connection`` still pointing at the
+                #     same partial handle, so Ask AI queries would
+                #     read from a corpus that the indexer had given
+                #     up on mid-batch.
+                #   - the module-level ``_HANDLE`` still bound, so the
+                #     next refresh would re-use the partial DB instead
+                #     of bootstrapping a clean encrypted snapshot.
+                # Tear all three down here so the next refresh starts
+                # from the prior good encrypted DB on disk.  ``_HANDLE``
+                # is already declared ``global`` at the top of
+                # ``_run_index_pass``; reassigning it inside this
+                # except branch is intentional.
+                try:
+                    configure_connection(None)
+                except Exception as cleanup_err:  # noqa: BLE001
+                    logger.debug(
+                        "Round 71 / corpus_bootstrap: configure_connection(None) "
+                        "during indexer error cleanup raised: %s",
+                        type(cleanup_err).__name__,
+                    )
+                try:
+                    handle.close(persist=False)
+                except Exception as cleanup_err:  # noqa: BLE001
+                    logger.debug(
+                        "Round 71 / corpus_bootstrap: handle.close(persist=False) "
+                        "during indexer error cleanup raised: %s",
+                        type(cleanup_err).__name__,
+                    )
                 with _BOOT_LOCK:
                     _STATE.last_error = type(index_err).__name__
                     _STATE.last_error_kind = "indexer"
                     _STATE.in_progress = False
                     _STATE.last_finished_at = _utc_now_iso()
+                    _HANDLE = None
                 logger.exception(
                     "Round 17 / corpus_bootstrap: indexer raised on source=%s",
                     label,
@@ -1553,11 +1587,29 @@ def _warm_embedder_in_background() -> None:
     ).start()
 
 
-def start_background(*, rebuild: bool = False) -> bool:
+def start_background(*, rebuild: bool = False, allow_refresh: bool = True) -> bool:
     """Spawn the bootstrap thread if it is not already running.
     Returns ``True`` when a new thread was started, ``False`` when the
-    feature flag is off, an existing pass is in progress, or another
-    thread already finished successfully and ``rebuild=False``."""
+    feature flag is off or an existing pass is in progress.
+
+    Round 71 / Phase 2 (#9): pre-R71 the function unconditionally
+    short-circuited when ``_STATE.completed=True and not rebuild``,
+    which permanently silenced the daily refresh worker -- the worker
+    calls ``request_refresh(rebuild=False)`` once per 24h to pick up
+    new content, but after the very first successful index pass that
+    request was a no-op for the rest of the process lifetime.  The
+    operator-flippable corpus would then go stale (and the
+    onedrive_status pill would happily say "synced" because the
+    OneDrive folder DOES contain new files; only the in-process
+    encrypted DB stayed at the first-pass snapshot).
+
+    The new gate accepts ``allow_refresh=True`` (the default) which
+    permits a re-index pass even when ``_STATE.completed=True``,
+    provided no other pass is currently in flight.  Callers that
+    explicitly want the legacy "only run once per process lifetime"
+    behavior (e.g. an unhappy-path retry that would otherwise
+    thrash) can pass ``allow_refresh=False``.
+    """
     global _THREAD
     with _BOOT_LOCK:
         _STATE.enabled = is_enabled()
@@ -1566,9 +1618,19 @@ def start_background(*, rebuild: bool = False) -> bool:
             return False
         if _STATE.in_progress:
             return False
-        if _STATE.completed and not rebuild:
+        if _STATE.completed and not rebuild and not allow_refresh:
             return False
         _STATE.started = True
+        # Round 71 / Phase 2 (#10): set ``in_progress=True`` BEFORE
+        # spawning the thread.  Pre-R71 the flag was set inside
+        # ``_run_index_pass`` after the thread started, so two
+        # concurrent ``request_refresh`` calls (e.g. a click-storm on
+        # the admin "Re-index now" button) could both pass the
+        # ``if _STATE.in_progress: return False`` gate above and
+        # spawn two threads racing to write the same encrypted DB.
+        # Setting the flag inside the same lock that guards the
+        # spawn closes the race.
+        _STATE.in_progress = True
         thread = threading.Thread(
             target=_run_index_pass,
             kwargs={"rebuild": bool(rebuild)},

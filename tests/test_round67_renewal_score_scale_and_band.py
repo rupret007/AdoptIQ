@@ -98,13 +98,20 @@ def test_renewal_xlsx_preserves_risk_band_for_band_filters() -> None:
 
 def test_renewal_word_publishes_0_10_scale_with_back_compat() -> None:
     """R67/B1: the renewal Word narrative (portfolio + single-customer
-    paths) MUST publish ``X.YZ/10`` and include the 0-100 score in
-    parentheses for back-compat."""
+    paths) MUST publish ``X.Y/10`` and include the 0-100 score in
+    parentheses for back-compat.
+
+    Round 71 / Phase 4 (#23): the format string was changed from
+    ``:.2f`` to ``:.1f`` to align with the SSoT in ``risk_scoring``
+    (which rounds 0-10 scores to 1 decimal).  Pre-R71 the renewal
+    surfaces published ``5.40/10`` while every other surface said
+    ``5.4/10`` for the SAME customer.
+    """
     src = _read_app_simple()
-    # Portfolio path
-    assert "_r67_score_10:.2f}/10" in src, (
-        "R67/B1: renewal narrative MUST publish 0-10 score using "
-        "'_r67_score_10:.2f}/10' format"
+    # Portfolio path -- Round 71: now :.1f, not :.2f.
+    assert "_r67_score_10:.1f}/10" in src, (
+        "Round 71 / Phase 4 (#23): renewal narrative MUST publish 0-10 "
+        "score using '_r67_score_10:.1f}/10' format (was :.2f pre-R71)"
     )
     assert "risk_score:.1f}/100" in src, (
         "R67/B1: renewal narrative MUST keep the 0-100 score in parentheses "
@@ -125,16 +132,23 @@ def test_renewal_word_dashboard_uses_moderate_label() -> None:
 
 def test_renewal_word_dashboard_overall_risk_score_uses_0_10_format() -> None:
     """The Customer Health Dashboard's Overall Risk Score row MUST
-    show the 0-10 value with the 0-100 in parentheses."""
+    show the 0-10 value with the 0-100 in parentheses.
+
+    Round 71 / Phase 4 (#23): the dashboard format string was changed
+    from ``:.2f`` to ``:.1f`` to align with the SSoT in
+    ``risk_scoring`` (which rounds 0-10 scores to 1 decimal).
+    """
     src = _read_app_simple()
-    assert "_r67_score_10:.2f}/10" in src
-    # The dashboard row uses the format f'{_r67_score_10:.2f}/10  ({risk_score:.1f}/100)'.
+    assert "_r67_score_10:.1f}/10" in src
+    # The dashboard row uses the format f'{_r67_score_10:.1f}/10  ({risk_score:.1f}/100)'.
     pattern = re.compile(
-        r"f'\{_r67_score_10:\.2f\}/10\s+\(\{risk_score:\.1f\}/100\)'"
+        r"f'\{_r67_score_10:\.1f\}/10\s+\(\{risk_score:\.1f\}/100\)'"
     )
     assert pattern.search(src), (
-        "R67/B1: dashboard Overall Risk Score format MUST be "
-        "'{0-10}/10  ({0-100}/100)' so both scales are visible"
+        "Round 71 / Phase 4 (#23): dashboard Overall Risk Score format "
+        "MUST be '{0-10:.1f}/10  ({0-100:.1f}/100)' so both scales are "
+        "visible AND the rounding precision matches the SSoT in "
+        "risk_scoring."
     )
 
 

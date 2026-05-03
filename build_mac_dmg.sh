@@ -54,10 +54,19 @@ BAKE_FIXTURE_DIR="${ADOPTIQ_BAKE_FIXTURE_DIR:-}"
 # the bake_corpus.py script logs a deprecation warning when it sees
 # the flag.  Operators do not need to set it.
 BAKE_AUTH_MODE_LEGACY="${ADOPTIQ_BAKE_AUTH_MODE:-}"
-BAKE_PYTHON_BIN="python3"
+# Round 71 / Phase 7 (#35): probe ``.venv/bin/python`` ONCE and unify
+# under ``PYTHON_BIN`` so the bake step (which runs BEFORE
+# ``./build_mac.sh``) and the post-build version-readback step both
+# use the same interpreter.  Pre-R71 the bake step bound to a
+# ``BAKE_PYTHON_BIN`` local while ``PYTHON_FOR_VER`` was a third name
+# below -- three names for the same probe, with no shared definition
+# and silently divergent fallbacks if anyone added env-var overrides
+# later.  Mirrors the contract in ``build_mac.sh`` (line 17-21).
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 if [[ -x ".venv/bin/python" ]]; then
-  BAKE_PYTHON_BIN=".venv/bin/python"
+  PYTHON_BIN=".venv/bin/python"
 fi
+BAKE_PYTHON_BIN="$PYTHON_BIN"
 if [[ "$BAKE_FLAG" == "0" || "$BAKE_FLAG" == "false" || "$BAKE_FLAG" == "no" ]]; then
   echo "ADOPTIQ_BAKE_CORPUS=$BAKE_FLAG -- skipping corpus bake"
   "$BAKE_PYTHON_BIN" scripts/bake_corpus.py --bake-dir bake --no-bake
@@ -127,12 +136,13 @@ if [[ ! -d "$APP_PATH" ]]; then
   fi
 fi
 
-PYTHON_FOR_VER="${PYTHON_BIN:-python3}"
-if [[ -x ".venv/bin/python" ]]; then
-  PYTHON_FOR_VER=".venv/bin/python"
-fi
-VERSION="${ADOPTIQ_VERSION:-$("$PYTHON_FOR_VER" -c 'from config import ADOPTIQ_VERSION; print(ADOPTIQ_VERSION)')}"
-BUILD="${ADOPTIQ_BUILD:-$("$PYTHON_FOR_VER" -c 'from config import ADOPTIQ_BUILD; print(ADOPTIQ_BUILD)')}"
+# Round 71 / Phase 7 (#35): reuse the unified ``PYTHON_BIN`` probe
+# from above so the version readback uses the same interpreter as the
+# bake step (and the same probe ``build_mac.sh`` itself uses).  Pre-R71
+# this block introduced a third ``PYTHON_FOR_VER`` local that
+# duplicated the venv probe inline.
+VERSION="${ADOPTIQ_VERSION:-$("$PYTHON_BIN" -c 'from config import ADOPTIQ_VERSION; print(ADOPTIQ_VERSION)')}"
+BUILD="${ADOPTIQ_BUILD:-$("$PYTHON_BIN" -c 'from config import ADOPTIQ_BUILD; print(ADOPTIQ_BUILD)')}"
 DMG_PATH="OUTBOX/AdoptIQ-v${VERSION}-build${BUILD}.dmg"
 
 rm -f "$DMG_PATH"

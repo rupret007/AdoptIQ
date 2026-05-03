@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,33 @@ logger = logging.getLogger(__name__)
 # (e.g. during ``app_simple`` import-time wiring) and we never want
 # the resolver to raise.
 _HARDCODED_DEFAULT = "gpt-5-nano"
+
+# Round 71 / Phase 5 (#28): inline allow-list regex used as a
+# defense-in-depth fallback when ``adoptiq_settings`` is unimportable.
+# Pre-R71 the env-var validation path swallowed the ImportError and
+# returned the env value verbatim, which meant a malformed env-var (e.g.
+# operator pasted ``"gpt-5-nano; rm -rf /"`` or a shell-quoted token by
+# mistake) propagated past this resolver into the CircuitChatClient
+# constructor, where the strict allow-list rejected it -- but with a
+# confusing "no model name provided" message because the value was
+# silently dropped at a deeper layer.  The inline regex below mirrors
+# the ``adoptiq_settings.is_valid_model_name`` contract: alphanumeric +
+# hyphen + dot + underscore, 1-128 chars.  Rejected values fall through
+# to the next layer just like settings.json values that fail the rich
+# allow-list.
+_R71_INLINE_MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _r71_inline_is_valid_model_name(value: str) -> bool:
+    """Defense-in-depth model-name validator used when adoptiq_settings
+    fails to import.  Mirrors the canonical ``is_valid_model_name``
+    allow-list contract (alphanumeric + ``-`` + ``.`` + ``_``,
+    bounded length).  Returns ``False`` for any value the strict
+    rule would reject.
+    """
+    if not value or not isinstance(value, str):
+        return False
+    return bool(_R71_INLINE_MODEL_NAME_RE.match(value.strip()))
 
 
 def _read_settings_value(key: str) -> Optional[str]:
@@ -107,10 +135,20 @@ def _read_env_value(env_var: str) -> Optional[str]:
             )
             return None
     except Exception:  # noqa: BLE001
-        # adoptiq_settings unimportable in this context -- accept the
-        # env value rather than crashing.  The CircuitChatClient
-        # constructor still rejects empty/None at the next layer.
-        pass
+        # Round 71 / Phase 5 (#28): adoptiq_settings is unimportable
+        # in this context.  Pre-R71 the env value was accepted
+        # verbatim, propagating malformed values past the resolver.
+        # Apply the inline allow-list as defense-in-depth; rejected
+        # values fall through to the next layer just like settings.json
+        # values that fail the canonical validator.
+        if not _r71_inline_is_valid_model_name(raw):
+            logger.warning(
+                "model_resolver: env %s failed inline allow-list "
+                "(adoptiq_settings unimportable; value digest=%s); "
+                "falling through",
+                env_var, _short_digest(raw),
+            )
+            return None
     return raw
 
 

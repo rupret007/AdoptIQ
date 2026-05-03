@@ -890,6 +890,40 @@ _SENSITIVE_ENDPOINTS = {
     # endpoints.  Round 36 / onedrive-sync-auth retired the entire
     # MSAL/Graph stack -- the routes themselves are gone -- so the
     # corresponding endpoint names have been removed from this set.
+    #
+    # Round 71 / Phase 1 (#6): the audit found 15 sensitive endpoints
+    # that had been added in Rounds 17 / 26 / 32 / 39 / 60 / 65 / 66 /
+    # 69 but never re-listed in this set, so they were effectively
+    # publicly reachable when an operator flipped on
+    # ``ADOPTIQ_BIND_PUBLIC=1`` for a LAN demo.  Add them now:
+    #   - ``api_shutdown`` (R60): can kill the process remotely.
+    #   - ``api_corpus_status`` / ``api_corpus_refresh`` /
+    #     ``api_corpus_reset`` (R17/R39): expose / mutate the
+    #     encrypted knowledge corpus state.
+    #   - ``api_intel_status`` / ``api_intel_refresh`` /
+    #     ``api_intel_reset`` (R26): user-facing aliases for the
+    #     above three.
+    #   - ``api_intel_upload`` (R26): accepts CSOne file uploads,
+    #     same threat surface as ``start_*_analysis``.
+    #   - ``api_settings_intelligence`` /
+    #     ``api_settings_ask_ai_model`` /
+    #     ``api_settings_report_model`` (R32/R69): persist
+    #     operator-flippable model selection + Intelligence on/off.
+    #   - ``get_grounding_diagnostics`` (R65/C-3): exposes
+    #     per-rejection diagnostic records (excerpts + sample
+    #     offending tokens; PII redacted under R71/Phase 5 (#25)
+    #     but still operator-only signal).
+    #   - ``get_ask_ai_diagnostics`` (R66): exposes per-query
+    #     retrieval diagnostics; same operator-only posture.
+    'api_shutdown',
+    'api_corpus_status', 'api_corpus_refresh', 'api_corpus_reset',
+    'api_intel_status', 'api_intel_refresh', 'api_intel_reset',
+    'api_intel_upload',
+    'api_settings_intelligence',
+    'api_settings_ask_ai_model',
+    'api_settings_report_model',
+    'get_grounding_diagnostics',
+    'get_ask_ai_diagnostics',
 }
 
 # Round 13 / Phase 4.1: UI shells (``index``, ``help``, etc.) are
@@ -1568,7 +1602,7 @@ def _r64_first_offending_token(sample_offending: Any) -> str:
         return ""
 
 
-def _r65_grounding_excerpt(text: Any, max_len: int = 200) -> str:
+def _r65_grounding_excerpt(text: Any, max_len: int = 200, customer_name: Optional[str] = None) -> str:
     """Round 65 / C-3: produce a bounded excerpt of LLM/briefing
     text for the grounding rejection diagnostic.
 
@@ -1584,6 +1618,19 @@ def _r65_grounding_excerpt(text: Any, max_len: int = 200) -> str:
     Whitespace is collapsed so multi-line briefings/narratives don't
     blow out the persisted JSON.  Output is hard-capped at
     ``max_len`` chars to keep ``analysis_status.json`` bounded.
+
+    Round 71 / Phase 5 (#25): when ``customer_name`` is supplied, the
+    excerpt is redacted to replace any in-text occurrence of the
+    customer name (case-insensitive) with the literal token
+    ``<CUSTOMER>`` BEFORE the length cap is applied.  Pre-R71 the
+    excerpts persisted to ``analysis_status.json`` (and surfaced
+    via the read-only ``/api/grounding-diagnostics/<id>`` endpoint)
+    carried the full customer name in plain text, which violates
+    the R64 contract that ``analysis_status.json`` should not
+    persist customer-identifiable text outside of the digested
+    ``customer_digest`` field.  Redacting in this single helper
+    keeps both the per-customer narrative gate AND the portfolio
+    narrative gate honest in one place.
     """
     if text is None:
         return ""
@@ -1592,6 +1639,21 @@ def _r65_grounding_excerpt(text: Any, max_len: int = 200) -> str:
     except Exception:  # noqa: BLE001
         return ""
     s = " ".join(s.split())
+    # Round 71 / Phase 5 (#25): strip customer name before length cap.
+    if customer_name:
+        try:
+            cn_str = str(customer_name).strip()
+            if cn_str and len(cn_str) >= 3:
+                # Compile a case-insensitive regex of the customer
+                # name with the bare-string fallback as defense in
+                # depth (e.g. names with regex-special chars).
+                import re as _r71_re_redact
+                _pattern = _r71_re_redact.compile(
+                    _r71_re_redact.escape(cn_str), _r71_re_redact.IGNORECASE
+                )
+                s = _pattern.sub("<CUSTOMER>", s)
+        except Exception:  # noqa: BLE001
+            pass
     if len(s) > max_len:
         return s[: max_len - 1] + "…"
     return s
@@ -1637,35 +1699,53 @@ def _r64_record_grounding_outcome(
         if rejected:
             summary["rejected"] = int(summary.get("rejected", 0)) + 1
             records = diag.setdefault("rejection_records", [])
-            if len(records) < _R64_MAX_GROUNDING_RECORDS:
-                try:
-                    failure_codes = sorted({str(f) for f in (failures or []) if f})
-                except Exception:  # noqa: BLE001
-                    failure_codes = []
-                # Round 65 / C-3: also persist a sanitised copy of
-                # the full ``sample_offending`` map (not just the
-                # first token) so Round 66's root-cause work can
-                # compare offending-value patterns across rejections.
-                _r65_sample_map: dict = {}
-                if isinstance(sample_offending, dict):
-                    for _k, _v in sample_offending.items():
-                        try:
-                            _r65_sample_map[str(_k)[:64]] = str(_v)[:120]
-                        except Exception:  # noqa: BLE001
-                            continue
-                records.append({
-                    "scope": scope,
-                    "customer_digest": _id_digest(customer_name) if customer_name else "",
-                    "narrative_length": int(narrative_length or 0),
-                    "failure_codes": failure_codes,
-                    "first_offending_token": _r64_first_offending_token(sample_offending),
-                    # Round 65 / C-3: structured per-rejection diagnostic
-                    # for downstream root-cause analysis.
-                    "sample_offending": _r65_sample_map,
-                    "briefing_excerpt": _r65_grounding_excerpt(briefing_excerpt),
-                    "narrative_excerpt": _r65_grounding_excerpt(narrative_excerpt),
-                    "recorded_at": _now_utc_iso_z(),
-                })
+            try:
+                failure_codes = sorted({str(f) for f in (failures or []) if f})
+            except Exception:  # noqa: BLE001
+                failure_codes = []
+            # Round 65 / C-3: also persist a sanitised copy of
+            # the full ``sample_offending`` map (not just the
+            # first token) so Round 66's root-cause work can
+            # compare offending-value patterns across rejections.
+            _r65_sample_map: dict = {}
+            if isinstance(sample_offending, dict):
+                for _k, _v in sample_offending.items():
+                    try:
+                        _r65_sample_map[str(_k)[:64]] = str(_v)[:120]
+                    except Exception:  # noqa: BLE001
+                        continue
+            _r71_record = {
+                "scope": scope,
+                "customer_digest": _id_digest(customer_name) if customer_name else "",
+                "narrative_length": int(narrative_length or 0),
+                "failure_codes": failure_codes,
+                "first_offending_token": _r64_first_offending_token(sample_offending),
+                # Round 65 / C-3: structured per-rejection diagnostic
+                # for downstream root-cause analysis.
+                "sample_offending": _r65_sample_map,
+                # Round 71 / Phase 5 (#25): redact customer_name from
+                # both excerpts before persisting so analysis_status.json
+                # carries no in-line customer identifier.
+                "briefing_excerpt": _r65_grounding_excerpt(briefing_excerpt, customer_name=customer_name),
+                "narrative_excerpt": _r65_grounding_excerpt(narrative_excerpt, customer_name=customer_name),
+                "recorded_at": _now_utc_iso_z(),
+            }
+            records.append(_r71_record)
+            # Round 71 / Phase 5 (#24): FIFO trim instead of stop-appending.
+            # Pre-R71 once ``len(records) >= _R64_MAX_GROUNDING_RECORDS``
+            # the helper silently dropped any further rejections, which
+            # means the operator opening ``/api/grounding-diagnostics``
+            # for a long-running multi-customer comprehensive report
+            # could only ever see the FIRST 50 rejections -- the
+            # tail of the run (often the most operationally relevant
+            # rejections) was invisible.  Trim the head of the list
+            # instead so the most recent N rejections survive.  The
+            # ``rejection_summary.rejected`` running count below still
+            # reflects the TRUE total -- only the per-record list is
+            # bounded so the persisted JSON stays compact.
+            if len(records) > _R64_MAX_GROUNDING_RECORDS:
+                # Drop the oldest records first (FIFO).
+                del records[:len(records) - _R64_MAX_GROUNDING_RECORDS]
         total = max(1, int(summary.get("total", 0)))
         rejected_n = int(summary.get("rejected", 0))
         summary["rate"] = round(rejected_n / total, 3)
@@ -1760,13 +1840,49 @@ def _redact_form_data(data: Any) -> Dict[str, Any]:
 
 
 def _client_ip_from_request(req) -> str:
-    """Client IP extraction. Trust proxy headers only when explicitly enabled."""
-    trust_proxy_headers = os.environ.get('ADOPTIQ_TRUST_PROXY_HEADERS', '').strip().lower() in {'1', 'true', 'yes'}
-    if trust_proxy_headers:
+    """Client IP extraction.
+
+    Round 71 / Phase 1 (#5): the pre-R71 implementation only required
+    ``ADOPTIQ_TRUST_PROXY_HEADERS=1`` to honor an attacker-controlled
+    ``X-Forwarded-For`` header — once the operator flipped that flag
+    on for a legitimate reverse-proxy deployment, ANY direct client
+    could spoof its IP by sending its own XFF header.  Behind a
+    deployment with a real reverse proxy (nginx / haproxy / cloudfront /
+    Cisco WSA / etc.) the only safe behavior is to trust XFF only when
+    the *direct* TCP peer (``REMOTE_ADDR``) is one of those known
+    proxy IPs.
+
+    Resolution order (highest precedence first):
+      1. If ``ADOPTIQ_TRUSTED_PROXY_IPS`` is set (comma-separated IP
+         list) AND ``REMOTE_ADDR`` matches one of the listed IPs,
+         honor the leftmost ``X-Forwarded-For`` token.
+      2. Else if ``ADOPTIQ_TRUST_PROXY_HEADERS`` is truthy AND
+         ``REMOTE_ADDR`` is loopback (``127.0.0.1`` / ``::1``), honor
+         XFF.  This back-compat path lets a developer testing a
+         reverse-proxy locally still get the spoofed-IP behavior, but
+         narrows the previously-global trust to just loopback-origin
+         requests so a remote client cannot spoof.
+      3. Otherwise return the direct ``REMOTE_ADDR`` (the real TCP
+         peer) — this is the safe default for the loopback-only deploy
+         the .app actually ships in.
+    """
+    remote_addr = req.environ.get('REMOTE_ADDR', '') or req.remote_addr or ''
+    trusted_proxy_ips_raw = os.environ.get('ADOPTIQ_TRUSTED_PROXY_IPS', '').strip()
+    if trusted_proxy_ips_raw:
+        trusted_proxy_ips = {
+            ip.strip() for ip in trusted_proxy_ips_raw.split(',') if ip.strip()
+        }
+        if remote_addr in trusted_proxy_ips:
+            xff = req.headers.get('X-Forwarded-For', '')
+            if xff:
+                return xff.split(',')[0].strip()
+        return remote_addr
+    legacy_trust = os.environ.get('ADOPTIQ_TRUST_PROXY_HEADERS', '').strip().lower() in {'1', 'true', 'yes'}
+    if legacy_trust and remote_addr in {'127.0.0.1', '::1'}:
         xff = req.headers.get('X-Forwarded-For', '')
         if xff:
             return xff.split(',')[0].strip()
-    return req.environ.get('REMOTE_ADDR', '') or req.remote_addr or ''
+    return remote_addr
 
 
 def _is_local_client(req) -> bool:
@@ -8785,13 +8901,35 @@ def run_compact_analysis(analysis_id):
                 except Exception as _anv_err:
                     # Validator must never break the report pipeline.
                     # Log at WARNING so a regression in the validator
-                    # (import failure, regex bug) is visible without
-                    # masking the underlying narrative.
+                    # (import failure, regex bug) is visible.
+                    #
+                    # Round 71 / Phase 3 (#15): the pre-R71 fail-OPEN
+                    # branch (``accepting LLM output as-is``) defeated
+                    # the entire R16/R27 grounding gate when the
+                    # validator import failed (e.g. fastembed unavail
+                    # in a stripped-down install) or a regex bug
+                    # raised at runtime -- a single import error
+                    # turned the gate into a permanent silent no-op
+                    # for that process lifetime.  Substitute the
+                    # canonical placeholder instead so the validator
+                    # failure mode matches the validator-rejected
+                    # mode: the report never quotes raw LLM text
+                    # without a successful grounding check.
                     logger.warning(
-                        "[[AI]] Round 16 / Phase 3.4: narrative validator raised "
-                        "unexpectedly (%s); accepting LLM output as-is",
+                        "[[AI]] Round 16 / Phase 3.4 + R71/#15: narrative "
+                        "validator raised unexpectedly (%s); substituting "
+                        "placeholder (FAIL CLOSED).",
                         _anv_err,
                     )
+                    try:
+                        from ai_narrative_validator import GROUNDING_FAILURE_PLACEHOLDER as _r71_compact_placeholder
+                        _safe_insight_text = _r71_compact_placeholder
+                    except Exception:
+                        _safe_insight_text = (
+                            "AI narrative withheld (grounding validator "
+                            "unavailable). The data tabs in this report "
+                            "remain authoritative."
+                        )
                 ai_insights = {
                     'portfolio_summary': {
                         'executive_summary': _safe_insight_text
@@ -9777,23 +9915,26 @@ def run_compact_analysis(analysis_id):
             # Round 67 / Build 41 (B1, vocab parity): re-map MEDIUM
             # -> MODERATE on the user-facing ``Risk_Level`` column so
             # the Compact and Renewal labels read the same word.
-            # Round 70 / Phase 3 (#11): the Build 43 acceptance audit
-            # found 6 ``Risk_Band='MEDIUM'`` rows leaking into the
-            # Compact ``Risk_Summary`` sheet.  R67/B6 originally kept
-            # ``Risk_Band`` as the canonical band key on the argument
-            # that band-based filters / color lookups elsewhere in the
-            # workbook still expected ``MEDIUM`` -- but the operator's
-            # eyes are on the *artifact*, so MEDIUM in the user-facing
-            # cell is a vocabulary regression regardless of the
-            # internal lookup contract.  Remap ``Risk_Band`` to
-            # MODERATE here too; downstream color/format lookups in
-            # the same writer block use the local ``band`` variable
-            # (still CRITICAL/HIGH/MEDIUM/LOW/HEALTHY), not the
-            # post-remap value, so internal filters keep working.
+            # ``Risk_Band`` keeps the canonical band key (CRITICAL /
+            # HIGH / MEDIUM / LOW / HEALTHY) so existing band-based
+            # filters and color lookups still match.
+            #
+            # Round 71 / Phase 0 (#1): REVERT the Round 70 / Phase 3
+            # (#11) over-reach that remapped ``Risk_Band`` to
+            # ``MODERATE`` too.  The Round 70 change broke the R67/B6
+            # contract split (``Risk_Band``=canonical for filters,
+            # ``Risk_Level``=user-facing remap) AND created a NEW
+            # cross-sheet inconsistency: Comprehensive
+            # ``Risk_Components.risk_band`` was still emitting raw
+            # ``MEDIUM`` while Compact ``Risk_Summary.Risk_Band`` was
+            # showing ``MODERATE`` for the same scope.  Restore the
+            # canonical band key here so the two sheets agree
+            # byte-for-byte.  The user-facing vocabulary parity
+            # contract is satisfied by the ``Risk_Level`` column
+            # alone, which the operator reads first.
             _r67_b6_score = round(score, 1)
             _r67_b6_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
             _r67_b6_risk_level = _r67_b6_LABEL_REMAP.get(risk_level, risk_level)
-            _r70_risk_band_user = _r67_b6_LABEL_REMAP.get(band, band)
             risk_summary_data.append({
                 # Round 49 / F-RP-COMPOSITE-KEY-BLEED: collapse merged
                 # Snowflake composite keys (``MARUBENI CORPORATION__
@@ -9805,7 +9946,7 @@ def run_compact_analysis(analysis_id):
                 'Overall_Risk_Score': _r67_b6_score,
                 'Risk_Score': _r67_b6_score,
                 'Risk_Level': _r67_b6_risk_level,
-                'Risk_Band': _r70_risk_band_user,
+                'Risk_Band': band,
                 'Adoption_Barriers': ab_count,
                 'Support_Cases': cs_count,
             })
@@ -11504,7 +11645,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     # key (CRITICAL / HIGH / MEDIUM / LOW / HEALTHY) is also
     # preserved internally so color-lookup paths still match.
     try:
-        _r67_score_10 = round(float(risk_score) / 10.0, 2) if risk_score else 0.0
+        # Round 71 / Phase 4 (#23): pin 0-10 score rounding to 1 decimal
+        # to match the SSoT in risk_scoring.py:823 (``round(score_0_100 / 10.0, 1)``).
+        # Pre-R71 this path emitted 2 decimals, drifting from the
+        # canonical headline format and from the Compact narrative for
+        # the same scope.
+        _r67_score_10 = round(float(risk_score) / 10.0, 1) if risk_score else 0.0
     except (TypeError, ValueError):
         _r67_score_10 = 0.0
     _r67_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
@@ -11525,7 +11671,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         # who anchor on /100 in muscle memory.
         exec_para.add_run(
             f'This portfolio of {n_cust} customers has an overall renewal risk score of '
-            f'{_r67_score_10:.2f}/10 ({_r67_risk_label}; {risk_score:.1f}/100). '
+            f'{_r67_score_10:.1f}/10 ({_r67_risk_label}; {risk_score:.1f}/100). '
         )
         if high_risk:
             exec_para.add_run(f'{len(high_risk)} customer(s) require immediate attention. ')
@@ -11540,7 +11686,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         # single-customer narrative path.
         exec_para.add_run(
             f'{_strip_markdown_chrome(_normalize_composite_customer_key(customer_name))} '
-            f'has a renewal risk score of {_r67_score_10:.2f}/10 '
+            f'has a renewal risk score of {_r67_score_10:.1f}/10 '
             f'({_r67_risk_label}; {risk_score:.1f}/100). '
         )
         exec_para.add_run(f'Key metrics: {format_number(ab_count)} adoption barriers, {format_number(case_count)} support cases, {format_number(bems_count)} BEMS escalations. ')
@@ -11559,7 +11705,9 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     # block re-reads risk_score/risk_category from the analysis so
     # we re-derive defensively rather than relying on closure capture).
     try:
-        _r67_score_10 = round(float(risk_score) / 10.0, 2) if risk_score else 0.0
+        # Round 71 / Phase 4 (#23): pin 0-10 score rounding to 1 decimal
+        # to match the SSoT in risk_scoring.py:823 (``round(score_0_100 / 10.0, 1)``).
+        _r67_score_10 = round(float(risk_score) / 10.0, 1) if risk_score else 0.0
     except (TypeError, ValueError):
         _r67_score_10 = 0.0
     _r67_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
@@ -11622,7 +11770,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         ('Correlated Service Incidents', format_number(correlated_incidents)),
         # Round 67 / Build 41 (B1): publish 0-10 + MODERATE in the
         # dashboard table to match the executive summary above.
-        ('Overall Risk Score', f'{_r67_score_10:.2f}/10  ({risk_score:.1f}/100)'),
+        # Round 71 / Phase 4 (#23): align rounding precision with the
+        # SSoT in ``risk_scoring`` (1 decimal for 0-10).  Pre-R71 this
+        # row used ``.2f`` while every other surface used ``.1f`` --
+        # the dashboard table read e.g. ``5.40/10`` while the narrative
+        # said ``5.4/10`` for the SAME customer.
+        ('Overall Risk Score', f'{_r67_score_10:.1f}/10  ({risk_score:.1f}/100)'),
         ('Risk Category', _r67_risk_label),
     ]
 
@@ -11659,6 +11812,17 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             continue
         row = dashboard_table.rows[i]
         # Color code risk category (moved from above)
+        # Round 71 / Phase 0 (#3): the dashboard table previously
+        # only painted CRITICAL (red), HIGH (orange), and LOW (green)
+        # — a MEDIUM-band customer rendered with the default black
+        # cell color, which made the highest-volume risk band
+        # visually identical to "no risk category set".  Add the
+        # canonical gold branch (matches the matplotlib palette
+        # ``#ffd700`` and the Excel conditional formatting MEDIUM
+        # band fill) so MEDIUM/MODERATE customers are visually
+        # distinct from neighboring HEALTHY rows.  HEALTHY also gets
+        # a green branch so the LOW->HEALTHY transition stays
+        # readable end-to-end.
         if label == 'Risk Category':
             for para in row.cells[1].paragraphs:
                 for run in para.runs:
@@ -11667,8 +11831,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                         run.font.color.rgb = RGBColor(220, 20, 60)
                     elif risk_category == 'HIGH':
                         run.font.color.rgb = RGBColor(255, 140, 0)
+                    elif risk_category in ('MEDIUM', 'MODERATE'):
+                        run.font.color.rgb = RGBColor(218, 165, 32)
                     elif risk_category == 'LOW':
                         run.font.color.rgb = RGBColor(34, 139, 34)
+                    elif risk_category == 'HEALTHY':
+                        run.font.color.rgb = RGBColor(40, 180, 99)
 
     doc.add_paragraph()
 
@@ -13786,11 +13954,13 @@ def run_customer_renewal_analysis(analysis_id):
                     except (TypeError, ValueError):
                         _score_0_100 = None
                     _band = _a.get('renewal_risk_category') or _a.get('risk_band') or ''
+                    # Round 71 / Phase 4 (#23): pin 0-10 score rounding
+                    # to 1 decimal to match the risk_scoring SSoT.
                     _ren_risk_profiles[_cn] = {
                         'risk_score_0_100': _score_0_100,
-                        'risk_score_0_10': (round(_score_0_100 / 10.0, 2) if isinstance(_score_0_100, (int, float)) else None),
+                        'risk_score_0_10': (round(_score_0_100 / 10.0, 1) if isinstance(_score_0_100, (int, float)) else None),
                         'risk_band': str(_band).upper(),
-                        'score': (round(_score_0_100 / 10.0, 2) if isinstance(_score_0_100, (int, float)) else None),
+                        'score': (round(_score_0_100 / 10.0, 1) if isinstance(_score_0_100, (int, float)) else None),
                     }
         except Exception as _ren_rp_err:
             logger.debug(
@@ -14202,15 +14372,30 @@ def run_customer_renewal_analysis(analysis_id):
             })
 
         # Build key metrics from available data
+        # Round 71 / Phase 0 (#2): the single-customer renewal XLSX
+        # ``Key_Metrics`` sheet was leaking ``Risk_Category='MEDIUM'`` to
+        # the operator while the multi-customer ``Renewal_Summary`` sheet
+        # already carried ``MODERATE`` (R67/B1).  Apply the same MEDIUM
+        # -> MODERATE remap here so the two artifacts agree.
+        _r71_key_metrics_label_remap = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
+        _r71_user_facing_risk_level = _r71_key_metrics_label_remap.get(risk_level, risk_level)
         key_metrics = renewal_analysis.get('key_metrics', {})
         if not key_metrics:
             key_metrics = {
                 'Risk_Score': overall_risk_score,
-                'Risk_Category': risk_level,
+                'Risk_Category': _r71_user_facing_risk_level,
                 'Analysis_Period': f'{days} days',
                 'Key_Findings': len(renewal_analysis.get('key_findings', [])),
                 'Recommendations': len(recommendations)
             }
+        else:
+            try:
+                _r71_existing_cat = str(key_metrics.get('Risk_Category', ''))
+                _r71_remapped = _r71_key_metrics_label_remap.get(_r71_existing_cat, _r71_existing_cat)
+                if _r71_existing_cat and _r71_remapped != _r71_existing_cat:
+                    key_metrics['Risk_Category'] = _r71_remapped
+            except Exception:
+                pass
 
         # Round 5 / Phase 1.6: emit a Report_Info ledger sheet so the
         # renewal customer Excel mirrors the leader / compact pattern of
@@ -15753,9 +15938,20 @@ def run_comprehensive_analysis(analysis_id):
 
         # Merge Snowflake APs into ``filtered_action_plans`` so the
         # downstream Excel sheet, Summary KPI, and per-customer
-        # drilldowns all see the same canonical AP universe. Dedup by
-        # ID (preferring the CSConsole row when both sources have the
-        # same record so any CSConsole-side enrichment is preserved).
+        # drilldowns all see the same canonical AP universe.
+        #
+        # Round 71 / Phase 4 (#19): Snowflake wins over CSConsole on
+        # duplicate ID, with LastModifiedDate tie-break.  Pre-R71 the
+        # merge used ``keep='first'`` (CSConsole wins) on the rationale
+        # that CSConsole carries some manual enrichment.  In practice
+        # CSConsole exports lag the Snowflake source-of-truth by hours
+        # to days, so on-conflict picking the Snowflake row gives a
+        # fresher status / ownership / due-date snapshot.  Sort by
+        # LastModifiedDate descending BEFORE drop_duplicates so that
+        # when both sources have the same ID, the most-recently-edited
+        # record survives -- and when LastModifiedDate is equal, the
+        # original concat order (CSConsole then Snowflake) determines
+        # which row keeps via ``keep='last'``.
         try:
             _r65_csconsole_ap_count = len(filtered_action_plans) if filtered_action_plans is not None else 0
             _r65_snowflake_ap_count = len(_r65_snowflake_aps) if _r65_snowflake_aps is not None else 0
@@ -15769,8 +15965,47 @@ def run_comprehensive_analysis(analysis_id):
                         ignore_index=True,
                     )
                     if 'ID' in _r65_combined.columns:
+                        # Round 71 / Phase 4 (#19): LastModifiedDate
+                        # tie-break.  Find a usable last-modified column
+                        # (the column name varies across CSConsole vs
+                        # Snowflake exports), coerce to datetime, and
+                        # sort ascending so ``keep='last'`` keeps the
+                        # most-recently-modified row.  Falls through to
+                        # plain ``keep='last'`` when no LMD column is
+                        # available (preserves the new Snowflake-wins
+                        # contract regardless).
+                        _r71_lmd_candidates = [
+                            'LastModifiedDate', 'LASTMODIFIEDDATE',
+                            'LAST_MODIFIED_DATE', 'LASTMODIFIED',
+                            'Last Modified Date', 'LAST_MODIFIED_DATE_C',
+                        ]
+                        _r71_lmd_col = next(
+                            (c for c in _r71_lmd_candidates if c in _r65_combined.columns),
+                            None,
+                        )
+                        if _r71_lmd_col is not None:
+                            try:
+                                _r71_lmd_series = pd.to_datetime(
+                                    _r65_combined[_r71_lmd_col],
+                                    errors='coerce',
+                                    utc=True,
+                                )
+                                _r65_combined = _r65_combined.assign(
+                                    _r71_lmd_sortkey=_r71_lmd_series
+                                ).sort_values(
+                                    by='_r71_lmd_sortkey',
+                                    ascending=True,
+                                    na_position='first',
+                                    kind='stable',
+                                ).drop(columns=['_r71_lmd_sortkey'])
+                            except Exception as _r71_lmd_err:
+                                logger.debug(
+                                    "Round 71 / #19: LMD sort skipped (%s); "
+                                    "falling back to concat-order keep='last'",
+                                    _r71_lmd_err,
+                                )
                         _r65_combined = _r65_combined.drop_duplicates(
-                            subset=['ID'], keep='first'
+                            subset=['ID'], keep='last'
                         ).reset_index(drop=True)
                     filtered_action_plans = _r65_combined
                     _r65_aps_provenance = "csconsole+snowflake"
@@ -18076,6 +18311,77 @@ def _get_ask_ai_query_diag(query_id: str) -> Optional[dict]:
     return _r68_load_ask_ai_diag(query_id)
 
 
+# Round 71 / Phase 5 (#26): per-IP token-bucket rate limit for the
+# diagnostic endpoints.  Pre-R71 the read-only diagnostic endpoints
+# (``/api/grounding-diagnostics/<id>`` and
+# ``/api/ask-ai/diagnostics/<id>``) had no per-IP throttle; an
+# operator (or a misbehaving script that accidentally polled in a
+# tight loop) could spam either endpoint and force a synchronous
+# read against the in-memory ``analysis_status`` dict (under
+# ``analysis_status_lock``) -- starving the analysis worker that
+# also takes the same lock for status updates.  The R71 guard caps
+# burst rate per source IP at ``_R71_DIAG_RATE_LIMIT_PER_MIN``
+# requests per 60s window with token-bucket semantics.  IPs that
+# exceed the limit get HTTP 429 with a Retry-After hint.  The
+# bucket is bounded (``_R71_DIAG_RATE_BUCKETS_MAX``) so a flood of
+# unique IPs cannot exhaust process memory.
+_R71_DIAG_RATE_LIMIT_PER_MIN: int = 30
+_R71_DIAG_RATE_WINDOW_S: float = 60.0
+_R71_DIAG_RATE_BUCKETS_MAX: int = 1024
+_R71_DIAG_RATE_LOCK = threading.Lock()
+_R71_DIAG_RATE_BUCKETS: Dict[str, List[float]] = {}
+
+
+def _r71_diag_rate_limit_check(client_ip: str) -> Tuple[bool, int]:
+    """Return ``(allowed, retry_after_seconds)`` for the given IP.
+
+    ``allowed=True`` means the request is under the per-IP burst cap
+    and may proceed.  When ``allowed=False`` the second tuple element
+    is the number of seconds the caller should wait before retrying
+    (used to populate the ``Retry-After`` response header).
+
+    Defensive against any failure mode -- on internal error, we fail
+    OPEN (return ``True``) rather than block legitimate operator
+    diagnostic access; the rate limit is best-effort.
+    """
+    if not client_ip:
+        return True, 0
+    try:
+        now = time.time()
+        with _R71_DIAG_RATE_LOCK:
+            bucket = _R71_DIAG_RATE_BUCKETS.get(client_ip)
+            if bucket is None:
+                # Bound the global bucket count to prevent memory
+                # exhaustion via unique-IP flood.  When at the cap
+                # drop the LEAST-recently-used bucket (oldest last
+                # request).
+                if len(_R71_DIAG_RATE_BUCKETS) >= _R71_DIAG_RATE_BUCKETS_MAX:
+                    try:
+                        _oldest_ip = min(
+                            _R71_DIAG_RATE_BUCKETS.items(),
+                            key=lambda kv: max(kv[1]) if kv[1] else 0.0,
+                        )[0]
+                        _R71_DIAG_RATE_BUCKETS.pop(_oldest_ip, None)
+                    except Exception:  # noqa: BLE001
+                        pass
+                bucket = []
+                _R71_DIAG_RATE_BUCKETS[client_ip] = bucket
+            # Trim entries outside the rolling window.
+            cutoff = now - _R71_DIAG_RATE_WINDOW_S
+            while bucket and bucket[0] < cutoff:
+                bucket.pop(0)
+            if len(bucket) >= _R71_DIAG_RATE_LIMIT_PER_MIN:
+                # Compute retry-after based on the OLDEST timestamp
+                # in the window (when it expires the bucket has room).
+                oldest = bucket[0] if bucket else now
+                retry_after = max(1, int(oldest + _R71_DIAG_RATE_WINDOW_S - now) + 1)
+                return False, retry_after
+            bucket.append(now)
+            return True, 0
+    except Exception:  # noqa: BLE001
+        return True, 0
+
+
 @app.route('/api/ask-ai/diagnostics/<query_id>')
 def get_ask_ai_diagnostics(query_id):
     """Round 66 / Pass 5 - read-only diagnostic for a specific Ask AI
@@ -18090,11 +18396,25 @@ def get_ask_ai_diagnostics(query_id):
     id from a different process lifetime).
 
     Loopback-only by default (the main app binds to 127.0.0.1
-    unless ``ADOPTIQ_BIND_PUBLIC=1``); no auth wrapper is added
-    here because the endpoint is strictly read-only and surfaces
-    only ranking metadata + source ids (no PII, no narrative
-    excerpts).
+    unless ``ADOPTIQ_BIND_PUBLIC=1``); auth wrapper relies on the
+    R71/Phase 1 (#6) ``_SENSITIVE_ENDPOINTS`` localhost gate.
+
+    Round 71 / Phase 1 (#7): validate ``query_id`` strictly before
+    touching the SQLite ring-buffer (the parameterised query already
+    blocks SQL injection, but a malformed id can cause downstream
+    consumers to crash; rejecting at the route boundary is cleaner).
     """
+    if not _is_valid_analysis_id(query_id):
+        return jsonify({"ok": False, "error": "invalid_query_id"}), 400
+    # Round 71 / Phase 5 (#26): per-IP burst rate limit before any
+    # in-memory or SQLite read happens.
+    _r71_diag_ip = _client_ip_from_request(request)
+    _r71_allowed, _r71_retry = _r71_diag_rate_limit_check(_r71_diag_ip)
+    if not _r71_allowed:
+        resp = jsonify({"ok": False, "error": "rate_limited", "retry_after": _r71_retry})
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(_r71_retry)
+        return resp
     try:
         entry = _get_ask_ai_query_diag(query_id)
         if entry is None:
@@ -18107,7 +18427,7 @@ def get_ask_ai_diagnostics(query_id):
     except Exception as _diag_err:  # noqa: BLE001
         logger.warning(
             "[R66 / P5] /api/ask-ai/diagnostics failed for %s: %s",
-            query_id, _diag_err,
+            _id_digest(query_id, length=8), _diag_err,
         )
         return jsonify({"ok": False, "error": "internal_error"}), 500
 
@@ -18130,11 +18450,26 @@ def get_grounding_diagnostics(analysis_id):
     Round 66 will use this data to root-cause the rejection rate.
 
     Loopback-only by default (the main app binds to 127.0.0.1
-    unless ``ADOPTIQ_BIND_PUBLIC=1``); no auth wrapper is added
-    here because the endpoint is strictly read-only and surfaces
-    only PII-digested data (customer names are sha256-prefix
-    digested by ``_id_digest`` per Round-64 contract).
+    unless ``ADOPTIQ_BIND_PUBLIC=1``); auth wrapper relies on the
+    R71/Phase 1 (#6) ``_SENSITIVE_ENDPOINTS`` localhost gate.
+
+    Round 71 / Phase 1 (#7): validate ``analysis_id`` strictly
+    before touching ``analysis_status`` (the dict lookup itself is
+    safe but rejecting a malformed id at the route boundary keeps
+    log correlation honest and avoids any subsequent consumer
+    that might assume a well-formed id).
     """
+    if not _is_valid_analysis_id(analysis_id):
+        return jsonify({"ok": False, "error": "invalid_analysis_id"}), 400
+    # Round 71 / Phase 5 (#26): per-IP burst rate limit before any
+    # lock-protected status dict read happens.
+    _r71_diag_ip = _client_ip_from_request(request)
+    _r71_allowed, _r71_retry = _r71_diag_rate_limit_check(_r71_diag_ip)
+    if not _r71_allowed:
+        resp = jsonify({"ok": False, "error": "rate_limited", "retry_after": _r71_retry})
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(_r71_retry)
+        return resp
     try:
         with analysis_status_lock:
             status = analysis_status.get(analysis_id)
@@ -20053,7 +20388,26 @@ def api_shutdown():
     # Round 60: TESTING short-circuit so pytest doesn't kill itself.
     # Both the Flask config flag and the env var are honored so the
     # test fixture can pick whichever is more convenient.
-    in_testing_mode = bool(app.config.get('TESTING')) or os.environ.get('ADOPTIQ_TESTING') == '1'
+    #
+    # Round 71 / Phase 1 (#8): the env-var TESTING short-circuit is
+    # MUTED in frozen builds (``sys.frozen``) so an attacker who can
+    # set ``ADOPTIQ_TESTING=1`` in the operator's shell environment
+    # cannot trick the packaged .app / .exe into accepting a no-op
+    # shutdown response (which would mask a real intrusion attempt
+    # from the operator's eyes).  Only the Flask config flag survives
+    # in frozen builds; that flag can only be set by code running
+    # inside the same process, not by an external env var.
+    flask_testing = bool(app.config.get('TESTING'))
+    env_testing = os.environ.get('ADOPTIQ_TESTING') == '1'
+    is_frozen = bool(getattr(sys, 'frozen', False))
+    if env_testing and is_frozen:
+        logger.warning(
+            "Round 71 / api_shutdown: ADOPTIQ_TESTING=1 env var is "
+            "IGNORED in frozen builds (would otherwise allow a no-op "
+            "shutdown bypass); flipping to live shutdown path."
+        )
+        env_testing = False
+    in_testing_mode = flask_testing or env_testing
     if in_testing_mode:
         logger.info("Round 60 / api_shutdown: TESTING mode -- would_shutdown=True (force=%s, running=%d)", force, len(running))
         return jsonify({
@@ -20275,6 +20629,24 @@ def _r69_sanitize_llm_error(raw: Any, *, max_len: int = 200) -> str:
     s = _re69.sub(r"(?i)bearer\s+[A-Za-z0-9._\-]+", "Bearer <redacted>", s)
     s = _re69.sub(r"eyJ[A-Za-z0-9._-]{8,}", "<jwt-redacted>", s)
     s = _re69.sub(r"(?i)client[_-]?secret[=:]\s*\S+", "client_secret=<redacted>", s)
+    # Round 71 / Phase 5 (#29): extend the credential redaction to
+    # cover the additional patterns commonly observed in upstream
+    # error payloads from CircuIT / Snowflake / Anthropic / Cisco
+    # internal endpoints.  The pre-R71 set caught Bearer + JWT +
+    # client_secret but missed:
+    #
+    #   * password / passwd / pwd in URL query strings + form data
+    #   * api_key / api-key / apikey patterns
+    #   * sk-XXXX-style provider keys (Anthropic, OpenAI, Stripe,
+    #     SendGrid, etc.)
+    #   * Authorization: <scheme> <token> headers without the literal
+    #     "bearer" prefix
+    #   * BEMS_PASSWORD / SNOWFLAKE_PASSWORD env-var names that may
+    #     appear in error frames near their values.
+    s = _re69.sub(r"(?i)\b(?:password|passwd|pwd)\s*[:=]\s*\S+", "password=<redacted>", s)
+    s = _re69.sub(r"(?i)\bapi[_-]?key\s*[:=]\s*\S+", "api_key=<redacted>", s)
+    s = _re69.sub(r"\bsk-[A-Za-z0-9_-]{16,}", "<api-key-redacted>", s)
+    s = _re69.sub(r"(?i)authorization:\s*\S+\s+\S+", "Authorization: <redacted>", s)
     if len(s) > max_len:
         s = s[: max_len - 3].rstrip() + "..."
     return s
@@ -20775,8 +21147,28 @@ def ask_ai_portfolio():
                     _r69_active_model = ''
                 if _r69_active_model:
                     _retrieval_diag['model_name'] = _r69_active_model
-                if isinstance(_retrieval_diag, dict) and _retrieval_diag:
-                    _record_ask_ai_query_diag(_query_id, _retrieval_diag)
+                # Round 71 / Phase 5 (#27): ALWAYS record a diagnostic
+                # payload, even when the upstream ``retrieval_diag``
+                # came back empty.  Pre-R71 the conditional record meant
+                # any query_id surfaced to the UI for an empty-diag run
+                # 404'd from /api/ask-ai/diagnostics/<query_id>, which
+                # surprised operators who clicked the debug chip and
+                # got "query_not_found" with no explanation.  Stamp a
+                # minimal stub so the lookup always returns 200 with
+                # ``method=unknown`` and an explicit
+                # ``empty_retrieval_diag=True`` marker -- the operator
+                # can then see WHY the diag is empty (typically: a
+                # legacy fallback or a corpus-bypass code path).
+                if not isinstance(_retrieval_diag, dict):
+                    _retrieval_diag = {}
+                if not _retrieval_diag:
+                    _retrieval_diag = {
+                        "method": "unknown",
+                        "empty_retrieval_diag": True,
+                        "model_name": _r69_active_model or "",
+                        "recorded_at": _now_utc_iso_z(),
+                    }
+                _record_ask_ai_query_diag(_query_id, _retrieval_diag)
                 return jsonify({
                     'ok': True,
                     'answer': grounded_result.get('answer') or 'No response generated.',
@@ -23048,7 +23440,13 @@ def run_subscription_analysis(analysis_id):
                 _update_progress(status, 70, '[AI] Processing AI response...', 'AI Analysis - Processing')
         except Exception as e:
             logger.warning(f"AI analysis failed, using fallback: {e}")
-            ai_response = f"Analysis completed for {sub_data['customer_name']} (Subscription: {subscription_id})"
+            # Round 71 / Phase 3 (#17): defensive .get() so a
+            # subscription record that is missing the customer_name
+            # field (e.g. partial Snowflake response) cannot raise a
+            # KeyError inside the AI-failure fallback path -- the
+            # original ``sub_data['customer_name']`` would have
+            # masked the upstream AI error with a confusing KeyError.
+            ai_response = f"Analysis completed for {sub_data.get('customer_name', subscription_id)} (Subscription: {subscription_id})"
 
         with analysis_status_lock:
             _update_progress(status, 75, 'Building Word report...', 'Report Generation')
@@ -23095,7 +23493,7 @@ def run_subscription_analysis(analysis_id):
             # Executive Summary
             doc.add_heading('Executive Summary', level=1)
             summary_p = doc.add_paragraph()
-            summary_p.add_run(f'Customer: {_strip_markdown_chrome(_normalize_composite_customer_key(sub_data["customer_name"]))}\n')
+            summary_p.add_run(f'Customer: {_strip_markdown_chrome(_normalize_composite_customer_key(sub_data.get("customer_name", subscription_id)))}\n')
             summary_p.add_run(f'Subscription: {subscription_id}\n')
             summary_p.add_run(f'Renewal Risk Level: {renewal_analysis.get("risk_level", "Unknown")} ({renewal_analysis.get("overall_risk_score", renewal_analysis.get("risk_score", 0))}/10)\n')
 
@@ -23286,10 +23684,68 @@ def run_subscription_analysis(analysis_id):
                 sp_p.add_run('No success priorities found for this subscription.')
 
             # AI Analysis
+            #
+            # Round 71 / Phase 3 (#14): wire ai_narrative_validator
+            # (R16/R27 grounding gate) into the subscription Word
+            # writer.  Pre-R71 the subscription path was the only
+            # report writer that surfaced raw LLM output to the user
+            # without any grounding check (Compact / Comprehensive /
+            # Renewal / Leader all already gate through
+            # ``ai_narrative_validator.validate_narrative``).  The
+            # subscription report also went through CircuIT, so any
+            # ungrounded number / invented entity / HTML injection
+            # in the LLM response landed straight in the docx.
+            # Apply the same fail-closed pattern as the Compact gate:
+            # on rejection (or validator exception) substitute the
+            # canonical placeholder so the report never quotes
+            # hallucinated numbers.
             if ai_response:
                 doc.add_heading('AI Analysis', level=1)
+                _r71_safe_ai_response = ai_response
+                if isinstance(ai_response, str) and ai_response.strip() and not ai_response.startswith("ERROR:"):
+                    try:
+                        import ai_narrative_validator as _r71_anv_sub
+                        _r71_sub_anv_result = _r71_anv_sub.validate_narrative(
+                            ai_response,
+                            briefing_book,
+                        )
+                        if not _r71_sub_anv_result.is_valid:
+                            logger.warning(
+                                "[[AI]] Round 71 / Phase 3 (#14): subscription "
+                                "narrative failed grounding validation; "
+                                "substituting placeholder. failures=%s "
+                                "samples=%s",
+                                list(_r71_sub_anv_result.failures),
+                                {
+                                    k: (v[:80] if isinstance(v, str) else v)
+                                    for k, v in (_r71_sub_anv_result.sample_offending or {}).items()
+                                },
+                            )
+                            _r71_safe_ai_response = _r71_anv_sub.GROUNDING_FAILURE_PLACEHOLDER
+                    except Exception as _r71_sub_anv_err:
+                        # Round 71 / Phase 3 (#15) parity: validator
+                        # exceptions MUST substitute the placeholder
+                        # rather than silently fall through to raw
+                        # LLM text -- otherwise an import / regex bug
+                        # in the validator turns the gate into a
+                        # silent no-op.
+                        logger.warning(
+                            "[[AI]] Round 71 / Phase 3 (#14): subscription "
+                            "narrative validator raised unexpectedly (%s); "
+                            "substituting placeholder for safety.",
+                            _r71_sub_anv_err,
+                        )
+                        try:
+                            from ai_narrative_validator import GROUNDING_FAILURE_PLACEHOLDER as _r71_sub_placeholder
+                            _r71_safe_ai_response = _r71_sub_placeholder
+                        except Exception:
+                            _r71_safe_ai_response = (
+                                "AI narrative withheld (grounding validator "
+                                "unavailable). The data tabs in this report "
+                                "remain authoritative."
+                            )
                 ai_p = doc.add_paragraph()
-                ai_p.add_run(ai_response)
+                ai_p.add_run(_r71_safe_ai_response)
 
             with analysis_status_lock:
                 _update_progress(status, 85, 'Saving Word document...', 'Report Generation')

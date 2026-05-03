@@ -1,9 +1,21 @@
 ; AdoptIQ Windows Installer - Inno Setup script
 ; Run: iscc adoptiq_setup.iss (requires Inno Setup 6)
 ; Output: AdoptIQ-Setup.exe in OUTBOX
-
+;
+; Round 71 / Phase 6 (#32): the MyAppVersion is now sourced from the
+; ADOPTIQ_VERSION environment variable (set by build_pc.bat from
+; config.py) rather than being hard-coded "1.0".  Pre-R71 the
+; installer cosmetically advertised "1.0" while every other surface
+; (config.py, version_info.txt, the Mac DMG label) showed the real
+; version, so an operator who right-clicked the .exe to inspect its
+; properties would see a misleading version number.  The fallback
+; "1.0.4" matches the current config.py default in case the build
+; runs without the env var (e.g. an operator running ``iscc`` ad-hoc).
 #define MyAppName "AdoptIQ"
-#define MyAppVersion "1.0"
+#define MyAppVersion GetEnv('ADOPTIQ_VERSION')
+#if MyAppVersion == ""
+  #define MyAppVersion "1.0.4"
+#endif
 #define MyAppPublisher "AdoptIQ"
 #define MyAppURL "http://localhost:5151"
 #define MyAppExeName "AdoptIQ.exe"

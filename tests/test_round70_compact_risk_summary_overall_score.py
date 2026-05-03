@@ -1,6 +1,6 @@
 """Round 70 / Phase 2 (#4) -- Compact ``Risk_Summary`` carries
-``Overall_Risk_Score`` canonical column AND the ``Risk_Band`` user-facing
-remap (no MEDIUM leakage).
+``Overall_Risk_Score`` canonical column AND the ``Risk_Level`` user-facing
+vocabulary remap (no MEDIUM in user-facing column).
 
 Build 43 acceptance audit found:
 
@@ -10,7 +10,7 @@ Build 43 acceptance audit found:
   silently dropped from the writer despite the R67/B6 contract that
   ``Overall_Risk_Score`` is canonical and ``Risk_Score`` is the
   back-compat alias.
-- 6 customers in the same sheet had ``Risk_Band='MEDIUM'`` despite the
+- 6 customers in the same sheet had ``Risk_Level='MEDIUM'`` despite the
   user-facing R67/B1 contract that the Compact and Renewal vocabulary
   must agree on ``MODERATE``.
 
@@ -19,8 +19,18 @@ The Round 70 fix:
 1. Pins the ``columns=`` arg on the ``Risk_Summary`` DataFrame
    constructor so pandas can never silently drop the canonical column
    even if the row dicts vary.
-2. Remaps ``Risk_Band`` through ``{MEDIUM -> MODERATE}`` at the
+2. Remaps ``Risk_Level`` through ``{MEDIUM -> MODERATE}`` at the
    row-build site so the artifact carries the user-facing vocabulary.
+
+Round 71 / Phase 0 (#1): REVERTED the Round 70 over-reach that also
+remapped ``Risk_Band``.  The R67/B6 contract split is:
+    - ``Risk_Band`` keeps the canonical band key (CRITICAL / HIGH /
+      MEDIUM / LOW / HEALTHY) so existing band-based filters and color
+      lookups still match (and so the Comprehensive
+      ``Risk_Components.risk_band`` column agrees byte-for-byte with
+      the Compact ``Risk_Summary.Risk_Band`` column for the same scope).
+    - ``Risk_Level`` carries the user-facing vocabulary remap
+      (MODERATE in place of MEDIUM).
 
 These tests pin the source-shape AND assert the contract on a synthetic
 dataframe that mirrors the writer's input shape so the artifact contract
@@ -31,7 +41,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
-import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -74,18 +83,40 @@ def test_risk_summary_row_dict_publishes_both_score_columns() -> None:
     )
 
 
-def test_risk_band_user_facing_label_remap_applied() -> None:
-    """R70/Phase 3 (#11): the row-build site MUST remap ``Risk_Band``
-    through ``_r67_b6_LABEL_REMAP`` so MEDIUM never leaks into the
-    artifact."""
+def test_risk_level_user_facing_label_remap_applied() -> None:
+    """R67/B1 + R71/Phase 0 (#1): the row-build site MUST remap
+    ``Risk_Level`` through ``_r67_b6_LABEL_REMAP`` so MEDIUM never
+    leaks into the user-facing artifact column."""
     src = _read_app_simple()
-    assert "_r70_risk_band_user = _r67_b6_LABEL_REMAP.get(band, band)" in src, (
-        "Round 70 / #11: Compact MUST remap Risk_Band through the same "
-        "{MEDIUM -> MODERATE} table as Risk_Level."
+    assert "_r67_b6_risk_level = _r67_b6_LABEL_REMAP.get(risk_level, risk_level)" in src, (
+        "Round 67 / B1: Compact MUST remap Risk_Level through the "
+        "{MEDIUM -> MODERATE} table so the user-facing label reads MODERATE."
     )
-    assert "'Risk_Band': _r70_risk_band_user," in src, (
-        "Round 70 / #11: Compact row dict MUST consume the remapped band, "
-        "not the raw canonical band key."
+    assert "'Risk_Level': _r67_b6_risk_level," in src, (
+        "Round 67 / B1: Compact row dict MUST consume the remapped "
+        "user-facing Risk_Level value."
+    )
+
+
+def test_risk_band_keeps_canonical_key_per_r67_b6_contract() -> None:
+    """R71/Phase 0 (#1): the row-build site MUST emit the *raw* canonical
+    band key for ``Risk_Band`` (no MEDIUM->MODERATE remap), because the
+    R67/B6 contract reserves the canonical key for cross-sheet filter /
+    color parity (and for byte-identical agreement with the Comprehensive
+    ``Risk_Components.risk_band`` column for the same scope).
+
+    The Round 70 over-reach that aliased ``Risk_Band`` to the user-facing
+    label has been reverted -- the user-facing vocabulary contract is
+    satisfied by the ``Risk_Level`` column alone."""
+    src = _read_app_simple()
+    assert "'Risk_Band': band," in src, (
+        "Round 71 / #1: Compact row dict MUST emit the raw canonical "
+        "band key for Risk_Band (no MEDIUM->MODERATE remap)."
+    )
+    assert "_r70_risk_band_user" not in src, (
+        "Round 71 / #1: the Round 70 over-reach that aliased Risk_Band "
+        "through _r67_b6_LABEL_REMAP must be removed; the variable name "
+        "should no longer appear anywhere in app_simple.py."
     )
 
 
@@ -96,21 +127,21 @@ def test_risk_band_user_facing_label_remap_applied() -> None:
 
 def _build_synth_risk_summary() -> pd.DataFrame:
     """Mirror the row dict shape the Compact writer builds, with one
-    row in the MEDIUM band so the remap path is exercised."""
+    row in the MEDIUM band so the contract split is exercised."""
     label_remap = {"MEDIUM": "MODERATE", "medium": "MODERATE", "Medium": "MODERATE"}
     rows = []
-    for customer, score, band, level in (
+    for customer, score, band, raw_level in (
         ("Acme Corp", 8.5, "CRITICAL", "CRITICAL"),
         ("Beta Co", 6.2, "HIGH", "HIGH"),
-        ("Gamma Ltd", 4.5, "MEDIUM", "MODERATE"),
+        ("Gamma Ltd", 4.5, "MEDIUM", "MEDIUM"),
         ("Delta Inc", 1.0, "LOW", "LOW"),
     ):
         rows.append({
             "Customer": customer,
             "Overall_Risk_Score": score,
             "Risk_Score": score,
-            "Risk_Level": level,
-            "Risk_Band": label_remap.get(band, band),
+            "Risk_Level": label_remap.get(raw_level, raw_level),
+            "Risk_Band": band,
             "Adoption_Barriers": 0,
             "Support_Cases": 0,
         })
@@ -150,16 +181,32 @@ def test_synth_risk_summary_overall_and_back_compat_agree() -> None:
     )
 
 
-def test_synth_risk_summary_no_medium_leaks_in_risk_band() -> None:
-    """Contract: no row may carry ``Risk_Band == 'MEDIUM'`` after the
-    R70 remap."""
+def test_synth_risk_summary_no_medium_leaks_in_risk_level() -> None:
+    """Contract: no row may carry ``Risk_Level == 'MEDIUM'`` after the
+    R67/B1 remap."""
     df = _build_synth_risk_summary()
-    bands = set(df["Risk_Band"].astype(str).tolist())
-    assert "MEDIUM" not in bands, (
-        f"Round 70 / #11: Risk_Band leaked MEDIUM: {bands!r}; expected "
+    levels = set(df["Risk_Level"].astype(str).tolist())
+    assert "MEDIUM" not in levels, (
+        f"Round 67 / B1: Risk_Level leaked MEDIUM: {levels!r}; expected "
         "MODERATE for every previously-MEDIUM customer."
     )
-    assert "MODERATE" in bands, (
-        f"Round 70 / #11: Risk_Band MUST carry MODERATE for the customer "
-        "that scored in the MEDIUM band; saw {bands!r}."
+    assert "MODERATE" in levels, (
+        f"Round 67 / B1: Risk_Level MUST carry MODERATE for the customer "
+        f"that scored in the MEDIUM band; saw {levels!r}."
+    )
+
+
+def test_synth_risk_summary_keeps_canonical_band_key() -> None:
+    """R71/Phase 0 (#1) contract: ``Risk_Band`` MUST keep the canonical
+    band key (CRITICAL/HIGH/MEDIUM/LOW/HEALTHY) for cross-sheet parity
+    with Comprehensive ``Risk_Components.risk_band``."""
+    df = _build_synth_risk_summary()
+    bands = set(df["Risk_Band"].astype(str).tolist())
+    assert "MEDIUM" in bands, (
+        f"Round 71 / #1: Risk_Band MUST keep canonical MEDIUM key (the "
+        f"Round 70 over-reach was reverted); saw {bands!r}."
+    )
+    assert "MODERATE" not in bands, (
+        f"Round 71 / #1: Risk_Band MUST NOT carry user-facing MODERATE; "
+        f"the user-facing remap belongs on Risk_Level only.  Saw {bands!r}."
     )

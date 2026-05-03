@@ -21,6 +21,14 @@ _ALLOWED_CANONICAL: Set[str] = {
     "CX_DB.CX_SWSSBST_BR.COLLAB_ACCOUNT_SUMMARY",
     "CX_DB.CX_SWSSBST_BR.ACCOUNTS_EXPIRED_LAST_MONTH",
     "CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU",
+    # Round 71 / Phase 4 (#18): RENEWAL_DATA is referenced by the
+    # comprehensive renewal opportunity prefetch in
+    # adoptiq_backend.py (lines 4692, 4723).  Pre-R71 the canonical
+    # name was missing from the allow-list, so any SQL routed
+    # through guard_sql() raised TablePolicyViolation -- silently
+    # zeroing the renewal opportunity bucket on every run.  Add
+    # the canonical name so the prefetch can run.
+    "CX_DB.CX_SWSSBST_BR.RENEWAL_DATA",
     "EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW",
     "EDW_SALES_ETL_DB.SS.ESA_C360_CUSTOMER_PULSE__C",
 }

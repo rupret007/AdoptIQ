@@ -93,13 +93,16 @@ def test_count_open_action_plans_with_ap_df_treats_blank_status_as_open():
     assert cm.count_open_action_plans(None, ap_df=ap_df) == 3
 
 
-def test_count_open_action_plans_with_ap_df_no_status_column_counts_all_rows():
-    """When the AP frame has no recognizable status column, fall back
-    to len(ap_df) so the Summary cell still surfaces a real signal
-    instead of 0.  (Older Snowflake projections sometimes omitted
-    STATUS_C; this preserves the count surface.)"""
+def test_count_open_action_plans_with_ap_df_no_status_column_returns_zero():
+    """Round 71 / Phase 4 (#20): when the AP frame has no recognizable
+    status column, return 0 + structured warning -- pre-R71 we returned
+    ``len(ap_df)`` (silently marking every row as "open"), which
+    inflated the Summary KPI any time the upstream Snowflake projection
+    was missing STATUS_C.  Returning 0 + a warning is the correct
+    fail-safe: the Summary cell now reads honestly while the operator
+    has greppable provenance for the schema drift."""
     ap_df = pd.DataFrame({"AP_NAME_C": ["AP-1", "AP-2", "AP-3"]})
-    assert cm.count_open_action_plans(None, ap_df=ap_df) == 3
+    assert cm.count_open_action_plans(None, ap_df=ap_df) == 0
 
 
 def test_count_open_action_plans_tolerates_alternate_status_column_names():

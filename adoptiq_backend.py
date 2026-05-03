@@ -6994,6 +6994,23 @@ def cross_reference_refs(ab_df: pd.DataFrame, csone_df: pd.DataFrame, ext_bugs: 
                     if x.startswith("CSC"):
                         refs.add(x.upper())
     matches = sorted(list(refs & ext_set))
+    # Round 71 / Phase 4 (#22): resolve title columns flexibly via the
+    # canonical LIKELY_TITLE_COLS allow-list rather than hardcoding
+    # ``row.get("title")`` / ``row.get("Title")``.  Pre-R71 a CSOne
+    # export that shipped its title under ``SUBJECT`` / ``SUBJECT_C`` /
+    # ``NAME`` / ``ACTION_PLAN_TITLE_C`` (all already in
+    # LIKELY_TITLE_COLS for the rest of the codebase) silently lost the
+    # title in the cross-reference matched-rows snapshot -- the
+    # downstream Word "matched bugs" table then rendered a blank
+    # title cell.
+    _r71_ab_title_col = None
+    if ab_df is not None and not ab_df.empty:
+        _r71_ab_title_col = next((c for c in LIKELY_TITLE_COLS if c in ab_df.columns), None)
+        if _r71_ab_title_col is None and "title" in ab_df.columns:
+            _r71_ab_title_col = "title"
+    _r71_csone_title_col = None
+    if csone_df is not None and not csone_df.empty:
+        _r71_csone_title_col = next((c for c in LIKELY_TITLE_COLS if c in csone_df.columns), None)
     matched_rows = []
     if matches and ab_df is not None and not ab_df.empty:
         for _, row in ab_df.iterrows():
@@ -7002,7 +7019,8 @@ def cross_reference_refs(ab_df: pd.DataFrame, csone_df: pd.DataFrame, ext_bugs: 
             if hits:
                 matched_rows.append({
                     "source":"AdoptionBarrier","id":row.get("ID"),"customer_name":row.get("customer_name"),
-                    "title":row.get("title"),"sub_technology":row.get("sub_technology"),"matches":", ".join(hits)
+                    "title": (row.get(_r71_ab_title_col) if _r71_ab_title_col else row.get("title")),
+                    "sub_technology":row.get("sub_technology"),"matches":", ".join(hits)
                 })
     if matches and csone_df is not None and not csone_df.empty:
         for _, row in csone_df.iterrows():
@@ -7011,7 +7029,8 @@ def cross_reference_refs(ab_df: pd.DataFrame, csone_df: pd.DataFrame, ext_bugs: 
             if hits:
                 matched_rows.append({
                     "source":"CSOne","case":row.get("SR Number"),"customer_name":row.get("customer_name"),
-                    "title":row.get("Title"),"matches":", ".join(hits)
+                    "title": (row.get(_r71_csone_title_col) if _r71_csone_title_col else row.get("Title")),
+                    "matches":", ".join(hits)
                 })
     # Create result dataframe with robust error handling
     try:
@@ -12624,7 +12643,50 @@ def main():
                     "[R25B/R25C] Portfolio drift validator unavailable (CLI path) (%s); proceeding without strict check.",
                     _r25b_other_err,
                 )
-        append_to_word_report(doc, portfolio_summary)
+        # Round 71 / Phase 3 (#16): apply the R16/R27 grounding gate
+        # to the CLI portfolio_summary append path.  Pre-R71 the CLI
+        # main() narrative bypassed validate_narrative entirely
+        # (the gate was only wired into the Flask report writers in
+        # app_simple.py).  Operators using the CLI to regenerate
+        # reports headlessly (e.g. nightly cron, build smoke
+        # harness) would get raw LLM text in the docx with no
+        # grounding check -- including any HTML injection or
+        # invented numbers the upstream validator would have caught.
+        # Apply the same fail-CLOSED contract: substitute the
+        # canonical placeholder on rejection OR validator exception.
+        _r71_safe_portfolio_summary = portfolio_summary
+        if isinstance(portfolio_summary, str) and portfolio_summary.strip() and not portfolio_summary.startswith("ERROR:"):
+            try:
+                import ai_narrative_validator as _r71_anv_cli
+                _r71_cli_anv_result = _r71_anv_cli.validate_narrative(
+                    portfolio_summary,
+                    portfolio_briefing,
+                )
+                if not _r71_cli_anv_result.is_valid:
+                    logger.warning(
+                        "Round 71 / Phase 3 (#16): CLI portfolio narrative "
+                        "failed grounding validation; substituting "
+                        "placeholder. failures=%s",
+                        list(_r71_cli_anv_result.failures),
+                    )
+                    _r71_safe_portfolio_summary = _r71_anv_cli.GROUNDING_FAILURE_PLACEHOLDER
+            except Exception as _r71_cli_anv_err:
+                logger.warning(
+                    "Round 71 / Phase 3 (#16): CLI portfolio narrative "
+                    "validator raised unexpectedly (%s); substituting "
+                    "placeholder for safety.",
+                    _r71_cli_anv_err,
+                )
+                try:
+                    from ai_narrative_validator import GROUNDING_FAILURE_PLACEHOLDER as _r71_cli_placeholder
+                    _r71_safe_portfolio_summary = _r71_cli_placeholder
+                except Exception:
+                    _r71_safe_portfolio_summary = (
+                        "AI narrative withheld (grounding validator "
+                        "unavailable). The data tabs in this report "
+                        "remain authoritative."
+                    )
+        append_to_word_report(doc, _r71_safe_portfolio_summary)
 
         # Generate customer deep dives
         customer_series = []
@@ -12768,7 +12830,43 @@ def main():
             except Exception:  # noqa: BLE001
                 _r69_report_model = None
             customer_storyboard = generate_llm_response(customer_prompt, customer_briefing, model_name=_r69_report_model)
-            append_to_word_report(doc, customer_storyboard)
+            # Round 71 / Phase 3 (#16): same R27 grounding gate on
+            # the CLI per-customer storyboard append path.
+            _r71_safe_storyboard = customer_storyboard
+            if isinstance(customer_storyboard, str) and customer_storyboard.strip() and not customer_storyboard.startswith("ERROR:"):
+                try:
+                    import ai_narrative_validator as _r71_anv_cust
+                    _r71_cust_anv_result = _r71_anv_cust.validate_narrative(
+                        customer_storyboard,
+                        customer_briefing,
+                    )
+                    if not _r71_cust_anv_result.is_valid:
+                        logger.warning(
+                            "Round 71 / Phase 3 (#16): CLI customer storyboard "
+                            "narrative for %s failed grounding validation; "
+                            "substituting placeholder. failures=%s",
+                            customer_name,
+                            list(_r71_cust_anv_result.failures),
+                        )
+                        _r71_safe_storyboard = _r71_anv_cust.GROUNDING_FAILURE_PLACEHOLDER
+                except Exception as _r71_cust_anv_err:
+                    logger.warning(
+                        "Round 71 / Phase 3 (#16): CLI customer storyboard "
+                        "narrative validator raised unexpectedly for %s (%s); "
+                        "substituting placeholder for safety.",
+                        customer_name,
+                        _r71_cust_anv_err,
+                    )
+                    try:
+                        from ai_narrative_validator import GROUNDING_FAILURE_PLACEHOLDER as _r71_cust_placeholder
+                        _r71_safe_storyboard = _r71_cust_placeholder
+                    except Exception:
+                        _r71_safe_storyboard = (
+                            "AI narrative withheld (grounding validator "
+                            "unavailable). The data tabs in this report "
+                            "remain authoritative."
+                        )
+            append_to_word_report(doc, _r71_safe_storyboard)
 
         # Save Word document
         docx_path = f"{base}.docx"

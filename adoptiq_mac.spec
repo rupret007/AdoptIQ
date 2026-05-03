@@ -111,6 +111,13 @@ hidden_imports = [
     'ask_ai_corpus',
     'report_corpus_context',
     'adoptiq_settings',
+    # Round 69 / Build 43 + Round 71 / Phase 7 #34: operator-flippable
+    # LLM model selection -- model_resolver is imported lazily by both
+    # Ask AI and report-narrative paths so PyInstaller's analyser misses
+    # it without an explicit pin.  Without this pin the frozen build
+    # silently falls back to the platform default model whenever the
+    # operator's settings.json says otherwise.
+    'model_resolver',
     # Round 66 / Pass 5 - hybrid retrieval (BM25 + dense + RRF) via
     # fastembed.  fastembed lazy-loads onnxruntime + tokenizers; pin
     # all three so the frozen build can warm the embedder on
