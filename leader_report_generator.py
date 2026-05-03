@@ -5751,23 +5751,34 @@ class LeaderReportGenerator:
                     # collapse onto the same band before counting.
                     high_severity_count = int(self._high_or_critical_barrier_mask(abs_df).sum())
                 if 'STATUS_C' in abs_df.columns:
-                    # Round 6 / Phase 5.6: normalize STATUS_C via
-                    # ``_is_status_open`` (the same helper the
-                    # account-health table and other leader sub-
-                    # sections already use) so case / whitespace /
-                    # legacy spelling differences ("open" vs "Open"
-                    # vs "OPEN" vs "In Progress") cannot silently
-                    # drop rows from the team summary count.
+                    # Round 72 / Build 46 (Finding 2): route ``open_ab_count``
+                    # through the canonical ``count_open_barriers`` helper for
+                    # cross-format parity with the leader Excel.  The pre-R72
+                    # inline ``status_series.apply(self._is_status_open).sum()``
+                    # path counted RAW ROWS (no dedup) and used a permissive
+                    # NOT-IN-CLOSED-TOKENS rule that classified non-canonical
+                    # statuses (e.g. "In Progress", "New", "Pending") as Open.
+                    # Meanwhile the harness extractor and every other report
+                    # call ``cm.count_open_barriers`` which (a) normalizes
+                    # status via ``normalize_status_label`` then matches
+                    # exactly to "Open" and (b) deduplicates by barrier ID.
+                    # Round 71 / Phase 1 acceptance against real Snowflake
+                    # data surfaced the divergence: the leader DOCX wrote
+                    # "Open Adoption Barriers: 65" while the leader XLSX
+                    # ``Adoption_Barriers`` sheet's canonical count was 63
+                    # (65 raw "Open" rows -> 63 distinct IDs).  Routing
+                    # through the SSoT helper makes the two artifacts agree
+                    # byte-for-byte and matches the Round 30 / M1 fix that
+                    # already routed ``resolved_ab_count`` through
+                    # ``cm.count_closed_barriers``.  The defensive fallback
+                    # below preserves the pre-R72 behaviour so a stale
+                    # fixture cannot break the leader report at runtime;
+                    # the canonical path is primary.
                     status_series = abs_df['STATUS_C']
-                    open_ab_count = int(status_series.apply(self._is_status_open).sum())
-                    # Round 30 / M1: route through the canonical
-                    # ``count_closed_barriers`` helper so this count
-                    # matches the lifecycle definition every other
-                    # report uses.  The previous inline regex
-                    # (``r'closed|resolved|complete'``) bypassed the
-                    # normalization map and over-counted labels like
-                    # "Resolved (Pending Customer Review)" while
-                    # silently missing any synonym not in the regex.
+                    try:
+                        open_ab_count = int(cm.count_open_barriers(abs_df))
+                    except Exception:  # noqa: BLE001
+                        open_ab_count = int(status_series.apply(self._is_status_open).sum())
                     try:
                         resolved_ab_count = int(cm.count_closed_barriers(abs_df))
                     except Exception:  # noqa: BLE001
@@ -5998,7 +6009,47 @@ class LeaderReportGenerator:
             severity_para.add_run(f"{total_high_severity} high/critical severity adoption barriers need priority resolution.\n")
 
         # Open adoption barriers
-        total_open_abs = sum(member['open_abs'] for member in team_summary_data)
+        # Round 72 / Build 46 (Finding 2): the legacy
+        # ``sum(member['open_abs'] for member in team_summary_data)``
+        # was the SUM of per-CSSM open AB counts.  When the same
+        # barrier was attributed to multiple CSSMs (via the
+        # ``_ATTRIBUTED_BY_ACCOUNT`` shared-account pathway in
+        # ``_slice_by_owner_or_account``), the per-CSSM counts
+        # double-counted -- producing a docx headline (e.g. 65)
+        # that disagreed with the canonical XLSX
+        # ``Adoption_Barriers`` sheet's deduplicated count
+        # (e.g. 63).  The Round 71/Phase-1 acceptance harness
+        # caught this as a parity mismatch on every leader run.
+        # The fix concatenates all per-CSSM AB frames (the same
+        # input that ``_create_detailed_ab_list`` uses to build
+        # the XLSX sheet) and runs ``cm.count_open_barriers``
+        # once on the combined frame.  The helper deduplicates by
+        # barrier ID so shared barriers count once.  Per-CSSM
+        # ``open_abs`` continues to feed the Individual Team Member
+        # Performance table (where the per-member view is the right
+        # reading), but the headline ``total_open_abs`` is now the
+        # canonical team-wide deduplicated count.
+        try:
+            _r72_combined_open_abs = []
+            for _data in team_data.values():
+                _ab_df = _data.get('adoption_barriers')
+                if _ab_df is not None and not _ab_df.empty:
+                    _r72_combined_open_abs.append(_ab_df)
+            if _r72_combined_open_abs:
+                _r72_combined_frame = pd.concat(_r72_combined_open_abs, ignore_index=True)
+                total_open_abs = int(cm.count_open_barriers(_r72_combined_frame))
+            else:
+                total_open_abs = 0
+        except Exception as _r72_open_err:  # noqa: BLE001
+            # Defensive fallback: keep the legacy sum-of-per-CSSM
+            # so the report does not regress to "no number" on a
+            # pandas-version edge case.
+            logger.debug(
+                "Round 72 / F2: combined open-AB count failed (%s); "
+                "falling back to per-CSSM sum.",
+                _r72_open_err,
+            )
+            total_open_abs = sum(member['open_abs'] for member in team_summary_data)
         if total_open_abs > 0:
             open_para = self.doc.add_paragraph()
             open_para.add_run('INFO: Open Adoption Barriers: ').font.bold = True

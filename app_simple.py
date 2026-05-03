@@ -14379,10 +14379,24 @@ def run_customer_renewal_analysis(analysis_id):
         # -> MODERATE remap here so the two artifacts agree.
         _r71_key_metrics_label_remap = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
         _r71_user_facing_risk_level = _r71_key_metrics_label_remap.get(risk_level, risk_level)
+        # Round 72 / Build 46 (Finding 1): round ``Risk_Score`` to 1
+        # decimal place so the renewal XLSX ``Key_Metrics`` sheet
+        # agrees with the DOCX narrative (which renders the same
+        # number via ``:.1f``).  Pre-R72 the XLSX wrote the raw float
+        # (e.g. ``9.81204188481677``) while the DOCX rendered ``9.8``,
+        # tripping the cross-format parity gate on every renewal run.
+        # Round 71 / Phase 4 (#23) pinned DOCX rounding but missed the
+        # XLSX side; this closes the symmetry.
+        def _r72_round_risk_score(value: Any) -> Any:
+            try:
+                return round(float(value), 1)
+            except (TypeError, ValueError):
+                return value
+
         key_metrics = renewal_analysis.get('key_metrics', {})
         if not key_metrics:
             key_metrics = {
-                'Risk_Score': overall_risk_score,
+                'Risk_Score': _r72_round_risk_score(overall_risk_score),
                 'Risk_Category': _r71_user_facing_risk_level,
                 'Analysis_Period': f'{days} days',
                 'Key_Findings': len(renewal_analysis.get('key_findings', [])),
@@ -14394,6 +14408,11 @@ def run_customer_renewal_analysis(analysis_id):
                 _r71_remapped = _r71_key_metrics_label_remap.get(_r71_existing_cat, _r71_existing_cat)
                 if _r71_existing_cat and _r71_remapped != _r71_existing_cat:
                     key_metrics['Risk_Category'] = _r71_remapped
+                # Round 72 / Build 46 (Finding 1): also normalize the
+                # pre-existing ``Risk_Score`` if the analyzer produced a
+                # raw float on its own ``key_metrics`` dict path.
+                if 'Risk_Score' in key_metrics:
+                    key_metrics['Risk_Score'] = _r72_round_risk_score(key_metrics['Risk_Score'])
             except Exception:
                 pass
 

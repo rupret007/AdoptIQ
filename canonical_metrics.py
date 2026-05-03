@@ -48,7 +48,7 @@ the table.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -813,6 +813,50 @@ def count_critical_barriers(
     return _count_barrier_records(ab_df, series.isin(["Critical", "High"]))
 
 
+def _select_first_populated_status_column(
+    ab_df: pd.DataFrame, candidates: Tuple[str, ...]
+) -> Optional[str]:
+    """Round 72 / Build 46 (Finding 2): pick the first candidate column
+    that actually has at least one non-empty value.
+
+    Pre-R72 the ``count_open_barriers`` / ``count_closed_barriers``
+    helpers picked ``AB_STATUS_C`` first if it was present in the
+    DataFrame at all, even when it was 100% NaN -- which is exactly
+    the shape produced by the leader-report Snowflake AB extract
+    (``AB_STATUS_C`` joins from a sister table that historically
+    isn't populated, while the canonical ``STATUS_C`` carries the
+    real "Open" / "Resolved" / "Cancelled" labels).  The pre-R72
+    naive ``next(c for c in candidates if c in ab_df.columns)`` pick
+    routed every per-CSSM ``count_open_barriers`` call into a
+    column whose ``normalize_status_label`` output was always
+    ``"Unknown"`` -- so the leader DOCX wrote "Open Adoption
+    Barriers: 0" while the leader XLSX ``Adoption_Barriers`` sheet
+    correctly read 63 distinct Open barriers via the canonical
+    rename ``STATUS_C -> Status``.
+
+    The fix: enumerate the candidate columns in the documented
+    priority order, and skip any column that has no non-empty
+    values.  Falling through to the next candidate keeps the
+    helper functions usable in pipelines that rely on the
+    secondary fallback (e.g. CSV imports that only carry
+    ``AB_STATUS_C``) without regressing the leader path.
+    Returns ``None`` if none of the candidates carry any data.
+    """
+
+    for col in candidates:
+        if col not in ab_df.columns:
+            continue
+        try:
+            non_empty = ab_df[col].fillna("").astype(str).str.strip().str.len() > 0
+        except Exception:  # noqa: BLE001
+            # Defensive: a non-string-coercible column shouldn't
+            # be picked silently -- skip it and keep looking.
+            continue
+        if bool(non_empty.any()):
+            return col
+    return None
+
+
 def count_open_barriers(ab_df: Optional[pd.DataFrame]) -> int:
     """Open AB count using canonical status normalization."""
 
@@ -823,8 +867,21 @@ def count_open_barriers(ab_df: Optional[pd.DataFrame]) -> int:
     elif "status_norm" in ab_df.columns:
         series = ab_df["status_norm"].fillna("").astype(str)
     else:
-        candidates = ("AB_STATUS_C", "STATUS_C", "Status", "STATUS")
-        col = next((c for c in candidates if c in ab_df.columns), None)
+        # Round 72 / Build 46 (Finding 2): prefer the canonical
+        # ``STATUS_C`` ahead of the historically-blank
+        # ``AB_STATUS_C`` so the leader / renewal / compact pipelines
+        # all converge on the same "Open" denominator. The helper
+        # ``_select_first_populated_status_column`` skips any
+        # candidate that is present but 100% NA, keeping the
+        # secondary fallbacks usable for pipelines that only carry
+        # ``AB_STATUS_C``.  Pre-R72 the leader DOCX wrote "Open
+        # Adoption Barriers: 0" because per-CSSM ``abs_df`` carried
+        # both ``STATUS_C`` (real values) and ``AB_STATUS_C``
+        # (all-NaN, by Snowflake join shape), and the naive
+        # ``next(c for c in candidates if c in ab_df.columns)`` pick
+        # routed straight into the empty column.
+        candidates = ("STATUS_C", "AB_STATUS_C", "Status", "STATUS")
+        col = _select_first_populated_status_column(ab_df, candidates)
         if col is None:
             return 0
         series = ab_df[col].fillna("").astype(str).apply(normalize_status_label)
@@ -856,8 +913,15 @@ def count_closed_barriers(ab_df: Optional[pd.DataFrame]) -> int:
     elif "status_norm" in ab_df.columns:
         series = ab_df["status_norm"].fillna("").astype(str)
     else:
-        candidates = ("AB_STATUS_C", "STATUS_C", "Status", "STATUS")
-        col = next((c for c in candidates if c in ab_df.columns), None)
+        # Round 72 / Build 46 (Finding 2): mirror ``count_open_barriers``
+        # priority + skip-empty logic so the closed-side count
+        # also converges on the canonical ``STATUS_C`` when the
+        # legacy ``AB_STATUS_C`` is present-but-blank in the
+        # leader/renewal Snowflake AB extract.  Without the
+        # symmetric fix the closed denominator silently drifted
+        # to zero on the same per-CSSM frames.
+        candidates = ("STATUS_C", "AB_STATUS_C", "Status", "STATUS")
+        col = _select_first_populated_status_column(ab_df, candidates)
         if col is None:
             return 0
         series = ab_df[col].fillna("").astype(str).apply(normalize_status_label)
