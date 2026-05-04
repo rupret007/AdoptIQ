@@ -2374,15 +2374,22 @@ class TestRound31Fixes:
         Round 39 / Phase 2.3: widened the search window from 2500
         to 3500 bytes.  The original window placed the second pattern
         at offset 2378; Round 39's doc comments + late-penalty hook
-        in ``_add_validation_section`` pushed it to offset 2602.  The
-        underlying invariant (both .get() patterns present in the
-        validation-section renderer) is unchanged.
+        in ``_add_validation_section`` pushed it to offset 2602.
+
+        Round 76 / R76-B: widened to 5000 bytes.  The new
+        "Snowflake Enrichment Sections Unavailable" banner block
+        (rendered from ``self.enhanced_insights.get_globally_unavailable_sections()``)
+        adds ~1200 bytes between the validation summary and the
+        ``data_sources`` access, pushing the second pattern past the
+        old 3500 window.  The underlying invariant (both .get()
+        patterns present in the validation-section renderer) is
+        unchanged.
         """
         with open(os.path.join(_PROJECT_ROOT, 'leader_report_generator.py'), encoding='utf-8') as f:
             src = f.read()
         idx = src.find('Data Validation & Verification')
         assert idx != -1
-        section = src[idx:idx + 3500]
+        section = src[idx:idx + 5000]
         assert "validation_results.get('summary'" in section
         assert "(validation_results.get('validation_checks') or {}).get('data_sources'" in section
 

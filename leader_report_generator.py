@@ -7064,6 +7064,41 @@ class LeaderReportGenerator:
         summary_para.add_run(f'  • Data Quality Score: {summary.get("data_quality_score", "N/A")}/100\n')
         summary_para.add_run(f'  • Validation Timestamp: {validation_results.get("timestamp", "N/A")}\n')
 
+        # Round 76 / R76-B: surface globally-unavailable Snowflake
+        # sections ONCE per report so the operator knows which
+        # enrichment categories were not queryable in this run
+        # (typically due to a missing/renamed column or unauthorized
+        # role), rather than repeating the per-customer warning.
+        # Build 49 acceptance audit found 423 repetitions of the
+        # booking warning across the leader DOCX; this banner
+        # collapses that to a single entry.  When the set is empty
+        # (clean Snowflake state), no banner is emitted.
+        try:
+            globally_unavailable = (
+                self.enhanced_insights.get_globally_unavailable_sections()
+                if self.enhanced_insights else []
+            )
+        except Exception:
+            globally_unavailable = []
+        if globally_unavailable:
+            ga_heading = self.doc.add_heading(
+                'Snowflake Enrichment Sections Unavailable', level=2
+            )
+            if ga_heading.runs:
+                ga_heading.runs[0].font.color.rgb = RGBColor(204, 102, 0)
+            ga_para = self.doc.add_paragraph()
+            ga_para.add_run(
+                "The following Snowflake-backed enrichment sections were "
+                "not enabled in the current role and have been omitted from "
+                "per-customer details: "
+            )
+            ga_run = ga_para.add_run(", ".join(globally_unavailable))
+            ga_run.font.bold = True
+            ga_para.add_run(
+                ".  Canonical AP / AB / CP / TAC / BEMS counts and the team "
+                "summary are unaffected by these omissions."
+            )
+
         # Critical Issues
         if summary.get('critical_issues'):
             issues_heading = self.doc.add_heading('Critical Issues', level=2)

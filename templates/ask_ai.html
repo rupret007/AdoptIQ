@@ -4,10 +4,86 @@
 
 {% block extra_css %}
 <style>
-    .ai-answer { white-space: pre-wrap; font-size: 0.95rem; line-height: 1.7; }
+    /* Round 74 / Phase 2 (P2): marked + DOMPurify render the answer
+       as proper HTML now (tables, headings, lists, code blocks,
+       block quotes), so ``white-space: pre-wrap`` would force every
+       newline to become a hard break and corrupt the layout.
+       Drop pre-wrap and lean on marked's block elements instead.
+       The fallback ``formatAnswerInto`` renderer already inserts
+       <br> between lines so the no-marked path still wraps correctly. */
+    .ai-answer { font-size: 0.95rem; line-height: 1.7; }
     .ai-card { border-left: 4px solid var(--accent-primary, var(--cisco-blue)); }
     .suggestion-btn { font-size: 0.8rem; }
     .context-badge { font-size: 0.75rem; }
+    /* Round 74 / Phase 2 (P2): table polish for marked-rendered
+       answers.  Without explicit borders + spacing markdown tables
+       look cramped against the surrounding prose. */
+    .ai-answer table {
+        width: 100%;
+        margin: 0.75rem 0;
+        border-collapse: collapse;
+        font-size: 0.9rem;
+    }
+    .ai-answer th, .ai-answer td {
+        border: 1px solid #dee2e6;
+        padding: 0.4rem 0.6rem;
+        text-align: left;
+        vertical-align: top;
+    }
+    .ai-answer thead th {
+        background-color: #f8f9fa;
+        font-weight: 600;
+    }
+    .ai-answer tbody tr:nth-child(even) { background-color: #fcfcfd; }
+    .ai-answer ul, .ai-answer ol { padding-left: 1.5rem; margin: 0.5rem 0; }
+    .ai-answer li { margin-bottom: 0.2rem; }
+    .ai-answer code {
+        background-color: #f1f3f5;
+        padding: 0.05rem 0.3rem;
+        border-radius: 3px;
+        font-size: 0.88em;
+    }
+    .ai-answer pre {
+        background-color: #f8f9fa;
+        border: 1px solid #e9ecef;
+        border-radius: 4px;
+        padding: 0.6rem 0.9rem;
+        overflow-x: auto;
+        font-size: 0.85rem;
+        margin: 0.6rem 0;
+    }
+    .ai-answer pre code { background: transparent; padding: 0; }
+    .ai-answer blockquote {
+        border-left: 3px solid #adb5bd;
+        padding-left: 0.8rem;
+        color: #495057;
+        margin: 0.6rem 0;
+    }
+    .ai-answer h1, .ai-answer h2, .ai-answer h3, .ai-answer h4, .ai-answer h5, .ai-answer h6 {
+        margin-top: 0.9rem;
+        margin-bottom: 0.45rem;
+    }
+    /* Round 74 / Phase 2 (P2): clickable source badges injected into
+       the marked-rendered DOM.  Phase 4 (P4) wires these to the
+       offcanvas evidence drawer. */
+    .r74-source-badge {
+        display: inline-block;
+        background-color: #e7f1ff;
+        color: #0a58ca;
+        border: 1px solid #b6d4fe;
+        border-radius: 3px;
+        padding: 0 0.35rem;
+        font-size: 0.78em;
+        font-weight: 600;
+        cursor: pointer;
+        margin: 0 0.15rem;
+        font-family: inherit;
+        line-height: 1.4;
+    }
+    .r74-source-badge:hover, .r74-source-badge:focus {
+        background-color: #cfe2ff;
+        outline: none;
+    }
 </style>
 {% endblock %}
 
@@ -94,6 +170,29 @@
                                 <i class="fas fa-paper-plane me-1"></i>Ask
                             </button>
                         </div>
+                    </div>
+                    {# Round 74 / Phase 5 (P5): conversation toggle so the
+                       operator can ask follow-ups in context (the LLM
+                       sees the prior 5 turns).  Default OFF -- a single
+                       question is the dominant case; the toggle is
+                       opt-in so the operator can choose to maintain
+                       conversational state when they need it. #}
+                    <div class="d-flex align-items-center gap-3 flex-wrap mb-3 small">
+                        <div class="form-check form-switch mb-0">
+                            <input class="form-check-input" type="checkbox" role="switch"
+                                   id="r74ConversationToggle">
+                            <label class="form-check-label small text-muted"
+                                   for="r74ConversationToggle">
+                                <i class="fas fa-comments me-1"></i>Continue conversation
+                                <span id="r74ConversationCount" class="badge bg-light text-secondary border ms-1"
+                                      style="display:none;">0 turns</span>
+                            </label>
+                        </div>
+                        <button type="button" id="r74ConversationResetBtn"
+                                class="btn btn-link btn-sm text-decoration-none p-0 text-muted"
+                                style="display:none;">
+                            <i class="fas fa-rotate-left me-1"></i>Reset conversation
+                        </button>
                     </div>
                     {# Round 68 / Build 42 (C6): suggestion chips are now
                        data-driven via GET /api/ask-ai/suggestions.  The
@@ -259,6 +358,15 @@
                                   id="r69DebugChipModel" style="display:none;">model: -</span>
                             <span class="badge bg-light text-secondary border font-monospace"
                                   id="r68DebugChipId">debug: -</span>
+                            {# Round 74 / Phase 3 (P3): streaming-mode
+                               pill -- shown when the answer arrived
+                               via the SSE endpoint, hidden when the
+                               sync fallback was used. #}
+                            <span class="badge bg-info-subtle text-info border-0"
+                                  id="r74StreamingPill" style="display:none;"
+                                  title="This answer was streamed via Server-Sent Events.">
+                                <i class="fas fa-bolt"></i> streaming
+                            </span>
                             <button type="button"
                                     id="r68DebugChipCopyBtn"
                                     class="btn btn-link btn-sm p-0 text-decoration-none small">
@@ -266,6 +374,55 @@
                                 <span>Copy debug ID</span>
                             </button>
                         </div>
+                        {# Round 74 / Phase 6 (P6): auto-suggested
+                           follow-up question chips.  Rendered after
+                           each answer when the server returned 1+
+                           suggestions; hidden when the suggestions
+                           list is empty.  Click a chip to fill the
+                           input + (when the conversation toggle is
+                           ON) auto-submit. #}
+                        <div id="r74FollowUpChipsContainer"
+                             class="mt-3 pt-3 border-top"
+                             style="display:none;">
+                            <div class="d-flex align-items-center mb-2 small text-muted">
+                                <i class="fas fa-lightbulb text-warning me-2"></i>
+                                <strong>Suggested follow-ups</strong>
+                            </div>
+                            <div id="r74FollowUpChips" class="d-flex flex-wrap gap-2"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {# Round 74 / Phase 4 (P4): Bootstrap Offcanvas evidence
+               drawer.  Slides in from the right when the user clicks
+               a ``.r74-source-badge``.  The drawer body is populated
+               by static/js/ask_ai.js -- it looks up the record in the
+               in-memory ``_r74EvidenceRecords`` index first; on a
+               miss it falls back to GET /api/ask-ai/evidence/<query_id>/<source_id>.
+               The aria-labelledby + role attributes make the drawer
+               screen-reader friendly. #}
+            <div class="offcanvas offcanvas-end"
+                 tabindex="-1"
+                 id="r74EvidenceDrawer"
+                 aria-labelledby="r74EvidenceDrawerLabel"
+                 role="dialog">
+                <div class="offcanvas-header border-bottom">
+                    <h5 class="offcanvas-title" id="r74EvidenceDrawerLabel">
+                        <i class="fas fa-quote-left text-primary me-2"></i>
+                        <span>Evidence record</span>
+                    </h5>
+                    <button type="button"
+                            class="btn-close"
+                            data-bs-dismiss="offcanvas"
+                            aria-label="Close evidence drawer"></button>
+                </div>
+                <div class="offcanvas-body">
+                    <div id="r74EvidenceDrawerStatus" class="alert alert-info small mb-3"
+                         style="display:none;" role="status"></div>
+                    <div id="r74EvidenceDrawerBody" class="small">
+                        <p class="text-muted mb-0">Click a <strong>[Source: ID]</strong>
+                            badge in the answer to view the underlying record.</p>
                     </div>
                 </div>
             </div>
@@ -353,6 +510,25 @@
 {% endblock %}
 
 {% block extra_js %}
+{# Round 74 / Phase 2 (P2): marked.js + DOMPurify for safe markdown
+   rendering of LLM answers.  Both libraries are pinned to a major
+   version via the +esm SRI-friendly URLs from cdn.jsdelivr.net (which
+   the page-level CSP already allow-lists for ``script-src``).
+   ``marked@11`` is a stable line that supports tables / fenced code
+   blocks / GFM out of the box; ``dompurify@3`` is the canonical
+   sanitizer.  Both expose globals (``marked``, ``DOMPurify``) so
+   ``ask_ai.js`` can detect-and-use them with a clean fallback to the
+   pre-R74 ``formatAnswerInto`` renderer when (for whatever reason --
+   blocked CDN, offline DMG run, future CSP tightening) the libraries
+   are not loaded. #}
+<script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"
+        integrity="sha384-zbcZAIxlvJtNE3Dp5nxLXdXtXyxwOdnILY1TDPVmKFhl4r4nSUG1r8bcFXGVa4Te"
+        crossorigin="anonymous"
+        referrerpolicy="no-referrer"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"
+        integrity="sha384-vdScihEZCfbPnBQf+lc7LgXUdJVYyhC3yWHUW5C5P5GpHRqVnaM6HJELJxT6IqwM"
+        crossorigin="anonymous"
+        referrerpolicy="no-referrer"></script>
 {# Round 8 / Phase 5.2: load the Ask-AI page client from a static
    asset so it executes under ``script-src 'self'`` without needing
    the unsafe-inline relaxation. #}

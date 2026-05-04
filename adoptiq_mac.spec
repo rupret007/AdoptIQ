@@ -121,6 +121,14 @@ hidden_imports = [
     # unreachable.  Build 46 acceptance found 0/4 docx artifacts carried
     # ``word/footer1.xml``; this pin closes that regression.
     '_r68_build_label',
+    # Round 74 / Phase 1 (F1): defense-in-depth post-save footer
+    # enforcer.  ``_r74_footer_enforcer`` is lazy-imported inside
+    # ``_r74_enforce_footer_safe`` (app_simple.py) so PyInstaller's
+    # static analyser does NOT follow it without an explicit pin.
+    # Without this pin the frozen build silently regresses to the
+    # Build 47 P0 (empty footers across all 4 reports) the moment any
+    # writer call site bypasses ``apply_word_footer``.
+    '_r74_footer_enforcer',
     # Round 69 / Build 43 + Round 71 / Phase 7 #34: operator-flippable
     # LLM model selection -- model_resolver is imported lazily by both
     # Ask AI and report-narrative paths so PyInstaller's analyser misses

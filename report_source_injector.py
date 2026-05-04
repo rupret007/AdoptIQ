@@ -253,6 +253,193 @@ def _append_run(paragraph: Any, text: str) -> None:
 # sentence-style behavior (citation immediately after the value).
 _BOUNDARY_HAS_UNIT_RE = re.compile(r"[A-Za-z]")
 
+# Round 76 / R76-A (P1): bullet-glyph detector for boundaries that
+# carry a list separator (``• ``, ``* ``, ``- ``).  Build 47-49 leader
+# reports emitted single-paragraph multi-KPI bullet lists like
+# ``'• Total team activities: 999• Total Action Plans: 366• ...'``
+# where the bullet glyph + next label collectively absorb into the
+# next match's label group via the greedy ``[A-Za-z /()\-]{2,80}?``
+# quantifier; the boundary segment ``'• Total Action Plans: '`` then
+# carries an alphabetic token (``Total``) so the R66/B1 unit-deferral
+# branch incorrectly fires and the citation lands as
+# ``'999• [Source: ...] Total Action Plans'``.  This regex is checked
+# BEFORE the unit branch -- when a bullet glyph is present, we route to
+# the R57 sentence-style placement (citation immediately after the
+# value, before the bullet) so the rendered output reads
+# ``'999 [Source: ...] • Total Action Plans: 366 [Source: ...]'`` and
+# the bullet remains attached to its label.
+_BOUNDARY_HAS_BULLET_RE = re.compile(r"[\u2022\*]|^-|\s-\s")
+
+# Round 76 / R76-A (P1): paren-group detector.  When an entire line is
+# a parenthetical KPI cluster like ``'(APs: 16, ABs: 3, CPs: 1, TAC: 4)'``
+# with all matches falling inside the parentheses and boundaries being
+# pure-punctuation commas, treat the cluster as ONE KPI: suppress
+# per-match interleaving and append a single citation immediately
+# after the closing ``)``.  This avoids the visual noise of four
+# inline citations sitting between the comma-separated values.  The
+# scan is conservative: BOTH a leading ``(`` AND a trailing ``)`` must
+# be present AND every match must fall between them.
+_PAREN_GROUP_OPEN_RE = re.compile(r"\(")
+_PAREN_GROUP_CLOSE_RE = re.compile(r"\)")
+
+
+def _line_is_paren_kpi_cluster(line: str, line_matches: list[Any]) -> bool:
+    """True when ``line`` is a single ``(KPI: v, KPI: v, ...)`` cluster.
+
+    Cluster recognition rules:
+      * exactly one ``(`` before the first match AND one matching
+        ``)`` after the last match (no nested or split clusters);
+      * cluster body contains at least ``len(matches) - 1`` commas
+        (one per KPI separator);
+      * cluster body contains NO bullet glyph (would indicate the
+        bullet branch should fire instead);
+      * NO between-match boundary contains an alphabetic word of 2+
+        chars (would indicate ``then`` / ``and`` / a unit token).
+
+    Note: the regex's value group ``[\\d,]*`` greedily absorbs commas
+    into the value (so ``16,`` becomes part of the value when followed
+    by another digit-likely token).  We therefore can't rely on the
+    boundary-substring carrying the comma -- we check the cluster
+    body as a whole instead.
+    """
+    if len(line_matches) < 2:
+        return False
+    first_start = line_matches[0].start()
+    last_end = line_matches[-1].end()
+    open_idx = line.rfind("(", 0, first_start)
+    if open_idx < 0:
+        return False
+    close_idx = line.find(")", last_end)
+    if close_idx < 0:
+        return False
+    if line.count("(", open_idx, close_idx) != 1:
+        return False
+    cluster_body = line[open_idx + 1: close_idx]
+    if cluster_body.count(",") < len(line_matches) - 1:
+        return False
+    if _BOUNDARY_HAS_BULLET_RE.search(cluster_body):
+        return False
+    for i in range(len(line_matches) - 1):
+        m = line_matches[i]
+        next_m = line_matches[i + 1]
+        between = line[m.end():next_m.start()]
+        if re.search(r"[A-Za-z]{2,}", between):
+            return False
+    return True
+
+
+def _embedded_paren_clusters(line: str, line_matches: list[Any]) -> dict[int, int]:
+    """Round 76 / Build 51: identify EMBEDDED ``(KPI: v, KPI: v, ...)``
+    clusters within a longer paragraph and return a map of
+    ``{cluster_end_match_idx: close_paren_position}``.
+
+    Build 50 acceptance found leader DOCX paragraphs of the form::
+
+        "Total Activities: 45 (APs: 16, ABs: 3, CPs: 1, TAC: 25) | "
+        "Warning:  BEMS Escalations: 4"
+
+    Match 0 (``Total Activities: 45``) sits OUTSIDE the parens, matches
+    1-4 (``APs: 16`` ... ``TAC: 25``) sit INSIDE, match 5
+    (``BEMS Escalations: 4``) sits AFTER the closing ``)``.  The
+    whole-line paren cluster check (``_line_is_paren_kpi_cluster``)
+    correctly rejects this line because the matches don't all fall
+    inside the parens.  Without an embedded-cluster classifier the
+    multi-match loop then emits four citations INSIDE the parens
+    (one per comma-separated KPI), producing
+    ``"(APs: 16, [Source: ...]ABs: 3, [Source: ...]CPs: 1, ...)"``.
+
+    This helper scans for ``(...)`` substrings and returns a mapping of
+    the LAST match-index in each qualifying cluster to the position
+    of the closing ``)`` so the multi-match loop can:
+      * skip per-match citation emission for matches inside the cluster
+        (cursor advances cleanly across the cluster body);
+      * emit ONE citation immediately after the closing ``)`` once the
+        cluster's last match has been processed.
+
+    Cluster qualification (matches the whole-line rules):
+      * 2+ matches inside the same ``(...)`` group;
+      * no nested ``(`` between cluster open and close;
+      * no bullet glyph in the cluster body;
+      * no alphabetic word (2+ chars) in any between-match boundary.
+    """
+    out: dict[int, int] = {}
+    if len(line_matches) < 2:
+        return out
+    i = 0
+    n = len(line_matches)
+    while i < n - 1:
+        m = line_matches[i]
+        m_start = m.start()
+        # Find the nearest unclosed ``(`` BEFORE this match.
+        before = line[:m_start]
+        last_open = before.rfind("(")
+        last_close = before.rfind(")")
+        if last_open <= last_close or last_open < 0:
+            i += 1
+            continue
+        # Find the matching ``)`` AFTER the cluster's start.
+        close_idx = line.find(")", m.end())
+        if close_idx < 0:
+            i += 1
+            continue
+        # No nested ``(`` inside the cluster body.
+        if "(" in line[last_open + 1: close_idx]:
+            i += 1
+            continue
+        # Collect every match index whose start lies inside the cluster.
+        cluster_end_idx = i
+        for j in range(i + 1, n):
+            mj = line_matches[j]
+            if mj.start() < close_idx:
+                cluster_end_idx = j
+            else:
+                break
+        if cluster_end_idx == i:
+            # Only one match in the cluster -- not a multi-KPI cluster.
+            i += 1
+            continue
+        # Cluster body must satisfy the same hygiene as the whole-line
+        # detector: no bullets, AND every comma-separated segment of
+        # the body must match a simple ``"<Label>: <number>"`` shape
+        # so we don't collapse a cluster that contains a sentence
+        # fragment (e.g. ``"(Total: 5 then Now: 3)"`` where ``then``
+        # got absorbed into the next match's label group by the
+        # greedy KPI regex).
+        cluster_body = line[last_open + 1: close_idx]
+        if _BOUNDARY_HAS_BULLET_RE.search(cluster_body):
+            i = cluster_end_idx + 1
+            continue
+        # Each comma-separated piece must look like ``label: number(unit?)``
+        # with at most TWO single-spaced words in the label.  A piece
+        # that contains a joining word (``then``, ``and``, ``but``,
+        # ``or``, ``with``) is disqualified.  Three+ word labels are
+        # also disqualified (real KPIs have at most ~2 words).
+        segments = [s.strip() for s in cluster_body.split(",")]
+        valid_shape = True
+        joiner_re = re.compile(
+            r"\b(then|and|but|or|with|while|where|when|after|before)\b",
+            re.IGNORECASE,
+        )
+        kpi_segment_re = re.compile(
+            r"^[A-Za-z][A-Za-z /\-]{0,40}:\s*-?\$?\d[\d,]*(?:\.\d+)?\s*[A-Za-z%]*$"
+        )
+        for seg in segments:
+            if not seg:
+                valid_shape = False
+                break
+            if joiner_re.search(seg):
+                valid_shape = False
+                break
+            if not kpi_segment_re.match(seg):
+                valid_shape = False
+                break
+        if not valid_shape:
+            i = cluster_end_idx + 1
+            continue
+        out[cluster_end_idx] = close_idx
+        i = cluster_end_idx + 1
+    return out
+
 # Round 66 / Pass 1 (B1): the label group in ``_PARAGRAPH_KPI_NUMERIC_RE``
 # is greedy across whitespace -- ``[A-Za-z /()\-]{2,80}?``. For an inline
 # pair like ``"Period: 90 Days  Customers: 39"`` the regex absorbs ``Days``
@@ -391,50 +578,107 @@ def _rewrite_paragraph_with_inline_citations(
             out_lines.append(line)
             continue
         if len(line_matches) == 1:
-            # Single match on this line: append citation at
-            # end-of-line so we never split a value->unit pair.
             out_lines.append(f"{line.rstrip()} {citation_chrome}")
             continue
-        # Multi-match line: walk pairs, deciding per-boundary whether to
-        # interleave at value-end (R57 sentence behavior) or defer past
-        # the unit token to next-label-start (R66/B1 unit-pair preservation).
+        # Round 76 / R76-A: paren-cluster recognition.  When the entire
+        # line is a single ``(KPI: v, KPI: v, ...)`` group, treat as
+        # ONE source-backed chunk: append ONE citation immediately
+        # after the closing ``)`` so we don't render four inline
+        # citations inside the parentheses (e.g. ``(APs: 16
+        # [Source: ...] , ABs: 3 [Source: ...] , ...)``).
+        if _line_is_paren_kpi_cluster(line, line_matches):
+            stripped = line.rstrip()
+            close_idx = stripped.rfind(")")
+            if close_idx >= 0:
+                trailing = stripped[close_idx + 1:]
+                out_lines.append(
+                    f"{stripped[:close_idx + 1]} {citation_chrome}{trailing}"
+                )
+                continue
+        # Round 76 / Build 51: identify EMBEDDED paren clusters within
+        # a longer paragraph (``"Total Activities: 45 (APs: 16, ABs: 3
+        # ...) | BEMS: 4"``) so the multi-match loop can collapse the
+        # in-paren KPIs into ONE post-paren citation instead of
+        # interleaving citations after every comma inside the parens.
+        embedded_map = _embedded_paren_clusters(line, line_matches)
+        # Build the set of match indices that are INSIDE any embedded
+        # cluster so the loop knows which matches to skip.  The map's
+        # value is the close-paren position, mapped from the LAST
+        # match index in the cluster.
+        in_cluster: set[int] = set()
+        for end_idx in embedded_map:
+            # walk backwards from end_idx until we leave the paren body
+            close_pos = embedded_map[end_idx]
+            # find the matching open paren for this close
+            open_pos = line.rfind("(", 0, close_pos)
+            for k in range(end_idx, -1, -1):
+                if line_matches[k].start() < open_pos:
+                    break
+                in_cluster.add(k)
         out_parts: list[str] = []
         cursor = 0
         for i, m in enumerate(line_matches):
             is_last = i == len(line_matches) - 1
+            # Round 76 / Build 51: handle EMBEDDED paren-cluster matches.
+            # Mid-cluster matches: do nothing (cursor stays put;
+            # cluster body will be flushed at the cluster-end branch
+            # below or by the next non-cluster match).  Cluster-end
+            # match: flush from cursor through the close paren and
+            # append ONE citation, then move on to the next match.
+            if i in in_cluster:
+                if i in embedded_map:
+                    close_idx = embedded_map[i]
+                    out_parts.append(line[cursor: close_idx + 1])
+                    out_parts.append(f" {citation_chrome}")
+                    cursor = close_idx + 1
+                    if is_last:
+                        # Pick up any trailing chars after the close paren
+                        trailing = line[cursor:].rstrip()
+                        if trailing:
+                            out_parts.append(trailing)
+                        continue
+                    continue
+                # mid-cluster: skip without writing
+                continue
             if is_last:
-                # Append everything from cursor to end of line, then the
-                # trailing citation. Preserves any unit on the LAST KPI
-                # (the R64 single-match-per-line invariant generalized).
                 out_parts.append(line[cursor:].rstrip())
                 out_parts.append(f" {citation_chrome}")
                 continue
             next_m = line_matches[i + 1]
-            # Boundary segment between this value's TRUE end (excluding
-            # any whitespace consumed by the regex's ``\\s*%?`` tail) and
-            # the next KPI label's LOGICAL start (compensating for unit
-            # absorption in next_m's label group via wide-gap detection).
             value_end = _value_end_no_trailing_ws(line, m)
             next_label_start = _logical_label_start_pos(line, next_m)
+            # Round 76 / Build 51: when the next match is inside an
+            # embedded paren cluster, the "between" segment ends at
+            # the cluster's open paren -- not at the next match's
+            # label start.  This keeps the value-and-paren handoff
+            # clean (``"Total Activities: 45 [Source: ...] (APs:
+            # ...)"``) instead of bleeding the citation into the
+            # paren cluster.
+            if (i + 1) in in_cluster:
+                # value-end placement preserves the natural paren attach
+                out_parts.append(line[cursor:value_end])
+                out_parts.append(f" {citation_chrome}")
+                cursor = m.end()
+                continue
             between = line[value_end:next_label_start]
-            if _BOUNDARY_HAS_UNIT_RE.search(between):
-                # Unit token present (e.g. ``Days``): defer citation past
-                # the unit so the value-unit pair stays intact. Emit
-                # text up to ``next_label_start`` (rstrip'd to absorb
-                # the gap whitespace), then citation, then a single
-                # space delimiter so the next label doesn't end up
-                # adjacent to the citation chrome. ``cursor`` advances
-                # to the next label start.
+            # Round 76 / R76-A: bullet-glyph boundary takes precedence
+            # over the R66/B1 unit-deferral branch.  When the boundary
+            # carries ``• ``, ``* ``, or `` - `` (list separators), the
+            # alphabetic tokens after it are NOT a unit -- they are the
+            # next KPI's label.  Routing through R57's value-end
+            # placement keeps the bullet attached to its label and
+            # produces ``999 [Source: ...] • Total Action Plans: 366
+            # [Source: ...]`` instead of the buggy mid-string
+            # ``999• [Source: ...] Total Action Plans``.
+            if _BOUNDARY_HAS_BULLET_RE.search(between):
+                out_parts.append(line[cursor:value_end])
+                out_parts.append(f" {citation_chrome}")
+                cursor = m.end()
+            elif _BOUNDARY_HAS_UNIT_RE.search(between):
                 out_parts.append(line[cursor:next_label_start].rstrip())
                 out_parts.append(f" {citation_chrome} ")
                 cursor = next_label_start
             else:
-                # Pure-punctuation boundary (e.g. ``. ``): R57 behavior --
-                # citation immediately after the value. Append from
-                # cursor through ``value_end`` (excludes any trailing
-                # whitespace consumed by the regex), then citation.
-                # ``cursor`` advances to ``m.end()`` so the consumed
-                # whitespace is NOT re-emitted on the next iteration.
                 out_parts.append(line[cursor:value_end])
                 out_parts.append(f" {citation_chrome}")
                 cursor = m.end()

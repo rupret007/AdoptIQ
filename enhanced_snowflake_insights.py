@@ -199,6 +199,24 @@ class EnhancedSnowflakeInsights:
         self.insights_data = {}
         self.source_attribution = {}
         self._skip_warned = set()  # log once when optional tables/columns are unavailable
+        # Round 76 / R76-B: instance-level set of section names that
+        # hit the global-config branch (table/column does not exist or
+        # role is not authorized).  These are NOT transient -- the
+        # same condition will hit on every customer in the same run --
+        # so the per-customer ``section_errors`` aggregator drops them
+        # and the leader/comprehensive writer surfaces them ONCE at the
+        # top of the report via a banner.  Build 49 acceptance audit
+        # found the leader DOCX repeated the per-customer "booking
+        # unavailable" warning ~423 times; this set lets us collapse
+        # that to a single banner.
+        # Round 76 / Build 51: extended to also catch
+        # ``column_missing:`` (raised by ``_resolve_columns``
+        # short-circuit) and ``table not in allowlist policy``
+        # (raised by ``_PolicyEnforcingCursor`` BEFORE the SQL even
+        # reaches Snowflake).  These are the most common
+        # global-config errors in production -- the original Build 50
+        # filter only matched server-side error strings.
+        self._globally_unavailable_sections: set[str] = set()
 
     # ------------------------------------------------------------------
     # Round 39 / Phase 2.2: schema-drift-tolerant column resolver.
@@ -220,6 +238,75 @@ class EnhancedSnowflakeInsights:
     #     row shape.
     #   * the set of missing columns so callers can decide whether to
     #     short-circuit when a CRITICAL column is gone.
+
+    def get_globally_unavailable_sections(self) -> list:
+        """Return the sorted list of section names that hit the
+        global-config branch on at least one customer call so far.
+
+        Round 76 / R76-B: the leader and comprehensive writers call
+        this AFTER the per-customer rendering loop completes to
+        decide whether to emit the top-of-report banner.  When the
+        set is empty (clean Snowflake state), no banner is emitted.
+        """
+        return sorted(self._globally_unavailable_sections)
+
+    @staticmethod
+    def _is_globally_unavailable_error(err_str: str) -> bool:
+        """Round 76 / Build 51: return True when ``err_str`` looks
+        like a global-config error (table/column missing, role
+        not authorized, or table-policy allowlist rejection).
+
+        These are NOT transient -- the same condition will hit on
+        every customer in the same run -- so per-customer
+        ``section_errors`` aggregation should drop them and the
+        report should surface a single top-of-report banner.
+
+        Build 50 acceptance found three error classes the original
+        filter (only ``does not exist`` / ``not authorized`` /
+        ``invalid identifier``) missed:
+          1. ``column_missing:`` -- raised by ``_resolve_columns``
+             short-circuit when a critical column is absent.
+          2. ``missing required column`` -- another shape of the
+             same column_missing class.
+          3. ``not in allowlist policy`` -- raised by
+             ``snowflake_table_policy.guard_sql`` BEFORE the SQL
+             reaches Snowflake when the table is not in
+             ``snowflake_table_policy.ALLOWED_TABLES``.
+
+        Round 76 / Build 52 extended the matcher AGAIN after the
+        Build 51 live acceptance audit found 317 ``unavailable``
+        tokens still in the leader DOCX (down from the Build 49
+        floor of 423 but above the <50 acceptance threshold).
+        Root cause: ``_PolicyEnforcingCursor.execute`` raises
+        ``TablePolicyViolation("Round 7 / Phase 2.5: <context>
+        refused by table policy")`` -- the wrapped error string
+        contains ``"refused by table policy"`` rather than the
+        upstream ``snowflake_table_policy.guard_sql`` shape
+        ``"not in allowlist policy"``.  Both ``guard_sql`` shapes
+        ("blocked by policy" for explicitly-blocked tables and
+        "not in allowlist policy" for unknown tables) are also
+        global-config classes -- the same SQL will fail on every
+        subsequent customer in the same run.  Build 52 adds:
+          4. ``"refused by table policy"`` -- raised by
+             ``_PolicyEnforcingCursor`` when the SQL references
+             an off-allowlist table.
+          5. ``"blocked by policy"`` -- raised by ``guard_sql``
+             when the SQL references an explicitly-blocked
+             table (e.g. legacy ``SUPPORT_CASES``).
+        """
+        if not err_str:
+            return False
+        s = str(err_str).lower()
+        return (
+            "does not exist" in s
+            or "not authorized" in s
+            or "invalid identifier" in s
+            or "column_missing" in s
+            or "missing required column" in s
+            or "not in allowlist policy" in s
+            or "refused by table policy" in s
+            or "blocked by policy" in s
+        )
 
     def _table_columns_safe(self, table_name: str) -> set:
         """Cached column-set lookup that never raises and always
@@ -390,11 +477,36 @@ class EnhancedSnowflakeInsights:
             # level so the leader report can render an explicit
             # "section unavailable" line for the customer instead of
             # silently dropping a section that hit a Snowflake error.
+            #
+            # Round 76 / R76-B: skip sections that are GLOBALLY
+            # unavailable (the same condition will hit on every
+            # customer, e.g. ``BOOKINGS_TABLE_FOR_ACCOUNT_CHECK``
+            # missing the ``AMOUNT`` column).  These are surfaced ONCE
+            # via ``insights['globally_unavailable_sections']`` and
+            # rendered as a single top-of-report banner by the leader
+            # writer instead of repeating per-customer (Build 49 audit
+            # found 423 repetitions of the booking warning).
+            #
+            # Round 76 / Build 51: also detect global-config errors
+            # CENTRALLY here via ``_is_globally_unavailable_error`` so
+            # sections that don't tag themselves (e.g. account/
+            # contract/engagement/support/product) but emit a
+            # ``column_missing:`` or ``not in allowlist policy``
+            # error are still recognised and routed into the
+            # globally-unavailable set.  This is defense in depth on
+            # top of the per-section ``globally_unavailable_section``
+            # tagging so adding a new section does not silently leak
+            # per-customer noise back into the report.
             section_errors: Dict[str, str] = {}
             for section_name, section_payload in insights['insights'].items():
                 if isinstance(section_payload, dict):
+                    if section_payload.get('globally_unavailable_section'):
+                        continue
                     err = section_payload.get('error')
                     if err:
+                        if self._is_globally_unavailable_error(str(err)):
+                            self._globally_unavailable_sections.add(section_name)
+                            continue
                         section_errors[section_name] = str(err)
             if section_errors:
                 insights['section_errors'] = section_errors
@@ -405,6 +517,14 @@ class EnhancedSnowflakeInsights:
                     customer_name,
                     len(section_errors),
                     ", ".join(sorted(section_errors.keys())),
+                )
+            # Round 76 / R76-B: surface the globally-unavailable set on
+            # every per-customer payload so the leader/comprehensive
+            # writer can render a banner without holding a reference to
+            # the EnhancedSnowflakeInsights instance.
+            if self._globally_unavailable_sections:
+                insights['globally_unavailable_sections'] = sorted(
+                    self._globally_unavailable_sections
                 )
 
             # Round 7 / Phase 2.9: redact customer name in INFO log.
@@ -842,13 +962,23 @@ class EnhancedSnowflakeInsights:
             
         except Exception as e:
             err_str = str(e)
-            # Table/column may not exist or role may lack access; don't flood logs
-            if "does not exist" in err_str or "not authorized" in err_str or "invalid identifier" in err_str:
+            # Round 76 / Build 51: route ALL global-config errors
+            # (table policy violation, column missing, role not
+            # authorized) through ``_is_globally_unavailable_error``
+            # so the central aggregator collapses them into a single
+            # banner instead of repeating per customer.
+            if self._is_globally_unavailable_error(err_str):
                 logger.debug(f"Booking insights skipped (table/column unavailable): {err_str[:120]}")
                 if "booking" not in self._skip_warned:
                     self._skip_warned.add("booking")
                     logger.info("Optional: Booking insights table/column not available; skipping for all customers.")
+                # Round 76 / R76-B: register as globally unavailable so the
+                # per-customer ``section_errors`` aggregator drops it and
+                # the report surfaces a single top-of-report banner
+                # instead of repeating the warning per customer.
+                self._globally_unavailable_sections.add("booking")
                 insights['error'] = 'Booking insights not configured (table/column unavailable).'
+                insights['globally_unavailable_section'] = True
             else:
                 logger.warning("Booking insights unavailable for %s: %s", _redact_customer(customer_name), e)  # Round 7 / Phase 2.9
                 _log_query_fallback("Booking insights query", e)
@@ -1279,12 +1409,18 @@ class EnhancedSnowflakeInsights:
             
         except Exception as e:
             err_str = str(e)
-            if "does not exist" in err_str or "not authorized" in err_str or "invalid identifier" in err_str:
+            # Round 76 / Build 51: route ALL global-config errors through
+            # ``_is_globally_unavailable_error`` so table-policy violations
+            # and column_missing errors collapse into a single banner too.
+            if self._is_globally_unavailable_error(err_str):
                 logger.debug(f"Risk insights skipped (table unavailable): {err_str[:120]}")
                 if "risk" not in self._skip_warned:
                     self._skip_warned.add("risk")
                     logger.info("Optional: RISK_ASSESSMENT table not available or not authorized; skipping for all customers.")
+                # Round 76 / R76-B: register as globally unavailable.
+                self._globally_unavailable_sections.add("risk")
                 insights['error'] = 'Risk insights not configured (table unavailable).'
+                insights['globally_unavailable_section'] = True
             else:
                 logger.warning("Risk insights unavailable for %s: %s", _redact_customer(customer_name), e)  # Round 7 / Phase 2.9
                 _log_query_fallback("Risk insights query", e)

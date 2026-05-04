@@ -27,16 +27,33 @@ def _read_app_simple() -> str:
 def test_round71_record_diag_always_called_after_grounded_ok() -> None:
     """The Ask AI grounded-ok branch MUST call
     ``_record_ask_ai_query_diag`` UNCONDITIONALLY (no
-    ``if _retrieval_diag:`` guard)."""
+    ``if _retrieval_diag:`` guard).
+
+    Round 74 / P4: the diag payload now carries an additional
+    ``_r74_evidence_records`` field (so the new evidence-drawer
+    lookup endpoint can resolve a source id back to a record).
+    The persistence call now passes a normalised dict
+    (``_r74_diag_to_persist``) which is built from
+    ``_retrieval_diag`` + the evidence records.  The R71 contract
+    is preserved (always called with the canonical query id, never
+    skipped); only the second argument's name changed from
+    ``_retrieval_diag`` to ``_r74_diag_to_persist``.
+    """
     src = _read_app_simple()
     # Locate the grounded-ok branch by the R71 marker.
     idx = src.find("Round 71 / Phase 5 (#27)")
     assert idx > 0
-    body = src[idx : idx + 1800]
-    # The record call MUST appear in this branch.
-    assert "_record_ask_ai_query_diag(_query_id, _retrieval_diag)" in body, (
+    body = src[idx : idx + 3500]
+    # Round 74 / P4: accept either the legacy direct-pass form or
+    # the new pre-built diag-dict form.  Both preserve the R71
+    # always-called-with-query-id contract.
+    legacy_call = "_record_ask_ai_query_diag(_query_id, _retrieval_diag)"
+    r74_call = "_record_ask_ai_query_diag(_query_id, _r74_diag_to_persist)"
+    assert legacy_call in body or r74_call in body, (
         "Round 71 / Phase 5 (#27): the grounded-ok branch must always "
-        "call _record_ask_ai_query_diag(...)."
+        "call _record_ask_ai_query_diag(_query_id, ...) -- either with "
+        "the raw _retrieval_diag (pre-R74 form) or with the R74 "
+        "_r74_diag_to_persist wrapper that adds evidence_records."
     )
 
 

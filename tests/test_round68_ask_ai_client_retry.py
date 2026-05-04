@@ -256,15 +256,33 @@ def test_r68_toast_slot_id_is_namespaced() -> None:
 
 
 def test_r68_attempt_initialized_at_top_of_askAI() -> None:
-    """``opts._r68_attempt`` must be initialized at the top of
-    ``askAI`` before the fetch fires, otherwise the recursive call
-    would treat each attempt as the first."""
+    """``opts._r68_attempt`` must be initialized at the top of the
+    synchronous fetch worker before the fetch fires, otherwise the
+    recursive call would treat each attempt as the first.
+
+    Round 74 / P3: the original ``askAI`` was renamed to
+    ``_r74AskSync`` so the new ``askAI`` could become the
+    streaming-vs-sync dispatcher.  The retry attempt counter still
+    lives in the same place -- the synchronous worker -- it just
+    has a new name now.
+    """
     src = _ask_ai_source()
-    idx = src.find("function askAI(question, opts) {")
-    assert idx != -1
+    # Round 74 / P3: probe the renamed sync worker (legacy
+    # function-name probe still present as a fallback to surface a
+    # clearer failure message if someone re-renames the worker).
+    idx = src.find("function _r74AskSync(question, opts) {")
+    if idx == -1:
+        # Fall back to the legacy name in case some future refactor
+        # restores it -- we're checking for the retry counter, not
+        # the name per se.
+        idx = src.find("function askAI(question, opts) {")
+    assert idx != -1, (
+        "could not find the synchronous askAI worker (looked for "
+        "_r74AskSync(question, opts) and the legacy askAI(question, opts))"
+    )
     snippet = src[idx : idx + 1200]
-    assert "_r68_attempt" in snippet, "_r68_attempt not initialized in askAI"
-    assert "_r68_max_attempts" in snippet, "_r68_max_attempts not initialized in askAI"
+    assert "_r68_attempt" in snippet, "_r68_attempt not initialized in sync worker"
+    assert "_r68_max_attempts" in snippet, "_r68_max_attempts not initialized in sync worker"
 
 
 if __name__ == "__main__":

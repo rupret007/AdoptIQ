@@ -87,6 +87,12 @@ hidden_imports = [
     # .docx WITHOUT the v{VER} build {N} stamp.  See adoptiq_mac.spec
     # for the full rationale.
     '_r68_build_label',
+    # Round 74 / Phase 1 (F1): defense-in-depth post-save footer
+    # enforcer.  Lazy-imported by ``_r74_enforce_footer_safe``
+    # (app_simple.py); without this pin the frozen build silently
+    # regresses to the Build 47 P0 (empty footers across all 4 reports).
+    # See adoptiq_mac.spec for the full rationale.
+    '_r74_footer_enforcer',
     # Round 69 / Build 43: operator-flippable LLM model selection -- the
     # resolver is imported lazily by both Ask AI and report-narrative
     # paths so PyInstaller's analyser misses it without an explicit pin.

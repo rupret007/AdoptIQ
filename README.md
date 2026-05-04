@@ -1,8 +1,20 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 42).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 52).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 52 (Round 76 — R76-A citation injection + R76-B Snowflake noise suppression)
+
+Build 52 closes the two pre-existing residuals (R76-A and R76-B) surfaced during the Build 49 re-audit. Both were noise-class bugs — they did not corrupt data or block report generation, but they polluted the user-facing report chrome enough that the operator had to mentally filter past them on every read. Net pytest delta `+37` (4775 → 4812 across Builds 50/51/52).
+
+- **Citation chrome no longer lands inside multi-KPI clusters.** Pre-Build 50, leader and comprehensive reports occasionally rendered citation markers mid-string in two specific layouts: bullet-list single paragraphs like `'• Total team activities: 999• Total Action Plans: 366'` (the bullet glyph was misclassified as a unit-deferral target, dropping the citation between the value and the next bullet) and paren-grouped KPI clusters like `'Bookings stalled (APs: 16, ABs: 3, CPs: 1, TAC: 4) and other context'` (each value got its own mid-cluster citation, producing `'(APs: 16, [Source: AdoptIQ Report Data Sources]ABs: 3, …)'`). Build 50 added two new boundary classifiers in `report_source_injector._rewrite_paragraph_with_inline_citations`: `_BOUNDARY_HAS_BULLET_RE` (`•`/`*`/` -`, checked BEFORE the unit-token branch) and `_line_is_paren_kpi_cluster` (whole-line clusters get ONE citation after the closing `)`). Build 51 extended this with `_embedded_paren_clusters` for clusters embedded in longer paragraphs — same one-citation-after-the-paren contract. Live audit confirmed 0 mid-string injections in all 4 DOCX (down from Build 49's 4 in leader + 1 each in comp/compact/renewal).
+
+- **Snowflake unavailability warnings are now consolidated into a single banner.** Pre-Build 50, every customer-section render in a leader / comprehensive report repeated the same `"Snowflake unavailable"` warning whenever the underlying Snowflake table didn't exist or the role didn't have access — a leader DOCX scoped to 53 customers leaked 423 such tokens. Build 50 introduced `EnhancedSnowflakeInsights._is_globally_unavailable_error` (SSoT for distinguishing global-config errors from transient ones) and `self._globally_unavailable_sections: set[str]` (instance-level, accumulates across customers); the validation summary in `LeaderReportGenerator._add_validation_section` renders ONE banner naming the affected sections. Build 51 extended the matcher to recognise `"column_missing"` and `"not in allowlist policy"` errors. Build 52 closed the loop with `"refused by table policy"` (raised by `_PolicyEnforcingCursor` for off-allowlist tables) and `"blocked by policy"` (raised by `guard_sql` for explicitly-blocked legacy tables). Live audit confirmed unavailable token count dropped from 423 → 1 (the legitimate single banner; 99.7% reduction).
+
+- **The lesson from this round: synthetic-fixture pytest is necessary but not sufficient.** Build 50 had ALL 17 R76-B fixture tests passing AND `make verify` GREEN, but the LIVE audit revealed two production-only error strings the fixtures didn't model. That's why Build 50 needed to iterate to Build 52 — the live bake-install-regen-audit loop was the only way to surface the real-world `_PolicyEnforcingCursor` error message shape. Future rounds touching Snowflake error handling, narrative emission, or formatter chrome will follow the same loop.
+
+- **Pinned by 37 new tests (4812 floor; Build 49 floor was 4775).** 17 tests for the R76-A bullet/paren classifier + 10 tests for the embedded paren cluster (Build 51) + 17 tests for the R76-B globally-unavailable section suppression + 17 tests for the central error filter (Build 51) + 10 tests for the `_PolicyEnforcingCursor` matcher (Build 52). All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit clean. Test floor 4775 → 4812 (+37). In-locals floor (40) preserved.
 
 ### What's New in Build 42 (Round 68 — Stale-binary trap, OneDrive gating, Ask AI overhaul)
 

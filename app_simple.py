@@ -490,6 +490,15 @@ from report_source_injector import inject_source_citations_into_docx as _r57_inj
 # behaviour around python-docx API drift.
 import _r68_build_label as _r73_build_label_pyinstaller_pin  # noqa: F401
 
+# Round 74 / Phase 1 (F1): same lazy-import problem applies to the
+# post-save footer enforcer.  ``_r74_enforce_footer_safe`` (below) lazy-
+# imports ``_r74_footer_enforcer`` inside its try/except, so PyInstaller
+# never sees the dependency without an explicit pin.  Without this pin
+# the frozen build silently skips post-save footer enforcement and the
+# Build 47 P0 (empty footers across all 4 reports) reappears the moment
+# any writer call site bypasses ``apply_word_footer``.
+import _r74_footer_enforcer as _r74_footer_enforcer_pyinstaller_pin  # noqa: F401
+
 
 def _r57_inject_citations_safe(docx_path: Optional[str], scenario_key: str) -> None:
     """Best-effort wrapper around ``inject_source_citations_into_docx``.
@@ -524,6 +533,64 @@ def _r57_inject_citations_safe(docx_path: Optional[str], scenario_key: str) -> N
             scenario_key,
             docx_path,
             inj_err,
+        )
+
+
+def _r74_enforce_footer_safe(docx_path: Optional[str], scenario_key: str) -> None:
+    """Defense-in-depth wrapper around ``enforce_build_label_footer``.
+
+    Round 74 / Phase 1 (F1): Build 47 acceptance confirmed all 4 DOCX
+    artifacts ship with empty footers despite the R73/F1 in-memory
+    hardening of ``_r68_build_label.apply_word_footer``.  Some upstream
+    writer call site is bypassing the wrapped ``.save()`` and the
+    rendered footer never carries the build label.
+
+    This wrapper runs AFTER the report file is on disk and operates on
+    the .docx zip bytes directly -- no upstream writer can prevent the
+    label from landing.  When enforcement actually had to inject
+    (i.e. the writer DID bypass ``apply_word_footer``) we log at WARNING
+    with the writer hint so a future deeper investigation can identify
+    which call site is responsible.
+
+    Contract: NEVER raises -- a failure logs at warning and returns so
+    the user still gets the report, even if the build label is missing
+    in the worst case.
+    """
+    if not docx_path:
+        return
+    try:
+        from _r74_footer_enforcer import enforce_build_label_footer  # noqa: PLC0415
+
+        diag = enforce_build_label_footer(docx_path)
+        injected = bool(diag.get("injected"))
+        reason = str(diag.get("reason", ""))
+        if injected:
+            logger.warning(
+                "[R74] footer enforced post-save for %s "
+                "(writer bypassed apply_word_footer); docx=%s parts=%s",
+                scenario_key,
+                os.path.basename(str(docx_path)),
+                diag.get("footer_parts_replaced"),
+            )
+        elif reason == "already stamped":
+            logger.debug(
+                "[R74] footer already stamped for %s; docx=%s",
+                scenario_key,
+                os.path.basename(str(docx_path)),
+            )
+        else:
+            logger.warning(
+                "[R74] footer enforcement skipped for %s: %s; docx=%s",
+                scenario_key,
+                reason,
+                os.path.basename(str(docx_path)),
+            )
+    except Exception as enf_err:  # noqa: BLE001
+        logger.warning(
+            "[R74] footer enforcer failed for %s: %s; docx=%s",
+            scenario_key,
+            enf_err,
+            docx_path,
         )
 
 
@@ -10636,7 +10703,16 @@ def run_compact_analysis(analysis_id):
                         # Report_Info sheet (see Sheet_Title rows).
                         df_clean.to_excel(writer, sheet_name=dashboard_sheet_name, index=False, startrow=0)
                         worksheet = writer.sheets[dashboard_sheet_name]
-                        title_text = f" {dashboard_sheet_name.replace('_', ' ')} - {manager} Portfolio Analysis"
+                        # Round 75 / B4: drop the leading-space typo
+                        # (`f" {...}"` -> `f"{...}"`).  Build 47 audit
+                        # caught Compact's ``Sheet_Title:Executive_Dashboard``
+                        # value rendering as
+                        # `' Executive Dashboard - All Managers Portfolio Analysis'`
+                        # while every other Sheet_Title row in every other
+                        # report had no leading space (line 10887 below
+                        # is the correct shape for the non-dashboard branch).
+                        # Pin via tests/test_round75_compact_executive_dashboard_no_leading_space.py.
+                        title_text = f"{dashboard_sheet_name.replace('_', ' ')} - {manager} Portfolio Analysis"
                         _r65_sheet_titles.append((dashboard_sheet_name, title_text))
                         # Round 5 / Phase 1.8: keep multi-column +
                         # single-column branches consistent.
@@ -11064,6 +11140,12 @@ def run_compact_analysis(analysis_id):
         # status flips to completed, so the version the user/supervisor
         # downloads via /download/<id>/word is the post-injected file.
         _r57_inject_citations_safe(exec_report_path, scenario_key='compact')
+        # Round 74 / Phase 1 (F1): defense-in-depth post-save footer
+        # enforcement -- runs on the .docx zip bytes AFTER R57 injects
+        # citations so even an upstream writer that bypassed
+        # ``apply_word_footer`` still ships an artifact with the
+        # ``AdoptIQ v{VER} build {N}`` stamp in the footer.
+        _r74_enforce_footer_safe(exec_report_path, scenario_key='compact')
 
         with analysis_status_lock:
             _update_progress(status, 100, 'Compact analysis completed successfully!', 'Completed')
@@ -14837,6 +14919,9 @@ def run_customer_renewal_analysis(analysis_id):
         # Round 57 / Phase B: inject [Source: ...] citations into the
         # finished renewal .docx before flipping status to completed.
         _r57_inject_citations_safe(renewal_word_path, scenario_key='renewal')
+        # Round 74 / Phase 1 (F1): defense-in-depth post-save footer
+        # enforcement -- see compact path above for the full rationale.
+        _r74_enforce_footer_safe(renewal_word_path, scenario_key='renewal')
 
         with analysis_status_lock:
             _update_progress(status, 100, 'Customer renewal analysis completed successfully!', 'Completed')
@@ -15271,6 +15356,90 @@ def run_comprehensive_analysis(analysis_id):
             # Round 4: non-fatal; suppressed silently in original code
             pass  # noqa: PIE790
         ab_norm = _prepare_ab(ab_scoped, team_subs_df)
+
+        # Round 75 / B3: defensive scope filter for manager-scoped runs.
+        # Build 47 audit caught one barrier (`aGte6000000pAi5CAE`) for
+        # ``CISCO SYSTEMS INC CA`` with empty ``ACCOUNT_MANAGER_C`` AND
+        # empty ``assignee_cssm_email`` leaking into Brian Frazier's
+        # comprehensive AB sheet, while the Leader path for the same
+        # 90d / All Contact Center scope correctly excluded it (the
+        # leader's per-CSSM ``_slice_by_owner_or_account`` step
+        # naturally drops barriers that are neither created by a team
+        # CSSM nor on a CSSM-owned account).
+        #
+        # The fetch-by-account_ids pathway includes any AB whose
+        # ``ACCOUNT_ID_C`` is in ``team_subs_df``. When the same Cisco-
+        # internal account appears in team_subs_df via a stale
+        # subscription record but the AB itself has neither manager
+        # attribution column populated, the comprehensive report ends
+        # up surfacing a barrier the operator never owned.
+        #
+        # Filter contract:
+        #   - skip when ``manager_name == "All Managers"`` (the
+        #     "All Managers" report intentionally includes everything)
+        #   - drop a row only when BOTH:
+        #       (a) ``ACCOUNT_MANAGER_C`` is empty / NaN AND
+        #       (b) ``assignee_cssm_email`` is empty / NaN (no creator
+        #           attribution either)
+        #   - rows surviving (a) but failing (b), OR vice-versa, are
+        #     preserved (defensive: better to keep an arguably-in-scope
+        #     row than to silently drop a real barrier).
+        #
+        # If a future scope shape uses a third attribution column
+        # (e.g. ``Owner_Email_C``), extend the gate -- the deferral is
+        # tracked in QUALITY_AUDIT.md under R75/B3.
+        if manager_name and manager_name != "All Managers":
+            try:
+                if ab_norm is not None and not ab_norm.empty:
+                    _r75_b3_before = len(ab_norm)
+
+                    def _r75_b3_is_blank(value: object) -> bool:
+                        if value is None:
+                            return True
+                        try:
+                            if pd.isna(value):
+                                return True
+                        except (TypeError, ValueError):
+                            pass
+                        token = str(value).strip().lower()
+                        return token in {"", "nan", "none", "null"}
+
+                    am_col = ab_norm.get(
+                        "ACCOUNT_MANAGER_C", pd.Series([""] * len(ab_norm), index=ab_norm.index)
+                    )
+                    cssm_col = ab_norm.get(
+                        "assignee_cssm_email",
+                        pd.Series([""] * len(ab_norm), index=ab_norm.index),
+                    )
+                    am_blank = am_col.apply(_r75_b3_is_blank)
+                    cssm_blank = cssm_col.apply(_r75_b3_is_blank)
+                    drop_mask = am_blank & cssm_blank
+                    if drop_mask.any():
+                        _r75_b3_dropped_ids: list = []
+                        try:
+                            if "ID" in ab_norm.columns:
+                                _r75_b3_dropped_ids = ab_norm.loc[drop_mask, "ID"].astype(str).tolist()
+                        except Exception:
+                            _r75_b3_dropped_ids = []
+                        ab_norm = ab_norm[~drop_mask].reset_index(drop=True)
+                        _r75_b3_after = len(ab_norm)
+                        logger.info(
+                            "Round 75 / B3: comprehensive AB scope filter for "
+                            "manager '%s' dropped %d rows missing both "
+                            "ACCOUNT_MANAGER_C and assignee_cssm_email "
+                            "(%d -> %d). Sample dropped IDs: %s",
+                            manager_name,
+                            _r75_b3_before - _r75_b3_after,
+                            _r75_b3_before,
+                            _r75_b3_after,
+                            _r75_b3_dropped_ids[:5],
+                        )
+            except Exception as _r75_b3_err:  # noqa: BLE001
+                logger.debug(
+                    "Round 75 / B3: comprehensive AB defensive scope filter "
+                    "skipped (%s); leaving ab_norm untouched.",
+                    _r75_b3_err,
+                )
 
         # Update status (thread-safe)
         update_analysis_status(analysis_id, {
@@ -15945,22 +16114,49 @@ def run_comprehensive_analysis(analysis_id):
         _r65_aps_provenance = "csconsole"  # default when no Snowflake fetch
         try:
             if ctx is not None and (account_ids or comprehensive_owner_emails):
+                # Round 75 / B1: structured logging for kwarg parity with the
+                # Leader path. Build 47 audit caught a 366 (Leader) vs 0
+                # (Comprehensive) divergence; this log surfaces a future
+                # divergence in the operator's stderr immediately.
+                logger.info(
+                    "Round 75 / B1: comprehensive AP fetch kwargs: "
+                    "account_ids=%d owner_emails=%d days=%d tech=%s",
+                    len(account_ids or []),
+                    len(comprehensive_owner_emails or []),
+                    int(days),
+                    status.get('tech'),
+                )
                 _r65_snowflake_aps = _r65_fetch_aps_snowflake(
                     ctx,
                     account_ids,
                     days,
                     owner_emails=comprehensive_owner_emails,
                 )
-                # Apply the same technology + customer-scope filter as
-                # CSConsole APs so the two sources can be merged on equal
-                # footing.
-                if _r65_snowflake_aps is not None and not _r65_snowflake_aps.empty:
-                    _r65_snowflake_aps = _filter_csconsole_data_by_technology(
-                        _r65_snowflake_aps,
-                        status['tech'],
-                        team_customer_names,
-                        account_ids=account_ids,
-                    )
+                # Round 75 / B1: do NOT post-filter Snowflake APs through
+                # ``_filter_csconsole_data_by_technology``. Build 47 audit
+                # showed 366 valid Snowflake AP rows for a Brian Frazier /
+                # All Contact Center scope being filtered to 0 because the
+                # AP source table (C360_CS_TASK_C_VW) lacks the
+                # ``SUB_TECHNOLOGY_C`` / ``TECHNOLOGY_C`` columns that the
+                # enhanced matcher branch requires; the matcher then
+                # produces an all-False mask with no account-scope fallback
+                # for that branch. The Leader path (366 rows in the same
+                # acceptance run) intentionally skips this filter -- the
+                # Snowflake query itself is already scoped by ``account_ids``
+                # (drawn from ``team_subs_df`` which is upstream tech-scoped)
+                # plus ``owner_emails``, so any AP returned is implicitly
+                # in-scope. Pre-R75 marker tag preserved.
+                _r65_snowflake_aps_unfiltered_count = (
+                    len(_r65_snowflake_aps) if _r65_snowflake_aps is not None else 0
+                )
+                logger.info(
+                    "Round 75 / B1: Snowflake AP fetch returned %d rows "
+                    "(scope: account_ids=%d owner_emails=%d) -- post-fetch "
+                    "tech filter intentionally NOT applied (mirrors Leader)",
+                    _r65_snowflake_aps_unfiltered_count,
+                    len(account_ids or []),
+                    len(comprehensive_owner_emails or []),
+                )
                 # Promote a fetch_error attr (if any) into partial-data
                 # warnings so the report banner is honest when Snowflake
                 # failed mid-run.
@@ -17442,6 +17638,13 @@ def run_comprehensive_analysis(analysis_id):
             # the Phase 3.5 baseline) -- the post-render injector handles
             # them all in one safe pass.
             _r57_inject_citations_safe(docx_path, scenario_key='comprehensive')
+            # Round 74 / Phase 1 (F1): defense-in-depth post-save footer
+            # enforcement -- see compact path above for the full rationale.
+            # Comprehensive is the most-affected report in Build 47
+            # (stamped core_properties yet empty footer) so this is the
+            # primary recipient of the WARNING log when enforcement
+            # actually had to inject.
+            _r74_enforce_footer_safe(docx_path, scenario_key='comprehensive')
 
             # Only set to completed if all customers were actually processed
             if customers_analyzed == len(all_customers):
@@ -21369,7 +21572,26 @@ def ask_ai_portfolio():
                         "model_name": _r69_active_model or "",
                         "recorded_at": _now_utc_iso_z(),
                     }
-                _record_ask_ai_query_diag(_query_id, _retrieval_diag)
+                # Round 74 / Phase 4 (P4): persist evidence_records on
+                # the diag payload so the evidence-drawer lookup
+                # endpoint can resolve a source id after the user
+                # clicks a citation badge.
+                _r74_diag_to_persist = dict(_retrieval_diag)
+                try:
+                    _r74_records = grounded_result.get('evidence_records') or []
+                    _r74_normalised = []
+                    for _rec in _r74_records:
+                        if not isinstance(_rec, dict):
+                            continue
+                        _slim = dict(_rec)
+                        for _k in ("content", "full_record", "snippet"):
+                            if _k in _slim and isinstance(_slim[_k], str) and len(_slim[_k]) > 32_000:
+                                _slim[_k] = _slim[_k][:32_000] + "...[truncated]"
+                        _r74_normalised.append(_slim)
+                    _r74_diag_to_persist['_r74_evidence_records'] = _r74_normalised
+                except Exception as _r74_norm_err:  # noqa: BLE001
+                    logger.debug("Round 74 / P4: evidence normalise failed (sync path): %s", _r74_norm_err)
+                _record_ask_ai_query_diag(_query_id, _r74_diag_to_persist)
                 return jsonify({
                     'ok': True,
                     'answer': grounded_result.get('answer') or 'No response generated.',
@@ -21391,6 +21613,28 @@ def ask_ai_portfolio():
                     # evidence index so the UI can render clickable
                     # citation badges with snippet popovers.
                     'evidence_index': grounded_result.get('evidence_index') or [],
+                    # Round 74 / Phase 4 (P4): surface the full
+                    # evidence record list so the new
+                    # ``#r74EvidenceDrawer`` Offcanvas can render
+                    # what the LLM was grounded on without a second
+                    # round-trip.  ``evidence_index`` is the
+                    # citation-badge index (R68/C7); the new
+                    # ``evidence_records`` carries the full record
+                    # bodies for the drawer UI.
+                    'evidence_records': grounded_result.get('evidence_records') or [],
+                    # Round 74 / Phase 6 (P6): follow-up suggestions.
+                    # The helper catches all exceptions internally and
+                    # returns ``[]`` on any failure so this call cannot
+                    # break the primary response path.
+                    'follow_up_suggestions': _r74_generate_follow_up_suggestions(
+                        answer_text=grounded_result.get('answer') or '',
+                        evidence_records=grounded_result.get('evidence_records') or [],
+                        scope_filters={
+                            'manager': data.get('manager') or '',
+                            'technology': data.get('technology') or '',
+                            'days': int(data.get('days') or 90)
+                        }
+                    ),
                     # Round 69 / Build 43: surface the active model name
                     # in the response so the R68 debug chip can render it
                     # alongside the retrieval method + query id.
@@ -22338,6 +22582,539 @@ def ask_ai_portfolio():
     except Exception as e:
         logger.error(f"Error in ask-ai-portfolio: {e}")
         return jsonify({'ok': False, 'error': 'An error occurred while processing your question. Please try again.'}), 500
+
+
+# ---------------------------------------------------------------------------
+# Round 74 / Build 48 / Phase 3 (P3): Ask AI streaming response endpoint.
+#
+# The synchronous ``/api/ask-ai-portfolio`` blocks for 15-30 s before the
+# answer flashes in.  Streaming gives the operator instant first-token
+# feedback even when (as in our current build) the underlying CircuIT
+# proxy does NOT support true LLM streaming.  We chunk the final answer
+# at word boundaries and yield SSE ``data:`` events on a small interval
+# so the client can render incrementally.  When CircuIT exposes native
+# streaming the chunk loop becomes a passthrough; until then this is
+# the documented Phase 3 deferral (recorded in the round 74 plan).
+# ---------------------------------------------------------------------------
+
+# Tunable: chars per SSE chunk.  ~64 chars is roughly 1 line of text
+# so the user sees the answer materialise as natural prose; smaller
+# chunks would make the typing-animation feel choppy on slower
+# connections, larger chunks defeat the purpose of streaming.
+_R74_SSE_CHUNK_SIZE = 64
+
+
+def _r74_chunk_text_for_sse(text: str, chunk_size: int = _R74_SSE_CHUNK_SIZE):
+    """Yield ``text`` in roughly ``chunk_size``-char chunks at word
+    boundaries (so a chunk does not split a word in half).
+
+    A NEWLINE inside the source text is always a chunk boundary so
+    markdown block elements (headings, list items, table rows) emit
+    cleanly between chunks instead of half-rendered.  Returns an
+    empty iterator on falsy input.
+    """
+    if not text or not isinstance(text, str):
+        return
+    if chunk_size <= 0:
+        chunk_size = _R74_SSE_CHUNK_SIZE
+    buf = []
+    buf_len = 0
+    for ch in text:
+        buf.append(ch)
+        buf_len += 1
+        # Force a flush at every newline so block elements stay intact.
+        if ch == '\n' and buf_len >= 1:
+            yield ''.join(buf)
+            buf = []
+            buf_len = 0
+            continue
+        if buf_len >= chunk_size:
+            # Try to break at the next whitespace so we don't split a
+            # word across two chunks.  If the buffer has no whitespace
+            # at all (e.g. a long URL), flush it as-is.
+            break_idx = -1
+            for i in range(buf_len - 1, -1, -1):
+                if buf[i].isspace():
+                    break_idx = i
+                    break
+            if break_idx >= 0 and break_idx >= chunk_size // 2:
+                head = ''.join(buf[: break_idx + 1])
+                tail = buf[break_idx + 1:]
+                yield head
+                buf = tail
+                buf_len = len(tail)
+            else:
+                yield ''.join(buf)
+                buf = []
+                buf_len = 0
+    if buf:
+        yield ''.join(buf)
+
+
+def _r74_format_sse_event(event_name: str, payload: dict) -> str:
+    """Format a single SSE frame.
+
+    The ``data:`` field MUST NOT contain raw newlines per the SSE
+    spec, so we serialise the payload to JSON (which is single-line
+    by default).  Multi-line ``data:`` is technically supported but
+    most browser EventSource implementations stitch newlines back
+    in inconsistently -- using JSON keeps the shape unambiguous.
+    """
+    import json as _json  # local to avoid shadowing the module-level
+
+    safe_event = ''.join(c for c in str(event_name) if c.isalnum() or c in ('-', '_'))
+    body = _json.dumps(payload, default=str, ensure_ascii=False)
+    return f"event: {safe_event}\ndata: {body}\n\n"
+
+
+def _r74_run_grounded_for_streaming(question: str, manager: str,
+                                    technology: str, days: int) -> dict:
+    """Synchronous wrapper around ``run_portfolio_grounded_ask_ai``.
+
+    Returns a normalised dict the SSE generator can consume:
+
+        {
+            "ok": bool,
+            "error": str | None,
+            "answer": str,
+            "query_id": str,
+            "retrieval_method": str,
+            "model_name": str,
+            "evidence_records": list,
+            "evidence_index": list,
+            "context_summary": str,
+            "evidence_truncated": bool,
+            "account_batch_truncated": bool,
+            "evidence_records_used": int | None,
+            "evidence_records_total": int | None,
+            "account_batch_size": int | None,
+            "account_total": int | None,
+            "partial_data_warnings": list,
+            "canonical_headline": dict,
+            "corpus": dict,
+        }
+
+    NEVER raises -- a failure populates ``ok=False`` + ``error=...``
+    so the SSE generator can emit an ``error`` event and close
+    cleanly.
+    """
+    out = {
+        "ok": False,
+        "error": "Grounded Ask AI is disabled.",
+        "answer": "",
+        "query_id": "",
+        "retrieval_method": "unknown",
+        "model_name": "",
+        "evidence_records": [],
+        "evidence_index": [],
+        "context_summary": "",
+        "evidence_truncated": False,
+        "account_batch_truncated": False,
+        "evidence_records_used": None,
+        "evidence_records_total": None,
+        "account_batch_size": None,
+        "account_total": None,
+        "partial_data_warnings": [],
+        "canonical_headline": {},
+        "corpus": {},
+    }
+    try:
+        if not is_grounded_ask_ai_enabled():
+            out["error"] = "Grounded Ask AI is disabled in this environment."
+            return out
+        grounded_result = run_portfolio_grounded_ask_ai(
+            AskAIRequest(
+                question=question,
+                manager=manager,
+                technology=technology,
+                days=days,
+            )
+        )
+        if not grounded_result.get("ok"):
+            out["error"] = (
+                grounded_result.get("error")
+                or "Grounded Ask AI did not produce an answer."
+            )
+            return out
+        # Build the same response shape the synchronous endpoint emits
+        # so the streaming meta event carries every field the UI
+        # already knows how to render.
+        try:
+            from model_resolver import get_active_ask_ai_model as _r69_active  # noqa: PLC0415
+
+            active_model = _r69_active() or ""
+        except Exception:  # noqa: BLE001
+            active_model = ""
+        retrieval_diag = dict(grounded_result.get("retrieval_diag") or {})
+        if active_model:
+            retrieval_diag["model_name"] = active_model
+        if not isinstance(retrieval_diag, dict) or not retrieval_diag:
+            retrieval_diag = {
+                "method": "unknown",
+                "empty_retrieval_diag": True,
+                "model_name": active_model or "",
+                "recorded_at": _now_utc_iso_z(),
+            }
+        query_id = secrets.token_urlsafe(12)
+        # Round 74 / Phase 4 (P4): persist the evidence records on
+        # the diag payload so the GET evidence-lookup endpoint can
+        # find them after the streaming response has flushed.  We
+        # store an evidence_records ``list`` alongside the existing
+        # retrieval_diag fields -- the FIFO eviction still applies.
+        diag_to_persist = dict(retrieval_diag)
+        try:
+            evidence_records_for_diag = grounded_result.get("evidence_records") or []
+            # Defensive: drop record bodies > 32 KB so a runaway
+            # corpus snippet cannot blow up the SQLite blob.
+            normalised = []
+            for rec in evidence_records_for_diag:
+                if not isinstance(rec, dict):
+                    continue
+                slim = dict(rec)
+                # Most fields are short, but ``content`` /
+                # ``full_record`` may be large; cap them.
+                for k in ("content", "full_record", "snippet"):
+                    if k in slim and isinstance(slim[k], str) and len(slim[k]) > 32_000:
+                        slim[k] = slim[k][:32_000] + "...[truncated]"
+                normalised.append(slim)
+            diag_to_persist["_r74_evidence_records"] = normalised
+        except Exception as norm_err:  # noqa: BLE001
+            logger.debug("Round 74 / P4: evidence_records normalise failed: %s", norm_err)
+        try:
+            _record_ask_ai_query_diag(query_id, diag_to_persist)
+        except Exception as diag_err:  # noqa: BLE001
+            logger.debug("Round 74 / P3: streaming diag persistence failed: %s", diag_err)
+        out["ok"] = True
+        out["error"] = None
+        out["answer"] = grounded_result.get("answer") or ""
+        out["query_id"] = query_id
+        out["retrieval_method"] = str(retrieval_diag.get("method") or "unknown")
+        out["model_name"] = active_model
+        out["evidence_records"] = grounded_result.get("evidence_records") or []
+        out["evidence_index"] = grounded_result.get("evidence_index") or []
+        out["context_summary"] = grounded_result.get("context_summary") or ""
+        out["evidence_truncated"] = bool(grounded_result.get("evidence_truncated"))
+        out["account_batch_truncated"] = bool(grounded_result.get("account_batch_truncated"))
+        out["evidence_records_used"] = grounded_result.get("evidence_records_used")
+        out["evidence_records_total"] = grounded_result.get("evidence_records_total")
+        out["account_batch_size"] = grounded_result.get("account_batch_size")
+        out["account_total"] = grounded_result.get("account_total")
+        out["partial_data_warnings"] = grounded_result.get("partial_data_warnings") or []
+        out["canonical_headline"] = grounded_result.get("canonical_headline") or {}
+        out["corpus"] = grounded_result.get("corpus") or {}
+        return out
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Round 74 / P3: grounded pipeline failed for stream: %s", exc)
+        out["error"] = f"Grounded pipeline failed: {exc}"
+        return out
+
+
+@app.route('/api/ask-ai-portfolio/stream', methods=['POST'])
+def ask_ai_portfolio_stream():
+    """Round 74 / Phase 3 (P3): SSE streaming sibling of
+    ``/api/ask-ai-portfolio``.
+
+    Same request schema, same throttle, same CSRF.  Response is
+    ``text/event-stream`` carrying:
+
+      * ``meta`` event once at the start (query_id, retrieval_method,
+        model_name, evidence_records, ...).
+      * ``data`` events for each answer chunk.
+      * ``done`` event at the end (Phase 6 will populate
+        ``follow_up_suggestions``).
+      * ``error`` event on a mid-stream failure.  The client falls
+        back to the synchronous endpoint when this fires.
+
+    The chunking is currently post-hoc (CircuIT proxy does not
+    expose token streaming).  When upstream streaming becomes
+    available the chunk loop will be a passthrough.
+    """
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
+        except Exception:
+            return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403
+    _throttle = _check_ask_ai_throttle()
+    if _throttle is not None:
+        return jsonify(_throttle[0]), _throttle[1]
+    try:
+        data = request.get_json(silent=True) or {}
+        question = str(data.get('question') or '').strip()
+        if not question or len(question) > 2000:
+            return jsonify({'ok': False, 'error': 'Please provide a question (max 2000 characters).'}), 400
+        manager = (data.get('manager') or '').strip() or 'All Managers'
+        technology = (data.get('technology') or '').strip() or 'All'
+        try:
+            days = min(max(int(data.get('days') or 90), 1), 365)
+        except (ValueError, TypeError):
+            days = 90
+    except Exception as parse_err:  # noqa: BLE001
+        logger.warning("Round 74 / P3: stream payload parse failed: %s", parse_err)
+        return jsonify({'ok': False, 'error': 'Invalid request payload.'}), 400
+
+    # Round 74 / Phase 5 (P5): if the client supplied a
+    # ``conversation_history`` array, prepend it to the question so
+    # the LLM sees the prior turns.  Phase 5 wires the actual
+    # storage / cap / reset; here we just accept the field.
+    try:
+        history = data.get('conversation_history') or []
+        if history and isinstance(history, list):
+            question = _r74_apply_conversation_history(question, history)
+    except Exception as hist_err:  # noqa: BLE001
+        logger.debug("Round 74 / P5: conversation history apply failed: %s", hist_err)
+
+    # Run the synchronous grounded pipeline FIRST (the SSE generator
+    # cannot block on Snowflake / LLM calls without holding the
+    # request thread; we'd lose the responsiveness benefit).  When
+    # CircuIT exposes streaming this becomes a true generator pipe.
+    pipeline = _r74_run_grounded_for_streaming(question, manager, technology, days)
+
+    def _event_stream():
+        try:
+            if not pipeline.get('ok'):
+                yield _r74_format_sse_event('error', {
+                    'error': pipeline.get('error') or 'Unknown error',
+                    'fallback_url': '/api/ask-ai-portfolio',
+                })
+                return
+            # 1. meta event -- everything the UI needs to render
+            #    debug chip + grounding context + evidence records
+            #    BEFORE the answer chunks land.
+            yield _r74_format_sse_event('meta', {
+                'query_id': pipeline.get('query_id') or '',
+                'retrieval_method': pipeline.get('retrieval_method') or 'unknown',
+                'model_name': pipeline.get('model_name') or '',
+                'context_summary': pipeline.get('context_summary') or '',
+                'evidence_truncated': bool(pipeline.get('evidence_truncated')),
+                'account_batch_truncated': bool(pipeline.get('account_batch_truncated')),
+                'evidence_records_used': pipeline.get('evidence_records_used'),
+                'evidence_records_total': pipeline.get('evidence_records_total'),
+                'account_batch_size': pipeline.get('account_batch_size'),
+                'account_total': pipeline.get('account_total'),
+                'partial_data_warnings': pipeline.get('partial_data_warnings') or [],
+                'canonical_headline': pipeline.get('canonical_headline') or {},
+                'corpus': pipeline.get('corpus') or {},
+                'evidence_index': pipeline.get('evidence_index') or [],
+                'evidence_records': pipeline.get('evidence_records') or [],
+            })
+            # 2. data events -- chunked answer text.
+            answer = pipeline.get('answer') or ''
+            for chunk in _r74_chunk_text_for_sse(answer, _R74_SSE_CHUNK_SIZE):
+                yield _r74_format_sse_event('data', {'chunk': chunk})
+            # 3. done event -- closes the stream.  Phase 6 will
+            #    populate ``follow_up_suggestions``; for now we emit
+            #    an empty list so the client renders no chips.
+            try:
+                follow_ups = _r74_generate_follow_up_suggestions(
+                    answer_text=answer,
+                    evidence_records=pipeline.get('evidence_records') or [],
+                    scope_filters={
+                        'manager': manager,
+                        'technology': technology,
+                        'days': days,
+                    },
+                )
+            except Exception as fu_err:  # noqa: BLE001
+                logger.debug("Round 74 / P6: follow-up gen failed: %s", fu_err)
+                follow_ups = []
+            yield _r74_format_sse_event('done', {
+                'completed_at': _now_utc_iso_z(),
+                'follow_up_suggestions': follow_ups,
+            })
+        except Exception as gen_err:  # noqa: BLE001
+            logger.warning("Round 74 / P3: SSE generator failed: %s", gen_err)
+            try:
+                yield _r74_format_sse_event('error', {
+                    'error': str(gen_err),
+                    'fallback_url': '/api/ask-ai-portfolio',
+                })
+            except Exception:  # noqa: BLE001
+                pass
+
+    return Response(
+        _event_stream(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-store',
+            'X-Accel-Buffering': 'no',  # disable nginx buffering if reverse-proxied
+        },
+    )
+
+
+@app.route('/api/ask-ai/evidence/<query_id>/<source_id>', methods=['GET'])
+def ask_ai_evidence_lookup(query_id: str, source_id: str):
+    """Round 74 / Phase 4 (P4): late-binding lookup for evidence records.
+
+    The streaming + synchronous Ask AI endpoints persist the full
+    ``evidence_records`` list on the query diag (under
+    ``_r74_evidence_records``).  When the user clicks a
+    ``.r74-source-badge`` in the rendered answer the drawer first
+    tries an in-memory lookup against the records the page already
+    has; on a miss (e.g. the page was re-loaded since the original
+    answer) the drawer falls back to this endpoint.
+
+    Loopback-only by default (the main app binds to 127.0.0.1
+    unless ``ADOPTIQ_BIND_PUBLIC=1`` -- see the binding logic at the
+    bottom of this module), so no additional auth check is layered
+    here.  Per-IP rate-limited via the R71 throttle to keep a
+    runaway page from spinning the SQLite store.
+    """
+    # Reuse the R71 per-IP rate limit (same shape as the other
+    # diagnostic endpoints).
+    try:
+        client_ip = request.remote_addr or ''
+        allowed, retry_after = _r71_diag_rate_limit_check(client_ip)
+        if not allowed:
+            resp = jsonify({'ok': False, 'error': 'rate_limited'})
+            resp.status_code = 429
+            resp.headers['Retry-After'] = str(retry_after)
+            return resp
+    except Exception:  # noqa: BLE001
+        pass
+
+    if not query_id or not source_id:
+        return jsonify({'ok': False, 'error': 'missing query_id or source_id'}), 400
+
+    try:
+        diag = _get_ask_ai_query_diag(str(query_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Round 74 / P4: diag lookup failed: %s", exc)
+        diag = None
+    if not diag or not isinstance(diag, dict):
+        return jsonify({'ok': False, 'error': 'unknown query_id'}), 404
+    records = diag.get('_r74_evidence_records') or []
+    if not isinstance(records, list):
+        return jsonify({'ok': False, 'error': 'malformed evidence index'}), 500
+    needle = str(source_id).strip()
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        rid = rec.get('source_id') or rec.get('id') or rec.get('citation_id')
+        if rid is None:
+            continue
+        if str(rid) == needle:
+            return jsonify({'ok': True, 'record': rec})
+    return jsonify({'ok': False, 'error': 'unknown source_id'}), 404
+
+
+def _r74_apply_conversation_history(question: str, history) -> str:
+    """Round 74 / Phase 5 (P5): prepend a synthesized conversation
+    block to ``question`` so the LLM sees the prior turns.
+
+    ``history`` is expected to be a list of ``{q, a}`` dicts (the
+    client sends at most 5 entries to bound prompt size).  Defensive
+    against malformed input -- a non-list / non-dict element is
+    dropped silently.  Returns ``question`` unchanged when there is
+    no usable history (so the streaming endpoint can call this
+    unconditionally without an ``if history`` guard).
+    """
+    if not isinstance(history, list) or not history:
+        return question
+    blocks = []
+    for turn in history[-5:]:  # cap at last 5 turns
+        if not isinstance(turn, dict):
+            continue
+        q = str(turn.get('q') or turn.get('question') or '').strip()
+        a = str(turn.get('a') or turn.get('answer') or '').strip()
+        if not q and not a:
+            continue
+        # Truncate very long answers so the prompt stays bounded.
+        if len(a) > 1500:
+            a = a[:1500] + '...'
+        blocks.append(f"Q: {q}\nA: {a}")
+    if not blocks:
+        return question
+    prefix = (
+        "Conversation context (prior turns -- use to interpret the "
+        "current question, do NOT re-answer the prior questions):\n\n"
+        + "\n\n".join(blocks)
+        + "\n\nCurrent question:\n"
+    )
+    return prefix + question
+
+
+def _r74_generate_follow_up_suggestions(answer_text: str,
+                                        evidence_records,
+                                        scope_filters) -> list:
+    """Round 74 / Phase 6 (P6): generate 2-3 follow-up question
+    suggestions tied to the answer's content.
+
+    Returns ``[]`` on any failure -- the suggestions are bonus UX,
+    never block.  The implementation is deliberately conservative:
+    we use a short heuristic + (when available) a small secondary
+    LLM call.  Phase 6's tests pin the contract; the actual LLM
+    call is wrapped so a missing model_resolver / CircuIT outage
+    cannot crash the streaming generator.
+    """
+    answer = str(answer_text or '').strip()
+    if not answer:
+        return []
+    # Heuristic suggestions derived from the scope filters -- always
+    # safe, always fast.  When the LLM call below succeeds it
+    # replaces these; when it fails we fall back to these so the
+    # operator still sees actionable chips.
+    scope = scope_filters or {}
+    manager = str(scope.get('manager') or '').strip()
+    technology = str(scope.get('technology') or '').strip()
+    fallback = []
+    if manager and manager != 'All Managers':
+        fallback.append(f"Drill into {manager}'s team -- which CSSM owns the highest ARR at risk?")
+    if technology and technology != 'All':
+        fallback.append(f"Show me the open adoption barriers for {technology} sorted by age.")
+    if not fallback:
+        fallback = [
+            "Which customers in the answer have an open critical TAC case?",
+            "What's the renewal date for the top 3 at-risk customers above?",
+        ]
+    fallback = fallback[:3]
+    # Try the secondary LLM call.  All failure modes fall through
+    # to ``fallback`` -- the chips MUST render even when the LLM is
+    # unavailable.
+    try:
+        from adoptiq_backend import generate_llm_response  # noqa: PLC0415
+
+        prompt = (
+            "Given this AdoptIQ answer, suggest 2-3 specific follow-up "
+            "questions a portfolio manager would naturally ask next. "
+            "Return ONLY a JSON array of strings, no prose, no markdown. "
+            "Each question MUST be answerable from the same data scope "
+            "(manager, technology, time window).\n\n"
+            f"Scope: manager={manager or 'All'}, technology={technology or 'All'}\n\n"
+            "Answer:\n"
+            f"{answer[:2000]}\n\n"
+            "Follow-up questions JSON array:"
+        )
+        # Use a very short timeout / token budget -- this is bonus UX.
+        resp = generate_llm_response(prompt, max_tokens=240)
+        if not resp or not isinstance(resp, str):
+            return fallback
+        # Parse the LLM response as a JSON array of strings.
+        import json as _json  # noqa: PLC0415
+        import re as _re  # noqa: PLC0415
+
+        match = _re.search(r"\[[\s\S]*?\]", resp)
+        if not match:
+            return fallback
+        try:
+            parsed = _json.loads(match.group(0))
+        except Exception:  # noqa: BLE001
+            return fallback
+        if not isinstance(parsed, list):
+            return fallback
+        suggestions = []
+        for item in parsed:
+            if not isinstance(item, str):
+                continue
+            text = item.strip()
+            if not text or len(text) > 240:
+                continue
+            suggestions.append(text)
+        if not suggestions:
+            return fallback
+        return suggestions[:3]
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Round 74 / P6: secondary LLM follow-up call failed: %s", exc)
+        return fallback
 
 
 @app.route('/external-intelligence')
@@ -25635,7 +26412,44 @@ def run_leader_report_generation(analysis_id):
             if all_action_plans:
                 sheets['Action_Plans'] = pd.concat(all_action_plans, ignore_index=True)
             if all_adoption_barriers:
-                sheets['Adoption_Barriers'] = pd.concat(all_adoption_barriers, ignore_index=True)
+                # Round 75 / B2: dedup by barrier ID before XLSX write.
+                # Build 47 audit caught Leader.Adoption_Barriers carrying
+                # 73 sheet rows / 69 unique IDs (4 duplicate barrier rows)
+                # for Brian Frazier 90d. Root cause: when a single
+                # adoption barrier is attributed to multiple CSSMs via
+                # the R72 ``_ATTRIBUTED_BY_ACCOUNT`` shared-account
+                # pathway in ``_slice_by_owner_or_account``, the
+                # per-CSSM AB frames each carry the SAME ID, and this
+                # raw ``pd.concat`` emits the row N times (one per
+                # attributed CSSM). R72/Layer A already fixed the
+                # canonical_metrics counts (so the docx headline reads
+                # the deduplicated 65/63 figure) but the XLSX sheet
+                # itself never went through the dedup. Fix: drop_dup
+                # by ID with keep='first' so the row's CSSM column is
+                # the first attribution -- matching the order in which
+                # _slice_by_owner_or_account walked the team_data.
+                # Rows without an ID column are passed through unchanged.
+                _r75_ab_combined = pd.concat(all_adoption_barriers, ignore_index=True)
+                if 'ID' in _r75_ab_combined.columns:
+                    _r75_ab_before = len(_r75_ab_combined)
+                    _r75_ab_with_id = _r75_ab_combined[
+                        _r75_ab_combined['ID'].notna()
+                    ].drop_duplicates(subset=['ID'], keep='first')
+                    _r75_ab_no_id = _r75_ab_combined[_r75_ab_combined['ID'].isna()]
+                    _r75_ab_combined = pd.concat(
+                        [_r75_ab_with_id, _r75_ab_no_id], ignore_index=True
+                    )
+                    _r75_ab_after = len(_r75_ab_combined)
+                    if _r75_ab_after != _r75_ab_before:
+                        logger.info(
+                            "Round 75 / B2: leader Adoption_Barriers sheet "
+                            "deduped by ID: %d raw rows -> %d unique "
+                            "(removed %d cross-CSSM duplicates)",
+                            _r75_ab_before,
+                            _r75_ab_after,
+                            _r75_ab_before - _r75_ab_after,
+                        )
+                sheets['Adoption_Barriers'] = _r75_ab_combined
             if all_customer_pulse:
                 sheets['Customer_Pulse'] = pd.concat(all_customer_pulse, ignore_index=True)
             if all_success_priorities:
@@ -26032,6 +26846,9 @@ def run_leader_report_generation(analysis_id):
         # baseline -- by far the largest surface; the injector walks
         # them all in one pass and writes back atomically.
         _r57_inject_citations_safe(filepath, scenario_key='leader')
+        # Round 74 / Phase 1 (F1): defense-in-depth post-save footer
+        # enforcement -- see compact path above for the full rationale.
+        _r74_enforce_footer_safe(filepath, scenario_key='leader')
 
         with analysis_status_lock:
             _update_progress(status, 100, 'Leader report generated successfully!', 'Complete')

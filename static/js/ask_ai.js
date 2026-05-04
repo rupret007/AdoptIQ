@@ -155,9 +155,213 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
+    // Round 74 / Phase 2 (P2): allow-list of HTML tags + attributes
+    // we permit through DOMPurify when rendering an LLM-generated
+    // markdown answer.  The list is intentionally tight: every entry
+    // is what marked@11 emits for the markdown subset our prompt
+    // template asks the LLM to use (headings, paragraphs, lists,
+    // tables, fenced code, blockquotes, inline emphasis, links).
+    // We deliberately omit ``img``, ``iframe``, ``style``, ``script``,
+    // ``svg``, ``form``, etc. so a hypothetical model jailbreak that
+    // injected raw HTML cannot smuggle privileged surface area into
+    // the page even if the bare markdown survives the sanitizer.
+    var _R74_MD_ALLOWED_TAGS = [
+        'a', 'b', 'blockquote', 'br', 'code', 'em', 'h1', 'h2', 'h3',
+        'h4', 'h5', 'h6', 'hr', 'i', 'li', 'ol', 'p', 'pre', 'span',
+        'strong', 'table', 'tbody', 'td', 'th', 'thead', 'tr', 'ul'
+    ];
+    var _R74_MD_ALLOWED_ATTRS = [
+        'href', 'target', 'rel', 'title', 'class', 'tabindex', 'role',
+        'data-source-id'
+    ];
+
+    // Round 74 / Phase 2 (P2): DOMPurify config object cached once so
+    // we do not allocate it per-render.  ``USE_PROFILES`` is omitted
+    // intentionally -- we want the explicit allow-list above, not the
+    // bundled HTML profile (which lets through ``form`` and ``input``).
+    var _R74_DOMPURIFY_CONFIG = {
+        ALLOWED_TAGS: _R74_MD_ALLOWED_TAGS,
+        ALLOWED_ATTR: _R74_MD_ALLOWED_ATTRS,
+        ALLOW_DATA_ATTR: false,
+        FORBID_TAGS: ['style', 'script', 'iframe', 'object', 'embed', 'form'],
+        FORBID_ATTR: ['style', 'onerror', 'onload', 'onclick']
+    };
+
+    // Round 74 / Phase 2 (P2): convert raw markdown text into a
+    // sanitised HTML string.  Returns ``null`` if either marked or
+    // DOMPurify is unavailable so the caller can fall back to the
+    // line-by-line ``formatAnswerInto`` renderer (CDN blocked,
+    // offline DMG run, future CSP tightening, etc.).
+    function _r74RenderMarkdownSafe(rawText) {
+        if (!rawText || typeof rawText !== 'string') { return ''; }
+        if (typeof window.marked === 'undefined' || typeof window.DOMPurify === 'undefined') {
+            return null;
+        }
+        try {
+            // marked@11: ``parse`` returns the rendered HTML string.
+            // ``gfm: true`` (default) gives us markdown tables; we
+            // also enable ``breaks: false`` so soft newlines stay as
+            // inline whitespace (matches typical markdown semantics).
+            // ``mangle: false`` and ``headerIds: false`` are R74-safe
+            // defaults that prevent marked from emitting auto-generated
+            // ids that would clash with our own DOM ids.
+            var html = window.marked.parse(rawText, {
+                gfm: true,
+                breaks: false,
+                mangle: false,
+                headerIds: false,
+                pedantic: false
+            });
+            return window.DOMPurify.sanitize(html, _R74_DOMPURIFY_CONFIG);
+        } catch (mdErr) {
+            // Defensive: any error in marked or DOMPurify must NOT
+            // crash the answer pipeline -- fall back to the legacy
+            // renderer.  Logged at debug so the operator can spot it
+            // in devtools without surfacing in the user UI.
+            try {
+                if (window.console && window.console.debug) {
+                    window.console.debug('[R74] markdown render failed, falling back', mdErr);
+                }
+            } catch (_) { /* noop */ }
+            return null;
+        }
+    }
+
+    // Round 74 / Phase 2 (P2): build the canonical R74 source-badge
+    // span for a single citation ID.  The badge carries:
+    //
+    //   - ``r74-source-badge`` class (CSS hook for the clickable look)
+    //   - ``data-source-id`` attribute (read by Phase 4's drawer)
+    //   - ``tabindex="0"`` + ``role="button"`` so keyboard users can
+    //     focus + Enter/Space to activate the badge
+    //
+    // Phase 4 wires the click + keydown handlers; Phase 2 just renders
+    // the badge so the markup is in place when the drawer module loads.
+    function _r74BuildSourceBadge(sid, originalText) {
+        var span = document.createElement('span');
+        span.className = 'r74-source-badge';
+        span.setAttribute('data-source-id', String(sid));
+        span.setAttribute('tabindex', '0');
+        span.setAttribute('role', 'button');
+        span.setAttribute(
+            'aria-label',
+            'Show evidence record for source ' + String(sid)
+        );
+        // textContent is XSS-safe; preserves the original ``[Source: ID]``
+        // appearance so a user reading the answer sees the same
+        // citation literal they would in plain markdown.
+        span.textContent = String(originalText || ('[Source: ' + sid + ']'));
+        return span;
+    }
+
+    // Round 74 / Phase 2 (P2): walk a freshly-rendered DOM subtree and
+    // replace ``[Source: ID]`` (or ``[Source: A, B, C]``) text-node
+    // matches with the new R74 source-badge spans.  Citations may
+    // appear inside paragraphs, list items, table cells, blockquotes,
+    // etc. -- we recursively walk every text node and split it on the
+    // citation pattern.  Element nodes are visited recursively but
+    // their attribute values are NOT touched (only the visible text
+    // content of text nodes).
+    //
+    // Idempotent: running the walker twice on the same subtree is a
+    // no-op (badges are <span> elements so subsequent walks see them
+    // as element nodes, not text nodes -- they get descended into and
+    // their textContent is examined, but the badge's textContent
+    // already starts with ``[Source:`` so the regex would re-match.
+    // To prevent double-wrapping we skip any text node whose parent
+    // already carries the ``r74-source-badge`` class).
+    function _r74PostProcessSourceBadges(rootEl) {
+        if (!rootEl) { return; }
+        var citationRe = /\[Source:\s*([^\]]+)\]/g;
+        function visit(node) {
+            if (!node) { return; }
+            if (node.nodeType === 3) { // Node.TEXT_NODE
+                // Idempotency guard: don't re-wrap text inside an
+                // already-built badge.
+                if (node.parentNode &&
+                    node.parentNode.classList &&
+                    node.parentNode.classList.contains('r74-source-badge')) {
+                    return;
+                }
+                var text = node.nodeValue;
+                if (!text || text.indexOf('[Source:') < 0) { return; }
+                var idx = 0;
+                var frag = document.createDocumentFragment();
+                var m;
+                citationRe.lastIndex = 0;
+                while ((m = citationRe.exec(text)) !== null) {
+                    if (m.index > idx) {
+                        frag.appendChild(document.createTextNode(text.slice(idx, m.index)));
+                    }
+                    var ids = String(m[1]).split(',');
+                    var badgeIds = [];
+                    for (var bi = 0; bi < ids.length; bi++) {
+                        var sid = String(ids[bi] || '').trim();
+                        if (sid) { badgeIds.push(sid); }
+                    }
+                    if (badgeIds.length === 0) {
+                        // Empty citation -- preserve the literal so
+                        // the user sees the malformed marker rather
+                        // than swallowing it silently.
+                        frag.appendChild(document.createTextNode(m[0]));
+                    } else {
+                        // ONE badge spans the whole ``[Source: A, B]``
+                        // marker; data-source-id carries the comma-
+                        // separated list so the drawer can fan out.
+                        frag.appendChild(_r74BuildSourceBadge(
+                            badgeIds.join(','), m[0]
+                        ));
+                    }
+                    idx = m.index + m[0].length;
+                }
+                if (idx < text.length) {
+                    frag.appendChild(document.createTextNode(text.slice(idx)));
+                }
+                if (node.parentNode) {
+                    node.parentNode.replaceChild(frag, node);
+                }
+                return;
+            }
+            if (node.nodeType !== 1) { return; } // ELEMENT_NODE only
+            if (node.classList && node.classList.contains('r74-source-badge')) {
+                // Don't descend into our own badges (idempotency).
+                return;
+            }
+            // Snapshot childNodes because the walker mutates the tree.
+            var children = Array.prototype.slice.call(node.childNodes);
+            for (var ci = 0; ci < children.length; ci++) {
+                visit(children[ci]);
+            }
+        }
+        visit(rootEl);
+    }
+
     function formatAnswerInto(targetEl, text) {
         while (targetEl.firstChild) targetEl.removeChild(targetEl.firstChild);
         if (!text || typeof text !== 'string') return;
+        // Round 74 / Phase 2 (P2): try the marked + DOMPurify render
+        // path first.  If either library is unavailable (CDN blocked,
+        // offline DMG run, etc.) ``_r74RenderMarkdownSafe`` returns
+        // ``null`` and we fall back to the pre-R74 line-by-line
+        // renderer which is XSS-safe by construction (every text
+        // sink is .textContent / createTextNode).
+        var sanitisedHtml = _r74RenderMarkdownSafe(text);
+        if (sanitisedHtml !== null) {
+            // ``innerHTML = sanitised`` is safe because DOMPurify
+            // stripped every script / event-handler / forbidden tag
+            // BEFORE it landed here.  We then walk the DOM to swap
+            // ``[Source: ID]`` literals for clickable badges (which
+            // are themselves XSS-safe -- the ID is set via dataset /
+            // textContent, never innerHTML).
+            targetEl.innerHTML = sanitisedHtml;
+            try {
+                _r74PostProcessSourceBadges(targetEl);
+            } catch (_) { /* never fail the answer on badge wiring */ }
+            return;
+        }
+        // Fallback: pre-R74 line-by-line renderer.  Preserved
+        // verbatim so a CDN outage / offline run still ships a
+        // readable answer.
         var lines = text.split(/\r?\n/);
         for (var i = 0; i < lines.length; i++) {
             var line = lines[i];
@@ -402,7 +606,32 @@ document.addEventListener('DOMContentLoaded', function() {
         } catch (_) { /* never break Ask AI on toast failure */ }
     }
 
-    function askAI(question, opts) {
+    // Round 74 / Phase 3 (P3): pre-R74 ``askAI`` was the single
+    // entry point.  R74 splits it into:
+    //
+    //   * ``_r74AskSync(question, opts)``   -- the original
+    //     synchronous endpoint flow, preserved verbatim so a
+    //     streaming failure / disabled streaming still works.
+    //   * ``_r74AskStreaming(question, opts)`` -- the new SSE
+    //     flow that gives instant first-token feedback.
+    //   * ``askAI(question, opts)`` -- the dispatcher.  Calls
+    //     ``_r74AskStreaming`` first; on a hard failure (network
+    //     error before any data lands, ``error`` event in the
+    //     stream, etc.) falls back to ``_r74AskSync`` transparently
+    //     so the operator never sees a streaming bug as a
+    //     user-visible failure.
+    //
+    // ``_r74StreamingEnabled`` is a feature flag the operator can
+    // flip via window.console for debugging.  Default ON.
+    var _r74StreamingEnabled = true;
+    try {
+        if (window.localStorage &&
+            window.localStorage.getItem('r74_streaming_disabled') === '1') {
+            _r74StreamingEnabled = false;
+        }
+    } catch (_) { /* localStorage may be disabled */ }
+
+    function _r74AskSync(question, opts) {
         opts = opts || {};
         if (!question.trim()) return;
         lastAskedQuestion = question.trim();
@@ -567,7 +796,10 @@ document.addEventListener('DOMContentLoaded', function() {
                         }
                     }
                     nextOpts._r68_attempt = opts._r68_attempt + 1;
-                    askAI(question, nextOpts);
+                    // Round 74 / Phase 3 (P3): retries stay on the
+                    // sync path so we don't oscillate between
+                    // streaming and sync mid-recovery.
+                    _r74AskSync(question, nextOpts);
                 }, backoffMs);
                 return true;
             }
@@ -591,11 +823,36 @@ document.addEventListener('DOMContentLoaded', function() {
                 // ``appendInline``) has the snippet data ready
                 // when it builds each ``[Source: ID]`` badge.
                 _r68SetEvidenceIndex(data.evidence_index);
+                // Round 74 / Phase 4 (P4): also seed the new R74
+                // evidence-record index so the offcanvas drawer
+                // can render the underlying record on click.
+                try {
+                    _r74SetEvidenceRecords(
+                        data.evidence_records,
+                        data.query_id
+                    );
+                } catch (_) { /* noop */ }
                 formatAnswerInto(answerContent, (data.answer && data.answer.trim()) ? data.answer : 'No answer was returned. Please try rephrasing your question.');
                 // Round 68 / Build 42 (C5): always render the debug
                 // chip on a successful answer so an operator can
                 // file a support ticket with the debug ID.
                 _r68RenderDebugChip(data);
+                // Round 74 / Phase 5 (P5): record the conversation
+                // turn AFTER we know the request succeeded.  When
+                // the conversation toggle is OFF this is a no-op.
+                try {
+                    if (_r74ConversationActive() && data.answer) {
+                        _r74ConversationPushTurn(
+                            lastAskedQuestion, data.answer, data.query_id
+                        );
+                    }
+                } catch (_) { /* noop */ }
+                // Round 74 / Phase 6 (P6): follow-up chips when the
+                // synchronous endpoint surfaces them.  Hidden when
+                // the response carries an empty / missing list.
+                try {
+                    _r74RenderFollowUpChips(data.follow_up_suggestions || []);
+                } catch (_) { /* noop */ }
                 if (data.context_summary) {
                     contextInfo.style.display = '';
                     contextDetail.textContent = data.context_summary;
@@ -682,6 +939,734 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             } catch (_) { /* noop */ }
         });
+    }
+
+    // -----------------------------------------------------------------
+    // Round 74 / Phase 4 (P4): in-memory evidence record index used by
+    // the offcanvas drawer.  Keyed by string source_id (the badge's
+    // ``data-source-id`` attribute).  Populated when an answer lands
+    // (sync OR streaming) and consulted on every badge click.
+    // -----------------------------------------------------------------
+    var _r74EvidenceRecords = {};
+    var _r74CurrentQueryId = '';
+
+    function _r74SetEvidenceRecords(records, queryId) {
+        _r74EvidenceRecords = {};
+        _r74CurrentQueryId = String(queryId || '');
+        if (!Array.isArray(records)) { return; }
+        for (var i = 0; i < records.length; i++) {
+            var rec = records[i];
+            if (!rec || typeof rec !== 'object') { continue; }
+            var sid = (rec.source_id != null) ? String(rec.source_id)
+                    : (rec.id != null) ? String(rec.id) : '';
+            if (!sid) { continue; }
+            _r74EvidenceRecords[sid] = rec;
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Round 74 / Phase 5 (P5): in-memory conversation history (capped
+    // at last 5 turns, sent in the next request payload when the
+    // conversation toggle is ON).  We KEEP the answer text trimmed to
+    // ~1500 chars per turn so the prompt stays bounded.
+    // -----------------------------------------------------------------
+    var _R74_CONVO_MAX_TURNS = 5;
+    var _r74ConversationHistory = [];
+    var r74ConversationToggle = document.getElementById('r74ConversationToggle');
+    var r74ConversationCount = document.getElementById('r74ConversationCount');
+    var r74ConversationResetBtn = document.getElementById('r74ConversationResetBtn');
+
+    function _r74ConversationActive() {
+        return !!(r74ConversationToggle && r74ConversationToggle.checked);
+    }
+
+    function _r74ConversationPushTurn(question, answer, queryId) {
+        if (!question || !answer) { return; }
+        _r74ConversationHistory.push({
+            q: String(question),
+            a: String(answer).slice(0, 1500),
+            query_id: String(queryId || '')
+        });
+        while (_r74ConversationHistory.length > _R74_CONVO_MAX_TURNS) {
+            _r74ConversationHistory.shift();
+        }
+        _r74RenderConversationCount();
+    }
+
+    function _r74RenderConversationCount() {
+        var n = _r74ConversationHistory.length;
+        if (r74ConversationCount) {
+            if (n > 0) {
+                r74ConversationCount.textContent = n + ' turn' + (n === 1 ? '' : 's');
+                r74ConversationCount.style.display = '';
+            } else {
+                r74ConversationCount.style.display = 'none';
+            }
+        }
+        if (r74ConversationResetBtn) {
+            r74ConversationResetBtn.style.display = n > 0 ? '' : 'none';
+        }
+    }
+
+    function _r74ResetConversation() {
+        _r74ConversationHistory = [];
+        _r74RenderConversationCount();
+        _r68ShowToast('Conversation reset.', 'success');
+    }
+
+    if (r74ConversationResetBtn) {
+        r74ConversationResetBtn.addEventListener('click', _r74ResetConversation);
+    }
+    if (r74ConversationToggle) {
+        r74ConversationToggle.addEventListener('change', function () {
+            // When toggling OFF, clear the in-memory history so a
+            // future toggle-ON starts fresh.  This matches operator
+            // expectation: toggle ON = "I'm having a conversation",
+            // toggle OFF = "I'm done, forget the context".
+            if (!this.checked) {
+                _r74ConversationHistory = [];
+                _r74RenderConversationCount();
+            }
+        });
+    }
+
+    // -----------------------------------------------------------------
+    // Round 74 / Phase 6 (P6): follow-up chip rendering.
+    // -----------------------------------------------------------------
+    var r74FollowUpChipsContainer = document.getElementById('r74FollowUpChipsContainer');
+    var r74FollowUpChips = document.getElementById('r74FollowUpChips');
+
+    function _r74RenderFollowUpChips(suggestions) {
+        if (!r74FollowUpChipsContainer || !r74FollowUpChips) { return; }
+        while (r74FollowUpChips.firstChild) {
+            r74FollowUpChips.removeChild(r74FollowUpChips.firstChild);
+        }
+        if (!Array.isArray(suggestions) || suggestions.length === 0) {
+            r74FollowUpChipsContainer.style.display = 'none';
+            return;
+        }
+        suggestions.forEach(function (s) {
+            var qText = (typeof s === 'string') ? s
+                : (s && typeof s.question === 'string') ? s.question
+                : '';
+            if (!qText.trim()) { return; }
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-outline-warning btn-sm';
+            btn.textContent = qText;
+            btn.addEventListener('click', function () {
+                questionInput.value = qText;
+                if (_r74ConversationActive()) {
+                    askAI(qText);
+                } else {
+                    try { questionInput.focus(); } catch (_) { /* noop */ }
+                }
+            });
+            r74FollowUpChips.appendChild(btn);
+        });
+        r74FollowUpChipsContainer.style.display = '';
+    }
+
+    function _r74HideFollowUpChips() {
+        if (r74FollowUpChipsContainer) {
+            r74FollowUpChipsContainer.style.display = 'none';
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Round 74 / Phase 4 (P4): offcanvas evidence drawer wiring.
+    // -----------------------------------------------------------------
+    var r74EvidenceDrawerEl = document.getElementById('r74EvidenceDrawer');
+    var r74EvidenceDrawerBody = document.getElementById('r74EvidenceDrawerBody');
+    var r74EvidenceDrawerStatus = document.getElementById('r74EvidenceDrawerStatus');
+    var r74EvidenceDrawerLabel = document.getElementById('r74EvidenceDrawerLabel');
+    var _r74EvidenceDrawerInstance = null;
+
+    function _r74OpenEvidenceDrawer() {
+        if (!r74EvidenceDrawerEl) { return; }
+        try {
+            if (window.bootstrap && window.bootstrap.Offcanvas) {
+                if (!_r74EvidenceDrawerInstance) {
+                    _r74EvidenceDrawerInstance = new window.bootstrap.Offcanvas(
+                        r74EvidenceDrawerEl
+                    );
+                }
+                _r74EvidenceDrawerInstance.show();
+            } else {
+                // Fallback when Bootstrap JS is not loaded -- toggle
+                // the .show class manually so the drawer is still
+                // visible (drawer styling comes from Bootstrap CSS
+                // which IS loaded).
+                r74EvidenceDrawerEl.classList.add('show');
+                r74EvidenceDrawerEl.style.visibility = 'visible';
+            }
+        } catch (err) {
+            try {
+                if (window.console && window.console.debug) {
+                    window.console.debug('[R74] drawer open failed', err);
+                }
+            } catch (_) { /* noop */ }
+        }
+    }
+
+    function _r74RenderEvidenceRecord(record, sourceId) {
+        if (!r74EvidenceDrawerBody) { return; }
+        while (r74EvidenceDrawerBody.firstChild) {
+            r74EvidenceDrawerBody.removeChild(r74EvidenceDrawerBody.firstChild);
+        }
+        if (!record || typeof record !== 'object') {
+            var emptyP = document.createElement('p');
+            emptyP.className = 'text-muted mb-0';
+            emptyP.textContent = 'No evidence record found for source "' + String(sourceId) + '".';
+            r74EvidenceDrawerBody.appendChild(emptyP);
+            return;
+        }
+        // Header pills.
+        var headerRow = document.createElement('div');
+        headerRow.className = 'd-flex flex-wrap gap-1 mb-3';
+        var typePill = document.createElement('span');
+        typePill.className = 'badge bg-primary text-light';
+        typePill.textContent = String(record.source_type || record.record_type || 'evidence');
+        headerRow.appendChild(typePill);
+        if (record.customer || record.customer_name || record.bu_name) {
+            var custPill = document.createElement('span');
+            custPill.className = 'badge bg-info text-dark';
+            custPill.textContent = String(
+                record.customer || record.customer_name || record.bu_name
+            );
+            headerRow.appendChild(custPill);
+        }
+        if (record.timestamp || record.recorded_at) {
+            var tsPill = document.createElement('span');
+            tsPill.className = 'badge bg-light text-muted border';
+            tsPill.textContent = String(record.timestamp || record.recorded_at);
+            headerRow.appendChild(tsPill);
+        }
+        r74EvidenceDrawerBody.appendChild(headerRow);
+        // Headline / snippet.
+        if (record.headline || record.title) {
+            var h = document.createElement('div');
+            h.className = 'fw-semibold mb-2';
+            h.textContent = String(record.headline || record.title);
+            r74EvidenceDrawerBody.appendChild(h);
+        }
+        if (record.snippet || record.summary) {
+            var s = document.createElement('p');
+            s.className = 'text-body mb-3';
+            s.textContent = String(record.snippet || record.summary);
+            r74EvidenceDrawerBody.appendChild(s);
+        }
+        // Definition list of every other field.
+        var dl = document.createElement('dl');
+        dl.className = 'row mb-3 small';
+        var skipKeys = {
+            'source_id': true, 'source_type': true, 'record_type': true,
+            'customer': true, 'customer_name': true, 'bu_name': true,
+            'timestamp': true, 'recorded_at': true,
+            'headline': true, 'title': true,
+            'snippet': true, 'summary': true,
+            'id': true
+        };
+        var keys = Object.keys(record).sort();
+        for (var i = 0; i < keys.length; i++) {
+            var k = keys[i];
+            if (skipKeys[k]) { continue; }
+            var v = record[k];
+            if (v == null || v === '') { continue; }
+            var dt = document.createElement('dt');
+            dt.className = 'col-sm-4 text-muted text-truncate';
+            dt.textContent = k;
+            dt.title = k;
+            var dd = document.createElement('dd');
+            dd.className = 'col-sm-8';
+            // Render arrays / objects as JSON so the user sees the shape
+            // without surrendering XSS safety -- still textContent.
+            var displayVal;
+            if (typeof v === 'object') {
+                try { displayVal = JSON.stringify(v, null, 2); }
+                catch (_) { displayVal = String(v); }
+                var pre = document.createElement('pre');
+                pre.className = 'small mb-0 bg-light p-2 rounded';
+                pre.style.cssText = 'white-space:pre-wrap;word-break:break-word;';
+                pre.textContent = displayVal;
+                dd.appendChild(pre);
+            } else {
+                dd.textContent = String(v);
+            }
+            dl.appendChild(dt);
+            dl.appendChild(dd);
+        }
+        if (dl.firstChild) {
+            r74EvidenceDrawerBody.appendChild(dl);
+        }
+        // Optional Snowflake deep-link footer.
+        if (record.snowflake_table) {
+            var footer = document.createElement('div');
+            footer.className = 'pt-2 mt-3 border-top text-muted small';
+            footer.textContent = 'Source table: ' + String(record.snowflake_table);
+            r74EvidenceDrawerBody.appendChild(footer);
+        }
+    }
+
+    function _r74SetDrawerLabel(sourceId, recordType) {
+        if (!r74EvidenceDrawerLabel) { return; }
+        while (r74EvidenceDrawerLabel.firstChild) {
+            r74EvidenceDrawerLabel.removeChild(r74EvidenceDrawerLabel.firstChild);
+        }
+        var icon = document.createElement('i');
+        icon.className = 'fas fa-quote-left text-primary me-2';
+        r74EvidenceDrawerLabel.appendChild(icon);
+        var span = document.createElement('span');
+        span.textContent = recordType
+            ? (String(recordType) + ' [' + String(sourceId) + ']')
+            : ('Evidence [' + String(sourceId) + ']');
+        r74EvidenceDrawerLabel.appendChild(span);
+    }
+
+    function _r74SetDrawerStatus(message, kind) {
+        if (!r74EvidenceDrawerStatus) { return; }
+        if (!message) {
+            r74EvidenceDrawerStatus.style.display = 'none';
+            r74EvidenceDrawerStatus.textContent = '';
+            return;
+        }
+        var bsKind = (kind === 'error') ? 'alert-danger' : 'alert-info';
+        r74EvidenceDrawerStatus.className = 'alert ' + bsKind + ' small mb-3';
+        r74EvidenceDrawerStatus.textContent = String(message);
+        r74EvidenceDrawerStatus.style.display = '';
+    }
+
+    function _r74OnSourceBadgeActivate(sourceId) {
+        var sid = String(sourceId || '').trim();
+        if (!sid) { return; }
+        // ``data-source-id`` may carry a comma-separated list when
+        // the original [Source: A, B] marker was multi-id.  For the
+        // drawer we just take the FIRST id (the others can be
+        // navigated via subsequent badge clicks).
+        var firstSid = sid.split(',')[0].trim();
+        if (!firstSid) { return; }
+        _r74SetDrawerLabel(firstSid);
+        _r74SetDrawerStatus('', null);
+        // Try in-memory index first.
+        var rec = _r74EvidenceRecords[firstSid];
+        if (rec) {
+            _r74SetDrawerLabel(firstSid, rec.source_type || rec.record_type);
+            _r74RenderEvidenceRecord(rec, firstSid);
+            _r74OpenEvidenceDrawer();
+            return;
+        }
+        // Fallback: ask the server.  This handles the post-reload
+        // case AND the case where the index dropped a record because
+        // it was too large to ship in the initial response.
+        if (!_r74CurrentQueryId) {
+            _r74RenderEvidenceRecord(null, firstSid);
+            _r74SetDrawerStatus(
+                'No evidence records available for this answer (the page may have been reloaded).',
+                'error'
+            );
+            _r74OpenEvidenceDrawer();
+            return;
+        }
+        _r74SetDrawerStatus('Loading evidence record...', null);
+        _r74OpenEvidenceDrawer();
+        var url = '/api/ask-ai/evidence/'
+            + encodeURIComponent(_r74CurrentQueryId)
+            + '/' + encodeURIComponent(firstSid);
+        fetch(url, { method: 'GET', credentials: 'same-origin',
+            headers: { 'Accept': 'application/json' } })
+            .then(function (r) {
+                if (!r.ok) {
+                    throw new Error('lookup failed: HTTP ' + r.status);
+                }
+                return r.json();
+            })
+            .then(function (data) {
+                if (data && data.ok && data.record) {
+                    _r74SetDrawerLabel(firstSid,
+                        data.record.source_type || data.record.record_type);
+                    _r74RenderEvidenceRecord(data.record, firstSid);
+                    _r74SetDrawerStatus('', null);
+                } else {
+                    _r74RenderEvidenceRecord(null, firstSid);
+                    _r74SetDrawerStatus(
+                        'Evidence record not available: ' + ((data && data.error) || 'unknown error'),
+                        'error'
+                    );
+                }
+            })
+            .catch(function (err) {
+                _r74RenderEvidenceRecord(null, firstSid);
+                _r74SetDrawerStatus(
+                    'Could not load evidence: ' + String(err && err.message || err),
+                    'error'
+                );
+            });
+    }
+
+    // Delegated click + keydown handler for source badges (works for
+    // every badge regardless of when it was rendered into the DOM).
+    if (answerContent) {
+        answerContent.addEventListener('click', function (evt) {
+            var t = evt.target;
+            while (t && t !== answerContent) {
+                if (t.classList && t.classList.contains('r74-source-badge')) {
+                    var sid = t.getAttribute('data-source-id') || '';
+                    _r74OnSourceBadgeActivate(sid);
+                    evt.preventDefault();
+                    return;
+                }
+                t = t.parentNode;
+            }
+        });
+        answerContent.addEventListener('keydown', function (evt) {
+            if (evt.key !== 'Enter' && evt.key !== ' ') { return; }
+            var t = evt.target;
+            if (t && t.classList && t.classList.contains('r74-source-badge')) {
+                var sid = t.getAttribute('data-source-id') || '';
+                _r74OnSourceBadgeActivate(sid);
+                evt.preventDefault();
+            }
+        });
+    }
+
+    // -----------------------------------------------------------------
+    // Round 74 / Phase 3 (P3): SSE streaming client.
+    // -----------------------------------------------------------------
+    //
+    // Uses fetch + ReadableStream to consume the SSE response (we
+    // can't use EventSource because EventSource doesn't support POST
+    // + custom headers, and we need both for CSRF).  The parser is
+    // a minimal SSE frame splitter (event: + data: + blank line).
+    //
+    // On a hard failure (network error before any data lands, ``error``
+    // event in the stream, or HTTP 4xx/5xx) the function REJECTS its
+    // promise so the dispatcher (askAI) can fall back to _r74AskSync
+    // transparently.  Once the answer area has been written to we
+    // RESOLVE so a mid-stream blip doesn't fire a duplicate sync
+    // request that would clobber the partial answer.
+    function _r74AskStreaming(question, opts) {
+        opts = opts || {};
+        return new Promise(function (resolve, reject) {
+            if (!question.trim()) { reject(new Error('empty question')); return; }
+            var trimmed = question.trim();
+            lastAskedQuestion = trimmed;
+            answerArea.style.display = '';
+            loadingState.style.display = '';
+            answerContent.textContent = '';
+            contextInfo.style.display = 'none';
+            hideAllBanners();
+            _r74HideFollowUpChips();
+            askBtn.disabled = true;
+
+            var _aiDaysRaw = parseInt(document.getElementById('aiDays').value, 10);
+            var payload = {
+                question: trimmed,
+                manager: document.getElementById('aiManager').value,
+                technology: document.getElementById('aiTech').value,
+                days: Number.isFinite(_aiDaysRaw) ? _aiDaysRaw : 90
+            };
+            // Round 74 / Phase 5 (P5): conversation context.
+            if (_r74ConversationActive() && _r74ConversationHistory.length) {
+                payload.conversation_history = _r74ConversationHistory.slice();
+            }
+
+            try { _r68SetStep(1); } catch (_) { /* noop */ }
+            window.setTimeout(function () { try { _r68SetStep(2); } catch (_) { } }, 3000);
+            window.setTimeout(function () { try { _r68SetStep(3); } catch (_) { } }, 6000);
+
+            var csrfToken = (document.querySelector('meta[name="csrf-token"]') || {})
+                .getAttribute('content') || '';
+            var abortCtl = (typeof AbortController === 'function')
+                ? new AbortController() : null;
+            try {
+                if (window._R68_ASK_AI_RUNTIME) {
+                    window._R68_ASK_AI_RUNTIME.activeAbort = abortCtl;
+                }
+            } catch (_) { /* noop */ }
+            var abortTimer = null;
+            if (abortCtl) {
+                abortTimer = setTimeout(function () {
+                    try { abortCtl.abort(); } catch (_) { /* noop */ }
+                }, 90000);
+            }
+
+            var fetchOpts = {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': csrfToken,
+                    'Accept': 'text/event-stream'
+                },
+                body: JSON.stringify(payload),
+                credentials: 'same-origin'
+            };
+            if (abortCtl) { fetchOpts.signal = abortCtl.signal; }
+
+            // Buffer for chunked answer text -- re-rendered on every
+            // data event so the user sees the answer materialise.
+            var bufferedAnswer = '';
+            var metaPayload = null;
+            var donePayload = null;
+            var anyChunkLanded = false;
+            var streamFailed = false;
+            var streamFailReason = '';
+            var firstChunkRendered = false;
+
+            function _cleanup() {
+                if (abortTimer) {
+                    try { clearTimeout(abortTimer); } catch (_) { /* noop */ }
+                    abortTimer = null;
+                }
+                askBtn.disabled = false;
+                loadingState.style.display = 'none';
+                try {
+                    if (window._R68_ASK_AI_RUNTIME &&
+                        window._R68_ASK_AI_RUNTIME.activeAbort === abortCtl) {
+                        window._R68_ASK_AI_RUNTIME.activeAbort = null;
+                    }
+                } catch (_) { /* noop */ }
+            }
+
+            function _processFrame(frame) {
+                if (!frame) { return; }
+                var lines = frame.split(/\r?\n/);
+                var event = 'message';
+                var dataLines = [];
+                for (var li = 0; li < lines.length; li++) {
+                    var line = lines[li];
+                    if (line.indexOf('event:') === 0) {
+                        event = line.slice(6).trim();
+                    } else if (line.indexOf('data:') === 0) {
+                        dataLines.push(line.slice(5).trimStart());
+                    }
+                }
+                if (dataLines.length === 0) { return; }
+                var raw = dataLines.join('\n');
+                var data;
+                try { data = JSON.parse(raw); }
+                catch (_) { data = { _raw: raw }; }
+                if (event === 'meta') {
+                    metaPayload = data;
+                    try {
+                        // R68 evidence index (citation badge popovers)
+                        // is still wired off ``evidence_index`` -- preserve.
+                        _r68SetEvidenceIndex(data.evidence_index);
+                        _r74SetEvidenceRecords(
+                            data.evidence_records,
+                            data.query_id
+                        );
+                    } catch (_) { /* noop */ }
+                } else if (event === 'data') {
+                    var chunk = (data && typeof data.chunk === 'string')
+                        ? data.chunk : '';
+                    if (chunk) {
+                        bufferedAnswer += chunk;
+                        anyChunkLanded = true;
+                        if (!firstChunkRendered) {
+                            loadingState.style.display = 'none';
+                            firstChunkRendered = true;
+                        }
+                        try {
+                            formatAnswerInto(answerContent, bufferedAnswer);
+                        } catch (_) { /* noop */ }
+                    }
+                } else if (event === 'done') {
+                    donePayload = data;
+                } else if (event === 'error') {
+                    streamFailed = true;
+                    streamFailReason = (data && data.error)
+                        ? String(data.error) : 'stream error';
+                }
+            }
+
+            fetch('/api/ask-ai-portfolio/stream', fetchOpts)
+                .then(function (response) {
+                    if (!response.ok) {
+                        throw new Error('HTTP ' + response.status);
+                    }
+                    var ctype = (response.headers.get('content-type') || '').toLowerCase();
+                    if (ctype.indexOf('text/event-stream') < 0) {
+                        throw new Error('non-SSE response: ' + (ctype || 'unknown'));
+                    }
+                    if (!response.body || typeof response.body.getReader !== 'function') {
+                        throw new Error('streaming unsupported in this browser');
+                    }
+                    var reader = response.body.getReader();
+                    var decoder = new TextDecoder('utf-8');
+                    var buffer = '';
+                    function pump() {
+                        return reader.read().then(function (chunk) {
+                            if (chunk.done) {
+                                if (buffer.trim()) { _processFrame(buffer); }
+                                return;
+                            }
+                            buffer += decoder.decode(chunk.value, { stream: true });
+                            // Frames are separated by a blank line
+                            // (\n\n).  Drain complete frames out of
+                            // the buffer; the trailing partial stays.
+                            var splitIdx;
+                            while ((splitIdx = buffer.indexOf('\n\n')) !== -1) {
+                                var frame = buffer.slice(0, splitIdx);
+                                buffer = buffer.slice(splitIdx + 2);
+                                _processFrame(frame);
+                            }
+                            return pump();
+                        });
+                    }
+                    return pump();
+                })
+                .then(function () {
+                    _cleanup();
+                    if (streamFailed) {
+                        // Mid-stream error event -- reject so the
+                        // dispatcher can fall back IF nothing landed
+                        // yet.  When chunks already rendered we
+                        // resolve to avoid clobbering the partial.
+                        if (anyChunkLanded) {
+                            _r68ShowToast(
+                                'Streaming finished early: ' + streamFailReason,
+                                'error'
+                            );
+                            _r74OnStreamComplete(metaPayload, bufferedAnswer, donePayload);
+                            resolve({ partial: true, reason: streamFailReason });
+                        } else {
+                            reject(new Error(streamFailReason));
+                        }
+                        return;
+                    }
+                    if (!anyChunkLanded) {
+                        reject(new Error('no chunks received from stream'));
+                        return;
+                    }
+                    _r74OnStreamComplete(metaPayload, bufferedAnswer, donePayload);
+                    resolve({ partial: false });
+                })
+                .catch(function (err) {
+                    _cleanup();
+                    if (anyChunkLanded) {
+                        // A network blip mid-stream is annoying but
+                        // we already painted SOMETHING -- don't
+                        // double-fire the sync fallback.
+                        _r74OnStreamComplete(metaPayload, bufferedAnswer, donePayload);
+                        resolve({ partial: true, reason: String(err) });
+                    } else {
+                        reject(err);
+                    }
+                });
+        });
+    }
+
+    function _r74OnStreamComplete(metaPayload, answerText, donePayload) {
+        // Render the same chrome the sync path renders so the user
+        // sees identical UX whether streaming worked or fell back.
+        try {
+            if (metaPayload) {
+                _r68RenderDebugChip({
+                    query_id: metaPayload.query_id || '',
+                    retrieval_method: metaPayload.retrieval_method || '',
+                    model_name: metaPayload.model_name || ''
+                });
+                if (metaPayload.context_summary) {
+                    contextInfo.style.display = '';
+                    contextDetail.textContent = metaPayload.context_summary;
+                }
+                var bits = [];
+                if (metaPayload.evidence_truncated) {
+                    bits.push('Evidence truncated to '
+                        + (metaPayload.evidence_records_used || '?')
+                        + ' of ' + (metaPayload.evidence_records_total || '?') + ' records.');
+                }
+                if (metaPayload.account_batch_truncated) {
+                    bits.push('Account-level evidence covers '
+                        + (metaPayload.account_batch_size || '?')
+                        + ' of ' + (metaPayload.account_total || '?') + ' accounts.');
+                }
+                if (bits.length) {
+                    truncationDetail.textContent = bits.join(' ')
+                        + ' Headline numbers come from the canonical metrics block (full population).';
+                    truncationBanner.style.display = '';
+                }
+                if (metaPayload.partial_data_warnings && metaPayload.partial_data_warnings.length) {
+                    while (partialDataList.firstChild) {
+                        partialDataList.removeChild(partialDataList.firstChild);
+                    }
+                    metaPayload.partial_data_warnings.forEach(function (w) {
+                        var li = document.createElement('li');
+                        li.textContent = (w.dataset || 'unknown') + ': ' + (w.error || 'unknown error');
+                        partialDataList.appendChild(li);
+                    });
+                    partialDataBanner.style.display = '';
+                }
+            }
+        } catch (_) { /* never fail on chrome rendering */ }
+        // Streaming pill on.
+        try {
+            var pill = document.getElementById('r74StreamingPill');
+            if (pill) { pill.style.display = ''; }
+        } catch (_) { /* noop */ }
+        // History + conversation tracking.
+        try {
+            var qid = (metaPayload && metaPayload.query_id) || '';
+            if (lastAskedQuestion && answerText) {
+                _r68RecordHistoryEntry(lastAskedQuestion, answerText, {
+                    query_id: qid,
+                    retrieval_method: (metaPayload && metaPayload.retrieval_method) || ''
+                });
+                if (_r74ConversationActive()) {
+                    _r74ConversationPushTurn(lastAskedQuestion, answerText, qid);
+                }
+            }
+        } catch (_) { /* noop */ }
+        // Follow-up chips from the done event.
+        try {
+            var suggestions = (donePayload && donePayload.follow_up_suggestions) || [];
+            _r74RenderFollowUpChips(suggestions);
+        } catch (_) { /* noop */ }
+    }
+
+    // Round 74 / Phase 3 (P3): public dispatcher.  Tries streaming
+    // first when enabled; falls back to the synchronous path on
+    // failure (network error before any data, HTTP error, browser
+    // doesn't support ReadableStream, etc.).
+    function askAI(question, opts) {
+        opts = opts || {};
+        // Hide streaming-only chrome on each new request.
+        try {
+            _r74HideFollowUpChips();
+            var pill = document.getElementById('r74StreamingPill');
+            if (pill) { pill.style.display = 'none'; }
+        } catch (_) { /* noop */ }
+        if (!_r74StreamingEnabled || opts._r74_force_sync) {
+            return _r74AskSync(question, opts);
+        }
+        // Streaming path.  On a hard failure transparently fall
+        // back to the sync path.
+        _r74AskStreaming(question, opts).then(
+            function (_result) { /* success: no fallback needed */ },
+            function (err) {
+                try {
+                    if (window.console && window.console.debug) {
+                        window.console.debug('[R74] streaming fell back to sync:', err);
+                    }
+                } catch (_) { /* noop */ }
+                // Inline toast so the operator sees that streaming
+                // didn't work but the answer is still on the way.
+                try {
+                    _r68ShowToast(
+                        'Streaming unavailable; falling back to standard request...',
+                        'retryable'
+                    );
+                } catch (_) { /* noop */ }
+                var nextOpts = {};
+                for (var k in opts) {
+                    if (Object.prototype.hasOwnProperty.call(opts, k)) {
+                        nextOpts[k] = opts[k];
+                    }
+                }
+                nextOpts._r74_force_sync = true;
+                _r74AskSync(question, nextOpts);
+            }
+        );
     }
 
     askBtn.addEventListener('click', function() { askAI(questionInput.value); });
