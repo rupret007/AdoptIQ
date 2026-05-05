@@ -726,6 +726,18 @@ CURATED_COLUMNS: Mapping[str, tuple[str, ...]] = {
     # sheet name to the same curated set so the projected schema
     # matches the Compact sibling.
     "Customer_Action_Plans": _CURATED_ACTION_PLANS,
+    # Round 86 / Build 62 (P0/F2): Build 61 acceptance audit found
+    # the Comprehensive XLSX still leaked the raw 242-col Snowflake
+    # dump on the ``CSConsole_Action_Plans`` sheet -- ``Action_Plans``
+    # (the comprehensive's primary AP sheet) WAS curated to 30 cols
+    # but its CSConsole sibling was NOT. The two sheets carry the
+    # same row set; the difference is purely the column projection.
+    # Map ``CSConsole_Action_Plans`` to the same curated set so the
+    # operator opening the Comprehensive workbook never sees
+    # ``CSDF_SYNC_ID_C``, ``GS_C_360_SUCCESS_PRIORITY_C``,
+    # ``IS_DELETED``, ``MAY_EDIT``, or any of the other ~210
+    # internal markers that Snowflake's raw view exposes.
+    "CSConsole_Action_Plans": _CURATED_ACTION_PLANS,
 }
 
 

@@ -213,6 +213,53 @@ def _dedupe_cases(cases: "tuple[HistoricalCase, ...] | list[HistoricalCase]") ->
     return out
 
 
+# Round 86 / Build 62 (P1/F3): internal AdoptIQ-generated filenames
+# (``AdoptIQ_Report_<scope>_<ts>.docx`` / ``AdoptIQ_Data_<scope>_<ts>.xlsx``
+# / ``AdoptIQ_Portfolio_*.xlsx``) leaked into customer-facing
+# Historical Context narratives via the ``[src: <filename>]`` tag the
+# Round 17 renderer appends after each resolution / case bullet.
+# The filename itself adds no information for the reader -- the
+# section heading already says "Drawn from the AdoptIQ Knowledge
+# Corpus (prior daily reports)" -- and surfaces an internal artifact
+# name in front of the user. ``_is_internal_adoptiq_filename`` is the
+# matcher used by both render paths to suppress the tag.
+_INTERNAL_ADOPTIQ_FILENAME_RE = re.compile(
+    r"^\s*AdoptIQ[_\-][A-Za-z0-9_\-]+\.(?:xlsx|xls|docx|doc|pdf)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_internal_adoptiq_filename(value: object) -> bool:
+    """Return True for AdoptIQ-generated filenames (e.g.
+    ``AdoptIQ_Report_Brian_Frazier_All_Contact_Center_90d_1234.xlsx``)
+    that should NOT leak into customer-facing narrative.
+    """
+    if not value:
+        return False
+    text = str(value).strip()
+    if not text:
+        return False
+    return bool(_INTERNAL_ADOPTIQ_FILENAME_RE.match(text))
+
+
+def _safe_source_label(value: object) -> Optional[str]:
+    """Sanitize a corpus ``source_filename`` for rendering.
+
+    Round 86: returns ``None`` for internal AdoptIQ filenames so the
+    ``[src: ...]`` citation tag is suppressed entirely (the surrounding
+    Historical Context section already attributes the data to the
+    AdoptIQ corpus). Returns the raw filename for non-AdoptIQ corpus
+    sources (e.g. user-supplied CSOne snapshots) where the filename is
+    operator-meaningful.
+    """
+    if value is None:
+        return None
+    if _is_internal_adoptiq_filename(value):
+        return None
+    label = _safe_str(value, limit=120)
+    return label or None
+
+
 def _is_safe_chunk(text: str) -> bool:
     """Defense-in-depth -- run free-form corpus text through the
     Round 17 prompt-safety validator before letting it into a
@@ -349,7 +396,13 @@ def build_historical_context(
             summary = _safe_str(case.summary, limit=240)
             if summary and not _is_safe_chunk(summary):
                 summary = ""
-            src = _safe_str(case.source_filename, limit=120) if case.source_filename else None
+            # Round 86 / Build 62 (P1/F3): route through
+            # ``_safe_source_label`` so AdoptIQ-internal filenames
+            # (``AdoptIQ_Report_*.xlsx``, ``AdoptIQ_Data_*.xlsx``)
+            # are dropped at construction time -- they then never
+            # reach the [src: ...] tag rendering OR the
+            # "Source files:" footer line.
+            src = _safe_source_label(case.source_filename)
             if src:
                 source_files.append(src)
             cases.append(
@@ -383,7 +436,10 @@ def build_historical_context(
             method = _safe_str(res.method_text, limit=240)
             if method and not _is_safe_chunk(method):
                 continue
-            src = _safe_str(res.source_filename, limit=120) if res.source_filename else None
+            # Round 86 / Build 62 (P1/F3): same suppression as cases
+            # above -- AdoptIQ-internal filenames are dropped at
+            # construction time so they never leak into Word.
+            src = _safe_source_label(res.source_filename)
             if src:
                 source_files.append(src)
             resolutions.append(
@@ -490,7 +546,14 @@ def render_to_text(context: HistoricalContext) -> str:
         if entry.resolutions:
             lines.append("  Top resolutions:")
             for r in entry.resolutions:
-                src = f"  [src: {r.source_filename}]" if r.source_filename else ""
+                # Round 86 / Build 62 (P1/F3): suppress [src: AdoptIQ_*.xlsx]
+                # tags that leak internal AdoptIQ-generated filenames into
+                # the customer-facing text. ``_safe_source_label`` returns
+                # None for AdoptIQ-internal names; the citation is dropped
+                # entirely in that case (the section header already
+                # attributes the data to the AdoptIQ corpus).
+                _src_label = _safe_source_label(r.source_filename)
+                src = f"  [src: {_src_label}]" if _src_label else ""
                 lines.append(f"    - {r.method_text}{src}")
     if context.source_files:
         lines.append("")
@@ -604,10 +667,11 @@ def render_to_word(doc: object, context: HistoricalContext) -> None:
                 if entry.resolutions:
                     add_paragraph("Top resolutions:")
                     for res in entry.resolutions:
-                        src = (
-                            f" [src: {res.source_filename}]"
-                            if res.source_filename else ""
-                        )
+                        # Round 86 / Build 62 (P1/F3): suppress
+                        # [src: AdoptIQ_*.xlsx] internal filenames
+                        # leaking into customer-facing Word.
+                        _src_label = _safe_source_label(res.source_filename)
+                        src = f" [src: {_src_label}]" if _src_label else ""
                         add_paragraph(
                             _safe_str(
                                 f"  - {res.method_text}{src}",

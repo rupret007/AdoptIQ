@@ -9899,3 +9899,60 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 **Acceptance criterion:** R85 ships when (a) the manual smoke flow lands as described, (b) the bake produces a working DMG without env-var overrides, (c) the new URL appears on BOTH `/` and `/preferences`, (d) the R83 negative self-test confirms the bundle is NOT offline-decryptable. All four are green on Build 61.
 
 **Trailer:** Made-with: Cursor
+
+## Round 86 — handoff 2026-05-05
+
+**What changed (plain English):**
+- **P0/F1: Compact-vs-Renewal score parity break (~10x drift).** Build 61 audit found "WORLD BANK GROUP US" scoring `0.7` in Compact and `7.1` in Renewal for the same scope -- a healthy customer with no AB/CS data was being saturated by a heuristic in `app_simple.py` (R67/B1 normalisation block, lines 14705-14713) that mis-classified a 0-100 input as a 0-10 input when the value happened to be ≤10.0. Fix: the Renewal `renewal_summary_data` loop now reads `cust_analysis.get('renewal_risk_score_10')` (already on 0-10 scale, written by `_calculate_simple_renewal_risk`) for `Overall_Risk_Score` and `cust_analysis.get('renewal_risk_score')` (0-100 scale) for `Risk_Score_0_100`. The R67/B1 normalisation block was rewritten to honor the explicit fields and only handle legacy single-customer paths + `Risk_Level` MEDIUM->MODERATE remapping -- no scale guessing.
+- **P0/F2: CSConsole_Action_Plans curated-projection regression.** Comprehensive XLSX shipped two AP sheets: `Action_Plans` (30 cols, curated since R67/B7) and `CSConsole_Action_Plans` (242 cols, raw Snowflake dump with `CSDF_SYNC_ID_C`, `GS_C_360_SUCCESS_PRIORITY_C`, `IS_DELETED`, `MAY_EDIT`, `MUTE__C`, `OWNER_ID_C`, and ~210 other internal markers). Fix: extend `report_export_schema.CURATED_COLUMNS` to map `"CSConsole_Action_Plans" -> _CURATED_ACTION_PLANS` (same set already used by `Action_Plans` and `Customer_Action_Plans`). Both sheets continue to coexist for back-compat; only the projection changes.
+- **P1/F3: Internal `[src: AdoptIQ_*.xlsx]` filename leakage in Word narratives.** Comprehensive + Leader DOCXes leaked tags like `[src: AdoptIQ_Report_Brian_Frazier_All_Contact_Center_90d_1234.xlsx]` into the customer-facing Historical Context section because the corpus rebuilt from prior AdoptIQ reports surfaced its own filenames as citations. Fix: `report_corpus_context.py` adds `_is_internal_adoptiq_filename` matcher + `_safe_source_label` helper; both render paths (`render_to_text`, `render_to_word`) call the helper to drop the `[src: ...]` tag entirely for AdoptIQ-internal names while preserving citations for external/operator-meaningful filenames (e.g. user-supplied CSOne snapshots).
+- **Audit-script false-positive findings dismissed.** The Phase A audit script flagged 3 "mid-string citation injections" (2 in Comprehensive + 1 in Leader) that turned out to be artifacts of the audit's `find_mid_string_citations` not splitting on `\n` before scanning -- the actual citations were at end-of-line in the source DOCX (R64/B4 contract honored). Confirmed by re-running the corrected detection (split-on-newline first) which returned 0 hits in both DOCXes. Source-tree contract (`report_source_injector._rewrite_paragraph_with_inline_citations`) verified clean by all 44 R64/R66/R76 citation tests still passing.
+
+**Files touched:**
+- `app_simple.py` — R86/F1 Renewal score parity fix in `renewal_summary_data` loop + R67/B1 block restructure to use explicit `renewal_risk_score_10` / `renewal_risk_score` keys, no heuristic. 4 `# Round 86` markers.
+- `report_corpus_context.py` — R86/F3 `_is_internal_adoptiq_filename` matcher + `_safe_source_label` helper + 4 call sites updated (2 render paths × cases/resolutions). 6 `# Round 86` markers.
+- `report_export_schema.py` — R86/F2 `CSConsole_Action_Plans -> _CURATED_ACTION_PLANS` curated-map entry. 1 `# Round 86` marker.
+- `tests/test_round66_p0_html_strip.py` — feed canonical Snowflake column names (`SUBJECT_C`, `STATUS_C`) to the `CSConsole_Action_Plans` HTML-strip test now that the sheet is curated through the projection. 1 `# Round 86` marker.
+- `tests/test_round67_renewal_score_scale_and_band.py` — update two R67 tests that had pinned the old buggy R67/B1 source-shape to instead validate the new R86/F1 explicit-key contract. 3 `# Round 86` markers.
+- `tests/test_round86_renewal_score_parity.py` — new (P0/F1 regression pin, 7 markers, 7 tests).
+- `tests/test_round86_csconsole_action_plans_curate.py` — new (P0/F2 regression pin, 10 markers, 8 tests).
+- `tests/test_round86_internal_filename_suppression.py` — new (P1/F3 regression pin, 9 markers, 8 tests).
+
+**SSoT modules touched:** `report_export_schema` (curated-columns map), `report_corpus_context` (filename suppression at source).
+
+**Tests added/updated:**
+- `tests/test_round86_renewal_score_parity.py::test_healthy_customer_low_score_not_saturated` — pins healthy customers (0-100 score ≤10) are not multiplied by 10 (this was the bug).
+- `tests/test_round86_renewal_score_parity.py::test_high_risk_customer_score_unchanged` — pins high-risk scoring continues to flow through correctly.
+- `tests/test_round86_renewal_score_parity.py::test_explicit_score_keys_take_precedence` — pins the new explicit-key contract.
+- `tests/test_round86_renewal_score_parity.py::test_legacy_overall_risk_score_fallback` — pins the legacy fallback path still works.
+- `tests/test_round86_renewal_score_parity.py::test_zero_score_remains_zero` — defense in depth.
+- `tests/test_round86_renewal_score_parity.py::test_buggy_heuristic_pattern_absent_from_app_simple` — negative-control source-shape pin.
+- `tests/test_round86_renewal_score_parity.py::test_renewal_summary_data_loop_uses_explicit_keys` — positive-control source-shape pin.
+- `tests/test_round86_csconsole_action_plans_curate.py::test_csconsole_action_plans_in_curated_columns_map` — pins the new map entry.
+- `tests/test_round86_csconsole_action_plans_curate.py::test_csconsole_action_plans_uses_same_curated_set_as_action_plans` — pins parity with `Action_Plans`.
+- `tests/test_round86_csconsole_action_plans_curate.py::test_curated_action_plans_drops_internal_markers` — negative-control: no `IS_DELETED`/`MAY_EDIT`/`MUTE__C`/`CSDF_SYNC`/`GS_C_`/`SFDC_`/`OWNER_ID_C` in curated set.
+- `tests/test_round86_csconsole_action_plans_curate.py::test_curated_action_plans_count_under_50_cols` — guard against raw-dump regression.
+- `tests/test_round86_csconsole_action_plans_curate.py::test_writer_routes_csconsole_action_plans_through_apply_export_schema` — end-to-end writer projection check.
+- `tests/test_round86_internal_filename_suppression.py::test_internal_adoptiq_filename_matcher_positives` — pins all standard AdoptIQ output filename shapes match.
+- `tests/test_round86_internal_filename_suppression.py::test_internal_adoptiq_filename_matcher_negatives` — pins external filenames are NOT matched.
+- `tests/test_round86_internal_filename_suppression.py::test_render_to_text_suppresses_adoptiq_src_tag` — text render path drops AdoptIQ tags, preserves external citations.
+- `tests/test_round86_internal_filename_suppression.py::test_render_to_word_suppresses_adoptiq_src_tag` — Word render path drops AdoptIQ tags, preserves external citations.
+
+**Verify status:**
+- `make verify` — **pass**.
+- pytest: 5311 passed, 4 skipped, 6 deselected (Build-61 floor was 5289; +22 R86 tests).
+- ruff: 0 findings.
+- bandit HIGH/MED: 0.
+- pip-audit: clean.
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py:14620-14760` — the Renewal `renewal_summary_data` loop + R67/B1 normalisation block. Confirm the R86/F1 fix correctly threads `renewal_risk_score_10` (0-10) into `Overall_Risk_Score` and `renewal_risk_score` (0-100) into `Risk_Score_0_100` without reintroducing the heuristic.
+2. `report_corpus_context.py:215-265` (matcher + helper) and the 4 call sites at 410-420, 446-453, 545-555, 626-637 — confirm the suppression is consistent across both render paths and at construction time (so the bottom-of-section "Source files:" footer also doesn't leak AdoptIQ filenames).
+3. `report_export_schema.py:737-740` — confirm `CSConsole_Action_Plans -> _CURATED_ACTION_PLANS` is in the right place in `CURATED_COLUMNS` and follows the same pattern as `Customer_Action_Plans`.
+4. The Build 62 DMG when baked: confirm a regenerated Comprehensive XLSX has `CSConsole_Action_Plans` at ~30 cols (NOT 242), and a regenerated Renewal XLSX has `Renewal_Summary.Overall_Risk_Score` for healthy customers reading values like `0.7` (0-10 scale, NOT `7.1` saturation).
+
+**Known deferrals (intentional non-fixes):**
+- The audit script's `find_mid_string_citations` has a known false-positive bug (doesn't split on `\n` before scanning). The audit script lives in `/tmp/r86_audit.py` and is throwaway -- the source-tree citation injection contract (R64/B4, R66/B1, R76/A) is honored correctly. Fixing the audit script itself is not part of this round.
+- The 4 customer score-parity findings flagged in the audit (4TH DIVISION HEADQUARTERS JP, ABBOTT LABORATORIES US, ADIDAS AG DE, AKAMAI US) are based on the OLD Build 61 artifacts -- the source-tree fix for P0/F1 is in place and pinned by 7 regression tests, but the actual artifacts won't show clean numbers until the operator regenerates reports on Build 62.
+
+**Trailer:** Made-with: Claude Opus 4.7

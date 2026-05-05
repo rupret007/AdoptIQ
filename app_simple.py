@@ -14632,11 +14632,43 @@ def run_customer_renewal_analysis(analysis_id):
                 # rendered "0 / UNKNOWN" for every row while the matching DOCX
                 # surfaced the real values. Fall back to the simple-analyzer
                 # keys so the Excel and Word outputs agree.
-                cust_risk_score = (
-                    cust_analysis.get('overall_risk_score')
-                    if cust_analysis.get('overall_risk_score') is not None
-                    else cust_analysis.get('renewal_risk_score', 0)
-                )
+                #
+                # Round 86 / Build 62 (P0/F1): the Build 61 acceptance audit
+                # surfaced a Compact-vs-Renewal score parity break -- a
+                # customer with no AB / CS data scored 0.7/10 in Compact but
+                # 7.1/10 in Renewal for the same scope. Root cause: the
+                # R67/B1 normalisation block below uses a numeric heuristic
+                # (`if _r67_orig_f > 10.0`) to guess whether the input is
+                # 0-10 or 0-100, but `_calculate_simple_renewal_risk`
+                # ALWAYS returns `renewal_risk_score` on the 0-100 scale
+                # (it's a passthrough of `profile['risk_score_0_100']`).
+                # For HEALTHY customers whose 0-100 score happens to be
+                # less than or equal to 10 (the typical "no signals
+                # observed" baseline), the heuristic mis-classifies the
+                # 0-100 input as a 0-10 input and multiplies by 10 to
+                # publish a saturated `Risk_Score_0_100`. The fix uses
+                # the explicit `renewal_risk_score_10` field that
+                # `_calculate_simple_renewal_risk` exposes (already on
+                # the 0-10 scale) and reads `renewal_risk_score` as the
+                # canonical 0-100 score -- no scale guessing.
+                _r86_score_10 = cust_analysis.get('renewal_risk_score_10')
+                _r86_score_100 = cust_analysis.get('renewal_risk_score')
+                # Single-customer / RenewalAnalyzer paths may emit
+                # ``overall_risk_score`` (typically already on the 0-10
+                # scale). Honor it when the simple-analyzer keys are
+                # missing so the legacy contract still flows through.
+                if _r86_score_10 is None and cust_analysis.get('overall_risk_score') is not None:
+                    _r86_score_10 = cust_analysis.get('overall_risk_score')
+                if _r86_score_10 is None and _r86_score_100 is not None:
+                    try:
+                        _r86_score_10 = round(float(_r86_score_100) / 10.0, 2)
+                    except (TypeError, ValueError):
+                        _r86_score_10 = None
+                if _r86_score_100 is None and _r86_score_10 is not None:
+                    try:
+                        _r86_score_100 = round(float(_r86_score_10) * 10.0, 1)
+                    except (TypeError, ValueError):
+                        _r86_score_100 = None
                 cust_risk_level = (
                     cust_analysis.get('risk_level')
                     or cust_analysis.get('renewal_risk_category')
@@ -14649,7 +14681,10 @@ def run_customer_renewal_analysis(analysis_id):
                     # (parity with the Risk_Summary fix at app_simple
                     # ~L8801).
                     'Customer': _normalize_composite_customer_key(cust_name),
-                    'Overall_Risk_Score': cust_risk_score,
+                    # Round 86 / Build 62 (P0/F1): explicit 0-10 / 0-100
+                    # projection -- no scale guessing.
+                    'Overall_Risk_Score': _r86_score_10 if _r86_score_10 is not None else 0,
+                    'Risk_Score_0_100': _r86_score_100 if _r86_score_100 is not None else 0,
                     'Risk_Level': cust_risk_level,
                     'Analysis_Date': analysis_date,
                     'Next_Review_Date': next_review_date
@@ -14684,6 +14719,19 @@ def run_customer_renewal_analysis(analysis_id):
         # EVERY row -- a missing input still produces an explicit None
         # cell so the column survives DataFrame construction and the
         # contract is honored regardless of upstream data shape.
+        # Round 86 / Build 62 (P0/F1): the Build 61 acceptance audit
+        # showed the original R67/B1 numeric heuristic
+        # (``if _r67_orig_f > 10.0``) mis-classified HEALTHY customers
+        # whose 0-100 score happens to be <= 10 (typical "no signals
+        # observed" baseline) as 0-10 inputs, then multiplied by 10
+        # and saturated ``Risk_Score_0_100`` to a phantom 71. The R86
+        # fix to the loop above already projects ``Overall_Risk_Score``
+        # and ``Risk_Score_0_100`` from explicit 0-10 / 0-100 fields on
+        # ``cust_analysis``; this block now ONLY handles the legacy
+        # single-customer renewal path (RenewalAnalyzer) where
+        # ``Risk_Score_0_100`` may not have been set yet, and the
+        # MODERATE / Risk_Band vocab parity remap. The numeric
+        # multiplication branch is intentionally removed.
         try:
             _r67_RISK_LEVEL_REMAP = {
                 'MEDIUM': 'MODERATE',
@@ -14693,24 +14741,35 @@ def run_customer_renewal_analysis(analysis_id):
             for _r67_row in renewal_summary_data:
                 if not isinstance(_r67_row, dict):
                     continue
+                # Round 86 / Build 62 (P0/F1): ``Risk_Score_0_100`` is
+                # already populated by the portfolio loop above (R86)
+                # OR by single-customer analyzer paths that explicitly
+                # emit it. Only fill it from ``Overall_Risk_Score``
+                # when both are present and the 0-100 column is
+                # missing -- and assume the 0-10 scale (the analyzer
+                # contract) so we never accidentally inflate an
+                # already-correct 0-100 value.
                 _r67_orig = _r67_row.get('Overall_Risk_Score')
+                _r86_existing_0_100 = _r67_row.get('Risk_Score_0_100')
                 try:
                     _r67_orig_f = float(_r67_orig) if _r67_orig is not None else None
                 except (TypeError, ValueError):
                     _r67_orig_f = None
-                # Round 70 / Phase 2 (#5): ALWAYS-PRESENT contract for
-                # ``Risk_Score_0_100`` AND ``Risk_Band`` -- set them
-                # FIRST so any early-continue path still leaves the
-                # columns populated.
-                if _r67_orig_f is None:
-                    _r67_row['Risk_Score_0_100'] = _r67_orig
-                else:
-                    if _r67_orig_f > 10.0:
-                        _r67_row['Risk_Score_0_100'] = round(_r67_orig_f, 1)
-                        _r67_row['Overall_Risk_Score'] = round(_r67_orig_f / 10.0, 2)
-                    else:
-                        _r67_row['Risk_Score_0_100'] = round(_r67_orig_f * 10.0, 1)
-                        _r67_row['Overall_Risk_Score'] = round(_r67_orig_f, 2)
+                try:
+                    _r86_existing_0_100_f = (
+                        float(_r86_existing_0_100)
+                        if _r86_existing_0_100 not in (None, '')
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    _r86_existing_0_100_f = None
+                if _r86_existing_0_100_f is None and _r67_orig_f is not None:
+                    # Single-customer path: assume 0-10 input (the
+                    # documented analyzer contract) and project 0-100.
+                    _r67_row['Risk_Score_0_100'] = round(_r67_orig_f * 10.0, 1)
+                    _r67_row['Overall_Risk_Score'] = round(_r67_orig_f, 2)
+                elif _r86_existing_0_100_f is None:
+                    _r67_row.setdefault('Risk_Score_0_100', _r67_orig)
                 _r67_lvl = _r67_row.get('Risk_Level')
                 if isinstance(_r67_lvl, str) and _r67_lvl:
                     _r67_row['Risk_Band'] = _r67_lvl.upper()

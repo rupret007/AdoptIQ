@@ -1,8 +1,16 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 61).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 62).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 62 (Round 86 — Build 61 acceptance audit + 3 fixes)
+
+Build 62 closes three correctness findings from the Build 61 acceptance audit. Net pytest delta `+22` (5289 → 5311). All four `make verify` gates green.
+
+- **P0/F1 — Compact-vs-Renewal score parity break (~10x drift).** A healthy customer with no adoption-barrier or support-case data scored `0.7` in the Compact report but `7.1` in the Renewal report for the same scope. Root cause was a numeric heuristic in the R67/B1 normalisation block that mis-classified a 0-100 score ≤10.0 as if it were already on the 0-10 scale and multiplied it by 10 -- saturating the Renewal `Risk_Score_0_100` column to a phantom 71.0. Fix: the Renewal `renewal_summary_data` loop now reads explicit `renewal_risk_score_10` (already on 0-10 scale) and `renewal_risk_score` (0-100 scale) keys directly from the analyzer; no scale guessing.
+- **P0/F2 — `CSConsole_Action_Plans` raw Snowflake dump regression.** The Comprehensive XLSX shipped two action-plan sheets: `Action_Plans` was curated to ~30 customer-facing columns (R67/B7 contract), but its sibling `CSConsole_Action_Plans` leaked the raw 242-col Snowflake projection complete with `IS_DELETED` / `MAY_EDIT` / `MUTE__C` / `CSDF_SYNC_ID_C` / `GS_C_360_SUCCESS_PRIORITY_C` and ~210 other internal markers. Fix: extend the curated-columns map to include the CSConsole sibling so both sheets ship at the same canonical column set.
+- **P1/F3 — Internal `[src: AdoptIQ_*.xlsx]` filename leakage in Word narratives.** Comprehensive and Leader DOCXes leaked tags like `[src: AdoptIQ_Report_Brian_Frazier_All_Contact_Center_90d_1234.xlsx]` into the customer-facing Historical Context section -- the corpus rebuilt from prior AdoptIQ daily reports surfaced its own filenames as citations. Fix: a new `_is_internal_adoptiq_filename` matcher routes the source-label sanitizer in `report_corpus_context.py` to drop the `[src: ...]` tag entirely for AdoptIQ-internal names. External / operator-meaningful filenames (e.g. user-supplied CSOne snapshots) continue to render normally.
 
 ### What's New in Build 61 (Round 85 — Share URL refresh + Preferences-hub mirror)
 

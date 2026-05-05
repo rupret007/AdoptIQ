@@ -38,31 +38,58 @@ def _read_app_simple() -> str:
 
 
 def test_renewal_xlsx_publishes_score_on_0_10_scale() -> None:
-    """R67/B1: the Renewal_Summary writer MUST normalise the score to
-    a 0-10 scale via ``round(_r67_orig_f / 10.0, 2)`` for any value
-    that arrives on the 0-100 axis."""
+    """R67/B1 contract (post-R86 implementation): the Renewal_Summary
+    writer MUST publish ``Overall_Risk_Score`` on the 0-10 scale.
+
+    Round 86 / Build 62 (P0/F1) replaced the buggy R67 numeric
+    heuristic (``if _r67_orig_f > 10.0`` -- which mis-classified
+    HEALTHY customers' 0-100 scores under 10 as 0-10 inputs and
+    saturated the back-compat column) with explicit projection from
+    ``cust_analysis['renewal_risk_score_10']`` (canonical 0-10) and
+    ``cust_analysis['renewal_risk_score']`` (canonical 0-100). The
+    R67/B1 contract still holds: the published 0-10 score MUST equal
+    the engine's ``risk_score_0_10`` field.
+    """
     src = _read_app_simple()
     assert "Round 67 / Build 41 (B1)" in src, "R67/B1 marker MUST be present"
-    pattern = re.compile(
-        r"_r67_row\['Overall_Risk_Score'\]\s*=\s*round\(_r67_orig_f\s*/\s*10\.0\s*,\s*2\)"
+    # Post-R86: the projection reads ``renewal_risk_score_10`` as the
+    # primary 0-10 source. This is the new SSoT contract.
+    assert "renewal_risk_score_10" in src, (
+        "R67/B1 (post-R86): the Renewal portfolio loop MUST read "
+        "``renewal_risk_score_10`` (canonical 0-10 from engine) "
+        "rather than guessing the scale from the numeric value."
     )
-    assert pattern.search(src), (
-        "R67/B1: Renewal_Summary Overall_Risk_Score MUST be normalised "
-        "via `round(_r67_orig_f / 10.0, 2)` for 0-100 scaled inputs"
+    # Round 86 / Build 62 marker.
+    assert "Round 86 / Build 62 (P0/F1)" in src, (
+        "R86/F1: marker MUST be present so future rounds know the "
+        "post-R67 projection contract."
     )
 
 
 def test_renewal_xlsx_preserves_risk_score_0_100_back_compat_column() -> None:
-    """R67/B1: ``Risk_Score_0_100`` MUST be set alongside
-    ``Overall_Risk_Score`` so existing tile / dashboard consumers
-    that pinned to the 0-100 axis don't break."""
+    """R67/B1 contract (post-R86 implementation): ``Risk_Score_0_100``
+    MUST be persisted on every Renewal_Summary row so existing
+    tile / dashboard consumers that pinned to the 0-100 axis don't
+    break.
+
+    Post-R86 the column is populated from
+    ``cust_analysis['renewal_risk_score']`` (canonical 0-100 from
+    engine, no numeric heuristic).
+    """
     src = _read_app_simple()
-    pattern = re.compile(
-        r"_r67_row\['Risk_Score_0_100'\]\s*=\s*round\(_r67_orig_f\s*,\s*1\)"
+    # The column is referenced (a) in the portfolio loop, (b) in the
+    # post-loop normalizer for single-customer fallback, (c) in the
+    # R70 canonical_cols projection. All three MUST stay.
+    assert "'Risk_Score_0_100'" in src, (
+        "R67/B1: Risk_Score_0_100 column MUST be present in the "
+        "Renewal_Summary writer."
     )
-    assert pattern.search(src), (
-        "R67/B1: Renewal_Summary MUST persist Risk_Score_0_100 = round(_r67_orig_f, 1) "
-        "for 0-100 scaled inputs (back-compat)"
+    # Post-R86: the loop reads ``renewal_risk_score`` directly as the
+    # 0-100 source -- no scale guessing.
+    assert "_r86_score_100 = cust_analysis.get('renewal_risk_score')" in src, (
+        "R67/B1 (post-R86): Risk_Score_0_100 MUST come from the "
+        "explicit ``renewal_risk_score`` field on cust_analysis "
+        "(NOT from a numeric multiplication of Overall_Risk_Score)."
     )
 
 

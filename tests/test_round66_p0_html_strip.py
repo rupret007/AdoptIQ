@@ -207,7 +207,19 @@ def test_write_excel_workbook_strips_html_from_action_plans_sheet(tmp_path):
 
 
 def test_write_excel_workbook_strips_html_from_csconsole_action_plans_sheet(tmp_path):
-    """Same contract for the ``CSConsole_Action_Plans`` pass-through sheet."""
+    """Same contract for the ``CSConsole_Action_Plans`` pass-through sheet.
+
+    Round 86 / Build 62 (P0/F2) update: the test now feeds canonical
+    Snowflake column names (``SUBJECT_C``) -- mirrors the R67/B7
+    update to the sibling ``Action_Plans`` test above.  R86 / P0/F2
+    extended the curated-column projection to ``CSConsole_Action_Plans``
+    so the operator-visible XLSX no longer leaks the raw 242-col
+    Snowflake dump (with ``IS_DELETED`` / ``MAY_EDIT`` / ``MUTE__C``
+    / ``CSDF_SYNC_ID_C`` / ``GS_C_360_SUCCESS_PRIORITY_C`` markers).
+    Post-projection friendly-header rename converts ``SUBJECT_C`` ->
+    ``Subject`` so the read-back assertion still anchors on the
+    user-visible header label.
+    """
     from adoptiq_backend import write_excel_workbook
 
     sheets = {
@@ -215,7 +227,8 @@ def test_write_excel_workbook_strips_html_from_csconsole_action_plans_sheet(tmp_
             {
                 "ID": "AP2",
                 "BU_NAME": "Beta Inc",
-                "Subject": '<p>Plain <em>action</em></p>',
+                "SUBJECT_C": '<p>Plain <em>action</em></p>',
+                "STATUS_C": "Open",
             }
         ]),
     }
