@@ -49,7 +49,13 @@ def test_config_corpus_share_url_default_is_canonical_cisco_share():
     """Round 35 contract: ``ADOPTIQ_CORPUS_SHARE_URL`` defaults to the
     Cisco-internal AdoptIQ_CSOne_Reports share when no env override
     is set.  This URL is intentional (the user accepted the operator-
-    identity tradeoff in exchange for a turnkey native corpus)."""
+    identity tradeoff in exchange for a turnkey native corpus).
+
+    Round 81 / Build 57 refreshed the trailing share-token from
+    ``e=O3a4Ij`` to ``e=kpHMgs``; the canonical pin moved here in
+    lockstep with ``tests/test_round35_corpus_url_hardcoded.py`` and
+    ``tests/test_round81_sharepoint_url_refresh.py``.
+    """
     import os
     import importlib
 
@@ -61,11 +67,12 @@ def test_config_corpus_share_url_default_is_canonical_cisco_share():
         expected = (
             "https://cisco-my.sharepoint.com/:f:/r/personal/"
             "jestory_cisco_com/Documents/AI%20Projects/"
-            "AdoptIQ_CSOne_Reports?csf=1&web=1&e=O3a4Ij"
+            "AdoptIQ_CSOne_Reports?csf=1&web=1&e=kpHMgs"
         )
         assert cfg.ADOPTIQ_CORPUS_SHARE_URL == expected, (
             "Config.ADOPTIQ_CORPUS_SHARE_URL must default to the "
-            "Round 35 hardcoded share URL when the env var is unset."
+            "Round 81 refreshed share URL (e=kpHMgs) when the env "
+            "var is unset."
         )
         # And the legacy attribute mirrors the canonical value so
         # corpus_bootstrap consumers keep working without churn.

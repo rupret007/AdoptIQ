@@ -52,6 +52,20 @@ def _isolate_state(tmp_path, monkeypatch):
     monkeypatch.setattr(
         corpus_bootstrap, "__file__", str(fake_module_path),
     )
+    # Round 83 / Build 59: pin the OneDrive sign-in proxy to
+    # ``"not_signed_in"`` for the R53 legacy-blocked test suite so
+    # they exercise the legacy ``blocked_no_onedrive`` branch (NOT
+    # the new R83 ``signed_in_no_corpus`` branch which fires
+    # automatically on dev hosts that DO have CloudStorage/
+    # OneDrive-Cisco populated).  Tests that want to exercise the
+    # new R83 path live in ``test_round83_onedrive_signed_in_proxy.py``
+    # and ``test_round83_signed_in_no_corpus_panel.py``; this fixture
+    # preserves the R53 contract intact.
+    monkeypatch.setattr(
+        corpus_bootstrap,
+        "_r83_onedrive_signed_in_proxy",
+        lambda: "not_signed_in",
+    )
     corpus_bootstrap.reset_for_tests()
     yield
     corpus_bootstrap.reset_for_tests()

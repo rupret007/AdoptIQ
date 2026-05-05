@@ -2639,21 +2639,46 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                     v{{ corpus_status.corpus.schema_version }}
                 </p>
 
-                {# Round 37 / Phase 2: OneDrive sync state pill.
+                {# Round 37 / Phase 2 (extended Round 83 / Build 59):
+                   OneDrive sign-in + sync state pills.
 
                    Round 36 replaced MSAL/Graph runtime auth with
                    "OneDrive sync presence as the auth signal" --
                    AdoptIQ trusts that the OneDrive desktop client
                    handled SSO/MFA/admin-consent and verifies by
                    probing ``Config.CSONE_ONEDRIVE_FOLDER`` for >=1
-                   non-empty file.  ``boot.onedrive_status`` is
-                   ``"synced"`` / ``"not_synced"`` / ``"unknown"``;
-                   ``boot.onedrive_file_count`` is the count of
-                   non-empty files seen at the last probe.  Surface
-                   it here so the operator can see at a glance
-                   whether daily refresh is unblocked. #}
+                   non-empty file.  Round 83 splits that single check
+                   into TWO independent signals so the admin tile can
+                   distinguish "signed in but corpus share missing"
+                   from "not signed in to OneDrive at all":
+
+                     * boot.signed_in_proxy: cross-platform probe of
+                       whether the OneDrive desktop client is set up
+                       at all on this host. Values: signed_in_cisco /
+                       signed_in_other / not_signed_in / unknown.
+                     * boot.onedrive_status: folder-specific check
+                       on Config.CSONE_ONEDRIVE_FOLDER. Values:
+                       synced / not_synced / unknown.
+
+                   Surfaced as two separate rows so the operator can
+                   see exactly which gate is blocking daily refresh. #}
                 {% set _od_status = corpus_status.boot.onedrive_status %}
                 {% set _od_count  = corpus_status.boot.onedrive_file_count %}
+                {% set _od_signin = corpus_status.boot.signed_in_proxy %}
+                {% if _od_signin %}
+                <p>
+                    <strong>OneDrive sign-in:</strong>
+                    {% if _od_signin == 'signed_in_cisco' %}
+                        <span class="risk-low">signed in (Cisco)</span>
+                    {% elif _od_signin == 'signed_in_other' %}
+                        <span class="risk-medium">signed in (non-Cisco account)</span>
+                    {% elif _od_signin == 'not_signed_in' %}
+                        <span class="risk-high">not signed in</span>
+                    {% else %}
+                        <span style="color:#6c757d;">unknown</span>
+                    {% endif %}
+                </p>
+                {% endif %}
                 {% if _od_status %}
                 <p>
                     <strong>OneDrive sync:</strong>
@@ -2670,11 +2695,35 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                     {% endif %}
                     {% if _od_status != 'synced' %}
                     <span style="color:#6c757d; font-size:0.9em;">
-                        &mdash; sign in to OneDrive and sync
-                        <code>AI Projects/AdoptIQ_CSOne_Reports</code>
+                        &mdash; add the
+                        <code>AdoptIQ_CSOne_Reports</code> shortcut to
+                        OneDrive (right-click the SharePoint folder
+                        and choose &ldquo;Add shortcut to OneDrive&rdquo;)
                         to enable daily refresh
                     </span>
                     {% endif %}
+                </p>
+                {% endif %}
+
+                {# Round 83 / Build 59: dedicated banner for the new
+                   ``signed_in_no_corpus`` state.  Distinct from
+                   ``blocked_no_onedrive`` below: the OneDrive desktop
+                   client is signed in, the user just needs to add
+                   the corpus share to their tree.  No need to
+                   re-authenticate. #}
+                {% if corpus_status.boot.source == 'signed_in_no_corpus' %}
+                <p style="margin-top: 0.6em; color: #856404; background: #fff3cd; border: 1px solid #ffeeba; padding: 0.6em 0.8em; border-radius: 4px;">
+                    <strong>Add corpus share to OneDrive (Round 83):</strong>
+                    OneDrive is signed in with a Cisco account, but
+                    the AdoptIQ corpus share is not in the user's
+                    OneDrive tree yet.  The user can click
+                    &ldquo;Add corpus share to my OneDrive&rdquo; on
+                    the analyze page to open the SharePoint URL in a
+                    browser; SSO completes automatically (they are
+                    already signed in to OneDrive) and the share lands
+                    as a shortcut.  The next daily refresh tick picks
+                    it up automatically -- no admin intervention
+                    required.
                 </p>
                 {% endif %}
 
@@ -2693,11 +2742,11 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                     <strong>Sign in to OneDrive required (Round 53):</strong>
                     AdoptIQ cannot decrypt the bundled corpus snapshot
                     until the canonical sentinel under
-                    <code>AI Projects/AdoptIQ_CSOne_Reports</code> is
-                    synced to disk by the OneDrive desktop client.
-                    The corpus is encrypted-at-rest against a key that
-                    lives in that share -- without the OneDrive sync,
-                    the bundled snapshot is intentionally unopenable
+                    <code>AdoptIQ_CSOne_Reports</code> is synced to
+                    disk by the OneDrive desktop client.  The corpus
+                    is encrypted-at-rest against a key that lives in
+                    that share -- without the OneDrive sync, the
+                    bundled snapshot is intentionally unopenable
                     (this is the security boundary added in
                     QUALITY_AUDIT.md Round 52.2 / Round 53).  The
                     Re-index / Rebuild / Reset buttons below are
@@ -2854,7 +2903,14 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                but the request would just hit the same fail-closed
                gate in ``corpus_bootstrap._run_index_pass`` and 0
                files would land. #}
-            {% set _corpus_blocked = (corpus_status.boot.source == 'blocked_no_onedrive') %}
+            {# Round 83 / Build 59: signed_in_no_corpus is a corpus-
+               open failure (same as blocked_no_onedrive) -- gate the
+               Re-index / Rebuild / Reset buttons on it too so the
+               operator does not retry into the same error. #}
+            {% set _corpus_blocked = (
+                corpus_status.boot.source == 'blocked_no_onedrive'
+                or corpus_status.boot.source == 'signed_in_no_corpus'
+            ) %}
             {% set _corpus_disabled = _corpus_busy or _corpus_blocked %}
             <form method="POST" action="/corpus_refresh" style="display:inline;">
                 <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
@@ -2895,7 +2951,8 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
             <h3>LLM Model Preferences (Round 69 / Build 43)</h3>
             <p style="color:#6c757d; margin-bottom:1rem;">
                 Per-call-site CircuIT model overrides.  Empty value clears the override
-                and falls back to <code>CIRCUIT_MODEL_NAME</code> (default <code>gpt-5-nano</code>).
+                and falls back to <code>CIRCUIT_MODEL_NAME</code> (default
+                <code>gemini-3.1-flash-lite</code>, Round 77 / Build 53).
                 <strong>Test</strong> must succeed before <strong>Save</strong> is enabled
                 so a typo or unprovisioned model cannot land in <code>settings.json</code>.
             </p>
@@ -2918,12 +2975,14 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                     <span class="badge bg-secondary" data-r69-admin-active>active: -</span>
                 </div>
                 <div style="display:flex; gap:0.4rem; align-items:center;">
+                    {# Round 77: gemini-3.1-flash-lite is the first option so it's the
+                       implicit selected default when the persisted value is empty. #}
                     <select name="model_name"
                             class="form-control form-select" data-r69-admin-input
                             aria-label="Ask AI model name"
                             style="font-family:monospace; flex-grow:1;">
+                        <option value="gemini-3.1-flash-lite" selected>gemini-3.1-flash-lite</option>
                         <option value="gpt-5-nano">gpt-5-nano</option>
-                        <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
                     </select>
                     <button type="button" class="btn btn-outline-primary"
                             data-r69-admin-test-btn>Test</button>
@@ -2942,12 +3001,14 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                     <span class="badge bg-secondary" data-r69-admin-active>active: -</span>
                 </div>
                 <div style="display:flex; gap:0.4rem; align-items:center;">
+                    {# Round 77: gemini-3.1-flash-lite is the first option so it's the
+                       implicit selected default when the persisted value is empty. #}
                     <select name="model_name"
                             class="form-control form-select" data-r69-admin-input
                             aria-label="Report narrative model name"
                             style="font-family:monospace; flex-grow:1;">
+                        <option value="gemini-3.1-flash-lite" selected>gemini-3.1-flash-lite</option>
                         <option value="gpt-5-nano">gpt-5-nano</option>
-                        <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
                     </select>
                     <button type="button" class="btn btn-outline-primary"
                             data-r69-admin-test-btn>Test</button>
@@ -3644,7 +3705,19 @@ def enhanced_admin_dashboard():
                                 audit_summary=audit_summary,
                                 running_reports=running_reports,
                                 running_reports_failed=running_reports_failed,
-                                main_app_url=MAIN_APP_URL,
+                                # Round 80: route through ``_live_main_url()`` so the
+                                # rendered "Back to AdoptIQ" anchor href reflects the
+                                # live ``ADOPTIQ_MAIN_URL`` env value, not the stale
+                                # module-level constant captured at import time.
+                                # Pre-R80 the .app running on a non-default port would
+                                # render the link pointing at ``http://localhost:5151``
+                                # (the import-time default) instead of the live port,
+                                # which is the bug Brian Frazier reported. The R44 /
+                                # Phase 8 helper already does the per-call env re-read
+                                # for HTTP fetches; this extends the same pattern to
+                                # the template-render path. Pinned by
+                                # tests/test_round80_admin_back_link_uses_live_url.py.
+                                main_app_url=_live_main_url(),
                                 verbose_debug=verbose_debug,
                                 snowflake_query_count=snowflake_query_count,
                                 snowflake_query_count_failed=snowflake_query_count_failed,

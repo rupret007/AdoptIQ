@@ -91,7 +91,16 @@ def test_round71_in_progress_cleared_in_finally_clause() -> None:
     src = _read_corpus_bootstrap()
     idx_run = src.find("def _run_index_pass(")
     assert idx_run >= 0
-    body = src[idx_run : idx_run + 6000]
+    # Round 83 / Build 59: R83 grew the function body past the
+    # original 6000-char cap (added ~150 lines of source-marker
+    # comments + proxy detection + signed_in_no_corpus disjunction).
+    # Scale the read window with function growth by walking to the
+    # next ``def`` boundary so this test is robust to future
+    # additions.
+    next_def = src.find("\ndef ", idx_run + 1)
+    if next_def == -1:
+        next_def = len(src)
+    body = src[idx_run:next_def]
     assert "_STATE.in_progress = False" in body, (
         "Round 71 / Phase 2 (#10): _run_index_pass must clear "
         "in_progress=False (in a finally block) so a crash mid-pass "

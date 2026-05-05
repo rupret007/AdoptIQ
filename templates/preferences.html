@@ -93,17 +93,24 @@
                         <p class="small text-muted mb-2">
                             Drives report storyboards, portfolio summaries, subscription
                             analyses, and compact AI insights.  Defaults to
-                            <code>gpt-5-nano</code>.  <strong>Changing this affects the
+                            <code>gemini-3.1-flash-lite</code> (Round 77 / Build 53).
+                            <strong>Changing this affects the
                             R27 grounding-rejection rate</strong> &mdash; click
                             <strong>Test</strong> to verify provisioning before saving.
                         </p>
                         <div class="input-group input-group-sm mb-2">
                             <span class="input-group-text">model</span>
+                            {# Round 77: gemini-3.1-flash-lite is the first option so
+                               it becomes the implicit selected default when the
+                               persisted value is empty.  R69 JS still overwrites
+                               <select>.value with the persisted value on load,
+                               so for explicit overrides this is cosmetic; for
+                               fresh installs it pins the visible state. #}
                             <select class="form-select font-monospace"
                                     data-r69-model-input
                                     aria-label="Report narrative model name">
+                                <option value="gemini-3.1-flash-lite" selected>gemini-3.1-flash-lite</option>
                                 <option value="gpt-5-nano">gpt-5-nano</option>
-                                <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
                             </select>
                             <button type="button"
                                     class="btn btn-outline-primary"
@@ -137,17 +144,21 @@
                         </div>
                         <p class="small text-muted mb-2">
                             Drives the interactive Ask AI page and grounded portfolio
-                            queries.  Defaults to <code>gpt-5-nano</code>.  Your tenant
+                            queries.  Defaults to <code>gemini-3.1-flash-lite</code>
+                            (Round 77 / Build 53).  Your tenant
                             must have the model provisioned &mdash; click
                             <strong>Test</strong> to verify before saving.
                         </p>
                         <div class="input-group input-group-sm mb-2">
                             <span class="input-group-text">model</span>
+                            {# Round 77: gemini-3.1-flash-lite is the first option
+                               so it becomes the implicit selected default when
+                               the persisted value is empty. #}
                             <select class="form-select font-monospace"
                                     data-r69-model-input
                                     aria-label="Ask AI model name">
+                                <option value="gemini-3.1-flash-lite" selected>gemini-3.1-flash-lite</option>
                                 <option value="gpt-5-nano">gpt-5-nano</option>
-                                <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
                             </select>
                             <button type="button"
                                     class="btn btn-outline-primary"

@@ -12,7 +12,9 @@ updates the docstring.
 
 These tests pin the new contract:
 
-  * Flag OFF + dir absent -> 3-source list (no ``intel_uploads``).
+  * Flag OFF + dir absent -> 3-source list (onedrive + local_outputs +
+    user_downloads, no ``intel_uploads``).  Round 80: local_outputs
+    source added between onedrive and user_downloads.
   * Flag OFF + admin pre-seeded the dir -> 4-source list.
   * Flag ON + dir present -> 4-source list.
 
@@ -29,10 +31,17 @@ from pathlib import Path
 
 
 def _common_two_source_setup(monkeypatch, tmp_path: Path):
-    """Round 36: set up OneDrive + Downloads so the base source list
-    is the canonical 2-entry shape (the legacy ``sharepoint_csone``
-    entry was retired with the MSAL/Graph runtime path).  Tests then
-    layer on the intel_uploads expectations.
+    """Round 36 + 80: set up OneDrive + local_outputs + Downloads so
+    the base source list is the canonical R80 shape (the legacy
+    ``sharepoint_csone`` entry was retired with the MSAL/Graph runtime
+    path; the new ``local_outputs`` source was added in R80 and slots
+    between ``onedrive`` and ``user_downloads``).  Tests then layer on
+    the intel_uploads expectations.
+
+    Round 80: this helper now also pins ``ADOPTIQ_OUTPUTS_DIR`` to a
+    tmp dir so the new ``local_outputs`` source is always present
+    deterministically -- regardless of whether the dev box happens to
+    have ``~/Library/Application Support/AdoptIQ/outputs/`` materialized.
 
     Patches BOTH the live ``config.Config`` and the
     ``corpus_bootstrap.Config`` references to be robust against
@@ -46,8 +55,14 @@ def _common_two_source_setup(monkeypatch, tmp_path: Path):
 
     od_dir = tmp_path / "od"
     dl_dir = tmp_path / "dl"
+    out_dir = tmp_path / "outputs"
     od_dir.mkdir()
     dl_dir.mkdir()
+    out_dir.mkdir()
+
+    # Round 80: pin the new local_outputs source via env override so
+    # the dev box's actual _APP_SUPPORT/outputs/ dir doesn't leak in.
+    monkeypatch.setenv("ADOPTIQ_OUTPUTS_DIR", str(out_dir))
 
     overrides = {
         "CSONE_ONEDRIVE_FOLDER": str(od_dir),
@@ -84,7 +99,8 @@ def test_intel_uploads_absent_when_flag_off_and_dir_missing(
     labels = [s["label"] for s in cb._resolve_index_sources()]
     assert "intel_uploads" not in labels
     # Round 36: sharepoint_csone source retired.
-    assert labels == ["onedrive", "user_downloads"]
+    # Round 80: local_outputs source added between onedrive and user_downloads.
+    assert labels == ["onedrive", "local_outputs", "user_downloads"]
 
 
 def test_intel_uploads_picked_up_when_flag_off_but_admin_pre_seeded(
@@ -112,8 +128,10 @@ def test_intel_uploads_picked_up_when_flag_off_but_admin_pre_seeded(
 
     labels = [s["label"] for s in cb._resolve_index_sources()]
     # Round 36: sharepoint_csone source retired.
+    # Round 80: local_outputs source added between onedrive and user_downloads.
     assert labels == [
         "onedrive",
+        "local_outputs",
         "user_downloads",
         "intel_uploads",
     ]
@@ -219,8 +237,10 @@ def test_intel_uploads_present_when_flag_on_and_dir_exists(
 
     labels = [s["label"] for s in cb._resolve_index_sources()]
     # Round 36: sharepoint_csone source retired.
+    # Round 80: local_outputs source added between onedrive and user_downloads.
     assert labels == [
         "onedrive",
+        "local_outputs",
         "user_downloads",
         "intel_uploads",
     ]

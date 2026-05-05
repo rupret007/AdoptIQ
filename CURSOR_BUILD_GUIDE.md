@@ -46,7 +46,7 @@ pip install pyinstaller
 Credentials are embedded at build time from `secrets.env`:
 
 - Copy `secrets.env.template` to `secrets.env` and fill in values (Snowflake/Keeper, CircuIT, PSIRT, and **ADOPTIQ_ADMIN_SECRET_KEY**)
-- Set `CIRCUIT_MODEL_NAME=gemini-3.1-flash-lite` if the packaged build should use the current Gemini default
+- The template now ships `CIRCUIT_MODEL_NAME=gemini-3.1-flash-lite` (the Round 77 / Build 53 default — faster CircuIT free-tier model). Set `CIRCUIT_MODEL_NAME=gpt-5-nano` instead if the packaged build should default to nano. Operators can also flip via the in-app Preferences page after launch (test-before-save).
 - Or copy an existing `secrets.env` from a previous build
 - The build runs `embed_credentials.py` and embeds them into the app (no .env needed at runtime)
 

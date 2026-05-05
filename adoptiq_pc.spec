@@ -97,6 +97,15 @@ hidden_imports = [
     # resolver is imported lazily by both Ask AI and report-narrative
     # paths so PyInstaller's analyser misses it without an explicit pin.
     'model_resolver',
+    # Round 79 / Build 55: BE-engineering priority barrier analysis.
+    # All four R79 modules are imported lazily inside try blocks in
+    # app_simple.py.  Without these pins the frozen Windows build
+    # silently ships WITHOUT the BE_Priority_Barriers / BE_Focus_Areas
+    # XLSX sheets AND the BE Priority Focus Areas Word section.
+    'be_priority_scorer',
+    'be_priority_llm_classifier',
+    'be_priority_pipeline',
+    'be_priority_word_section',
     # Round 66 / Pass 5 - hybrid retrieval (BM25 + dense + RRF) via
     # fastembed.  fastembed lazy-loads onnxruntime + tokenizers; pin
     # all three so the frozen build can warm the embedder on

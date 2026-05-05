@@ -69,10 +69,29 @@ logger = logging.getLogger(__name__)
 # ``_is_valid_model_name`` (allow-list ``[A-Za-z0-9._-]`` only,
 # 1-128 chars) so a typo or shell-injection attempt cannot land
 # in the on-disk settings file or be passed to ``CircuitChatClient``.
+#
+# Round 84 / Build 60 adds ``corpus_share_url`` so the operator can
+# rotate the SharePoint share URL (used by the analyze-page
+# bootstrap-shortcut button + the optional ``odopen://`` deep link)
+# without a DMG rebuild.  This is NOT the Round 33 / Build8
+# ``sharepoint_folder_url`` key resurrected -- that key drove the
+# retired MSAL/Graph fetcher and is silently dropped from any
+# legacy ``settings.json`` on load.  ``corpus_share_url`` ONLY
+# feeds ``corpus_share_url_resolver.get_active_corpus_share_url``
+# which is consumed by ``_r83_safe_share_url`` for the in-browser
+# bootstrap UX.  The encryption / sentinel / decrypt path is
+# UNCHANGED -- a stolen DMG without OneDrive auth is still useless
+# ciphertext (R83 contract preserved by ``_run_index_pass``'s
+# ``allow_local_sentinel=False`` runtime call).  Empty string is
+# the canonical "unset" sentinel and means "fall back to env, then
+# config default".  Validated via ``_is_valid_sharepoint_url`` so a
+# malformed or non-Cisco URL cannot land in the on-disk settings
+# file or be passed to ``window.open``.
 _SCHEMA: Dict[str, tuple] = {
     "corpus_knowledge_enabled": (bool, False),
     "ask_ai_model_name": (str, ""),  # Round 69 / Build 43
     "report_model_name": (str, ""),  # Round 69 / Build 43
+    "corpus_share_url": (str, ""),  # Round 84 / Build 60
 }
 
 SETTINGS_FILENAME = "settings.json"
@@ -148,9 +167,18 @@ def _is_valid_model_name(value: Any) -> bool:
 # are gated on the strict ``_is_valid_model_name`` allow-list so the
 # operator-flippable model seam cannot silently accept a malformed
 # value via either the UI POST or a hand-edited ``settings.json``.
+#
+# Round 84 / Build 60: ``corpus_share_url`` is gated on the same
+# ``_is_valid_sharepoint_url`` allow-list that vetted the retired
+# Round 33 / Build8 ``sharepoint_folder_url`` key.  The validator
+# already enforces ``^https://`` + ``*.sharepoint.com`` host + 2048
+# byte cap, so a malformed or non-Cisco URL cannot land in the
+# on-disk settings file or reach ``window.open``.  Empty string is
+# the canonical "unset" sentinel and is accepted unchanged.
 _VALIDATORS: Dict[str, Callable[[Any], bool]] = {
     "ask_ai_model_name": _is_valid_model_name,  # Round 69 / Build 43
     "report_model_name": _is_valid_model_name,  # Round 69 / Build 43
+    "corpus_share_url": _is_valid_sharepoint_url,  # Round 84 / Build 60
 }
 
 

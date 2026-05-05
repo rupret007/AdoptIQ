@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import secrets
+import shutil  # Round 81: outputs-by-manager migration uses shutil.move
 import signal  # Round 60: SIGTERM-based graceful shutdown for /api/shutdown
 import time
 import threading
@@ -1004,6 +1005,7 @@ _SENSITIVE_ENDPOINTS = {
     'api_settings_intelligence',
     'api_settings_ask_ai_model',
     'api_settings_report_model',
+    'api_settings_corpus_share_url',  # Round 84 / Build 60
     'get_grounding_diagnostics',
     'get_ask_ai_diagnostics',
 }
@@ -2508,6 +2510,373 @@ try:
     (_APP_SUPPORT / 'outputs').mkdir(exist_ok=True)
 except Exception as e:
     logger.error(f"Failed to create directories: {e}")
+
+# Round 81 / Build 57: outputs organized by <manager>/<report_type>/.
+# Pre-R81 every report landed in a flat <APP_SUPPORT>/outputs/ which
+# became unreadable once a single manager produced 100+ reports.  The
+# new layout:
+#   outputs/<Manager>/Compact/<file>.docx
+#   outputs/<Manager>/Renewal/<file>.docx
+#   outputs/<Manager>/Comprehensive/<file>.docx
+#   outputs/<Manager>/Leader/<file>.docx
+#   outputs/<Manager>/Customer/<Customer>/<file>.docx   (per-customer renewal/subscription)
+#
+# The two helpers below are the SSoT for resolving a writer's output
+# directory.  All five report writers go through
+# ``_r81_resolve_report_output_dir`` so a future move/rename only
+# touches one site.  ``_r81_sanitize_path_segment`` defends against
+# path traversal in user-supplied manager / customer / technology
+# names: strict ``[A-Za-z0-9._-]`` allow-list, spaces folded to ``_``,
+# everything else stripped, capped at 80 chars, returns ``_Unknown``
+# when the input collapses to empty.
+
+_R81_SAFE_SEGMENT_CHARS = re.compile(r"[A-Za-z0-9._-]+")
+_R81_SEGMENT_MAX_LEN = 80
+_R81_UNKNOWN_SEGMENT = "_Unknown"
+_R81_REPORT_TYPES = ("Compact", "Renewal", "Comprehensive", "Leader", "Customer")
+_R81_MIGRATION_SENTINEL_NAME = ".r81_migrated"
+# The filename body between ``AdoptIQ_Report_<Type>_`` and the
+# trailing ``_<days>d_<timestamp>`` carries the manager plus the
+# technology, both of which contain underscores (spaces are folded
+# to ``_``).  We can't naively split on ``_`` so we anchor the END
+# of the name on ``_<n>d_<YYYYMMDD>_<HHMMSS>.<ext>`` and treat the
+# whole middle as ``<manager>_<tech>``, then resolve the manager
+# via longest-prefix-match against the known team roster (built at
+# migration time from ``adoptiq_backend.TEAM_ROSTER``).
+_R81_MIGRATION_HEAD_RE = re.compile(
+    r"^AdoptIQ_Report_(?P<type>Compact|Renewal|Comprehensive|Leader)_"
+    r"(?P<body>[A-Za-z0-9._-]+?)"
+    r"_(?P<days>\d+)d_(?P<ts>\d{8}_\d{6}Z?)\."
+)
+
+
+def _r81_known_manager_segments() -> tuple[str, ...]:
+    """Build a tuple of known-manager safe-segment names from the
+    in-process team roster, sorted by descending length so the
+    longest-prefix match wins (``Mithun_Sakthivel_Subramanian``
+    beats ``Mithun_Sakthivel`` if both happened to be in scope).
+    Falls back to an empty tuple if the roster is unavailable so
+    the parse-fail branch routes to ``_Unknown/_Unknown/``.
+
+    ``adoptiq_backend._load_team_config`` returns a 2-tuple of
+    ``(team_roster, managers)`` (cf. adoptiq_backend.py:660-683); we
+    take the second element.  Roster managers are also folded in via
+    the first column of each ``team_roster`` row so the regex still
+    catches managers that happen not to be in the dropdown list.
+    """
+    try:
+        from adoptiq_backend import _load_team_config as _r81_team_loader  # noqa: PLC0415
+        cfg = _r81_team_loader()
+        roster_rows: list = []
+        managers_list: list = []
+        if isinstance(cfg, tuple) and len(cfg) >= 2:
+            roster_rows = list(cfg[0] or [])
+            managers_list = list(cfg[1] or [])
+        elif isinstance(cfg, dict):
+            roster_rows = list(cfg.get("team_roster") or [])
+            managers_list = list(cfg.get("managers") or [])
+        # Pull manager names from BOTH the dropdown list AND the
+        # roster's first column so any pre-R80 historical filename
+        # whose manager is no longer in the dropdown still resolves.
+        candidate_names: list[str] = []
+        for name in managers_list:
+            if name and isinstance(name, str):
+                candidate_names.append(name)
+        for row in roster_rows:
+            try:
+                first = row[0] if isinstance(row, (list, tuple)) and row else ""
+            except Exception:
+                first = ""
+            if first and isinstance(first, str):
+                candidate_names.append(first)
+        normalized = [_r81_sanitize_path_segment(n) for n in candidate_names if n]
+        unique = {n for n in normalized if n and n != _R81_UNKNOWN_SEGMENT}
+        return tuple(sorted(unique, key=len, reverse=True))
+    except Exception:
+        return ()
+
+
+def _r81_sanitize_path_segment(name: object) -> str:
+    """Sanitize a single path segment for the outputs-by-manager layout.
+
+    Strict allow-list of ``[A-Za-z0-9._-]`` plus space-to-underscore
+    folding so a manager named ``"Brian Frazier"`` becomes
+    ``"Brian_Frazier"``.  Anything that survives shorter than 1 char
+    after sanitization is replaced with ``_R81_UNKNOWN_SEGMENT`` so
+    callers never have to special-case empty strings.
+    """
+    if name is None:
+        return _R81_UNKNOWN_SEGMENT
+    raw = str(name).strip()
+    if not raw:
+        return _R81_UNKNOWN_SEGMENT
+    folded = raw.replace(" ", "_")
+    matches = _R81_SAFE_SEGMENT_CHARS.findall(folded)
+    if not matches:
+        return _R81_UNKNOWN_SEGMENT
+    cleaned = "_".join(matches)[:_R81_SEGMENT_MAX_LEN].strip("._-")
+    return cleaned or _R81_UNKNOWN_SEGMENT
+
+
+def _r81_outputs_root() -> Path:
+    """Return the outputs root directory, creating it idempotently.
+
+    Mirrors :func:`adoptiq_backend._ensure_outputs` so a writer that
+    routes through ``_r81_resolve_report_output_dir`` does not also
+    have to call the backend helper.  Frozen builds resolve to
+    ``<APP_SUPPORT>/outputs`` -- the path the .app cd'd into at
+    startup.  Dev mode preserves the legacy ``./outputs`` relative
+    path so test harnesses that ``monkeypatch.chdir`` keep working.
+    """
+    if _frozen:
+        out = _APP_SUPPORT / "outputs"
+    else:
+        out = Path("outputs")
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+    except Exception as _r81_root_err:  # noqa: BLE001
+        logger.debug(
+            "Round 81: outputs root mkdir failed: %s", type(_r81_root_err).__name__
+        )
+    return out
+
+
+def _r81_resolve_report_output_dir(
+    manager: object,
+    report_type: object,
+    customer: object | None = None,
+) -> Path:
+    """Resolve the per-manager / per-report-type output directory.
+
+    Layout:
+      * Multi-customer reports (Compact/Renewal/Comprehensive/Leader):
+        ``<outputs>/<Manager>/<ReportType>/``
+      * Per-customer renewal/subscription:
+        ``<outputs>/<Manager>/Customer/<Customer>/``
+
+    When ``report_type`` is unrecognised we still create the directory
+    -- the writer-side rewiring in Phase 2.2 only ever passes one of
+    the canonical types, but a defensive default keeps the helper
+    safe to call from future code paths or test harnesses.
+    """
+    root = _r81_outputs_root()
+    safe_manager = _r81_sanitize_path_segment(manager)
+    safe_type = _r81_sanitize_path_segment(report_type)
+    if customer is None:
+        target = root / safe_manager / safe_type
+    else:
+        # Per-customer reports always live under
+        # ``<Manager>/Customer/<Customer>/`` regardless of the
+        # report_type the caller supplies; this keeps the historical
+        # download endpoints (which look for ``Customer/`` in the
+        # path) working without further refactoring.
+        safe_customer = _r81_sanitize_path_segment(customer)
+        target = root / safe_manager / "Customer" / safe_customer
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except Exception as _r81_mkdir_err:  # noqa: BLE001
+        logger.warning(
+            "Round 81: failed to create per-manager output dir %s: %s",
+            target,
+            type(_r81_mkdir_err).__name__,
+        )
+    return target
+
+
+def _r81_migrate_flat_outputs_if_needed(outputs_dir: Path | None = None) -> dict:
+    """One-shot, idempotent migration of pre-R81 flat outputs.
+
+    Walks the *top level* of ``outputs_dir`` looking for legacy
+    ``AdoptIQ_Report_<Type>_<Manager>_*.{docx,xlsx}`` files and moves
+    them into the new ``<Manager>/<Type>/`` layout.  Files whose
+    pattern doesn't parse land under
+    ``<_R81_UNKNOWN_SEGMENT>/<_R81_UNKNOWN_SEGMENT>/`` so the operator
+    can review them rather than having them silently re-categorised.
+
+    Idempotent via the ``.r81_migrated`` sentinel: a second call after
+    a successful migration is a no-op.  Returns a summary dict so the
+    caller (and tests) can assert on counts without re-walking the
+    tree.
+    """
+    if outputs_dir is None:
+        outputs_dir = _r81_outputs_root()
+    summary = {"moved": 0, "skipped": 0, "failed": 0, "total": 0, "sentinel": False}
+    try:
+        outputs_dir = Path(outputs_dir)
+        if not outputs_dir.exists():
+            return summary
+        sentinel = outputs_dir / _R81_MIGRATION_SENTINEL_NAME
+        if sentinel.exists():
+            summary["sentinel"] = True
+            return summary
+        # Top-level only -- ``outputs_dir.glob("AdoptIQ_*.{docx,xlsx}")``
+        # would also pick up nested subdir hits which we explicitly
+        # do NOT want to re-migrate.
+        legacy_files = sorted(
+            list(outputs_dir.glob("AdoptIQ_*.docx"))
+            + list(outputs_dir.glob("AdoptIQ_*.xlsx"))
+            + list(outputs_dir.glob("Leader_Report_*.docx"))
+            + list(outputs_dir.glob("Leader_Report_*.xlsx"))
+        )
+        summary["total"] = len(legacy_files)
+        # Build the known-manager roster ONCE per migration pass so the
+        # longest-prefix match in the loop body is O(N) over filenames
+        # rather than O(N*M) reads of the team config.
+        known_managers = _r81_known_manager_segments()
+        for src in legacy_files:
+            try:
+                if not src.is_file():
+                    summary["skipped"] += 1
+                    continue
+                manager_seg = _R81_UNKNOWN_SEGMENT
+                type_seg = _R81_UNKNOWN_SEGMENT
+                m = _R81_MIGRATION_HEAD_RE.match(src.name)
+                if m:
+                    type_seg = m.group("type")
+                    body = m.group("body") or ""
+                    # ``body`` is ``<manager>_<tech>`` -- resolve the
+                    # manager via longest-prefix match against the
+                    # roster so multi-token managers
+                    # (``Mithun_Sakthivel_Subramanian``) win over
+                    # shorter siblings.  If nothing matches we still
+                    # land the file under the type folder, just under
+                    # ``_Unknown/<type>/``.
+                    manager_match = ""
+                    for candidate in known_managers:
+                        prefix = candidate + "_"
+                        if body == candidate or body.startswith(prefix):
+                            manager_match = candidate
+                            break
+                    if manager_match:
+                        manager_seg = manager_match
+                else:
+                    # Fallback parse: ``Leader_Report_<rest>.<ext>``.
+                    # Leader filenames have varied across builds (R68
+                    # added the ``_<n>d_<ts>`` suffix; older builds just
+                    # used ``Leader_Report_<Manager>_<arbitrary>.docx``)
+                    # so we strip the prefix + extension and longest-
+                    # prefix-match against the roster -- anything that
+                    # doesn't match falls through to ``_Unknown/_Unknown``
+                    # which is the documented contract.
+                    leader_m = re.match(
+                        r"^Leader_Report_(?P<body>[A-Za-z0-9._-]+)\.(?:docx|xlsx)$",
+                        src.name,
+                        re.IGNORECASE,
+                    )
+                    if leader_m:
+                        type_seg = "Leader"
+                        body = leader_m.group("body") or ""
+                        manager_match = ""
+                        for candidate in known_managers:
+                            prefix = candidate + "_"
+                            if body == candidate or body.startswith(prefix):
+                                manager_match = candidate
+                                break
+                        if manager_match:
+                            manager_seg = manager_match
+                dest_dir = outputs_dir / manager_seg / type_seg
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / src.name
+                if dest.exists():
+                    # Same filename already migrated -- treat as
+                    # success-equivalent; remove the legacy duplicate
+                    # so the next migration pass does not re-trip.
+                    try:
+                        src.unlink()
+                        summary["skipped"] += 1
+                    except Exception:
+                        summary["failed"] += 1
+                    continue
+                shutil.move(str(src), str(dest))
+                summary["moved"] += 1
+            except Exception as _move_err:  # noqa: BLE001
+                summary["failed"] += 1
+                logger.debug(
+                    "Round 81 migration: %s -> failed: %s",
+                    src,
+                    type(_move_err).__name__,
+                )
+        if summary["failed"] == 0:
+            try:
+                sentinel.touch()
+                summary["sentinel"] = True
+            except Exception as _sentinel_err:  # noqa: BLE001
+                logger.debug(
+                    "Round 81: sentinel write failed: %s",
+                    type(_sentinel_err).__name__,
+                )
+        logger.info(
+            "Round 81 outputs migration: moved=%d skipped=%d failed=%d total=%d sentinel=%s",
+            summary["moved"],
+            summary["skipped"],
+            summary["failed"],
+            summary["total"],
+            summary["sentinel"],
+        )
+    except Exception as _outer_err:  # noqa: BLE001
+        logger.warning(
+            "Round 81 outputs migration aborted: %s",
+            type(_outer_err).__name__,
+        )
+    return summary
+
+
+# Run the one-shot migration at startup.  Silent on a fresh install
+# (no legacy files to walk) and idempotent on subsequent launches via
+# the ``.r81_migrated`` sentinel.
+try:
+    _r81_migrate_flat_outputs_if_needed()
+except Exception as _r81_migrate_outer:  # noqa: BLE001
+    logger.debug(
+        "Round 81 startup migration call failed: %s",
+        type(_r81_migrate_outer).__name__,
+    )
+
+
+def _r82_persist_team_subs_diag(status: Optional[Dict[str, Any]], team_subs_df: Any) -> None:
+    """Round 82 / Phase A4: persist the DSM primary+secondary attribution
+    rollup that ``adoptiq_backend.get_subscriptions_for_team`` stamped
+    onto ``team_subs_df.attrs['_r82_team_subs_diag']`` so an operator
+    inspecting the run can see exactly how many additional rows came
+    from secondary email columns vs primary, AND which secondary column
+    names actually matched.
+
+    Best-effort -- never raises.  When ``status`` is ``None`` (e.g. the
+    Ask AI portfolio path that doesn't drive ``analysis_status``), the
+    function is a silent no-op.
+
+    The diag dict carries no PII (only column names, row counts, and
+    a UTC timestamp), so it's safe to ship to the operator-facing
+    ``/api/status/all`` rollup and the per-analysis status JSON.
+    """
+    if status is None or team_subs_df is None:
+        return
+    try:
+        diag = None
+        attrs = getattr(team_subs_df, "attrs", None)
+        if isinstance(attrs, dict):
+            diag = attrs.get("_r82_team_subs_diag")
+        if not isinstance(diag, dict):
+            return
+        # Acquire the lock once and persist; failures here MUST NOT
+        # propagate (the report run is more important than the diag).
+        try:
+            with analysis_status_lock:
+                status["team_subs_diag"] = diag
+                try:
+                    save_analysis_status()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    except Exception as _persist_err:
+        try:
+            logger.debug(
+                "Round 82 / _r82_persist_team_subs_diag failed: %s",
+                type(_persist_err).__name__,
+            )
+        except Exception:
+            pass
 
 # Round 26 / Phase D: pre-create the AdoptIQ Intelligence uploads
 # folder at startup with 0700 permissions, so the first upload (or
@@ -9104,7 +9473,8 @@ def run_compact_analysis(analysis_id):
         # Create compact report with timeout protection
         ts = time.strftime("%Y%m%d_%H%M%S")
         tag = f"{manager.replace(' ','_')}_{technology.replace(' ','_').replace('&','and')}_{days}d_{ts}"
-        out_dir = _ensure_outputs()
+        # Round 81 / Build 57: per-manager output layout.
+        out_dir = _r81_resolve_report_output_dir(manager, "Compact")
         base = str(out_dir / f"AdoptIQ_Report_Compact_{tag}")
 
         logger.info(f"[[WRITE]] Creating Word report: {base}.docx")
@@ -13266,6 +13636,8 @@ def run_customer_renewal_analysis(analysis_id):
             # Portfolio or single with manager: fetch manager's team (do not overwrite team_subs_df from single-customer path above)
             cssm_emails = [email for mgr, name, email in TEAM_ROSTER if mgr == manager or manager == "All Managers"]
             team_subs_df = get_subscriptions_for_team(ctx, cssm_emails)
+            # Round 82 / Phase A4: persist primary+secondary attribution diag.
+            _r82_persist_team_subs_diag(status, team_subs_df)
 
             if team_subs_df.empty:
                 error_msg = (
@@ -14152,9 +14524,12 @@ def run_customer_renewal_analysis(analysis_id):
         ts = time.strftime("%Y%m%d_%H%M%S")
         if renewal_type == 'renewal_portfolio':
             tag = f"Portfolio_{manager.replace(' ','_')}_{technology.replace(' ','_').replace('&','and')}_{days}d_{ts}"
+            # Round 81 / Build 57: portfolio renewal -> <manager>/Renewal/.
+            out_dir = _r81_resolve_report_output_dir(manager, "Renewal")
         else:
             tag = f"{customer_name.replace(' ','_')}_{technology.replace(' ','_').replace('&','and')}_{days}d_{ts}"
-        out_dir = _ensure_outputs()
+            # Round 81 / Build 57: per-customer renewal -> <manager>/Customer/<customer>/.
+            out_dir = _r81_resolve_report_output_dir(manager, "Renewal", customer=customer_name)
         base = str(out_dir / f"AdoptIQ_Report_Renewal_{tag}")
 
         # Generate renewal report (handles both single and portfolio)
@@ -15133,6 +15508,8 @@ def run_comprehensive_analysis(analysis_id):
             team_subs_df = team_subs_df_unfiltered.copy()
         else:
             team_subs_df_unfiltered = get_subscriptions_for_team(ctx, cssm_emails)
+            # Round 82 / Phase A4: persist primary+secondary attribution diag.
+            _r82_persist_team_subs_diag(analysis_status.get(analysis_id), team_subs_df_unfiltered)
             team_subs_empty = team_subs_df_unfiltered is None or (hasattr(team_subs_df_unfiltered, 'empty') and team_subs_df_unfiltered.empty)
             if team_subs_empty:
                 error_msg = (
@@ -15659,7 +16036,8 @@ def run_comprehensive_analysis(analysis_id):
         # Generate reports
         ts = time.strftime("%Y%m%d_%H%M%S")
         tag = f"{status['manager'].replace(' ','_')}_{status['tech'].replace(' ','_').replace('&','and')}_{status['days']}d_{ts}"
-        out_dir = _ensure_outputs()
+        # Round 81 / Build 57: per-manager output layout for Comprehensive.
+        out_dir = _r81_resolve_report_output_dir(status['manager'], "Comprehensive")
         base = str(out_dir / f"AdoptIQ_Report_{tag}")
 
         with analysis_status_lock:
@@ -16973,6 +17351,167 @@ def run_comprehensive_analysis(analysis_id):
         # Track actually analyzed customers (not skipped)
         customers_actually_analyzed = 0
 
+        # Round 79 / Build 55 (B2/B3/B5/B6): build the BE-priority outputs
+        # ONCE here -- BEFORE the per-customer narrative loop -- so the
+        # per-customer briefing book (R79/B6) can consult ``ab_norm``'s
+        # BE-priority columns when emitting ``Independent_BE_Priority``
+        # and ``Independent_BE_Class`` for each AB row in the prompt.
+        # Without this hoist the pipeline ran AFTER the loop and the
+        # briefing only saw ``severity_norm`` / ``open_age_days``;
+        # ``be_llm_class`` was always missing because the classifier
+        # had not yet executed.
+        #
+        # Once the canonical DataFrames are built, we additionally
+        # enrich ``ab_norm`` with two extra columns -- ``be_priority_score``
+        # and ``be_llm_class`` -- via a left-join on ``ID`` against the
+        # canonical barriers DataFrame. Per-customer slices (``cust_ab``)
+        # naturally inherit the columns when ``ab_norm[mask]`` is
+        # constructed inside the loop. Failures short-circuit to
+        # provenance DataFrames so the Word section + XLSX writers
+        # downstream still get a non-None argument.
+        _r79_barriers_canonical: Optional[pd.DataFrame] = None
+        _r79_focus_canonical: Optional[pd.DataFrame] = None
+        _r79_canonical_diag: Dict[str, Any] = {}
+        try:
+            import be_priority_pipeline as _r79_be_pipeline  # noqa: PLC0415
+
+            _r79_use_llm = bool(getattr(Config, "BE_PRIORITY_LLM_ENABLED", True))
+            _r79_top_n = int(getattr(Config, "BE_PRIORITY_LLM_TOP_N", 50))
+            _r79_focus_max = int(
+                getattr(Config, "BE_PRIORITY_FOCUS_AREAS_PER_TECH", 10)
+            )
+            _r79_focus_min = float(
+                getattr(Config, "BE_PRIORITY_MIN_CLUSTER_SCORE", 30.0)
+            )
+
+            try:
+                from model_resolver import (
+                    get_active_report_model as _r79_get_report_model,
+                )
+                _r79_report_model = _r79_get_report_model()
+            except Exception:  # noqa: BLE001
+                _r79_report_model = None
+
+            def _r79_be_llm_callable(system_prompt: str, user_prompt: str) -> str:
+                return generate_llm_response(
+                    system_prompt, user_prompt, model_name=_r79_report_model
+                )
+
+            # Round 79 / Build 55 (R20-001): variables ``filtered_customer_pulse``
+            # / ``ab_norm`` / ``risk_profiles`` are all reliably bound by the time
+            # we reach this hoist (line 16088 / line 13364 / line 15711
+            # respectively, all unconditional). Pass them directly -- the outer
+            # try/except still catches any unexpected ``NameError`` so a future
+            # refactor that moves the hoist before one of those bindings does
+            # not silently break the BE-priority pipeline.
+            _r79_pulse_df = filtered_customer_pulse
+
+            (
+                _r79_barriers_canonical,
+                _r79_focus_canonical,
+                _r79_canonical_diag,
+            ) = _r79_be_pipeline.build_be_priority_outputs(
+                ab_norm,
+                risk_profiles=risk_profiles,
+                pulse_df=_r79_pulse_df,
+                llm_top_n=_r79_top_n,
+                llm_callable=_r79_be_llm_callable if _r79_use_llm else None,
+                use_llm=_r79_use_llm,
+                max_per_tech=_r79_focus_max,
+                min_cluster_score=_r79_focus_min,
+                correlation_id=str(analysis_id),
+            )
+            status["be_priority_diag"] = _r79_canonical_diag
+            logger.info(
+                "[COMPREHENSIVE] Round 79 / B2: BE-priority outputs built; "
+                "rows_scored=%d top_n=%d focus_rows=%d",
+                int(_r79_canonical_diag.get("rows_scored", 0) or 0),
+                int(_r79_canonical_diag.get("top_n_selected", 0) or 0),
+                len(_r79_focus_canonical) if _r79_focus_canonical is not None else 0,
+            )
+
+            # Round 79 / B6: enrich ``ab_norm`` with BE-priority columns
+            # so the per-customer briefing book sees ``be_priority_score``
+            # and ``be_llm_class`` on every row. The canonical barriers
+            # DataFrame uses ``Barrier_ID`` (the upstream CSConsole record
+            # identifier) as the join key. Skipped silently when the
+            # canonical block returned a provenance row (broken pipeline,
+            # empty input, etc.).
+            try:
+                if (
+                    _r79_barriers_canonical is not None
+                    and not _r79_barriers_canonical.empty
+                    and "Barrier_ID" in _r79_barriers_canonical.columns
+                    and "ID" in ab_norm.columns
+                ):
+                    _r79_provenance_only = (
+                        "_adoptiq_provenance_row"
+                        in _r79_barriers_canonical.columns
+                        and bool(
+                            _r79_barriers_canonical["_adoptiq_provenance_row"]
+                            .fillna(False)
+                            .any()
+                        )
+                    )
+                    if not _r79_provenance_only:
+                        _r79_score_map: Dict[str, float] = {}
+                        _r79_class_map: Dict[str, str] = {}
+                        for _r79_row in _r79_barriers_canonical.to_dict("records"):
+                            _r79_bid = str(_r79_row.get("Barrier_ID") or "").strip()
+                            if not _r79_bid:
+                                continue
+                            try:
+                                _r79_score_val = float(
+                                    _r79_row.get("BE_Priority_Score") or 0.0
+                                )
+                            except (TypeError, ValueError):
+                                _r79_score_val = 0.0
+                            _r79_score_map[_r79_bid] = _r79_score_val
+                            _r79_class_val = str(
+                                _r79_row.get("BE_Class") or ""
+                            ).strip()
+                            _r79_class_map[_r79_bid] = _r79_class_val
+
+                        _r79_ab_id_str = ab_norm["ID"].astype(str)
+                        ab_norm["be_priority_score"] = _r79_ab_id_str.map(
+                            _r79_score_map
+                        ).fillna(0.0)
+                        ab_norm["be_llm_class"] = _r79_ab_id_str.map(
+                            _r79_class_map
+                        ).fillna("")
+            except Exception as _r79_merge_err:  # noqa: BLE001
+                logger.debug(
+                    "[COMPREHENSIVE] Round 79 / B6: ab_norm BE-priority "
+                    "enrichment skipped: %s", _r79_merge_err,
+                )
+        except Exception as _r79_err:  # noqa: BLE001
+            logger.warning(
+                "[COMPREHENSIVE] Round 79 / B2: BE-priority pipeline failed; "
+                "emitting provenance rows downstream: %s", _r79_err,
+            )
+            logger.debug(
+                "[COMPREHENSIVE] Round 79 / B2: full BE-priority pipeline "
+                "trace: %s", _r79_err, exc_info=True,
+            )
+            _r79_msg = (
+                f"BE-priority pipeline raised: {str(_r79_err)[:200]}. "
+                "Both XLSX sheets and the Word section render with this "
+                "provenance row so the operator can root-cause without "
+                "opening logs."
+            )
+            _r79_barriers_canonical = pd.DataFrame([{
+                "_adoptiq_provenance_row": True,
+                "AdoptIQ_Status": "ERROR",
+                "AdoptIQ_Source": "be_priority_pipeline.build_be_priority_outputs",
+                "AdoptIQ_Message": _r79_msg,
+            }])
+            _r79_focus_canonical = pd.DataFrame([{
+                "_adoptiq_provenance_row": True,
+                "AdoptIQ_Status": "ERROR",
+                "AdoptIQ_Source": "be_priority_pipeline.build_be_priority_outputs",
+                "AdoptIQ_Message": _r79_msg,
+            }])
+
         for i, customer_name in enumerate(all_customers, 1):
             # Update progress for each customer
             customer_progress = 75 + int((i / max(len(all_customers), 1)) * 15)  # 75-90% range
@@ -17302,6 +17841,48 @@ def run_comprehensive_analysis(analysis_id):
                 )
                 customers_actually_analyzed += 1  # Count error fallback as analyzed
 
+        # Round 79 / Build 55 (B5): BE Priority Focus Areas Word section.
+        # Sits AFTER the per-customer narratives so the operator-facing
+        # docx flow goes:
+        #   Title -> portfolio overview -> per-customer narratives ->
+        #   BE Engineering Priority Focus Areas -> Historical Context ->
+        #   closing chrome.
+        # Reads the canonical DataFrames built BEFORE the per-customer
+        # loop (R79/B6 hoist -- needed so the briefing book at L17093
+        # could thread BE-priority columns into the per-customer LLM
+        # prompts). The hoist + this delayed Word section append keeps
+        # the docx prose and the XLSX data byte-for-byte aligned. Any
+        # failure short-circuits to a single heading + fallback
+        # paragraph so the docx never ships an empty or partially-
+        # rendered section.
+        # Pinned by ``tests/test_round79_b5_be_word_section.py``.
+        try:
+            import be_priority_word_section as _r79_be_word  # noqa: PLC0415
+
+            # Resolve the underlying python-docx ``Document`` so we can
+            # call ``add_heading`` / ``add_paragraph`` -- the
+            # ``report_builder`` wrapper exposes ``doc`` attribute
+            # (Round 17 builder convention).
+            _r79_word_doc = getattr(report_builder, "doc", None) or getattr(
+                report_builder, "document", None
+            )
+            if _r79_word_doc is not None:
+                _r79_be_word.add_be_priority_focus_areas_section(
+                    _r79_word_doc,
+                    barriers_df=_r79_barriers_canonical,
+                    focus_areas_df=_r79_focus_canonical,
+                    diag=_r79_canonical_diag,
+                    heading_level=1,
+                )
+        except Exception as _r79_word_err:  # noqa: BLE001
+            # Round 79 / B5: never block the docx save on a section
+            # failure -- log + continue. The XLSX still carries the
+            # full data via BE_Priority_Barriers / BE_Focus_Areas.
+            logger.warning(
+                "[COMPREHENSIVE] Round 79 / B5: BE-priority Word section "
+                "skipped: %s", _r79_word_err,
+            )
+
         # === 3. Save Final Report ===
         status['progress'] = 90
         status['message'] = ' Finalizing comprehensive AI-powered report and generating outputs...'
@@ -17591,6 +18172,20 @@ def run_comprehensive_analysis(analysis_id):
                     "written with provenance row (no rows constructed; "
                     "construction_error=%r)", _r67_b2_construction_error,
                 )
+
+            # Round 79 / Build 55 (B2/B3): assign the BE-priority sheets
+            # from the canonical DataFrames built immediately after the
+            # per-customer narrative loop ends. Computing the outputs
+            # ONCE (above) and consuming them here guarantees the docx
+            # Word section AND the XLSX rows agree byte-for-byte.
+            # Honours the R67/B2 always-assign contract: even when the
+            # pipeline failed and stashed provenance rows in the
+            # canonical locals, the sheet is still in ``all_sheets``.
+            # Pinned by tests/test_round79_b4_be_xlsx_sheets.py.
+            if _r79_barriers_canonical is not None:
+                all_sheets["BE_Priority_Barriers"] = _r79_barriers_canonical
+            if _r79_focus_canonical is not None:
+                all_sheets["BE_Focus_Areas"] = _r79_focus_canonical
 
             # Round 67 / Build 41 (B3): log the final all_sheets keys
             # immediately before the writer call so any production
@@ -19156,6 +19751,97 @@ def api_version():
         return jsonify({'ok': False, 'error_kind': 'version_endpoint_error'}), 500
 
 
+@app.route('/api/diag/dsm-columns', methods=['GET'])
+def api_diag_dsm_columns():
+    """Round 82 / Phase A1 -- enumerate columns on the DSM assignment table.
+
+    Exists so an operator can identify the exact secondary-CSSM column
+    name in their Snowflake environment without opening a separate
+    Snowflake session.  The conservative ``_R82_SECONDARY_DSM_EMAIL_CANDIDATES``
+    tuple in ``adoptiq_backend`` covers the common naming patterns
+    (``SECONDARY_DSM_EMAIL``, ``BACKUP_DSM_EMAIL``, ``OWNER_EMAIL_2``,
+    ``DELEGATE_DSM_EMAIL``, etc.); this endpoint surfaces ANY column
+    in the table that ends in ``_EMAIL`` / ``_EMAIL_2`` /
+    ``_EMAIL_BACKUP`` so a missing pattern can be spotted and added
+    in a follow-on commit.
+
+    Auth: same dual-path as ``/api/corpus/refresh`` -- a Flask-WTF
+    CSRF token (browser path) OR a constant-time-compared
+    ``X-AdoptIQ-Internal`` header (admin-app proxy path).  Loopback-only
+    by default since the main app binds to 127.0.0.1 unless
+    ``ADOPTIQ_BIND_PUBLIC=1`` is set.
+
+    Response shape::
+
+        {
+            "ok": true,
+            "table": "CX_DB.CX_SWSSBST_BR.dsm_assignment_data",
+            "columns": [...],
+            "primary_email_columns_present": [...],
+            "secondary_email_candidates_present": [...],
+            "all_email_like_columns": [...],
+            "introspected_at": "<UTC ISO-8601>",
+            "error_kind": null
+        }
+
+    Returns HTTP 200 on success, 403 on auth failure, 503 on
+    Snowflake-unreachable, 500 on harness failure.  No PII; only
+    schema metadata.
+    """
+    authorized = False
+    _internal_expected = os.environ.get('ADOPTIQ_INTERNAL_TOKEN', '')
+    _internal_provided = request.headers.get('X-AdoptIQ-Internal', '')
+    if (
+        _internal_expected
+        and _internal_provided
+        and secrets.compare_digest(str(_internal_expected), str(_internal_provided))
+    ):
+        authorized = True
+
+    if not authorized and app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(
+                request.headers.get('X-CSRFToken')
+                or request.headers.get('X-CSRF-Token')
+                or request.form.get('csrf_token')
+                or request.args.get('csrf_token')
+            )
+            authorized = True
+        except Exception:
+            authorized = False
+    elif not authorized and not app.config.get('WTF_CSRF_ENABLED', True):
+        authorized = True
+
+    if not authorized:
+        return jsonify({'ok': False, 'error': 'CSRF validation failed'}), 403
+
+    ctx = None
+    try:
+        from adoptiq_backend import _connect_with_keeper as _r82_connect
+        from adoptiq_backend import introspect_dsm_columns as _r82_introspect
+        ctx = _r82_connect()
+        payload = _r82_introspect(ctx)
+        status_code = 200 if payload.get('ok') else 503
+        return jsonify(payload), status_code
+    except Exception as err:
+        logger.error(
+            "Round 82 / api_diag_dsm_columns harness failed: %s",
+            type(err).__name__,
+            exc_info=True,
+        )
+        return jsonify({
+            'ok': False,
+            'error': 'DSM column-discovery diagnostic failed',
+            'error_kind': 'diag.dsm_columns.unhandled',
+        }), 500
+    finally:
+        if ctx is not None:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+
+
 @app.route('/api/diag/connectivity', methods=['GET'])
 def api_diag_connectivity():
     """Run the DNS -> TLS -> AppRole -> secret-read -> Snowflake self-test.
@@ -19217,9 +19903,22 @@ def previous_reports():
         if not os.path.exists(outputs_dir):
             os.makedirs(outputs_dir)
 
-        # Find all report files (including leader reports - both old and new naming)
-        word_files = glob.glob(os.path.join(outputs_dir, "AdoptIQ_*.docx")) + glob.glob(os.path.join(outputs_dir, "Leader_Report_*.docx"))
-        excel_files = glob.glob(os.path.join(outputs_dir, "AdoptIQ_*.xlsx")) + glob.glob(os.path.join(outputs_dir, "AdoptIQ_Data_*.xlsx"))
+        # Find all report files (including leader reports - both old and new naming).
+        # Round 81 / Build 57: switch from top-level ``glob.glob`` to
+        # ``Path.rglob`` so the new ``<Manager>/<Type>/`` nested layout
+        # is walked.  ``rglob`` returns ``Path`` objects so we cast to
+        # ``str`` for back-compat with downstream string-only sorting.
+        _r81_outputs_path = Path(outputs_dir)
+        word_files = [
+            str(p) for p in _r81_outputs_path.rglob("AdoptIQ_*.docx")
+        ] + [
+            str(p) for p in _r81_outputs_path.rglob("Leader_Report_*.docx")
+        ]
+        excel_files = [
+            str(p) for p in _r81_outputs_path.rglob("AdoptIQ_*.xlsx")
+        ] + [
+            str(p) for p in _r81_outputs_path.rglob("AdoptIQ_Data_*.xlsx")
+        ]
 
         # Round 13 / Phase 10.8 + 11.8: previously this consumed
         # ``glob.glob(...)`` results in raw filesystem order, which
@@ -19687,8 +20386,11 @@ def _r68_build_suggestion_chips(
             # Bounded scan -- the outputs directory grows over time.
             # Take the 32 newest files to keep the sort cheap on
             # huge directories, then pick the .docx.
+            #
+            # Round 81 / Build 57: ``rglob`` walks the new
+            # ``<Manager>/<Type>/`` nested layout.
             try:
-                candidates = list(outputs_dir.glob("AdoptIQ_*.docx"))
+                candidates = list(outputs_dir.rglob("AdoptIQ_*.docx"))
             except OSError:
                 candidates = []
             if candidates:
@@ -20259,6 +20961,16 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             # :func:`corpus_bootstrap._check_onedrive_sync_status`.
             "onedrive_status": None,
             "onedrive_file_count": None,
+            # Round 83 / Build 59: OneDrive sign-in proxy. Independent
+            # of ``onedrive_status`` (which is folder-specific). One
+            # of ``"signed_in_cisco"`` / ``"signed_in_other"`` /
+            # ``"not_signed_in"`` / ``"unknown"`` / ``None``. Used by
+            # ``static/js/intel_status.js::classifyCorpusPanel`` to
+            # distinguish the new ``signed_in_no_corpus`` state (signed
+            # in but the corpus share isn't in the user's OneDrive
+            # tree yet) from ``blocked_no_onedrive`` (not signed in to
+            # OneDrive at all).
+            "signed_in_proxy": None,
             # Round 53 / Phase 53.4.1: clickable "Open OneDrive folder"
             # link surfaced on the analyze-page panel when the corpus
             # is in the ``blocked_no_onedrive`` state.  Defaults to
@@ -20330,6 +21042,12 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             "onedrive_file_count": getattr(
                 boot_state, "onedrive_file_count", None,
             ),
+            # Round 83 / Build 59: surface the OneDrive sign-in proxy
+            # so the panel can render the new ``signed_in_no_corpus``
+            # state (signed in but corpus share missing) distinctly
+            # from the legacy ``blocked_no_onedrive`` state (not
+            # signed in at all).
+            "signed_in_proxy": getattr(boot_state, "signed_in_proxy", None),
             # Round 53 / Phase 53.4.1: surface the configured
             # OneDrive deep-link only if the scheme passes the
             # allow-list below.  Done inside the serializer (not at
@@ -20380,6 +21098,117 @@ def api_corpus_status():
     the tile can render the banner; the JSON body always carries the
     machine-readable state."""
     return jsonify(_r17_corpus_status_payload()), 200
+
+
+# ---------------------------------------------------------------------------
+# Round 83 / Build 59: corpus bootstrap shortcut endpoint
+# ---------------------------------------------------------------------------
+
+
+# Round 83 / Build 59: scheme allow-list for the corpus share URL
+# returned by ``/api/corpus/bootstrap-shortcut``. Narrower than the
+# R53 deep-link list because the bootstrap UX *only* opens a
+# SharePoint share URL in the user's browser -- ``odopen:`` and
+# ``ms-onedrive:`` are not appropriate for this endpoint (those
+# launch the OneDrive desktop client which is already installed on
+# the host that hits the new ``signed_in_no_corpus`` branch).
+_R83_SHARE_URL_SCHEMES: tuple = ("https://",)
+# Same length cap as R53 deep-link to keep the validator behavior
+# consistent across endpoints. SharePoint share URLs in the wild
+# are well under 2KB.
+_R83_SHARE_URL_MAX_BYTES: int = 2048
+
+
+def _r83_safe_share_url() -> Optional[str]:
+    """Round 83 / Build 59: return the configured SharePoint share
+    URL when its scheme passes the allow-list AND the value is
+    under the size cap; ``None`` otherwise. Never raises -- a
+    malformed config should NOT prevent the bootstrap-shortcut
+    endpoint from rendering an honest ``ok: false`` payload.
+
+    Round 84 / Build 60: source of truth moved from a single read
+    of ``Config.ADOPTIQ_CORPUS_SHARE_URL`` to the layered
+    ``corpus_share_url_resolver.get_active_corpus_share_url()`` which
+    walks ``settings.json`` -> env -> config default. The R83
+    https-only + 2048-byte cap is preserved here as defense-in-depth
+    so even if a future resolver change relaxes the validator, the
+    bootstrap-shortcut endpoint never returns a non-https URL.
+
+    When the analyze-page panel sits in the ``signed_in_no_corpus``
+    state, this URL is what the "Add corpus share to my OneDrive"
+    button opens. The encryption / sentinel / decrypt path is NOT
+    affected by this URL -- a stolen DMG without OneDrive auth is
+    still useless ciphertext (R83 contract: ``_run_index_pass`` calls
+    ``open_corpus_for_user(..., allow_local_sentinel=False)``).
+
+    Pinned by ``tests/test_round83_signed_in_no_corpus_panel.py`` and
+    extended by ``tests/test_round84_corpus_share_url_resolver.py``.
+    """
+    try:
+        import corpus_share_url_resolver as _resolver
+    except Exception:  # noqa: BLE001 - import path may be partial in tests
+        return None
+    try:
+        raw, _source = _resolver.get_active_corpus_share_url()
+    except Exception:  # noqa: BLE001 - resolver MUST NOT crash this fn
+        return None
+    if not raw:
+        return None
+    candidate = str(raw).strip()
+    if not candidate:
+        return None
+    try:
+        size_bytes = len(candidate.encode("utf-8"))
+    except (UnicodeEncodeError, UnicodeDecodeError):  # pragma: no cover - defensive
+        return None
+    if size_bytes > _R83_SHARE_URL_MAX_BYTES:
+        return None
+    lower = candidate.lower()
+    for scheme in _R83_SHARE_URL_SCHEMES:
+        if lower.startswith(scheme):
+            return candidate
+    return None
+
+
+@app.route('/api/corpus/bootstrap-shortcut', methods=['GET'])
+def api_corpus_bootstrap_shortcut():
+    """Round 83 / Build 59: read-only endpoint that returns the
+    SharePoint share URL the user needs to click to add the AdoptIQ
+    corpus shortcut to their OneDrive tree.
+
+    The frontend uses this endpoint when the corpus panel is in the
+    new ``signed_in_no_corpus`` state -- the user is signed in to
+    Cisco OneDrive but the corpus share isn't in their tree yet.
+    Clicking the panel button opens the URL in the browser; SSO
+    completes automatically (the user is already signed in to their
+    Cisco identity provider on this device, since the OneDrive
+    desktop client is also signed in), the share lands as a
+    shortcut, and the next daily refresh tick picks it up.
+
+    Returns 200 with ``{ok: true, share_url: <https://...>}`` when
+    the configured URL passes the scheme allow-list. Returns 200
+    with ``{ok: false, error: <reason>}`` when the URL is missing
+    or rejected so the frontend can surface a useful error rather
+    than crash.
+
+    Loopback-only by default (the main app binds to 127.0.0.1
+    unless ``ADOPTIQ_BIND_PUBLIC=1``); payload carries no PII.
+    """
+    safe = _r83_safe_share_url()
+    if not safe:
+        return jsonify({
+            'ok': False,
+            'error': 'corpus_share_url_unavailable',
+            'message': (
+                "The AdoptIQ corpus share URL is not configured "
+                "or failed allow-list validation. Contact your "
+                "AdoptIQ administrator."
+            ),
+        }), 200
+    return jsonify({
+        'ok': True,
+        'share_url': safe,
+    }), 200
 
 
 @app.route('/api/corpus/refresh', methods=['POST'])
@@ -21162,6 +21991,156 @@ def api_settings_report_model():
     """Round 69 / Build 43: GET (read) / POST (persist) the user's
     report-narrative CircuIT model preference."""
     return _r69_handle_model_setting("report_model_name", "CIRCUIT_MODEL_NAME_REPORT")
+
+
+# ---------------------------------------------------------------------------
+# Round 84 / Build 60: operator-flippable corpus share URL.
+#
+# Two methods on a single route:
+#
+# * GET  ``/api/settings/corpus-share-url`` -- returns the active URL
+#   plus the source-precedence label ("settings.json" / "env" /
+#   "config.py") so the analyze-page card can show the operator
+#   which tier produced the value currently being used by the
+#   bootstrap-shortcut button.
+# * POST ``/api/settings/corpus-share-url`` -- persists a new URL to
+#   ``settings.json``. Empty string clears the override (deletes
+#   the key from settings.json so the resolver falls through to env
+#   then to the hardcoded default). Validated via
+#   ``adoptiq_settings.is_valid_sharepoint_url`` BEFORE write so a
+#   non-Cisco / malformed URL cannot land on disk.
+#
+# Auth: same dual-path as ``/api/settings/intelligence`` via
+# ``_r17_2_authorize_corpus_admin`` (CSRF token OR
+# ``X-AdoptIQ-Internal``). The encryption / sentinel / decrypt path
+# is NOT touched by this endpoint -- the URL only governs which
+# SharePoint share opens in the user's browser when they click the
+# bootstrap button. R83 contract preserved: a stolen DMG without
+# OneDrive auth is still useless ciphertext (per
+# ``corpus_bootstrap._run_index_pass`` calling
+# ``open_corpus_for_user(..., allow_local_sentinel=False)``).
+# ---------------------------------------------------------------------------
+
+
+@app.route('/api/settings/corpus-share-url', methods=['GET', 'POST'])
+def api_settings_corpus_share_url():
+    """Round 84 / Build 60: GET (read) / POST (persist) the
+    operator-set SharePoint share URL used by the analyze-page
+    bootstrap-shortcut button.
+
+    GET response shape: ``{ok: true, share_url: <str|null>,
+    source: "settings.json"|"env"|"config.py",
+    persisted_value: <str>}`` where ``share_url`` is the active
+    resolver result (None if every tier failed validation),
+    ``source`` is the winning tier, and ``persisted_value`` is the
+    raw value currently in ``settings.json`` (empty string when no
+    operator override is set).
+
+    POST request shape: ``{"url": "<https://...sharepoint.com/...>"}``.
+    Empty string clears the override. Validated via
+    ``adoptiq_settings.is_valid_sharepoint_url``; a malformed value
+    returns 400 + ``error: "invalid_share_url"``.
+
+    POST response shape: same as GET on success. Atomic write via
+    ``adoptiq_settings.save_settings`` (mode ``0o600``,
+    ``os.replace`` swap) so a crash mid-write cannot truncate
+    ``settings.json``.
+
+    Pinned by ``tests/test_round84_corpus_share_url_endpoint.py``.
+    """
+    try:
+        import adoptiq_settings as _settings
+        import corpus_share_url_resolver as _resolver
+    except Exception as imp_err:  # noqa: BLE001 - import path may be partial in tests
+        logger.exception("Round 84 / Build 60: settings/resolver import failed")
+        return jsonify({
+            "ok": False,
+            "error": f"resolver_import_failed: {type(imp_err).__name__}",
+        }), 500
+
+    if request.method == "GET":
+        # Read-only path -- no auth, mirrors the R69 model-setting GET
+        # contract (loopback-only by default; payload carries no PII
+        # -- the URL is a Cisco-tenant SharePoint link, not a secret).
+        try:
+            persisted = _settings.get("corpus_share_url", "") or ""
+        except Exception:  # noqa: BLE001 - defensive
+            persisted = ""
+        try:
+            active_url, source = _resolver.get_active_corpus_share_url()
+        except Exception:  # noqa: BLE001
+            active_url, source = None, _resolver.SOURCE_CONFIG
+        return jsonify({
+            "ok": True,
+            "share_url": active_url,
+            "source": source,
+            "persisted_value": persisted,
+            "env_var": "ADOPTIQ_CORPUS_SHARE_URL",
+            "env_value_set": bool(os.environ.get("ADOPTIQ_CORPUS_SHARE_URL")),
+        }), 200
+
+    # POST path -- writes settings.json. Auth required.
+    auth_err = _r17_2_authorize_corpus_admin()
+    if auth_err is not None:
+        body, code = auth_err
+        return jsonify(body), code
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "invalid_json_payload"}), 400
+    raw_value = payload.get("url")
+    # Empty string is the canonical "unset" sentinel and is accepted.
+    if raw_value is None:
+        raw_value = ""
+    if not isinstance(raw_value, str):
+        return jsonify({"ok": False, "error": "url_must_be_string"}), 400
+    candidate = raw_value.strip()
+    if not _settings.is_valid_sharepoint_url(candidate):
+        return jsonify({
+            "ok": False,
+            "error": "invalid_share_url",
+            "detail": (
+                "Allowed: empty string (clears override) OR "
+                "https://<tenant>.sharepoint.com/<path> (max 2048 bytes). "
+                "Non-https schemes, non-sharepoint hosts, oversize values "
+                "are rejected."
+            ),
+        }), 400
+
+    # Persist via the standard settings.json contract.
+    # Empty string clears the override (the schema validator accepts
+    # empty as the "unset" sentinel; on save it remains "" which
+    # `_read_settings_value` treats as "fall through to env layer").
+    try:
+        merged = dict(_settings.load_settings() or {})
+        merged["corpus_share_url"] = candidate
+        _settings.save_settings(merged)
+    except Exception as save_err:  # noqa: BLE001 - never crash on write fail
+        logger.exception(
+            "Round 84 / Build 60: settings.json write failed for corpus_share_url"
+        )
+        return jsonify({
+            "ok": False,
+            "error": f"settings_write_failed: {type(save_err).__name__}",
+        }), 500
+
+    # Re-resolve so the response carries the new active value + source label.
+    try:
+        active_url, source = _resolver.get_active_corpus_share_url()
+    except Exception:  # noqa: BLE001
+        active_url, source = None, _resolver.SOURCE_CONFIG
+    logger.info(
+        "Round 84 / Build 60: corpus_share_url persisted (source=%s, persisted=%s)",
+        source, "(unset)" if not candidate else "(set)",
+    )
+    return jsonify({
+        "ok": True,
+        "share_url": active_url,
+        "source": source,
+        "persisted_value": candidate,
+        "env_var": "ADOPTIQ_CORPUS_SHARE_URL",
+        "env_value_set": bool(os.environ.get("ADOPTIQ_CORPUS_SHARE_URL")),
+    }), 200
 
 
 @app.route('/api/llm/ping', methods=['POST'])
@@ -23642,11 +24621,41 @@ def download_file(filename):
         # name and double-check containment with ``os.path.realpath`` (which
         # also follows symlinks) to defend against a symlink farm planted in
         # the outputs directory.
+        #
+        # Round 81 / Build 57: the new outputs layout nests files under
+        # ``<Manager>/<Type>/<filename>``, so the legacy direct
+        # ``os.path.join(outputs_real, safe_filename)`` no longer hits.
+        # First try the legacy flat path (pre-migration installs and
+        # any filename written before R81 startup migrated), then fall
+        # through to a single-pass rglob for the safe filename.  In
+        # both branches the resolved path is re-verified against
+        # ``outputs_real`` via ``realpath`` so a symlink farm under
+        # any subdirectory cannot escape the outputs root.
         outputs_dir = str(_APP_SUPPORT / "outputs") if _frozen else os.path.abspath("outputs")
         outputs_real = os.path.realpath(outputs_dir)
         outputs_prefix = outputs_real + os.sep
-        file_path = os.path.join(outputs_real, safe_filename)
-        resolved_path = os.path.realpath(file_path)
+        flat_candidate = os.path.join(outputs_real, safe_filename)
+        resolved_path = os.path.realpath(flat_candidate)
+        if not os.path.isfile(resolved_path):
+            # Walk the new R81 nested layout for the safe filename.
+            # ``Path.rglob`` returns the first match; when multiple
+            # writers happened to land on the same filename (e.g.
+            # repeated runs at the same UTC second), the iteration
+            # order matches ``os.scandir`` so the response is stable
+            # within a single directory snapshot.
+            try:
+                _r81_match = next(
+                    (
+                        p for p in Path(outputs_real).rglob(safe_filename)
+                        if p.is_file()
+                    ),
+                    None,
+                )
+            except OSError:
+                _r81_match = None
+            if _r81_match is None:
+                return f"File not found: {safe_filename}", 404
+            resolved_path = os.path.realpath(str(_r81_match))
         if not (resolved_path == outputs_real or resolved_path.startswith(outputs_prefix)):
             return "Access denied", 403
         if not os.path.isfile(resolved_path):
@@ -24430,8 +25439,16 @@ def run_subscription_analysis(analysis_id):
             _update_progress(status, 75, 'Building Word report...', 'Report Generation')
 
         # Generate reports (canonical outputs when frozen)
-        output_dir = _APP_SUPPORT / "outputs" if _frozen else Path("outputs")
-        output_dir.mkdir(parents=True, exist_ok=True)
+        # Round 81 / Build 57: subscription analysis is a per-customer
+        # one-off with no manager scope, so it lands under
+        # ``<outputs>/_Unknown/Customer/<Customer>/`` -- structurally
+        # consistent with the per-customer renewal path so a future
+        # download-by-customer UX has a single shape to walk.
+        output_dir = _r81_resolve_report_output_dir(
+            None,
+            "Customer",
+            customer=sub_data.get("customer_name") or "Unknown",
+        )
 
         # Round 12 / Phase 10.6: anchor artifact filename suffix on UTC and
         # tag with ``Z`` so subscription analysis filenames are deterministic
@@ -25347,12 +26364,34 @@ def download_result(analysis_id, file_type):
     _out_dir = _APP_SUPPORT / "outputs" if _frozen else Path(os.path.abspath("outputs"))
 
     def _resolve_safe_path(raw_path, out_dir):
-        """Resolve file path and verify it's under the outputs directory."""
+        """Resolve file path and verify it's under the outputs directory.
+
+        Round 81 / Build 57: when the legacy flat fallback misses
+        (because the file was migrated into a nested ``<Manager>/<Type>/``
+        subdir on first launch), walk the outputs tree once via
+        ``Path.rglob(<basename>)`` to pick the migrated file.  The
+        prefix containment check below still applies, so the rglob
+        fallback cannot escape the outputs root via a symlink.
+        """
         out_abs = os.path.abspath(str(out_dir))
         prefix = out_abs + os.sep
         resolved = os.path.abspath(raw_path)
         if not os.path.exists(resolved):
             resolved = os.path.abspath(str(Path(out_dir) / os.path.basename(raw_path)))
+        if not os.path.exists(resolved):
+            try:
+                _r81_basename = os.path.basename(raw_path)
+                _r81_match = next(
+                    (
+                        p for p in Path(out_dir).rglob(_r81_basename)
+                        if p.is_file()
+                    ),
+                    None,
+                ) if _r81_basename else None
+            except OSError:
+                _r81_match = None
+            if _r81_match is not None:
+                resolved = os.path.abspath(str(_r81_match))
         if not os.path.exists(resolved):
             return None
         if resolved == out_abs or resolved.startswith(prefix):
@@ -25796,6 +26835,8 @@ def run_leader_report_generation(analysis_id):
             if cssm_emails:
                 team_subs_df = get_subscriptions_for_team(ctx, cssm_emails)
                 logger.info(f"[[OK]] Retrieved {len(team_subs_df)} team subscriptions for {manager}")
+                # Round 82 / Phase A4: persist primary+secondary attribution diag.
+                _r82_persist_team_subs_diag(status, team_subs_df)
         except Exception as e:
             logger.warning(f"[[WARNING]] Failed to fetch team subscriptions: {e}")
 
@@ -26098,6 +27139,11 @@ def run_leader_report_generation(analysis_id):
                 and _r30_leader_partial_warnings
                 else None
             ),
+            # Round 81 / Build 57: route the leader docx into
+            # ``<outputs>/<Manager>/Leader/`` instead of the flat
+            # legacy ``<outputs>/`` so the per-manager folder
+            # invariant matches Compact / Renewal / Comprehensive.
+            output_dir=_r81_resolve_report_output_dir(manager, "Leader"),
         )
 
         if check_cancellation(analysis_id):
@@ -26410,7 +27456,42 @@ def run_leader_report_generation(analysis_id):
                 sheets['Team_Summary'] = pd.DataFrame(summary_rows)
 
             if all_action_plans:
-                sheets['Action_Plans'] = pd.concat(all_action_plans, ignore_index=True)
+                # Round 78 / B2: dedup AP by ID before XLSX write.
+                # Build 53 audit caught Leader.Action_Plans carrying
+                # 366 sheet rows / 344 unique IDs (22 duplicate AP rows)
+                # for Brian Frazier 90d. Same root cause as R75/B2 (AB
+                # sheet) but on the AP sheet: when a single Action Plan
+                # is attributed to multiple CSSMs via the R72
+                # ``_ATTRIBUTED_BY_ACCOUNT`` shared-account pathway in
+                # ``_slice_by_owner_or_account``, per-CSSM AP frames
+                # each carry the SAME ID, and this raw ``pd.concat``
+                # emits the row N times (one per attributed CSSM).
+                # Fix: drop_dup by ID with keep='first' so the row's
+                # CSSM column is the first attribution -- matching the
+                # order in which _slice_by_owner_or_account walked the
+                # team_data. Rows without an ID column are passed
+                # through unchanged. Mirrors R75/B2 (Adoption_Barriers).
+                _r78_ap_combined = pd.concat(all_action_plans, ignore_index=True)
+                if 'ID' in _r78_ap_combined.columns:
+                    _r78_ap_before = len(_r78_ap_combined)
+                    _r78_ap_with_id = _r78_ap_combined[
+                        _r78_ap_combined['ID'].notna()
+                    ].drop_duplicates(subset=['ID'], keep='first')
+                    _r78_ap_no_id = _r78_ap_combined[_r78_ap_combined['ID'].isna()]
+                    _r78_ap_combined = pd.concat(
+                        [_r78_ap_with_id, _r78_ap_no_id], ignore_index=True
+                    )
+                    _r78_ap_after = len(_r78_ap_combined)
+                    if _r78_ap_after != _r78_ap_before:
+                        logger.info(
+                            "Round 78 / B2: leader Action_Plans sheet "
+                            "deduped by ID: %d raw rows -> %d unique "
+                            "(removed %d cross-CSSM duplicates)",
+                            _r78_ap_before,
+                            _r78_ap_after,
+                            _r78_ap_before - _r78_ap_after,
+                        )
+                sheets['Action_Plans'] = _r78_ap_combined
             if all_adoption_barriers:
                 # Round 75 / B2: dedup by barrier ID before XLSX write.
                 # Build 47 audit caught Leader.Adoption_Barriers carrying
@@ -26452,6 +27533,107 @@ def run_leader_report_generation(analysis_id):
                 sheets['Adoption_Barriers'] = _r75_ab_combined
             if all_customer_pulse:
                 sheets['Customer_Pulse'] = pd.concat(all_customer_pulse, ignore_index=True)
+
+            # Round 79 / Build 55 (B2/B3): Leader BE-priority sheets.
+            # Wires the same orchestrator the Comprehensive flow uses so
+            # the leader XLSX surfaces ``BE_Priority_Barriers`` and
+            # ``BE_Focus_Areas`` for the manager's full team scope. The
+            # scorer is deterministic (testable in isolation); the LLM
+            # classifier optionally tags the top-50 with TRUE_BLOCKER /
+            # TRAINING_GAP / FEATURE_REQUEST / DUPLICATE / AMBIGUOUS /
+            # NOT_A_BARRIER but the tag NEVER alters the score. Honours
+            # the R67/B2 always-assign contract via the inner pipeline
+            # helper (any failure ships explicit provenance rows so the
+            # operator never sees a phantom missing sheet).
+            if 'Adoption_Barriers' in sheets and not sheets['Adoption_Barriers'].empty:
+                try:
+                    import be_priority_pipeline as _r79_be_pipeline_lead  # noqa: PLC0415
+
+                    _r79_lead_use_llm = bool(
+                        getattr(Config, "BE_PRIORITY_LLM_ENABLED", True)
+                    )
+                    _r79_lead_top_n = int(getattr(Config, "BE_PRIORITY_LLM_TOP_N", 50))
+                    _r79_lead_focus_max = int(
+                        getattr(Config, "BE_PRIORITY_FOCUS_AREAS_PER_TECH", 10)
+                    )
+                    _r79_lead_focus_min = float(
+                        getattr(Config, "BE_PRIORITY_MIN_CLUSTER_SCORE", 30.0)
+                    )
+
+                    try:
+                        from model_resolver import (
+                            get_active_report_model as _r79_lead_get_report_model,
+                        )
+                        _r79_lead_report_model = _r79_lead_get_report_model()
+                    except Exception:  # noqa: BLE001
+                        _r79_lead_report_model = None
+
+                    def _r79_lead_be_llm_callable(
+                        system_prompt: str, user_prompt: str
+                    ) -> str:
+                        return generate_llm_response(
+                            system_prompt,
+                            user_prompt,
+                            model_name=_r79_lead_report_model,
+                        )
+
+                    _r79_lead_pulse_df = sheets.get('Customer_Pulse')
+
+                    _r79_lead_barriers_df, _r79_lead_focus_df, _r79_lead_diag = (
+                        _r79_be_pipeline_lead.build_be_priority_outputs(
+                            sheets['Adoption_Barriers'],
+                            risk_profiles=None,
+                            pulse_df=_r79_lead_pulse_df,
+                            llm_top_n=_r79_lead_top_n,
+                            llm_callable=(
+                                _r79_lead_be_llm_callable
+                                if _r79_lead_use_llm
+                                else None
+                            ),
+                            use_llm=_r79_lead_use_llm,
+                            max_per_tech=_r79_lead_focus_max,
+                            min_cluster_score=_r79_lead_focus_min,
+                            correlation_id=str(analysis_id),
+                        )
+                    )
+
+                    sheets['BE_Priority_Barriers'] = _r79_lead_barriers_df
+                    sheets['BE_Focus_Areas'] = _r79_lead_focus_df
+                    status['be_priority_diag'] = _r79_lead_diag
+                    logger.info(
+                        "[LEADER] Round 79 / B2: BE-priority sheets built; "
+                        "rows_scored=%d top_n=%d focus_rows=%d",
+                        int(_r79_lead_diag.get("rows_scored", 0) or 0),
+                        int(_r79_lead_diag.get("top_n_selected", 0) or 0),
+                        len(_r79_lead_focus_df) if _r79_lead_focus_df is not None else 0,
+                    )
+                except Exception as _r79_lead_err:  # noqa: BLE001
+                    logger.warning(
+                        "[LEADER] Round 79 / B2: BE-priority pipeline "
+                        "failed; emitting provenance rows: %s",
+                        _r79_lead_err,
+                    )
+                    logger.debug(
+                        "[LEADER] Round 79 / B2: full BE-priority pipeline "
+                        "trace: %s", _r79_lead_err, exc_info=True,
+                    )
+                    _r79_lead_msg = (
+                        f"BE-priority pipeline raised: {str(_r79_lead_err)[:200]}. "
+                        "Both sheets render with this provenance row so the "
+                        "operator can root-cause without opening logs."
+                    )
+                    sheets['BE_Priority_Barriers'] = pd.DataFrame([{
+                        "_adoptiq_provenance_row": True,
+                        "AdoptIQ_Status": "ERROR",
+                        "AdoptIQ_Source": "be_priority_pipeline.build_be_priority_outputs",
+                        "AdoptIQ_Message": _r79_lead_msg,
+                    }])
+                    sheets['BE_Focus_Areas'] = pd.DataFrame([{
+                        "_adoptiq_provenance_row": True,
+                        "AdoptIQ_Status": "ERROR",
+                        "AdoptIQ_Source": "be_priority_pipeline.build_be_priority_outputs",
+                        "AdoptIQ_Message": _r79_lead_msg,
+                    }])
             if all_success_priorities:
                 sheets['Success_Priorities'] = pd.concat(all_success_priorities, ignore_index=True)
             if all_tac_cases:
@@ -26839,6 +28021,63 @@ def run_leader_report_generation(analysis_id):
         except Exception as excel_error:
             logger.error(f"[[ERROR]] Error creating Excel file: {excel_error}", exc_info=True)
             excel_path = None
+
+        # Round 79 / Build 55 (B5): append the BE Priority Focus Areas
+        # Word section to the leader docx as a POST-PROCESSING step --
+        # the leader doc is built+saved inside ``generate_leader_report``
+        # so we re-open the file, append the section, and save back.
+        # This keeps ``leader_report_generator`` unchanged (less risk)
+        # while still giving the operator the same prose section the
+        # Comprehensive flow injects via ``add_be_priority_focus_areas_section``
+        # in-line. The section is appended BEFORE the R57 citation
+        # injector runs so any [Source: ...] markers we emit get
+        # processed by the same chrome path. Failures log + continue;
+        # the XLSX still carries the canonical data via
+        # ``BE_Priority_Barriers`` / ``BE_Focus_Areas``. Pinned by
+        # ``tests/test_round79_b5_be_word_section.py``.
+        try:
+            import be_priority_word_section as _r79_lead_be_word  # noqa: PLC0415
+            from docx import Document as _r79_lead_DocxDocument  # noqa: PLC0415
+
+            # Round 79 / Build 55 (R20-001): ``sheets`` is reliably bound at
+            # line 26597 (unconditional ``sheets = {}`` inside the leader
+            # generation block). The outer try/except still catches any
+            # unexpected ``NameError`` so a future refactor that hoists this
+            # block above the binding does not silently skip the section.
+            _r79_lead_barriers = (
+                sheets.get("BE_Priority_Barriers")
+                if isinstance(sheets, dict)
+                else None
+            )
+            _r79_lead_focus = (
+                sheets.get("BE_Focus_Areas")
+                if isinstance(sheets, dict)
+                else None
+            )
+            _r79_lead_word_diag = status.get("be_priority_diag")
+            if _r79_lead_focus is not None and filepath:
+                _r79_lead_doc = _r79_lead_DocxDocument(filepath)
+                _r79_lead_be_word.add_be_priority_focus_areas_section(
+                    _r79_lead_doc,
+                    barriers_df=_r79_lead_barriers,
+                    focus_areas_df=_r79_lead_focus,
+                    diag=_r79_lead_word_diag,
+                    heading_level=1,
+                )
+                _r79_lead_doc.save(filepath)
+                logger.info(
+                    "[LEADER] Round 79 / B5: BE-priority Word section "
+                    "appended to %s", filepath,
+                )
+        except Exception as _r79_lead_word_err:  # noqa: BLE001
+            logger.warning(
+                "[LEADER] Round 79 / B5: BE-priority Word section "
+                "skipped: %s", _r79_lead_word_err,
+            )
+            logger.debug(
+                "[LEADER] Round 79 / B5: full BE-priority Word section "
+                "trace: %s", _r79_lead_word_err, exc_info=True,
+            )
 
         # Round 57 / Phase B: inject [Source: ...] citations into the
         # leader .docx before status flips to completed.  Leader carries

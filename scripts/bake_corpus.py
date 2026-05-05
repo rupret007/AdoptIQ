@@ -266,9 +266,19 @@ def _emit_skip_marker(bake_dir: Path) -> int:
 
 
 def _resolve_source_dir(args: argparse.Namespace) -> Optional[Path]:
-    """Round 36: resolve the local source directory in priority order.
-    Returns ``None`` when no source is configured (caller emits a
-    descriptive error).
+    """Round 36 (extended Round 83 / Build 59): resolve the local
+    source directory in priority order. Returns ``None`` when no
+    source is configured (caller emits a descriptive error).
+
+    Round 83 widens the auto-detect step: when ``Config.CSONE_ONEDRIVE_FOLDER``
+    points at a non-existent path (the first-existing-wins fallback
+    in ``_resolve_csone_onedrive_folder`` returns the modern macOS
+    candidate even when nothing is synced), the resolver walks the
+    full ``_csone_onedrive_candidates()`` list and returns the first
+    candidate that exists AND is a directory. This rescues the
+    corpus owner's machine where the canonical R80 leaf is not
+    present but the R83 owner-style path is, without forcing a
+    manual ``ADOPTIQ_BAKE_FIXTURE_DIR`` env override.
     """
     if args.source:
         return Path(args.source).expanduser().resolve()
@@ -278,8 +288,33 @@ def _resolve_source_dir(args: argparse.Namespace) -> Optional[Path]:
     env_dir = os.environ.get("ADOPTIQ_BAKE_FIXTURE_DIR", "").strip()
     if env_dir:
         return Path(env_dir).expanduser().resolve()
-    # Fall through to Config.CSONE_ONEDRIVE_FOLDER -- the OneDrive
-    # desktop client's local mirror.
+    # Round 83 / Build 59: explicitly walk the candidate list so the
+    # bake script picks up an owner-style path when the canonical
+    # R80 leaf isn't present. This is a defense-in-depth layer on
+    # top of Config.CSONE_ONEDRIVE_FOLDER (which itself walks the
+    # same list at config-import time but returns the first
+    # candidate when NONE exist, so we re-walk here to surface a
+    # ``None`` rather than a non-existent default).
+    try:
+        from config import _csone_onedrive_candidates
+        for candidate in _csone_onedrive_candidates():
+            try:
+                resolved = Path(candidate).expanduser().resolve()
+                if resolved.exists() and resolved.is_dir():
+                    logger.info(
+                        "Round 83 / bake: auto-detected source dir %s",
+                        resolved,
+                    )
+                    return resolved
+            except OSError:
+                continue
+    except Exception as err:  # noqa: BLE001 - defensive
+        logger.warning(
+            "could not enumerate OneDrive candidates: %s", err,
+        )
+    # Final fallback: trust Config.CSONE_ONEDRIVE_FOLDER even when it
+    # doesn't exist on disk so the caller's error message points at a
+    # known-canonical path rather than ``None``.
     try:
         from config import Config
         path = getattr(Config, "CSONE_ONEDRIVE_FOLDER", None)
@@ -319,14 +354,18 @@ def _stage_source_files(source_dir: Path, dest_dir: Path) -> int:
 
 
 def _resolve_onedrive_sentinel_root(args: argparse.Namespace) -> Optional[Path]:
-    """Round 53 / Phase 53.1: locate the OneDrive folder that hosts
-    the canonical AdoptIQ corpus sentinel.  Resolution priority
-    (highest first):
+    """Round 53 / Phase 53.1 (extended Round 83 / Build 59): locate
+    the OneDrive folder that hosts the canonical AdoptIQ corpus
+    sentinel.  Resolution priority (highest first):
 
     1. ``--onedrive-sentinel-root <path>`` CLI flag.
     2. ``ADOPTIQ_BAKE_SENTINEL_ROOT`` env var.
-    3. ``Config.CSONE_ONEDRIVE_FOLDER`` (the OneDrive desktop client's
-       local mirror of ``AI Projects/AdoptIQ_CSOne_Reports``).
+    3. Walk ``config._csone_onedrive_candidates()`` and pick the
+       first candidate that exists AND is a directory (Round 83 -- so
+       the corpus owner's owner-style path resolves automatically
+       without a manual env override).
+    4. Fall back to ``Config.CSONE_ONEDRIVE_FOLDER`` (the OneDrive
+       desktop client's local mirror).
 
     When the resolved candidate path exists and is a directory it is
     returned.  Otherwise ``None`` is returned and the caller emits a
@@ -346,6 +385,29 @@ def _resolve_onedrive_sentinel_root(args: argparse.Namespace) -> Optional[Path]:
         env_root = os.environ.get("ADOPTIQ_BAKE_SENTINEL_ROOT", "").strip()
         if env_root:
             onedrive_root = Path(env_root).expanduser().resolve()
+    if onedrive_root is None:
+        # Round 83 / Build 59: walk the explicit candidate list FIRST
+        # so we pick the owner-style path on the corpus owner's
+        # machine even though it isn't ``Config.CSONE_ONEDRIVE_FOLDER``.
+        try:
+            from config import _csone_onedrive_candidates
+            for candidate in _csone_onedrive_candidates():
+                try:
+                    resolved = Path(candidate).expanduser().resolve()
+                    if resolved.exists() and resolved.is_dir():
+                        onedrive_root = resolved
+                        logger.info(
+                            "Round 83 / bake: auto-detected sentinel "
+                            "root %s",
+                            resolved,
+                        )
+                        break
+                except OSError:
+                    continue
+        except Exception as err:  # noqa: BLE001 - defensive
+            logger.warning(
+                "could not enumerate OneDrive candidates: %s", err,
+            )
     if onedrive_root is None:
         try:
             from config import Config

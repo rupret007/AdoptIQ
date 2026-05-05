@@ -20,8 +20,9 @@ Resolution order, highest precedence first:
    var (per-site env override; surfaced via ``CIRCUIT_CONFIG``).
 3. ``CIRCUIT_MODEL_NAME`` env var (single-model legacy default;
    surfaced via ``CIRCUIT_CONFIG``).
-4. Hardcoded ``gpt-5-nano`` (config.py default; the resolver MUST
-   never return an empty string).
+4. Hardcoded ``gemini-3.1-flash-lite`` (config.py default; the resolver
+   MUST never return an empty string).  Round 77 / Build 53 flipped this
+   from ``gpt-5-nano``; see :data:`_HARDCODED_DEFAULT` for rationale.
 
 Defensive posture: every value that comes off settings.json AND every
 env value is re-vetted through ``adoptiq_settings.is_valid_model_name``
@@ -53,7 +54,17 @@ logger = logging.getLogger(__name__)
 # module sometimes run before ``config.Config`` is fully initialised
 # (e.g. during ``app_simple`` import-time wiring) and we never want
 # the resolver to raise.
-_HARDCODED_DEFAULT = "gpt-5-nano"
+#
+# Round 77 / Build 53: flipped from ``gpt-5-nano`` to
+# ``gemini-3.1-flash-lite``.  Both options are CircuIT free-tier (15
+# RPM, 120K peak tokens/min, 50M monthly input, 5M completion, $0
+# quarterly).  Operator testing showed flash-lite delivered materially
+# lower per-customer latency on the comprehensive report's per-customer
+# storyboard loop while preserving the R66/B11 + R67/B8 grounding-pass
+# rate.  ``gpt-5-nano`` remains a one-click toggle in the
+# ``[data-r69-model-input]`` dropdowns on the analyze + ask-ai pages
+# AND the admin console (R69 / Build 43 + R73 / UX-3 contracts).
+_HARDCODED_DEFAULT = "gemini-3.1-flash-lite"  # Round 77
 
 # Round 71 / Phase 5 (#28): inline allow-list regex used as a
 # defense-in-depth fallback when ``adoptiq_settings`` is unimportable.

@@ -23,9 +23,15 @@ from pathlib import Path
 import pytest
 
 
+# Round 81 / Build 57: refreshed canonical share-token from
+# ``e=O3a4Ij`` to ``e=kpHMgs`` (the SharePoint share-token that
+# Brian and the team now use).  The path is unchanged; only the
+# trailing query-string token rotates.  Pinned by
+# ``tests/test_round81_sharepoint_url_refresh.py``; the pre-R81
+# token is regression-guarded there as well.
 _EXPECTED_DEFAULT = (
     "https://cisco-my.sharepoint.com/:f:/r/personal/jestory_cisco_com/"
-    "Documents/AI%20Projects/AdoptIQ_CSOne_Reports?csf=1&web=1&e=O3a4Ij"
+    "Documents/AI%20Projects/AdoptIQ_CSOne_Reports?csf=1&web=1&e=kpHMgs"
 )
 
 

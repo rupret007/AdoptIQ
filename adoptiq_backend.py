@@ -683,37 +683,79 @@ def _load_team_config():
         return _get_default_team_config()
 
 def _get_default_team_config():
-    """Default team configuration (fallback)"""
+    """Default team configuration (fallback when team_config.json is
+    missing or unreadable).
+
+    Round 80: rewritten to byte-for-byte parity with the post-R80
+    team_config.json. Pre-R80 the fallback drifted (referenced a
+    non-existent ``Josh Horowitz`` manager, placed ``Asad Sarfaraz``
+    under Dee Kindrick instead of the correct manager, and was missing
+    the entire ``Shams`` block); per ``.cursor/rules/adoptiq.mdc``
+    Tier 3 the fallback MUST stay aligned with the JSON SSoT so an
+    operator who somehow loses ``team_config.json`` sees the canonical
+    roster, not a 2024-era ghost. Pinned by
+    ``tests/test_round80_team_roster_includes_new_managers.py::
+    test_default_fallback_matches_json_roster_byte_for_byte``.
+    """
+    # Round 80
     team_roster = [
-        ("Dee Kindrick", "Nate Hardy", "nahardy@cisco.com"),
-        ("Dee Kindrick", "Eli Walsh", "elwalsh@cisco.com"),
-        ("Dee Kindrick", "Cesar Ozuna", "ceozuna@cisco.com"),
-        ("Dee Kindrick", "Stephen Williams", "stepwil3@cisco.com"),
-        ("Dee Kindrick", "Asad Sarfaraz", "asarfara@cisco.com"),
-        ("Dee Kindrick", "Prabhakar Dakinedi", "pdakined@cisco.com"),
-        ("Dee Kindrick", "Michael Thompson", "mithomp2@cisco.com"),
-        ("Dee Kindrick", "Xavier Pena", "xpena@cisco.com"),
-        ("Dee Kindrick", "Christine Simrell", "chrsimre@cisco.com"),
+        # Dee Kindrick (12 reports, alphabetical by name)
+        ("Dee Kindrick", "Anthony Ortiz", "antortiz@cisco.com"),
         ("Dee Kindrick", "Brice Mercer", "brimerce@cisco.com"),
-        ("Brian Frazier", "Angelica Hernandez Becerra", "angelihe@cisco.com"),
-        ("Brian Frazier", "Jeffrey Story", "jestory@cisco.com"),
-        ("Brian Frazier", "Hector Gonzalez", "hectgon2@cisco.com"),
-        ("Brian Frazier", "Ujjwal Aneja", "uaneja@cisco.com"),
-        ("Brian Frazier", "Jose Nerio Chavarri Espinosa", "josencha@cisco.com"),
+        ("Dee Kindrick", "Cesar Ozuna", "ceozuna@cisco.com"),
+        ("Dee Kindrick", "Chris Clark", "christc3@cisco.com"),
+        ("Dee Kindrick", "Christine Simrell", "chrsimre@cisco.com"),
+        ("Dee Kindrick", "Eli Walsh", "elwalsh@cisco.com"),
+        ("Dee Kindrick", "Michael Ramsey", "michrams@cisco.com"),
+        ("Dee Kindrick", "Michael Thompson", "mithomp2@cisco.com"),
+        ("Dee Kindrick", "Nate Hardy", "nahardy@cisco.com"),
+        ("Dee Kindrick", "Prabhakar Dakinedi", "pdakined@cisco.com"),
+        ("Dee Kindrick", "Stephen Williams", "stepwil3@cisco.com"),
+        ("Dee Kindrick", "Xavier Pena", "xpena@cisco.com"),
+        # Brian Frazier (9 reports, post-R80 -- Angelica + Samuel
+        # Tamayo moved to Mithun Sakthivel Subramanian)
         ("Brian Frazier", "Arpit Patel", "arpitpat@cisco.com"),
+        ("Brian Frazier", "Brandon Doan", "brdoan@cisco.com"),
         ("Brian Frazier", "Greg Dolberry", "gdolberr@cisco.com"),
         ("Brian Frazier", "Haydee Hernandez Ceja", "hayherna@cisco.com"),
+        ("Brian Frazier", "Jeffrey Story", "jestory@cisco.com"),
+        ("Brian Frazier", "Jose Nerio Chavarri Espinosa", "josencha@cisco.com"),
+        ("Brian Frazier", "Mario Pena", "marpena2@cisco.com"),
+        ("Brian Frazier", "Nitish Sinha", "nitsinh2@cisco.com"),
         ("Brian Frazier", "William Phillips", "willphil@cisco.com"),
-        ("Josh Horowitz", "Michael Ramsey", "michrams@cisco.com"),
-        ("Josh Horowitz", "Anthony Ortiz", "antortiz@cisco.com"),
-        ("Josh Horowitz", "Nitish Sinha", "nitsinh2@cisco.com"),
-        ("Josh Horowitz", "Samuel Tamayo", "samtamay@cisco.com"),
-        ("Josh Horowitz", "Mario Pena", "marpena2@cisco.com"),
-        ("Josh Horowitz", "Tim Tyler", "tityler@cisco.com"),
-        ("Josh Horowitz", "Chris Clark", "christc3@cisco.com"),
-        ("Josh Horowitz", "Brandon Doan", "brdoan@cisco.com"),
+        # Paresh Jadhav (8 reports, NEW R80)
+        ("Paresh Jadhav", "Avinash Vinu", "avinu@cisco.com"),
+        ("Paresh Jadhav", "Gagandeep Kaur Walia", "gagwalia@cisco.com"),
+        ("Paresh Jadhav", "Ian Gagnon", "igagnon@cisco.com"),
+        ("Paresh Jadhav", "Kohei Kobayashi", "kkitawak@cisco.com"),
+        ("Paresh Jadhav", "Samuel Sugandaran", "ssuganda@cisco.com"),
+        ("Paresh Jadhav", "Sei Tonomi", "stonomi@cisco.com"),
+        ("Paresh Jadhav", "Seitaro Shinagawa", "sshinaga@cisco.com"),
+        ("Paresh Jadhav", "Timothy Brown", "timothbr@cisco.com"),
+        # Mithun Sakthivel Subramanian (8 reports, NEW R80)
+        ("Mithun Sakthivel Subramanian", "Angelica Hernandez Becerra", "angelihe@cisco.com"),
+        ("Mithun Sakthivel Subramanian", "Asad Sarfaraz", "asarfara@cisco.com"),
+        ("Mithun Sakthivel Subramanian", "Balaji Kandasamy Shanmugam", "balakand@cisco.com"),
+        ("Mithun Sakthivel Subramanian", "Mariyam Hachikyan", "mhachiky@cisco.com"),
+        ("Mithun Sakthivel Subramanian", "Prashant Yadav", "prashyad@cisco.com"),
+        ("Mithun Sakthivel Subramanian", "Ramon Gonzalez Reyes", "ramongo@cisco.com"),
+        ("Mithun Sakthivel Subramanian", "Samuel Tamayo", "samtamay@cisco.com"),
+        ("Mithun Sakthivel Subramanian", "Shagul Hameed", "shaghame@cisco.com"),
+        # Shams (5 reports)
+        ("Shams", "Daniel O'Flaherty", "doflaher@cisco.com"),
+        ("Shams", "Hector Gonzalez", "hectgon2@cisco.com"),
+        ("Shams", "Ron Estillore", "restillo@cisco.com"),
+        ("Shams", "Tim Tyler", "tityler@cisco.com"),
+        ("Shams", "Ujjwal Aneja", "uaneja@cisco.com"),
     ]
-    managers = ["Dee Kindrick", "Brian Frazier", "Shams", "All Managers"]
+    managers = [
+        "Dee Kindrick",
+        "Brian Frazier",
+        "Paresh Jadhav",
+        "Mithun Sakthivel Subramanian",
+        "Shams",
+        "All Managers",
+    ]
     return team_roster, managers
 
 # Load team configuration
@@ -1167,6 +1209,57 @@ def load_db_profile() -> Optional[dict]:
 # --------------------------- Snowflake ---------------------------
 DSM_TABLE = "CX_DB.CX_SWSSBST_BR.dsm_assignment_data"
 AB_TABLE  = "EDW_SALES_ETL_DB.SS.C360_CS_TASK_C_VW"
+
+# Round 82 / Build 58: account-attribution correctness via primary +
+# secondary DSM email column UNION.  Pre-R82 ``get_subscriptions_for_team``
+# walked a hardcoded 4-column tuple (``PRIMARY_DSM_EMAIL`` ->
+# ``CSSM_EMAIL`` -> ``ASSIGNEE_EMAIL`` -> ``OWNER_EMAIL``) and stopped at
+# the FIRST match.  When a roster email lives only in a "secondary"
+# column (Brian's team had this symptom -- specific accounts missing
+# from the per-CSSM slice because the email lived in ``SECONDARY_DSM_EMAIL``
+# / ``BACKUP_DSM_EMAIL`` / similar), those subscriptions never entered
+# ``team_subs_df`` and downstream ``CSSM_EMAIL == cssm_email`` slicing
+# in ``leader_report_generator`` returned empty per-CSSM frames.
+#
+# The R82 fix splits the contract:
+#   * ``_R82_PRIMARY_DSM_EMAIL_COLUMNS`` -- trusted DSM-owner columns;
+#     first hit wins for the primary slice (preserves pre-R82 ordering
+#     so the "I expect to see Alice's primary subscriptions" contract
+#     never regresses).
+#   * ``_R82_SECONDARY_DSM_EMAIL_CANDIDATES`` -- conservative naming
+#     patterns for secondary owner columns.  Each candidate that is
+#     PRESENT in the DSM table (and not already in the primary set)
+#     generates an additional parameterised ``SELECT ... WHERE
+#     <secondary_col> IN (...)`` query.  The merged result is
+#     deduplicated on ``(SUBSCRIPTION_ID, ACCOUNT_ID_C, BU_NAME,
+#     CSSM_EMAIL)`` so the same row never double-counts even if
+#     primary + secondary both hold the same email.
+#
+# The candidate list is intentionally CONSERVATIVE (specific naming
+# patterns, not "any column ending in _EMAIL") so a stray column like
+# ``CASE_COMMENT_EMAIL`` cannot silently widen the WHERE clause.  When
+# Brian's environment surfaces a column we did not anticipate, the new
+# ``introspect_dsm_columns()`` helper + ``/api/diag/dsm-columns`` admin
+# endpoint enumerate the FULL column list so an operator can name the
+# real secondary column for a follow-on commit.
+_R82_PRIMARY_DSM_EMAIL_COLUMNS: Tuple[str, ...] = (
+    "PRIMARY_DSM_EMAIL",
+    "CSSM_EMAIL",
+    "ASSIGNEE_EMAIL",
+    "OWNER_EMAIL",
+)
+_R82_SECONDARY_DSM_EMAIL_CANDIDATES: Tuple[str, ...] = (
+    "SECONDARY_DSM_EMAIL",
+    "SECONDARY_CSSM_EMAIL",
+    "BACKUP_DSM_EMAIL",
+    "BACKUP_CSSM_EMAIL",
+    "DELEGATE_DSM_EMAIL",
+    "DELEGATE_CSSM_EMAIL",
+    "OWNER_EMAIL_2",
+    "OWNER_EMAIL_BACKUP",
+    "CSSM_EMAIL_2",
+    "DSM_EMAIL_2",
+)
 
 # Cache stores (columns, fetched_at_monotonic). TTL bounds staleness so that
 # schema additions (e.g. a new owner-email column) are picked up within an hour
@@ -2195,8 +2288,98 @@ def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[
         }
 
 
+def introspect_dsm_columns(ctx) -> Dict[str, Any]:
+    """Round 82 / Phase A1: enumerate columns in the DSM assignment table.
+
+    Returns a structured payload showing the full column inventory plus
+    which primary / secondary email columns are present.  Designed to
+    drive the ``/api/diag/dsm-columns`` admin endpoint so an operator
+    can identify the exact secondary-CSSM column name in their
+    Snowflake environment WITHOUT opening a separate Snowflake session.
+
+    Never raises -- returns a structured ``error_kind`` field on
+    failure so the endpoint can surface "Snowflake unreachable" vs
+    "table missing" cleanly.
+
+    Contract::
+
+        {
+            "table": "CX_DB.CX_SWSSBST_BR.dsm_assignment_data",
+            "columns": [...sorted list of column names...],
+            "primary_email_columns_present": [...subset of _R82_PRIMARY_DSM_EMAIL_COLUMNS...],
+            "secondary_email_candidates_present": [...subset of _R82_SECONDARY_DSM_EMAIL_CANDIDATES...],
+            "all_email_like_columns": [...sorted *_EMAIL columns...],
+            "introspected_at": "<UTC ISO-8601>",
+            "ok": True | False,
+            "error_kind": "<stable enum>" | None,
+        }
+
+    The ``all_email_like_columns`` slot is the operator escape hatch:
+    if the secondary column lives outside our conservative
+    ``_R82_SECONDARY_DSM_EMAIL_CANDIDATES`` list, the operator can see
+    it surface here and submit a follow-on PR adding it to the
+    candidates tuple.
+    """
+    payload: Dict[str, Any] = {
+        "table": DSM_TABLE,
+        "columns": [],
+        "primary_email_columns_present": [],
+        "secondary_email_candidates_present": [],
+        "all_email_like_columns": [],
+        "introspected_at": datetime.now(timezone.utc).isoformat(),
+        "ok": False,
+        "error_kind": None,
+    }
+    if ctx is None:
+        payload["error_kind"] = "snowflake_context_unavailable"
+        return payload
+    try:
+        available_columns = _get_table_columns(ctx, DSM_TABLE)
+        if not available_columns:
+            payload["error_kind"] = "dsm_table_introspection_empty"
+            return payload
+        sorted_cols = sorted(str(c).upper() for c in available_columns)
+        payload["columns"] = sorted_cols
+        payload["primary_email_columns_present"] = [
+            col for col in _R82_PRIMARY_DSM_EMAIL_COLUMNS if col in available_columns
+        ]
+        payload["secondary_email_candidates_present"] = [
+            col for col in _R82_SECONDARY_DSM_EMAIL_CANDIDATES if col in available_columns
+        ]
+        payload["all_email_like_columns"] = [
+            c for c in sorted_cols if c.endswith("_EMAIL") or c.endswith("_EMAIL_2") or c.endswith("_EMAIL_BACKUP")
+        ]
+        payload["ok"] = True
+        return payload
+    except Exception as err:
+        payload["error_kind"] = _stable_failure_kind(err)
+        logger.warning(
+            "Round 82 / introspect_dsm_columns failed: %s",
+            type(err).__name__,
+            exc_info=False,
+        )
+        return payload
+
+
 def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
-    """Gets all subscriptions and associated accounts for a list of CSSM emails with proper resource management."""
+    """Gets all subscriptions and associated accounts for a list of CSSM emails with proper resource management.
+
+    Round 82 / Phase A: UNIONs across the primary + any present
+    secondary DSM email columns so a roster email that lives only in
+    a secondary column (e.g. ``SECONDARY_DSM_EMAIL`` /
+    ``BACKUP_DSM_EMAIL``) still pulls the matching subscriptions into
+    ``team_subs_df``.  Pre-R82 the function picked the FIRST primary
+    column that existed and stopped, silently dropping every row whose
+    only matching email was in a secondary column.  See the SSoT
+    comment near ``_R82_PRIMARY_DSM_EMAIL_COLUMNS`` for the contract.
+
+    The returned DataFrame's ``attrs`` dict carries
+    ``_r82_team_subs_diag`` -- a structured rollup that callers (the
+    leader path's status writer in particular) can persist into
+    ``analysis_status['team_subs_diag']`` so an operator inspecting
+    a run can see how many additional rows came from secondary columns
+    vs primary, and which secondary column names actually matched.
+    """
     if ctx is None:
         return pd.DataFrame()
     if not emails:
@@ -2206,77 +2389,170 @@ def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
     try:
         cur = ctx.cursor()
         available_columns = _get_table_columns(ctx, DSM_TABLE)
-        email_col = next(
-            (
-                col for col in (
-                    "PRIMARY_DSM_EMAIL",
-                    "CSSM_EMAIL",
-                    "ASSIGNEE_EMAIL",
-                    "OWNER_EMAIL",
-                )
-                if col in available_columns
-            ),
+
+        # Round 82 / Phase A: identify primary + secondary email columns.
+        # Primary preserves pre-R82 first-hit ordering exactly so the
+        # "expected primary subscription" contract can never regress.
+        primary_email_col: Optional[str] = next(
+            (col for col in _R82_PRIMARY_DSM_EMAIL_COLUMNS if col in available_columns),
             None,
         )
-        if not email_col:
-            logger.warning("No CSSM/owner email columns found in %s; returning empty team subscription set", DSM_TABLE)
-            return pd.DataFrame(columns=["SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"])
+        secondary_email_cols: List[str] = [
+            col for col in _R82_SECONDARY_DSM_EMAIL_CANDIDATES
+            if col in available_columns and col != primary_email_col
+        ]
 
-        # Use proper parameterized query to prevent SQL injection
-        select_exprs = [
+        if not primary_email_col and not secondary_email_cols:
+            logger.warning(
+                "Round 82 / get_subscriptions_for_team: no primary OR secondary "
+                "CSSM/owner email columns found in %s; returning empty team "
+                "subscription set",
+                DSM_TABLE,
+            )
+            empty = pd.DataFrame(columns=["SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"])
+            try:
+                empty.attrs["_r82_team_subs_diag"] = {
+                    "primary_email_column_used": None,
+                    "secondary_email_columns_used": [],
+                    "primary_rows": 0,
+                    "secondary_rows": 0,
+                    "merged_rows": 0,
+                    "duplicate_rows_dropped": 0,
+                    "introspected_at": datetime.now(timezone.utc).isoformat(),
+                    "error_kind": "no_email_columns_found",
+                }
+            except Exception:
+                pass
+            return empty
+
+        # Build the canonical SELECT body once -- the trailing
+        # ``CSSM_EMAIL`` alias swaps per-query so each row carries the
+        # email value from the column that matched it.
+        base_select_exprs = [
             _column_or_default_expr(available_columns, "SUBSCRIPTION_ID", "NULL"),
             _column_or_default_expr(available_columns, "ACCOUNT_ID_C", "NULL"),
             _column_or_default_expr(available_columns, "BU_NAME", "''"),
-            f"{email_col} AS CSSM_EMAIL",
         ]
-        select_clause = ", ".join(e for e in select_exprs if e)
+        base_select_clause = ", ".join(e for e in base_select_exprs if e)
 
-        # Round 6 / Phase 4.1: chunk the email IN clause.  Snowflake's
-        # ``IN`` clause has practical limits and many database
-        # connectors emit one bind per placeholder, which can hit
-        # both the parser bind-count limit and the network-batch limit
-        # for very large teams.  We split the email list into
-        # batches and union the results client-side, deduplicating on
-        # SUBSCRIPTION_ID + ACCOUNT_ID_C + BU_NAME + CSSM_EMAIL so a
-        # single subscription that matches via two emails is not
-        # counted twice in callers downstream.
         EMAIL_CHUNK_SIZE = 500
-        rows: List[Any] = []
-        col_descr: Optional[List[Any]] = None
         deduped_emails: List[str] = []
-        _seen_emails = set()
+        _seen_emails: set = set()
         for _e in emails:
             _ek = str(_e).strip().lower()
             if not _ek or _ek in _seen_emails:
                 continue
             _seen_emails.add(_ek)
             deduped_emails.append(_e)
-        for i in range(0, len(deduped_emails), EMAIL_CHUNK_SIZE):
-            chunk = deduped_emails[i:i + EMAIL_CHUNK_SIZE]
-            placeholders = ','.join(['%s'] * len(chunk))
-            sql = (
-                f"SELECT DISTINCT {select_clause} "
-                f"FROM {DSM_TABLE} "
-                f"WHERE {email_col} IN ({placeholders})"
-            )
-            cur.execute(sql, chunk)
-            chunk_rows = cur.fetchall()
+
+        # Round 82 / Phase A: per-source-column collection so the diag
+        # can attribute rows back to which physical column matched.
+        # ``_query_one_email_col`` runs the chunked IN-clause query for
+        # a single email column and returns the row list + column
+        # descriptor.  We invoke it once per (primary + secondaries)
+        # column and merge client-side, deduping after the union.
+        def _query_one_email_col(email_col: str) -> Tuple[List[Any], Optional[List[Any]]]:
+            local_rows: List[Any] = []
+            local_descr: Optional[List[Any]] = None
+            select_clause = f"{base_select_clause}, {email_col} AS CSSM_EMAIL"
+            for i in range(0, len(deduped_emails), EMAIL_CHUNK_SIZE):
+                chunk = deduped_emails[i:i + EMAIL_CHUNK_SIZE]
+                placeholders = ','.join(['%s'] * len(chunk))
+                sql = (
+                    f"SELECT DISTINCT {select_clause} "
+                    f"FROM {DSM_TABLE} "
+                    f"WHERE {email_col} IN ({placeholders})"
+                )
+                cur.execute(sql, chunk)
+                chunk_rows = cur.fetchall()
+                if local_descr is None:
+                    local_descr = cur.description
+                local_rows.extend(chunk_rows)
+            return local_rows, local_descr
+
+        all_rows: List[Any] = []
+        col_descr: Optional[List[Any]] = None
+        primary_row_count = 0
+        secondary_rows_per_col: Dict[str, int] = {}
+
+        if primary_email_col:
+            p_rows, p_descr = _query_one_email_col(primary_email_col)
+            primary_row_count = len(p_rows)
             if col_descr is None:
-                col_descr = cur.description
-            rows.extend(chunk_rows)
+                col_descr = p_descr
+            all_rows.extend(p_rows)
+
+        for sec_col in secondary_email_cols:
+            s_rows, s_descr = _query_one_email_col(sec_col)
+            secondary_rows_per_col[sec_col] = len(s_rows)
+            if col_descr is None:
+                col_descr = s_descr
+            all_rows.extend(s_rows)
+
         if col_descr is None:
-            return pd.DataFrame(columns=["SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"])
-        df = pd.DataFrame(rows, columns=[c[0] for c in col_descr])
+            empty = pd.DataFrame(columns=["SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"])
+            try:
+                empty.attrs["_r82_team_subs_diag"] = {
+                    "primary_email_column_used": primary_email_col,
+                    "secondary_email_columns_used": secondary_email_cols,
+                    "primary_rows": 0,
+                    "secondary_rows": 0,
+                    "merged_rows": 0,
+                    "duplicate_rows_dropped": 0,
+                    "introspected_at": datetime.now(timezone.utc).isoformat(),
+                    "error_kind": "no_rows_returned_from_any_column",
+                }
+            except Exception:
+                pass
+            return empty
+
+        df = pd.DataFrame(all_rows, columns=[c[0] for c in col_descr])
+        merged_rows_pre_dedup = len(df)
         if not df.empty:
             try:
                 df = df.drop_duplicates(
-                    subset=[c for c in ("SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL") if c in df.columns]
+                    subset=[c for c in ("SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL") if c in df.columns],
+                    keep="first",
                 ).reset_index(drop=True)
             except Exception:
                 df = df.drop_duplicates().reset_index(drop=True)
+        merged_rows_post_dedup = len(df)
         for required_col in ("SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"):
             if required_col not in df.columns:
                 df[required_col] = ""
+
+        # Round 82 / Phase A4: stamp the diag rollup on ``df.attrs`` so
+        # leader / comprehensive / compact callers can persist it onto
+        # ``analysis_status['team_subs_diag']``.  Structured log emitted
+        # at INFO once per call so the same data is visible in the
+        # rotating file log without touching analysis_status.
+        secondary_total = sum(secondary_rows_per_col.values())
+        diag = {
+            "primary_email_column_used": primary_email_col,
+            "secondary_email_columns_used": secondary_email_cols,
+            "primary_rows": primary_row_count,
+            "secondary_rows": secondary_total,
+            "secondary_rows_per_col": secondary_rows_per_col,
+            "merged_rows": merged_rows_post_dedup,
+            "duplicate_rows_dropped": max(0, merged_rows_pre_dedup - merged_rows_post_dedup),
+            "introspected_at": datetime.now(timezone.utc).isoformat(),
+            "error_kind": None,
+        }
+        try:
+            df.attrs["_r82_team_subs_diag"] = diag
+        except Exception:
+            pass
+        if secondary_email_cols:
+            logger.info(
+                "Round 82 / get_subscriptions_for_team: primary_col=%s primary_rows=%d "
+                "secondary_cols=%s secondary_rows=%d merged_rows=%d duplicates_dropped=%d",
+                primary_email_col,
+                primary_row_count,
+                secondary_email_cols,
+                secondary_total,
+                merged_rows_post_dedup,
+                diag["duplicate_rows_dropped"],
+            )
         # Round 2 / Phase 4.4: stamp the row contract so downstream
         # callers (consistency validator, contracts dashboard) can
         # detect schema drift on this load path.  Previously only the
@@ -4038,7 +4314,10 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
     patterns = ['AdoptIQ_Data_*.xlsx', 'AdoptIQ_Report_*.xlsx']
     found = []
     for pat in patterns:
-        found.extend(outputs.glob(pat))
+        # Round 81 / Build 57: walk the new ``<Manager>/<Type>/``
+        # nested layout via ``rglob`` so per-manager subdirectories
+        # are picked up by the historical-trend scanner.
+        found.extend(outputs.rglob(pat))
 
     try:
         found.sort(key=lambda f: f.stat().st_mtime, reverse=True)
@@ -8099,6 +8378,30 @@ Report Date: {_r12_now_utc.strftime("%B %d, %Y")} UTC
 _RE_NUMBERED_LIST_ITEM = re.compile(r'^\d+[\.\)]\s')
 
 
+# Round 78 / B1 - Comprehensive narrative stub-bullet filter.
+# Build 53 acceptance audit found the per-customer storyboard LLM
+# emitting ~170 stub bullets like "Industry Benchmarking: Data
+# unavailable." per Comprehensive run.  These come from the
+# PROMPT_CUSTOMER_TEMPLATE asking the model to fill 8 sub-categories
+# (Industry Benchmarking, Technical Competency, Adoption Velocity,
+# Competitive Positioning, Integration Complexity, Operational
+# Disruption, Sentiment Indicators, Communication Patterns) and the
+# briefing not having data for many of them.  The bullets are
+# accurate (LLM honestly admits the gap) but they're noise -- when
+# the line is *only* "<Category>: Data unavailable." we want to
+# suppress the bullet so the user sees only sub-categories with real
+# signal.  Critical contract: the regex matches ONLY when the entire
+# bullet is the stub.  Bullets like "Operational Disruption: Data
+# unavailable. No active incidents." (substantive narrative after
+# the marker) and "Strategic Headwinds: ... (SP-ID: data
+# unavailable) ..." (parenthetical, not the whole bullet) MUST be
+# preserved.  See ``_R78_STUB_RE`` doctest in the regression file.
+_R78_STUB_RE = re.compile(
+    r'^\*{0,2}[A-Z][\w &/\-]+\*{0,2}\s*:\s*\*{0,2}\s*[Dd]ata\s+[Uu]navailable'
+    r'\s*\*{0,2}\.?\s*\*{0,2}\s*$',
+)
+
+
 # Round 27 - LLM compliance leak post-processor.
 # The PROMPT_CUSTOMER_TEMPLATE includes the literal string
 # ``Customer Health Score: [A, B, C, D, F]`` (and similar bracketed
@@ -8348,6 +8651,17 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
         # Handle bullet points - remove ALL markdown symbols
         elif line.startswith(('* ', '- ', '• ')):
             bullet_text = line[2:].strip()
+            # Round 78 / B1: drop pure "<Category>: Data unavailable." stub
+            # bullets so the Comprehensive narrative isn't drowned in LLM-
+            # honest empty acknowledgements (Build 53 audit: 170 stubs).
+            # Match constraint enforces that the entire bullet must be the
+            # stub -- bullets with substantive follow-on narrative are
+            # preserved.  Mirror the empty-line-skip convention at line
+            # 8313 (i += 1 + continue) so the while-loop doesn't infinite-
+            # loop on the unincremented index.
+            if _R78_STUB_RE.match(bullet_text):
+                i += 1
+                continue
             # Create paragraph and use helper to process ** symbols
             p = doc.add_paragraph(style='List Bullet')
             p.clear()
@@ -8831,6 +9145,18 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
                 "Customer_Support_Cases",
                 "External_Incidents",
                 "TAC_Cases",
+                # Round 79 / Build 55 (B2): the new BE-priority sheets
+                # carry CSConsole-sourced ``Description`` and ``Title``
+                # cells projected from the underlying AB rows. These
+                # cells routinely contain ``<br />``, ``<p>``, and
+                # entity-encoded markup that Snowflake stores verbatim.
+                # Adding the two new sheets here routes them through
+                # the same ``_strip_html_safe`` path the upstream
+                # ``Adoption_Barriers`` / ``AB_Detail_All`` sheets
+                # already use so the BE-priority output never leaks
+                # raw HTML to the operator.
+                "BE_Priority_Barriers",
+                "BE_Focus_Areas",
             )
             if _r25f_strip_html is not None and name in _R66_HTML_STRIP_SHEETS:
                 try:
@@ -8982,6 +9308,17 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
     return f"{base_path}.xlsx"
 
 # --------------------------- LLM prompt ---------------------------
+
+
+class _R79BriefingDisabled(Exception):
+    """Round 79 / B6 sentinel raised inside the per-AB briefing emit
+    block when ``Config.BE_PRIORITY_BRIEFING_ENABLED`` is False. Caught
+    by the outer try/except on the same iteration so the loop falls
+    through to the shared ``briefing.append('---')`` row close without
+    appending the BE-priority context fields. Used purely as control
+    flow to keep the legacy 4-line shape intact under kill-switch."""
+
+
 def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incidents, matches, matched_df, db_profile, engagement_counts=None, csconsole_data=None, arr_data=None, arr_impact=None, feature_requests=None, software_defects=None, psirt_vulns=None, risk_profiles=None):
     """Creates a detailed text block for the LLM prompt.
 
@@ -9491,6 +9828,101 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
             briefing.append(f"**Customer:** {customer}")
             briefing.append(f"**Title:** {title}")
             briefing.append(f"**Full Description:** {description}")
+
+            # Round 79 / Build 55 (B6): emit additional BE-priority context
+            # fields when present on the row. The scorer (R79/B1) enriches
+            # ``ab_norm`` upstream with ``be_priority_score`` and
+            # ``be_top_signal``; the LLM classifier (R79/B2) adds
+            # ``be_llm_class``. ``severity_norm`` and ``open_age_days``
+            # are written by ``_prepare_ab`` and routinely available.
+            # The briefing book renders each field only when it has a
+            # non-empty value so legacy callers (compact / renewal that
+            # don't run the BE-priority scorer) see the original 4-line
+            # block unchanged. Operator kill-switch:
+            # ``Config.BE_PRIORITY_BRIEFING_ENABLED=False`` falls back to
+            # the pre-Round-79 4-line shape (defensive: lets the
+            # operator bypass the new fields without redeploying if a
+            # future issue is traced to them). Pinned by
+            # ``tests/test_round79_b6_briefing_enrichment.py``.
+            # Round 79 / Build 55 (B6 robust kill-switch lookup): some sibling
+            # tests (R32 / R33 / R35 / R69 / R77) call
+            # ``importlib.reload(config)`` which mints a NEW ``Config`` class
+            # while the ``from config import Config`` binding above still
+            # points at the ORIGINAL class.  A test that monkeypatches
+            # ``BE_PRIORITY_BRIEFING_ENABLED=False`` on the post-reload class
+            # is invisible to a stale ``Config`` reference, so the kill-switch
+            # would silently no-op.  Re-resolve through ``sys.modules['config']``
+            # on every call so the live class is consulted.  Falls back to the
+            # captured ``Config`` reference if the module entry is missing.
+            try:
+                _r79_live_cfg = sys.modules.get('config')
+                _r79_live_class = (
+                    getattr(_r79_live_cfg, 'Config', None)
+                    if _r79_live_cfg is not None
+                    else None
+                )
+                if _r79_live_class is None:
+                    _r79_live_class = Config
+                _r79_briefing_enabled = bool(
+                    getattr(_r79_live_class, 'BE_PRIORITY_BRIEFING_ENABLED', True)
+                )
+            except Exception:  # noqa: BLE001
+                _r79_briefing_enabled = True
+            try:
+                if not _r79_briefing_enabled:
+                    raise _R79BriefingDisabled()
+                _r79_severity = row.get('severity_norm')
+                if _r79_severity is not None and not (
+                    isinstance(_r79_severity, float) and pd.isna(_r79_severity)
+                ):
+                    _r79_severity_str = str(_r79_severity).strip()
+                    if _r79_severity_str:
+                        briefing.append(f"**CSConsole_Severity:** {_r79_severity_str}")
+
+                _r79_be_score = row.get('be_priority_score')
+                if _r79_be_score is not None and not (
+                    isinstance(_r79_be_score, float) and pd.isna(_r79_be_score)
+                ):
+                    try:
+                        _r79_score_val = float(_r79_be_score)
+                        briefing.append(
+                            f"**Independent_BE_Priority:** {_r79_score_val:.1f}"
+                        )
+                    except (TypeError, ValueError):
+                        pass
+
+                _r79_be_class = row.get('be_llm_class')
+                if (
+                    _r79_be_class is not None
+                    and isinstance(_r79_be_class, str)
+                    and _r79_be_class.strip()
+                    and _r79_be_class.strip().upper() != "UNCLASSIFIED"
+                ):
+                    briefing.append(
+                        f"**Independent_BE_Class:** {_r79_be_class.strip()}"
+                    )
+
+                _r79_days_open = row.get('open_age_days')
+                if _r79_days_open is not None and not (
+                    isinstance(_r79_days_open, float) and pd.isna(_r79_days_open)
+                ):
+                    try:
+                        _r79_days_int = int(round(float(_r79_days_open)))
+                        if _r79_days_int >= 0:
+                            briefing.append(f"**Days_Open:** {_r79_days_int}")
+                    except (TypeError, ValueError):
+                        pass
+            except _R79BriefingDisabled:
+                # Kill-switch path -- legacy 4-line briefing shape only.
+                pass
+            except Exception as _r79_brief_err:  # noqa: BLE001
+                logger.debug(
+                    "Round 79 / B6: BE-priority briefing enrichment skipped "
+                    "for barrier %s (%s)",
+                    barrier_id,
+                    _r79_brief_err,
+                )
+
             briefing.append("---")
 
         briefing.append("---")

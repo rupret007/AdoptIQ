@@ -85,14 +85,43 @@ else
       exit 1
     fi
   else
-    echo "Bake source: Config.CSONE_ONEDRIVE_FOLDER (default)"
+    # Round 83 / Build 59: surface the exact path the bake script
+    # auto-selected so the operator can see at a glance whether the
+    # canonical R80 leaf or the R83 owner-style fallback was picked.
+    # Before R83 the bake step printed a generic "Config.CSONE_ONEDRIVE_FOLDER
+    # (default)" line that obscured which candidate actually worked.
+    echo "Bake source: auto-detect via _csone_onedrive_candidates() walk"
+    AUTO_DETECT_PATH=$("$BAKE_PYTHON_BIN" -c "
+from config import _csone_onedrive_candidates
+import os
+for c in _csone_onedrive_candidates():
+    if os.path.isdir(c):
+        print(c)
+        break
+" 2>/dev/null)
+    if [[ -n "$AUTO_DETECT_PATH" ]]; then
+      echo "  auto-detected: $AUTO_DETECT_PATH"
+    else
+      echo "  (no candidate exists on disk -- bake will likely fail;"
+      echo "   set ADOPTIQ_BAKE_FIXTURE_DIR to override)"
+    fi
     if ! "$BAKE_PYTHON_BIN" scripts/bake_corpus.py \
           --bake-dir bake \
           $BAKE_EXTRA_ARGS; then
       echo
-      echo "ERROR: bake_corpus.py failed.  Pass ADOPTIQ_BAKE_FIXTURE_DIR"
-      echo "       to point at a different local directory, or skip the"
-      echo "       bake entirely with: ADOPTIQ_BAKE_CORPUS=0 ./build_mac_dmg.sh"
+      echo "ERROR: bake_corpus.py failed.  Round 83 / Build 59 walks"
+      echo "       _csone_onedrive_candidates() automatically (canonical"
+      echo "       R80 leaf, then R83 owner-style fallback).  If none of"
+      echo "       those four candidates exist on disk, the bake fails."
+      echo
+      echo "       Remediation options:"
+      echo "         1. Set ADOPTIQ_BAKE_FIXTURE_DIR to point at a local"
+      echo "            directory containing the corpus + sentinel."
+      echo "         2. Add the AdoptIQ corpus shortcut to OneDrive on"
+      echo "            this build host (right-click the SharePoint"
+      echo "            folder, choose 'Add shortcut to OneDrive')."
+      echo "         3. Skip the bake entirely:"
+      echo "            ADOPTIQ_BAKE_CORPUS=0 ./build_mac_dmg.sh"
       exit 1
     fi
   fi

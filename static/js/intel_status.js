@@ -143,8 +143,11 @@
             // Round 53.3: surface the actionable remediation message
             // produced by ``corpus_bootstrap`` (rather than a generic
             // "Error") so the global banner matches the corpus panel.
+            // Round 80: default fallback now references the
+            // SharePoint shortcut workflow rather than the
+            // owner-only "AI Projects/AdoptIQ_CSOne_Reports" path.
             var blockedMsg = (payload.boot && payload.boot.last_error)
-                || 'OneDrive sync of AI Projects/AdoptIQ_CSOne_Reports is required to unlock the corpus.';
+                || 'Add the AdoptIQ corpus SharePoint folder as a OneDrive shortcut to unlock the corpus.';
             return blockedMsg;
         }
         if (state === 'error') {
@@ -630,6 +633,17 @@
         if (boot.in_progress) { return 'refreshing'; }
         var source = (typeof boot.source === 'string') ? boot.source : '';
         var od = (typeof boot.onedrive_status === 'string') ? boot.onedrive_status : '';
+        // Round 83 / Build 59: signed_in_no_corpus takes precedence
+        // over blocked_no_onedrive.  Both are corpus-open failures,
+        // but they need different panel copy and different bootstrap
+        // CTAs:
+        //   * signed_in_no_corpus -- user signed in to Cisco
+        //     OneDrive, but the corpus share isn't in their tree.
+        //     One-click "Add corpus share" button surfaces here.
+        //   * blocked_no_onedrive -- user not signed in to OneDrive
+        //     at all (or signed in to a non-Cisco account).  Legacy
+        //     "Sign in to OneDrive" copy.
+        if (source === 'signed_in_no_corpus') { return 'signed_in_no_corpus'; }
         // Round 53 / Phase 53.4: blocked_no_onedrive takes precedence
         // over refresh_failed because a "no OneDrive sentinel" error
         // is the *cause* of the open failure -- showing
@@ -663,6 +677,10 @@
             case 'fresh_not_synced':    return 'OneDrive sync required';
             case 'refreshing':          return 'Refreshing\u2026';
             case 'refresh_failed':      return 'Last refresh failed';
+            // Round 83 / Build 59: distinct from blocked_no_onedrive
+            // -- the user IS signed in to OneDrive, they just need
+            // to add the corpus share to their tree.
+            case 'signed_in_no_corpus': return 'Add corpus share to OneDrive';
             case 'blocked_no_onedrive': return 'Sign in to OneDrive';
             default:                    return 'checking\u2026';
         }
@@ -677,6 +695,10 @@
             case 'fresh_not_synced':    return 'bg-warning text-dark';
             case 'refreshing':          return 'bg-primary';
             case 'refresh_failed':      return 'bg-danger';
+            // Round 83 / Build 59: warning pill (same severity as
+            // ``blocked_no_onedrive`` -- corpus is unavailable until
+            // the user takes action) with distinct label + button.
+            case 'signed_in_no_corpus': return 'bg-warning text-dark';
             case 'blocked_no_onedrive': return 'bg-warning text-dark';
             default:                    return 'bg-secondary';
         }
@@ -694,11 +716,20 @@
                         + ').  Daily refresh enabled.';
                 }
                 return 'OneDrive synced.  Daily refresh enabled.';
+            // Round 80: panel messaging now points users at the
+            // canonical SharePoint share + "Add shortcut to OneDrive"
+            // workflow. Pre-R80 the message asked them to sync
+            // "AI Projects/AdoptIQ_CSOne_Reports" -- a path only the
+            // corpus owner can sync. The clickable SharePoint deep
+            // link is rendered separately via [data-onedrive-deep-link]
+            // (Round 53.4.1) backed by Config.ADOPTIQ_CORPUS_ONEDRIVE_DEEP_LINK.
             case 'baked_not_synced':
-                return 'OneDrive folder not detected.  '
-                    + 'Sign in to OneDrive and sync '
-                    + '\u201CAI Projects/AdoptIQ_CSOne_Reports\u201D '
-                    + 'to enable daily refresh.';
+                return 'OneDrive shortcut not detected.  '
+                    + 'Open the AdoptIQ corpus folder in SharePoint and '
+                    + 'click \u201CAdd shortcut to OneDrive\u201D so the '
+                    + 'daily reports sync to your Mac.  '
+                    + '(You must be signed in to OneDrive on this '
+                    + 'device first.)';
             case 'self_healed_baked':
                 if (fileCount != null && fileCount > 0) {
                     return 'Bundled snapshot was reinstalled to recover '
@@ -712,11 +743,17 @@
                     + 'OneDrive to enable the next daily refresh.';
             case 'fresh_indexing':
                 return 'Indexing OneDrive folder for the first time\u2026';
+            // Round 80: same SharePoint shortcut workflow as
+            // baked_not_synced (no bundled snapshot to fall back on
+            // here, but the user-facing fix is identical -- add the
+            // shortcut so the OneDrive client syncs the folder).
             case 'fresh_not_synced':
-                return 'No baked snapshot is bundled and OneDrive sync '
-                    + 'is not detected.  Sign in to OneDrive and sync '
-                    + '\u201CAI Projects/AdoptIQ_CSOne_Reports\u201D '
-                    + 'to populate the corpus.';
+                return 'No bundled snapshot is present and the OneDrive '
+                    + 'shortcut is not detected.  '
+                    + 'Open the AdoptIQ corpus folder in SharePoint and '
+                    + 'click \u201CAdd shortcut to OneDrive\u201D to '
+                    + 'populate the corpus.  (You must be signed in to '
+                    + 'OneDrive on this device first.)';
             case 'refreshing':
                 return 'Refreshing knowledge corpus from OneDrive\u2026';
             case 'refresh_failed':
@@ -724,13 +761,37 @@
                     ? String(boot.last_refresh_error) : 'unknown';
                 return 'Last refresh failed (' + detail
                     + ').  The baked snapshot is still being served.';
+            // Round 83 / Build 59: signed in to OneDrive but the
+            // corpus share isn't in the user's tree yet.  Distinct
+            // from blocked_no_onedrive: the OneDrive client is
+            // already authenticated, so clicking "Add corpus share"
+            // opens the SharePoint URL in the browser, SSO completes
+            // automatically (the user is already signed in), the
+            // share lands as a shortcut, and the next daily refresh
+            // tick picks it up. No need to mention OneDrive sign-in.
+            case 'signed_in_no_corpus':
+                return 'OneDrive is signed in, but the AdoptIQ corpus '
+                    + 'share is not in your OneDrive tree yet.  Click '
+                    + '\u201CAdd corpus share to my OneDrive\u201D to '
+                    + 'open the share in your browser; OneDrive will '
+                    + 'mirror it locally and AdoptIQ will pick it up '
+                    + 'on the next refresh.';
+            // Round 80: same SharePoint shortcut workflow as the
+            // other two not-synced branches. The corpus is encrypted
+            // against a key that lives in the synced shortcut folder,
+            // so until the shortcut is added + sync completes
+            // AdoptIQ cannot decrypt the bundled snapshot.
             case 'blocked_no_onedrive':
-                return 'AdoptIQ needs you to sign in to OneDrive and '
-                    + 'sync \u201CAI Projects/AdoptIQ_CSOne_Reports\u201D '
-                    + 'to unlock the corpus.  The corpus is encrypted '
-                    + 'against a key that lives in that OneDrive '
-                    + 'folder, so until it is synced AdoptIQ cannot '
-                    + 'decrypt the bundled snapshot.';
+                return 'AdoptIQ needs you to add the AdoptIQ corpus '
+                    + 'shortcut to OneDrive to unlock the corpus.  '
+                    + 'Open the SharePoint folder and click '
+                    + '\u201CAdd shortcut to OneDrive\u201D so the '
+                    + 'OneDrive client syncs it to your Mac.  The '
+                    + 'corpus is encrypted against a key that lives '
+                    + 'in that synced folder, so until the shortcut '
+                    + 'is added AdoptIQ cannot decrypt the bundled '
+                    + 'snapshot.  (You must be signed in to OneDrive '
+                    + 'on this device first.)';
             default:
                 return '';
         }
@@ -801,18 +862,40 @@
         }
     }
 
-    // Round 53 / Phase 53.4.1: render (or hide) the OneDrive deep-
-    // link anchor.  Looks for a ``[data-onedrive-deep-link]`` slot
-    // anywhere inside the panel and writes the href + visibility.
-    // The slot is hidden in every non-blocked state so it never
-    // confuses users who already have OneDrive synced.
+    // Round 53 / Phase 53.4.1 (extended Round 83 / Build 59):
+    // render (or hide) the OneDrive deep-link anchor. Looks for a
+    // ``[data-onedrive-deep-link]`` slot anywhere inside the panel
+    // and writes the href + visibility. The slot is hidden in
+    // every state where the corpus is healthy so it never confuses
+    // users who already have OneDrive synced.
+    //
+    // Round 83 unhides the button on the new ``signed_in_no_corpus``
+    // state in addition to the legacy ``blocked_no_onedrive`` state,
+    // and rewrites the visible label so the user sees a clearer
+    // CTA matching the panel copy. The href stays the same
+    // (Config.ADOPTIQ_CORPUS_ONEDRIVE_DEEP_LINK -> SharePoint share
+    // URL); only the visible text changes.
     function paintDeepLink(state, payload) {
         var anchors = document.querySelectorAll('[data-onedrive-deep-link]');
         if (!anchors || anchors.length === 0) { return; }
         var rawUrl = (payload && payload.boot)
             ? payload.boot.onedrive_deep_link : null;
         var safe = r53SafeDeepLink(rawUrl);
-        var visible = (state === 'blocked_no_onedrive' && safe);
+        var visible = (
+            (state === 'blocked_no_onedrive' || state === 'signed_in_no_corpus')
+            && safe
+        );
+        // Round 83: dynamic button label so the user sees a CTA
+        // that matches the state. Pre-R83 every blocked state showed
+        // the same "Open AdoptIQ corpus folder in OneDrive" text,
+        // which was inappropriate for the new signed_in_no_corpus
+        // state where the user has not yet added the share.
+        var buttonText;
+        if (state === 'signed_in_no_corpus') {
+            buttonText = 'Add corpus share to my OneDrive';
+        } else {
+            buttonText = 'Open AdoptIQ corpus folder in OneDrive';
+        }
         for (var i = 0; i < anchors.length; i += 1) {
             var a = anchors[i];
             if (visible) {
@@ -822,6 +905,10 @@
                 // OneDrive page cannot reach window.opener.
                 a.setAttribute('target', '_blank');
                 a.setAttribute('rel', 'noopener noreferrer');
+                // textContent is XSS-safe (no innerHTML); the label
+                // text comes from this module's source code, not
+                // from the server payload.
+                a.textContent = buttonText;
                 a.hidden = false;
                 a.removeAttribute('hidden');
             } else {

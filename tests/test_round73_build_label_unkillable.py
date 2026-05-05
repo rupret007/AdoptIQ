@@ -329,6 +329,14 @@ def test_freshly_built_artifacts_carry_footer1_xml() -> None:
 
     Skips silently when no .docx is present in OUTBOX/ so this test
     does not flake in CI / dev where the bake has not been run.
+
+    Round 79 / Build 55: exclude ``.app/`` package internals from the
+    glob.  PyInstaller bundles the python-docx library under
+    ``OUTBOX/AdoptIQ.app/Contents/Resources/docx/templates/default.docx``
+    -- a stub template that is NOT a freshly-built AdoptIQ report and
+    has never carried a footer.  Without this filter the test produces
+    a false positive against any developer who has run a Mac bake
+    locally (the bundled .app stays in OUTBOX/ for re-install).
     """
 
     import zipfile  # noqa: PLC0415
@@ -336,7 +344,14 @@ def test_freshly_built_artifacts_carry_footer1_xml() -> None:
     outbox = PROJECT_ROOT / "OUTBOX"
     if not outbox.exists():
         pytest.skip("Round 73 / F1: OUTBOX/ does not exist (no DMG bake yet)")
-    docx_files = sorted(outbox.glob("**/*.docx"))
+    docx_files = [
+        p for p in sorted(outbox.glob("**/*.docx"))
+        # Round 79 / Build 55: skip ``.app/`` package internals (vendored
+        # python-docx default.docx template inside a packaged .app).  The
+        # check uses each path part so ``.app`` anywhere in the path is
+        # excluded, not just at the top level.
+        if not any(part.endswith(".app") for part in p.parts)
+    ]
     if not docx_files:
         pytest.skip("Round 73 / F1: no .docx artifacts in OUTBOX/ to inspect")
 

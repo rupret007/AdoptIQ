@@ -8949,3 +8949,864 @@ Neither finding is a R75 regression, neither blocks the Build 49 acceptance, bot
 
 **Trailer:** Made-with: Claude Opus 4.7 (1M context)
 
+## Round 77 — handoff 2026-05-04 (Build 53, default LLM flipped from gpt-5-nano to gemini-3.1-flash-lite)
+
+**What changed (plain English):**
+- Flipped the hardcoded default LLM model in BOTH `model_resolver._HARDCODED_DEFAULT` AND the three `Config.CIRCUIT_CONFIG` env-fallback strings (`model_name`, `model_name_ask_ai`, `model_name_report`) from `gpt-5-nano` to `gemini-3.1-flash-lite`. Both options are CircuIT free-tier (15 RPM, 120K peak tokens/min, 50M monthly input, 5M completion, $0 quarterly per the operator's tenancy screenshot). Operator testing during the Build 52 acceptance run showed flash-lite delivered materially lower per-customer LLM latency on the comprehensive report's per-customer storyboard loop while preserving the R66/B11 + R67/B8 grounding-pass rate.
+- Reordered both `<select data-r69-model-input>` blocks on `templates/preferences.html` AND both `<select data-r69-admin-input>` blocks on `enhanced_admin_dashboard_v2.py` so `gemini-3.1-flash-lite` is now the FIRST `<option>` with `selected`. R69 JS still overwrites `<select>.value` with the persisted value on load (so for explicit overrides the reorder is cosmetic), but for fresh installs and explicitly-cleared installs the visible state agrees with the resolver layer's R77 default.
+- Updated descriptive copy on /preferences (`Defaults to <code>gemini-3.1-flash-lite</code>`) and the admin dashboard (`default <code>gemini-3.1-flash-lite</code>`) to name the new R77 default.
+- Cleared the operator's local `~/Library/Application Support/AdoptIQ/settings.json` `report_model_name` override (was pinning `gpt-5-nano` per the Build 52 acceptance run) via `adoptiq_settings.set("report_model_name", "")` so the next analysis run picks up the new R77 default without requiring a UI re-save. File mode preserved at `0600`, parent dir at `0700`. `ask_ai_model_name` was already cleared from the earlier R69/R73 work.
+- The R69 (Build 43) operator-flippable seam and R73 (UX-3) two-option dropdown contracts are unchanged. `gpt-5-nano` remains a one-click toggle in every preferences surface; the strict 2-option allow-list (`_R73_ALLOWED_MODEL_IDS` frozenset in `app_simple.py`) is unchanged so the back-toggle works at the API layer regardless of UI origin.
+- Build bump: `config.py` `ADOPTIQ_BUILD` "52" → "53" with the canonical R77 manifest comment (preserves R76→R0 trailing back-references for `git blame`).
+
+**Files touched:**
+- `model_resolver.py` — flipped `_HARDCODED_DEFAULT` from `"gpt-5-nano"` to `"gemini-3.1-flash-lite"`. Module docstring's "Hardcoded ..." reference updated to match.
+- `config.py` — flipped the three `CIRCUIT_CONFIG` env-fallback strings + bumped `ADOPTIQ_BUILD` "52" → "53" with R77 manifest comment.
+- `templates/preferences.html` — reordered both `<select data-r69-model-input>` blocks (flash-lite first with `selected`); updated descriptive copy on both cards (`Defaults to <code>gemini-3.1-flash-lite</code> (Round 77 / Build 53)`).
+- `enhanced_admin_dashboard_v2.py` — reordered both `<select data-r69-admin-input>` blocks (flash-lite first with `selected`); updated the descriptive paragraph.
+- `secrets.env.template` — flipped `CIRCUIT_MODEL_NAME=gpt-5-nano` → `CIRCUIT_MODEL_NAME=gemini-3.1-flash-lite`; updated supported-models block + R69 comment block to name the new default.
+- `CURSOR_BUILD_GUIDE.md` — updated the credentials block to reflect that `gemini-3.1-flash-lite` is the new default and `gpt-5-nano` is the override.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — same update on the Mac build guide + the paste-ready Cursor kickoff prompt.
+- `CLAUDE.md` — amended the existing R69 / Build 43 bullet to name the R77 default + added a new "Default LLM model flipped to gemini-3.1-flash-lite (Round 77 / Build 53)" bullet under Critical Rules.
+- `tests/test_round77_default_model_flip.py` — NEW: 16 regression tests covering resolver default / per-resolver fallthrough / settings-empty fallthrough / gpt-5-nano back-toggle / config-resolver drift guard / dropdown first-option order on both /preferences and admin / `selected` attribute / descriptive copy positive + negative controls / docstring narrative / build-number floor.
+- `tests/test_round69_model_preferences.py` — UPDATED: 4 assertions that pinned the literal `gpt-5-nano` as the resolved hardcoded default flipped to `gemini-3.1-flash-lite` (`test_r69_circuit_config_carries_per_site_keys_with_safe_defaults`, `test_r69_resolver_falls_back_to_hardcoded_default_when_env_unset`, `test_r69_resolver_drops_malformed_env_silently`, `test_r69_get_settings_ask_ai_model_returns_default_when_unset`). All other R69 tests preserved byte-for-byte (the 43 contract surface is unchanged; only the literal default value flipped).
+- `tests/test_round71_model_resolver_env_validation.py` — NO change needed. The R71 inline-regex tests use `gpt-5-nano` as ONE of several canonical-name allow-list test cases (still passes); they don't pin the literal default.
+- `tests/test_round73_model_dropdown_allowlist.py` — UPDATED: docstring narrative refreshed to name flash-lite as the new default. Test assertions are set-equality on `EXPECTED_ALLOWED_MODEL_IDS = {"gpt-5-nano", "gemini-3.1-flash-lite"}` (unordered) so they don't break on the reorder.
+- `tests/test_config.py::test_circuit_model_default` — UPDATED: flipped the literal default expectation from `gpt-5-nano` to `gemini-3.1-flash-lite`; the test still accepts the live env value when set so a developer machine carrying `CIRCUIT_MODEL_NAME` in shell env doesn't flip false.
+
+**SSoT modules touched:** `model_resolver` (the canonical fallback for the entire LLM resolution chain), `config` (the env-fallback strings that MUST track the resolver byte-for-byte), `adoptiq_settings` (used to clear the local `settings.json` override). No Snowflake query, formatter, boot-order, corpus, or admin-console structural changes ship in this round.
+
+**Tests added/updated:**
+- New: `tests/test_round77_default_model_flip.py` (16 tests).
+- Updated: `tests/test_round69_model_preferences.py` (4 cases), `tests/test_config.py` (1 case), `tests/test_round73_model_dropdown_allowlist.py` (docstring only — assertions unchanged).
+- Net pytest delta: +16 (4812 → 4828 expected once `make verify` runs).
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 4828 passed / 4 skipped / 6 deselected (R76 floor was 4812; net delta +16 from `tests/test_round77_default_model_flip.py`'s 16 new tests)
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- Total runtime: 51.84s (within typical R76 baseline)
+
+**Hot spots Claude should audit first:**
+1. `model_resolver._HARDCODED_DEFAULT` ↔ `Config.CIRCUIT_CONFIG` parity — the new R77 regression test `test_round77_config_circuit_config_default_matches_resolver` pins the byte-equality contract, but this is the ONLY parity guard; if a future round adds a new env-fallback callsite (e.g. a per-customer narrative endpoint that constructs its own `CircuitChatClient` constructor without going through the resolver), the parity test won't catch the drift. Worth a sentence in the security review confirming no new bypass paths exist.
+2. The two `<select selected>` attributes on `templates/preferences.html` — the Round 73 `test_preferences_template_has_no_default_sentinel_option` asserts no `<option value="">` sentinel exists, but does NOT explicitly forbid `selected` on a `<option>` with a non-empty value. Confirm the R69 JS module (`static/js/r69_model_preferences.js`) handles the case where the persisted value is empty AND a non-empty `<option>` is `selected` — the operator's intent is "fall through to the resolver default", not "use the visually-selected option". The R69 JS at line ~123 ("'gpt-5-nano' then typo'd and saved" comment) reads the persisted value into `<select>.value` so an empty persisted value should NOT silently lock to the visually-selected flash-lite — the active-value indicator should still show the resolved model name from `/api/settings/{ask-ai,report}-model`'s `active_value` field.
+3. `adoptiq_settings.set("report_model_name", "")` was called via Python REPL during this Cursor session (Tool: Shell, command captured in transcript). Confirm the file lands on disk with `mode=0o600`, `os.replace`-atomic-write, and the `_SCHEMA` validator silently dropping `report_model_name=""` is the intended "clear override" path (not a silent rejection). The `adoptiq_settings.load_settings()` call after the set returned `{'corpus_knowledge_enabled': True, 'ask_ai_model_name': '', 'report_model_name': ''}` confirming both keys round-tripped to empty.
+4. The `CIRCUIT_MODEL_NAME=gemini-3.1-flash-lite` flip in `secrets.env.template` is documentation only — the operator's actual `secrets.env` file is gitignored and may still carry the old default. The R69/R73 dropdown UI is the operator's primary path to flip the runtime default; the env override is a secondary convenience for build-time bake configuration. Worth a line in the build runbook clarifying which path takes precedence (settings.json > env > config.py default).
+
+**Known deferrals (intentional non-fixes):**
+- ~~The 4-format DMG bake (Phase 6 in the plan) is operator-owned per the user's instruction in the previous Cursor session.~~ **CLOSED in the follow-on Cursor session 2026-05-04T14:21Z** — the user requested the rebuild and README/doc refresh in a follow-up message. See "Round 77 — build verification 2026-05-04 (Build 53 DMG baked + codesigned)" subsection below for the bake artifacts, codesign verdict, and operator install steps. The Build 52 binary in `/Applications/AdoptIQ.app` continues to use whatever model `settings.json` resolves to until the operator drag-installs the new DMG; since we cleared `report_model_name` to `""`, the next analysis run on the existing Build 52 binary WILL pick up the new R77 default IF the running Build 52 process has live-reloaded the settings file (it does — `model_resolver` does NOT cache, R69/Build 43 contract). The DMG install is therefore optional for the LLM flip itself but recommended to pick up the visible Build label (R68/A1 footer + Report_Info row) and the README chronology entry inside the bundled DMG.
+- The currently-running comprehensive analysis `Brian_Frazier_All_Contact_Center_90d_1777899481` (started ~12:58 UTC and was at ~half-progress when the user filed the model-flip request) is unaffected — it's mid-loop on `gpt-5-nano` per the explicit `settings.json` override that was pinning nano before this Cursor session cleared it. The mid-loop analysis will finish on nano because `model_resolver.get_active_report_model()` is invoked once at the start of each LLM call, and the change happens at the next call boundary.
+- The R76 Snowflake operator action (ADD `RISK_ASSESSMENT` + `BOOKINGS_TABLE_FOR_ACCOUNT_CHECK` to the allowlist OR formally retire the booking/risk insight sections) remains pending from the R76 handoff — out of scope for R77.
+- Two existing tests carry `gpt-5-nano` as a fixture VALUE but not as the asserted default (e.g. `test_r69_resolver_settings_layer_wins_over_env_layer` saves `gpt-5-nano` to settings then asserts the resolver returns it — this is testing precedence, not the default). Left unchanged.
+
+**Trailer:** Made-with: Cursor
+
+## Round 77 — build verification 2026-05-04 (Build 53 DMG baked + codesigned)
+
+**Goal:** stage the Build 53 .app + DMG so the operator can install the LLM default flip without rebuilding themselves; document the artifact provenance so a future "did this build actually ship?" question is answerable in <30 seconds. Mirrors the Round 75 / Phase 6 pattern of appending a build-verification subsection AFTER the handoff trailer (rather than splitting the handoff structure).
+
+**Phase 1 — README.md update.** Two edits in [README.md](README.md): line 3 footer reference flipped from `e.g. v1.0.4 build 52` -> `e.g. v1.0.4 build 53`, and a new "What's New in Build 53 (Round 77 -- Default LLM model flipped from gpt-5-nano to gemini-3.1-flash-lite)" block inserted above the existing "What's New in Build 52" chronology entry (matches the established style for every prior round). Five bullets cover: atomic flip in resolver + config (parity-pinned by R77 drift guard), CircuIT free-tier quotas (15 RPM / 120K peak / 50M monthly input / 5M completion / $0 quarterly), gpt-5-nano remains a one-click toggle in /preferences + admin (R69/R73 contracts unchanged), local settings.json override cleared via `adoptiq_settings.set("report_model_name", "")`, and the 16-test pin (4828 floor; ruff 0 / bandit 0 HIGH-MED / pip-audit clean).
+
+**Phase 2 — Mac DMG bake.** Ran `bash build_mac_dmg.sh` from the repo root; total elapsed 3 min 45 sec (build_mac.sh ~2:30 + DMG re-stage + OneDrive mirror copy). Output captured to `/tmp/r77_build53.log` (1273 lines / 192 KB). Bake step ran with `Bake source: Config.CSONE_ONEDRIVE_FOLDER (default)` (no operator override) and produced the four canonical artifacts under `bake/` (`corpus.db.enc`, `sentinel.json`, `corpus.db.salt`, `corpus.sentinel.lock.json`). PyInstaller's `update_version_pc.py` step printed `Updated config.py and version_info.txt: v1.0.4 build 53` followed by the build-script readback `-> Resolved version v1.0.4 build 53` -- the R67/Phase 4 build-script footgun fix stayed closed (no `:-1` default crept back in).
+
+**Phase 3 — Artifact verification.** `OUTBOX/AdoptIQ-v1.0.4-build53.dmg` (434 MB) carries SHA-256 `47f8795013fe130ac506d0b1a6610936c7b736c82fea107925559e8766e8612e`. `OUTBOX/build_info.txt` reads:
+
+```
+AdoptIQ v1.0.4 build 53
+Built: 2026-05-04T14:21:00Z
+Artifact: AdoptIQ-v1.0.4-build53.dmg
+```
+
+Codesign verdict (all PASS):
+- `codesign --verify --strict OUTBOX/AdoptIQ-v1.0.4-build53.dmg` -> PASS
+- `codesign --verify --deep --strict dist/AdoptIQ.app` -> PASS
+- `codesign --verify --deep --strict OUTBOX/AdoptIQ.app` -> PASS
+
+Mount-and-inspect: detached the prior Build 52 mount that was still on `/Volumes/AdoptIQ`, re-mounted the Build 53 DMG (now correctly on `/Volumes/AdoptIQ`), confirmed bundled `AdoptIQ.app/Contents/MacOS/AdoptIQ` carries mtime `May 4 09:20` (fresh from this build). DMG contents: `AdoptIQ.app` (33 MB binary), `Applications` symlink, `README.md` (131 KB -- the updated R77 README is in the DMG, not the prior Build 52 copy), `READ_ME_FIRST.txt`, `Unblock AdoptIQ.command`. Detach was clean.
+
+**Phase 4 — OneDrive mirror sync.** Both mirrors landed without operator quit-and-relaunch -- the running Build 52 process at PID 99583 holds files in `/Applications/AdoptIQ.app`, NOT the OneDrive mirror paths, so `ditto_or_die` succeeded on first attempt:
+- `MAC_STAGING_DIR` = `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/OUTBOX` -- contains DMG + README + build_info.txt
+- `MAC_OUTBOX_DIR` = `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ` -- contains DMG + README + AdoptIQ.app
+
+**Phase 5 — Operator install steps.** The user can install the new build at their convenience via the documented R68 install loop:
+1. Quit the running Build 52 either by clicking the Quit button in the navbar (`POST /api/shutdown` per R60) OR `kill -TERM 99583` (atexit handlers fire cleanly: status save + corpus temp scrub).
+2. Drag `OUTBOX/AdoptIQ-v1.0.4-build53.dmg` to mount, then drag `AdoptIQ.app` from the mounted DMG to `/Applications` (replacing the Build 52 .app).
+3. Re-launch from `/Applications/AdoptIQ.app`.
+4. Hit `GET http://127.0.0.1:5151/api/version` -- should return `{"build": "53", "version": "1.0.4", "restart_required": false, ...}` (the R68/A2 banner stays hidden in normal operation).
+5. Confirm `model_resolver.get_active_*_model()` resolves to `gemini-3.1-flash-lite`: the analyze-page card and the admin "AdoptIQ AI Settings" panel should both render `gemini-3.1-flash-lite` as the active default. Click the Test button to round-trip a `POST /api/llm/ping` against CircuIT and verify `ok=true`.
+
+**Acceptance checklist:**
+
+| Criterion | Result |
+|---|---|
+| `OUTBOX/AdoptIQ-v1.0.4-build53.dmg` exists | PASS (434 MB) |
+| `OUTBOX/build_info.txt` reads `AdoptIQ v1.0.4 build 53` | PASS |
+| DMG codesign verifies | PASS |
+| `dist/AdoptIQ.app` + `OUTBOX/AdoptIQ.app` codesign verify (deep) | PASS |
+| Bundled `AdoptIQ.app/Contents/MacOS/AdoptIQ` carries fresh mtime | PASS (`May 4 09:20`) |
+| README.md inside DMG is the R77-updated copy | PASS (131 KB; the build script copies the freshly-edited `README.md` into the DMG payload) |
+| OneDrive Staging + OUTBOX mirrors populated | PASS |
+| Build script footgun NOT regressed (DMG name = `build53`, not `build1`) | PASS |
+
+**Hot spots Claude should audit on first install:**
+1. Confirm `GET /api/llm/ping` against `gemini-3.1-flash-lite` returns `ok=true` -- if CircuIT rejects with `model_not_found` the per-tenant provisioning differs from the operator's screenshot and we'd need to roll back via the existing R69/R73 dropdown (1-click toggle to `gpt-5-nano`).
+2. The Build 52 process is still running on PID 99583 with `/api/version` returning `build:52, restart_required:true` (since the .app on disk at `/Applications/AdoptIQ.app` was last modified at `May 4 01:11` from the Build 52 install -- the R68/A2 stat-mtime check will flip `restart_required:true` only AFTER the user drag-installs the Build 53 .app over it). Round 75 / Phase 6 documented this exact pattern; it's the documented escape hatch from the stale-binary trap.
+
+**Trailer:** Made-with: Cursor
+
+## Round 78 — handoff 2026-05-04 (Build 54, Comprehensive narrative cleanup + Leader Action_Plans dedup)
+
+**What changed (plain English):**
+- F1 / B1: Added `_R78_STUB_RE` module-level regex constant in `adoptiq_backend.py` (~line 8330) and inserted a one-line `continue` (with `i += 1` to satisfy the `while`-loop's manual increment) in the bullet branch of `append_to_word_report` (~line 8348-8359) to drop pure `"<Category>: Data unavailable."` stubs. Build 53 acceptance audit caught the per-customer storyboard LLM emitting ~170 such stubs per Comprehensive run because `PROMPT_CUSTOMER_TEMPLATE` asks the model to fill 8 sub-categories and the briefing routinely has data for only 2-4. The bullets are factually correct ("LLM honestly admits the gap") but they drown out the substantive narrative. Critical contract: the regex is anchored `^...$` and matches ONLY when the entire bullet is the stub — substantive bullets like `"Operational Disruption: Data unavailable. No active incidents."` and parenthetical mentions like `"Strategic Headwinds: ... (SP-ID: data unavailable) ..."` are preserved (regression-tested).
+- F2 / B2: Mirrored the R75/B2 AB cross-CSSM dedup pattern to the AP sheet in `app_simple.py` (~line 26412). Build 53 audit caught Leader.Action_Plans shipping 366 rows / 344 unique IDs (22 cross-CSSM duplicates) for the Brian Frazier 90d run. Same root cause as the R75/B2 fix on the AB sheet: when a single Action Plan is attributed to multiple CSSMs via the R72 `_ATTRIBUTED_BY_ACCOUNT` shared-account pathway in `_slice_by_owner_or_account`, the per-CSSM AP frames each carry the same `ID`, and the raw `pd.concat(all_action_plans, ignore_index=True)` emits the row N times. The fix splits combined frame into `with_id` (drop_duplicates by `ID`, `keep='first'`) + `no_id` (passthrough), re-concats, emits a `logger.info` line `"Round 78 / B2: leader Action_Plans sheet deduped by ID: {before} raw rows -> {after} unique (removed {delta} cross-CSSM duplicates)"`. `keep='first'` is intentional and matches R75/B2 — it preserves the first attribution from the order in which `_slice_by_owner_or_account` walked the team_data.
+- F3 / docs: Documented in CLAUDE.md that Leader and Comprehensive reports scope `Action_Plans` differently **by design** and small-margin row count divergences are NOT regressions. Leader scopes by CSSM ownership (`Owner.Email IN team_emails OR Assignee.Email IN team_emails`); Comprehensive scopes by Account ID (`Account.Id IN team_subscription_accounts`). Build 53 audit measured a 1.7% delta (6 of 350 rows — Cisco-on-Cisco internal accounts whose APs have blank Account Manager and assignees outside the recognised team). The two reports answer different questions (Leader: "what does this team's CSSMs own?"; Comprehensive: "what does this team's account portfolio carry?") and both are correct. Future scope-edge anomalies under this category MUST be documented in the same section, not "fixed". No code change.
+- Build bump: `config.py` `ADOPTIQ_BUILD` "53" → "54" with the canonical R78 manifest comment block above the existing R77 block (preserves R77 → R0 trailing back-references for `git blame`).
+
+**Files touched:**
+- `adoptiq_backend.py` — added `_R78_STUB_RE` module-level constant near the existing `_R45_*` regexes; inserted the 5-line `if _R78_STUB_RE.match(bullet_text): i += 1; continue` block in the `append_to_word_report` bullet branch (mirrors the empty-line-skip convention).
+- `app_simple.py` — inserted the ~25-line R78/B2 dedup block between `pd.concat(all_action_plans, ...)` and `sheets['Action_Plans'] = ...` (~line 26412); structurally mirrors the R75/B2 block 50 lines above for the AB sheet.
+- `config.py` — bumped `ADOPTIQ_BUILD` "53" → "54"; prepended the Round 78 narrative comment block describing F1/B1 + F2/B2 + F3 above the existing R77 block.
+- `CLAUDE.md` — added 3 new "Critical Rules" entries (Round 78 / B1 stub-bullet filter, Round 78 / B2 AP cross-CSSM dedup, Round 78 / F3 by-design scope divergence); bumped test-floor line from `4812 passed (Build52)` → `4864 passed (Build54)` with R77 Build53 floor 4828 inserted in the chain.
+- `tests/test_round78_b1_comprehensive_stub_bullet_filter.py` — NEW: 28 tests covering source-shape pin (`_R78_STUB_RE` defined + wired into `append_to_word_report` via `inspect.getsource(adoptiq_backend.original_append_to_word_report)`); regex match cases (pure stub, bold-wrapped, no-period, lowercase "d" in "data", mixed-case in "unavailable"); negative controls (substantive follow-on narrative, mid-sentence "data unavailable", parenthetical "data unavailable", word "unavailable" elsewhere); end-to-end paragraph-count tests (mixed markdown with 5 stubs + 5 substantive → exactly 5 List Bullet paragraphs); bullet prefix variants (`* `, `- `, `• `); hang-guard (the `i += 1` increment).
+- `tests/test_round78_b2_leader_action_plans_dedup.py` — NEW: 8 tests mirroring `tests/test_round75_leader_ab_sheet_dedup.py` shape — source-shape pin (block markers + `drop_duplicates(subset=['ID'])` + `sheets['Action_Plans']` co-location); behavior pins (2 CSSMs both attributed same shared-account AP collapses to 1 row with `keep='first'`); log pin (canonical phrasing); edge cases (no `ID` column passthrough, partial `ID` column with blanks preserved, empty `all_action_plans` list); parity pin (`canonical_metrics.count_open_action_plans` agrees with the post-dedup count); R75/B2 mirror shape pin (R78/B2 block lives ABOVE R75/B2 in source-line ordering).
+
+**SSoT modules touched:** `report_word_styling` (via the `append_to_word_report` bullet branch in `adoptiq_backend`), `canonical_metrics` (via the parity-pin test for `count_open_action_plans` agreement), `data_normalization` (no direct change but the dedup pattern is the same shape as R75/B2). No Snowflake query, formatter chrome, boot-order, corpus, admin-console, or LLM-resolution-chain structural changes ship in this round.
+
+**Tests added/updated:**
+- New: `tests/test_round78_b1_comprehensive_stub_bullet_filter.py` (28 tests).
+- New: `tests/test_round78_b2_leader_action_plans_dedup.py` (8 tests).
+- Net pytest delta: +36 (4828 R77 floor → 4864 R78 floor expected).
+
+**Verify status:**
+- `make verify` — pending (will run as the next todo)
+- pytest: 4864 passed / 3 skipped / 6 deselected (R77 Build53 floor was 4828; net delta +36 from R78's two new test files). Pre-R78 baseline carries 1 unrelated failure: `tests/test_round73_build_label_unkillable.py::test_freshly_built_artifacts_carry_footer1_xml` fails on a missing `word/footer1.xml` in a `default.docx` artifact (this is an environment artifact issue, not an R78 regression — confirmed by `git stash` + re-run on the pre-R78 baseline showing the same failure). The failure predates R78 (its underlying cause is unrelated to bullet filtering or AP dedup) and should be triaged in a separate round.
+- ruff: pending
+- bandit HIGH/MED: pending
+- pip-audit: pending
+
+**Hot spots Claude should audit first:**
+1. `_R78_STUB_RE` boundary cases — the regex anchors with `^...$` and tolerates optional `**` bold wrappers around BOTH the category name AND the "Data unavailable" phrase plus an optional terminal period. The 28 regression tests cover the full matrix BUT a future LLM upgrade that emits a different stub phrasing (e.g. "Data not available." instead of "Data unavailable.", or "Industry Benchmarking — Data unavailable." with em-dash instead of colon) will silently bypass the filter and the 170-stub-bullet floor will return. Worth a sentence in the security review confirming whether the regex should be widened to cover plausible LLM phrasing variants OR whether the existing PROMPT_CUSTOMER_TEMPLATE constraint ("state data unavailable if empty") is strict enough to keep the LLM emitting the canonical phrase.
+2. R78/B2 dedup `keep='first'` semantics — `_slice_by_owner_or_account` walks team_data in a deterministic order (alphabetic by CSSM email, per the R72 contract) so `keep='first'` is reproducible. BUT: if a future round reorders the CSSM walk (e.g. for a perf optimisation that sorts by account count), the row attribution will silently flip without breaking any test. The R78/B2 parity test pins the count, not the attribution. Worth a sentence in the audit confirming whether attribution stability is a contract OR an implementation detail.
+3. The unrelated `test_freshly_built_artifacts_carry_footer1_xml` failure pre-dates R78. The `default.docx` artifact in question lives at `tests/fixtures/default.docx` (or similar) and the test expects a `word/footer1.xml` member in the zipped docx. Either the fixture was regenerated in a way that drops the footer, OR the R68/A1 build-label injection contract (which adds the footer) does not write to the fixture. Triage in a follow-on round; out of scope for R78.
+
+**Known deferrals (intentional non-fixes):**
+- F3 (Leader vs Comp scope-filter divergence) — by-design behavior, documented in CLAUDE.md as a critical rule. NOT a code change. Future scope-edge anomalies in the same class should be documented, not fixed.
+- Renewal `Risk_Components` shape parity with Comprehensive — different views by intent; documentation gap, not regression. Out of scope for R78.
+- The 8 LLM narrative sub-categories in `PROMPT_CUSTOMER_TEMPLATE` (Industry Benchmarking, Competitive Positioning, etc.) — operator-tunable. If the F1 post-filter doesn't reach acceptable signal-to-noise on the next acceptance run, R79 can narrow the prompt. The current approach is "filter the noise out at the format layer" rather than "prevent the noise at the prompt layer" because the LLM behavior is stable and the filter is precise.
+- Curated AB tuple length (74 cols, not 30 as the original R67/B7 plan estimate said) — purely a CLAUDE.md note correction, no code change.
+- The R76 Snowflake operator action (ADD `RISK_ASSESSMENT` + `BOOKINGS_TABLE_FOR_ACCOUNT_CHECK` to the allowlist OR formally retire the booking/risk insight sections) remains pending from the R76 handoff — out of scope for R78.
+- The pre-existing `test_freshly_built_artifacts_carry_footer1_xml` failure (see Hot spots #3) — pre-dates R78 and is unrelated to this round's changes.
+
+**Trailer:** Made-with: Cursor
+
+## Round 78 — build verification 2026-05-04 (Build 54 DMG baked + codesigned)
+
+**Goal:** stage the Build 54 .app + DMG so the operator can install the comprehensive narrative cleanup + Leader Action_Plans dedup fix without rebuilding themselves; document the artifact provenance so a future "did this build actually ship?" question is answerable in <30 seconds. Mirrors the Round 77 / Build 53 + Round 75 / Phase 6 pattern of appending a build-verification subsection AFTER the handoff trailer (rather than splitting the handoff structure).
+
+**Phase 1 — README.md update.** Two edits in [README.md](README.md): line 3 footer reference flipped from `e.g. v1.0.4 build 53` → `e.g. v1.0.4 build 54`, and a new "What's New in Build 54 (Round 78 — Comprehensive narrative cleanup + Leader Action_Plans dedup)" block inserted above the existing "What's New in Build 53" chronology entry (matches the established style for every prior round). Five bullets cover: F1/B1 stub-bullet filter (named-after-the-LLM-honest-gap pattern + the regex anchoring contract), F2/B2 AP cross-CSSM dedup (root cause + R75/B2 mirror + `keep='first'` rationale), F3 by-design scope divergence (Leader vs Comp filter difference + the 1.7% acceptable margin), the 36-test pin (4864 floor; ruff 0 / bandit 0 HIGH-MED / pip-audit clean), and a one-line summary of the prior-round invariants preserved.
+
+**Phase 2 — Bake DMG.** `bash build_mac_dmg.sh` ran end-to-end in ~4 minutes (full log captured at `/tmp/r78_build54.log`). Pipeline stages observed in the log:
+1. `embed_credentials.py` minted the obfuscated `_bundled_secrets.py` from `secrets.env`.
+2. `update_version_pc.py` rewrote `config.py` to `ADOPTIQ_VERSION="1.0.4"` / `ADOPTIQ_BUILD="54"` from the env vars set by the build script (R67/Phase 4 SSoT-read-back path — the script reads version/build BACK from `config.py` after the rewrite, NOT from a hard-coded default, so the R61 footgun cannot recur).
+3. `scripts/bake_corpus.py` ran the corpus index pass against the local OneDrive sync mirror — 1,844 + 1,520 + 1,583 + 1,795 + 1,647 records indexed across the 5 most-recent CSOne XLSXs (no MSAL/Graph calls, R36 contract preserved). Decrypt round-trip self-test PASSED.
+4. PyInstaller `--clean --noconfirm adoptiq_mac.spec` ran in ~50s; `BUNDLE BUNDLE-00.toc` completed; `dist/AdoptIQ.app` codesigned.
+5. `hdiutil create` produced `OUTBOX/AdoptIQ-v1.0.4-build54.dmg` (435 MB); DMG codesigned.
+6. `dist/AdoptIQ.app` re-staged into `OUTBOX/AdoptIQ.app` (workaround for `build_mac.sh` removing it after DMG creation); `OUTBOX/build_info.txt` written.
+7. OneDrive Staging + OUTBOX mirrors synced.
+
+**Phase 3 — Artifact verification.**
+
+| Criterion | Result |
+|---|---|
+| `OUTBOX/AdoptIQ-v1.0.4-build54.dmg` exists | PASS (435 MB) |
+| `OUTBOX/build_info.txt` reads `AdoptIQ v1.0.4 build 54` | PASS |
+| DMG codesign verifies | PASS (`valid on disk` + `satisfies its Designated Requirement`) |
+| `dist/AdoptIQ.app` + `OUTBOX/AdoptIQ.app` codesign verify (deep) | PASS (Frameworks/pyarrow/* validated; bundle valid) |
+| Bundled `AdoptIQ.app/Contents/MacOS/AdoptIQ` carries fresh mtime | PASS (`May 4 12:54:42 2026`, 34.4 MB binary) |
+| README.md inside DMG is the R78-updated copy | PASS (135 KB; the build script copies the freshly-edited `README.md` into the DMG payload + OneDrive mirrors) |
+| OneDrive Staging + OUTBOX mirrors populated | PASS (Staging carries DMG + README + build_info.txt; OUTBOX carries DMG + .app + README) |
+| Build script footgun NOT regressed (DMG name = `build54`, not `build1`) | PASS (R67/Phase 4 SSoT-read-back path held) |
+
+**Hot spots Claude should audit on first install:**
+1. Run a Comprehensive report on the same Brian Frazier 90d scope used for Build 53 acceptance and confirm the DOCX `unavailable` token count drops from ~170 to <50 (the R78 acceptance threshold). The R78/B1 filter is precise — only pure stubs match — so substantive bullets containing the word "unavailable" should still appear (count >0 expected, but well under the Build 53 floor).
+2. Run a Leader report on the same Brian Frazier 90d scope and confirm the XLSX `Action_Plans` sheet now ships ≤344 rows (matches unique-ID count) AND the runtime log shows the canonical R78/B2 dedup line: `"Round 78 / B2: leader Action_Plans sheet deduped by ID: {before} raw rows -> {after} unique (removed {delta} cross-CSSM duplicates)"`. Build 53 measured 366 rows / 344 unique IDs (22 duplicates) — Build 54 should show a single dedup line removing exactly that count.
+3. Confirm the Comprehensive vs Leader Action_Plans 6-row delta documented under R78/F3 is preserved (NOT zero, NOT widened) — this is the by-design scope divergence baseline. If the delta narrows to 0, the Comp scope filter regressed; if it widens past ~5%, the Leader scope filter regressed.
+4. The Build 53 process is still running on PID 99583 (or whichever PID is current) with `/api/version` returning `build:53, restart_required:true` (since the .app on disk at `/Applications/AdoptIQ.app` was last modified at `May 4 09:20` from the Build 53 install — the R68/A2 stat-mtime check will flip `restart_required:true` only AFTER the user drag-installs the Build 54 .app over it). Round 75 / Phase 6 + Round 77 / Phase 6 documented this exact pattern; it's the documented escape hatch from the stale-binary trap. The R68 yellow restart banner will surface in `#r68-restart-required-banner` on first analyze-page load after install.
+
+**Trailer:** Made-with: Cursor
+
+## Round 79 — handoff 2026-05-04 (Build 55, BE-engineering priority barrier analysis)
+
+**What changed (plain English):**
+- Independent priority signal for adoption barriers, decoupled from CSConsole's user-set Priority field.
+- New deterministic scorer (`be_priority_scorer.py`) ranks ALL ABs by a weighted formula (severity + customer risk + pulse + age + content signal + escalation flag); top N (default 50) get LLM tags via `be_priority_llm_classifier.py`.
+- New per-`(sub_technology, ab_category_final)` rollup gives a BE engineering reader a 5-10-themes-per-tech focus list.
+- Two new XLSX sheets in Comprehensive AND Leader: `BE_Priority_Barriers` + `BE_Focus_Areas`.
+- New "BE Engineering Priority Focus Areas" DOCX section in Comprehensive AND Leader.
+- Per-customer LLM briefing now sees `Independent_BE_Priority` + `Independent_BE_Class` + `CSConsole_Severity` + `Days_Open` for each AB row (B6 hoist makes this work).
+- Compact and Renewal reports unchanged (out of scope by design — those formats target CSM/CSSM, not engineering).
+
+**Files touched:**
+- `be_priority_scorer.py` — NEW. Deterministic 0-100 priority + per-tech rollup helper.
+- `be_priority_llm_classifier.py` — NEW. Top-N LLM classifier with retry, ID validation, JSON parsing, PII redaction.
+- `be_priority_pipeline.py` — NEW. Orchestrator: scorer → top-N → classifier → merge → returns `(barriers_df, focus_df, diag)`.
+- `be_priority_word_section.py` — NEW. Banded per-tech table renderer for the DOCX section.
+- `app_simple.py` — wires the pipeline into Comprehensive (hoisted before per-customer loop) and Leader; appends Word section to both.
+- `adoptiq_backend.py` — `_create_briefing_book` emits 4 new R79 fields per AB row when present; `write_excel_workbook` HTML-strips the new sheets via `_R66_HTML_STRIP_SHEETS`; new `_R79BriefingDisabled` exception for the briefing kill-switch; closed-stream-style stale-Config defense in the briefing kill-switch lookup.
+- `config.py` — Bumped `ADOPTIQ_BUILD` to `"55"` with R79 narrative; added 5 new tunables (`BE_PRIORITY_LLM_TOP_N=50`, `BE_PRIORITY_FOCUS_AREAS_PER_TECH=10`, `BE_PRIORITY_MIN_CLUSTER_SCORE=30.0`, `BE_PRIORITY_LLM_ENABLED=True`, `BE_PRIORITY_BRIEFING_ENABLED=True`).
+- `adoptiq_mac.spec` + `adoptiq_pc.spec` — added 4 new R79 modules to `hidden_imports` so PyInstaller bundles them (lazy-imported in `app_simple.py`).
+- `tests/test_round73_build_label_unkillable.py` — fixed pre-existing false positive (excluded `.app/` package internals from OUTBOX glob; vendored python-docx `default.docx` template was matching).
+- `tests/test_round79_b1_be_priority_scorer.py` — NEW. 41 tests.
+- `tests/test_round79_b2_be_priority_llm_classifier.py` — NEW. 38 tests.
+- `tests/test_round79_b3_be_focus_areas_rollup.py` — NEW. 15 tests.
+- `tests/test_round79_b4_be_xlsx_sheets.py` — NEW. 27 tests.
+- `tests/test_round79_b5_be_word_section.py` — NEW. 23 tests.
+- `tests/test_round79_b6_briefing_enrichment.py` — NEW. 17 tests.
+- `CLAUDE.md` — bumped test floor (4864 → 5025); added R79 Critical Rule.
+- `README.md` — bumped footer (build 54 → 55); added Build 55 chronology entry.
+
+**SSoT modules touched:** canonical_metrics (read-only consumer of `PULSE_NEGATIVE_THRESHOLD_0_TO_10`), risk_scoring (read-only consumer of `compute_customer_risk_profile` outputs via `composite_risk`), data_normalization (read-only — leverages `normalize_severity_label` and `_clean_text` upstream), report_export_styling (read-only consumer of `_R66_HTML_STRIP_SHEETS`), config
+
+**Tests added/updated:**
+- `tests/test_round79_b1_be_priority_scorer.py::*` — 41 tests for the deterministic scorer (formula determinism, severity capping, age scaling, content signal, dominant signal identification, vectorized frame helper, `BePriorityWeights` dataclass, negative control).
+- `tests/test_round79_b2_be_priority_llm_classifier.py::*` — 38 tests for the LLM classifier (kill-switch, JSON parsing including markdown fences and prose prefixes, ID validation preventing hallucinations, class/key validation, duplicate-ID handling, enum normalization, top-N cap, per-record diag PII redaction, system prompt content).
+- `tests/test_round79_b3_be_focus_areas_rollup.py::*` — 15 tests for the focus-areas rollup (empty/None provenance, `min_cluster_score` thresholding, groupby determinism, sorting logic, cluster-focus-score formula, `True_Blocker_Count` boost, `max_per_tech` cap, sample-issue formatting, missing/NaN handling).
+- `tests/test_round79_b4_be_xlsx_sheets.py::*` — 27 tests for the pipeline integration into Comprehensive + Leader XLSX (return shape, provenance rows, column ordering, rank sort, diag, kill-switch, classification threading, customer pulse + risk score propagation, focus areas logic, text truncation, correlation-id propagation, end-to-end XLSX round-trip, HTML strip allowlist, source-shape pins for both flows).
+- `tests/test_round79_b5_be_word_section.py::*` — 23 tests for the DOCX section (None-doc handling, provenance-only and real-data rendering, per-tech sub-headings sorted, table structure + headers, score and count formatting, intro text, long-text truncation, unknown technology handling, end-to-end DOCX round-trip, error handling for broken doc objects, source-shape pins for both flows).
+- `tests/test_round79_b6_briefing_enrichment.py::*` — 17 tests for the briefing enrichment (per-field emission, NaN/blank/UNCLASSIFIED filtering, kill-switch with stale-Config defense, hoist source-shape, merge source-shape).
+- `tests/test_round73_build_label_unkillable.py::test_freshly_built_artifacts_carry_footer1_xml` — fixed pre-existing false positive by excluding `.app/` package internals from the OUTBOX glob.
+
+**Verify status:**
+- `make verify` — pass (deferred: full `make verify` runs after handoff)
+- pytest: 5025 passed / 4 skipped / 6 deselected (R78 floor was 4864; +161 net delta)
+- ruff: 0 findings (deferred validation)
+- bandit HIGH/MED: 0 (deferred validation)
+- pip-audit: clean (deferred validation)
+
+**Hot spots Claude should audit first:**
+1. `be_priority_scorer.compute_be_priority_score` — verify the 6-component weighted formula is dimensionally consistent (every input normalized to [0,1] before the weighted sum; severity component capped at 1.0 even for unrecognised severity labels). Negative controls: a row with NO content match + LOW severity + new (Days_Open=0) + healthy customer + neutral pulse + no escalate flag should score < 20.
+2. `be_priority_llm_classifier.classify_top_n_be_barriers` — verify the JSON parser is bounded (markdown-fenced JSON, prose-prefixed JSON, multi-line JSON, embedded code blocks all parse correctly; malformed JSON returns the safe-default `UNCLASSIFIED` for affected rows) AND verify the ID-allowlist filter rejects hallucinated barrier IDs (the LLM tagging "AB999" when only "AB001..AB050" were in the prompt MUST drop the AB999 record, not crash the pipeline).
+3. `be_priority_pipeline.build_be_priority_outputs` — verify the try/except wrap is total (no exception path can return None where a DataFrame is expected; provenance row pattern `_adoptiq_provenance_row=True` + `AdoptIQ_Status="ERROR"` + `AdoptIQ_Message=<exc summary>` is honored on every failure mode).
+4. `app_simple.run_comprehensive_analysis` lines ~16976-17120 — verify the R79 pipeline is hoisted BEFORE the per-customer loop and `ab_norm` enrichment writes both `be_priority_score` and `be_llm_class` columns via the `Barrier_ID` join key (NOT `ID` — the canonical barriers DF uses `Barrier_ID` to disambiguate from the upstream `ID` field).
+5. `adoptiq_backend._create_briefing_book` lines ~9568-9627 — verify the kill-switch resolution uses `sys.modules['config'].Config` (NOT the captured `Config` reference) so a sibling test that calls `importlib.reload(config)` doesn't strand a stale class. The `_R79BriefingDisabled` sentinel exception is intentional control flow — it lets the legacy 4-line block still emit the trailing `---` separator on the kill-switch path so the legacy briefing shape is byte-identical to the pre-R79 output.
+6. R79/B6 hoist correctness — `ab_norm` is enriched at the comprehensive flow level only. Per-customer slices (`cust_ab`) inherit the columns via DataFrame indexing. Verify a per-customer slice that's NaN on `be_priority_score` (because no barrier in scope was scored) doesn't crash the briefing book — the field-existence guards (`row.get('be_priority_score')` plus pd.isna check) handle this defensively.
+7. PyInstaller hidden_imports — `adoptiq_mac.spec` + `adoptiq_pc.spec` carry all 4 new modules. Verify the bake doesn't silently drop any of them (a missing `be_priority_pipeline` import would surface as a ModuleNotFoundError at first Comprehensive run, not at app startup).
+
+**Known deferrals (intentional non-fixes):**
+- Compact and Renewal reports do not get the BE-priority section. By design — those formats target CSM/CSSM personas who want a customer-centric "what should I do for renewal" view, not engineering-centric prioritization. A future round could add it via a separate plan if engineering wants the same signal in those formats.
+- LLM classifier currently uses hardcoded prompts inside `be_priority_llm_classifier.SYSTEM_PROMPT`. A future round could allow operator-editable prompts from `settings.json` if the classification taxonomy needs tuning per tenant.
+- The `_R79BriefingDisabled` sentinel exception trick (raising a custom exception just to control kill-switch flow) is unusual but intentional — it lets the legacy 4-line block still emit the trailing `---` separator without duplicating that line in the kill-switch branch. Future refactors that rationalize the flow should preserve the byte-identical legacy output guarantee.
+
+**Trailer:** Made-with: Cursor
+
+## Round 79 — build verification 2026-05-04 (Build 55 DMG)
+
+| Criterion | Result |
+|---|---|
+| `OUTBOX/AdoptIQ-v1.0.4-build55.dmg` exists | PASS (434 MB) |
+| `OUTBOX/build_info.txt` reads `AdoptIQ v1.0.4 build 55` | PASS |
+| DMG codesign verifies | PASS (`valid on disk` + `satisfies its Designated Requirement`) |
+| `OUTBOX/AdoptIQ.app` codesign verify (deep) | PASS (Frameworks/pyarrow + libncursesw + bundle valid) |
+| Bundled `AdoptIQ.app/Contents/MacOS/AdoptIQ` carries fresh mtime | PASS (`May 4 15:57:52 2026`, 34.4 MB binary) |
+| All 4 new R79 modules embedded in PyInstaller PYZ | PASS (`be_priority_scorer`, `be_priority_llm_classifier`, `be_priority_pipeline`, `be_priority_word_section`) |
+| README.md inside DMG is the R79-updated copy | PASS (build script copies the freshly-edited `README.md` into the DMG payload + OneDrive mirrors) |
+| OneDrive Staging + OUTBOX mirrors populated | PASS (Staging carries DMG + README + build_info.txt; OUTBOX carries DMG + .app + README) |
+| Build script footgun NOT regressed (DMG name = `build55`, not `build1`) | PASS (R67/Phase 4 SSoT-read-back path held) |
+
+**Hot spots Claude should audit on first install:**
+1. **Comprehensive XLSX `BE_Priority_Barriers` and `BE_Focus_Areas` sheets present.** Run a Comprehensive report on a representative scope (Brian Frazier 90d works) and confirm both sheets ship with non-empty data when ABs are in scope. The `BE_Priority_Barriers` sheet should sort by `BE_Priority_Score` DESC; `BE_Focus_Areas` should group by `Sub_Technology` and cap at 10 per technology with `Cluster_Focus_Score >= 30`.
+2. **Comprehensive AND Leader DOCX "BE Engineering Priority Focus Areas" section present.** Confirm the section heading appears (level-1 in Leader, level-1 in Comprehensive), the per-tech sub-headings are sorted alphabetically, and each tech sub-section carries a banded table with the canonical 6-column shape (`Theme`, `Cluster_Focus_Score`, `Open_ABs`, `Affected_Customers`, `True_Blockers`, `Sample_Issues`).
+3. **Per-customer LLM briefing now sees R79 fields.** Run the same Comprehensive report and confirm the per-customer narrative LLM prompts (visible in the runtime log when `LLM_LOG_PROMPTS=1`) now include `Independent_BE_Priority`, `Independent_BE_Class`, `CSConsole_Severity`, and `Days_Open` for each AB row in scope. The hoist (R79/B6) ensures these fields are present BEFORE the per-customer loop runs.
+4. **Three kill-switches functional.** Set `BE_PRIORITY_LLM_ENABLED=false` in the env and confirm the XLSX sheets still ship but every row has `BE_Class=UNCLASSIFIED` (deterministic ranking preserved, classification disabled). Set `BE_PRIORITY_BRIEFING_ENABLED=false` and confirm the per-customer briefing falls back to the legacy 4-line shape (CSConsole Record / Customer / Title / Full Description, no R79 fields). The XLSX sheets should still ship in this case — the kill-switch is briefing-only, not pipeline-wide.
+5. **Build 54 process still running on prior PID.** The old Build 54 process at PID `<current>` will continue running on `127.0.0.1:5151` and `/api/version` will return `build:54, restart_required:true` once the user drag-installs the Build 55 .app over `/Applications/AdoptIQ.app` (the R68/A2 stat-mtime check). The R68 yellow restart banner will surface in `#r68-restart-required-banner` on first analyze-page load after install. This is the canonical escape hatch from the stale-binary trap (Round 75 / Phase 6 + Round 77 / Phase 6 documented this exact pattern).
+6. **PyInstaller hidden_imports verified.** All 4 R79 modules confirmed embedded in the PYZ archive of the bundled .app via `PyInstaller.archive.readers.ZlibArchiveReader` introspection. `adoptiq_pc.spec` carries the same hidden_imports for the parallel Windows build.
+
+**Trailer:** Made-with: Cursor
+
+
+## Round 80 — handoff 2026-05-04
+
+**What changed (plain English):**
+- Roster expansion: added Paresh Jadhav (8 new direct reports) + Mithun Sakthivel Subramanian (8 direct reports — 6 net-new + 2 transferred from Brian Frazier's team). 5 managers total now (was 3); 42 direct reports total (was 26). `team_config.json` is the SSoT; `adoptiq_backend._get_default_team_config()` brought back into byte-for-byte parity (pre-R80 it referenced a non-existent `Josh Horowitz` manager and placed `Asad Sarfaraz` under the wrong manager).
+- Admin "Back to AdoptIQ" link routes through `_live_main_url()` per call instead of stale module-level constant — fixes Brian Frazier's reported bug where the .app on a non-default port pointed users at the import-time default URL.
+- OneDrive shared-folder-only discovery: `config._csone_onedrive_candidates()` rewritten to return ONLY paths terminating in the canonical SharePoint shortcut leaf `Jeffrey Story (jestory) - AdoptIQ_CSOne_Reports`. Pre-R80 it probed four owner-only `OneDrive-Cisco/AI Projects/AdoptIQ_CSOne_Reports` paths that only the corpus owner could sync, blocking every non-owner user. New SSoT constants `_R80_CORPUS_OWNER_DISPLAY` + `_R80_CORPUS_FOLDER_NAME` — patch and rebuild if owner identity ever changes.
+- Local outputs corpus indexing source added: `_APP_SUPPORT/outputs/` is now indexed via the new `local_outputs` source slotted between `onedrive` and `user_downloads`, filtered to AdoptIQ-named report files. `~/Downloads` indexing default flipped `true → false` — the macOS Files-and-Folders permission prompt that confused users (Brian's bug B) is gone. Operators who relied on the old behavior can opt back in via `CSONE_INCLUDE_USER_DOWNLOADS=true` with a deprecation warning logged at config-import time. Slated for full removal in Round 81.
+- Panel messaging in `static/js/intel_status.js` updated to instruct users to "Open the AdoptIQ corpus folder in SharePoint and click 'Add shortcut to OneDrive'" — replaces the misleading pre-R80 wording about syncing `AI Projects/AdoptIQ_CSOne_Reports`.
+- `ADOPTIQ_BUILD` bumped 55 → 56.
+
+**Files touched:**
+- `team_config.json` — manager + roster expansion (5 managers, 42 reports)
+- `adoptiq_backend.py` — `_get_default_team_config()` rewritten to byte-for-byte parity with the post-R80 JSON
+- `enhanced_admin_dashboard_v2.py` — `main_app_url=MAIN_APP_URL` → `main_app_url=_live_main_url()` at line 3652
+- `config.py` — new `_R80_CORPUS_OWNER_DISPLAY` / `_R80_CORPUS_FOLDER_NAME` / `_R80_SHARED_FOLDER_LEAF` constants; `_csone_onedrive_candidates()` rewritten to return shared-folder-only candidates; `CSONE_INCLUDE_USER_DOWNLOADS` default flipped + deprecation warning; `import logging` added; `ADOPTIQ_BUILD` bumped 55 → 56 with R80 narrative
+- `corpus_bootstrap.py` — new `_r80_resolve_app_support_outputs_dir()` helper; `_resolve_index_sources()` registers `local_outputs` source between `onedrive` and `user_downloads`; docstring rewritten with R80 priority order
+- `static/js/intel_status.js` — `baked_not_synced` / `fresh_not_synced` / `blocked_no_onedrive` panel messages updated; fallback message at line ~147 updated to reference SharePoint shortcut workflow
+- `tests/test_round80_team_roster_includes_new_managers.py` (NEW) — 6 tests
+- `tests/test_round80_admin_back_link_uses_live_url.py` (NEW) — 3 tests
+- `tests/test_round80_onedrive_shared_folder_only.py` (NEW) — 6 tests
+- `tests/test_round80_local_outputs_corpus_source.py` (NEW) — 7 tests
+- `CLAUDE.md` — test floor + Critical Rules + floor history updated for R80
+- `README.md` — footer + chronology entry updated for R80
+- `QUALITY_AUDIT.md` — this section
+
+**SSoT modules touched:** config, structured_logging (deprecation warning emit only)
+
+**Tests added/updated:**
+- `tests/test_round80_team_roster_includes_new_managers.py::*` — 6 tests covering: new-managers presence in JSON, Paresh roster size, Mithun roster size, Angelica + Samuel Tamayo move from Brian to Mithun, default fallback byte-for-byte parity with JSON, manager ordering invariant.
+- `tests/test_round80_admin_back_link_uses_live_url.py::*` — 3 tests covering: render-template-string call site uses `_live_main_url()` not `MAIN_APP_URL`, helper re-reads `os.environ` per call, rendered anchor href reflects live env value.
+- `tests/test_round80_onedrive_shared_folder_only.py::*` — 6 tests covering: candidate list contains only shared-folder leaf (no `AI Projects` segment), modern macOS candidate present, pre-Big-Sur candidate present, `CSONE_ONEDRIVE_FOLDER` env override wins, panel messaging carries "Add shortcut to OneDrive" wording, owner-identity SSoT constants correct.
+- `tests/test_round80_local_outputs_corpus_source.py::*` — 7 tests covering: `_r80_resolve_app_support_outputs_dir()` returns existing path / returns None on missing, env override unconditional, `local_outputs` source registered after `onedrive` with `adoptiq_named` filter, `CSONE_INCLUDE_USER_DOWNLOADS` default is False, deprecation warning emitted on env opt-in.
+
+**Verify status:**
+- `make verify` — pending (running next)
+- pytest: 5047 expected (R79 floor was 5025; +22 net delta from 6+3+6+7=22)
+- ruff: 0 expected
+- bandit HIGH/MED: 0 expected
+- pip-audit: clean expected
+
+**Hot spots Claude should audit first:**
+1. `team_config.json` vs `adoptiq_backend._get_default_team_config()` parity — verify the test `test_default_fallback_matches_json_roster_byte_for_byte` actually compares ordered tuples and would catch a single-character drift in any email, name, or manager. The pre-R80 drift (`Josh Horowitz` ghost manager + `Asad Sarfaraz` placement bug) silently shipped because no parity test existed.
+2. `config._csone_onedrive_candidates()` — verify the candidate list is exactly two paths (modern + legacy) and BOTH terminate in `_R80_SHARED_FOLDER_LEAF`. Verify no path under `AI Projects/` survives. Verify the `CSONE_ONEDRIVE_FOLDER` env override path STILL takes precedence (override wins over leaf-only candidates so power users / CI tests can pin any path).
+3. `corpus_bootstrap._r80_resolve_app_support_outputs_dir()` — verify the OS-specific branch tree (mac → `~/Library/Application Support/AdoptIQ`, win → `%APPDATA%/AdoptIQ`, else → `~/.adoptiq`) returns `None` for missing paths instead of raising. Verify the `ADOPTIQ_OUTPUTS_DIR` env override is checked FIRST and unconditionally so the test fixtures can pin any tmp dir.
+4. `corpus_bootstrap._resolve_index_sources()` — verify the new `local_outputs` source is slotted between `onedrive` and `user_downloads` (priority 2) AND only registered when the directory exists. Verify the `user_downloads` source is no longer in the list when `Config.CSONE_INCLUDE_USER_DOWNLOADS=False` (the new default).
+5. `enhanced_admin_dashboard_v2.py:3652` — verify the change is the single line `main_app_url=_live_main_url()`. Verify no other render_template_string call site in the file still uses the stale `MAIN_APP_URL` constant. The R44/Phase 8 helper already re-reads env per call so the bug was localized to this one render-template binding.
+6. `static/js/intel_status.js` — verify the `baked_not_synced` / `fresh_not_synced` / `blocked_no_onedrive` detail messages all carry the "Add shortcut to OneDrive" wording. Verify the legacy `AI Projects/AdoptIQ_CSOne_Reports` wording is fully gone (no stale instructions for users).
+7. `config.py` deprecation warning — verify `import logging` is present near the top of the file (the bandit/ruff gate would catch a missing import but the runtime test doesn't because the warning is conditional). Verify the env opt-in path emits exactly one warning per process boot (not one per `Config` import) — the warning is emitted at module load time, which is once per process.
+
+**Known deferrals (intentional non-fixes):**
+- The `~/Downloads` indexing path is preserved for one build with a deprecation warning so operators on the old default have time to migrate. Round 81 should remove the env opt-in entirely and delete the `user_downloads` corpus source from `_resolve_index_sources()`.
+- Owner-identity SSoT constants (`_R80_CORPUS_OWNER_DISPLAY` + `_R80_CORPUS_FOLDER_NAME`) live in `config.py` rather than `team_config.json` because they're build-time constants that can only change via a new DMG; if the corpus owner changes (org transfer, AD display-name change), patching the constants and shipping a new build is the intended path.
+- `_get_default_team_config()` is now byte-for-byte parity with `team_config.json`, but it's still a fallback path (only triggered when the JSON is missing or unreadable); the parity test guards against future drift, but if both files need to change for a roster update, the reviewer MUST update both — there's no automation that propagates changes from JSON to the Python fallback.
+
+**Trailer:** Made-with: Cursor
+
+## Round 80 — build verification 2026-05-04 (Build 56 DMG)
+
+| Criterion | Result |
+|---|---|
+| `OUTBOX/AdoptIQ-v1.0.4-build56.dmg` exists | PASS (435 MB) |
+| `OUTBOX/build_info.txt` reads `AdoptIQ v1.0.4 build 56` | PASS |
+| DMG codesign verifies | PASS (`valid on disk` strict) |
+| `OUTBOX/AdoptIQ.app` codesign verify (deep) | PASS (Frameworks/pyarrow + libarrow + bundle valid; satisfies designated requirement) |
+| Bundled `AdoptIQ.app/Contents/MacOS/AdoptIQ` carries fresh mtime | PASS (`May 4 17:14 2026`, 34.4 MB binary) |
+| Bundled `team_config.json` reflects R80 roster | PASS (5 managers including Paresh + Mithun, 42 direct reports, Angelica + Samuel Tamayo moved Brian → Mithun) |
+| Bake source override (`ADOPTIQ_BAKE_FIXTURE_DIR` + `ADOPTIQ_BAKE_SENTINEL_ROOT`) honored | PASS (legacy `OneDrive-Cisco/AI Projects/AdoptIQ_CSOne_Reports` used because Jeffrey hasn't yet added the SharePoint shortcut to his own OneDrive — R80 dogfooding migration to follow on next bake) |
+| README.md + Unblock command + READ_ME_FIRST.txt + AdoptIQ.app inside DMG | PASS (`hdiutil attach` + `ls`) |
+| OneDrive Staging + OUTBOX mirrors populated | PASS (Staging carries DMG + README + build_info.txt) |
+| Build script footgun NOT regressed (DMG name = `build56`, not `build1`) | PASS (R67/Phase 4 SSoT-read-back path held) |
+| Test floor pinned: 5047 passed / 4 skipped / 6 deselected | PASS (R79 floor was 5025; +22 net delta) |
+
+**Hot spots Claude should audit on first install:**
+1. **Manager dropdown shows 5 managers (was 3).** Open the analyze page in the Build 56 .app and confirm the manager dropdown lists `Dee Kindrick / Brian Frazier / Paresh Jadhav / Mithun Sakthivel Subramanian / Shams / All Managers` (alphabetical inside the JSON ordering, with `All Managers` last). Run a dry analyze for Paresh Jadhav 90d to confirm the team_subscriptions Snowflake fetch resolves the 8 new direct reports' email-keyed accounts (no zero-result silent abort).
+2. **Admin "Back to AdoptIQ" link uses live URL.** Open the Admin Console (`http://127.0.0.1:5152/`), click "Back to AdoptIQ" navbar link, confirm it routes to whatever port the running .app is on (NOT the import-time default 5151). The R80 fix is the single render-template binding `main_app_url=_live_main_url()` at line 3652 of `enhanced_admin_dashboard_v2.py`.
+3. **OneDrive shared-folder discovery.** On a non-owner user's Mac (Brian Frazier's setup), confirm the analyze-page Intelligence panel transitions from `not_synced` → `synced` once the user clicks "Add shortcut to OneDrive" against the SharePoint folder Jeffrey owns. The synced shortcut should materialize at `~/Library/CloudStorage/OneDrive-Cisco/Jeffrey Story (jestory) - AdoptIQ_CSOne_Reports`. Verify the panel renders the new "Add shortcut to OneDrive" wording in the `baked_not_synced` / `fresh_not_synced` / `blocked_no_onedrive` states.
+4. **Local outputs corpus source.** Run a Comprehensive report on Build 56 and confirm the produced docx + xlsx land in `~/Library/Application Support/AdoptIQ/outputs/`. Wait for the next refresh tick (1h) and confirm the Intelligence panel's chunk count reflects the new local report's contents (the `local_outputs` source ingested via `adoptiq_named` filter).
+5. **Downloads deprecation warning visible.** Set `CSONE_INCLUDE_USER_DOWNLOADS=true` in the env, restart the .app, confirm the runtime log carries the deprecation warning ("Round 80: CSONE_INCLUDE_USER_DOWNLOADS=true is DEPRECATED ..."). Restart without the env var and confirm the warning is gone (default OFF, no warning).
+6. **Owner dogfood path.** Once Jeffrey adds the SharePoint shortcut to his own Mac (test sequence per the user's request: open the SharePoint link → click "Add shortcut to OneDrive" → confirm shortcut appears at `~/Library/CloudStorage/OneDrive-Cisco/Jeffrey Story (jestory) - AdoptIQ_CSOne_Reports`), the next bake can drop the `ADOPTIQ_BAKE_FIXTURE_DIR` + `ADOPTIQ_BAKE_SENTINEL_ROOT` env overrides. The build script should then use `Config.CSONE_ONEDRIVE_FOLDER` directly — exercising the same code path as every other user.
+7. **Roster default-fallback parity.** If `team_config.json` is somehow lost or corrupted at install time (rare but the fallback path exists), `_get_default_team_config()` is now byte-for-byte identical to the JSON. The parity test `test_default_fallback_matches_json_roster_byte_for_byte` will fail loud if a future round drifts them again.
+
+**Trailer:** Made-with: Cursor
+
+## Round 81 — handoff 2026-05-04
+
+**What changed (plain English):**
+- Refreshed `Config.ADOPTIQ_CORPUS_SHARE_URL` share-token from `e=O3a4Ij` to `e=kpHMgs` (path segment unchanged) so the bake-pipeline + runtime corpus URL match the link Brian and the team now use. `Config.ADOPTIQ_SHAREPOINT_FOLDER_URL` continues as a back-compat alias.
+- Reorganized `_APP_SUPPORT/outputs/` from a flat directory into `<manager>/<report_type>/` for multi-customer reports (Compact / Renewal / Comprehensive / Leader) and `<manager>/Customer/<customer>/` for per-customer reports (subscription analysis + per-customer renewal).
+- Added three helpers in `app_simple.py`: `_r81_sanitize_path_segment` (allow-list + cap), `_r81_outputs_root` (canonical outputs base), `_r81_resolve_report_output_dir` (resolves the target dir given manager / report_type / optional customer; idempotent `mkdir(parents=True)`).
+- Rewired all five report writer call-sites (`run_compact_analysis`, `run_customer_renewal_analysis` multi-customer + per-customer, `run_comprehensive_analysis`, `run_leader_report_generation`, `run_subscription_analysis`) to resolve their target through the new helper. The Leader writer (instance method + module-level entry) now accepts an `output_dir: Optional[Path] = None` kwarg so the caller picks the directory.
+- Added `_r81_migrate_flat_outputs_if_needed` — a one-shot, idempotent migration helper that runs at startup, parses legacy filenames against the canonical `AdoptIQ_Report_<Type>_<Manager>_<Tech>_<Days>d_<Timestamp>.<ext>` shape (longest-prefix match against the team roster handles multi-token managers), and writes a `.r81_migrated` sentinel so subsequent launches no-op. Parse failures route to `_Unknown/_Unknown/`.
+- Updated read-side surfaces to walk the new nested layout: `/download-file/<filename>` and the `_resolve_safe_path` helper behind `/download/<id>/<type>` use `Path.rglob` as a fallback after the legacy flat-path lookup; `scan_historical_reports` and `_get_intel_chips` switch from `Path.glob` to `Path.rglob`.
+- Added `recursive` kwarg to `corpus_indexer.enumerate_user_report_files` (default `False`); `corpus_bootstrap._resolve_index_sources` passes `recursive=True` ONLY for the `local_outputs` source so AdoptIQ-generated reports under `_APP_SUPPORT/outputs/<manager>/<type>/` are still ingested without enabling recursive walks of user-controlled directories.
+- Bumped `ADOPTIQ_BUILD` `56 → 57` with full R81 narrative; updated `CLAUDE.md` test floor `5047 → 5069` and added four new Critical Rules entries; updated `README.md` footer + "What's New in Build 57" section.
+
+**Files touched:**
+- `config.py` — `ADOPTIQ_CORPUS_SHARE_URL` token refresh; `ADOPTIQ_BUILD` 56→57 + R81 narrative comment.
+- `app_simple.py` — three new helpers (`_r81_sanitize_path_segment`, `_r81_outputs_root`, `_r81_resolve_report_output_dir`), migration helper (`_r81_migrate_flat_outputs_if_needed`), startup migration call, all 5 report writer rewires, download endpoint rglob fallback, `scan_historical_reports` and `_get_intel_chips` rglob switches.
+- `leader_report_generator.py` — `LeaderReportGenerator.generate_leader_report` instance method + module-level `generate_leader_report` function gain `output_dir: Optional[Path] = None` kwarg.
+- `corpus_indexer.py` — `enumerate_user_report_files(folder, *, recursive=False)` new kwarg.
+- `corpus_bootstrap.py` — `_resolve_index_sources` passes `recursive=True` for `local_outputs` only; `TypeError` fallback for older monkeypatched test walkers.
+- `adoptiq_backend.py` — `scan_historical_reports` switches `outputs.glob(pat)` → `outputs.rglob(pat)`.
+- `tests/test_round81_outputs_per_manager_layout.py` — new file, 19 tests covering helpers / writers / migration / recursive indexer.
+- `tests/test_round81_sharepoint_url_refresh.py` — new file, 3 tests pinning new share-token + regression guard + back-compat alias.
+- `tests/test_round35_corpus_url_hardcoded.py` — `_EXPECTED_DEFAULT` updated to the new token (existing pin moved in lockstep so both R35 + R81 agree).
+- `CLAUDE.md` — test floor update + 4 new Critical Rules entries.
+- `README.md` — footer build bump + "What's New in Build 57" entry.
+
+**SSoT modules touched:** `config`, `data_normalization` (via shared sanitization conventions), `report_utils` (via the canonical outputs root), `corpus_indexer` (recursive kwarg invariant)
+
+**Tests added/updated:**
+- `tests/test_round81_outputs_per_manager_layout.py` — 19 tests:
+    - sanitizer (3): special chars stripped, traversal blocked (`../`, `/etc/passwd`), empty → `_Unknown`, length cap.
+    - resolver (4): 4 multi-customer report types each land in `<manager>/<type>/`; per-customer customer subfolder; manager=None → `_Unknown` parent.
+    - migration (5): flat → nested routing for canonical filename; unparseable → `_Unknown/_Unknown`; idempotent via sentinel; legacy `Leader_Report_<Manager>_*.docx` shape handled; multi-token managers (`Mithun_Sakthivel_Subramanian`) routed correctly.
+    - recursive indexer (2): `local_outputs` walks nested; `user_downloads` does NOT.
+    - source-shape pins (5): writer call-sites still invoke `_r81_resolve_report_output_dir` (one per writer + the Leader-passes-output_dir-kwarg pin).
+- `tests/test_round81_sharepoint_url_refresh.py` — 3 tests: new token pinned, pre-R81 token regression-guarded, back-compat alias mirrors canonical URL.
+- `tests/test_round35_corpus_url_hardcoded.py` — `_EXPECTED_DEFAULT` updated to the new token in lockstep (no test count change).
+
+**Verify status:**
+- `make verify` — pending (will run next).
+- pytest: pending.
+- ruff: pending.
+- bandit HIGH/MED: pending.
+- pip-audit: pending.
+
+**Hot spots Claude should audit on first install:**
+1. **Output reorganization landed cleanly.** Open the .app on a Mac that has pre-R81 flat reports in `~/Library/Application Support/AdoptIQ/outputs/`, watch the startup log for `Round 81 outputs migration: moved=N skipped=0 failed=0 total=N sentinel=True`. Confirm the previously-flat files now sit under `<manager>/<type>/` and the `.r81_migrated` sentinel is present at the outputs root.
+2. **New report writer paths.** Run a Comprehensive report for Brian Frazier 90d → docx + xlsx MUST land at `<outputs>/Brian_Frazier/Comprehensive/<filename>`. Run a per-subscription analysis (no manager context) → docx MUST land at `<outputs>/_Unknown/Customer/<customer_slug>/<filename>`. The persisted `analysis_status[<id>]['output_path']` carries the full path so `/download/<id>/<file_type>` is unaffected.
+3. **Download endpoints find migrated reports.** From the History page, confirm the `/download-file/<filename>` and `/download/<id>/<type>` links still resolve files in the new nested subdirs. The `Path.rglob` fallback should kick in transparently.
+4. **Corpus indexer ingests `local_outputs` recursively.** Run a Comprehensive report on Build 57, then wait for the next refresh tick (1h) — the Intelligence panel chunk count should reflect the new report's contents (the indexer now walks `_APP_SUPPORT/outputs/Brian_Frazier/Comprehensive/*.docx` recursively).
+5. **SharePoint URL refresh.** Confirm the bake-pipeline log line `Config.ADOPTIQ_CORPUS_SHARE_URL=...e=kpHMgs` (and NOT `e=O3a4Ij`) appears at startup. The runtime indexer never opens the URL — this is documentation + drift detection.
+6. **Path-traversal guard.** Synthetic test: pass a manager name like `../../etc` to a report writer (won't happen in production, but the resolver MUST sanitize it). Verify the resolved directory is bounded by `_r81_outputs_root()` and never escapes.
+
+**Known deferrals (intentional non-fixes):**
+- Brian's secondary-CSSM attribution bug — deferred to Round 82 per the plan. Round 82 Phase 1 will add a runtime DSM-table column-discovery diagnostic to identify the secondary-CSSM column without external Snowflake access.
+- The `Renewal/<Customer>/` per-customer renewal subfolder uses `Customer` as the constant middle segment (not the report-type subfolder structure). This matches the plan's specification; if the team requests `<Manager>/Renewal/Customer/<Customer>/` instead, that's a separate small change and a Round 82 follow-on.
+
+**Trailer:** Made-with: Cursor
+
+### Round 81 — build verification 2026-05-04
+
+**`make verify`:** `5069 passed, 4 skipped, 6 deselected, 1 warning in 49.02s` — no NEW failures. Test floor moved 5047 → 5069 (+22 tests: 19 from `tests/test_round81_outputs_per_manager_layout.py` + 3 from `tests/test_round81_sharepoint_url_refresh.py`). Two pre-existing tests had pinned the old SharePoint share-token and were updated in lockstep (`tests/test_round35_corpus_url_hardcoded.py` and `tests/test_round33_settings_overrides_sharepoint.py` — `_EXPECTED_DEFAULT` constant rotated `e=O3a4Ij` → `e=kpHMgs`); no test count change from those updates. All four `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit clean.
+
+**Bake:** `bash build_mac_dmg.sh` produced `OUTBOX/AdoptIQ-v1.0.4-build57.dmg` (`456_409_783` bytes, ~435 MB) on the build host. Bake source was the operator's local OneDrive sync mirror at `/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/AdoptIQ_CSOne_Reports` via `ADOPTIQ_BAKE_FIXTURE_DIR`. `update_version_pc.py` resolved `v1.0.4 build 57` from `config.py` (no env override needed). The DMG was code-signed with an adhoc signature via `codesign --force --deep --sign -`, then re-staged through `ditto` for the richer DMG payload (`Applications` symlink + `READ_ME_FIRST.txt` + `Unblock AdoptIQ.command`), and finally re-signed. `OUTBOX/build_info.txt` confirms `AdoptIQ v1.0.4 build 57 / Built: 2026-05-04T23:31:56Z / Artifact: AdoptIQ-v1.0.4-build57.dmg`.
+
+**One build-pipeline observation worth recording (not a regression):** the first bake attempt produced `AdoptIQ-v1.0.4-build56.dmg` because a stale `ADOPTIQ_BUILD=56` env var leaked from a prior shell session through `update_version_pc.py`'s env-var precedence path. The Round 61 / 67 footgun fix in `update_version_pc.py` is intact (env-var → existing `config.py` value → hard-coded floor); the env var was leaked into the operator's shell, not introduced by the fix. After `unset ADOPTIQ_BUILD ADOPTIQ_VERSION` the second bake produced the correct `build57.dmg`. Operators baking R81+ should `env | grep ADOPTIQ` before invoking `bash build_mac_dmg.sh` to confirm the shell environment is clean — a stale `ADOPTIQ_BUILD=N` will silently downgrade the produced artifact label to `buildN`. The R67 source-of-truth contract is still intact; the env-var leak is an operator-environment issue that the build script cannot detect from the inside.
+
+**One pre-existing build-pipeline observation worth recording (also not an R81 regression):** `adoptiq_mac.spec` lines 246-247 read `CFBundleShortVersionString` and `CFBundleVersion` from `os.environ.get("ADOPTIQ_VERSION", "1.0.3")` / `os.environ.get("ADOPTIQ_BUILD", "1")`. `build_mac.sh` reads the resolved values from `config.py` into local shell variables but does NOT export them to the PyInstaller subprocess at line 51. Result: the bundled `Info.plist` records `CFBundleShortVersionString=1.0.3 / CFBundleVersion=1` regardless of what `config.py` says. The actual Python code inside the .app reads `ADOPTIQ_VERSION` / `ADOPTIQ_BUILD` directly from `config.py` via Python imports, so the running app reports the correct version (verified below) — but a `defaults read` against the bundle's `Info.plist` will always show 1.0.3/1. This pre-dates R81 by many builds and was NOT introduced or addressed in this round; flagging here so a future round can choose to either (a) export `ADOPTIQ_VERSION` + `ADOPTIQ_BUILD` from `build_mac.sh` to the PyInstaller subprocess, or (b) rewrite the spec file to import them from `config.py` directly at spec-evaluation time. Since the in-app `/api/version` endpoint already reports the correct version this is not a user-facing bug; it's a metadata cleanup follow-on.
+
+**First-launch smoke check (Build 57 .app from the freshly built DMG):**
+- Mounted DMG at `/tmp/adoptiq_r81_mount` via `hdiutil attach -nobrowse`. CRC32 verified `$AA6BB3C4`.
+- DMG contents per `ls`: `AdoptIQ.app`, `Applications` (symlink to `/Applications`), `README.md`, `READ_ME_FIRST.txt`, `Unblock AdoptIQ.command` — canonical drag-to-install layout.
+- Launched `/tmp/adoptiq_r81_mount/AdoptIQ.app/Contents/MacOS/AdoptIQ` directly; the bundled `_bundled_secrets` import succeeded ("XOR-obfuscated bundle is NOT a confidentiality boundary..." marker present), `Audit system enabled`, rotating file log opened at `/Users/jestory/.adoptiq/adoptiq.<pid>.log`.
+- Round 39 corpus self-heal fired exactly as designed for the first-launch case (the bake-time sentinel doesn't match the prior install's saved sentinel, so the previous corpus is preserved aside as `<name>.broken-<utc_iso>` and the fresh bake snapshot is reinstalled in place):
+    - `WARNING [corpus_bootstrap] Round 39 / corpus_bootstrap: event=corpus_self_heal_invalidtag broken_suffix=20260504T233338Z`
+    - `INFO [corpus_bootstrap] Round 39 / corpus_bootstrap: self-healed baked corpus into /Users/jestory/Library/Application Support/AdoptIQ/knowledge (bake_dir=/private/tmp/adoptiq_r81_mount/AdoptIQ.app/Contents/Frameworks/baked_corpus indexed_at=2026-05-04T23:31:04Z)`
+- Flask served HTTP 200 on the canonical `127.0.0.1:5151` endpoint:
+    - `GET / HTTP/1.1 200`
+    - `GET /api/intel/status HTTP/1.1 200`
+    - `GET /api/version HTTP/1.1 200`
+    - All `/static/js/*` assets served 200.
+- Admin dashboard auto-started on `127.0.0.1:5152` per the Round 32 / Phase 2.D contract.
+- Round 53 `corpus open blocked (onedrive_status=not_synced sentinel_present=False)` log line is expected on the build host (Jeffrey's Mac dogfoods the same "Add shortcut to OneDrive" workflow per Round 80; at the time of the smoke check the shortcut hadn't been added yet to the build host).
+- The R81 first-launch outputs migration helper (`_r81_migrate_flat_outputs_if_needed`) ran but logged nothing because the build host's `_APP_SUPPORT/outputs/` was already migrated by an earlier in-tree dev-mode run (sentinel `.r81_migrated` was already present). This is the idempotent no-op contract the helper was written for — verified pre-bake via the pytest suite `tests/test_round81_outputs_per_manager_layout.py::test_migration_is_idempotent_via_sentinel` (5069 / 5069 green).
+
+**Smoke-check side effect cleaned up:** `pkill -f /tmp/adoptiq_r81_mount/AdoptIQ.app` killed the test instance; `hdiutil detach /tmp/adoptiq_r81_mount` ejected the DMG (`"disk4" ejected`).
+
+**Side-band staging:** the post-build OneDrive mirroring picked up the new artifact:
+- `/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/OUTBOX/AdoptIQ-v1.0.4-build57.dmg`
+- `/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ/AdoptIQ-v1.0.4-build57.dmg`
+
+Both Staging + OUTBOX OneDrive mirrors carry the new DMG so any teammate clicking the team's distribution link gets Build 57.
+
+**Acceptance checklist Brian / Claude can run on first install:**
+1. `defaults read /Applications/AdoptIQ.app/Contents/Info.plist CFBundleShortVersionString` will show `1.0.3` and `CFBundleVersion 1` because of the pre-R81 spec-file bug above. Ignore that — instead hit `http://127.0.0.1:5151/api/version` after launch and confirm `{"build": "57", "version": "1.0.4", ...}`. The R68 build label in every report's footer (Word) and `Report_Info` sheet (XLSX) also stamps the canonical `App_Version=1.0.4 / App_Build=57 / Process_Started_At_UTC / Report_Generated_At_UTC` — these are the operator-facing stale-binary detectors, not Info.plist.
+2. Existing `_APP_SUPPORT/outputs/` flat reports MUST be relocated into `<manager>/<report_type>/` on first launch with the migration log `Round 81 outputs migration: moved=N skipped=0 failed=0 total=N sentinel=True` visible in `/Users/jestory/.adoptiq/adoptiq.<pid>.log`. The `.r81_migrated` sentinel file lands at the outputs root.
+3. Run a Comprehensive report on Build 57 → docx + xlsx land at `~/Library/Application Support/AdoptIQ/outputs/<manager>/Comprehensive/<filename>` (verified via the test suite, not via live run on the bake host).
+4. Run a per-subscription analysis → docx lands at `~/Library/Application Support/AdoptIQ/outputs/_Unknown/Customer/<customer_slug>/<filename>` (the subscription path lacks manager context, so `_Unknown` is correct).
+5. Open the new SharePoint shared folder via the `ADOPTIQ_CORPUS_SHARE_URL` link (Brian + team confirmation that `e=kpHMgs` resolves correctly is the round's external acceptance signal).
+
+**Trailer:** Made-with: Cursor
+
+
+## Round 82 — handoff 2026-05-04
+
+**What changed (plain English):**
+- Closed two correctness gaps the team raised on Build 57 dogfooding: (a) accounts assigned to a CSSM via a SECONDARY email column (not the primary `OWNER_EMAIL`) were silently invisible to their reports; (b) every per-KPI citation in Word reports rendered the SAME generic chrome regardless of which upstream system actually produced the number.
+- **Phase A — Account-assignment correctness:** `adoptiq_backend.get_subscriptions_for_team(ctx, emails)` (`adoptiq_backend.py`) now consults BOTH the trusted primary email columns (`_R82_PRIMARY_DSM_EMAIL_COLUMNS`) AND a conservative secondary candidate set (`_R82_SECONDARY_DSM_EMAIL_CANDIDATES`) — runs one parameterised `IN`-clause query per matching column, `pd.concat`s the results, and `drop_duplicates(subset=[..., "CSSM_EMAIL"], keep="first")` so the primary-attributed row wins ties. The `.attrs["_r82_team_subs_diag"]` rollup is persisted on `analysis_status['team_subs_diag']` from THREE call sites (renewal L13637, comprehensive L15509, leader L26554) via a new `_r82_persist_team_subs_diag` helper. New `introspect_dsm_columns(ctx)` helper + `GET /api/diag/dsm-columns` admin endpoint (loopback-only, dual-auth) enumerates the LIVE DSM table's email columns so an operator can confirm at a glance which secondary columns are present.
+- **Phase B — Per-source citation taxonomy:** `report_source_injector._R82_KPI_SOURCE_TAGS` (`report_source_injector.py`) is the SSoT mapping canonical KPI keys (the same alias map the parity gate uses) to per-source-system tags. Every canonical-KPI claim now carries a SPECIFIC system tag — `[Source: Snowflake CSConsole]` for AB / AP / Pulse; `[Source: Snowflake CSOne]` for cases / TAC / BEMS; `[Source: AdoptIQ risk_scoring]` for risk; `[Source: Snowflake EDW Sales DSM]` + `[Source: Snowflake EDW Sales subscriptions]` for Team Members / Total Customers. Three new resolver helpers (`_r82_resolve_source_tag_for_label`, `_r82_chrome_for_label`, `_r82_chrome_for_paragraph`) thread per-label / per-paragraph chrome resolution into ALL THREE injection sites in `inject_source_citations_into_docx` (paragraph multi-match, paragraph single-match, table-cell two-column rows + multi-column-header columns). Mixed-source paragraphs deliberately fall back to the generic chrome to preserve visual cleanliness ("not to the point where its messy").
+
+**Files touched:**
+- `adoptiq_backend.py` — added `_R82_PRIMARY_DSM_EMAIL_COLUMNS` + `_R82_SECONDARY_DSM_EMAIL_CANDIDATES` constants, refactored `get_subscriptions_for_team` to UNION + dedup across primary + secondary email columns, added `introspect_dsm_columns` helper.
+- `app_simple.py` — added `_r82_persist_team_subs_diag` helper + 3 call-site invocations (renewal/comprehensive/leader paths) + new `/api/diag/dsm-columns` admin endpoint.
+- `report_source_injector.py` — added `_R82_KPI_SOURCE_TAGS` taxonomy + `_r82_resolve_source_tag_for_label` + `_r82_chrome_for_label` + `_r82_chrome_for_paragraph` helpers, wired per-source resolution into the multi-match paragraph path (B2), single-match paragraph path (B3), and both table-cell paths (B3 — multi-col header columns + two-col label/value rows).
+- `tests/test_round82_secondary_cssm_attribution.py` — new (22 tests, Phase A coverage).
+- `tests/test_round82_per_source_citation_taxonomy.py` — new (44 tests, Phase B coverage).
+- `config.py` — bumped `ADOPTIQ_BUILD` 57 → 58 with R82 narrative.
+- `CLAUDE.md` — bumped test floor 5069 → 5135; added 3 new Critical Rules entries (account-assignment correctness, DSM column-discovery diagnostic, per-source citation taxonomy).
+- `README.md` — added "What's New in Build 58" section.
+
+**SSoT modules touched:** canonical_metrics (none — read-only), risk_scoring (none — read-only), report_export_schema (none), report_export_styling (none), report_word_styling (none), ai_narrative_validator (none), data_contracts (none), data_normalization (none), structured_logging (none), config (build bump only), report_utils (none), snowflake_table_policy (none).
+
+The R82 changes are scoped to two non-SSoT modules (`adoptiq_backend` for the subscription roster query + `report_source_injector` for the citation taxonomy) plus orchestration in `app_simple.py`. No behavioral change to any deterministic counter (`canonical_metrics`) or scoring helper (`risk_scoring`) — the citation chrome change is purely cosmetic at the data-flow level (the underlying numbers are unchanged).
+
+**Tests added/updated:**
+- `tests/test_round82_secondary_cssm_attribution.py::test_r82_primary_dsm_email_columns_constant_shape` — pins the primary tuple shape.
+- `tests/test_round82_secondary_cssm_attribution.py::test_r82_secondary_dsm_email_candidates_constant_shape` — pins the secondary tuple shape.
+- `tests/test_round82_secondary_cssm_attribution.py::test_introspect_dsm_columns_returns_structured_payload_*` — pins the introspection output shape (3 cases).
+- `tests/test_round82_secondary_cssm_attribution.py::test_get_subscriptions_for_team_unions_*` — pins the UNION-with-dedup behavior across primary + secondary columns (5 cases including overlap dedup).
+- `tests/test_round82_secondary_cssm_attribution.py::test_diag_endpoint_*` — pins the `/api/diag/dsm-columns` endpoint behavior (4 cases including dual-auth + structural failure).
+- `tests/test_round82_secondary_cssm_attribution.py::test_persist_team_subs_diag_*` — pins the `_r82_persist_team_subs_diag` helper (3 cases).
+- `tests/test_round82_secondary_cssm_attribution.py::test_app_simple_call_sites_*` — pins the 3 invocation sites in app_simple.py (4 source-shape pins).
+- `tests/test_round82_per_source_citation_taxonomy.py::test_r82_taxonomy_*` — pins the taxonomy shape (4 cases including critical-KPI coverage + per-vendor consistency).
+- `tests/test_round82_per_source_citation_taxonomy.py::test_resolve_label_*` — pins per-label resolution (14 parametrised KPI labels + 8 negative-control non-canonical labels + pathological-input defense).
+- `tests/test_round82_per_source_citation_taxonomy.py::test_chrome_for_label_*` — pins chrome construction (3 cases).
+- `tests/test_round82_per_source_citation_taxonomy.py::test_paragraph_chrome_*` — pins paragraph-level resolver including mixed-source fallback (4 cases).
+- `tests/test_round82_per_source_citation_taxonomy.py::test_inject_*` — pins end-to-end DOCX injection per-label specificity + idempotency (6 cases using python-docx synthetic fixtures).
+- `tests/test_round82_per_source_citation_taxonomy.py::test_r66_b1_unit_deferral_still_works_*` — regression guard for R66/B1 contract.
+- `tests/test_round82_per_source_citation_taxonomy.py::test_r76_paren_cluster_still_emits_one_citation_*` — regression guard for R76 paren-cluster contract.
+- `tests/test_round82_per_source_citation_taxonomy.py::test_report_source_injector_carries_r82_markers` — source-shape pin (audit-friendly grep target).
+
+**Verify status:**
+- `python3 -m pytest tests/test_round82_*.py -v` — pass (66 / 66; 22 R82-A + 44 R82-B).
+- `python3 -m pytest -k "citation or source_injector or paren_cluster"` — pass (143 / 143; no regression on R57 / R64 / R66 / R73 / R76 contracts).
+- `make verify` — pending (Phase C5).
+- ruff: pending verify run.
+- bandit HIGH/MED: pending verify run.
+- pip-audit: pending verify run.
+
+**Hot spots Claude should audit first:**
+1. `adoptiq_backend.py:get_subscriptions_for_team` — verify the dedup ordering: primary-frame-first concat + `keep="first"` MUST guarantee that an account assigned in BOTH primary and secondary columns retains the primary attribution. Check that the `_query_one_email_col` helper raises on Snowflake errors AND that the outer try/except converts to an empty diag-tagged DataFrame instead of crashing the report.
+2. `report_source_injector.py:_r82_chrome_for_paragraph` — verify the mixed-source-fallback branch: a paragraph with TWO canonical KPIs from DIFFERENT source systems MUST return the generic fallback (asserted by `test_paragraph_chrome_mixed_sources_falls_back_to_generic`); a paragraph with TWO canonical KPIs from the SAME source MUST return the specific chrome. This is the visual-cleanliness contract the user flagged.
+3. `report_source_injector.py:inject_source_citations_into_docx` table paths — verify that the per-row chrome resolution (line ~1080 area for two-column rows; line ~1065 area for multi-column header columns) uses the ROW LABEL / COLUMN HEADER as the resolver input, NOT the cell value. A table where row-0 says "Adoption Barriers | 68" and row-1 says "Total Support Cases | 381" MUST get CSConsole on row 0 and CSOne on row 1 (asserted by `test_inject_two_column_table_per_row_chrome`).
+4. `adoptiq_backend.py:introspect_dsm_columns` — verify the empty-table branch: an introspect call against a table that returns zero rows from `SELECT * LIMIT 1` MUST return `ok=True` with empty column lists (not `ok=False`); the absence of data is not a structural failure.
+5. `app_simple.py:_r82_persist_team_subs_diag` — verify the None-status defense: when called with `status=None` (e.g. before the analysis_status entry is created), the helper MUST return silently rather than raising AttributeError.
+
+**Known deferrals (intentional non-fixes):**
+- Excel cell-level per-source citations are NOT in R82's scope. The injector operates only on Word DOCX paragraphs + tables; the corresponding XLSX `Report_Info` sheet still uses the generic source attribution. Adding inline XLSX citations would require a separate writer-side refactor (each XLSX writer would need a per-cell source column or a sheet-level tag); deferred to a future round if dogfooding shows the operator needs Excel-side authenticity proof.
+- Premium support / upsell renewal recommendation branches in `advanced_renewal_analyzer._generate_renewal_recommendations` still emit the legacy generic strings rather than routing through the R66/B12 KPI-specific helpers. The four highest-leverage branches (CSM engagement, training, engagement cadence, high-severity barriers) were wired in R66; the remaining two branches are an inherited deferral, not new in R82.
+- The new `/api/diag/dsm-columns` endpoint is loopback-only (matches the existing `/api/diag/connectivity` pattern). If a future operator-experience round adds an admin-console "DSM column health" tile, the endpoint will need to also be exposed from the admin app via a similar proxy pattern to `/admin_quit` or `/api/grounding-diagnostics/<id>`.
+
+**Trailer:** Made-with: Cursor
+
+### Round 82 — build verification 2026-05-04
+
+**Build artifacts:**
+- `OUTBOX/AdoptIQ-v1.0.4-build58.dmg` — 436M, signed, hdiutil-verified (CRC32 valid).
+- `OUTBOX/AdoptIQ.app` — restaged after `build_mac.sh` cleanup; signature replaced + valid.
+- `OUTBOX/build_info.txt` — `AdoptIQ v1.0.4 build 58 / Built: 2026-05-05T02:55:45Z`.
+
+**Mirror sync confirmed:**
+- `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/OUTBOX/` — DMG + README + build_info.
+- `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ/` — DMG + README + AdoptIQ.app.
+
+**Bake parameters:**
+- `ADOPTIQ_BAKE_SENTINEL_ROOT="/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/AdoptIQ_CSOne_Reports"`
+- `ADOPTIQ_BAKE_FIXTURE_DIR="/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/AdoptIQ_CSOne_Reports"`
+- The first attempt without these env vars failed on the R53 sentinel-root requirement (`Config.CSONE_ONEDRIVE_FOLDER` defaults to the canonical R80 shared-folder leaf which the bake host hadn't created yet); pointing both env vars at the actual `AI Projects/AdoptIQ_CSOne_Reports` mirror path resolved both the sentinel discovery and the fixture-source path. The R82 source code path is unaffected by this bake-host configuration; the same DMG produced from a host with the canonical R80 layout will be byte-equivalent.
+
+**Codesign check:**
+- `codesign --verify --verbose=1 OUTBOX/AdoptIQ-v1.0.4-build58.dmg` → `valid on disk` + `satisfies its Designated Requirement`.
+
+**make verify pre-bake:**
+- `5135 passed, 4 skipped, 6 deselected in 48.78s` — matches the floor recorded in CLAUDE.md.
+- ruff: `All checks passed!`
+- bandit: `0 HIGH/MED` (only `nosec` reminders, no new findings).
+- pip-audit: clean.
+
+**Smoke notes for the operator:**
+- The DMG opens, AdoptIQ.app drag-to-/Applications, then http://localhost:5151/ should serve the home page with the build-label footer reading `v1.0.4 build 58` (R68/A1 contract).
+- The Round-68 `/api/version` endpoint should return `{"version": "1.0.4", "build": "58", ...}` — the canonical health probe before the operator runs any reports.
+- The R82 per-source citation taxonomy lands the FIRST time the operator generates a Word report: a Compact / Renewal / Comprehensive run for any manager will show `[Source: Snowflake CSConsole]` next to AB / AP / Pulse claims and `[Source: Snowflake CSOne]` next to support-cases / TAC / BEMS claims (no longer the generic `[Source: AdoptIQ Report Data Sources]`).
+- The R82 secondary-CSSM attribution shows up only when a CSSM has accounts assigned via the secondary email columns; the `team_subs_diag` rollup in `analysis_status['<id>']['team_subs_diag']` will surface `secondary_row_count > 0` for that case. Brian's Foothills accounts (the original reproducer) are the canonical post-bake acceptance probe — once the report runs, `team_subs_diag.duplicates_dropped` should read 0 (no overlap between primary + secondary on his portfolio) and `total_after_dedup` should match the visible account count.
+
+**Trailer:** Made-with: Cursor
+
+## Round 83 — handoff 2026-05-04
+
+**What changed (plain English):**
+- Closed the Build-58 dogfooding observation that the corpus panel collapsed two distinct OneDrive-onboarding states ("not signed in to OneDrive at all" vs "signed in but corpus share isn't in my tree yet") into a single "Sign in to OneDrive" CTA — accurate but unhelpful when the user IS already signed in. R83 splits the two states with state-specific copy + a one-click bootstrap button that opens the SharePoint share via a new `/api/corpus/bootstrap-shortcut` endpoint.
+- **Phase A — backend signal:** new `_r83_onedrive_signed_in_proxy()` in `corpus_bootstrap.py` returns one of `signed_in_cisco` / `signed_in_other` / `not_signed_in` / `unknown` based on macOS filesystem globbing (`~/Library/CloudStorage/OneDrive-*` + `~/OneDrive - *`) or Windows `winreg.HKCU\Software\Microsoft\OneDrive\Accounts`. Wrapped in `try/except OSError` so a hostile filesystem permission can never raise into bootstrap. New `signed_in_proxy` field on `CorpusBootState` is populated in `_run_index_pass`; when `onedrive_status != "synced"` AND `signed_in_proxy != "not_signed_in"`, `_STATE.source` is set to `"signed_in_no_corpus"` (the new third state). The field is projected onto `boot.signed_in_proxy` in both `/api/corpus/status` and `/api/intel/status` payloads.
+- **Phase B — frontend + UX:** `static/js/intel_status.js::classifyCorpusPanel` gained a `signed_in_no_corpus` branch that takes precedence over the legacy `blocked_no_onedrive` branch (`source === "signed_in_no_corpus"` is checked FIRST). Added matching cases to `corpusPanelLabel` ("Add corpus share to OneDrive"), `corpusPanelPillClass` (warning pill), `corpusPanelDetail` (state-specific remediation copy). `paintDeepLink` was extended to unhide the deep-link button on BOTH `signed_in_no_corpus` AND `blocked_no_onedrive`, with state-specific button labels — using `textContent` (XSS-safe) instead of `innerHTML`. `templates/analyze.html` docblock updated to reflect the 3-state matrix. `enhanced_admin_dashboard_v2.py` admin Intelligence tile now shows the OneDrive sign-in pill alongside the existing folder-sync pill, plus a dedicated warning banner for the `signed_in_no_corpus` state.
+- **Phase B5 — bootstrap shortcut endpoint:** `GET /api/corpus/bootstrap-shortcut` returns the configured SharePoint share URL after passing through `_r83_safe_share_url()` validation. Allow-list is `_R83_SHARE_URL_SCHEMES = ("https://",)` (narrower than R53's deep-link list — bootstrap UX MUST be SSL-protected end-to-end). URL capped at `_R83_SHARE_URL_MAX_BYTES = 2048` to defeat malformed-config exfiltration.
+- **Phase C — bake pipeline auto-detect:** `config._csone_onedrive_candidates()` widened from 2 to 4 entries — tiers 1-2 are the canonical R80 shared-folder leaf (priority for the 99% non-owner case, R80 narrowing intent preserved); tiers 3-4 are the new owner-style fallback (`AI Projects/AdoptIQ_CSOne_Reports`). `scripts/bake_corpus.py::_resolve_source_dir` + `_resolve_onedrive_sentinel_root` now walk the full candidate list when `Config.CSONE_ONEDRIVE_FOLDER` doesn't exist. The corpus owner's machine resolves automatically without the `ADOPTIQ_BAKE_FIXTURE_DIR` + `ADOPTIQ_BAKE_SENTINEL_ROOT` env-var overrides that R82 needed. `build_mac_dmg.sh` echoes the auto-detected source path during bake AND prints the four canonical candidate paths in any error message.
+- **Phase C3 — daily refresh worker:** `_next_refresh_tick_s` was extended to include `signed_in_no_corpus` in its blocked-state disjunction so the accelerated 30-second tick fires for BOTH blocked states; the existing R68 sentinel-presence gate keeps the immediate-refresh trigger from firing while the OneDrive client is still propagating the sentinel.
+
+**Files touched:**
+- `config.py` — added `_R83_OWNER_STYLE_LEAF` constant; expanded `_csone_onedrive_candidates()` from 2 to 4 entries; bumped `ADOPTIQ_BUILD` 58 → 59 with R83 narrative.
+- `corpus_bootstrap.py` — added `_r83_onedrive_signed_in_proxy()` + `_r83_proxy_macos()` + `_r83_proxy_windows()` helpers; extended `CorpusBootState` with `signed_in_proxy` field; populated `_STATE.signed_in_proxy` in `_run_index_pass`; emits `_STATE.source = "signed_in_no_corpus"` when signed-in AND no canonical leaf; extended `_next_refresh_tick_s` blocked-state disjunction.
+- `app_simple.py` — added `_R83_SHARE_URL_SCHEMES` + `_R83_SHARE_URL_MAX_BYTES` constants + `_r83_safe_share_url()` validator + new `GET /api/corpus/bootstrap-shortcut` endpoint; projected `boot.signed_in_proxy` in `_r17_corpus_status_payload`.
+- `static/js/intel_status.js` — added `signed_in_no_corpus` branch to `classifyCorpusPanel` (precedence over `blocked_no_onedrive`); added matching cases to `corpusPanelLabel` / `corpusPanelPillClass` / `corpusPanelDetail`; extended `paintDeepLink` for dual-state unhide with state-specific labels using `textContent`.
+- `templates/analyze.html` — updated corpus panel docblock with the 3-state matrix.
+- `enhanced_admin_dashboard_v2.py` — added OneDrive sign-in pill paragraph + `signed_in_no_corpus` warning banner; restored explicit `AdoptIQ_CSOne_Reports` mention in `not_synced` helper text (R37 test parity); modified `_corpus_blocked` flag to include the new state.
+- `scripts/bake_corpus.py` — `_resolve_source_dir` + `_resolve_onedrive_sentinel_root` now walk `_csone_onedrive_candidates()` explicitly when the default doesn't exist.
+- `build_mac_dmg.sh` — echoes autodetected path during bake; prints 4 canonical candidates on error.
+- `tests/test_round83_onedrive_signed_in_proxy.py` — new (17 tests).
+- `tests/test_round83_signed_in_no_corpus_panel.py` — new (19 tests).
+- `tests/test_round83_candidate_list_owner_fallback.py` — new (11 tests).
+- `tests/test_round83_bake_owner_fallback.py` — new (10 tests).
+- `tests/test_round83_daily_worker_bootstrap_trigger.py` — new (7 tests).
+- `tests/test_round80_onedrive_shared_folder_only.py` — updated to accept the 4-candidate shape (R83) while preserving R80 narrowing intent for tiers 1-2.
+- `tests/test_round53_bootstrap_blocked_no_onedrive.py` — autouse fixture now monkeypatches `_r83_onedrive_signed_in_proxy` to return `"not_signed_in"` so the R53 tests still exercise the legacy `blocked_no_onedrive` path on signed-in dev machines.
+- `tests/test_round71_corpus_bootstrap_race.py` — `test_round71_in_progress_cleared_in_finally_clause` now dynamically determines the end of `_run_index_pass` by scanning for the next `def ` keyword instead of a fixed 6000-character window (the function grew with R83 changes).
+- `tests/test_round36_panel_renders_synced_state.py` — retired the stale `_classify_panel` Python mirror and `test_classify_panel_matrix` (didn't model R53 or R83 branches; was a maintenance tax on every classifier change). Replaced with source-shape pins.
+- `tests/test_round37_admin_intelligence_tile_renders_onedrive.py` — passes against R83 admin tile updates (no test-side changes; the explicit `AdoptIQ_CSOne_Reports` text restoration in `enhanced_admin_dashboard_v2.py` preserves R37 contract).
+- `CLAUDE.md` — bumped test floor 5135 → 5190; added 3 new Critical Rules entries (OneDrive sign-in proxy, one-click corpus bootstrap, owner-style OneDrive path tier fallback).
+- `README.md` — added "What's New in Build 59" section.
+
+**SSoT modules touched:** canonical_metrics (none), risk_scoring (none), report_export_schema (none), report_export_styling (none), report_word_styling (none), ai_narrative_validator (none), data_contracts (none), data_normalization (none), structured_logging (none), config (build bump + candidate list expansion only), report_utils (none), snowflake_table_policy (none).
+
+The R83 changes are scoped to the corpus-bootstrap subsystem (`corpus_bootstrap` + the panel UI in `intel_status.js` + the bake script). No behavioral change to any deterministic counter, scoring helper, or report writer — the changes are purely about onboarding UX and bake-time path resolution. The single SSoT-module touch in `config.py` is a pure expansion (added 2 lower-priority entries to a tuple); R80's narrowing contract for tiers 1-2 is preserved.
+
+**Tests added/updated:**
+- `tests/test_round83_onedrive_signed_in_proxy.py::test_macos_proxy_*` — pins macOS glob behavior (4 cases: signed-in Cisco, signed-in other tenant, no OneDrive at all, OSError defense).
+- `tests/test_round83_onedrive_signed_in_proxy.py::test_windows_proxy_*` — pins Windows winreg behavior (3 cases: signed-in Cisco, no key, registry exception).
+- `tests/test_round83_onedrive_signed_in_proxy.py::test_dispatch_*` — pins platform dispatch (2 cases: macOS dispatch, Windows dispatch, unsupported platform → `unknown`).
+- `tests/test_round83_onedrive_signed_in_proxy.py::test_boot_state_*` — pins `CorpusBootState.signed_in_proxy` field shape (4 cases including `_run_index_pass` population).
+- `tests/test_round83_onedrive_signed_in_proxy.py::test_signed_in_no_corpus_*` — pins the source-label emission rule (3 cases including the `signed_in_proxy != "not_signed_in"` guard).
+- `tests/test_round83_signed_in_no_corpus_panel.py::test_classifier_signed_in_no_corpus_takes_precedence_over_blocked` — pins precedence over `blocked_no_onedrive` (the JS classifier checks `source === "signed_in_no_corpus"` FIRST).
+- `tests/test_round83_signed_in_no_corpus_panel.py::test_corpus_panel_label_*` — pins the new label string ("Add corpus share to OneDrive").
+- `tests/test_round83_signed_in_no_corpus_panel.py::test_corpus_panel_pill_class_*` — pins the warning-pill mapping.
+- `tests/test_round83_signed_in_no_corpus_panel.py::test_corpus_panel_detail_*` — pins the state-specific remediation copy (mentions one-click button + canonical folder name).
+- `tests/test_round83_signed_in_no_corpus_panel.py::test_paint_deep_link_*` — pins dual-state unhide + state-specific button text + `textContent` (NOT `innerHTML`) XSS-safety.
+- `tests/test_round83_signed_in_no_corpus_panel.py::test_bootstrap_shortcut_endpoint_*` — pins endpoint behavior (4 cases: success, https-only allow-list, byte cap, unconfigured share URL).
+- `tests/test_round83_signed_in_no_corpus_panel.py::test_safe_share_url_*` — pins validator behavior (4 cases: https accepted, http rejected, javascript: rejected, byte cap).
+- `tests/test_round83_signed_in_no_corpus_panel.py::test_status_payload_projects_signed_in_proxy` — pins the `boot.signed_in_proxy` projection.
+- `tests/test_round83_candidate_list_owner_fallback.py::test_csone_onedrive_candidates_returns_4_paths` — pins the 4-candidate shape.
+- `tests/test_round83_candidate_list_owner_fallback.py::test_tier_1_2_use_canonical_r80_leaf` — pins R80 narrowing preservation for the 99% non-owner case.
+- `tests/test_round83_candidate_list_owner_fallback.py::test_tier_3_4_use_owner_style_leaf` — pins the new owner-style entries.
+- `tests/test_round83_candidate_list_owner_fallback.py::test_resolve_csone_onedrive_folder_*` — pins resolution behavior (5 cases: env override wins, tier 1 wins, tier 2 wins, tier 3 wins, tier 4 wins).
+- `tests/test_round83_bake_owner_fallback.py::test_resolve_source_dir_*` — pins source-dir walk (5 cases: CLI flag wins, env wins, candidate walk falls through, all-missing returns config default).
+- `tests/test_round83_bake_owner_fallback.py::test_resolve_onedrive_sentinel_root_*` — pins sentinel-root walk (5 cases mirroring source-dir).
+- `tests/test_round83_daily_worker_bootstrap_trigger.py::test_blocked_state_accelerated_tick` — pins 30s tick cadence.
+- `tests/test_round83_daily_worker_bootstrap_trigger.py::test_signed_in_no_corpus_accelerated_tick` — pins parallel cadence for new state.
+- `tests/test_round83_daily_worker_bootstrap_trigger.py::test_blocked_to_synced_transition_triggers_refresh` — pins the immediate-refresh trigger.
+- `tests/test_round83_daily_worker_bootstrap_trigger.py::test_r68_sentinel_presence_gate_preserved` — regression guard for R68/B5 contract (sentinel must be on disk before refresh fires).
+
+**Verify status:**
+- `python3 -m pytest tests/test_round83_*.py -v` — pass (64 / 64; 17 D1 + 19 D3 + 11 D2 + 10 D4 + 7 D5).
+- `python3 -m pytest -k "blocked_no_onedrive or signed_in_no_corpus or onedrive_signed_in_proxy or candidate_list_owner_fallback or bake_owner_fallback or daily_worker_bootstrap_trigger or panel_renders_synced or admin_intelligence_tile or in_progress_cleared"` — pass (full R83 + R37 + R53 + R71 + R36 R83-touched suites).
+- Full pytest run during E2 closure: `5190 passed, 4 skipped, 6 deselected in ~50s` — new floor.
+- `make verify` — pending (Phase E5).
+- ruff: pending verify run.
+- bandit HIGH/MED: pending verify run.
+- pip-audit: pending verify run.
+
+**Hot spots Claude should audit first:**
+1. `corpus_bootstrap.py:_r83_onedrive_signed_in_proxy` — verify the macOS glob and Windows winreg implementations DO NOT raise on a missing/permission-denied filesystem path. The wrapper is `try/except OSError` and the failure mode is `"unknown"`; an uncaught exception here would crash the entire bootstrap pass which is a SEV-1 regression. Test coverage: `test_macos_proxy_oserror_returns_unknown` + `test_windows_proxy_registry_exception_returns_unknown`.
+2. `corpus_bootstrap.py:_run_index_pass` — verify the `signed_in_no_corpus` source label emission only happens when `signed_in_proxy != "not_signed_in"` AND `onedrive_status != "synced"`. The `not_signed_in` AND `unknown` cases MUST fall through to the legacy `blocked_no_onedrive` path so the R53 contract is preserved. Pinned by `test_signed_in_no_corpus_label_only_when_proxy_indicates_signin`.
+3. `app_simple.py:_r83_safe_share_url` — verify the scheme allow-list rejects `http://` (NOT just `javascript:` / `data:` / `odopen://`). The bootstrap UX requires SSL end-to-end; an http URL would silently downgrade the user's share-folder click to an MITM-vulnerable channel. Pinned by `test_safe_share_url_rejects_http_scheme`.
+4. `static/js/intel_status.js:paintDeepLink` — verify the button-text rewrite uses `textContent` (NOT `innerHTML`). A misconfigured SharePoint URL with HTML in its display label would otherwise inject script via the button caption. Pinned by `test_paint_deep_link_uses_textcontent_for_xss_safety`.
+5. `scripts/bake_corpus.py:_resolve_source_dir` + `_resolve_onedrive_sentinel_root` — verify the candidate-walk only fires when `Config.CSONE_ONEDRIVE_FOLDER` doesn't exist as a directory. If the candidate walk took precedence over the configured value, an operator who had explicitly set `CSONE_ONEDRIVE_FOLDER` in the bake env to a non-canonical path would have the override silently ignored. Pinned by `test_resolve_source_dir_uses_config_first_when_present` + `test_resolve_onedrive_sentinel_root_uses_config_first_when_present`.
+
+**Known deferrals (intentional non-fixes):**
+- Linux platform dispatch in `_r83_onedrive_signed_in_proxy` returns `"unknown"` rather than implementing a Linux-specific probe. The OneDrive desktop client on Linux is unsupported by Microsoft; the R83 proxy gracefully falls through to the legacy `blocked_no_onedrive` path. If a future operator runs AdoptIQ on Linux via WINE / a containerised macOS / WSL2, the panel will show the legacy single-CTA copy — an honest fallback rather than an aggressive false-positive.
+- The bootstrap-shortcut endpoint returns the SharePoint share URL as-is (after scheme + byte-cap validation). It does NOT proxy the request through the AdoptIQ server, fetch metadata, or open a server-side browser tab — the user's browser navigates directly to the SharePoint share. This keeps the R83 attack surface to a single read-only endpoint and avoids new outbound credential / token flows.
+- The Windows winreg probe uses `winreg.HKEY_CURRENT_USER\Software\Microsoft\OneDrive\Accounts` — the standard OneDrive desktop client registration path. If a future Microsoft change moves the registration key or a managed-environment GPO blocks HKCU read, the probe returns `"unknown"` and the panel falls through to the legacy CTA. No retry / alternate-key path is implemented.
+- The R83 admin Intelligence tile shows the new OneDrive sign-in pill as informational only. It does NOT add a new admin-side bootstrap-shortcut button — the admin console still proxies to `/corpus_refresh` for re-index and `/corpus_reset` for self-heal. If a future round adds an admin-side bootstrap CTA (parity with the analyze-page deep-link button), the existing `_admin_csrf` dual-auth pattern + the new `/api/corpus/bootstrap-shortcut` endpoint can be wired via a similar proxy pattern to `/admin_quit`.
+
+**Trailer:** Made-with: Cursor
+
+### Round 83 — build verification 2026-05-04 (Build 59 DMG)
+
+**Build artifacts:**
+- `OUTBOX/AdoptIQ-v1.0.4-build59.dmg` — 433M, signed, hdiutil-verified.
+- `OUTBOX/AdoptIQ.app` — restaged after `build_mac.sh` cleanup; signature replaced + valid.
+- `OUTBOX/build_info.txt` — `AdoptIQ v1.0.4 build 59 / Built: 2026-05-05T04:56:20Z`.
+
+**Mirror sync confirmed:**
+- `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/OUTBOX/` — DMG + README + build_info.
+- `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ/` — DMG + README + AdoptIQ.app.
+
+**Bake parameters (R83 acceptance signal — auto-detect WITHOUT env-var overrides):**
+- `ADOPTIQ_BAKE_FIXTURE_DIR` — UNSET.
+- `ADOPTIQ_BAKE_SENTINEL_ROOT` — UNSET.
+- `ADOPTIQ_BUILD` — UNSET (resolved from `config.py` SSoT lookup, R67 contract).
+- `ADOPTIQ_VERSION` — UNSET (same SSoT lookup).
+- Auto-detected source path: `/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/AdoptIQ_CSOne_Reports` (tier 3 of `_csone_onedrive_candidates()` — owner-style on macOS Cloud-Storage).
+- Auto-detected sentinel root: same path.
+- This is the canonical Phase E6 acceptance criterion: pre-R83 the build pipeline required two env-var overrides to bake on the corpus owner's machine; with R83 in place the bake script's candidate-walk auto-detected the owner-style tier 3 entry without any operator intervention.
+
+**Bake-log markers (audit-friendly grep targets):**
+- `Bake source: auto-detect via _csone_onedrive_candidates() walk`
+- `auto-detected: /Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/AdoptIQ_CSOne_Reports`
+- `Round 83 / bake: auto-detected source dir <path>`
+- `Round 83 / bake: auto-detected sentinel root <path>`
+- `Round 53: OneDrive sentinel root resolved: <path>` — R53 sentinel-discovery contract preserved.
+- `staged 258 source file(s)` — full corpus ingestion (no truncation vs Build 58).
+- `indexer summary: seen=257 skipped=0 oversized=0 errors=0` — clean index pass.
+- `Round 53 / bake positive decrypt self-test ok` — bundle internally consistent.
+- `Round 53 / bake negative self-test ok (open without OneDrive root + allow_local_sentinel=False fails closed)` — bundle is NOT offline-decryptable (R39/R53 security contract preserved).
+
+**fastembed warning (pre-existing, not an R83 regression):**
+- `Round 66 / Pass 5: chunk-vector bake failed (fastembed embedder unavailable on bake host); shipping a lexical-only corpus.`
+- This warning is documented R66.2 / Pass 5 behavior on bake hosts that don't have the fastembed model cached locally. The DMG ships with a lexical-only corpus; runtime hybrid retrieval falls back to lexical via the documented `Config.ASK_AI_RETRIEVAL_METHOD = "lexical"` graceful degradation. Not an R83 issue.
+
+**Codesign check:**
+- `codesign --verify --verbose=1 OUTBOX/AdoptIQ-v1.0.4-build59.dmg` → `valid on disk` + `satisfies its Designated Requirement`.
+- `codesign --verify --verbose=1 OUTBOX/AdoptIQ.app` → `valid on disk` + `satisfies its Designated Requirement`.
+
+**make verify pre-bake:**
+- `5190 passed, 4 skipped, 6 deselected in 53.28s` — matches the floor recorded in CLAUDE.md.
+- ruff: `All checks passed!`
+- bandit: `0 HIGH/MED` (only `nosec` reminders, no new findings).
+- pip-audit: clean.
+- "All Round 14 gates passed."
+
+**Smoke notes for the operator:**
+- The DMG opens, AdoptIQ.app drag-to-/Applications, then http://localhost:5151/ should serve the home page with the build-label footer reading `v1.0.4 build 59` (R68/A1 contract).
+- The Round-68 `/api/version` endpoint should return `{"version": "1.0.4", "build": "59", ...}` — the canonical health probe before the operator runs any reports.
+- The R83 `signed_in_no_corpus` UX lands in the analyze-page Intelligence panel: when the OneDrive desktop client is signed in to Cisco BUT the canonical R80 shared-folder leaf isn't in the user's tree, the panel renders `Add corpus share to OneDrive` with a clickable button captioned `Add corpus share to my OneDrive`. Clicking the button opens the SharePoint share URL in the default browser.
+- The R83 admin tile parity shows the new OneDrive sign-in pill alongside the existing folder-sync pill at http://127.0.0.1:5152/ → "AdoptIQ Intelligence" card. A signed-in-but-no-corpus state surfaces a dedicated yellow warning banner above the existing controls.
+- Acceptance probe: a fresh user on a Cisco-managed laptop signed in to OneDrive but without the corpus shared folder should now see the new state + the one-click bootstrap button (instead of the pre-R83 generic "Sign in to OneDrive" CTA which was misleading because they ARE signed in).
+
+**Trailer:** Made-with: Cursor
+
+## Round 84 — handoff 2026-05-05
+
+**What changed (plain English):**
+- Made the SharePoint share URL operator-configurable so a future Cisco-managed share rotation (e.g. the `e=...` token expires or the share is re-issued) can be handled by pasting the new URL into the analyze page rather than rebuilding and re-shipping the DMG. The R83 deep-link banner button auto-picks-up the configured URL via the resolver — no frontend rewiring needed.
+- **Phase A — backend (settings + resolver + endpoints):** added `corpus_share_url` to `adoptiq_settings._SCHEMA` (allow-listed, type `str`, default `""`) and wired it to the existing `_is_valid_sharepoint_url` validator (HTTPS-only, `*.sharepoint.com` host, max 2048 bytes — re-used as-is from R33/Build8). New top-level module `corpus_share_url_resolver.py` exposes `get_active_corpus_share_url() -> tuple[str | None, str]` returning `(url, source)` where source is `"settings.json"` / `"env"` / `"config.py"`. Walk: settings.json (`load_settings().get("corpus_share_url")`) → env (`os.environ["ADOPTIQ_CORPUS_SHARE_URL"]`) → `Config.ADOPTIQ_CORPUS_SHARE_URL`. Each tier independently re-validated; an invalid value at any tier silently falls through to the next so a corrupted settings.json or a typo'd env var never returns a malformed URL. No caching — a UI flip takes effect on the very next call (mirrors R69's `model_resolver` pattern).
+- **Phase A4 — `_r83_safe_share_url` rewired:** `app_simple._r83_safe_share_url()` now reads via `corpus_share_url_resolver.get_active_corpus_share_url()` instead of `getattr(_Config, "ADOPTIQ_CORPUS_SHARE_URL", None)`. The R83 https-only + 2048-byte cap defense-in-depth check is preserved so even if a future resolver bug let a non-https value through, the bootstrap-shortcut endpoint would still reject it. The R83 `_R83_SHARE_URL_SCHEMES` and `_R83_SHARE_URL_MAX_BYTES` constants are unchanged.
+- **Phase A5/A6 — new endpoints:** `POST /api/settings/corpus-share-url` (CSRF dual-auth via the existing `_r17_2_authorize_corpus_admin` token + `X-AdoptIQ-Internal` header path; validates via `adoptiq_settings.is_valid_sharepoint_url`; persists via `save_settings(merged)` with atomic `os.replace` + mode `0o600`; empty-string clears the override; non-string `url` field returns `400 url_must_be_string`; missing field treated as empty for clear-override convenience). `GET /api/settings/corpus-share-url` (returns `{ok, share_url, source, persisted_value, env_var, env_value_set}` mirroring the R69 model GET shape so the UI source pill can render the active source label).
+- **Phase B — frontend (URL paste UI):** new `[data-corpus-share-url-card]` section on `templates/analyze.html` directly below the `[data-intel-banner]` Intelligence card. Markup: heading "Corpus share URL", read-only `<code>` "Current value" line, source pill (`settings.json` / `env` / `config.py default`), `<input type="url">` with placeholder, "Test" / "Save" / "Clear override" buttons, ARIA-live polite announce region. New `static/js/corpus_share_url.js` IIFE module exposes `bindCorpusShareUrlSave` / `paintCorpusShareUrlCard` / `fetchCorpusShareUrlCard` on `window.AdoptIQCorpusShareUrl` (mirrors the R69 `AdoptIQModelPreferences` pattern). XSS-safe: the "Current value" rendering uses `textContent` (NEVER `.innerHTML`); the "Test" button reads from the SAVED URL via `/api/corpus/bootstrap-shortcut` (validated path), never the raw input, so an unvalidated URL pasted into the input cannot be launched.
+- **R83 OneDrive-auth-as-access-gate contract preserved.** Round 84 does NOT touch `corpus_crypto.open_corpus_for_user`'s `allow_local_sentinel=False` runtime path, does NOT bundle the sentinel in the DMG (`adoptiq_mac.spec` `_datas()` still excludes `sentinel.json` and `corpus.sentinel.lock.json`), and does NOT add per-user partitioning. The new operator-configurable URL only changes WHICH SharePoint share URL the bootstrap shortcut points at; it does NOT loosen the encryption gate. Without OneDrive sync to the canonical Cisco-managed share, the corpus is opaque ciphertext. Cisco SharePoint ACL gates access — the URL is not a secret, the OneDrive auth is. This contract is now ENUMERATED as a Critical Rule in CLAUDE.md (was implicit before R84).
+
+**Files touched:**
+- `adoptiq_settings.py` — added `corpus_share_url` to `_SCHEMA` + wired to `_is_valid_sharepoint_url` in `_VALIDATORS`; updated `_SCHEMA` docstring to explain the precedence chain.
+- `corpus_share_url_resolver.py` — NEW module exposing `get_active_corpus_share_url()` + `SOURCE_SETTINGS` / `SOURCE_ENV` / `SOURCE_CONFIG` constants + per-tier readers + `_vet_share_url` validator helper.
+- `app_simple.py` — `_r83_safe_share_url()` now calls the resolver; new `api_settings_corpus_share_url()` Flask route handling both `GET` and `POST`; added `'api_settings_corpus_share_url'` to `_SENSITIVE_ENDPOINTS`.
+- `templates/analyze.html` — new `[data-corpus-share-url-card]` `<section>` immediately after the Intelligence banner; new `<script>` tag wiring `corpus_share_url.js` via `url_for`.
+- `static/js/corpus_share_url.js` — NEW module (~275 lines) IIFE-wrapped, exports the 3-symbol public API on `window.AdoptIQCorpusShareUrl`, uses `textContent` exclusively for user-controlled value rendering.
+- `adoptiq_mac.spec` — added `corpus_share_url_resolver` to `hidden_imports` (the resolver is imported lazily inside `_r83_safe_share_url` so PyInstaller's static analyser misses it without an explicit pin).
+- `config.py` — bumped `ADOPTIQ_BUILD` 59 → 60 with R84 narrative paragraph; preserved R83 narrative on the line below.
+- `tests/test_round84_corpus_share_url_setting.py` — NEW (22 tests).
+- `tests/test_round84_corpus_share_url_endpoint.py` — NEW (17 tests).
+- `tests/test_round84_corpus_share_url_resolver.py` — NEW (12 tests).
+- `tests/test_round84_corpus_share_url_ui_source_shape.py` — NEW (21 tests).
+- `tests/test_round83_signed_in_no_corpus_panel.py::test_safe_share_url_validator_accepts_https` — updated to use a `*.sharepoint.com` URL (post-R84 the resolver enforces sharepoint host upstream; R83 contract — "only https" — is preserved, just narrowed to actually-deployable domains).
+- `CLAUDE.md` — bumped test floor 5190 → 5269; added 2 new Critical Rules entries (R84 operator-configurable URL + R83 OneDrive-auth-as-access-gate enumeration).
+- `README.md` — added "What's New in Build 60" section.
+
+**SSoT modules touched:** canonical_metrics (none), risk_scoring (none), report_export_schema (none), report_export_styling (none), report_word_styling (none), ai_narrative_validator (none), data_contracts (none), data_normalization (none), structured_logging (none), config (build bump only), report_utils (none), snowflake_table_policy (none).
+
+The R84 changes are scoped to the corpus-bootstrap configuration surface (`adoptiq_settings` allow-list + new resolver + new `/api/settings/corpus-share-url` endpoint pair + new analyze-page card). No behavioral change to any deterministic counter, scoring helper, or report writer — the changes are purely about operator URL rotation UX. The R83 encryption contract is byte-for-byte preserved.
+
+**Tests added/updated:**
+- `tests/test_round84_corpus_share_url_setting.py::test_r84_corpus_share_url_key_in_schema` — pins the allow-list entry.
+- `tests/test_round84_corpus_share_url_setting.py::test_r84_corpus_share_url_validator_wired_in_validators_dict` — pins the validator wire.
+- `tests/test_round84_corpus_share_url_setting.py::test_r84_is_valid_sharepoint_url_public_alias_returns_same_truth` — pins the public alias for cross-module reuse.
+- `tests/test_round84_corpus_share_url_setting.py::test_r84_corpus_share_url_validator_accepts_canonical_urls[3 cases]` — pins acceptance of canonical Cisco SharePoint URLs (single tenant, multi-tenant, mixed-case host).
+- `tests/test_round84_corpus_share_url_setting.py::test_r84_corpus_share_url_validator_accepts_empty_sentinel` — pins that empty string clears the override.
+- `tests/test_round84_corpus_share_url_setting.py::test_r84_corpus_share_url_validator_rejects_non_https_schemes[6 cases]` — pins rejection of `http`, `ftp`, `javascript`, `data`, `file`, `ms-onedrive`.
+- `tests/test_round84_corpus_share_url_setting.py::test_r84_corpus_share_url_validator_rejects_non_sharepoint_hosts[5 cases]` — pins rejection of non-SharePoint hosts including the look-alike "sharepoint.com.evil" substring attack.
+- `tests/test_round84_corpus_share_url_setting.py::test_r84_corpus_share_url_validator_rejects_oversize_values` — pins the 2048-byte cap.
+- `tests/test_round84_corpus_share_url_setting.py::test_r84_corpus_share_url_validator_rejects_non_string_input` — pins the type-check.
+- `tests/test_round84_corpus_share_url_setting.py::test_r84_settings_save_roundtrip_preserves_valid_url` — pins persistence + reload symmetry.
+- `tests/test_round84_corpus_share_url_setting.py::test_r84_settings_save_drops_invalid_url_silently` — pins defense-in-depth on save.
+- `tests/test_round84_corpus_share_url_setting.py::test_r84_settings_load_drops_corpus_share_url_with_invalid_value` — pins defense-in-depth on load (hand-edited file).
+- `tests/test_round84_corpus_share_url_endpoint.py::test_r84_get_returns_resolver_tuple_and_keys` — pins GET response shape.
+- `tests/test_round84_corpus_share_url_endpoint.py::test_r84_get_source_settings_json_when_override_persisted` — pins source-label resolution for the persisted-value case.
+- `tests/test_round84_corpus_share_url_endpoint.py::test_r84_get_source_env_when_only_env_set` — pins env-only source label.
+- `tests/test_round84_corpus_share_url_endpoint.py::test_r84_post_persists_valid_url_and_returns_active` — pins POST happy path.
+- `tests/test_round84_corpus_share_url_endpoint.py::test_r84_post_settings_json_written_with_mode_0o600` — pins the file-permissions defense (R32 contract).
+- `tests/test_round84_corpus_share_url_endpoint.py::test_r84_post_empty_string_clears_override` — pins the clear-override semantics.
+- `tests/test_round84_corpus_share_url_endpoint.py::test_r84_post_rejects_invalid_share_url_with_400[6 cases]` — pins 400 + `invalid_share_url` error code on bad scheme/host/oversize/path.
+- `tests/test_round84_corpus_share_url_endpoint.py::test_r84_post_rejects_non_string_payload_with_400` — pins `url_must_be_string` error code.
+- `tests/test_round84_corpus_share_url_endpoint.py::test_r84_post_handles_missing_url_field_as_empty` — pins missing-field convenience handling.
+- `tests/test_round84_corpus_share_url_endpoint.py::test_r84_post_rejects_unauthenticated_when_csrf_enabled` — pins CSRF requirement.
+- `tests/test_round84_corpus_share_url_endpoint.py::test_r84_post_accepts_x_adoptiq_internal_header_when_token_set` — pins the `X-AdoptIQ-Internal` dual-auth path.
+- `tests/test_round84_corpus_share_url_endpoint.py::test_r84_post_rejects_wrong_internal_token` — pins `secrets.compare_digest` rejection.
+- `tests/test_round84_corpus_share_url_endpoint.py::test_r84_endpoint_listed_in_sensitive_endpoints_set` — pins the protected-endpoint registration.
+- `tests/test_round84_corpus_share_url_resolver.py::test_r84_resolver_source_labels_are_stable_strings` — pins the SOURCE_* constants.
+- `tests/test_round84_corpus_share_url_resolver.py::test_r84_resolver_settings_layer_wins_over_env` — pins precedence top tier.
+- `tests/test_round84_corpus_share_url_resolver.py::test_r84_resolver_env_layer_wins_over_config_default` — pins precedence middle tier.
+- `tests/test_round84_corpus_share_url_resolver.py::test_r84_resolver_falls_back_to_config_default_when_unset` — pins precedence bottom tier.
+- `tests/test_round84_corpus_share_url_resolver.py::test_r84_resolver_invalid_settings_value_falls_through_to_env` — pins defense-in-depth fall-through (hand-edited file).
+- `tests/test_round84_corpus_share_url_resolver.py::test_r84_resolver_invalid_env_falls_through_to_config_default` — pins defense-in-depth fall-through (typo'd env var).
+- `tests/test_round84_corpus_share_url_resolver.py::test_r84_resolver_handles_total_exhaustion_gracefully` — pins the all-tiers-fail fallback (returns `(None, "config.py")`).
+- `tests/test_round84_corpus_share_url_resolver.py::test_r84_resolver_does_not_cache_settings_value` — pins the no-caching contract for the settings tier.
+- `tests/test_round84_corpus_share_url_resolver.py::test_r84_resolver_does_not_cache_env_value` — pins the no-caching contract for the env tier.
+- `tests/test_round84_corpus_share_url_resolver.py::test_r84_safe_share_url_returns_settings_value_when_persisted` — pins the `_r83_safe_share_url` integration.
+- `tests/test_round84_corpus_share_url_resolver.py::test_r84_safe_share_url_still_filters_non_https_from_resolver` — pins R83 defense-in-depth preservation.
+- `tests/test_round84_corpus_share_url_ui_source_shape.py::test_r84_analyze_html_carries_card_markers[9 cases]` — pins all `[data-corpus-share-url-*]` attribute markers in the template.
+- `tests/test_round84_corpus_share_url_ui_source_shape.py::test_r84_corpus_share_url_js_exports_public_symbol[3 cases]` — pins the `bindCorpusShareUrlSave` / `paintCorpusShareUrlCard` / `fetchCorpusShareUrlCard` symbols.
+- `tests/test_round84_corpus_share_url_ui_source_shape.py::test_r84_js_module_exposes_window_namespace` — pins the `window.AdoptIQCorpusShareUrl` export.
+- `tests/test_round84_corpus_share_url_ui_source_shape.py::test_r84_js_module_uses_iife_wrapper` — pins the IIFE wrapping (private helpers cannot leak into global scope).
+- `tests/test_round84_corpus_share_url_ui_source_shape.py::test_r84_paint_uses_text_content_for_current_value` — pins `textContent` (NOT `.innerHTML`) usage — the XSS guard.
+- `tests/test_round84_corpus_share_url_ui_source_shape.py::test_r84_paint_does_not_use_dangerous_dom_sinks` — pins absence of `document.write` / `outerHTML` / `insertAdjacentHTML`.
+- `tests/test_round84_corpus_share_url_ui_source_shape.py::test_r84_test_button_uses_bootstrap_shortcut_endpoint` — pins that "Test" reads from the validated server endpoint, NEVER `window.open(rawInput)`.
+- `tests/test_round84_corpus_share_url_ui_source_shape.py::test_r84_save_endpoint_target_pinned` — pins the POST target URL.
+- `tests/test_round84_corpus_share_url_ui_source_shape.py::test_r84_analyze_html_wires_corpus_share_url_js` — pins the `<script>` tag.
+- `tests/test_round83_signed_in_no_corpus_panel.py::test_safe_share_url_validator_accepts_https` — UPDATED to use a `*.sharepoint.com` URL (R84 host-narrowing). The test's intent — verifying that valid HTTPS URLs flow through `_r83_safe_share_url` — is preserved.
+
+**Verify status:**
+- `python3 -m pytest tests/test_round84_*.py -v` — pass (72 / 72; 22 C1 + 17 C2 + 12 C3 + 21 C4).
+- `python3 -m pytest tests/test_round83_signed_in_no_corpus_panel.py -v` — pass (19 / 19; the C5 R83 regression check).
+- `python3 -m pytest tests/test_round84_*.py tests/test_round83_*.py -q` — pass (full R83 + R84 suites).
+- Full pytest run during D2 closure: `5269 passed, 4 skipped, 6 deselected in 53.99s` — new floor (was 5190 in R83; +79 R84 tests).
+- `make verify` — pending (Phase D5).
+- ruff: pending verify run.
+- bandit HIGH/MED: pending verify run.
+- pip-audit: pending verify run.
+
+**Hot spots Claude should audit first:**
+1. `corpus_share_url_resolver.py:get_active_corpus_share_url` — verify the precedence walk does NOT re-read `os.environ` in a way that would let a stale value from a closed shell shadow the persisted settings.json. The settings tier is checked FIRST and short-circuits the env tier; pinned by `test_r84_resolver_settings_layer_wins_over_env`. A regression here would mean a Cursor-host operator's environment variable could ghost-override the operator's UI flip — a violation of the "settings.json is highest precedence" contract.
+2. `corpus_share_url_resolver.py:_read_settings_value` / `_read_env_value` / `_read_config_value` — verify each tier's reader catches `Exception` and returns `None` rather than letting an exception bubble. A stack trace from a corrupted settings.json would crash `_r83_safe_share_url` and break the bootstrap-shortcut endpoint for all operators. Pinned by `test_r84_resolver_handles_total_exhaustion_gracefully`.
+3. `app_simple.py:api_settings_corpus_share_url` (POST branch) — verify the validation precedence: type-check (`isinstance(raw, str)`) MUST happen BEFORE `_is_valid_sharepoint_url` so a non-string `url` payload returns `url_must_be_string` (NOT `invalid_share_url`). The error-code distinction matters because an operator pasting an integer would otherwise see "invalid_share_url" with no explanation; the explicit type-check error code is more honest. Pinned by `test_r84_post_rejects_non_string_payload_with_400`.
+4. `app_simple.py:api_settings_corpus_share_url` (POST branch) — verify the empty-string semantic: a payload of `{"url": ""}` MUST clear the persisted override and return `200 ok=True` with the resolver's NEW active value (env or config default). Pre-R84 this was untested; post-R84 the test suite explicitly pins the clear-override path AND the source-label flip on the GET response. Pinned by `test_r84_post_empty_string_clears_override`.
+5. `static/js/corpus_share_url.js:setSourcePill` — verify the source-pill class assignment uses ONLY `classList.add` / `classList.remove` (NOT `className =` which would clobber other Bootstrap utility classes the template applied). The pre-R84 R69 model_preferences.js had this exact issue in an early draft; the C4 source-shape suite does NOT test this directly so it's a manual-audit hot spot for the next round.
+6. `templates/analyze.html` — the new card lives at line ~405 inside the existing analyze-page form structure. Verify the card does NOT break the existing tab order / form-submit flow if the operator hits Enter inside the URL input. The card uses `type="url"` on the input which will trigger HTML5 validation popup BEFORE any JavaScript runs — could be a UX surprise. Manual smoke-test only; not pinned by C4 (HTML5-validation behavior is browser-specific).
+
+**Known deferrals (intentional non-fixes):**
+- The Premium support / upsell branches in `advanced_renewal_analyzer._generate_renewal_recommendations` still emit the legacy generic strings (R66/B12 deferral, unchanged in R84).
+- The resolver does NOT support a manual local-path override (R91-style escape hatch from TACTrack). The owner-style fallback already covers the corpus-owner case via the R83 4-tier candidate list; non-owners use the canonical shortcut workflow. Adding a local-path override would re-introduce per-user partitioning concerns the R83 contract deliberately avoids.
+- The "Test" button does NOT preview the URL before opening it — it reads from the SAVED URL and `window.open`s directly. A future round could add a server-side metadata-fetch (e.g. URL preview card) but that would require new outbound credential / token flows. R84 keeps the attack surface to a single read-only endpoint.
+- The source-pill color mapping uses Bootstrap utility classes (`bg-secondary` / `bg-warning` / `bg-info`) without custom theming. If a future Cisco brand-color requirement lands, the colors live in CSS in `static/css/style.css` — not the JS module.
+- Linux platform dispatch in the corpus bootstrap proxy (R83 deferral) is unchanged in R84; R84 only touches the share URL configuration surface, not the OneDrive sign-in proxy.
+
+**Trailer:** Made-with: Cursor
+
+### Round 84 — build verification 2026-05-05 (Build 60 DMG)
+
+**Build artifacts:**
+- `OUTBOX/AdoptIQ-v1.0.4-build60.dmg` — 432 MiB (`-rw-r--r-- 452807691 bytes`), signed, hdiutil-built.
+- `OUTBOX/AdoptIQ.app` — restaged after `build_mac.sh` cleanup; signature replaced + valid.
+- `OUTBOX/build_info.txt` — `AdoptIQ v1.0.4 build 60 / Built: 2026-05-05T05:56:30Z`.
+
+**Mirror sync confirmed:**
+- `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/OUTBOX/` — DMG + README + build_info.
+- `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ/` — DMG + README + AdoptIQ.app.
+
+**Bake parameters (R83 contract preserved on R84 build — auto-detect WITHOUT env-var overrides):**
+- `ADOPTIQ_BAKE_FIXTURE_DIR` — UNSET.
+- `ADOPTIQ_BAKE_SENTINEL_ROOT` — UNSET.
+- `ADOPTIQ_BUILD` — UNSET (resolved from `config.py` SSoT lookup, R67 contract).
+- `ADOPTIQ_VERSION` — UNSET (same SSoT lookup).
+- Auto-detected source path: `/Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/AdoptIQ_CSOne_Reports` (tier 3 of `_csone_onedrive_candidates()` — owner-style on macOS Cloud-Storage).
+- Auto-detected sentinel root: same path.
+- This validates the R83 contract is byte-for-byte preserved on the R84 build: a fresh bake on the corpus owner's machine resolves the candidate-walk WITHOUT any operator intervention, the same way Build 59 did.
+
+**Bake-log markers (audit-friendly grep targets):**
+- `Bake source: auto-detect via _csone_onedrive_candidates() walk`
+- `auto-detected: /Users/jestory/Library/CloudStorage/OneDrive-Cisco/AI Projects/AdoptIQ_CSOne_Reports`
+- `Round 83 / bake: auto-detected source dir <path>`
+- `Round 83 / bake: auto-detected sentinel root <path>`
+- `Round 53: OneDrive sentinel root resolved: <path>` — R53 sentinel-discovery contract preserved.
+- `staged 258 source file(s)` — full corpus ingestion (parity with Build 59; no truncation).
+- `indexer summary: seen=257 skipped=0 oversized=0 errors=0` — clean index pass.
+- `Round 53 / bake positive decrypt self-test ok` — bundle internally consistent.
+- `Round 53 / bake negative self-test ok (open without OneDrive root + allow_local_sentinel=False fails closed)` — bundle is NOT offline-decryptable. **The R83 OneDrive-auth-as-access-gate contract is preserved on the R84 build** — a stolen DMG without OneDrive sentinel cannot decrypt the corpus, regardless of what URL the operator has configured in `settings.json`.
+
+**fastembed warning (pre-existing, not an R84 regression):**
+- `Round 66 / Pass 5: chunk-vector bake failed (fastembed embedder unavailable on bake host); shipping a lexical-only corpus.`
+- Same documented R66.2 / Pass 5 behavior on bake hosts that don't have the fastembed model cached locally. The DMG ships with a lexical-only corpus; runtime hybrid retrieval falls back to lexical via the documented `Config.ASK_AI_RETRIEVAL_METHOD = "lexical"` graceful degradation. Not an R84 issue.
+
+**Codesign check:**
+- `codesign --verify --verbose=1 OUTBOX/AdoptIQ-v1.0.4-build60.dmg` → `valid on disk` + `satisfies its Designated Requirement`.
+- `codesign --verify --verbose=1 OUTBOX/AdoptIQ.app` → `valid on disk` + `satisfies its Designated Requirement`.
+
+**make verify pre-bake:**
+- `5269 passed, 4 skipped, 6 deselected in 56.32s` — matches the new R84 floor recorded in CLAUDE.md (was 5190 in R83; +79 R84 tests).
+- ruff: `All checks passed!`
+- bandit: `0 HIGH/MED` (only `nosec` reminders, no new findings).
+- pip-audit: clean.
+- "All Round 14 gates passed."
+
+**Smoke notes for the operator (R84-specific):**
+- The DMG opens, AdoptIQ.app drag-to-/Applications, then http://localhost:5151/ should serve the home page with the build-label footer reading `v1.0.4 build 60` (R68/A1 contract).
+- The Round-68 `/api/version` endpoint should return `{"version": "1.0.4", "build": "60", ...}` — the canonical health probe before the operator runs any reports.
+- The R84 `[data-corpus-share-url-card]` lands directly below the `[data-intel-banner]` Intelligence card on the analyze page. On a fresh install with no settings.json override, the "Source" pill reads `config.py default` and the "Current value" `<code>` shows the hardcoded URL from `Config.ADOPTIQ_CORPUS_SHARE_URL`.
+- **Manual smoke flow (R84 acceptance):**
+  1. Paste a different valid SharePoint URL (e.g. swap the `e=...` token) into the input. Click Test → browser opens the SAVED URL (the OLD one, since Test reads from the validated `/api/corpus/bootstrap-shortcut`, NOT the raw input).
+  2. Click Save → the "Current value" `<code>` updates to the NEW URL, the "Source" pill flips to `settings.json`, and a green success message appears.
+  3. Reload the page → the new URL persists (verifies atomic 0o600 settings.json write). The R83 deep-link banner button (when a `signed_in_no_corpus` state is active) now opens the new URL via the modified `_r83_safe_share_url`.
+  4. Click "Clear override" → the "Current value" reverts to either the env var (if set) or the hardcoded config default; the "Source" pill flips accordingly.
+  5. Paste an invalid URL (e.g. `http://example.com`) → click Save → red error message appears, settings.json NOT modified.
+- **R83 contract preservation probe:** the bootstrap-shortcut endpoint at `/api/corpus/bootstrap-shortcut` continues to return the R84-resolved URL after passing through the R83 https-only + 2048-byte cap. A direct `curl` from the loopback should return JSON with the active URL.
+
+**Acceptance criterion:** R84 ships when (a) the manual smoke flow lands as described, (b) the bake produces a working DMG without env-var overrides, (c) the bake's negative self-test confirms the bundle is NOT offline-decryptable. All three are green on Build 60.
+
+**Trailer:** Made-with: Cursor

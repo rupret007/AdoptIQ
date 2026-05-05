@@ -803,6 +803,7 @@ class LeaderReportGenerator:
         intel_truncated: Optional[Dict[str, Any]] = None,
         intel_fetch_limit: Optional[int] = None,
         partial_data_warnings: Optional[List[Dict[str, Any]]] = None,
+        output_dir: Optional[Path] = None,
     ) -> Tuple[Document, str, Dict, List]:
         """
         Generate comprehensive leader report for a manager
@@ -916,7 +917,24 @@ class LeaderReportGenerator:
         self._add_overall_individual_summary(team_data, manager_name, days)
 
         _cb(80, 'Saving Word document...', 'Document Generation')
-        output_dir = _ensure_outputs()
+        # Round 81 / Build 57: honor caller-supplied ``output_dir`` so
+        # ``app_simple._r81_resolve_report_output_dir(manager, "Leader")``
+        # routes the docx into ``<outputs>/<Manager>/Leader/``.  When
+        # ``output_dir`` is None we fall back to the legacy flat path
+        # for back-compat (the test harness path that constructs a
+        # ``LeaderReportGenerator`` directly without going through
+        # ``app_simple`` does not pass ``output_dir``).
+        if output_dir is None:
+            output_dir = _ensure_outputs()
+        try:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as _r81_outdir_err:  # noqa: BLE001
+            logger.debug(
+                "Round 81: leader output_dir mkdir failed (%s) -- falling back to _ensure_outputs",
+                type(_r81_outdir_err).__name__,
+            )
+            output_dir = _ensure_outputs()
         # Round 7 / Phase 6.7: stamp the filename in UTC so two leader
         # reports kicked off within the same minute by users in
         # different timezones do not collide on the same
@@ -7695,7 +7713,8 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                           arr_impact: Optional[Dict] = None,
                           intel_truncated: Optional[Dict[str, Any]] = None,
                           intel_fetch_limit: Optional[int] = None,
-                          partial_data_warnings: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, str, Dict]:
+                          partial_data_warnings: Optional[List[Dict[str, Any]]] = None,
+                          output_dir: Optional[Path] = None) -> Tuple[str, str, Dict]:
     """
     Main function to generate leader report
 
@@ -7745,6 +7764,7 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             intel_truncated=intel_truncated,
             intel_fetch_limit=intel_fetch_limit,
             partial_data_warnings=partial_data_warnings,
+            output_dir=output_dir,  # Round 81 / Build 57: per-manager layout
         )
         logger.info(f"generator.generate_leader_report() completed. filepath: {filepath}")
 

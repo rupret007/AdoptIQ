@@ -77,8 +77,16 @@ class TestConfigDefaults:
     def test_circuit_model_default(self):
         """``CIRCUIT_MODEL_NAME`` must either match the env var captured
         at config-load time, or be the documented fallback default
-        ``'gpt-5-nano'``.  We accept either because import-order varies
-        (Round 30 import-pollution-resilience pin)."""
+        ``'gemini-3.1-flash-lite'``.  We accept either because
+        import-order varies (Round 30 import-pollution-resilience pin).
+
+        Round 77 / Build 53: hardcoded fallback flipped from
+        ``gpt-5-nano`` to ``gemini-3.1-flash-lite`` (operator testing
+        showed materially lower per-customer LLM latency on the
+        comprehensive report's per-customer storyboard loop).
+        ``gpt-5-nano`` remains a one-click toggle in the
+        ``[data-r69-model-input]`` dropdowns.
+        """
         actual = Config.CIRCUIT_CONFIG['model_name']
         # Either the value matches the *current* env (config loaded
         # after bundled_secrets populated env), or it's the fallback
@@ -87,10 +95,11 @@ class TestConfigDefaults:
         # from the env-aware getter and is not a different hardcoded
         # literal.
         env_val = os.environ.get('CIRCUIT_MODEL_NAME')
-        assert actual == (env_val or 'gpt-5-nano') or actual == 'gpt-5-nano', (
+        _r77_default = 'gemini-3.1-flash-lite'
+        assert actual == (env_val or _r77_default) or actual == _r77_default, (
             f"CIRCUIT_CONFIG['model_name']={actual!r} did not match "
             f"either the live CIRCUIT_MODEL_NAME env ({env_val!r}) or "
-            f"the fallback default 'gpt-5-nano'."
+            f"the Round 77 fallback default {_r77_default!r}."
         )
 
     def test_no_hardcoded_secrets_in_snowflake(self):

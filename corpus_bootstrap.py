@@ -151,6 +151,30 @@ class CorpusBootState:
     # last check (0 when not_synced).
     onedrive_status: Optional[str] = None
     onedrive_file_count: Optional[int] = None
+    # Round 83 / Build 59: OneDrive sign-in proxy. Independent of
+    # ``onedrive_status`` (which is folder-specific). Detects whether
+    # the OneDrive desktop client is set up at all on this host so the
+    # corpus panel can distinguish "not signed into OneDrive at all"
+    # from "signed into OneDrive but the AdoptIQ corpus folder isn't
+    # synced yet -- click here to add the share." Cross-platform via
+    # ``_r83_onedrive_signed_in_proxy``: macOS reads
+    # ``~/Library/CloudStorage/OneDrive-*`` glob; Windows reads
+    # ``HKCU\\Software\\Microsoft\\OneDrive\\Accounts\\Business1``
+    # registry key existence (no value reads, no PII).
+    #
+    #   * ``"signed_in_cisco"`` -- a Cisco-tenant OneDrive sync root is
+    #                              present (the canonical match for
+    #                              the AdoptIQ workflow).
+    #   * ``"signed_in_other"`` -- some OneDrive sync root is present
+    #                              but not the Cisco-tenant one
+    #                              (personal OneDrive, different
+    #                              tenant). Bootstrap button is NOT
+    #                              shown -- the user needs to sign
+    #                              into Cisco OneDrive first.
+    #   * ``"not_signed_in"``   -- no OneDrive sync root detected.
+    #   * ``"unknown"``         -- detection has not run yet OR the
+    #                              probe raised (defensive fallback).
+    signed_in_proxy: Optional[str] = None
     # Round 66 / Pass 5 - hybrid retrieval bootstrap state.
     #   * ``embedder_status``: "ready" | "unavailable" | None (untried).
     #   * ``embedder_load_error``: short human-readable error from the
@@ -202,6 +226,8 @@ def get_state() -> CorpusBootState:
             last_refresh_error=_STATE.last_refresh_error,
             onedrive_status=_STATE.onedrive_status,
             onedrive_file_count=_STATE.onedrive_file_count,
+            # Round 83
+            signed_in_proxy=_STATE.signed_in_proxy,
         )
 
 
@@ -286,6 +312,191 @@ def _check_onedrive_sync_status() -> tuple[str, int, Optional[str]]:
         return "not_synced", 0, path_str
     except OSError:
         return "not_synced", 0, path_str
+
+
+# ---------------------------------------------------------------------------
+# Round 83 / Build 59: OneDrive sign-in proxy
+# ---------------------------------------------------------------------------
+
+
+# Glob patterns for macOS OneDrive sync roots. The OneDrive desktop
+# client materializes one folder per signed-in account under
+# ``~/Library/CloudStorage/`` named ``OneDrive-<tenant>`` for work
+# accounts and ``OneDrive-Personal`` for consumer accounts; legacy
+# pre-Big-Sur installs use ``~/OneDrive - <tenant>`` directly under
+# the home directory.
+_R83_MACOS_CISCO_GLOBS = (
+    "Library/CloudStorage/OneDrive-Cisco*",
+    "OneDrive - Cisco*",
+)
+_R83_MACOS_ANY_GLOBS = (
+    "Library/CloudStorage/OneDrive-*",
+    "OneDrive - *",
+)
+
+
+def _r83_onedrive_signed_in_proxy() -> str:
+    """Round 83 / Build 59: probe whether ANY OneDrive account is
+    signed in on this host -- independent of whether the canonical
+    AdoptIQ corpus folder is synced.
+
+    Replaces the implicit ``_check_onedrive_sync_status`` overload
+    where "folder missing" was conflated with "not signed into
+    OneDrive at all" -- two distinct UX states that need different
+    panel copy and different bootstrap buttons.
+
+    Returns one of:
+
+      * ``"signed_in_cisco"`` -- a Cisco-tenant OneDrive sync root is
+                                 present on disk (the canonical
+                                 match for the AdoptIQ workflow).
+      * ``"signed_in_other"`` -- some OneDrive sync root is present
+                                 but not the Cisco-tenant one. The
+                                 user is signed into OneDrive but
+                                 with the wrong account; the
+                                 corpus panel surfaces a "switch
+                                 accounts" hint instead of the
+                                 share-URL bootstrap button.
+      * ``"not_signed_in"``   -- no OneDrive sync root detected.
+      * ``"unknown"``         -- defensive fallback when probes
+                                 raised. UI treats it as
+                                 ``"not_signed_in"`` for behavior
+                                 but logs it separately.
+
+    Detection is filesystem / registry existence-only -- no plist
+    parsing, no MSAL, no Graph calls, no shell-out to ``ps``.
+    Round 36's "trust the OneDrive client; verify locally"
+    architecture is preserved. No PII enters logs or
+    ``analysis_status.json`` -- we never read account email values
+    out of the registry / plist; existence of the slot is the
+    signal.
+
+    Pinned by ``tests/test_round83_onedrive_signed_in_proxy.py``.
+    """
+    # Round 83
+    try:
+        if sys.platform == "darwin":
+            return _r83_macos_signed_in_proxy()
+        if sys.platform.startswith("win"):
+            return _r83_windows_signed_in_proxy()
+        # Other unix platforms: check the Linux-style fallback paths
+        # the OneDrive client occasionally creates. None of these are
+        # supported AdoptIQ targets but a sensible default keeps the
+        # contract honest.
+        return _r83_macos_signed_in_proxy()
+    except Exception:  # noqa: BLE001 - defensive boot-path
+        return "unknown"
+
+
+def _r83_macos_signed_in_proxy() -> str:
+    """macOS arm of :func:`_r83_onedrive_signed_in_proxy`. Walks the
+    home directory for OneDrive sync-root names. ``OSError`` collapses
+    to ``"not_signed_in"`` so a permission error never raises out of
+    the boot path."""
+    # Round 83
+    home_str = os.path.expanduser("~")
+    try:
+        home = Path(home_str)
+        if not home.is_dir():
+            return "not_signed_in"
+    except OSError:
+        return "not_signed_in"
+    cisco_present = False
+    other_present = False
+    for pattern in _R83_MACOS_CISCO_GLOBS:
+        try:
+            for match in home.glob(pattern):
+                try:
+                    if match.is_dir():
+                        cisco_present = True
+                        break
+                except OSError:
+                    continue
+        except OSError:
+            continue
+        if cisco_present:
+            break
+    if cisco_present:
+        return "signed_in_cisco"
+    for pattern in _R83_MACOS_ANY_GLOBS:
+        try:
+            for match in home.glob(pattern):
+                try:
+                    if match.is_dir():
+                        other_present = True
+                        break
+                except OSError:
+                    continue
+        except OSError:
+            continue
+        if other_present:
+            break
+    if other_present:
+        return "signed_in_other"
+    return "not_signed_in"
+
+
+def _r83_windows_signed_in_proxy() -> str:
+    """Windows arm of :func:`_r83_onedrive_signed_in_proxy`. Uses
+    ``winreg`` to probe for the OneDrive Accounts registry slots
+    (existence-only -- no value reads, no PII). Falls back to
+    ``%LOCALAPPDATA%\\Microsoft\\OneDrive\\settings\\Business1`` and
+    ``%USERPROFILE%\\OneDrive - Cisco`` directories when the registry
+    probe is unavailable (e.g. on a shimmed test environment)."""
+    # Round 83
+    try:
+        import winreg  # type: ignore[import-not-found]
+    except ImportError:
+        winreg = None  # type: ignore[assignment]
+    if winreg is not None:
+        try:
+            # Cisco-tenant slot is conventionally ``Business1`` for
+            # the user's primary work account.
+            with winreg.OpenKey(  # type: ignore[attr-defined]
+                winreg.HKEY_CURRENT_USER,  # type: ignore[attr-defined]
+                r"Software\Microsoft\OneDrive\Accounts\Business1",
+            ):
+                return "signed_in_cisco"
+        except OSError:
+            pass
+        try:
+            with winreg.OpenKey(  # type: ignore[attr-defined]
+                winreg.HKEY_CURRENT_USER,  # type: ignore[attr-defined]
+                r"Software\Microsoft\OneDrive\Accounts\Personal",
+            ):
+                return "signed_in_other"
+        except OSError:
+            pass
+    # Filesystem fallback: same shape as the macOS probe.
+    home_str = os.path.expanduser("~")
+    localappdata = os.environ.get("LOCALAPPDATA", "")
+    candidates_cisco = [
+        os.path.join(home_str, "OneDrive - Cisco"),
+    ]
+    if localappdata:
+        candidates_cisco.append(
+            os.path.join(localappdata, "Microsoft", "OneDrive",
+                         "settings", "Business1"),
+        )
+    for candidate in candidates_cisco:
+        try:
+            if os.path.isdir(candidate):
+                return "signed_in_cisco"
+        except OSError:
+            continue
+    candidates_other = []
+    if localappdata:
+        candidates_other.append(
+            os.path.join(localappdata, "Microsoft", "OneDrive",
+                         "settings", "Personal"),
+        )
+    for candidate in candidates_other:
+        try:
+            if os.path.isdir(candidate):
+                return "signed_in_other"
+        except OSError:
+            continue
+    return "not_signed_in"
 
 
 def _r68_onedrive_sentinel_present() -> bool:
@@ -764,23 +975,32 @@ def _should_refresh(
 
 
 def _next_refresh_tick_s(blocked_streak: int) -> float:
-    """Round 53 / Phase 53.4.2: compute how long the daily-refresh
-    loop should sleep before its next iteration.
+    """Round 53 / Phase 53.4.2 (extended Round 83 / Build 59):
+    compute how long the daily-refresh loop should sleep before its
+    next iteration.
 
-    * When the corpus is in the ``blocked_no_onedrive`` state AND we
-      have not yet hit the bounded retry cap, return the accelerated
-      30-second tick so we transition out of the blocked state
-      promptly once the user syncs OneDrive.
+    * When the corpus is in EITHER ``blocked_no_onedrive`` (not
+      signed in to OneDrive) OR ``signed_in_no_corpus`` (signed in
+      but corpus share missing) AND we have not yet hit the bounded
+      retry cap, return the accelerated 30-second tick so we
+      transition out of the blocked state promptly once the user
+      either signs in to OneDrive (``blocked_no_onedrive`` ->
+      ``synced``) or adds the corpus share to their OneDrive tree
+      (``signed_in_no_corpus`` -> ``synced``).
     * Otherwise return the standard hourly tick.
 
     ``blocked_streak`` is the number of consecutive ticks the loop
-    has spent observing the blocked state.  Resets to 0 the moment
-    the state clears.  Pinned by
-    ``tests/test_round53_ux_helpers.py``.
+    has spent observing either blocked state.  Resets to 0 the
+    moment the state clears.  Pinned by
+    ``tests/test_round53_ux_helpers.py`` and
+    ``tests/test_round83_daily_worker_bootstrap_trigger.py``.
     """
     with _BOOT_LOCK:
         source = _STATE.source
-    if source == "blocked_no_onedrive" and blocked_streak < _DAILY_REFRESH_BLOCKED_MAX_TICKS:
+    blocked = (
+        source == "blocked_no_onedrive" or source == "signed_in_no_corpus"
+    )
+    if blocked and blocked_streak < _DAILY_REFRESH_BLOCKED_MAX_TICKS:
         return _DAILY_REFRESH_TICK_BLOCKED_S
     return _DAILY_REFRESH_TICK_S
 
@@ -862,7 +1082,19 @@ def _daily_refresh_loop() -> None:
             with _BOOT_LOCK:
                 _STATE.onedrive_status = od_status
                 _STATE.onedrive_file_count = od_count
-            blocked_now = (source_at_tick_start == "blocked_no_onedrive")
+            # Round 83 / Build 59: ``signed_in_no_corpus`` is the new
+            # blocked state added when the OneDrive desktop client is
+            # signed in to a Cisco account but the corpus share is
+            # not in the user's tree yet. Same transition semantics
+            # as ``blocked_no_onedrive`` -- the user takes action
+            # (adds the share via the panel button), the OneDrive
+            # client mirrors it locally, the next tick observes
+            # ``onedrive_status == 'synced'`` and ``sentinel_present``,
+            # and the worker fires an immediate refresh.
+            blocked_now = (
+                source_at_tick_start == "blocked_no_onedrive"
+                or source_at_tick_start == "signed_in_no_corpus"
+            )
             # Round 53: blocked-to-synced transition detection.  When
             # the loop sees the user just synced, kick an immediate
             # refresh regardless of the 24h window so the corpus
@@ -891,15 +1123,18 @@ def _daily_refresh_loop() -> None:
                 logger.debug(
                     "Round 68 / Build 42 (B5): OneDrive folder is synced "
                     "but sentinel has not landed yet -- keeping the "
-                    "accelerated tick cadence (blocked_streak=%d)",
-                    blocked_streak,
+                    "accelerated tick cadence (blocked_streak=%d "
+                    "source=%s)",
+                    blocked_streak, source_at_tick_start,
                 )
                 continue
             if blocked_now and not transition_unblocked:
                 blocked_streak += 1
                 # While still blocked we only need to keep ticking;
                 # there is nothing the indexer can do until the user
-                # finishes the OneDrive sync.
+                # finishes either the OneDrive sign-in (legacy
+                # ``blocked_no_onedrive``) or the share-shortcut add
+                # (Round 83 ``signed_in_no_corpus``).
                 continue
             if not transition_unblocked:
                 if not _should_refresh(last_refresh_ts=last_ts):
@@ -1079,24 +1314,71 @@ def _accumulate_index_stats(target: IndexStats, source: IndexStats) -> None:
         target.finished_at = source.finished_at
 
 
-def _resolve_index_sources() -> list[dict[str, object]]:
-    """Round 17.1 + 26 + 36: enumerate the corpus index sources for
-    the current bootstrap pass.  Order matters because ``index_folder``
-    rebuilds only on the first source -- subsequent sources do
-    incremental upserts on top of the rows the first source wrote.
+# Round 80: locate AdoptIQ's writable outputs directory so the
+# corpus indexer can ingest reports the running app produces.  This
+# is the same path ``app_simple.py`` writes to (mac:
+# ``~/Library/Application Support/AdoptIQ/outputs/``, win:
+# ``%APPDATA%\AdoptIQ\outputs\``, else ``~/.adoptiq/outputs/``).
+# Returns ``None`` on resolution failure or when the directory does
+# not exist so the bootstrap stays robust.  Honours the
+# ``ADOPTIQ_OUTPUTS_DIR`` env override unconditionally so tests and
+# power users can pin any path.  Pinned by
+# ``tests/test_round80_local_outputs_corpus_source.py``.
+def _r80_resolve_app_support_outputs_dir() -> Optional[Path]:
+    """Round 80: return the absolute path to AdoptIQ's writable
+    ``outputs/`` directory if it exists, else ``None``."""
+    # Round 80
+    override = os.environ.get('ADOPTIQ_OUTPUTS_DIR')
+    if override:
+        try:
+            override_path = Path(str(override))
+            return override_path if override_path.is_dir() else None
+        except Exception:
+            return None
+    try:
+        if sys.platform == 'darwin':
+            base = Path.home() / 'Library' / 'Application Support' / 'AdoptIQ'
+        elif sys.platform == 'win32':
+            base = Path(os.environ.get('APPDATA', str(Path.home()))) / 'AdoptIQ'
+        else:
+            base = Path.home() / '.adoptiq'
+        outputs = base / 'outputs'
+        return outputs if outputs.is_dir() else None
+    except Exception:
+        return None
 
-    Priority (Round 36 - MSAL/Graph removed):
+
+def _resolve_index_sources() -> list[dict[str, object]]:
+    """Round 17.1 + 26 + 36 + 80: enumerate the corpus index sources
+    for the current bootstrap pass.  Order matters because
+    ``index_folder`` rebuilds only on the first source -- subsequent
+    sources do incremental upserts on top of the rows the first
+    source wrote.
+
+    Priority (Round 80 -- local_outputs added, user_downloads
+    deprecated by default):
 
     1. ``onedrive`` -- the synced OneDrive folder
        (``Config.CSONE_ONEDRIVE_FOLDER``); appended only when the
        resolved directory actually exists so we don't waste a walker
-       pass logging a "missing" warning on every refresh.  Now the
-       primary source -- the OneDrive desktop client handles auth /
-       MFA / admin-consent and we trust the on-disk mirror.
-    2. ``user_downloads`` -- ``~/Downloads`` filtered to AdoptIQ
-       report names, when ``CSONE_INCLUDE_USER_DOWNLOADS`` is
-       truthy.
-    3. ``intel_uploads`` (Round 26) -- per-user drop folder
+       pass logging a "missing" warning on every refresh.  Round 80
+       narrows discovery to the SharePoint-shortcut leaf only -- see
+       ``config._csone_onedrive_candidates``.
+    2. ``local_outputs`` (Round 80, NEW) -- ``_APP_SUPPORT/outputs/``
+       filtered to AdoptIQ report names, so reports the running app
+       generates are picked up by the next refresh tick without
+       requiring the user to manually drop them into ``~/Downloads``
+       or ``intel_uploads``.  Always present (the .app creates the
+       directory at startup) and permission-clean (no macOS Files-
+       and-Folders prompt).
+    3. ``user_downloads`` -- ``~/Downloads`` filtered to AdoptIQ
+       report names.  Round 80 flipped the default to OFF because
+       the macOS Files-and-Folders permission prompt confused
+       users; the source can still be opted in via
+       ``CSONE_INCLUDE_USER_DOWNLOADS=true`` for one build, with a
+       deprecation warning logged at config-import time.  Slated
+       for full removal in Round 81.
+    4. ``intel_uploads`` (Round 26) -- per-user drop folder
        populated by ``/api/intel/upload``.  Walked when the
        directory exists.  Pre-create is gated on
        ``ADOPTIQ_INTEL_UPLOAD_ENABLED`` (Round 26 review /
@@ -1138,7 +1420,23 @@ def _resolve_index_sources() -> list[dict[str, object]]:
                 onedrive_root,
             )
 
-    # 2) Downloads.
+    # 2) Round 80: AdoptIQ's own _APP_SUPPORT/outputs/ folder.  This
+    # is where every generated report lands so it's always present
+    # and always permission-clean (no macOS Files-and-Folders prompt
+    # the way ~/Downloads triggers).  Slotted between OneDrive and
+    # Downloads so the OneDrive source remains the primary signal
+    # for the corpus walker's rebuild decision.
+    outputs_dir = _r80_resolve_app_support_outputs_dir()
+    if outputs_dir is not None:
+        sources.append(
+            {
+                "label": "local_outputs",
+                "dir": str(outputs_dir),
+                "filter": "adoptiq_named",
+            }
+        )
+
+    # 3) Downloads (Round 80: deprecated, opt-in only).
     include_downloads = bool(getattr(Config, "CSONE_INCLUDE_USER_DOWNLOADS", False))
     downloads_dir = getattr(Config, "CSONE_USER_DOWNLOADS_DIR", None)
     if include_downloads and downloads_dir:
@@ -1152,7 +1450,7 @@ def _resolve_index_sources() -> list[dict[str, object]]:
                 }
             )
 
-    # 3) Round 26: per-user uploaded CSOne reports.  We walk this
+    # 4) Round 26: per-user uploaded CSOne reports.  We walk this
     # source unconditionally when the directory exists -- not gated
     # on ``ADOPTIQ_INTEL_UPLOAD_ENABLED`` -- so admin-pre-seeded
     # files are still ingested even when the live upload endpoint
@@ -1210,6 +1508,11 @@ def _run_index_pass(*, rebuild: bool) -> None:
     # immediately (the slow indexer walk no longer gates the UI's
     # ability to tell the user whether OneDrive is talking to disk).
     od_status, od_count, _ = _check_onedrive_sync_status()
+    # Round 83 / Build 59: probe sign-in proxy independently so the
+    # panel can distinguish "not signed in to OneDrive" from "signed
+    # in but the AdoptIQ corpus folder is not synced yet" -- two
+    # separate UX states with different bootstrap CTAs.
+    signed_in_proxy = _r83_onedrive_signed_in_proxy()
 
     with _BOOT_LOCK:
         _STATE.in_progress = True
@@ -1218,6 +1521,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
         _STATE.onedrive_root = str(onedrive_root) if onedrive_root else None
         _STATE.onedrive_status = od_status
         _STATE.onedrive_file_count = od_count
+        _STATE.signed_in_proxy = signed_in_proxy
         _STATE.last_error = None
         _STATE.last_error_kind = None
         _STATE.last_sources = None
@@ -1261,21 +1565,56 @@ def _run_index_pass(*, rebuild: bool) -> None:
             sentinel_present = False
     if od_status != "synced" or not sentinel_present:
         with _BOOT_LOCK:
-            _STATE.source = "blocked_no_onedrive"
-            _STATE.last_error = (
-                "OneDrive sync of AI Projects/AdoptIQ_CSOne_Reports "
-                "is required to unlock the corpus.  Open the OneDrive "
-                "desktop client, sign in with your Cisco account, and "
-                "sync the folder."
-            )
-            _STATE.last_error_kind = "no_onedrive_sentinel"
+            # Round 83 / Build 59: split the legacy
+            # ``blocked_no_onedrive`` state in two so the panel can
+            # render different copy + a different bootstrap button:
+            #
+            #   * ``signed_in_no_corpus`` -- the OneDrive client is
+            #     signed in with a Cisco account but the canonical
+            #     AdoptIQ share is not in the user's tree yet. The
+            #     panel surfaces a "Add the AdoptIQ share to your
+            #     OneDrive" button that opens the SharePoint URL
+            #     in the user's browser; SSO completes via Cisco
+            #     IdP, the share lands as a shortcut, the OneDrive
+            #     client mirrors it locally, and the next daily
+            #     refresh tick picks it up.
+            #   * ``blocked_no_onedrive`` -- the OneDrive client is
+            #     not signed in at all (or signed in only with a
+            #     non-Cisco account). The user must complete the
+            #     OneDrive desktop client sign-in BEFORE the
+            #     bootstrap shortcut button is meaningful, so the
+            #     panel keeps the legacy "Sign in to OneDrive"
+            #     copy.
+            if signed_in_proxy == "signed_in_cisco":
+                _STATE.source = "signed_in_no_corpus"
+                _STATE.last_error = (
+                    "OneDrive is signed in but the AdoptIQ corpus "
+                    "share is not in your OneDrive tree yet.  Click "
+                    "\"Add corpus share to my OneDrive\" to open the "
+                    "share in your browser; OneDrive will mirror it "
+                    "locally and AdoptIQ will pick it up on the next "
+                    "refresh."
+                )
+                _STATE.last_error_kind = "no_corpus_share"
+            else:
+                _STATE.source = "blocked_no_onedrive"
+                _STATE.last_error = (
+                    "OneDrive sync of AI Projects/AdoptIQ_CSOne_Reports "
+                    "is required to unlock the corpus.  Open the OneDrive "
+                    "desktop client, sign in with your Cisco account, and "
+                    "sync the folder."
+                )
+                _STATE.last_error_kind = "no_onedrive_sentinel"
             _STATE.in_progress = False
             _STATE.last_finished_at = _utc_now_iso()
             _STATE.completed = False
         _safe_log_info(
             "Round 53 / corpus_bootstrap: corpus open blocked "
-            "(onedrive_status=%s sentinel_present=%s)",
-            od_status, sentinel_present,
+            "(onedrive_status=%s sentinel_present=%s signed_in_proxy=%s "
+            "source=%s)",
+            od_status, sentinel_present, signed_in_proxy,
+            "signed_in_no_corpus" if signed_in_proxy == "signed_in_cisco"
+            else "blocked_no_onedrive",
         )
         configure_connection(None)
         return
@@ -1394,8 +1733,29 @@ def _run_index_pass(*, rebuild: bool) -> None:
                 # filter there is "all supported extensions").  For
                 # the Downloads case we pass a pre-filtered list via
                 # the dedicated user-report walker.
+                #
+                # Round 81 / Build 57: ``local_outputs`` (the
+                # AdoptIQ-managed ``<APP_SUPPORT>/outputs/`` tree) is
+                # walked recursively so the new ``<Manager>/<Type>/``
+                # nested layout is fully picked up.  ``user_downloads``
+                # remains top-level only (R17 contract): we MUST NOT
+                # walk arbitrary user subdirectories under
+                # ``~/Downloads``.
                 if filter_kind == "adoptiq_named":
-                    files = enumerate_user_report_files(src_dir, signal=signal)
+                    _r81_recursive = label == "local_outputs"
+                    try:
+                        files = enumerate_user_report_files(
+                            src_dir,
+                            signal=signal,
+                            recursive=_r81_recursive,
+                        )
+                    except TypeError:
+                        # Older monkeypatched walker without the R81
+                        # ``recursive`` kwarg -- fall back to legacy
+                        # call shape so test fakes do not break.
+                        files = enumerate_user_report_files(
+                            src_dir, signal=signal
+                        )
                     src_stats = index_folder(
                         handle.conn,
                         src_dir,

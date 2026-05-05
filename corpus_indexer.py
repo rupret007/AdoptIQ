@@ -333,22 +333,27 @@ def enumerate_user_report_files(
     downloads_dir: Path | str | None,
     *,
     signal: Optional[IndexSignal] = None,
+    recursive: bool = False,
 ) -> list[CorpusFile]:
     """Round 17.1: enumerate AdoptIQ-named report files in the runtime
     user's ``~/Downloads`` directory.
 
     Filename allow-list: ``^AdoptIQ[\\s_].+\\.(xlsx|docx|csv)$`` so
-    unrelated downloads are never opened.  Walks the top level only
-    (no recursion) -- AdoptIQ writes reports to the root of the user's
-    Downloads folder; if a user nested them in a subdirectory they can
-    still re-export at runtime.  Defensive: returns ``[]`` when
-    ``downloads_dir`` is ``None``, missing, or unreadable.
+    unrelated downloads are never opened.  Defaults to top-level only
+    (``recursive=False``) -- the historical Downloads-folder source
+    must NOT walk arbitrary user subdirectories.
+
+    Round 81 / Build 57: callers indexing the AdoptIQ-managed
+    ``<APP_SUPPORT>/outputs/`` tree pass ``recursive=True`` so the
+    new ``<Manager>/<Type>/<file>.docx`` nested layout is fully
+    walked.  Defensive: returns ``[]`` when ``downloads_dir`` is
+    ``None``, missing, or unreadable.
     """
     return enumerate_corpus_files(
         downloads_dir,
         signal=signal,
         filename_filter=_USER_REPORT_NAME_RE,
-        recursive=False,
+        recursive=bool(recursive),
     )
 
 

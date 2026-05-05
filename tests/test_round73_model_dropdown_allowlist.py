@@ -10,9 +10,14 @@ with an unfriendly authorization error.
 R73 / UX-3 narrows BOTH the UI surface and the API surface to two
 canonical model ids:
 
-* ``gpt-5-nano`` -- AdoptIQ's tested default for both Ask AI and
-  report narratives.
-* ``gemini-3.1-flash-lite`` -- the supported alternative.
+* ``gemini-3.1-flash-lite`` -- AdoptIQ's tested default for both Ask AI
+  and report narratives (Round 77 / Build 53 flipped this from
+  ``gpt-5-nano`` -- operator testing showed flash-lite delivered
+  materially lower per-customer LLM latency on the comprehensive
+  report's per-customer storyboard loop while preserving the
+  R66/B11 + R67/B8 grounding-pass rate).
+* ``gpt-5-nano`` -- the supported alternative; one-click toggle in
+  every preferences surface.
 
 The new contract has three layers, all pinned by this test file:
 

@@ -83,6 +83,138 @@ logger = logging.getLogger(__name__)
 # Word document is what the reader scans to confirm provenance.
 _PARAGRAPH_FALLBACK_CITATION = " [Source: AdoptIQ Report Data Sources]"
 
+
+# Round 82 / Phase B1: per-source-system citation taxonomy.  Pre-R82
+# every citation rendered the SAME generic chrome
+# ``[Source: AdoptIQ Report Data Sources]`` regardless of which
+# upstream system actually produced the number.  An operator reading
+# a Comprehensive Title Page could see ``Adoption Barriers: 68
+# [Source: AdoptIQ Report Data Sources]`` and ``Support Cases: 381
+# [Source: AdoptIQ Report Data Sources]`` and have no proof of
+# DATA AUTHENTICITY -- both citations were chrome with no per-system
+# attribution.
+#
+# R82 / B1 maps each canonical KPI key (resolved via
+# ``_gate_canonical_kpi_label`` -- the same alias map the gate uses)
+# to a specific source-system tag.  When the paragraph (or a table
+# row's label) resolves to a known canonical KPI, the citation
+# carries the SPECIFIC system name (``Snowflake CSConsole``,
+# ``Snowflake CSOne``, ``AdoptIQ risk_scoring``).  Mixed-source
+# paragraphs (multiple canonical KPIs from DIFFERENT systems) fall
+# back to the generic chrome -- the trade-off is intentional, the
+# alternative would be rendering several different per-match
+# citations on a single line and re-introducing visual mess.
+#
+# Adding a new canonical KPI to ``KPI_ALIASES`` SHOULD also add an
+# entry here; absence falls back to generic chrome (no harm done,
+# only the authenticity upgrade is missed for the new KPI).  The
+# tests in ``tests/test_round82_per_source_citation_taxonomy.py`` pin
+# the contract for every entry below.
+_R82_KPI_SOURCE_TAGS: dict[str, str] = {
+    # Snowflake CSConsole-derived KPIs.
+    "adoption_barriers": "Snowflake CSConsole",
+    "open_adoption_barriers": "Snowflake CSConsole",
+    "critical_barriers": "Snowflake CSConsole",
+    "action_plans": "Snowflake CSConsole",
+    "customer_pulse": "Snowflake CSConsole",
+    "success_priorities": "Snowflake CSConsole",
+    # Snowflake CSOne-derived KPIs (support cases / TAC / BEMS).
+    "support_cases": "Snowflake CSOne",
+    "escalated_support_cases": "Snowflake CSOne",
+    "critical_cases": "Snowflake CSOne",
+    "high_cases": "Snowflake CSOne",
+    "bems": "Snowflake CSOne",
+    # Snowflake EDW Sales-derived KPIs (DSM / subscription roster).
+    "team_members": "Snowflake EDW Sales DSM",
+    "total_customers": "Snowflake EDW Sales subscriptions",
+    # AdoptIQ-derived KPIs.
+    "risk_score": "AdoptIQ risk_scoring",
+    "risk_category": "AdoptIQ risk_scoring",
+    "high_risk_customers": "AdoptIQ canonical_metrics",
+    # External intelligence-derived KPIs.
+    "incidents": "AdoptIQ external_intelligence",
+    # Scope metadata KPIs (manager / technology / window are config
+    # values, not data-pipeline outputs -- attribute to team_config
+    # rather than a Snowflake table so the operator knows the value
+    # came from the form they submitted).
+    "manager": "AdoptIQ team_config",
+    "technology": "AdoptIQ team_config",
+    "window_days": "AdoptIQ analysis scope",
+}
+
+
+def _r82_resolve_source_tag_for_label(label: str) -> Optional[str]:
+    """Round 82 / Phase B1: resolve a KPI label to its specific source tag.
+
+    Returns the per-source-system tag (``"Snowflake CSConsole"``,
+    ``"AdoptIQ risk_scoring"``, etc.) when the label canonicalises to
+    a known KPI in ``_R82_KPI_SOURCE_TAGS``.  Returns ``None`` when:
+
+      * the gate's ``_canonical_kpi_label`` returns ``None`` (label
+        is not a canonical KPI -- e.g. metadata fragments like
+        ``"Generated"``);
+      * the canonical key has no entry in the taxonomy (a new KPI
+        was added to ``KPI_ALIASES`` without updating this map --
+        the caller falls back to generic chrome).
+
+    Never raises; on any internal failure returns ``None`` so the
+    caller falls back to the generic ``_PARAGRAPH_FALLBACK_CITATION``.
+    """
+    if not label:
+        return None
+    try:
+        canonical = _gate_canonical_kpi_label(label)
+    except Exception:
+        return None
+    if not canonical:
+        return None
+    return _R82_KPI_SOURCE_TAGS.get(canonical)
+
+
+def _r82_chrome_for_label(label: str, fallback: str = _PARAGRAPH_FALLBACK_CITATION) -> str:
+    """Round 82 / Phase B1: return the specific per-source chrome for a label.
+
+    Result format matches ``_PARAGRAPH_FALLBACK_CITATION``: a leading
+    space + bracketed source tag.  When no per-source tag is known,
+    returns ``fallback`` so the caller never has to special-case the
+    miss path.
+    """
+    tag = _r82_resolve_source_tag_for_label(label)
+    if tag:
+        return f" [Source: {tag}]"
+    return fallback
+
+
+def _r82_chrome_for_paragraph(
+    matches: list[Any], fallback: str = _PARAGRAPH_FALLBACK_CITATION
+) -> str:
+    """Round 82 / Phase B1: pick the right citation chrome for a paragraph.
+
+    When ALL canonical matches in the paragraph resolve to the SAME
+    source tag, return that specific tag's chrome.  Mixed-source
+    paragraphs (multiple canonical KPIs from different systems on the
+    SAME paragraph) fall back to the generic chrome -- this preserves
+    visual density (one chrome per match) without splitting attribution
+    across N differently-labelled citations on a single line.
+
+    Empty / no-canonical-match input returns ``fallback`` (which is
+    the generic chrome by default).
+    """
+    if not matches:
+        return fallback
+    tags: set[str] = set()
+    for m in matches:
+        try:
+            label = m.group("label").strip() if hasattr(m, "group") else ""
+        except Exception:
+            label = ""
+        tag = _r82_resolve_source_tag_for_label(label)
+        if tag:
+            tags.add(tag)
+    if len(tags) == 1:
+        return f" [Source: {tags.pop()}]"
+    return fallback
+
 # Mirror of ``_PARAGRAPH_KPI_NUMERIC_RE`` from
 # ``report_iteration_loop.py``.  We import via duck-typing rather than
 # a hard dependency because the gate module is dev-side only and the
@@ -881,8 +1013,18 @@ def inject_source_citations_into_docx(
             # writers producing such paragraphs use plain
             # ``add_paragraph(text)`` so this is acceptable in
             # practice).
+            #
+            # Round 82 / Phase B2: when ALL canonical matches in the
+            # paragraph resolve to the SAME source system (via
+            # ``_r82_chrome_for_paragraph``), use that system's
+            # specific chrome (e.g. ``[Source: Snowflake CSConsole]``).
+            # Mixed-source paragraphs fall back to the generic chrome
+            # so we don't render multiple different per-match
+            # citations on a single line and re-introduce visual
+            # mess (the user-stated R82 acceptance criterion).
+            paragraph_chrome = _r82_chrome_for_paragraph(canonical_matches, citation)
             new_text = _rewrite_paragraph_with_inline_citations(
-                paragraph.text, all_matches, citation.strip()
+                paragraph.text, all_matches, paragraph_chrome.strip()
             )
             _replace_paragraph_text(paragraph, new_text)
         elif canonical_matches:
@@ -890,7 +1032,18 @@ def inject_source_citations_into_docx(
             # total): append once. The segment from match.end() to
             # end-of-text contains the trailing citation, so the gate
             # marks it source_backed.
-            _append_run(paragraph, citation)
+            #
+            # Round 82 / Phase B3: route the single canonical
+            # match's label through ``_r82_chrome_for_label`` so the
+            # appended chrome carries the specific per-source
+            # attribution when the label maps into the R82 KPI
+            # taxonomy.  Falls back to the generic chrome on misses.
+            try:
+                single_label = canonical_matches[0].group("label").strip()
+            except Exception:  # noqa: BLE001 - label extraction never fatal
+                single_label = ""
+            single_chrome = _r82_chrome_for_label(single_label, citation)
+            _append_run(paragraph, single_chrome)
         else:
             # No canonical KPI match -- pure narrative paragraph with
             # short numeric tokens. Trailing citation satisfies the
@@ -930,7 +1083,17 @@ def inject_source_citations_into_docx(
                         if _SOURCE_TOKEN_RE.search(adj_text):
                             counts["skipped_already_cited"] += 1
                             continue
-                        if _inject_into_cell(value_row_cells[col_idx], citation):
+                        # Round 82 / Phase B3: route per-column header
+                        # through the R82 taxonomy so each numeric
+                        # cell carries the system-specific chrome
+                        # (e.g. ``[Source: Snowflake CSConsole]`` for
+                        # an ``Adoption Barriers`` column).  Misses
+                        # fall back to the generic chrome silently.
+                        col_chrome = _r82_chrome_for_label(
+                            header_cells[col_idx] if col_idx < len(header_cells) else "",
+                            citation,
+                        )
+                        if _inject_into_cell(value_row_cells[col_idx], col_chrome):
                             counts["table_cells_injected"] += 1
 
         # Two-column ``label | value`` rows.
@@ -945,7 +1108,14 @@ def inject_source_citations_into_docx(
                 counts["skipped_already_cited"] += 1
                 continue
             value_cell = rows[row_idx].cells[1]
-            if _inject_into_cell(value_cell, citation):
+            # Round 82 / Phase B3: row label drives per-source chrome
+            # for two-column tables.  ``Customer Pulse | 87`` resolves
+            # to ``[Source: Snowflake CSConsole]``; ``Total Customers
+            # | 39`` resolves to ``[Source: Snowflake EDW Sales
+            # subscriptions]``.  Misses fall back to generic.
+            row_label = row_text[0] if row_text else ""
+            row_chrome = _r82_chrome_for_label(row_label, citation)
+            if _inject_into_cell(value_cell, row_chrome):
                 counts["table_cells_injected"] += 1
 
     if counts["paragraphs_injected"] == 0 and counts["table_cells_injected"] == 0:

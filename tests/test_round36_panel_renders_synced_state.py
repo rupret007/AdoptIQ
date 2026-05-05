@@ -178,140 +178,71 @@ def test_panel_detail_includes_onedrive_setup_instructions():
 
 
 # ---------------------------------------------------------------------------
-# Behavioral re-implementation: mirror classifyCorpusPanel in Python.
+# Source-shape pins (R83 cleanup): replace the legacy Python mirror.
 # ---------------------------------------------------------------------------
+# Round 83 / Phase D7 removed ``_classify_panel`` (a stale Python mirror
+# of ``classifyCorpusPanel`` that did NOT model the R53
+# ``blocked_no_onedrive`` branch and would NOT have modelled the R83
+# ``signed_in_no_corpus`` branch either).  The mirror was a tax on every
+# round that touched the JS classifier without buying any signal that
+# the same-file static-substring pins above weren't already buying --
+# and worse, it advertised a contract ("ten cardinal payloads") that
+# silently went stale as the JS state machine grew from seven to nine
+# states.  R53 + R68 + R83 panel tests use source-shape pins (see
+# ``tests/test_round83_signed_in_no_corpus_panel.py`` for the canonical
+# pattern) instead of a Python mirror; this file follows suit.
 
 
-def _classify_panel(payload):
-    """Python mirror of the JS classifyCorpusPanel function.  Pinned
-    here so a behavioral regression in either side surfaces.  Branch
-    order matches the JS source (in_progress > error > baked vs
-    fresh)."""
-    boot = (payload or {}).get("boot") if payload else None
-    if not boot:
-        return "unknown"
-    if boot.get("in_progress"):
-        return "refreshing"
-    if boot.get("last_refresh_error"):
-        return "refresh_failed"
-    source = boot.get("source") if isinstance(boot.get("source"), str) else ""
-    od = (
-        boot.get("onedrive_status")
-        if isinstance(boot.get("onedrive_status"), str)
-        else ""
+def test_classifier_dispatches_all_seven_r36_baseline_states():
+    """The R36 baseline classifier MUST recognise the seven cardinal
+    R36 states.  R53 (``blocked_no_onedrive``) and R83
+    (``signed_in_no_corpus``) add two more; their pins live in the
+    R53/R83 panel tests respectively."""
+    # Round 83 / D7: source-shape replacement for the retired mirror.
+    classifier_start = JS_SRC.find("function classifyCorpusPanel")
+    classifier_end = JS_SRC.find(
+        "function corpusPanelLabel", classifier_start,
     )
-    if source == "baked" and od == "synced":
-        return "baked_synced"
-    if source == "baked":
-        return "baked_not_synced"
-    if source == "fresh" and od == "synced":
-        return "fresh_indexing"
-    if source == "fresh":
-        return "fresh_not_synced"
-    return "unknown"
-
-
-@pytest.mark.parametrize(
-    ("payload", "expected"),
-    [
-        # Cardinal four (the spec's primary states).
-        (
-            {
-                "boot": {
-                    "source": "baked",
-                    "onedrive_status": "synced",
-                    "onedrive_file_count": 12,
-                }
-            },
-            "baked_synced",
-        ),
-        (
-            {
-                "boot": {
-                    "source": "baked",
-                    "onedrive_status": "not_synced",
-                    "onedrive_file_count": 0,
-                }
-            },
-            "baked_not_synced",
-        ),
-        (
-            {
-                "boot": {
-                    "source": "fresh",
-                    "onedrive_status": "synced",
-                    "onedrive_file_count": 7,
-                }
-            },
-            "fresh_indexing",
-        ),
-        (
-            {
-                "boot": {
-                    "source": "fresh",
-                    "onedrive_status": "not_synced",
-                    "onedrive_file_count": 0,
-                }
-            },
-            "fresh_not_synced",
-        ),
-        # Refresh in progress wins regardless of source / status.
-        (
-            {
-                "boot": {
-                    "source": "baked",
-                    "onedrive_status": "synced",
-                    "in_progress": True,
-                }
-            },
-            "refreshing",
-        ),
-        # Error wins over the baked/fresh classification (operator
-        # must see the error first).
-        (
-            {
-                "boot": {
-                    "source": "baked",
-                    "onedrive_status": "synced",
-                    "last_refresh_error": "URLError",
-                }
-            },
-            "refresh_failed",
-        ),
-        # Defaults: no payload -> unknown (pre-poll grey pill).
-        (None, "unknown"),
-        ({}, "unknown"),
-        ({"boot": None}, "unknown"),
-        # Malformed source / status -> unknown (defensive).
-        (
-            {"boot": {"source": None, "onedrive_status": "synced"}},
-            "unknown",
-        ),
-    ],
-)
-def test_classify_panel_matrix(payload, expected):
-    """Behavioral pin: the ten cardinal payloads classify exactly as
-    documented in the panel spec.  Mirrors the JS one-to-one so a
-    drift on either side fails this test."""
-    assert _classify_panel(payload) == expected
+    assert classifier_start != -1 and classifier_end != -1
+    classifier = JS_SRC[classifier_start:classifier_end]
+    # Pin the seven R36 baseline state names -- if any are dropped or
+    # renamed, this test fires.
+    for state in (
+        "baked",          # source value (resolves to baked_synced /
+                          # baked_not_synced via the OneDrive status check)
+        "fresh",          # similar
+        "synced",         # od_status branch
+        "not_synced",     # od_status branch (used for messaging downstream)
+        "in_progress",    # refreshing branch
+        "last_refresh_error",  # refresh_failed branch
+    ):
+        assert state in classifier, (
+            f"R36 baseline classifier branch for {state!r} missing -- "
+            "did a refactor drop a state?"
+        )
+    # The classifier MUST emit the four cardinal R36 state labels.
+    for label in (
+        "'baked_synced'",
+        "'baked_not_synced'",
+        "'fresh_indexing'",
+        "'fresh_not_synced'",
+        "'refreshing'",
+        "'refresh_failed'",
+        "'unknown'",
+    ):
+        assert label in classifier, (
+            f"R36 baseline classifier output {label!r} missing -- "
+            "did a refactor drop a state?"
+        )
 
 
 def test_label_for_baked_synced_says_active_and_synced():
-    """Compose a payload, run it through both classifier + label
-    extraction, and assert the user sees 'Active' + 'OneDrive
-    synced' on the happy path."""
-    payload = {
-        "boot": {
-            "source": "baked",
-            "onedrive_status": "synced",
-            "onedrive_file_count": 5,
-        }
-    }
-    state = _classify_panel(payload)
-    assert state == "baked_synced"
-    # Spot-check that the JS label switch carries the corresponding
-    # user copy (we already pinned the copy above, but assert it
-    # composes through the state lookup here).
+    """Pin the user copy for the happy-path label
+    (``baked_synced`` -> ``Active (OneDrive synced)``).  This is
+    the most-visible label in the panel; a regression here would
+    confuse an operator opening a healthy install."""
+    # Round 83 / D7: was previously gated on the Python mirror,
+    # now uses the JS source-shape directly.
     label_block = re.search(
         r"function corpusPanelLabel\(state\)\s*\{(.+?)\n\s*\}",
         JS_SRC,
@@ -319,14 +250,12 @@ def test_label_for_baked_synced_says_active_and_synced():
     )
     assert label_block is not None, "corpusPanelLabel function missing"
     body = label_block.group(1)
-    case_pos = body.find("case '" + state + "':")
-    assert case_pos != -1, f"label switch missing case for {state}"
-    # Find the return statement that follows the case label and
-    # assert it carries the expected fragment.
+    case_pos = body.find("case 'baked_synced':")
+    assert case_pos != -1, "label switch missing case for baked_synced"
     return_pos = body.find("return", case_pos)
     assert return_pos != -1
     return_line = body[return_pos:body.find("\n", return_pos)]
     assert "Active" in return_line and "OneDrive synced" in return_line, (
-        f"corpusPanelLabel({state}) returned unexpected line: "
+        f"corpusPanelLabel(baked_synced) returned unexpected line: "
         f"{return_line!r}"
     )

@@ -44,9 +44,8 @@ pip install pyinstaller
 
 1. Create `secrets.env` from `secrets.env.template`.
 2. Fill required values (Snowflake, CircuIT, PSIRT, and **ADOPTIQ_ADMIN_SECRET_KEY** for packaged builds—the app will not start without it).
-3. If you want the packaged Mac build to use the latest faster CircuIT default, set:
-   - `CIRCUIT_MODEL_NAME=gemini-3.1-flash-lite`
-3. Generate bundled secrets:
+3. CircuIT model selection: as of Round 77 / Build 53 the hardcoded default is `gemini-3.1-flash-lite` (the faster of the two CircuIT free-tier options); the `secrets.env.template` ships with `CIRCUIT_MODEL_NAME=gemini-3.1-flash-lite` already set. To prefer `gpt-5-nano` for the packaged build, change that line — or leave the env entry blank and let an operator flip it via the **Preferences** UI page (test-before-save) or the Admin Console settings tile after launch.
+4. Generate bundled secrets:
 
 ```bash
 python embed_credentials.py
@@ -263,7 +262,7 @@ both the build operator and the auditor see it.
 ```text
 You are in the AdoptIQ_MAC staging codebase. Please:
 1) Implement all parity items from MIGRATION_TO_MAC.md.
-2) Confirm build prerequisites and secrets setup, including `CIRCUIT_MODEL_NAME=gemini-3.1-flash-lite` if the packaged app should use Gemini by default.
+2) Confirm build prerequisites and secrets setup. As of Round 77 / Build 53 the hardcoded default is `gemini-3.1-flash-lite` (and `secrets.env.template` ships that value); operators can flip to `gpt-5-nano` via the Preferences UI or by setting `CIRCUIT_MODEL_NAME=gpt-5-nano` in `secrets.env` before bake.
 3) Build a macOS artifact using `./build_mac.sh` and optionally `./build_mac_dmg.sh`.
 4) Run tests and provide a concise validation report with output paths.
 ```

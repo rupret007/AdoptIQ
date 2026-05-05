@@ -2,6 +2,8 @@
   "managers": [
     "Dee Kindrick",
     "Brian Frazier",
+    "Paresh Jadhav",
+    "Mithun Sakthivel Subramanian",
     "Shams",
     "All Managers"
   ],
@@ -68,11 +70,6 @@
     },
     {
       "manager": "Brian Frazier",
-      "name": "Angelica Hernandez Becerra",
-      "email": "angelihe@cisco.com"
-    },
-    {
-      "manager": "Brian Frazier",
       "name": "Arpit Patel",
       "email": "arpitpat@cisco.com"
     },
@@ -113,13 +110,88 @@
     },
     {
       "manager": "Brian Frazier",
+      "name": "William Phillips",
+      "email": "willphil@cisco.com"
+    },
+    {
+      "manager": "Paresh Jadhav",
+      "name": "Avinash Vinu",
+      "email": "avinu@cisco.com"
+    },
+    {
+      "manager": "Paresh Jadhav",
+      "name": "Gagandeep Kaur Walia",
+      "email": "gagwalia@cisco.com"
+    },
+    {
+      "manager": "Paresh Jadhav",
+      "name": "Ian Gagnon",
+      "email": "igagnon@cisco.com"
+    },
+    {
+      "manager": "Paresh Jadhav",
+      "name": "Kohei Kobayashi",
+      "email": "kkitawak@cisco.com"
+    },
+    {
+      "manager": "Paresh Jadhav",
+      "name": "Samuel Sugandaran",
+      "email": "ssuganda@cisco.com"
+    },
+    {
+      "manager": "Paresh Jadhav",
+      "name": "Sei Tonomi",
+      "email": "stonomi@cisco.com"
+    },
+    {
+      "manager": "Paresh Jadhav",
+      "name": "Seitaro Shinagawa",
+      "email": "sshinaga@cisco.com"
+    },
+    {
+      "manager": "Paresh Jadhav",
+      "name": "Timothy Brown",
+      "email": "timothbr@cisco.com"
+    },
+    {
+      "manager": "Mithun Sakthivel Subramanian",
+      "name": "Angelica Hernandez Becerra",
+      "email": "angelihe@cisco.com"
+    },
+    {
+      "manager": "Mithun Sakthivel Subramanian",
+      "name": "Asad Sarfaraz",
+      "email": "asarfara@cisco.com"
+    },
+    {
+      "manager": "Mithun Sakthivel Subramanian",
+      "name": "Balaji Kandasamy Shanmugam",
+      "email": "balakand@cisco.com"
+    },
+    {
+      "manager": "Mithun Sakthivel Subramanian",
+      "name": "Mariyam Hachikyan",
+      "email": "mhachiky@cisco.com"
+    },
+    {
+      "manager": "Mithun Sakthivel Subramanian",
+      "name": "Prashant Yadav",
+      "email": "prashyad@cisco.com"
+    },
+    {
+      "manager": "Mithun Sakthivel Subramanian",
+      "name": "Ramon Gonzalez Reyes",
+      "email": "ramongo@cisco.com"
+    },
+    {
+      "manager": "Mithun Sakthivel Subramanian",
       "name": "Samuel Tamayo",
       "email": "samtamay@cisco.com"
     },
     {
-      "manager": "Brian Frazier",
-      "name": "William Phillips",
-      "email": "willphil@cisco.com"
+      "manager": "Mithun Sakthivel Subramanian",
+      "name": "Shagul Hameed",
+      "email": "shaghame@cisco.com"
     },
     {
       "manager": "Shams",

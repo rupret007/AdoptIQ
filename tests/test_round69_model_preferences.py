@@ -108,7 +108,9 @@ def test_r69_circuit_config_carries_per_site_keys_with_safe_defaults(monkeypatch
     import config as _c
     importlib.reload(_c)
     cfg = _c.Config.CIRCUIT_CONFIG
-    assert cfg["model_name"] == cfg["model_name_ask_ai"] == cfg["model_name_report"] == "gpt-5-nano"
+    # Round 77 / Build 53: hardcoded default flipped from ``gpt-5-nano``
+    # to ``gemini-3.1-flash-lite``.
+    assert cfg["model_name"] == cfg["model_name_ask_ai"] == cfg["model_name_report"] == "gemini-3.1-flash-lite"
 
 
 def test_r69_circuit_config_env_override_distinct(monkeypatch):
@@ -131,6 +133,8 @@ def test_r69_circuit_config_env_override_distinct(monkeypatch):
 
 
 def test_r69_resolver_falls_back_to_hardcoded_default_when_env_unset(monkeypatch, tmp_path):
+    """Round 77 / Build 53: hardcoded default flipped from ``gpt-5-nano``
+    to ``gemini-3.1-flash-lite``."""
     monkeypatch.delenv("CIRCUIT_MODEL_NAME", raising=False)
     monkeypatch.delenv("CIRCUIT_MODEL_NAME_ASK_AI", raising=False)
     monkeypatch.delenv("CIRCUIT_MODEL_NAME_REPORT", raising=False)
@@ -138,8 +142,8 @@ def test_r69_resolver_falls_back_to_hardcoded_default_when_env_unset(monkeypatch
     monkeypatch.setattr(_s, "_app_support_dir", lambda: tmp_path)
     import model_resolver as _mr
     importlib.reload(_mr)
-    assert _mr.get_active_ask_ai_model() == "gpt-5-nano"
-    assert _mr.get_active_report_model() == "gpt-5-nano"
+    assert _mr.get_active_ask_ai_model() == "gemini-3.1-flash-lite"
+    assert _mr.get_active_report_model() == "gemini-3.1-flash-lite"
 
 
 def test_r69_resolver_env_layer_wins_over_config_default(monkeypatch, tmp_path):
@@ -165,7 +169,10 @@ def test_r69_resolver_settings_layer_wins_over_env_layer(monkeypatch, tmp_path):
 
 def test_r69_resolver_drops_malformed_env_silently(monkeypatch, tmp_path):
     """A typo'd env var (with a space) must not propagate -- the
-    resolver should fall through to the next layer."""
+    resolver should fall through to the next layer.
+
+    Round 77 / Build 53: hardcoded default flipped to
+    ``gemini-3.1-flash-lite``."""
     monkeypatch.setenv("CIRCUIT_MODEL_NAME_ASK_AI", "rm -rf /")
     monkeypatch.delenv("CIRCUIT_MODEL_NAME", raising=False)
     import adoptiq_settings as _s
@@ -173,7 +180,7 @@ def test_r69_resolver_drops_malformed_env_silently(monkeypatch, tmp_path):
     import model_resolver as _mr
     importlib.reload(_mr)
     # Drops the malformed env, falls through to hardcoded default.
-    assert _mr.get_active_ask_ai_model() == "gpt-5-nano"
+    assert _mr.get_active_ask_ai_model() == "gemini-3.1-flash-lite"
 
 
 def test_r69_resolver_does_not_cache_settings_value(monkeypatch, tmp_path):
@@ -335,7 +342,10 @@ def test_r69_no_report_site_accidentally_uses_ask_ai_resolver():
 
 
 def test_r69_get_settings_ask_ai_model_returns_default_when_unset(client, monkeypatch, tmp_path):
-    """GET on the endpoint returns the persisted + active values."""
+    """GET on the endpoint returns the persisted + active values.
+
+    Round 77 / Build 53: ``active_value`` reflects the new hardcoded
+    default ``gemini-3.1-flash-lite`` when no override is set."""
     import adoptiq_settings as _s
     monkeypatch.setattr(_s, "_app_support_dir", lambda: tmp_path)
     monkeypatch.delenv("CIRCUIT_MODEL_NAME_ASK_AI", raising=False)
@@ -346,7 +356,7 @@ def test_r69_get_settings_ask_ai_model_returns_default_when_unset(client, monkey
     assert data["ok"] is True
     assert data["setting_key"] == "ask_ai_model_name"
     assert data["persisted_value"] == ""
-    assert data["active_value"] == "gpt-5-nano"
+    assert data["active_value"] == "gemini-3.1-flash-lite"
     assert data["env_var"] == "CIRCUIT_MODEL_NAME_ASK_AI"
 
 
