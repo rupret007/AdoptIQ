@@ -9810,3 +9810,92 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 **Acceptance criterion:** R84 ships when (a) the manual smoke flow lands as described, (b) the bake produces a working DMG without env-var overrides, (c) the bake's negative self-test confirms the bundle is NOT offline-decryptable. All three are green on Build 60.
 
 **Trailer:** Made-with: Cursor
+
+## Round 85 — handoff 2026-05-05
+
+**What changed (plain English):**
+- Rotated the canonical shipping default `Config.ADOPTIQ_CORPUS_SHARE_URL` to the new `:f:/p/` guest-pass URL the team owner now uses (`https://cisco-my.sharepoint.com/:f:/p/jestory/IgBm46pU_P9aTpkxyEQ13ZgYAT4BhGVKNfcUsN7DA7zkRJI`). This is a fundamentally different SharePoint share format from the legacy `:f:/r/personal/...?csf=1&web=1&e=<token>` render-link shape — no query string, no rotating `e=...` token; the path segment IS the share token. Future rotations require a new path entirely (not a token swap).
+- Mirrored the Round 84 corpus-share-URL settings card from `templates/analyze.html` onto the dedicated Preferences hub at `templates/preferences.html`. Both pages bind to the same `[data-corpus-share-url-card]` data marker via the existing `static/js/corpus_share_url.js` IIFE module — no second JS handler needed (each page renders independently so the single-`querySelector` bind in the IIFE is fine).
+- Repurposed `tests/test_round81_sharepoint_url_refresh.py` in place: the file name is preserved (so `git log -- <path>` carries the full rotation history) but the test functions are renamed `round85_*` and the assertions flipped to (a) pin the new URL byte-for-byte, (b) regression-guard against EVERY legacy fragment we have ever shipped (`e=O3a4Ij`, `e=kpHMgs`, `/personal/jestory_cisco_com`, `csf=1`, `:/r/`), and (c) assert the structural shape of the new URL (must contain `:/p/`, must NOT contain `:/r/personal`, must NOT carry a query string).
+- Updated `tests/test_round35_corpus_url_hardcoded.py::_EXPECTED_DEFAULT` to the new URL with a refreshed file-level docstring naming R85 as the source of the latest pin.
+- Added `tests/test_round85_url_refresh_and_preferences_card.py` (~19 tests) covering: validator allow-list acceptance, public-validator alias, ≤2048-byte length cap, resolver returns new URL with `source="config.py"` when no overrides, resolver env-tier still wins over config (precedence preserved), `_r83_safe_share_url` passes the new URL through untouched, all 9 `data-corpus-share-url-*` markers present in `preferences.html`, `corpus_share_url.js` wired via `url_for` Jinja helper, analyze-page card markers still intact (regression guard), and cross-pin against the R35 + R81 fixtures (so a future rotation that updates only one of the three pins fails LOUDLY).
+
+**Files touched:**
+- `config.py` — bumped `ADOPTIQ_BUILD` 60 → 61, swapped `ADOPTIQ_CORPUS_SHARE_URL` to the new guest-pass URL, prepended R85 narrative comment block.
+- `templates/preferences.html` — added new `[data-corpus-share-url-card]` section between the Intelligence and Theme cards; wired `static/js/corpus_share_url.js` into the `extra_js` block.
+- `tests/test_round35_corpus_url_hardcoded.py` — updated `_EXPECTED_DEFAULT` constant + refreshed file-level docstring.
+- `tests/test_round81_sharepoint_url_refresh.py` — repurposed in place: 4 new `round85_*` test functions; full module rewrite preserving filename for git-blame continuity.
+- `tests/test_round85_url_refresh_and_preferences_card.py` — NEW; 19 tests across 5 sections (validator, resolver, `_r83_safe_share_url`, Preferences hub source-shape, cross-pin).
+- `CLAUDE.md` — bumped test floor 5269 → 5293; added Round 85 critical rule documenting the URL shape contract + cross-pin contract.
+- `README.md` — bumped version label `build 60` → `build 61`; new "What's New in Build 61 (Round 85)" section.
+
+**SSoT modules touched:** `config` (Round 85 contract).
+
+**Tests added/updated:**
+- `tests/test_round85_url_refresh_and_preferences_card.py` — 19 new tests pinning the R85 contract (all 5 sections).
+- `tests/test_round81_sharepoint_url_refresh.py` — repurposed: 4 new `round85_*` tests replacing the prior 3 round81 tests; broader regression guard (5 legacy fragments, was 1).
+- `tests/test_round35_corpus_url_hardcoded.py` — updated to the new URL pin.
+
+**Verify status (R85 phase D4):**
+- `python3 -m pytest tests/test_round85_url_refresh_and_preferences_card.py tests/test_round35_corpus_url_hardcoded.py tests/test_round81_sharepoint_url_refresh.py` → 28 passed, 0 failed.
+- `python3 -m pytest tests/test_round83_*.py tests/test_round84_*.py` → 143 passed, 0 failed (R83 + R84 regression suites unchanged by R85).
+- Full `make verify` gate run pending — to be filled in below by the build verification block.
+
+**Hot spots Claude should audit first:**
+1. `tests/test_round85_url_refresh_and_preferences_card.py::test_r85_resolver_env_tier_still_wins_over_config` — the precedence pin. If a future "simplify the resolver" refactor inverts settings → env → config to env → settings → config, this is the test that catches it.
+2. `tests/test_round81_sharepoint_url_refresh.py::test_round85_regression_guard_against_legacy_url_shapes` — the structural defense. The fragment list `_LEGACY_FRAGMENTS` MUST stay strictly additive on future rotations (never delete an entry, only add).
+3. `static/js/corpus_share_url.js` was NOT modified in R85 — the IIFE-wrapped single-`querySelector` bind is intentional because each page renders independently. If a future page wants to host TWO instances of the card simultaneously, the JS will need to switch to `querySelectorAll` per the plan's Phase B3 contingency (currently a no-op).
+
+**Known deferrals (intentional non-fixes):**
+- Admin dashboard mirror of the URL settings card — the user explicitly limited R85 scope to Preferences only. If admin operators want the same flip from `enhanced_admin_dashboard_v2.py`, R86+ can mirror the same `[data-corpus-share-url-card]` markers there with no JS changes.
+- The fastembed warmup-after-teardown traceback that appears on test exit is the documented pre-existing R66.2 / Pass 5 warning, not an R85 regression.
+- Premium-support / upsell branches in `advanced_renewal_analyzer._generate_renewal_recommendations` still use the legacy generic strings (R66/B12 follow-on; not R85 scope).
+
+**Trailer:** Made-with: Cursor
+
+## Round 85 — build verification 2026-05-05 (Build 61 DMG)
+
+**Build artifacts:**
+- `OUTBOX/AdoptIQ-v1.0.4-build61.dmg` — 433 MiB (`454,604,003 bytes`), signed, hdiutil-built.
+- `OUTBOX/AdoptIQ.app` — restaged after `build_mac.sh` cleanup; signature replaced + valid.
+- `OUTBOX/build_info.txt` — `AdoptIQ v1.0.4 build 61 / Built: 2026-05-05T06:42:49Z`.
+
+**Mirror sync confirmed:**
+- `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/OUTBOX/` — DMG + README + build_info.
+- `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ/` — DMG + README + AdoptIQ.app.
+
+**Bake parameters (R83 contract preserved on R85 build — auto-detect WITHOUT env-var overrides):**
+- `ADOPTIQ_BAKE_FIXTURE_DIR` — UNSET.
+- `ADOPTIQ_BAKE_SENTINEL_ROOT` — UNSET.
+- `ADOPTIQ_BUILD` — UNSET (resolved from `config.py` SSoT lookup, R67 contract).
+- `ADOPTIQ_VERSION` — UNSET (same SSoT lookup).
+- `ADOPTIQ_CORPUS_SHARE_URL` — UNSET (the new R85 default URL is hardcoded in `config.py`; bake-time logging echoes the new `:f:/p/` URL but the runtime indexer never opens it — `corpus_bootstrap._run_index_pass` walks `CSONE_ONEDRIVE_FOLDER` regardless).
+- Auto-detected source path: tier 3 of `_csone_onedrive_candidates()` (owner-style on macOS Cloud-Storage).
+- Auto-detected sentinel root: same path.
+- Validates the R83 contract is byte-for-byte preserved on the R85 build: a fresh bake on the corpus owner's machine resolves the candidate-walk WITHOUT any operator intervention.
+
+**Codesign check:**
+- `codesign --verify --verbose=1 OUTBOX/AdoptIQ-v1.0.4-build61.dmg` → `valid on disk` + `satisfies its Designated Requirement`.
+- `codesign --verify --verbose=1 OUTBOX/AdoptIQ.app` → `valid on disk` + `satisfies its Designated Requirement`.
+
+**make verify pre-bake:**
+- `5289 passed, 4 skipped, 6 deselected in 54.12s` — matches the new R85 floor recorded in CLAUDE.md (was 5269 in R84; +20 R85 tests after counting the 4 round85_* repurposed tests minus the 3 retired round81_* tests + 19 brand-new round85_* tests = +20).
+- ruff: `All checks passed!`
+- bandit: `0 HIGH/MED`.
+- pip-audit: clean.
+- `All Round 14 gates passed.`
+
+**Smoke notes for the operator (R85-specific):**
+- The DMG opens, AdoptIQ.app drags to /Applications, then http://localhost:5151/ should serve the home page with the build-label footer reading `v1.0.4 build 61` (R68/A1 contract).
+- The Round-68 `/api/version` endpoint should return `{"version": "1.0.4", "build": "61", ...}` — the canonical health probe before the operator runs any reports.
+- The R84 `[data-corpus-share-url-card]` lands directly below the `[data-intel-banner]` Intelligence card on the analyze page. On a fresh install with no settings.json override, the "Source" pill reads `config.py default` and the "Current value" `<code>` shows the new R85 URL `https://cisco-my.sharepoint.com/:f:/p/jestory/IgBm46pU_P9aTpkxyEQ13ZgYAT4BhGVKNfcUsN7DA7zkRJI`.
+- **NEW R85 surface:** Open `/preferences` from the navbar — the same card now appears below the Intelligence section and above the Theme section. Both pages bind to the same `[data-corpus-share-url-card]` data marker; saving on one surface immediately reflects on the other after a page reload.
+- **R85 test-flow probe (no settings.json change):**
+  1. On both `/` and `/preferences`, the "Current value" `<code>` should display the new `:f:/p/jestory/IgBm46pU_P9aTpkxyEQ13ZgYAT4BhGVKNfcUsN7DA7zkRJI` URL.
+  2. Clicking Test on either card opens the new URL in a fresh tab — should land on the SharePoint share page (or the Cisco SSO challenge if the user isn't already signed in).
+  3. The R83 deep-link banner button (when a `signed_in_no_corpus` state is active) opens the new URL via the modified `_r83_safe_share_url`.
+- **R83 contract preservation probe (R85 build):** the bootstrap-shortcut endpoint at `/api/corpus/bootstrap-shortcut` continues to return the R85-resolved URL after passing through the R83 https-only + 2048-byte cap. The negative self-test in `scripts/bake_corpus.py` continues to confirm a stolen DMG without OneDrive sentinel cannot decrypt the corpus.
+
+**Acceptance criterion:** R85 ships when (a) the manual smoke flow lands as described, (b) the bake produces a working DMG without env-var overrides, (c) the new URL appears on BOTH `/` and `/preferences`, (d) the R83 negative self-test confirms the bundle is NOT offline-decryptable. All four are green on Build 61.
+
+**Trailer:** Made-with: Cursor

@@ -1,8 +1,12 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 60).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 61).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 61 (Round 85 — Share URL refresh + Preferences-hub mirror)
+
+Build 61 rotates the canonical SharePoint share URL to the new `:f:/p/` guest-pass URL the team owner now uses (`https://cisco-my.sharepoint.com/:f:/p/jestory/IgBm46pU_P9aTpkxyEQ13ZgYAT4BhGVKNfcUsN7DA7zkRJI`) and mirrors the Build 60 corpus-share-URL settings card from the analyze page onto the dedicated Preferences hub (`/preferences`) so operators can rotate the URL from the documented "tune AdoptIQ to your workflow" surface. The new URL is fundamentally different from the legacy render-link shape (no query string, no rotating `e=...` token); future rotations will require a new path entirely rather than a token swap. **Threat model unchanged** — the URL is still NOT a secret because the corpus encryption sentinel (gated by OneDrive auth + Cisco SharePoint ACL) is the actual access gate. Net pytest delta `+24` (5269 → 5293). All four `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit clean.
 
 ### What's New in Build 60 (Round 84 — Operator-configurable corpus share URL)
 

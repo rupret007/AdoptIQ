@@ -219,6 +219,109 @@
                 </div>
             </section>
 
+            {# ----- Section: Corpus share URL (R85 / Build 61) ------- #}
+            {# Round 85 / Build 61: mirror of the analyze-page R84 card.
+               Same data-* markers + same static/js/corpus_share_url.js
+               module so operators can rotate the SharePoint share URL
+               from the documented Preferences hub (not just the analyze
+               page).  Threat model unchanged: the URL is NOT a secret;
+               Cisco SharePoint ACL gates the share, OneDrive auth gates
+               corpus decryption (R83 contract preserved by
+               ``corpus_bootstrap._run_index_pass`` calling
+               ``open_corpus_for_user(..., allow_local_sentinel=False)``).
+               Source-shape pinned by
+               ``tests/test_round85_url_refresh_and_preferences_card.py``. #}
+            <section id="prefs-corpus-share-url-card"
+                     class="card shadow-cisco fade-in mb-4"
+                     data-corpus-share-url-card
+                     style="animation-delay: 0.25s;"
+                     aria-labelledby="prefs-share-url-heading"
+                     aria-live="polite"
+                     aria-atomic="true">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-share-url-heading">
+                        <i class="fas fa-link me-2" aria-hidden="true"></i>
+                        Corpus share URL
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-3">
+                        Operator-rotatable SharePoint share URL used by the
+                        <strong>Add corpus share to my OneDrive</strong>
+                        button on the Knowledge Corpus panel.  Changing
+                        this value does NOT alter the encryption contract:
+                        a DMG without OneDrive auth is still useless ciphertext.
+                        Resolution precedence:
+                        <code>settings.json</code> (this page) &rarr;
+                        <code>ADOPTIQ_CORPUS_SHARE_URL</code> env &rarr;
+                        <code>config.py</code> default.
+                    </p>
+                    <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
+                        <span class="badge rounded-pill bg-secondary"
+                              data-corpus-share-url-source-pill
+                              title="Which precedence tier produced the active URL">
+                            <span data-corpus-share-url-source-text>checking&hellip;</span>
+                        </span>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-corpus-share-url-current">
+                            Current value
+                        </label>
+                        <code class="d-block small text-break"
+                              id="prefs-corpus-share-url-current"
+                              data-corpus-share-url-current
+                              aria-live="polite">
+                            (loading&hellip;)
+                        </code>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-corpus-share-url-input">
+                            New SharePoint share URL
+                            <span class="text-muted">
+                                (leave blank to clear the override and fall
+                                back to the env / config default)
+                            </span>
+                        </label>
+                        <input type="url"
+                               class="form-control form-control-sm"
+                               id="prefs-corpus-share-url-input"
+                               data-corpus-share-url-input
+                               placeholder="https://cisco-my.sharepoint.com/:f:/p/..."
+                               maxlength="2048"
+                               autocomplete="off"
+                               spellcheck="false">
+                    </div>
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        <button type="button"
+                                class="btn btn-sm btn-outline-secondary"
+                                data-corpus-share-url-test
+                                title="Open the saved URL in a new browser tab to verify it lands on the correct share">
+                            <i class="fas fa-external-link-alt me-1" aria-hidden="true"></i>
+                            Test
+                        </button>
+                        <button type="button"
+                                class="btn btn-sm btn-primary"
+                                data-corpus-share-url-save
+                                title="Persist the new URL to settings.json (atomic write, mode 0o600)">
+                            <i class="fas fa-save me-1" aria-hidden="true"></i>
+                            Save
+                        </button>
+                        <button type="button"
+                                class="btn btn-sm btn-outline-warning"
+                                data-corpus-share-url-clear
+                                title="Clear the operator override and fall back to the env / config default">
+                            <i class="fas fa-undo me-1" aria-hidden="true"></i>
+                            Clear override
+                        </button>
+                        <span class="small ms-2"
+                              data-corpus-share-url-feedback
+                              aria-live="polite"></span>
+                    </div>
+                </div>
+            </section>
+
             {# ----- Section: Theme (informational) ------------------- #}
             <section class="card shadow-cisco fade-in mb-4"
                      style="animation-delay: 0.3s;"
@@ -285,4 +388,11 @@
    Save contract so a typo'd model name or unprovisioned model cannot
    land in settings.json. #}
 <script src="{{ url_for('static', filename='js/r69_model_preferences.js') }}"></script>
+{# Round 85 / Build 61: mirror of the analyze-page corpus share URL
+   card.  Reuses the IIFE-wrapped R84 module so the same
+   ``[data-corpus-share-url-*]`` markers bind here without a second
+   JS handler.  Threat model + XSS posture unchanged from R84
+   (textContent rendering, https-only allow-list, Test reads the
+   SAVED URL via ``/api/corpus/bootstrap-shortcut``). #}
+<script src="{{ url_for('static', filename='js/corpus_share_url.js') }}"></script>
 {% endblock %}

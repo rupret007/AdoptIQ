@@ -23,15 +23,20 @@ from pathlib import Path
 import pytest
 
 
-# Round 81 / Build 57: refreshed canonical share-token from
-# ``e=O3a4Ij`` to ``e=kpHMgs`` (the SharePoint share-token that
-# Brian and the team now use).  The path is unchanged; only the
-# trailing query-string token rotates.  Pinned by
-# ``tests/test_round81_sharepoint_url_refresh.py``; the pre-R81
-# token is regression-guarded there as well.
+# Round 85 / Build 61: rotated to a NEW SharePoint share format -- a
+# ``:f:/p/`` guest-pass URL with no query string and no rotating
+# ``e=...`` token.  This is fundamentally different from the legacy
+# render-link shape (R35 -> R81 -> Build 60) which carried
+# ``/personal/jestory_cisco_com/Documents/...?csf=1&web=1&e=<token>``.
+# The legacy shape regression guard now lives in
+# ``tests/test_round81_sharepoint_url_refresh.py`` (renamed-in-place
+# to round85_* test functions) and rejects every legacy fragment
+# (``e=O3a4Ij``, ``e=kpHMgs``, ``/personal/jestory_cisco_com``,
+# ``csf=1``) so a future cherry-pick / merge cannot silently restore
+# either of the older URL shapes.
 _EXPECTED_DEFAULT = (
-    "https://cisco-my.sharepoint.com/:f:/r/personal/jestory_cisco_com/"
-    "Documents/AI%20Projects/AdoptIQ_CSOne_Reports?csf=1&web=1&e=kpHMgs"
+    "https://cisco-my.sharepoint.com/:f:/p/jestory/"
+    "IgBm46pU_P9aTpkxyEQ13ZgYAT4BhGVKNfcUsN7DA7zkRJI"
 )
 
 
