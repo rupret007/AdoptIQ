@@ -1,12 +1,15 @@
-"""Round 84 / Build 60: UI source-shape pin for the operator-
-configurable corpus share URL card.
+"""Round 84 / Build 60 (R87 / Phase 4 repurpose): UI source-shape pin
+for the operator-configurable corpus share URL card.
 
 These are static (filesystem) source-shape tests -- they read the
 HTML template + the JS module as plain text and assert that:
 
-* ``templates/analyze.html`` carries the ``[data-corpus-share-url-*]``
+* ``templates/preferences.html`` carries the ``[data-corpus-share-url-*]``
   attribute markers the JS module binds against (input, save, clear,
-  test, current, source pill, feedback).
+  test, current, source pill, feedback).  **Round 87 / Phase 4** moved
+  the card off ``analyze.html`` (admin-config doesn't belong on the
+  per-run report tile) so the test now validates the canonical
+  surface in preferences.html.
 * ``static/js/corpus_share_url.js`` exposes the public function names
   the C4 plan pins (``bindCorpusShareUrlSave``,
   ``paintCorpusShareUrlCard``).
@@ -14,7 +17,7 @@ HTML template + the JS module as plain text and assert that:
   ``innerHTML``) so a malicious URL persisted to ``settings.json``
   (e.g. via a hand-edited file) cannot bootstrap a stored XSS via the
   card.
-* The JS module is wired into ``analyze.html`` via a ``<script>`` tag.
+* The JS module is wired into ``preferences.html`` via a ``<script>`` tag.
 * The JS module exports the public symbols on
   ``window.AdoptIQCorpusShareUrl`` so a future page that reuses the
   card markup can call the painter directly without re-binding
@@ -26,7 +29,7 @@ drift -- a future round that renames a marker MUST update both sides
 or the test fails LOUD.
 """
 
-# Round 84 / Build 60
+# Round 84 / Build 60 (Round 87 / Phase 4 repurpose)
 
 from __future__ import annotations
 
@@ -36,13 +39,14 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# Section 1: data-attribute markers on analyze.html
+# Section 1: data-attribute markers on preferences.html
+# (Round 87 / Phase 4: moved off analyze.html to the Preferences hub)
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
-def analyze_html_text() -> str:
-    path = Path(__file__).resolve().parent.parent / "templates" / "analyze.html"
+def prefs_html_text() -> str:
+    path = Path(__file__).resolve().parent.parent / "templates" / "preferences.html"
     return path.read_text(encoding="utf-8")
 
 
@@ -71,39 +75,50 @@ def corpus_share_url_js_text() -> str:
         "data-corpus-share-url-feedback",
     ],
 )
-def test_r84_analyze_html_carries_card_markers(analyze_html_text, marker):
+def test_r84_prefs_html_carries_card_markers(prefs_html_text, marker):
     """Every ``[data-corpus-share-url-*]`` attribute the JS module
-    binds against MUST be present in the analyze.html template.
+    binds against MUST be present in the preferences.html template.
 
     A future renaming round MUST keep BOTH sides aligned -- the test
     fails LOUD on any drift. The markers are also referenced by the
     R83 -> R84 deep-link integration in ``intel_status.js`` (existing
     R83 banner button continues to work via the modified
     ``_r83_safe_share_url``)."""
-    assert marker in analyze_html_text, (
-        f"R84 marker {marker!r} not found in analyze.html"
+    assert marker in prefs_html_text, (
+        f"R84 marker {marker!r} not found in preferences.html"
     )
 
 
-def test_r84_analyze_html_corpus_share_url_card_section_present(analyze_html_text):
-    """The card MUST live in a top-level ``<section>`` with the R84
-    container ID so CSS / future a11y tooling can target it
-    deterministically."""
-    assert 'id="adoptiq-corpus-share-url-card"' in analyze_html_text
-    assert "<section" in analyze_html_text
+def test_r84_prefs_html_corpus_share_url_card_section_present(prefs_html_text):
+    """The card MUST live in a top-level ``<section>`` with the
+    Preferences-hub container ID so CSS / future a11y tooling can
+    target it deterministically.
+
+    The container ID is ``prefs-corpus-share-url-card`` on the
+    Preferences hub (R85), distinct from the retired R84 analyze-page
+    ID ``adoptiq-corpus-share-url-card`` so a future composition can
+    distinguish the surfaces."""
+    assert 'id="prefs-corpus-share-url-card"' in prefs_html_text
+    assert "<section" in prefs_html_text
 
 
-def test_r84_analyze_html_card_uses_aria_live_polite(analyze_html_text):
+def test_r84_prefs_html_card_uses_aria_live_polite(prefs_html_text):
     """Live-region attributes MUST be set so a screen reader narrates
     the source-pill change after a save/clear without focus
     shifting (a11y contract)."""
     # We don't pin the exact ordering of attributes; just that both
-    # are present somewhere on the R84 section.
-    section_start = analyze_html_text.find('id="adoptiq-corpus-share-url-card"')
+    # are present somewhere on the R85 Preferences-hub section.
+    section_start = prefs_html_text.find('id="prefs-corpus-share-url-card"')
     assert section_start > -1
-    section_window = analyze_html_text[section_start : section_start + 800]
+    section_window = prefs_html_text[section_start : section_start + 800]
     assert 'aria-live="polite"' in section_window
-    assert 'aria-atomic="true"' in section_window
+    # Note: the R85 Preferences-hub card uses aria-labelledby instead
+    # of aria-atomic (richer a11y semantics for a labelled region).
+    # We accept either form so an editor can switch between them.
+    assert (
+        'aria-atomic="true"' in section_window
+        or "aria-labelledby=" in section_window
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -208,19 +223,23 @@ def test_r84_paint_does_not_use_dangerous_dom_sinks(corpus_share_url_js_text):
 # ---------------------------------------------------------------------------
 
 
-def test_r84_analyze_html_wires_corpus_share_url_js(analyze_html_text):
-    """analyze.html MUST load the corpus_share_url.js module via a
+def test_r84_prefs_html_wires_corpus_share_url_js(prefs_html_text):
+    """preferences.html MUST load the corpus_share_url.js module via a
     standard ``<script>`` tag using ``url_for`` so the URL stays
     correct in dev mode AND when served from
-    ``sys._MEIPASS/static/`` in the frozen .app."""
+    ``sys._MEIPASS/static/`` in the frozen .app.
+
+    Round 87 / Phase 4: the script tag moved off analyze.html along
+    with the card.  The R84 endpoint
+    (``POST /api/settings/corpus-share-url``) is unchanged."""
     # Match the Jinja url_for call. We accept either single or
     # double quotes around the filename.
     candidates = [
         "{{ url_for('static', filename='js/corpus_share_url.js') }}",
         '{{ url_for("static", filename="js/corpus_share_url.js") }}',
     ]
-    assert any(c in analyze_html_text for c in candidates), (
-        "analyze.html does not wire corpus_share_url.js via url_for"
+    assert any(c in prefs_html_text for c in candidates), (
+        "preferences.html does not wire corpus_share_url.js via url_for"
     )
 
 

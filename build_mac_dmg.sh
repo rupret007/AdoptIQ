@@ -128,6 +128,46 @@ for c in _csone_onedrive_candidates():
 fi
 echo
 
+# Round 87 / Phase 1: opt-in release gate.  When ADOPTIQ_RELEASE_GATE=1
+# is set we hard-fail the build if the corpus bake was skipped or if
+# either of the two artifacts the .spec file relies on are missing.
+# Default-off so dev iteration (BAKE=0 or arbitrary --no-bake) still
+# works exactly as before; CI / shipping pipelines opt in by exporting
+# ADOPTIQ_RELEASE_GATE=1 BEFORE invoking this script.
+#
+# This closes the R86 audit's PARTIAL on the "baked corpus shipped
+# with DMG" requirement -- a future operator could otherwise run with
+# ADOPTIQ_BAKE_CORPUS=0 and silently ship a DMG that hits
+# blocked_no_onedrive on first launch for users without the OneDrive
+# folder synced.  The .bake-skipped marker is the SSoT that
+# scripts/bake_corpus.py writes from _emit_skip_marker (line ~233).
+if [[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" ]]; then
+  echo
+  echo "=============================================="
+  echo "  Round 87: ADOPTIQ_RELEASE_GATE=1 active"
+  echo "=============================================="
+  if [[ -f "bake/.bake-skipped" ]]; then
+    echo
+    echo "ERROR: ADOPTIQ_RELEASE_GATE=1 but bake/.bake-skipped is present."
+    echo "       The corpus bake was skipped (ADOPTIQ_BAKE_CORPUS=0 or"
+    echo "       --no-bake) -- shipping builds MUST carry a baked corpus."
+    echo "       Re-run without ADOPTIQ_BAKE_CORPUS=0 OR clear the"
+    echo "       release gate (unset ADOPTIQ_RELEASE_GATE) for a dev build."
+    exit 1
+  fi
+  if [[ ! -f "bake/corpus.db.enc" || ! -f "bake/corpus.db.salt" ]]; then
+    echo
+    echo "ERROR: ADOPTIQ_RELEASE_GATE=1 but bake/corpus.db.enc or"
+    echo "       bake/corpus.db.salt is missing.  The .spec file ships"
+    echo "       these artifacts under Resources/baked_corpus/ so the"
+    echo "       runtime can install the encrypted corpus on first launch."
+    echo "       Aborting release."
+    exit 1
+  fi
+  echo "  Bake artifacts present, gate satisfied."
+  echo
+fi
+
 ./build_mac.sh
 
 # Round 28 / pipeline-drift workaround (matches the documented note

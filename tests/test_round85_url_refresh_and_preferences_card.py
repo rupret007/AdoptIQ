@@ -201,17 +201,51 @@ def test_r85_preferences_template_wires_corpus_share_url_js():
     )
 
 
-def test_r85_analyze_template_card_unchanged():
-    """Regression guard: the R84 analyze-page card must still carry
-    its markers so adding the Preferences mirror has not accidentally
-    deleted it."""
+def test_r85_analyze_template_card_relocated_to_preferences():
+    """Round 87 / Phase 4 update: the R84 analyze-page card MOVED to
+    ``templates/preferences.html`` (admin-config doesn't belong on
+    the per-run report tile -- mirrors the R73 UX-2 split that moved
+    the report-narrative model picker off this page).
+
+    Pre-R87 this test asserted the card markers + script tag were
+    STILL on analyze.html (a regression guard against R85
+    accidentally dropping the analyze-page surface).  Post-R87 the
+    contract flips: the card MUST NOT be on analyze.html, but the
+    Phase 4 relocation comment block MUST be (so a future paste-back
+    regression has to consciously delete the marker).
+
+    The full negative-control + destination-side guard lives in
+    ``tests/test_round87_card_removed_from_analyze.py``; this test
+    is the smaller smoke-pin that the R85 file's view of the world
+    still matches reality."""
     html = _read_analyze_html()
-    assert "data-corpus-share-url-card" in html, (
-        "Round 85 regression: analyze-page card markers were removed"
+    assert "data-corpus-share-url-card" not in html, (
+        "Round 87 / Phase 4 regression: the corpus-share-URL card "
+        "data-marker is back on analyze.html.  Admin-config "
+        "belongs on the Preferences hub (preferences.html); the "
+        "analyze page is for running reports."
     )
-    assert "corpus_share_url.js" in html, (
-        "Round 85 regression: analyze-page no longer wires "
-        "corpus_share_url.js"
+    # Pin the actual script-tag wiring (``filename='js/corpus_share_url.js'``
+    # under url_for), NOT a bare ``corpus_share_url.js`` substring --
+    # the Phase 4 explanatory comment block intentionally mentions the
+    # filename in plain text so a future reader knows where the script
+    # tag moved.  Pin only the wiring pattern so the comment text does
+    # not trip this regression guard.
+    forbidden_wirings = [
+        "filename='js/corpus_share_url.js'",
+        'filename="js/corpus_share_url.js"',
+    ]
+    for needle in forbidden_wirings:
+        assert needle not in html, (
+            f"Round 87 / Phase 4 regression: analyze.html still "
+            f"wires corpus_share_url.js via {needle!r}.  The "
+            f"script belongs on preferences.html since the card "
+            f"moved there."
+        )
+    assert "Round 87 / Phase 4" in html, (
+        "Round 87 / Phase 4 regression: the relocation comment "
+        "block was deleted from analyze.html.  Keep the marker "
+        "so a future paste-back has to consciously remove it."
     )
 
 

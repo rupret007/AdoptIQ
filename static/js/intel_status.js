@@ -208,6 +208,26 @@
         if (summary) {
             summary.textContent = buildSummary(payload, state);
         }
+        // Round 87 / Phase 5: toggle the "Reports remain safe to run
+        // during indexing" clarifier.  Visible only while the panel
+        // is in the ``running`` state (i.e. ``boot.in_progress`` is
+        // truthy).  Build 62 acceptance feedback flagged that the
+        // operator saw "Indexing CSOne reports..." with no signal
+        // that report generation was unaffected; this line surfaces
+        // the SSoT contract that core reports (Comprehensive, Compact,
+        // Renewal, Leader) do NOT depend on the corpus index pass --
+        // only Ask AI grounding does.  Hidden in every other state so
+        // the line never appears outside an active index pass.
+        var clarifier = banner.querySelector(
+            '[data-intel-indexing-clarifier]'
+        );
+        if (clarifier) {
+            if (state === 'running') {
+                clarifier.removeAttribute('hidden');
+            } else {
+                clarifier.setAttribute('hidden', '');
+            }
+        }
     }
 
     function paint(payload) {

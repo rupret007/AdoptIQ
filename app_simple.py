@@ -28594,6 +28594,177 @@ def _probe_existing_adoptiq(port, timeout=2.0):
     return 'adoptiq' in body
 
 
+# Round 87 / Phase 3: launcher auto-quit-stale helpers.
+#
+# Pre-R87 the duplicate-launch branch routed the user back to the
+# already-running instance via R38.1's webbrowser.open + sys.exit(0).
+# That was correct for "user double-clicked twice in 10 seconds" but
+# wrong for "user installed Build N+1 and double-clicked from
+# /Applications while Build N is still on port 5151" -- they got
+# routed to the OLD build with a "Restart required" banner that
+# required them to manually quit and relaunch.  Round 87 detects the
+# stale-binary case and force-quits the older instance so the new
+# build can boot in its place.
+#
+# The detection chain is intentionally narrow:
+#   * Frozen-only (``sys.frozen`` truthy).  Dev iteration must be
+#     predictable; never auto-kill a `python app_simple.py` running in
+#     a terminal session.
+#   * Compares the running instance's ``process_started_at_utc``
+#     (from its own ``GET /api/version``) against the freshly-launched
+#     binary's ``Path(sys.executable).stat().st_mtime``.  We are stale
+#     iff our mtime is unambiguously NEWER (1.0 s tolerance for
+#     filesystem-mtime resolution + clock drift).
+#   * Any failure -- bad port, version probe timeout, malformed JSON,
+#     unparseable timestamp -- returns False so we fall back to the
+#     R38.1 re-route.  Never raises into the boot path.
+#
+# The kill itself is ``os.kill(pid, SIGTERM)`` not the HTTP
+# ``/api/shutdown`` endpoint.  The HTTP path requires either CSRF
+# (browser-only) or the ``ADOPTIQ_INTERNAL_TOKEN`` env var matching
+# between processes -- the new launcher process can't share that
+# token cleanly with the running one without a sidecar pidfile + key
+# scheme.  SIGTERM still fires the ``atexit`` handlers in the running
+# process (``_shutdown_handler`` saves analysis_status, ``_r17_corpus_shutdown``
+# scrubs the corpus temp file), so the cleanup contract is preserved.
+
+
+def _query_running_instance_started_at(port, timeout=2.0):
+    """Round 87 / Phase 3: return the running instance's ``process_started_at_utc``.
+
+    GETs ``http://127.0.0.1:<port>/api/version`` and pulls the
+    ``process_started_at_utc`` ISO timestamp out of the JSON.
+    Best-effort: returns ``None`` on any error (malformed port,
+    network timeout, JSON parse failure, missing field).  Never
+    raises into the boot path.
+    """
+    try:
+        port_int = int(port)
+    except (TypeError, ValueError):
+        return None
+    if not (1 <= port_int <= 65535):
+        return None
+    try:
+        import json as _r87_json
+        import urllib.request as _r87_urlreq
+    except ImportError:  # pragma: no cover - stdlib always present
+        return None
+    try:
+        # Round 87: same loopback-only safety as _probe_existing_adoptiq.
+        # URL built from http:// + 127.0.0.1 + validated int port.
+        with _r87_urlreq.urlopen(  # noqa: S310  # nosec B310
+            'http://127.0.0.1:%d/api/version' % port_int, timeout=timeout
+        ) as resp:
+            payload = _r87_json.loads(
+                resp.read(8192).decode('utf-8', errors='ignore')
+            )
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    started = payload.get('process_started_at_utc')
+    if not started:
+        return None
+    return str(started)
+
+
+def _running_instance_is_stale(port, our_mtime, *, timeout=2.0):
+    """Round 87 / Phase 3: True iff the running instance is older than us.
+
+    ``our_mtime`` is typically ``Path(sys.executable).stat().st_mtime``
+    captured fresh at boot (the freshly-double-clicked .app's binary).
+    ``port`` is the main TCP port the running instance is bound to.
+
+    Returns False (preserve R38.1 re-route) when:
+      * not running in a frozen build (dev iteration must be predictable)
+      * the running instance's ``/api/version`` is unreachable, malformed,
+        or the ``process_started_at_utc`` field is unparseable
+      * the running instance's started-at is >= our mtime (the running
+        binary IS our binary -- still a duplicate launch, just not stale)
+
+    Returns True only when the new install is unambiguously newer
+    than the running process's start time.  1.0 s tolerance avoids
+    clock-drift and filesystem-mtime-resolution false positives.
+    """
+    if not getattr(sys, 'frozen', False):
+        return False
+    started_iso = _query_running_instance_started_at(port, timeout=timeout)
+    if not started_iso:
+        return False
+    try:
+        from datetime import datetime as _r87_dt, timezone as _r87_tz
+        # ``datetime.fromisoformat`` in 3.11 accepts +HH:MM offsets but
+        # not the Zulu shorthand 'Z'.  Normalise so the parser doesn't
+        # raise on payloads that use either form.
+        normalised = started_iso.strip()
+        if normalised.endswith('Z'):
+            normalised = normalised[:-1] + '+00:00'
+        started_dt = _r87_dt.fromisoformat(normalised)
+        if started_dt.tzinfo is None:
+            started_dt = started_dt.replace(tzinfo=_r87_tz.utc)
+        started_epoch = started_dt.timestamp()
+    except Exception:
+        return False
+    try:
+        our_epoch = float(our_mtime)
+    except (TypeError, ValueError):
+        return False
+    # Strict newer-than.  1.0 s tolerance covers HFS+ / APFS mtime
+    # resolution + small clock skew between the build host and the
+    # user's machine.
+    return our_epoch > started_epoch + 1.0
+
+
+def _force_quit_existing_adoptiq(port, *, pid=None, timeout=10.0, poll_interval=0.5):
+    """Round 87 / Phase 3: SIGTERM a stale running AdoptIQ on ``port``.
+
+    Resolves the listener pid via ``_check_port_available`` if not
+    supplied, sends ``SIGTERM`` (NOT SIGKILL -- atexit handlers must
+    fire so analysis_status saves and the corpus temp file gets
+    scrubbed), then polls ``_check_port_available`` until the port
+    frees up or ``timeout`` elapses.
+
+    Returns True on success (port free), False on timeout or kill
+    failure.  Never raises -- the caller is the boot path and a
+    failure must fall back to the R38.1 re-route, not crash.
+    """
+    import signal as _r87_signal
+    import time as _r87_time
+
+    if pid is None:
+        try:
+            _, found_pid, _ = _check_port_available(port)
+            pid = found_pid
+        except Exception:
+            return False
+    if not pid:
+        return False
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return False
+
+    try:
+        os.kill(pid_int, _r87_signal.SIGTERM)
+    except (OSError, ProcessLookupError, PermissionError) as kill_err:
+        logger.debug(
+            "Round 87 / force-quit: kill(%s, SIGTERM) failed: %s",
+            pid_int, kill_err,
+        )
+        return False
+
+    deadline = _r87_time.monotonic() + max(0.5, float(timeout))
+    while _r87_time.monotonic() < deadline:
+        try:
+            available, _, _ = _check_port_available(port)
+            if available:
+                return True
+        except Exception:  # pragma: no cover - defensive
+            pass
+        _r87_time.sleep(poll_interval)
+    return False
+
+
 # Round 17.3: resolve the main-app TCP port from the environment so
 # operators can move AdoptIQ off a contested port without a rebuild.
 # 5151 is adjacent to the user's other 5150 ("Van Halen") app and out
@@ -28723,18 +28894,94 @@ if __name__ == '__main__':
         # an AdoptIQ instance, just re-focus the browser there and exit
         # cleanly -- no dialog, no Dock-bounce-into-the-void.
         if _probe_existing_adoptiq(PORT):
-            print("AdoptIQ is already running on http://localhost:%s/ -- "
-                  "opening that instance." % PORT)
-            try:
-                webbrowser.open('http://localhost:%s/' % PORT)
-            except Exception as _open_err:
-                logger.debug(
-                    "Round 38.1: webbrowser.open failed for existing "
-                    "AdoptIQ instance on port %s: %s",
-                    PORT, _open_err,
+            # Round 87 / Phase 3: when we are launching a NEWER frozen
+            # binary than the already-running instance, force-quit the
+            # stale process and boot fresh.  Pre-R87 the user had to
+            # manually quit + relaunch because the R38.1 re-route
+            # silently routed them to the old build with a "Restart
+            # required" banner.  We now do that for them.
+            _r87_our_mtime = None
+            if getattr(sys, 'frozen', False):
+                try:
+                    _r87_our_mtime = Path(sys.executable).stat().st_mtime
+                except OSError as _r87_stat_err:
+                    logger.debug(
+                        "Round 87: stat(sys.executable) failed: %s",
+                        _r87_stat_err,
+                    )
+                    _r87_our_mtime = None
+            _r87_should_force_quit = (
+                _r87_our_mtime is not None
+                and _running_instance_is_stale(PORT, _r87_our_mtime)
+            )
+            if _r87_should_force_quit:
+                print(
+                    "AdoptIQ: stale older instance detected on port %s; "
+                    "shutting it down and starting fresh." % PORT
                 )
-            sys.exit(0)
+                if _force_quit_existing_adoptiq(PORT, pid=other_pid):
+                    print(
+                        "AdoptIQ: stale instance shut down; continuing boot."
+                    )
+                    # Re-check port availability so the rest of the
+                    # ``if not available:`` block (the in-use dialog
+                    # logic) is short-circuited.  Mirrors the kill-then-
+                    # recheck pattern at lines ~28954 and ~28999 in the
+                    # existing macOS / CLI dialog flows.
+                    available, other_pid, other_name = _check_port_available(PORT)
+                    if not available:
+                        print(
+                            "AdoptIQ: port %s did not free after "
+                            "force-quit; re-routing to localhost as a "
+                            "fallback." % PORT
+                        )
+                        try:
+                            webbrowser.open('http://localhost:%s/' % PORT)
+                        except Exception as _r87_open_err:
+                            logger.debug(
+                                "Round 87 / fallback re-route: "
+                                "webbrowser.open failed: %s",
+                                _r87_open_err,
+                            )
+                        sys.exit(0)
+                    # Fall through to normal boot below; ``available``
+                    # is now True so the in-use dialog block is skipped.
+                else:
+                    print(
+                        "AdoptIQ: could not force-quit stale instance; "
+                        "falling back to re-route."
+                    )
+                    try:
+                        webbrowser.open('http://localhost:%s/' % PORT)
+                    except Exception as _r87_open_err:
+                        logger.debug(
+                            "Round 87 / fallback re-route: "
+                            "webbrowser.open failed: %s",
+                            _r87_open_err,
+                        )
+                    sys.exit(0)
+            else:
+                # Not frozen, not stale, or version probe failed --
+                # preserve R38.1 / Build13 re-route to existing instance.
+                print("AdoptIQ is already running on http://localhost:%s/ -- "
+                      "opening that instance." % PORT)
+                try:
+                    webbrowser.open('http://localhost:%s/' % PORT)
+                except Exception as _open_err:
+                    logger.debug(
+                        "Round 38.1: webbrowser.open failed for existing "
+                        "AdoptIQ instance on port %s: %s",
+                        PORT, _open_err,
+                    )
+                sys.exit(0)
 
+    # Round 87 / Phase 3: the in-use dialog logic only runs when the
+    # listener is NOT AdoptIQ at all (probe returned False) or the R87
+    # force-quit path bailed without sys.exit (impossible; all failure
+    # branches above sys.exit).  Wrap in another ``if not available:``
+    # so the post-force-quit success path skips the dialog cleanly --
+    # ``available`` was just re-set to True.
+    if not available:
         print("")
         print("Port %s is in use by another program." % PORT)
         if other_pid and other_name:

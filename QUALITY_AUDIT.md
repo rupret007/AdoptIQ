@@ -9956,3 +9956,66 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - The 4 customer score-parity findings flagged in the audit (4TH DIVISION HEADQUARTERS JP, ABBOTT LABORATORIES US, ADIDAS AG DE, AKAMAI US) are based on the OLD Build 61 artifacts -- the source-tree fix for P0/F1 is in place and pinned by 7 regression tests, but the actual artifacts won't show clean numbers until the operator regenerates reports on Build 62.
 
 **Trailer:** Made-with: Claude Opus 4.7
+
+## Round 87 — handoff 2026-05-05
+
+**What changed (plain English):**
+- **Phase 1: Release-time corpus bake gate.** `build_mac_dmg.sh` carries an opt-in `ADOPTIQ_RELEASE_GATE=1` block immediately AFTER the `scripts/bake_corpus.py` invocation. When the gate is active, the build hard-fails (`exit 1`) if `bake/.bake-skipped` is present (the marker `_emit_skip_marker` writes when `ADOPTIQ_BAKE_CORPUS=0` or `--no-bake` is set) OR if either `bake/corpus.db.enc` / `bake/corpus.db.salt` is missing. Default `${ADOPTIQ_RELEASE_GATE:-0}` keeps dev iteration permissive — only CI / shipping pipelines opt in. Closes the R86 audit's PARTIAL on the "baked corpus shipped with DMG" requirement.
+- **Phase 2: Corpus security model documented honestly.** New "Corpus security model (Round 87)" subsection in `README.md` names BOTH the durable at-rest artifacts (`corpus.db.enc` AES-256-GCM ciphertext, `corpus.db.salt` per-install KDF salt; mode `0o600`, parent dir `0o700`) AND the runtime ephemeral plaintext SQLite file in `$TMPDIR/adoptiq_corpus/` (mode `0o600`). The honest claim is "plaintext is ephemeral, single-user, and scrubbed on clean exit" (best-effort scrub via `EncryptedCorpusHandle.close` registered as `atexit` handler — zero-write the first 1 MB + `fsync`, then `unlink`) — NOT "never plaintext on disk" (which is unverifiable because SQLite cannot operate without a real file descriptor). The OneDrive sentinel + Microsoft tenant ACL are the access gate, NOT the URL — rotating the share URL (R85, R87 / Phase 4) does NOT weaken the encryption. Closes the R86 audit's PARTIAL on "ciphertext at rest / ephemeral plaintext at runtime" with verifiable framing.
+- **Phase 3: Launcher auto-quits stale older AdoptIQ on upgrade.** `app_simple.py` carries three new module-level helpers (`_query_running_instance_started_at(port)`, `_running_instance_is_stale(port, our_mtime)`, `_force_quit_existing_adoptiq(port, *, pid=None)`) wired into the duplicate-launch branch of the `if __name__ == '__main__':` block. When a frozen build is double-clicked AND the running instance's `process_started_at_utc` (from its own `GET /api/version`) is older than our `Path(sys.executable).stat().st_mtime` (1.0 s tolerance), the new launcher SIGTERMs the listener pid (NOT SIGKILL — `atexit` handlers must fire so `analysis_status.json` saves and the corpus temp file scrubs), polls until the port frees (10 s timeout), and proceeds to boot. Detection is intentionally narrow: frozen-only (`getattr(sys, 'frozen', False)`); any failure (bad port, version probe timeout, malformed JSON, unparseable timestamp) returns False so we fall back to the R38.1 re-route. Closes the user's Build 62 acceptance feedback that double-clicking a fresh DMG silently re-routed back to the older running build with a "Restart required" banner.
+- **Phase 4: Corpus share URL card moved to Preferences hub only.** `templates/analyze.html` no longer carries the R84 corpus share URL card or the `static/js/corpus_share_url.js` script tag (admin-config doesn't belong on the per-run report tile — mirrors the R73 UX-2 split that moved the report-narrative model picker off this page). The card lives exclusively on `templates/preferences.html` (R85 added it; R87 finishes the migration). The R84 endpoint, JS handler, and JSON contract are unchanged — only the visual surface moved. The R84 UI source-shape test was repurposed to validate against `preferences.html`; the existing R85 `test_r85_analyze_template_card_unchanged` test was inverted to assert the card is now ABSENT from analyze.html (with the Phase 4 relocation comment marker preserved as the per-file footprint anchor).
+- **Phase 5: Corpus indexing UX clarifier.** `templates/analyze.html` carries a small italic clarifier `<p data-intel-indexing-clarifier hidden>` immediately under the AdoptIQ Intelligence panel's `[data-intel-banner-summary]` line. Visible text: "Reports remain safe to run during indexing — only Ask AI grounding waits for the index pass to finish." `intel_status.js::paintBanner` calls `clarifier.removeAttribute('hidden')` when `state === 'running'` (mirrors the SSR `boot.in_progress` conditional that drives the "Indexing CSOne reports..." summary) and `setAttribute('hidden', '')` otherwise so the line never appears outside an active index pass. Closes the user's Build 62 acceptance feedback that the panel showed only "Indexing CSOne reports..." with no signal that core report generation (Comprehensive, Compact, Renewal, Leader) was unaffected.
+- **Build 62 audit findings (delta from R86 acceptance):** No P0/P1 accuracy or stability defects in the Build 62 reports the user provided. Brian Frazier's account count of 23 (down from prior runs) was investigated and verified as expected Snowflake assignment churn — `team_config.json` rosters are dynamic and account assignments drift between runs as Salesforce ownership changes. NOT a code regression. Cross-format score parity (R86/P0/F1 fix) and `CSConsole_Action_Plans` curated projection (R86/P0/F2 fix) both validate clean in the Build 62 artifacts.
+
+**Files touched:**
+- `build_mac_dmg.sh` — Phase 1 release gate block, 2 `Round 87` markers.
+- `README.md` — Phase 2 "Corpus security model" subsection, 1 `Round 87` marker (heading anchor).
+- `app_simple.py` — Phase 3 launcher auto-kill helpers + duplicate-launch branch, 12 `Round 87` markers across the three new helpers + the modified branch.
+- `templates/analyze.html` — Phase 4 card removal + relocation comment block, Phase 5 clarifier subtitle. 3 `Round 87` markers.
+- `static/js/intel_status.js` — Phase 5 paintBanner clarifier toggle, 1 `Round 87` marker.
+- `tests/test_round84_corpus_share_url_ui_source_shape.py` — Phase 4 fixture repointed at preferences.html, test names updated to `test_r84_prefs_html_*`. 4 `Round 87` markers.
+- `tests/test_round85_url_refresh_and_preferences_card.py` — Phase 4 inverted `test_r85_analyze_template_card_unchanged` to `test_r85_analyze_template_card_relocated_to_preferences`. 5 `Round 87` markers.
+- `config.py` — Build bump 62 → 63 + R87 round-summary docstring, 1 `Round 87` marker.
+- `tests/test_round87_release_gate_corpus_bake.py` — new, 4 source-shape tests for Phase 1.
+- `tests/test_round87_corpus_security_doc.py` — new, 4 contract-pin tests for Phase 2.
+- `tests/test_round87_launcher_auto_kill_stale.py` — new, ~10 source-shape + behavior tests for Phase 3.
+- `tests/test_round87_card_removed_from_analyze.py` — new, 6 negative-control + destination-side tests for Phase 4.
+- `tests/test_round87_corpus_indexing_ux_subtitle.py` — new, 4 source-shape tests for Phase 5.
+
+**SSoT modules touched:** `corpus_bootstrap` (security model doc only — no code changes), `app_simple` (launcher branch).
+
+**Tests added/updated:**
+- `tests/test_round87_release_gate_corpus_bake.py::test_release_gate_block_present` — pins the `ADOPTIQ_RELEASE_GATE` guard exists at the documented location in `build_mac_dmg.sh`.
+- `tests/test_round87_release_gate_corpus_bake.py::test_release_gate_default_permissive` — pins `${VAR:-0}` form keeps dev iteration unaffected.
+- `tests/test_round87_release_gate_corpus_bake.py::test_release_gate_round_marker_present` — pins the `# Round 87 / Phase 1` marker on the new lines.
+- `tests/test_round87_release_gate_corpus_bake.py::test_bake_corpus_script_still_emits_skipped_marker` — keeps the SSoT side (`.bake-skipped` marker) intact so the gate has a reliable signal to consult.
+- `tests/test_round87_corpus_security_doc.py::test_readme_corpus_security_section_anchor` — pins the `#### Corpus security model` heading exists.
+- `tests/test_round87_corpus_security_doc.py::test_readme_documents_at_rest_encryption` — pins AES-256-GCM, `corpus.db.enc`, `corpus.db.salt` named.
+- `tests/test_round87_corpus_security_doc.py::test_readme_documents_runtime_plaintext_temp_file` — pins `$TMPDIR/adoptiq_corpus/`, `0o600`, parent `0o700` named.
+- `tests/test_round87_corpus_security_doc.py::test_readme_documents_temp_file_lifecycle` — pins ephemeral, scrubbed, `atexit` named.
+- `tests/test_round87_launcher_auto_kill_stale.py::*` — 10 source-shape + behavior tests for the three new helpers (round-marker presence, helper signatures, duplicate-launch wiring, SIGTERM-not-SIGKILL, frozen-only guard, dialog-logic post-block check, version probe success / failure, stale-detection true / false, force-quit no-pid).
+- `tests/test_round87_card_removed_from_analyze.py::*` — 6 tests: 4 negative-control on analyze.html (no card section ID, no data-marker, no script tag, relocation marker present) + 2 destination-side on preferences.html (card section ID + script tag still present).
+- `tests/test_round87_corpus_indexing_ux_subtitle.py::test_r87_analyze_html_carries_indexing_clarifier_marker` — pins `[data-intel-indexing-clarifier]` on analyze.html.
+- `tests/test_round87_corpus_indexing_ux_subtitle.py::test_r87_analyze_html_clarifier_hidden_by_default` — pins SSR `hidden` attribute.
+- `tests/test_round87_corpus_indexing_ux_subtitle.py::test_r87_analyze_html_clarifier_text_is_factual` — pins reports + indexing + Ask AI concept anchors.
+- `tests/test_round87_corpus_indexing_ux_subtitle.py::test_r87_intel_status_js_toggles_clarifier_on_running` — pins `paintBanner` queries the clarifier, calls `removeAttribute('hidden')` on running, `setAttribute('hidden', '')` otherwise, gated on `state === 'running'`.
+
+**Verify status:**
+- `make verify` — **pass**.
+- pytest: 5348 passed, 4 skipped, 6 deselected (R86 floor was 5311; +37 R87 net including 29 new R87 tests + 8 R85 / R84 / R38.1 tests that were updated to validate the new R87 source-shapes).
+- ruff: 0 findings.
+- bandit HIGH/MED: 0.
+- pip-audit: clean.
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py` `_running_instance_is_stale` + `_force_quit_existing_adoptiq` + the duplicate-launch branch wiring — confirm the SIGTERM-and-poll pattern is correct, the `frozen-only` guard is honored, and a failed force-quit cleanly falls back to R38.1 re-route without showing a misleading "port in use" dialog. Three `webbrowser.open` re-route paths in the modified block; each must end in `sys.exit(0)`.
+2. `build_mac_dmg.sh` ADOPTIQ_RELEASE_GATE=1 block — confirm the gate runs AFTER `scripts/bake_corpus.py` (so the `.bake-skipped` marker is settled before the check) and BEFORE PyInstaller (so a missing artifact aborts before staging). The `[[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" ]]` form covers all reasonable truthy values without admitting anything spurious.
+3. `static/js/intel_status.js::paintBanner` — confirm the clarifier toggle is INSIDE the `paintBanner` body (so it runs on every status paint, not just on first load) and that the running-branch unhide / not-running re-hide MUST always happen together (a missing else branch would leave the line visible after the index pass completes).
+4. The Build 63 DMG when baked: confirm `ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh` succeeds and produces the four bake artifacts; a re-run with `ADOPTIQ_BAKE_CORPUS=0` AND `ADOPTIQ_RELEASE_GATE=1` MUST exit 1 with the "ADOPTIQ_RELEASE_GATE=1 but bake/.bake-skipped is present" message; a re-run with no `ADOPTIQ_RELEASE_GATE` and `ADOPTIQ_BAKE_CORPUS=0` MUST succeed (dev iteration unaffected).
+
+**Known deferrals (intentional non-fixes):**
+- The R85 `test_r85_analyze_template_card_unchanged` test was renamed to `test_r85_analyze_template_card_relocated_to_preferences` and inverted (now asserts the card is ABSENT from analyze.html). The wider `tests/test_round85_url_refresh_and_preferences_card.py` file still validates the R85 contracts (URL allow-list, resolver tier, `_r83_safe_share_url`); only the analyze-page assertion flipped. This is the documented "repurpose" path described in the user's Phase 4 plan.
+- Brian Frazier's account count drift (23 vs prior runs) is NOT a code regression; it's expected churn from `team_config.json` roster + Salesforce account ownership changes. Documented in the Build 62 audit findings above. No fix required.
+- The R86 audit's PARTIAL #3 ("operator-configurable share URL") is now fully closed by the combined R84 (operator can configure) + R85 (URL rotated to canonical default) + R87 / Phase 4 (card lives on Preferences hub) work.
+
+**Trailer:** Made-with: Cursor

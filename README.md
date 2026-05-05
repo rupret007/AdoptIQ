@@ -551,6 +551,30 @@ Use the packaged app for your platform. No Python or development tools are requi
 3. The daily refresh worker re-indexes from the local mirror every 24 hours. The encryption sentinel resolution order (Round 36) is: OneDrive sentinel (`<onedrive_root>/.adoptiq_corpus_sentinel.json`) → auto-minted local `sentinel.json` (mode `0o600`, parent `0o700`) under `~/Library/Application Support/AdoptIQ/knowledge/`.
 4. There is no "Connect to Microsoft" / device-code prompt anywhere in AdoptIQ; the OneDrive client owns the auth flow.
 
+#### Corpus security model (Round 87)
+
+The Knowledge Corpus carries operational and customer data, so its on-disk and in-memory contracts are worth stating explicitly.
+
+**At-rest encryption (the artifacts you can see on disk)**
+
+- `~/Library/Application Support/AdoptIQ/knowledge/corpus.db.enc` is the encrypted SQLite database (AES-256-GCM). Mode `0o600`, parent dir `0o700`.
+- `~/Library/Application Support/AdoptIQ/knowledge/corpus.db.salt` is the per-install KDF salt (random bytes, mode `0o600`). Filename pinned by `corpus_crypto._salt_path_for`.
+- The OneDrive sentinel (`<onedrive_root>/.adoptiq_corpus_sentinel.json`) is the access-gate material. Without it, the encrypted DB is opaque ciphertext to the app — even on the same machine. That sentinel sits inside a Cisco SharePoint folder gated by Microsoft tenant ACL; access is granted by Microsoft, not by AdoptIQ.
+
+**Runtime ephemeral plaintext (the temp file you may notice in $TMPDIR)**
+
+SQLite needs a real file descriptor to issue SELECT/INSERT statements, so AdoptIQ decrypts the encrypted DB into an ephemeral plaintext SQLite file at `$TMPDIR/adoptiq_corpus/corpus.<random>.db` (mode `0o600`, parent dir `0o700`). This is necessary — there is no zero-knowledge SQLite engine — but the file is treated as a transient working buffer:
+
+- It exists ONLY while AdoptIQ is running. A fresh app launch creates a new temp file with a new random suffix.
+- On clean shutdown (Quit button, ⌘Q, or `SIGTERM`), `EncryptedCorpusHandle.close` runs a best-effort scrub (zero-write the first 1 MB + `fsync`) and then `unlink`s the temp file. The scrub is registered as an `atexit` handler in `app_simple.py` so it fires on the same code path that saves `analysis_status.json`.
+- On a hard crash (`SIGKILL`, power loss), the temp file remains on disk until the OS clears `$TMPDIR` on the next reboot. macOS clears `$TMPDIR` on every boot; Linux/Unix systems vary by configuration. The file is still mode `0o600`, so only the running user can read it.
+
+**What this means for stakeholders**
+
+- "Encrypted at rest" is true: the durable artifacts shipped with the DMG and the durable artifacts in App Support are AES-256-GCM ciphertext. An attacker copying `corpus.db.enc` off the disk gets opaque bytes.
+- "Never plaintext on disk" is NOT a claim AdoptIQ can honestly make, because SQLite cannot operate that way. The honest claim is "plaintext is ephemeral, single-user, and scrubbed on clean exit."
+- The SharePoint share URL is not the secret. The corpus encryption key is derived from the OneDrive sentinel, which is gated by the Microsoft tenant ACL. Rotating the share URL (R85, R87 / Phase 4) does not weaken the encryption.
+
 **To quit:** Use **AdoptIQ → Quit AdoptIQ** from the menu bar (or ⌘Q). Closing only the terminal window may leave the app running in the background.
 
 ### If macOS blocks the app or it bounces in the Dock and exits

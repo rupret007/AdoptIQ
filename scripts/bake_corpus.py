@@ -532,11 +532,20 @@ def _index_into_encrypted_corpus(
     # We deliberately do NOT preserve a prior bake -- each build
     # re-keys to ensure salt + db agree.  The 4-element list keeps
     # legacy Round 33/34 artifacts from leaking into the new bundle.
+    #
+    # Round 87 / Phase 1: also clear ``.bake-skipped`` because we are
+    # about to produce REAL artifacts.  Without this, a prior dev
+    # iteration that ran ``ADOPTIQ_BAKE_CORPUS=0`` would leave the
+    # marker on disk and the new ``ADOPTIQ_RELEASE_GATE=1`` block in
+    # ``build_mac_dmg.sh`` would trip on it after a successful bake
+    # (the gate is the only consumer of ``.bake-skipped``; the
+    # script never reads it on the real-bake path).
     for stale in (
         encrypted_path,
         bake_dir / "sentinel.json",
         bake_dir / "corpus.db.salt",
         bake_dir / "corpus.sentinel.lock.json",
+        bake_dir / ".bake-skipped",
     ):
         try:
             stale.unlink(missing_ok=True)

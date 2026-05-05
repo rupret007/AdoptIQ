@@ -156,16 +156,26 @@ def test_duplicate_launch_short_circuits_to_existing_adoptiq():
     ``_probe_existing_adoptiq`` BEFORE printing the port-in-use message
     or showing any dialog, and on a True result must
     ``webbrowser.open`` then ``sys.exit(0)``.  Otherwise the user sees
-    the original "bounce and stop" symptom on second double-click."""
+    the original "bounce and stop" symptom on second double-click.
+
+    Round 87 / Phase 3 expanded this block by adding the
+    auto-quit-stale launcher path BEFORE the R38.1 short-circuit
+    fallback, so the window has to be wider than the original 3000
+    chars (the R87 branches push the original ``sys.exit(0)`` farther
+    down).  The R87 block ALSO adds two of its own ``sys.exit(0)``
+    calls on the force-quit-failed and post-force-quit-port-still-
+    busy paths, so the contract is preserved on every code path that
+    routes via ``webbrowser.open``."""
     src = _read_app_simple_source()
     block_anchor = src.find('available, other_pid, other_name = _check_port_available(PORT)')
     assert block_anchor != -1, (
         'duplicate-launch port check anchor not found; refactor changed '
         'the structure -- update this test'
     )
-    # Look at the first ~3000 chars after the anchor (covers the whole
-    # ``if not available:`` block on Mac + Windows + tty fallbacks).
-    block = src[block_anchor:block_anchor + 3000]
+    # R87 widened the block; 6000 chars covers the whole expanded
+    # ``if not available:`` block (R87 auto-quit branches +
+    # original R38.1 short-circuit + Mac + Windows + tty fallbacks).
+    block = src[block_anchor:block_anchor + 6000]
     assert '_probe_existing_adoptiq(PORT)' in block, (
         'Round 38.1 short-circuit MUST live inside the duplicate-launch '
         'block so the existing AdoptIQ instance is detected before the '

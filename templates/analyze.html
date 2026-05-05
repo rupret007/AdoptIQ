@@ -10,12 +10,13 @@
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <!-- Subscription Search Script -->
 <script src="{{ url_for('static', filename='js/subscription-search.js') }}"></script>
-{# Round 84 / Build 60: corpus share URL settings card handler.
-   Loaded here (not in base.html) because the card lives only on
-   the analyze page.  Same-origin so the strict CSP from base.html
-   does not need any new exceptions.  Source-shape pinned by
-   tests/test_round84_corpus_share_url_ui_source_shape.py. #}
-<script src="{{ url_for('static', filename='js/corpus_share_url.js') }}"></script>
+{# Round 87 / Phase 4: the corpus share URL card moved to
+   /preferences -- it's a dedicated admin-config surface, not a
+   per-run report tile, so it belongs on the Preferences hub
+   (mirrors the R73 UX-2 split that moved the report-narrative
+   model picker off this page for the same reason).  The
+   js/corpus_share_url.js script tag is loaded by
+   templates/preferences.html instead. #}
 {# Round 73 / Phase 4 (UX-2): the inline report-narrative model
    picker that lived here pre-R73 has moved to the dedicated
    /preferences page.  The shared static/js/r69_model_preferences.js
@@ -121,6 +122,35 @@
                                 {% else %}
                                     Idle &mdash; no run yet this session.
                                 {% endif %}
+                            </p>
+                            {# Round 87 / Phase 5: indexing-safe clarifier.
+                               Build 62 acceptance feedback noted the
+                               panel showed only "Indexing CSOne
+                               reports..." while the operator was about
+                               to run reports, with no signal that
+                               report generation was unaffected.  This
+                               subtitle explicitly states the contract:
+                               core report generation (Comprehensive,
+                               Compact, Renewal, Leader) does NOT
+                               depend on the corpus index -- only Ask
+                               AI grounding does.  The element is
+                               server-rendered with the ``hidden``
+                               attribute and unhidden by
+                               ``intel_status.js::paintBanner`` only
+                               when the panel state is ``running`` (the
+                               same boot.in_progress signal that
+                               drives the "Indexing CSOne reports..."
+                               summary line) so the line never
+                               appears outside an active index pass.
+                               Source-shape pinned by
+                               ``tests/test_round87_corpus_indexing_ux_subtitle.py``. #}
+                            <p class="mb-0 mt-1 small text-muted fst-italic"
+                               data-intel-indexing-clarifier
+                               hidden>
+                                <i class="fas fa-info-circle me-1"
+                                   aria-hidden="true"></i>
+                                Reports remain safe to run during indexing &mdash;
+                                only Ask AI grounding waits for the index pass to finish.
                             </p>
                         </div>
                         <div class="d-flex align-items-center gap-2">
@@ -386,107 +416,20 @@
                 </div>
             </section>
 
-            {# Round 84 / Build 60: operator-flippable corpus share URL
-               card.  Lets the operator rotate the SharePoint share
-               token (the ``e=...`` query parameter on
-               ``Config.ADOPTIQ_CORPUS_SHARE_URL``) without rebuilding
-               the DMG.  POSTs to
-               ``/api/settings/corpus-share-url`` (allow-listed
-               sharepoint.com host, https-only, 2048-byte cap; CSRF
-               dual-auth via ``_r17_2_authorize_corpus_admin``).
-               Threat model: this URL is NOT a secret -- the
-               SharePoint ACL gates the share, OneDrive auth gates
-               the corpus decryption (R83 contract preserved by
-               ``corpus_bootstrap._run_index_pass`` calling
-               ``open_corpus_for_user(..., allow_local_sentinel=False)``).
-               JS handler in ``static/js/corpus_share_url.js`` --
-               source-shape pinned by
-               ``tests/test_round84_corpus_share_url_ui_source_shape.py``. #}
-            <section id="adoptiq-corpus-share-url-card"
-                     class="card shadow-cisco fade-in mb-4"
-                     data-corpus-share-url-card
-                     style="animation-delay: 0.28s;"
-                     aria-live="polite"
-                     aria-atomic="true">
-                <div class="card-body py-3">
-                    <div class="d-flex flex-wrap align-items-center gap-3 mb-2">
-                        <div class="flex-grow-1">
-                            <h2 class="h6 mb-1">
-                                <i class="fas fa-link me-2 text-primary" aria-hidden="true"></i>
-                                Corpus share URL
-                            </h2>
-                            <p class="mb-0 small text-muted">
-                                Operator-rotatable SharePoint share URL used by the
-                                <strong>Add corpus share to my OneDrive</strong>
-                                button on the Knowledge Corpus panel above. Changing
-                                this value does NOT alter the encryption contract:
-                                a DMG without OneDrive auth is still useless ciphertext.
-                            </p>
-                        </div>
-                        <span class="badge rounded-pill bg-secondary"
-                              data-corpus-share-url-source-pill
-                              title="Which precedence tier produced the active URL">
-                            <span data-corpus-share-url-source-text>checking&hellip;</span>
-                        </span>
-                    </div>
-                    <div class="mb-2">
-                        <label class="form-label small text-muted mb-1"
-                               for="adoptiq-corpus-share-url-current">
-                            Current value
-                        </label>
-                        <code class="d-block small text-break"
-                              id="adoptiq-corpus-share-url-current"
-                              data-corpus-share-url-current
-                              aria-live="polite">
-                            (loading&hellip;)
-                        </code>
-                    </div>
-                    <div class="mb-2">
-                        <label class="form-label small text-muted mb-1"
-                               for="adoptiq-corpus-share-url-input">
-                            New SharePoint share URL
-                            <span class="text-muted">
-                                (leave blank to clear the override and fall back
-                                to the env / config default)
-                            </span>
-                        </label>
-                        <input type="url"
-                               class="form-control form-control-sm"
-                               id="adoptiq-corpus-share-url-input"
-                               data-corpus-share-url-input
-                               placeholder="https://cisco-my.sharepoint.com/:f:/r/personal/...?csf=1&web=1&e=..."
-                               maxlength="2048"
-                               autocomplete="off"
-                               spellcheck="false">
-                    </div>
-                    <div class="d-flex flex-wrap align-items-center gap-2">
-                        <button type="button"
-                                class="btn btn-sm btn-outline-secondary"
-                                data-corpus-share-url-test
-                                title="Open the saved URL in a new browser tab to verify it lands on the correct share">
-                            <i class="fas fa-external-link-alt me-1" aria-hidden="true"></i>
-                            Test
-                        </button>
-                        <button type="button"
-                                class="btn btn-sm btn-primary"
-                                data-corpus-share-url-save
-                                title="Persist the new URL to settings.json (atomic write, mode 0o600)">
-                            <i class="fas fa-save me-1" aria-hidden="true"></i>
-                            Save
-                        </button>
-                        <button type="button"
-                                class="btn btn-sm btn-outline-warning"
-                                data-corpus-share-url-clear
-                                title="Clear the operator override and fall back to the env / config default">
-                            <i class="fas fa-undo me-1" aria-hidden="true"></i>
-                            Clear override
-                        </button>
-                        <span class="small ms-2"
-                              data-corpus-share-url-feedback
-                              aria-live="polite"></span>
-                    </div>
-                </div>
-            </section>
+            {# Round 87 / Phase 4: the corpus share URL settings card
+               that lived here in Build 60 (R84) has moved to the
+               dedicated /preferences hub.  The analyze page is for
+               running reports; admin-config (model picker, share URL)
+               belongs on Preferences.  Mirrors the R73 UX-2 split that
+               moved the report-narrative model picker off this page
+               for the same reason.  The card itself, its JS handler,
+               and the ``/api/settings/corpus-share-url`` GET/POST
+               endpoint are unchanged -- only the visual surface moved.
+               This comment block intentionally remains so a future
+               regression that re-adds the card to analyze.html
+               surfaces in the per-file footprint.  Source-shape
+               pinned by
+               ``tests/test_round87_card_removed_from_analyze.py``. #}
 
             {# Round 73 / Phase 4 (UX-2): the inline report-narrative
                model picker card that lived here pre-R73 has moved to
