@@ -4574,8 +4574,19 @@ class LeaderReportGenerator:
                         row_cells[1].text = customer
 
                         # Title - FIXED: No truncation
+                        # Round 89 / F2: route TAC case Title through
+                        # ``_strip_markdown_chrome`` so leftover markdown
+                        # bold (``**X**``) / unpaired-italic (``*X``) chrome
+                        # does not reach python-docx as literal asterisks.
+                        # Build 63 audit caught one cell rendering
+                        # ``**Classic Calabrio***delete old report - Calabrio
+                        # WFO# 00179474`` -- the exact case the R42/Phase 6
+                        # helper was authored to handle but was never wired
+                        # into the TAC table path.  Mirrors the AB / Pulse /
+                        # Action_Plans subject treatment at L4394 / L4445 /
+                        # L4486 / L5359 / L6333.
                         title = case.get('Title', 'No title')
-                        row_cells[2].text = str(title)
+                        row_cells[2].text = _strip_markdown_chrome(title) or 'No title'
 
                         # Priority
                         priority = case.get('Highest Priority', case.get('Priority', ''))
