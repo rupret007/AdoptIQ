@@ -10081,3 +10081,67 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - Round 88 covers the user's explicit Brian Frazier feedback (Greg Dolberry account attribution + OneDrive folder discovery); the third feedback item (admin "Back to AdoptIQ" bad link) was already fixed in R80.
 
 **Trailer:** Made-with: Cursor
+
+## Round 89 — handoff 2026-05-06
+
+**What changed (plain English):**
+- **F1 (P1): Compact `Risk_Score` back-compat alias retired.** The R67/B6 hedge column on Compact `Risk_Summary` (`Risk_Score`, kept as a back-compat alias for one build then deprecated per the R67/B6 contract) is GONE. The canonical column names on Compact are `Overall_Risk_Score` (0-10 scale, primary headline) and `Risk_Score_0_10` (R88/F2, explicit-scale column adjacent to the canonical headline). All four reader sites in `app_simple.run_compact_analysis` (the `_canonical_high_risk_names` sort at L10465-71, the `Risk_Band`-based fallback sort at L10477-83, the bare-cutoff filter+sort at L10495-500, and the mean fallback at L10615-27) now read `Overall_Risk_Score` directly. The row-build dict at L10404-18 emits `Overall_Risk_Score` + `Risk_Score_0_10` ONLY (no `Risk_Score` slot); the explicit `columns=` tuple at L10429-32 lists `Customer, Overall_Risk_Score, Risk_Score_0_10, Risk_Level, Risk_Band, Adoption_Barriers, Support_Cases` (no `Risk_Score`).
+- **F2 (P1): Leader TAC table case Title strips markdown chrome.** `LeaderReportGenerator._add_tac_section` now routes TAC case Title strings through `_strip_markdown_chrome(...)` before assigning to `row_cells[2].text`. Pre-R89 the writer at line 4578 of `leader_report_generator.py` did `row_cells[2].text = str(title)` raw, bypassing markdown sanitization that the AB / Pulse / Action_Plans / Software_Defects subject paths at lines 4394 / 4445 / 4486 / 5359 / 6333 had ALL already adopted via the same `_strip_markdown_chrome` helper. Build 63 audit caught the residual: a TAC case title `**Classic Calabrio***delete old report - Calabrio WFO# 00179474` rendered with literal asterisks intact in the docx table cell.
+- **F3 (P0 — discovered during Phase 5 install): macOS `Info.plist` version stamping is SSoT-driven, no hard-coded fallback.** `adoptiq_mac.spec` now resolves `CFBundleShortVersionString` and `CFBundleVersion` through the new `_r89_resolve_version_from_config()` helper that reads `ADOPTIQ_VERSION` / `ADOPTIQ_BUILD` directly from `config.py` as a fallback when the env vars are not exported into the PyInstaller subprocess. Pre-R89 the spec carried hard-coded fallbacks of `"1.0.3"` / `"1"` whenever `os.environ.get(...)` returned `None` — the same R67-class footgun the R67/Phase 4 fix landed in `build_mac.sh` / `build_mac_dmg.sh` / `build_pc.bat` but missed in `adoptiq_mac.spec` itself. Build 65's first DMG showed `1.0.3 build 1` in Finder/About even though every in-app surface (`/api/version`, the R68/A1 build label in every report, the R68/A2 restart-required banner) read the correct `1.0.4 / 65` from `config.py` at runtime. Defense in depth: `build_mac.sh` MUST also `export ADOPTIQ_VERSION` and `export ADOPTIQ_BUILD` after the read-back from `config.py` so the PyInstaller subprocess inherits them.
+
+**Live acceptance loop result (R76 lesson learned: synthetic-fixture pytest is necessary but not sufficient):**
+- Build 63 baseline audit (`_audit_build63_findings.md`): captured pre-R89 state.
+- Build 65 first DMG (pre-F3): all in-app surfaces correct, but Finder/About showed `1.0.3 build 1` — caught at install time during Phase 5.
+- Build 65 second DMG (post-F3 re-bake): both `OUTBOX/AdoptIQ.app` AND `dist/AdoptIQ.app` Info.plist correctly stamped `1.0.4 / 65`. Installed and launched; `/api/version` returned `{"version":"1.0.4","build":"65"}`.
+- All 4 reports completed in 240s with 0 errors. Audit (`_audit_build65_findings.md`) result: **P0=0, P1=4, P2=0** (gate PASSED). All 8 artifacts carry the `Build 65` stamp in both XLSX `Report_Info` AND Word footer.
+- The 4 P1 findings are all in the same R76/R76-A `>1 [Source: ...] tag per paragraph` bucket; analysis confirmed all are R66/B1-compliant multi-line bulleted blocks (one citation per line/bullet) NOT R76/R76-A paren/bullet cluster violations. Plus 1 borderline mid-string injection in Compact `(Watch, 0-10 scale): 8` — the `0-10` value matched the value regex but `scale` is not in the unit-deferral allow-list. Acceptable formatting awkwardness (1 occurrence per report); deferred to R90.
+- **R88/F4 confirmed live in production**: Greg Dolberry now shows 3 customers in B65 Leader Subscriptions sheet (was 2 in B63). The CISCO SYSTEMS INC CA account that was invisible due to secondary CSSM attribution is now correctly attributed via the R82 multi-column UNION delegation.
+- **R89/F1 + R88/F2 confirmed live in production**: Compact `Risk_Summary` columns went from `Customer, Overall_Risk_Score, Risk_Score, Risk_Level, Risk_Band, Adoption_Barriers, Support_Cases` (B63) → `Customer, Overall_Risk_Score, Risk_Score_0_10, Risk_Level, Risk_Band, Adoption_Barriers, Support_Cases` (B65). Renewal `Renewal_Summary` carries `Overall_Risk_Score, Risk_Score_0_10, Risk_Score_0_100, Risk_Level, Risk_Band` per the R88/F2 + R67/B6 contract.
+
+**Files touched:**
+- `app_simple.py` — F1 Compact `Risk_Summary` writer + 4 reader sites retargeted from `Risk_Score` → `Overall_Risk_Score`. 7 `Round 89` markers across L10387-10627.
+- `leader_report_generator.py` — F2 TAC table title now routed through `_strip_markdown_chrome`. 2 `Round 89` markers.
+- `adoptiq_mac.spec` — F3 new `_r89_resolve_version_from_config()` helper + `_R89_RESOLVED_VERSION` / `_R89_RESOLVED_BUILD` resolution chain. 4 `Round 89` markers.
+- `build_mac.sh` — F3 `export ADOPTIQ_VERSION` + `export ADOPTIQ_BUILD` after the read-back from `config.py`. 2 `Round 89` markers.
+- `config.py` — build bump 64 → 65.
+- `tests/test_round89_compact_risk_score_alias_removed.py` — new, F1 source-shape + columns tuple + 5 reader-site pins + DataFrame-level absence assertion + sort-on-Overall_Risk_Score regression test.
+- `tests/test_round89_f2_leader_tac_title_md_strip.py` — new, F2 8 tests (source-shape pin + R42-helper-marker pin + 5 helper-behavior regression guards + black-box `**` absence smoke).
+- `tests/test_round89_f3_mac_spec_version_stamping.py` — new, F3 10 tests (no hard-coded fallback / helper presence + correct regex / env precedence over config / build_mac.sh exports the resolved values / round-trip behavioral verification of the helper / R89 source markers in both spec + build script).
+- `tests/test_round70_compact_risk_summary_overall_score.py` — F1 source-shape pin updated to drop the legacy `Risk_Score` alias from the expected schema.
+- `tests/test_round88_risk_score_0_10_populated.py` — F1 source-shape pin updated to drop the legacy `Risk_Score` alias from the expected schema.
+- `CLAUDE.md` — test floor bumped 5434 → 5461; three new R89 critical-rules entries added (F1, F2, F3).
+
+**SSoT modules touched:**
+- `report_export_schema` — no (only Compact `Risk_Summary` writer dict keys + columns tuple changed; the schema module itself was not touched).
+- `risk_scoring` — no.
+- `canonical_metrics` — no.
+- `leader_report_components` — no (the `LeaderReportGenerator` itself; the F2 fix wires `_strip_markdown_chrome` into `_add_tac_section` only).
+- `report_word_styling` — no.
+
+**Tests added/updated:**
+- `tests/test_round89_compact_risk_score_alias_removed.py` (10 tests) — F1 writer source-shape + columns tuple + 5 reader-site pins + DataFrame-level absence assertion + sort-on-Overall_Risk_Score regression test.
+- `tests/test_round89_f2_leader_tac_title_md_strip.py` (8 tests) — F2 source-shape pin + R42-helper-marker pin + 5 helper-behavior regression guards + black-box `**` absence smoke.
+- `tests/test_round89_f3_mac_spec_version_stamping.py` (10 tests) — F3 no hard-coded fallback / helper presence + regex / env precedence / build_mac.sh exports / round-trip behavior / R89 source markers.
+- `tests/test_round70_compact_risk_summary_overall_score.py` — UPDATED literal-string source-shape pin to drop the legacy `Risk_Score` alias.
+- `tests/test_round88_risk_score_0_10_populated.py` — UPDATED literal-string source-shape pin to drop the legacy `Risk_Score` alias.
+
+**Verify status:**
+- `make verify` — **pass** (last full local run completed in 1m07s).
+- pytest: **5461 passed, 4 skipped, 6 deselected** (R88 floor was 5434; +27 R89 net including 28 new R89 tests + 5 R70 / R88 pins updated to reflect the new R89 contracts).
+- ruff: 0 findings.
+- bandit HIGH/MED: 0.
+- pip-audit: clean.
+
+**Hot spots Claude should audit first:**
+1. `adoptiq_mac.spec::_r89_resolve_version_from_config()` — confirm the regex `ADOPTIQ_VERSION\s*=\s*"([^"]*)"` correctly matches `config.py`'s SSoT lines AND that `_R89_RESOLVED_VERSION` / `_R89_RESOLVED_BUILD` resolve as `os.environ.get(...) OR _R89_CFG_VERSION OR "1.0.3"` (env > config.py > hard-coded fallback). The `or` chain matters — a future refactor that uses `if` short-circuits could re-introduce the precedence bug.
+2. `build_mac.sh` — confirm BOTH `export ADOPTIQ_VERSION` AND `export ADOPTIQ_BUILD` lines are present immediately after the `ADOPTIQ_VERSION=$("$PYTHON_BIN" -c ...)` read-back. The R67/Phase 4 read-back-from-config pattern was necessary but not sufficient on its own; without `export`, the shell-local variables stay invisible to the spec's `os.environ.get` calls.
+3. `app_simple.run_compact_analysis` row-build site (L10404-18) — confirm the row dict emits `Overall_Risk_Score` + `Risk_Score_0_10` ONLY (no `Risk_Score` slot), AND the `pd.DataFrame(columns=[...])` at L10429-32 lists these in the canonical order without the legacy alias.
+4. `leader_report_generator._add_tac_section` line 4578 — confirm `row_cells[2].text = _strip_markdown_chrome(title) or 'No title'` (NOT `str(title)` or any direct assignment). The `or 'No title'` fallback shape mirrors the canonical `or 'No subject'` / `or 'N/A'` pattern at the other five strip sites in the same file.
+5. The audit script `_audit_build65.py` itself (gitignored) — the `>1 [Source: ...] tag per paragraph` check is too strict; multi-line bulleted blocks legitimately carry one citation per bullet per the R66/B1 contract. A future version of the audit should distinguish `multiple citations on one literal line` (the actual R76/R76-A violation shape) from `multiple citations across multiple newline-separated lines in one paragraph object` (legitimate per R66/B1). Out of scope for R89 — Round 90 candidate.
+
+**Known deferrals (intentional non-fixes):**
+- **R90 candidate**: Compact paragraph #19 mid-injection: `Score 4-6 (Watch, 0-10 [Source: AdoptIQ Report Data Sources] scale): 8` — the `0-10` value matched the value regex but `scale` is not in the citation injector's unit-deferral allow-list (which currently covers Days/Months/Weeks/hours/cases/customers/barriers/plans/%). Single occurrence per Compact docx, formatting awkwardness only, no data correctness impact. Fix would be to add `scale` to the unit-deferral allow-list AND/OR detect parenthetical-qualifier context (e.g., `(Watch, ... scale)` after a band label).
+- **R90 candidate**: The `_audit_build65.py` script's `F_multi_source_paragraph_hits` check counts ANY paragraph with `>1 [Source: ...] tag` as P1. The actual R76/R76-A contract is "one citation flush at the boundary of a paren/bullet KPI cluster" — multi-line bulleted blocks where each bullet carries one citation legitimately have N citations per paragraph object. The audit currently false-flags these. Manually triaged this round (12/12 Leader hits, 1/2 Compact hits, 1/1 Renewal hit, 1/1 Comprehensive hit are all R66/B1-compliant); 1 Compact hit is the borderline `0-10 scale` mid-injection mentioned above.
+- **Branch convention**: The plan called for committing on `mac-sync-2026-05-06`; actual commits landed on `main` because that's the active integration branch (recent rounds 85-88 all landed on `main` directly). Master push deferred to user direction per the existing workflow.
+
+**Trailer:** Made-with: Cursor

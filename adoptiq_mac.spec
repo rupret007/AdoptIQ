@@ -242,6 +242,42 @@ coll = COLLECT(
     name='AdoptIQ',
 )
 
+# Round 89 / F3: SSoT-driven version stamping for Info.plist.  The previous
+# spec hard-coded fallbacks of ``"1.0.3"`` / ``"1"`` whenever the
+# ``ADOPTIQ_VERSION`` / ``ADOPTIQ_BUILD`` env vars weren't explicitly
+# exported into the PyInstaller subprocess -- the same R67-class footgun
+# that R67 / Phase 4 fixed in the bash scripts but missed here.  Build 65
+# acceptance caught this when the .app's Info.plist showed ``1.0.3 build 1``
+# even though every in-app surface (``/api/version``, the R68/A1 build
+# label in every report, the R68/A2 restart-required banner) read the
+# correct ``1.0.4 / 65`` from ``config.py`` at runtime.
+#
+# Defense-in-depth: prefer env var (set by build_mac.sh after the R67/Phase4
+# read-back from config.py), then read directly from config.py as the SSoT
+# fallback.  This mirrors the ``update_version_pc.py`` _VERSION_LINE_RE
+# pattern so a future caller invoking PyInstaller without the env vars set
+# (e.g. a developer running ``pyinstaller adoptiq_mac.spec`` by hand) still
+# gets the right version stamp.
+def _r89_resolve_version_from_config():
+    try:
+        root = os.path.dirname(os.path.abspath(SPEC)) if 'SPEC' in globals() else os.getcwd()
+        config_path = os.path.join(root, 'config.py')
+        with open(config_path, encoding='utf-8') as fh:
+            text = fh.read()
+        import re as _re
+        m_v = _re.search(r'ADOPTIQ_VERSION\s*=\s*"([^"]*)"', text)
+        m_b = _re.search(r'ADOPTIQ_BUILD\s*=\s*"([^"]*)"', text)
+        v = m_v.group(1) if m_v else None
+        b = m_b.group(1) if m_b else None
+        return v, b
+    except Exception:
+        return None, None
+
+
+_R89_CFG_VERSION, _R89_CFG_BUILD = _r89_resolve_version_from_config()
+_R89_RESOLVED_VERSION = os.environ.get("ADOPTIQ_VERSION") or _R89_CFG_VERSION or "1.0.3"
+_R89_RESOLVED_BUILD = os.environ.get("ADOPTIQ_BUILD") or _R89_CFG_BUILD or "1"
+
 app = BUNDLE(
     coll,
     name='AdoptIQ.app',
@@ -251,8 +287,8 @@ app = BUNDLE(
         # Ensure the app is a standard foreground app.
         "LSBackgroundOnly": False,
         # Populate version metadata in Finder/About dialogs.
-        "CFBundleShortVersionString": os.environ.get("ADOPTIQ_VERSION", "1.0.3"),
-        "CFBundleVersion": os.environ.get("ADOPTIQ_BUILD", "1"),
+        "CFBundleShortVersionString": _R89_RESOLVED_VERSION,
+        "CFBundleVersion": _R89_RESOLVED_BUILD,
         "NSHighResolutionCapable": True,
     },
 )

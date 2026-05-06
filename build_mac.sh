@@ -44,6 +44,15 @@ echo "Updating version/build metadata..."
 ADOPTIQ_VERSION="$ADOPTIQ_VERSION" ADOPTIQ_BUILD="$ADOPTIQ_BUILD" "$PYTHON_BIN" update_version_pc.py
 ADOPTIQ_VERSION="$("$PYTHON_BIN" -c 'from config import ADOPTIQ_VERSION; print(ADOPTIQ_VERSION)')"
 ADOPTIQ_BUILD="$("$PYTHON_BIN" -c 'from config import ADOPTIQ_BUILD; print(ADOPTIQ_BUILD)')"
+# Round 89 / F3: export the resolved values so the PyInstaller subprocess
+# (and the ``adoptiq_mac.spec`` Info.plist block inside it) inherits them.
+# Without ``export``, the shell variables stay local to this script and
+# ``os.environ.get("ADOPTIQ_VERSION")`` inside the spec returns None, falling
+# through to the spec's hard-coded ``"1.0.3"`` / ``"1"`` fallbacks (the
+# Build 65 acceptance bug).  The R67/Phase 4 fix landed the read-back from
+# config.py here but missed the export.
+export ADOPTIQ_VERSION
+export ADOPTIQ_BUILD
 echo "  -> Resolved version v${ADOPTIQ_VERSION} build ${ADOPTIQ_BUILD}"
 
 echo
