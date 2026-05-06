@@ -358,6 +358,41 @@ def _paragraph_match_is_canonical_kpi(match: Any) -> bool:
     return _is_canonical_kpi_label(label)
 
 
+# Round 90 / Build 66: paren-balance filter for spurious mid-parenthetical
+# matches.  ``_PARAGRAPH_KPI_NUMERIC_RE``'s label charset includes ``)``
+# (so balanced labels like ``Medium Risk (band)`` match), but this also
+# lets a closing paren in the middle of a parenthetical extract a
+# spurious match.  The Build-65 Compact report's Risk Summary line
+# ``"Score 4-6 (Watch, 0-10 scale): 9"`` parsed match #4 as
+# ``label='scale)' value='9'`` (because ``scale`` starts after the
+# comma and ``)`` is in the charset).  The R66/B1 unit-deferral branch
+# then landed the citation right BEFORE ``scale``, producing the
+# user-facing ``"0-10 [Source: AdoptIQ Report Data Sources] scale"``
+# mid-string injection.  Real KPI labels never start inside an unmatched
+# ``(``, so reject when ``)`` count exceeds ``(`` count.
+def _paragraph_match_is_well_formed(match: Any) -> bool:
+    """Reject ``_PARAGRAPH_KPI_NUMERIC_RE`` matches whose label is a
+    mid-parenthetical fragment.
+
+    The regex's label charset includes ``)`` (so balanced labels like
+    ``Medium Risk (band)`` match), but this also lets a closing paren
+    in the middle of a parenthetical (``"(Watch, 0-10 scale): 9"`` ->
+    label=``"scale)"``) extract a spurious match.  Real labels never
+    start inside an unmatched ``(``, so reject when ``)`` count exceeds
+    ``(`` count.
+
+    Round 90 / Build 66 -- fixes Build 65 acceptance bug where the
+    Compact report rendered ``"0-10 [Source: ...] scale"`` mid-string
+    on the Risk Summary tile.  Pinned by
+    ``tests/test_round90_paren_label_filter.py``.
+    """
+    try:
+        label = match.group("label") or ""
+    except (IndexError, AttributeError):
+        return True
+    return label.count(")") <= label.count("(")
+
+
 def _append_run(paragraph: Any, text: str) -> None:
     """Append a plain run to ``paragraph`` carrying ``text``.
 
@@ -702,7 +737,18 @@ def _rewrite_paragraph_with_inline_citations(
     lines = text.split("\n")
     out_lines: list[str] = []
     for line in lines:
-        line_matches = list(_PARAGRAPH_KPI_NUMERIC_RE.finditer(line))
+        # Round 90 / Build 66: the rewriter re-extracts matches per-line,
+        # so the well-formed filter (paren-balance) must apply HERE too,
+        # not just on the caller's ``all_matches``.  Without this filter
+        # a spurious ``label='scale)' value='9'`` match on a single line
+        # leaks past the caller-side filter once the line is split, and
+        # the R66/B1 unit-deferral branch produces the buggy
+        # ``"0-10 [Source: ...] scale"`` mid-string injection.
+        line_matches = [
+            m
+            for m in _PARAGRAPH_KPI_NUMERIC_RE.finditer(line)
+            if _paragraph_match_is_well_formed(m)
+        ]
         if not line_matches:
             out_lines.append(line)
             continue
@@ -982,7 +1028,20 @@ def inject_source_citations_into_docx(
         # The injector must therefore inject after every metric match
         # (regardless of metadata) AND additionally append a trailing
         # citation only when the narrative gate would actually fire.
-        all_matches = list(_PARAGRAPH_KPI_NUMERIC_RE.finditer(paragraph.text))
+        # Round 90 / Build 66: filter spurious mid-parenthetical matches
+        # (label has more ``)`` than ``(``) before the rewriter sees
+        # them.  Without this filter, a line like
+        # ``"Score 4-6 (Watch, 0-10 scale): 9"`` would parse a fourth
+        # match with ``label='scale)'`` and the R66/B1 unit-deferral
+        # branch in ``_rewrite_paragraph_with_inline_citations`` would
+        # land the citation right BEFORE ``scale``, producing the
+        # user-facing ``"0-10 [Source: ...] scale"`` mid-string injection
+        # observed on the Build 65 Compact Risk Summary tile.
+        all_matches = [
+            m
+            for m in _PARAGRAPH_KPI_NUMERIC_RE.finditer(paragraph.text)
+            if _paragraph_match_is_well_formed(m)
+        ]
         # Round 57 (post-pass-2): the gate's
         # ``_paragraph_claim_source_backed`` slices the segment from a
         # canonical match to the NEXT regex match -- using the FULL

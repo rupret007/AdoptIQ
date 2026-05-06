@@ -937,7 +937,27 @@ ADOPTIQ_VERSION = "1.0.4"
 # tests across validator, resolver, ``_r83_safe_share_url``,
 # preferences-page source-shape, analyze-card regression guard, and
 # cross-pin against the R35 + R81 fixtures).
-ADOPTIQ_BUILD = "65"  # Round 89 / Build 65
+ADOPTIQ_BUILD = "66"  # Round 90 / Build 66
+# Round 90 / Build 66: hyperfocused fix for the Build-65 acceptance bug
+# where the Compact Risk Summary tile rendered
+# ``"Score 4-6 (Watch, 0-10 [Source: AdoptIQ Report Data Sources] scale): 9"``
+# -- the citation was jammed mid-string between ``0-10`` and ``scale``.
+# Root cause: ``_PARAGRAPH_KPI_NUMERIC_RE`` in ``report_source_injector``
+# matches ``label='scale)' value='9'`` as a fourth, spurious match on
+# the line because ``)`` is in the regex's label charset and there is no
+# guard against a label that starts inside an unmatched parenthetical.
+# The R66/B1 unit-deferral branch then sees alphabetic tokens in the
+# boundary segment between match #3 and match #4 and lands the citation
+# at the spurious match's next-label-start position -- which is right
+# BEFORE ``scale``.  Fix: a new ``_paragraph_match_is_well_formed`` helper
+# rejects matches whose label has more ``)`` than ``(``.  Real KPI labels
+# never start inside an unmatched ``(``, so this is a strict, conservative
+# filter applied in TWO sites (caller's ``all_matches`` builder + the
+# rewriter's per-line ``line_matches``).  Pinned by
+# ``tests/test_round90_paren_label_filter.py`` (16 tests covering the
+# helper unit semantics, the regex source-shape pin, the end-to-end pin
+# on the Build-65 failing line, and the R76 paren-cluster + R66/B1
+# single-line regression guards).  Net pytest delta +16 (5443 -> 5459).
 # Round 88 / Build 64: Build 63 acceptance audit + targeted fixes.
 # F1 strips literal markdown asterisks from Comprehensive narratives by
 # (a) extending the ``append_to_word_report.clean_and_format_text``
