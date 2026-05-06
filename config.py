@@ -937,7 +937,61 @@ ADOPTIQ_VERSION = "1.0.4"
 # tests across validator, resolver, ``_r83_safe_share_url``,
 # preferences-page source-shape, analyze-card regression guard, and
 # cross-pin against the R35 + R81 fixtures).
-ADOPTIQ_BUILD = "63"
+ADOPTIQ_BUILD = "64"  # Round 88 / Build 64
+# Round 88 / Build 64: Build 63 acceptance audit + targeted fixes.
+# F1 strips literal markdown asterisks from Comprehensive narratives by
+# (a) extending the ``append_to_word_report.clean_and_format_text``
+# sanitiser with a new ``_r88_italic_re = re.compile(r"(?<![*\\w])\\*([^*\\n]+?)\\*(?![*\\w])")``
+# pass so single-star ``*italic*`` markers convert to docx italic runs
+# instead of leaking literal asterisks (the ``**bold**`` path was already
+# handled), AND (b) removing 19 ``*...*`` instructional wrappers from
+# the LLM prompt templates (``PROMPT_COMPREHENSIVE_TEMPLATE``,
+# ``PROMPT_CUSTOMER_TEMPLATE``, ``PROMPT_COMPACT_EXECUTIVE_TEMPLATE``)
+# so the model stops mirroring our own emphasis markup back into the
+# narrative.  F2 adds a dedicated ``Risk_Score_0_10`` column to BOTH the
+# Compact ``Risk_Summary`` AND Renewal ``Renewal_Summary`` XLSX sheets
+# (sourced from ``Overall_Risk_Score`` on the Compact side and either
+# ``Overall_Risk_Score`` or a derivation of ``Risk_Score_0_100`` on the
+# Renewal side) so an operator parsing the workbook downstream has an
+# unambiguous 0-10 column name -- the legacy ``Overall_Risk_Score`` and
+# back-compat ``Risk_Score`` aliases are preserved.  F3 drops the
+# redundant ``_Renewal_Report`` filename suffix on the Renewal docx
+# (pre-R88 produced ``AdoptIQ_Report_Renewal_..._Renewal_Report.docx``);
+# the saved name is now just ``<base_path>.docx`` matching Compact /
+# Comprehensive.  F4 (P0) wires
+# ``LeaderReportGenerator._get_subscriptions_for_cssm`` to delegate to
+# ``adoptiq_backend.get_subscriptions_for_team`` so the R82 multi-column
+# UNION (primary + secondary DSM email columns) is honoured -- closes
+# Brian's Build 61 acceptance gap where Greg Dolberry's secondary
+# accounts (BU - Cisco Systems INC CA, BU - Wells Fargo, BU - Apple INC
+# US) were missing from his Leader report.  F5 (P1) adds an
+# operator-configurable CSOne OneDrive folder override.  New
+# ``settings.json`` key ``csone_onedrive_folder`` (validated via
+# ``adoptiq_settings._is_valid_csone_folder_path`` -- absolute or
+# tilde-prefixed only, NUL/control/shell-meta-free, 4096-byte cap),
+# new ``GET / POST /api/settings/csone-onedrive-folder`` endpoint
+# (CSRF dual-auth + atomic 0o600 write + in-process
+# ``Config.CSONE_ONEDRIVE_FOLDER`` mutation so the next index pass
+# uses the new path WITHOUT a restart), and a new card on
+# ``templates/preferences.html`` (modeled on the R85 corpus-share-url
+# card; same IIFE-wrapped JS module, textContent rendering, no
+# innerHTML / eval).  Resolution precedence in
+# ``config._resolve_csone_onedrive_folder``:
+# ``settings.json`` -> ``CSONE_ONEDRIVE_FOLDER`` env ->
+# ``_csone_onedrive_candidates()`` auto-discovery.  Closes Brian's
+# Build 61 acceptance gap where his sharer-prefixed sync folder
+# ``/Users/brfrazie/Library/CloudStorage/OneDrive-Cisco/Jeffrey Story (jestory) - AdoptIQ_CSOne_Reports``
+# did not match the canonical ``AI Projects/AdoptIQ_CSOne_Reports``
+# shape and AdoptIQ silently fell through to the bundled baked
+# artifact only.
+#
+# Pinned by:
+#   - ``tests/test_round88_comprehensive_no_markdown_asterisks.py``
+#   - ``tests/test_round88_risk_score_0_10_populated.py``
+#   - ``tests/test_round88_renewal_filename_no_redundant_suffix.py``
+#   - ``tests/test_round88_cssm_subscriptions_union.py``
+#   - ``tests/test_round88_csone_folder_override.py`` (44 tests)
+#   - ``tests/test_round88_csone_folder_override_ui.py`` (17 tests)
 # Round 87 / Build 63: corpus-tightening + upgrade-launch UX +
 # corpus-indexing UX + URL-card relocation.  Phase 1 adds an opt-in
 # ``ADOPTIQ_RELEASE_GATE=1`` block to ``build_mac_dmg.sh`` that
@@ -1228,11 +1282,50 @@ def _csone_onedrive_candidates() -> list[str]:
 
 
 def _resolve_csone_onedrive_folder() -> str:
-    """Round 17.2: return the first existing OneDrive candidate, or
-    fall back to the modern Cloud-Storage path so error messages
-    still point at the right "expected" location when nothing is
-    synced.  Honors ``CSONE_ONEDRIVE_FOLDER`` env override
-    unconditionally so power users can pin any path."""
+    """Round 17.2 (extended Round 88 / F5): return the active CSOne
+    OneDrive folder path.
+
+    Resolution order, highest precedence first:
+
+    1. ``settings.json['csone_onedrive_folder']`` -- operator-set via
+       the admin Preferences card.  Round 88 / F5 (P1) addition for
+       Brian Frazier's Build 63 acceptance comment ("the file location
+       for my machine is /Users/<sharee>/.../Jeffrey Story (jestory) -
+       AdoptIQ_CSOne_Reports").  Tilde-expanded so ``~/Library/...``
+       works.  Re-vetted via
+       ``adoptiq_settings.is_valid_csone_folder_path`` so a corrupt
+       settings.json cannot inject a malformed path.  Empty string is
+       the canonical "unset" sentinel and falls through.
+    2. ``CSONE_ONEDRIVE_FOLDER`` env override -- preserved verbatim so
+       power users keeping the variable in their shell rc still get
+       the same effective path.
+    3. ``_csone_onedrive_candidates()`` auto-discovery -- the R80/R83
+       candidate list (canonical leaf, owner-style leaf, etc.) walked
+       in priority order; first existing wins.
+    4. First candidate as fallback so error messages still point at
+       the right "expected" location when nothing is synced.
+
+    The settings.json read is wrapped in a broad try/except because
+    this resolver runs at ``config.Config`` import time and a partial
+    install / missing module MUST NOT break boot.  A corrupt or
+    missing settings.json simply falls through to layer 2.
+    """
+    # Round 88 / F5 (P1): settings.json takes precedence over env.
+    try:
+        import adoptiq_settings as _settings  # noqa: PLC0415
+        try:
+            persisted = _settings.get("csone_onedrive_folder", "")
+        except Exception:  # noqa: BLE001 - resolver MUST NOT raise
+            persisted = ""
+        if isinstance(persisted, str) and persisted.strip():
+            try:
+                if _settings.is_valid_csone_folder_path(persisted):
+                    return os.path.expanduser(persisted.strip())
+            except Exception:  # noqa: BLE001
+                pass  # noqa: PIE790 - fall through to env layer
+    except Exception:  # noqa: BLE001 - settings module unavailable in some test fixtures
+        pass  # noqa: PIE790
+
     override = os.environ.get('CSONE_ONEDRIVE_FOLDER')
     if override:
         return override

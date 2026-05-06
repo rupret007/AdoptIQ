@@ -58,13 +58,21 @@ def _read_app_simple() -> str:
 def test_risk_summary_columns_carry_overall_risk_score_canonical() -> None:
     """R70/Phase 2 (#4): the explicit ``columns=`` list on the
     ``risk_summary_df`` constructor MUST list ``Overall_Risk_Score``
-    BEFORE ``Risk_Score`` (canonical first, alias second)."""
+    BEFORE ``Risk_Score`` (canonical first, alias second).
+
+    Round 88 / F2 inserted ``Risk_Score_0_10`` between the two so an
+    operator parsing the workbook downstream has an unambiguous
+    0-10 column name; the R70 ordering contract (canonical before
+    alias) is preserved."""
     src = _read_app_simple()
-    needle = "columns=['Customer', 'Overall_Risk_Score', 'Risk_Score', 'Risk_Level', 'Risk_Band', 'Adoption_Barriers', 'Support_Cases']"
+    needle = "columns=['Customer', 'Overall_Risk_Score', 'Risk_Score_0_10', 'Risk_Score', 'Risk_Level', 'Risk_Band', 'Adoption_Barriers', 'Support_Cases']"
     assert needle in src, (
-        "Round 70 / #4: the Compact Risk_Summary DataFrame constructor "
-        "MUST pin the column order with Overall_Risk_Score before Risk_Score "
-        "so pandas can never silently drop the canonical column."
+        "Round 70 / #4 + Round 88 / F2: the Compact Risk_Summary DataFrame "
+        "constructor MUST pin the column order with Overall_Risk_Score "
+        "FIRST and Risk_Score AFTER Risk_Score_0_10 so pandas can never "
+        "silently drop the canonical column AND the unambiguous 0-10 "
+        "scale column stays adjacent to Overall_Risk_Score for operator "
+        "readability."
     )
 
 

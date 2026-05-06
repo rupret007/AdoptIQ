@@ -140,7 +140,15 @@ def test_renewal_report_single_customer():
             portfolio_mode=False,
         )
         assert os.path.exists(path)
-        assert path.endswith("_Renewal_Report.docx")
+        # Round 88 / F3: ``base_path`` already carries the ``Renewal``
+        # token (in production it is ``AdoptIQ_Report_Renewal_<tag>``),
+        # so the writer no longer appends a redundant
+        # ``_Renewal_Report`` suffix.  Aligned with Compact +
+        # Comprehensive which save as ``{base}.docx``.  The synthetic
+        # base in this test is ``test_renewal_single`` so the file is
+        # ``test_renewal_single.docx``.
+        assert path.endswith(".docx")
+        assert not path.endswith("_Renewal_Report.docx")
         assert os.path.getsize(path) > 1000
 
 

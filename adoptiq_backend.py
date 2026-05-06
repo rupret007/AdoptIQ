@@ -8573,21 +8573,52 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
         # Add some spacing
         doc.add_paragraph()
 
+    # Round 88 / F1: italic-marker regex used by ``clean_and_format_text``  # Round 88
+    # to strip leftover single-star italic chrome that the LLM mirrors  # Round 88
+    # from the prompt template's instructional lines (e.g.  # Round 88
+    # ``*P1/P2 cases requiring immediate attention:*``).  The negative  # Round 88
+    # lookbehind/lookahead for ``*`` or word char prevents this from  # Round 88
+    # matching inside ``**bold**`` segments OR mid-word usage.  Mirrors  # Round 88
+    # the lineage in ``app_simple._strip_markdown_chrome`` (R48 / F-RP-MD-LEAK).  # Round 88
+    _r88_italic_re = re.compile(r"(?<![*\w])\*([^*\n]+?)\*(?![*\w])")  # Round 88
+
     # Helper function to process text and remove ALL markdown while preserving formatting
     def clean_and_format_text(text, paragraph):
-        """Process text to remove ** and apply proper bold formatting - NO ** SYMBOLS SHOWN"""
+        """Process text to remove ** / * markdown and apply proper bold/italic formatting.
+
+        Round 88 / F1: extended to also strip single-star italic markers
+        (``*text*``) so leftover prompt-instruction chrome that the LLM
+        mirrors back never reaches the docx as literal asterisks.  Bold
+        (``**text**``) is processed FIRST; italic is processed on the
+        residual non-bold segments so we never double-strip a bold pair
+        as two unmatched italics.
+        """
         # First, handle the case where ** might not be paired correctly
         # Count the number of ** - if odd, just remove all of them
         count = text.count('**')
 
         if count == 0:
-            # No bold markers, just add clean text
-            paragraph.add_run(text.strip())
+            # No bold markers, but italic markers may still be present.
+            # Round 88 / F1: strip single-star italics so the LLM-mirrored
+            # ``*xxx:*`` chrome is converted to italic runs without the
+            # literal asterisks.
+            italic_segments = _r88_italic_re.split(text)
+            if len(italic_segments) <= 1:
+                paragraph.add_run(text.strip())
+                return paragraph
+            for idx, seg in enumerate(italic_segments):
+                if not seg:
+                    continue
+                run = paragraph.add_run(seg if idx > 0 else seg.lstrip())
+                if idx % 2 == 1:
+                    run.italic = True
             return paragraph
 
         if count == 1 or count % 2 != 0:
             # Odd number of ** - malformed markdown, just remove all ** and don't try to bold
             clean_text = text.replace('**', '')
+            # Round 88 / F1: also strip italic chrome on the malformed-bold path.
+            clean_text = _r88_italic_re.sub(r"\1", clean_text)
             run = paragraph.add_run(clean_text.strip())
             run.bold = True  # Make it bold since it was probably meant to be emphasized
             return paragraph
@@ -8597,6 +8628,20 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
         parts = text.split('**')
         for idx, part in enumerate(parts):
             if part:  # Include all parts, even if just whitespace
+                # Round 88 / F1: strip italic chrome from each non-bold segment
+                # before emitting the run.  Bold segments (odd idx) are kept
+                # verbatim so we never accidentally consume a literal ``*`` that
+                # belongs inside the bold prose.
+                if idx % 2 == 0:
+                    italic_segments = _r88_italic_re.split(part)
+                    if len(italic_segments) > 1:
+                        for j_idx, j_seg in enumerate(italic_segments):
+                            if not j_seg:
+                                continue
+                            r = paragraph.add_run(j_seg)
+                            if j_idx % 2 == 1:
+                                r.italic = True
+                        continue
                 # Don't strip individual parts to preserve spacing
                 run = paragraph.add_run(part)
                 if idx % 2 == 1:  # Odd indices are bold (text between ** pairs)
@@ -11191,7 +11236,7 @@ The following totals are computed by the canonical metrics pipeline directly fro
 ## **Portfolio Health Score: [A/B/C/D/F]**
 
 **Grade Justification:**
-*State the grade and justify with SPECIFIC metrics drawn from the briefing book: BEMS escalation count, critical-defect count, count of affected customers, and chronic-issue count.  Quote the numbers EXACTLY as they appear in the briefing -- do NOT compute new ratios or rates (e.g. "escalation rate at V%") that the briefing does not already state.  If a rate was not provided, write "(rate not available)" instead of estimating it.  Be direct about whether this portfolio is healthy, at-risk, or in crisis.*
+State the grade and justify with SPECIFIC metrics drawn from the briefing book: BEMS escalation count, critical-defect count, count of affected customers, and chronic-issue count.  Quote the numbers EXACTLY as they appear in the briefing -- do NOT compute new ratios or rates (e.g. "escalation rate at V%") that the briefing does not already state.  If a rate was not provided, write "(rate not available)" instead of estimating it.  Be direct about whether this portfolio is healthy, at-risk, or in crisis.
 
 ---
 
@@ -11206,16 +11251,16 @@ The following totals are computed by the canonical metrics pipeline directly fro
 • **Trend Direction:** [Improving/Stable/Deteriorating with evidence]
 
 **The Truth About This Portfolio** (3-4 sentences):
-*What's the real situation? Are customers struggling with specific features? Is there a pattern of escalations? Are defects blocking adoption? What's keeping customers from success? Be honest and direct.*
+What's the real situation? Are customers struggling with specific features? Is there a pattern of escalations? Are defects blocking adoption? What's keeping customers from success? Be honest and direct.
 
 ---
 
 ## **🔴 Critical Trouble Spots - Executive Attention Required**
 
-*These are the RED FLAGS that need immediate visibility:*
+These are the RED FLAGS that need immediate visibility:
 
 ### **BEMS Escalations** (Complex Engineering Issues)
-*BEMS escalations indicate problems requiring back-end engineering - these are serious:*
+BEMS escalations indicate problems requiring back-end engineering - these are serious:
 
 • **[Customer Name]:** [X BEMS cases] - **BEMS IDs:** [List actual BEMS IDs] - [Brief problem description]
 • **[Customer Name]:** [X BEMS cases] - **BEMS IDs:** [List actual BEMS IDs] - [Brief problem description]
@@ -11224,14 +11269,14 @@ The following totals are computed by the canonical metrics pipeline directly fro
 **Total BEMS Impact:** [X customers with Y total BEMS escalations - what this means for the portfolio]
 
 ### **Critical Defects Affecting Customers**
-*Known software defects from help.webex.com that are impacting your customers:*
+Known software defects from help.webex.com that are impacting your customers:
 
 • **[Defect ID]:** [Short description] - **Impacts:** [List affected customers] - **Status:** [Open/Fixed/Workaround]
 • **[Defect ID]:** [Short description] - **Impacts:** [List affected customers] - **Status:** [Open/Fixed/Workaround]
 • **[Defect ID]:** [Short description] - **Impacts:** [List affected customers] - **Status:** [Open/Fixed/Workaround]
 
 ### **High-Severity TAC Cases**
-*P1/P2 cases requiring immediate attention:*
+P1/P2 cases requiring immediate attention:
 
 • **[Customer]:** P1 - **Case:** [Number] - [Problem description] - [Days open]
 • **[Customer]:** P2 - **Case:** [Number] - [Problem description] - [Days open]
@@ -11240,7 +11285,7 @@ The following totals are computed by the canonical metrics pipeline directly fro
 
 ## **All Customers in Trouble (from this Briefing, Sorted by Risk)**
 
-*List every customer **listed in this briefing book** that has severe issues, sorted by risk level. Do NOT limit to just 5. Round 6 / Phase 3.4: This is intentionally scoped to "customers listed in the briefing" rather than "ALL customers" -- if the briefing was truncated or partial, only the customers it actually contains are valid; do not invent or extrapolate to customers it does not name. If the briefing notes a partial fetch, say so explicitly here.*
+List every customer **listed in this briefing book** that has severe issues, sorted by risk level. Do NOT limit to just 5. Round 6 / Phase 3.4: This is intentionally scoped to "customers listed in the briefing" rather than "ALL customers" -- if the briefing was truncated or partial, only the customers it actually contains are valid; do not invent or extrapolate to customers it does not name. If the briefing notes a partial fetch, say so explicitly here.
 
 **🔒 Round 25 / Phase C — RISK BAND BINDING (READ BEFORE WRITING):**
 The briefing book contains a section titled **"Canonical Risk Bands (Round 25 / Phase C)"** with each customer's authoritative risk band (CRITICAL / HIGH / MEDIUM / LOW / HEALTHY) computed by the canonical risk-scoring pipeline.  When you assign a `Risk Level:` to any customer below, you MUST use the band listed there verbatim.  Specifically:
@@ -11278,13 +11323,13 @@ If the briefing's canonical risk-band section is missing or truncated, say so ex
 **5. [Customer Name] - Risk Level: [LOW]**
 • [Same detailed format]
 
-*Round 25 / Phase C: each `Risk Level: [X]` MUST be one of the five canonical bands (CRITICAL, HIGH, MEDIUM, LOW, HEALTHY) -- never a compound like "HIGH/CRITICAL" or "MEDIUM/LOW".*
+Round 25 / Phase C: each `Risk Level: [X]` MUST be one of the five canonical bands (CRITICAL, HIGH, MEDIUM, LOW, HEALTHY) -- never a compound like "HIGH/CRITICAL" or "MEDIUM/LOW".
 
 ---
 
 ## **Common Problems Across Portfolio**
 
-*Identify the patterns - what's broken or blocking adoption across multiple customers:*
+Identify the patterns - what's broken or blocking adoption across multiple customers:
 
 ### **Problem Pattern #1: [Descriptive Name of the Issue]**
 • **What's Happening:** [Clear description of the problem customers are facing]
@@ -11305,7 +11350,7 @@ If the briefing's canonical risk-band section is missing or truncated, say so ex
 
 ## **Adoption Barriers Breakdown**
 
-*What specific barriers are blocking customer success:*
+What specific barriers are blocking customer success:
 
 **By Type/Theme:**
 • **[Barrier Theme 1]:** [X customers] - [Description and examples]
@@ -11313,7 +11358,7 @@ If the briefing's canonical risk-band section is missing or truncated, say so ex
 • **[Barrier Theme 3]:** [Z customers] - [Description and examples]
 
 **High-Severity Barriers:**
-*List 3-5 most critical adoption barriers with complete details:*
+List 3-5 most critical adoption barriers with complete details:
 • **[Customer]:** [Full barrier description] - **Severity:** [Level] - **Status:** [Open/Working/Resolved]
 • **[Customer]:** [Full barrier description] - **Severity:** [Level] - **Status:** [Open/Working/Resolved]
 
@@ -11338,7 +11383,7 @@ If the briefing's canonical risk-band section is missing or truncated, say so ex
 
 ## **Service Incidents & External Factors**
 
-*Recent service incidents or platform issues affecting customers:*
+Recent service incidents or platform issues affecting customers:
 • **[Incident from status.webex.com]:** [Impact on portfolio customers]
 • **[Platform Issue]:** [How this is affecting adoption/experience]
 
@@ -11346,7 +11391,7 @@ If the briefing's canonical risk-band section is missing or truncated, say so ex
 
 ## **Positive Momentum** (Brief)
 
-*Quick wins and successes to balance the trouble focus:*
+Quick wins and successes to balance the trouble focus:
 • [Success or resolved issue]
 • [Positive trend or customer achievement]
 
@@ -11418,10 +11463,10 @@ Generate a detailed, customer-specific report in Markdown. Do NOT omit any heade
 **Technology Focus:** {TECHNOLOGY}
 
 ### **Customer Health Score: <one letter A | B | C | D | F, no brackets, no quotes>**
-*Provide a comprehensive 3-4 sentence justification based on this customer's specific data related to {TECHNOLOGY} adoption and support. Include specific metrics, trend analysis, and strategic implications.*
+Provide a comprehensive 3-4 sentence justification based on this customer's specific data related to {TECHNOLOGY} adoption and support. Include specific metrics, trend analysis, and strategic implications.
 
 ### **1. Advanced Trend Analysis & Pattern Recognition**
-*Identify the top 3-5 recurring issue patterns for THIS CUSTOMER specifically related to {TECHNOLOGY}. Perform sophisticated thematic analysis of their titles and descriptions to create meaningful insights.*
+Identify the top 3-5 recurring issue patterns for THIS CUSTOMER specifically related to {TECHNOLOGY}. Perform sophisticated thematic analysis of their titles and descriptions to create meaningful insights.
 
 **Pattern 1: [Theme Name]**
 - **Frequency:** [Count and percentage of this customer's {TECHNOLOGY}-related cases]
@@ -11437,41 +11482,41 @@ Generate a detailed, customer-specific report in Markdown. Do NOT omit any heade
 - [Same detailed structure as Pattern 1]
 
 ### **2. Comprehensive Business Impact Assessment**
-*   **Operational Disruption:** *[Detailed analysis of how {TECHNOLOGY} technical issues translate into business terms, including specific metrics and examples.]*
-*   **Financial Impact:** *[Quantified cost analysis including downtime, productivity loss, and opportunity costs.]*
-*   **Strategic Headwinds:** *[How these {TECHNOLOGY} issues slow down this customer's strategic goals and competitive positioning.]*
-*   **Customer Experience Impact:** *[How {TECHNOLOGY} issues affect their end customers and service delivery quality.]*
+- **Operational Disruption:** [Detailed analysis of how {TECHNOLOGY} technical issues translate into business terms, including specific metrics and examples.]
+- **Financial Impact:** [Quantified cost analysis including downtime, productivity loss, and opportunity costs.]
+- **Strategic Headwinds:** [How these {TECHNOLOGY} issues slow down this customer's strategic goals and competitive positioning.]
+- **Customer Experience Impact:** [How {TECHNOLOGY} issues affect their end customers and service delivery quality.]
 
 ### **3. Advanced Customer Pulse & Sentiment Analysis**
-*   **Pulse Rating:** [Good (Green), Average (Yellow), or Poor (Red)]
-*   **Sentiment Indicators:** [Specific evidence of customer satisfaction, frustration, or engagement levels]
-*   **Relationship Health:** [Assessment of the overall customer relationship and trust levels]
-*   **Engagement Quality:** [Depth of technical discussions, proactive vs reactive interactions]
+- **Pulse Rating:** [Good (Green), Average (Yellow), or Poor (Red)]
+- **Sentiment Indicators:** [Specific evidence of customer satisfaction, frustration, or engagement levels]
+- **Relationship Health:** [Assessment of the overall customer relationship and trust levels]
+- **Engagement Quality:** [Depth of technical discussions, proactive vs reactive interactions]
 *   **Communication Patterns:** [Frequency, tone, and escalation patterns in support interactions]
 
 ### **4. Strategic Technology Assessment**
-*   **{TECHNOLOGY} Maturity Level:** [Novice/Developing/Proficient/Advanced/Expert with specific evidence]
-*   **Adoption Velocity:** [Rate of {TECHNOLOGY} feature adoption and expansion]
-*   **Technical Competency:** [Internal team capabilities and knowledge gaps]
-*   **Integration Complexity:** [Challenges with existing infrastructure and systems]
-*   **Innovation Readiness:** [Willingness and capability to adopt new {TECHNOLOGY} features]
+- **{TECHNOLOGY} Maturity Level:** [Novice/Developing/Proficient/Advanced/Expert with specific evidence]
+- **Adoption Velocity:** [Rate of {TECHNOLOGY} feature adoption and expansion]
+- **Technical Competency:** [Internal team capabilities and knowledge gaps]
+- **Integration Complexity:** [Challenges with existing infrastructure and systems]
+- **Innovation Readiness:** [Willingness and capability to adopt new {TECHNOLOGY} features]
 
 ### **5. Competitive Intelligence & Market Context**
-*   **Industry Benchmarking:** [How this customer's {TECHNOLOGY} adoption compares to industry peers]
-*   **Competitive Positioning:** [How {TECHNOLOGY} challenges affect their market position]
-*   **Market Opportunities:** [Untapped potential and expansion possibilities]
-*   **Technology Evolution Impact:** [How emerging trends affect their {TECHNOLOGY} strategy]
+- **Industry Benchmarking:** [How this customer's {TECHNOLOGY} adoption compares to industry peers]
+- **Competitive Positioning:** [How {TECHNOLOGY} challenges affect their market position]
+- **Market Opportunities:** [Untapped potential and expansion possibilities]
+- **Technology Evolution Impact:** [How emerging trends affect their {TECHNOLOGY} strategy]
 
 ### **6. Predictive Risk Assessment**
-*   **Churn Risk Level:** [Low, Medium, High, Critical]
-*   **Risk Factors:** [Specific indicators that suggest potential issues or opportunities, **including BEMS escalation patterns**]
-*   **BEMS Risk Analysis:** [If BEMS escalations exist for this customer, **list the count and specific BEMS IDs** (e.g., "3 BEMS escalations: BEMS-12345, BEMS-67890, BEMS-11111"). If no BEMS, state "No BEMS escalations". These indicate complex technical issues requiring specialized engineering expertise]
-*   **Success Probability:** [Likelihood of successful {TECHNOLOGY} adoption and value realization]
-*   **Timeline Projections:** [Where this customer is heading in the next 6-12 months]
-*   **Early Warning Signs:** [Specific patterns that require immediate attention, **especially BEMS escalation trends**]
+- **Churn Risk Level:** [Low, Medium, High, Critical]
+- **Risk Factors:** [Specific indicators that suggest potential issues or opportunities, **including BEMS escalation patterns**]
+- **BEMS Risk Analysis:** [If BEMS escalations exist for this customer, **list the count and specific BEMS IDs** (e.g., "3 BEMS escalations: BEMS-12345, BEMS-67890, BEMS-11111"). If no BEMS, state "No BEMS escalations". These indicate complex technical issues requiring specialized engineering expertise]
+- **Success Probability:** [Likelihood of successful {TECHNOLOGY} adoption and value realization]
+- **Timeline Projections:** [Where this customer is heading in the next 6-12 months]
+- **Early Warning Signs:** [Specific patterns that require immediate attention, **especially BEMS escalation trends**]
 
 ### **7. Strategic Recommendations & Action Plan**
-*Provide 4-6 prioritized, **S.M.A.R.T.** recommendations for this specific customer focused on {TECHNOLOGY}.*
+Provide 4-6 prioritized, **S.M.A.R.T.** recommendations for this specific customer focused on {TECHNOLOGY}.
 
 **Recommendation 1: [Priority Level]**
 - **Problem Statement:** [Detailed description of the {TECHNOLOGY}-related problem with quantified impact]
@@ -11490,18 +11535,18 @@ Generate a detailed, customer-specific report in Markdown. Do NOT omit any heade
 - [Same detailed structure as Recommendation 1]
 
 ### **8. External Intelligence & Competitive Context**
-*   **Software Defects Impact:** [How publicly known bugs (help.webex.com) correlate with this customer's specific issues]
-*   **Service Incident Correlation:** [Impact of recent service incidents (status.webex.com) on this customer's experience]
-*   **Cross-Reference Analysis:** [Specific customer issues that align with known software defects or service incidents]
-*   **Industry Benchmarking:** [How this customer's {TECHNOLOGY} adoption compares to industry peers]
-*   **Competitive Positioning:** [Their {TECHNOLOGY} capabilities vs. market alternatives]
-*   **Innovation Opportunities:** [Emerging {TECHNOLOGY} capabilities they could leverage]
+- **Software Defects Impact:** [How publicly known bugs (help.webex.com) correlate with this customer's specific issues]
+- **Service Incident Correlation:** [Impact of recent service incidents (status.webex.com) on this customer's experience]
+- **Cross-Reference Analysis:** [Specific customer issues that align with known software defects or service incidents]
+- **Industry Benchmarking:** [How this customer's {TECHNOLOGY} adoption compares to industry peers]
+- **Competitive Positioning:** [Their {TECHNOLOGY} capabilities vs. market alternatives]
+- **Innovation Opportunities:** [Emerging {TECHNOLOGY} capabilities they could leverage]
 
 ### **9. Success Metrics & Monitoring Plan**
-*   **Key Performance Indicators:** [Specific metrics to track {TECHNOLOGY} success]
-*   **Monitoring Frequency:** [How often to review progress and adjust strategy]
-*   **Escalation Triggers:** [Specific conditions that require immediate intervention]
-*   **Success Celebration:** [How to recognize and reinforce positive outcomes]
+- **Key Performance Indicators:** [Specific metrics to track {TECHNOLOGY} success]
+- **Monitoring Frequency:** [How often to review progress and adjust strategy]
+- **Escalation Triggers:** [Specific conditions that require immediate intervention]
+- **Success Celebration:** [How to recognize and reinforce positive outcomes]
 
 **CORRELATION MANDATE:** Before finalizing your analysis, you MUST connect adoption barriers with TAC case themes and external bugs. If a customer has both barriers and cases about the same technology area, that is a compound risk signal. Identify the single most impactful action that would address the largest cluster of connected issues.
 """
@@ -13460,7 +13505,7 @@ PROMPT_COMPACT_EXECUTIVE_TEMPLATE = """
 ---
 
 ## **Portfolio Health: [A/B/C/D/F]**
-*Grade with SPECIFIC metrics: X BEMS escalations, Y defects, Z critical cases. Direct assessment: healthy/at-risk/in crisis.*
+Grade with SPECIFIC metrics: X BEMS escalations, Y defects, Z critical cases. Direct assessment: healthy/at-risk/in crisis.
 
 ---
 
@@ -13481,7 +13526,7 @@ PROMPT_COMPACT_EXECUTIVE_TEMPLATE = """
 
 ## **Customers in Trouble (from the briefing book)**
 
-*List EACH customer that the briefing book identifies as having problems. Round 10 / Phase 6.3: do NOT extrapolate beyond the customers that appear in the briefing -- "EVERY"/"ALL" framing previously encouraged the model to invent rows when the briefing was truncated.*
+List EACH customer that the briefing book identifies as having problems. Round 10 / Phase 6.3: do NOT extrapolate beyond the customers that appear in the briefing -- "EVERY"/"ALL" framing previously encouraged the model to invent rows when the briefing was truncated.
 
 **1. [Customer] - Risk: [HIGH/CRITICAL]**
 • **Problem:** [What's really wrong]

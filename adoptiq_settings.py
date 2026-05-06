@@ -92,6 +92,25 @@ _SCHEMA: Dict[str, tuple] = {
     "ask_ai_model_name": (str, ""),  # Round 69 / Build 43
     "report_model_name": (str, ""),  # Round 69 / Build 43
     "corpus_share_url": (str, ""),  # Round 84 / Build 60
+    # Round 88 / F5 (P1): OneDrive CSOne folder override.  When the
+    # OneDrive desktop client materializes a SHARED folder (someone
+    # else's "AdoptIQ_CSOne_Reports") the local path acquires a
+    # sharer-prefix segment (e.g.
+    # ``/Users/<sharee>/Library/CloudStorage/OneDrive-Cisco/Jeffrey Story (jestory) - AdoptIQ_CSOne_Reports``)
+    # which the auto-discovery candidate list in
+    # ``config._csone_onedrive_candidates`` may or may not match
+    # depending on how the user named the synced folder.  Brian
+    # Frazier's Build 63 acceptance comment ("So still can't connect
+    # for the OneDrive ... the file location for my machine is
+    # /Users/brfrazie/Library/CloudStorage/OneDrive-Cisco/Jeffrey Story
+    # (jestory) - AdoptIQ_CSOne_Reports") is the canonical bug this
+    # key addresses — give the operator a UI-flippable override that
+    # short-circuits the candidate list.  Empty string is the
+    # "unset" sentinel and means "fall through to env then to
+    # auto-discovery".  Validated via ``_is_valid_csone_folder_path``
+    # on save AND on load so a hand-edited / corrupt value cannot
+    # land in ``settings.json``.
+    "csone_onedrive_folder": (str, ""),
 }
 
 SETTINGS_FILENAME = "settings.json"
@@ -154,6 +173,73 @@ def _is_valid_model_name(value: Any) -> bool:
     return bool(_MODEL_NAME_RE.match(value))
 
 
+# Round 88 / F5 (P1): OneDrive CSOne folder path validator.
+#
+# Acceptance constraints (defense in depth — the path will also be
+# walked by ``os.path.isdir`` later, but the validator must reject
+# obviously-bad shapes BEFORE they touch the filesystem):
+#
+# * Empty string = "unset" sentinel (caller falls through to env then
+#   auto-discovery).
+# * Must be a string.
+# * Must be ``<= 4096`` bytes (POSIX ``PATH_MAX`` is typically 4096
+#   on Linux, 1024 on macOS — we cap at the more permissive value).
+# * Must NOT contain a NUL byte (``\x00``) — would terminate paths in
+#   downstream syscalls and is a classic injection vector.
+# * Must NOT contain a newline (``\n`` / ``\r``) or pipe / shell
+#   metacharacter that would never appear in a legitimate path.
+# * Must be EITHER an absolute path (``startswith("/")`` on POSIX or
+#   ``[A-Za-z]:[\\/]`` on Windows) OR start with ``~`` for tilde
+#   expansion.  Relative paths are rejected because they would resolve
+#   against whatever cwd the .app inherits, which is operator-hostile.
+# * NUL byte and most shell metacharacters are rejected by the
+#   character-class regex; the path-shape check is a separate branch
+#   so the rejection reason can be surfaced cleanly.
+#
+# We deliberately do NOT require the path to exist — the user might
+# set this value BEFORE OneDrive finishes materializing the folder
+# (Brian's exact workflow: he created the folder manually and then
+# pointed AdoptIQ at it).  The downstream consumer
+# (``config._resolve_csone_onedrive_folder``) is responsible for the
+# existence probe + the auto-discovery fall-through.
+_CSONE_FOLDER_FORBIDDEN_CHARS_RE = re.compile(
+    r"[\x00-\x1f|;&`$<>*?\"]"  # control chars + shell metas
+)
+
+
+def _is_valid_csone_folder_path(value: Any) -> bool:
+    """Return True if ``value`` is empty (= unset) OR a syntactically
+    valid absolute / tilde-prefixed path with no shell-injection
+    surface.
+
+    See the SSoT comment near ``_CSONE_FOLDER_FORBIDDEN_CHARS_RE`` for
+    the full acceptance contract.  Pinned by
+    ``tests/test_round88_csone_folder_override.py``.
+    """
+    if value is None or value == "":
+        return True
+    if not isinstance(value, str):
+        return False
+    candidate = value.strip()
+    if not candidate:
+        # All-whitespace input — treat as the empty/unset sentinel.
+        return True
+    if len(candidate) > 4096:
+        return False
+    if _CSONE_FOLDER_FORBIDDEN_CHARS_RE.search(candidate):
+        return False
+    # Windows drive-letter path (e.g. ``C:\Users\...``).
+    if (
+        len(candidate) >= 3
+        and candidate[1] == ":"
+        and candidate[0].isalpha()
+        and candidate[2] in ("\\", "/")
+    ):
+        return True
+    # POSIX absolute or tilde-prefixed path.
+    return candidate.startswith("/") or candidate.startswith("~")
+
+
 # Per-key validators.  A validator returning False causes the key to
 # be dropped (with a warning) on both load and save.  Keys without a
 # validator entry pass through after type coercion.
@@ -179,6 +265,7 @@ _VALIDATORS: Dict[str, Callable[[Any], bool]] = {
     "ask_ai_model_name": _is_valid_model_name,  # Round 69 / Build 43
     "report_model_name": _is_valid_model_name,  # Round 69 / Build 43
     "corpus_share_url": _is_valid_sharepoint_url,  # Round 84 / Build 60
+    "csone_onedrive_folder": _is_valid_csone_folder_path,  # Round 88 / F5
 }
 
 
@@ -378,6 +465,18 @@ def is_valid_model_name(value: Any) -> bool:
     return _is_valid_model_name(value)
 
 
+def is_valid_csone_folder_path(value: Any) -> bool:
+    """Round 88 / F5 (P1): public alias for the CSOne folder path allow-list.
+
+    Used by ``app_simple.py``'s ``POST /api/settings/csone-onedrive-folder``
+    handler to vet operator input BEFORE it reaches ``save_settings``
+    AND by ``config._resolve_csone_onedrive_folder`` to defensively
+    re-vet a settings.json value so a corrupt or hand-edited file
+    cannot bypass the UI allow-list.
+    """
+    return _is_valid_csone_folder_path(value)
+
+
 __all__ = [
     "SETTINGS_FILENAME",
     "load_settings",
@@ -387,4 +486,5 @@ __all__ = [
     "schema_keys",
     "is_valid_sharepoint_url",
     "is_valid_model_name",  # Round 69 / Build 43
+    "is_valid_csone_folder_path",  # Round 88 / F5
 ]

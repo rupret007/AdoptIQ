@@ -1341,105 +1341,72 @@ class LeaderReportGenerator:
         return team_data
 
     def _get_subscriptions_for_cssm(self, cssm_emails: List[str]) -> pd.DataFrame:
-        """Get subscriptions for specific CSSM emails"""
+        """Get subscriptions for specific CSSM emails.
+
+        Round 88 / F4 (P0 — Greg Dolberry account-attribution bug):
+        delegates to the R82-aware ``adoptiq_backend.get_subscriptions_for_team``
+        which UNIONs across BOTH the primary DSM email columns
+        (``PRIMARY_DSM_EMAIL`` / ``CSSM_EMAIL`` / ``ASSIGNEE_EMAIL`` /
+        ``OWNER_EMAIL``) AND the conservative secondary candidate set
+        (``SECONDARY_DSM_EMAIL`` / ``SECONDARY_CSSM_EMAIL`` /
+        ``BACKUP_DSM_EMAIL`` / ``BACKUP_CSSM_EMAIL`` /
+        ``DELEGATE_DSM_EMAIL`` / ``DELEGATE_CSSM_EMAIL`` /
+        ``OWNER_EMAIL_2`` / ``OWNER_EMAIL_BACKUP`` / ``CSSM_EMAIL_2`` /
+        ``DSM_EMAIL_2``) — see ``_R82_PRIMARY_DSM_EMAIL_COLUMNS`` and
+        ``_R82_SECONDARY_DSM_EMAIL_CANDIDATES`` in ``adoptiq_backend``.
+
+        Pre-R88 this method walked ONLY the primary column and stopped
+        at the first hit, so a CSSM listed as the SECONDARY owner on
+        an account (Brian's example: Greg Dolberry primary on
+        BU - Cisco Systems INC CA, secondary on BU - Wells Fargo and
+        BU - Apple INC US, with APs on all four) silently lost the
+        secondary-only accounts from ``team_subs_df``.  Downstream
+        the per-CSSM ``CSSM_EMAIL == cssm_email`` slicing returned an
+        empty subscription set and the corresponding AP/AB/CP fetches
+        derived no ``account_ids`` for those accounts.
+
+        The delegation is pure (no behavior change for environments
+        where only primary columns exist) AND preserves the
+        ``_r82_team_subs_diag`` rollup on ``df.attrs`` so the leader
+        report's status writer can persist it onto
+        ``analysis_status['team_subs_diag']`` for operator visibility.
+        """
         logger.debug(f"_get_subscriptions_for_cssm called. cssm_emails: {cssm_emails}")
         if not cssm_emails:
-            logger.debug(f"No cssm_emails provided, returning empty DataFrame")
+            logger.debug("No cssm_emails provided, returning empty DataFrame")
             return pd.DataFrame()
 
-        cur = None
         try:
-            from adoptiq_backend import (
-                DSM_TABLE,
-                _get_table_columns,
-                _column_or_default_expr,
+            from adoptiq_backend import get_subscriptions_for_team  # noqa: PLC0415
+        except ImportError as imp_err:
+            logger.error(
+                "Round 88 / F4: cannot import get_subscriptions_for_team "
+                "from adoptiq_backend (%s); falling back to empty result. "
+                "This indicates a corrupt installation.",
+                imp_err,
             )
-            logger.debug(f"Creating cursor from ctx. ctx type: {type(self.ctx)}, ctx is None: {self.ctx is None}")
+            return pd.DataFrame()
 
-            cur = self.ctx.cursor()
-            logger.debug(f"Cursor created successfully")
-
-            # Round 3 / Phase 3.5: pick the actual email column from the
-            # DSM schema. Some DSM views expose CSSM_EMAIL, others
-            # PRIMARY_DSM_EMAIL. Hardcoding PRIMARY_DSM_EMAIL silently
-            # produced an empty result set on environments where the
-            # column is named CSSM_EMAIL, which then looked like
-            # "this CSSM owns no subscriptions" rather than a schema
-            # mismatch.
-            try:
-                _dsm_cols = _get_table_columns(self.ctx, DSM_TABLE) or set()
-            except Exception as _intro_err:
-                logger.warning(
-                    "Could not introspect %s columns for leader subscription lookup: %s",
-                    DSM_TABLE, _intro_err,
-                )
-                _dsm_cols = set()
-            if "PRIMARY_DSM_EMAIL" in _dsm_cols:
-                _email_col = "PRIMARY_DSM_EMAIL"
-            elif "CSSM_EMAIL" in _dsm_cols:
-                _email_col = "CSSM_EMAIL"
-            else:
-                # Default to PRIMARY_DSM_EMAIL for backward compatibility
-                # but log loudly so this isn't silent.
-                logger.warning(
-                    "Neither PRIMARY_DSM_EMAIL nor CSSM_EMAIL found in %s; "
-                    "defaulting to PRIMARY_DSM_EMAIL. Result set may be empty.",
-                    DSM_TABLE,
-                )
-                _email_col = "PRIMARY_DSM_EMAIL"
-
-            # Round 7 / Phase 6.1: chunk the email list so very large
-            # CSSM rosters do not blow the Snowflake statement size /
-            # IN-list limits.  ``_chunk_in_clause`` returns one chunk
-            # for typical roster sizes; multi-chunk dispatch only kicks
-            # in for unusually large teams.  We concatenate the rows
-            # across chunks and rely on the SELECT DISTINCT + final
-            # drop_duplicates below to keep the merged frame clean.
-            email_chunks = self._chunk_in_clause(cssm_emails)
-            all_rows: List[Tuple[Any, ...]] = []
-            cols: Optional[List[str]] = None
-            for _chunk_idx, _chunk in enumerate(email_chunks, start=1):
-                placeholders = ','.join(['%s'] * len(_chunk))
-                sql = f"""
-                SELECT DISTINCT SUBSCRIPTION_ID, ACCOUNT_ID_C, BU_NAME, {_email_col} AS CSSM_EMAIL
-                FROM {DSM_TABLE}
-                WHERE {_email_col} IN ({placeholders})
-                """
-                logger.debug(
-                    "Executing SQL chunk %d/%d (%d emails)",
-                    _chunk_idx, len(email_chunks), len(_chunk),
-                )
-                cur.execute(sql, _chunk)
-                _rows = cur.fetchall() or []
-                if _rows and cols is None:
-                    cols = [c[0] for c in cur.description]
-                all_rows.extend(_rows)
-
-            logger.debug(f"Fetched {len(all_rows)} rows across {len(email_chunks)} chunk(s)")
-
-            if not all_rows or cols is None:
-                logger.debug(f"No rows returned, returning empty DataFrame")
-                return pd.DataFrame()
-
-            df = pd.DataFrame(all_rows, columns=cols)
-            # Multi-chunk runs can re-emit the same SUBSCRIPTION_ID if
-            # a CSSM appears in more than one chunk's result via the
-            # DISTINCT inside a single query (it cannot, but defensively
-            # de-dupe across chunks too).
-            if "SUBSCRIPTION_ID" in df.columns:
-                df = df.drop_duplicates(subset=["SUBSCRIPTION_ID"], keep="first").reset_index(drop=True)
-            logger.debug(f"Created DataFrame with {len(df)} rows")
-
-            return df
+        try:
+            df = get_subscriptions_for_team(self.ctx, cssm_emails)
+            logger.debug(
+                "Round 88 / F4: get_subscriptions_for_team returned %d rows "
+                "(roster size=%d)",
+                len(df) if isinstance(df, pd.DataFrame) else 0,
+                len(cssm_emails),
+            )
+            # Pass the diag through so callers (e.g. status writers in
+            # ``app_simple.run_leader_report_generation``) can persist
+            # ``_r82_team_subs_diag`` onto ``analysis_status``.
+            return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
         except Exception as e:
-            logger.error(f"Error fetching subscriptions: {e}", exc_info=True)
+            logger.error(
+                f"Round 88 / F4: error in get_subscriptions_for_team delegation: {e}",
+                exc_info=True,
+            )
             # Round 7 / Phase 6.10: distinguish fetch-failed from
             # zero-rows so classify_data_state -> "failed" downstream.
             return self._empty_df_failed(e)
-        finally:
-            if cur:
-                cur.close()
-                logger.debug(f"Cursor closed")
 
     def _build_task_owner_clause(self, owner_emails: List[str], alias: Optional[str] = None):
         """Build a parameterized owner-match clause for C360_CS_TASK_C_VW.

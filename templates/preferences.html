@@ -322,6 +322,134 @@
                 </div>
             </section>
 
+            {# ----- Section: CSOne OneDrive folder (R88 / Build 64) -- #}
+            {# Round 88 / Build 64: closes Brian Frazier's Build 61
+               acceptance gap.  His sharer-prefixed local sync path
+
+                   /Users/brfrazie/Library/CloudStorage/OneDrive-Cisco/
+                   Jeffrey Story (jestory) - AdoptIQ_CSOne_Reports
+
+               does not match the canonical
+               ``AI Projects/AdoptIQ_CSOne_Reports`` shape that the
+               R36 / R83 ``_csone_onedrive_candidates`` auto-discovery
+               looks for, so AdoptIQ falls through to "no CSOne folder
+               found" and corpus indexing degrades to the bundled
+               baked artifact only.  This card lets the operator
+               point AdoptIQ at the actual sync path WITHOUT a DMG
+               rebuild.  Resolution precedence:
+               ``settings.json`` (this card) &rarr;
+               ``CSONE_ONEDRIVE_FOLDER`` env &rarr;
+               auto-discovery candidates.  Threat model: the path
+               is NOT a secret -- the OneDrive desktop client still
+               gates content access (only files the operator's own
+               Microsoft account is authorised to see land in the
+               local sync mirror).  Source-shape pinned by
+               ``tests/test_round88_csone_folder_override.py`` and
+               ``tests/test_round88_csone_folder_override_ui.py``. #}
+            <section id="prefs-csone-folder-card"
+                     class="card shadow-cisco fade-in mb-4"
+                     data-csone-folder-card
+                     style="animation-delay: 0.275s;"
+                     aria-labelledby="prefs-csone-folder-heading"
+                     aria-live="polite"
+                     aria-atomic="true">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-csone-folder-heading">
+                        <i class="fas fa-folder-open me-2" aria-hidden="true"></i>
+                        CSOne OneDrive folder
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-3">
+                        Operator-configurable absolute path to the local
+                        OneDrive sync folder containing the AdoptIQ CSOne
+                        reports.  Useful when the desktop client appends
+                        a sharer prefix
+                        (e.g. <code>Jeffrey Story (jestory) - AdoptIQ_CSOne_Reports</code>)
+                        that the auto-discovery does not recognise.
+                        Resolution precedence:
+                        <code>settings.json</code> (this card) &rarr;
+                        <code>CSONE_ONEDRIVE_FOLDER</code> env &rarr;
+                        auto-discovery candidates.
+                    </p>
+                    <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
+                        <span class="badge rounded-pill bg-secondary"
+                              data-csone-folder-source-pill
+                              title="Which precedence tier produced the active path">
+                            <span data-csone-folder-source-text>checking&hellip;</span>
+                        </span>
+                        <span class="badge rounded-pill bg-secondary"
+                              data-csone-folder-exists
+                              title="Whether the active path exists on disk right now">
+                            unknown
+                        </span>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-csone-folder-current">
+                            Active path
+                        </label>
+                        <code class="d-block small text-break"
+                              id="prefs-csone-folder-current"
+                              data-csone-folder-current
+                              aria-live="polite">
+                            (loading&hellip;)
+                        </code>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-csone-folder-persisted">
+                            Persisted override
+                        </label>
+                        <code class="d-block small text-break"
+                              id="prefs-csone-folder-persisted"
+                              data-csone-folder-persisted
+                              aria-live="polite">
+                            (loading&hellip;)
+                        </code>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-csone-folder-input">
+                            New folder path
+                            <span class="text-muted">
+                                (absolute path or
+                                <code>~/...</code>; leave blank to clear
+                                the override and fall back to env /
+                                auto-discovery)
+                            </span>
+                        </label>
+                        <input type="text"
+                               class="form-control form-control-sm"
+                               id="prefs-csone-folder-input"
+                               data-csone-folder-input
+                               placeholder="/Users/&lt;you&gt;/Library/CloudStorage/OneDrive-Cisco/Jeffrey Story (jestory) - AdoptIQ_CSOne_Reports"
+                               maxlength="4096"
+                               autocomplete="off"
+                               spellcheck="false">
+                    </div>
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        <button type="button"
+                                class="btn btn-sm btn-primary"
+                                data-csone-folder-save
+                                title="Persist the new path to settings.json (atomic write, mode 0o600) and apply it in-process">
+                            <i class="fas fa-save me-1" aria-hidden="true"></i>
+                            Save
+                        </button>
+                        <button type="button"
+                                class="btn btn-sm btn-outline-warning"
+                                data-csone-folder-clear
+                                title="Clear the operator override and fall back to env / auto-discovery">
+                            <i class="fas fa-undo me-1" aria-hidden="true"></i>
+                            Clear override
+                        </button>
+                        <span class="small ms-2"
+                              data-csone-folder-feedback
+                              aria-live="polite"></span>
+                    </div>
+                </div>
+            </section>
+
             {# ----- Section: Theme (informational) ------------------- #}
             <section class="card shadow-cisco fade-in mb-4"
                      style="animation-delay: 0.3s;"
@@ -395,4 +523,9 @@
    (textContent rendering, https-only allow-list, Test reads the
    SAVED URL via ``/api/corpus/bootstrap-shortcut``). #}
 <script src="{{ url_for('static', filename='js/corpus_share_url.js') }}"></script>
+{# Round 88 / Build 64: CSOne OneDrive folder override card.
+   Mirrors the corpus_share_url IIFE pattern -- ``[data-csone-folder-*]``
+   markers bind without a second handler.  XSS posture identical
+   (textContent rendering, no innerHTML, no eval). #}
+<script src="{{ url_for('static', filename='js/r88_csone_folder_override.js') }}"></script>
 {% endblock %}

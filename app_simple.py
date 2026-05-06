@@ -1006,6 +1006,7 @@ _SENSITIVE_ENDPOINTS = {
     'api_settings_ask_ai_model',
     'api_settings_report_model',
     'api_settings_corpus_share_url',  # Round 84 / Build 60
+    'api_settings_csone_onedrive_folder',  # Round 88 / F5 (P1)
     'get_grounding_diagnostics',
     'get_ask_ai_diagnostics',
 }
@@ -10390,6 +10391,13 @@ def run_compact_analysis(analysis_id):
             _r67_b6_score = round(score, 1)
             _r67_b6_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
             _r67_b6_risk_level = _r67_b6_LABEL_REMAP.get(risk_level, risk_level)
+            # Round 88 / F2: publish the explicit 0-10 score under the  # Round 88
+            # canonical column name ``Risk_Score_0_10`` so any consumer  # Round 88
+            # that wants to know the scale can rely on the column name  # Round 88
+            # alone -- no scale-guessing on the ``Overall_Risk_Score``  # Round 88
+            # alias. Mirrors the ``Risk_Score_0_100`` back-compat slot in  # Round 88
+            # ``renewal_summary_data`` so Compact and Renewal speak the  # Round 88
+            # same column-name vocabulary for the 0-10 scale.  # Round 88
             risk_summary_data.append({
                 # Round 49 / F-RP-COMPOSITE-KEY-BLEED: collapse merged
                 # Snowflake composite keys (``MARUBENI CORPORATION__
@@ -10399,6 +10407,7 @@ def run_compact_analysis(analysis_id):
                 # instead of join-key strings.
                 'Customer': _normalize_composite_customer_key(customer),
                 'Overall_Risk_Score': _r67_b6_score,
+                'Risk_Score_0_10': _r67_b6_score,  # Round 88 / F2
                 'Risk_Score': _r67_b6_score,
                 'Risk_Level': _r67_b6_risk_level,
                 'Risk_Band': band,
@@ -10416,9 +10425,12 @@ def run_compact_analysis(analysis_id):
         # rows include extra keys (the loop's append shape adds keys
         # in dict-insertion order, but the explicit ``columns=``
         # contract here is the source of truth for the artifact).
+        # Round 88 / F2: ``Risk_Score_0_10`` slotted in BEFORE the  # Round 88
+        # legacy ``Risk_Score`` alias so readers see the explicit  # Round 88
+        # scale-named column first.  # Round 88
         risk_summary_df = pd.DataFrame(
             risk_summary_data,
-            columns=['Customer', 'Overall_Risk_Score', 'Risk_Score', 'Risk_Level', 'Risk_Band', 'Adoption_Barriers', 'Support_Cases']
+            columns=['Customer', 'Overall_Risk_Score', 'Risk_Score_0_10', 'Risk_Score', 'Risk_Level', 'Risk_Band', 'Adoption_Barriers', 'Support_Cases']
         )
         logger.info(f"[[DATA]] Risk summary DataFrame created with {len(risk_summary_df)} rows")
 
@@ -13442,7 +13454,17 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         logger.warning("Round 70 / Phase 1: Renewal simple word footer skipped: %s", _r68_err)
 
     # Save
-    word_path = f"{base_path}_Renewal_Report.docx"
+    # Round 88 / F3: ``base_path`` is already
+    # ``AdoptIQ_Report_Renewal_<tag>`` (constructed at L14544 in
+    # ``run_customer_renewal_analysis``).  Pre-R88 the writer appended
+    # ``_Renewal_Report.docx`` which produced the redundant
+    # ``AdoptIQ_Report_Renewal_<tag>_Renewal_Report.docx`` stem the
+    # Build 63 acceptance audit flagged.  Aligning with the Compact
+    # writer (L9994: ``f"{base}.docx"``) and the Comprehensive writer
+    # (L18007: ``f"{base}.docx"``) drops the redundant chrome and
+    # produces ``AdoptIQ_Report_Renewal_<tag>.docx``.  The existing
+    # tests in ``test_reports_extensive.py`` are updated in tandem.
+    word_path = f"{base_path}.docx"
     doc.save(word_path)
     logger.info(f"[RENEWAL] Report saved to: {word_path}")
 
@@ -14683,7 +14705,12 @@ def run_customer_renewal_analysis(analysis_id):
                     'Customer': _normalize_composite_customer_key(cust_name),
                     # Round 86 / Build 62 (P0/F1): explicit 0-10 / 0-100
                     # projection -- no scale guessing.
+                    # Round 88 / F2: also publish the 0-10 score under  # Round 88
+                    # the explicit ``Risk_Score_0_10`` column name so  # Round 88
+                    # downstream consumers don't have to guess that  # Round 88
+                    # ``Overall_Risk_Score`` is on the 0-10 scale.  # Round 88
                     'Overall_Risk_Score': _r86_score_10 if _r86_score_10 is not None else 0,
+                    'Risk_Score_0_10': _r86_score_10 if _r86_score_10 is not None else 0,  # Round 88 / F2
                     'Risk_Score_0_100': _r86_score_100 if _r86_score_100 is not None else 0,
                     'Risk_Level': cust_risk_level,
                     'Analysis_Date': analysis_date,
@@ -14691,10 +14718,13 @@ def run_customer_renewal_analysis(analysis_id):
                 })
         else:
             # Single customer
+            # Round 88 / F2: single-customer Renewal also publishes  # Round 88
+            # ``Risk_Score_0_10`` for parity with the portfolio loop.  # Round 88
             renewal_summary_data = [{
                 # Round 49 / F-RP-COMPOSITE-KEY-BLEED.
                 'Customer': _normalize_composite_customer_key(customer_name),
                 'Overall_Risk_Score': overall_risk_score,
+                'Risk_Score_0_10': overall_risk_score,  # Round 88 / F2
                 'Risk_Level': risk_level,
                 'Analysis_Date': analysis_date,
                 'Next_Review_Date': next_review_date
@@ -14770,6 +14800,17 @@ def run_customer_renewal_analysis(analysis_id):
                     _r67_row['Overall_Risk_Score'] = round(_r67_orig_f, 2)
                 elif _r86_existing_0_100_f is None:
                     _r67_row.setdefault('Risk_Score_0_100', _r67_orig)
+                # Round 88 / F2: mirror the 0-10 score under the explicit  # Round 88
+                # ``Risk_Score_0_10`` column name. ``Overall_Risk_Score``  # Round 88
+                # is the canonical 0-10 SSoT after the R67/B1 scale  # Round 88
+                # alignment, so we just copy it across; a single missing  # Round 88
+                # 0-10 row would still get backfilled here from the  # Round 88
+                # 0-100 column when ``Overall_Risk_Score`` is absent.  # Round 88
+                _r88_row_score_10 = _r67_row.get('Overall_Risk_Score')
+                if _r88_row_score_10 in (None, ''):
+                    if _r86_existing_0_100_f is not None:
+                        _r88_row_score_10 = round(_r86_existing_0_100_f / 10.0, 2)
+                _r67_row.setdefault('Risk_Score_0_10', _r88_row_score_10)
                 _r67_lvl = _r67_row.get('Risk_Level')
                 if isinstance(_r67_lvl, str) and _r67_lvl:
                     _r67_row['Risk_Band'] = _r67_lvl.upper()
@@ -14796,9 +14837,14 @@ def run_customer_renewal_analysis(analysis_id):
         # / pivots that pre-R70 worked because the rows happened to
         # carry the columns explicitly. The list mirrors the contract
         # documented in CLAUDE.md and pinned by R70 artifact tests.
+        # Round 88 / F2: ``Risk_Score_0_10`` slotted in BETWEEN the  # Round 88
+        # ambiguously-named ``Overall_Risk_Score`` and the back-compat  # Round 88
+        # ``Risk_Score_0_100`` so the schema reads as a clear  # Round 88
+        # scale-progression: 0-10 first, 0-100 second.  # Round 88
         _r70_renewal_canonical_cols: tuple[str, ...] = (
             'Customer',
             'Overall_Risk_Score',
+            'Risk_Score_0_10',  # Round 88 / F2
             'Risk_Score_0_100',
             'Risk_Level',
             'Risk_Band',
@@ -22199,6 +22245,205 @@ def api_settings_corpus_share_url():
         "persisted_value": candidate,
         "env_var": "ADOPTIQ_CORPUS_SHARE_URL",
         "env_value_set": bool(os.environ.get("ADOPTIQ_CORPUS_SHARE_URL")),
+    }), 200
+
+
+# ---------------------------------------------------------------------------
+# Round 88 / F5 (P1): CSOne OneDrive folder override.
+#
+# Brian Frazier's Build 63 acceptance comment named the canonical
+# failure mode: when a user "Add[s] shortcut to OneDrive" against a
+# shared folder, the local path acquires a sharer-prefix segment
+# (e.g. ``/Users/<sharee>/.../Jeffrey Story (jestory) -
+# AdoptIQ_CSOne_Reports``) which the auto-discovery candidate list
+# in ``config._csone_onedrive_candidates`` may or may not match
+# depending on the user's OneDrive client version.  Pre-R88 the only
+# escape hatch was the ``CSONE_ONEDRIVE_FOLDER`` env variable, which
+# requires a shell rc edit + restart.  R88/F5 layers a UI-flippable
+# override on top via ``settings.json``.
+#
+# The endpoint shape mirrors R69 (model name) and R84 (share URL):
+#
+# * GET  ``/api/settings/csone-onedrive-folder`` -- returns the active
+#   path + the source-precedence label ("settings.json" / "env" /
+#   "auto-discovery") so the admin Preferences card can show which
+#   tier produced the value currently in use.  Also returns
+#   ``path_exists`` so the operator can see at a glance whether the
+#   path is materialized on disk yet.
+# * POST ``/api/settings/csone-onedrive-folder`` -- persists a new
+#   path.  Empty string clears the override.  Validated via
+#   ``adoptiq_settings.is_valid_csone_folder_path`` BEFORE write so a
+#   shell-injection payload or relative path cannot land on disk.
+#   On successful persist also mutates ``Config.CSONE_ONEDRIVE_FOLDER``
+#   in-process so the daily-refresh worker + the auto-discovery probe
+#   see the new value on their next tick (no restart required).
+#
+# Auth: same dual-path as ``/api/settings/intelligence`` via
+# ``_r17_2_authorize_corpus_admin`` (CSRF token OR
+# ``X-AdoptIQ-Internal``).  The encryption / sentinel / decrypt path
+# is NOT touched -- the path only governs which directory the corpus
+# indexer + autodiscovery walks.
+# ---------------------------------------------------------------------------
+
+
+@app.route('/api/settings/csone-onedrive-folder', methods=['GET', 'POST'])
+def api_settings_csone_onedrive_folder():
+    """Round 88 / F5 (P1): GET (read) / POST (persist) the
+    operator-set OneDrive CSOne folder path used by the corpus
+    indexer + autodiscovery probe.
+
+    GET response shape: ``{ok: true, folder_path: <str>,
+    source: "settings.json"|"env"|"auto-discovery"|"fallback",
+    persisted_value: <str>, path_exists: bool, env_var: str,
+    env_value_set: bool}``.  ``folder_path`` is the result of
+    ``config._resolve_csone_onedrive_folder()``; ``source`` names the
+    winning tier.  ``persisted_value`` is the raw value currently in
+    ``settings.json`` (empty string when no operator override is set).
+
+    POST request shape: ``{"folder_path": "<absolute path or ~/...>"}``.
+    Empty string clears the override.  Validated via
+    ``adoptiq_settings.is_valid_csone_folder_path``; a malformed value
+    returns 400 + ``error: "invalid_folder_path"``.
+
+    POST response shape: same as GET on success.  Atomic write via
+    ``adoptiq_settings.save_settings`` (mode ``0o600``,
+    ``os.replace`` swap) so a crash mid-write cannot truncate
+    ``settings.json``.
+
+    On successful persist this endpoint also mutates
+    ``Config.CSONE_ONEDRIVE_FOLDER`` in-process so the new value
+    takes effect on the next corpus refresh tick without a restart.
+
+    Pinned by ``tests/test_round88_csone_folder_override.py``.
+    """
+    try:
+        import adoptiq_settings as _settings  # noqa: PLC0415
+        from config import Config as _Config, _resolve_csone_onedrive_folder  # noqa: PLC0415
+    except Exception as imp_err:  # noqa: BLE001 - import path may be partial in tests
+        logger.exception("Round 88 / F5: settings/config import failed")
+        return jsonify({
+            "ok": False,
+            "error": f"settings_import_failed: {type(imp_err).__name__}",
+        }), 500
+
+    def _resolve_with_source() -> tuple[str, str]:
+        """Return ``(active_path, source_label)`` mirroring the
+        R84 ``corpus_share_url_resolver`` 4-tier shape.  Source labels:
+        ``"settings.json"`` / ``"env"`` / ``"auto-discovery"`` /
+        ``"fallback"``.
+        """
+        try:
+            persisted = _settings.get("csone_onedrive_folder", "") or ""
+        except Exception:  # noqa: BLE001 - defensive
+            persisted = ""
+        if isinstance(persisted, str) and persisted.strip():
+            try:
+                if _settings.is_valid_csone_folder_path(persisted):
+                    return os.path.expanduser(persisted.strip()), "settings.json"
+            except Exception:  # noqa: BLE001
+                pass  # noqa: PIE790
+        env_value = os.environ.get("CSONE_ONEDRIVE_FOLDER", "") or ""
+        if env_value:
+            return env_value, "env"
+        active = _resolve_csone_onedrive_folder()
+        try:
+            if os.path.isdir(active):
+                return active, "auto-discovery"
+        except Exception:  # noqa: BLE001
+            pass  # noqa: PIE790
+        return active, "fallback"
+
+    if request.method == "GET":
+        # Read-only path -- no auth required (mirrors R69 model GET
+        # contract; loopback-only by default; payload carries no PII).
+        try:
+            persisted = _settings.get("csone_onedrive_folder", "") or ""
+        except Exception:  # noqa: BLE001
+            persisted = ""
+        active_path, source = _resolve_with_source()
+        try:
+            path_exists = bool(active_path) and os.path.isdir(active_path)
+        except Exception:  # noqa: BLE001
+            path_exists = False
+        return jsonify({
+            "ok": True,
+            "folder_path": active_path,
+            "source": source,
+            "persisted_value": persisted,
+            "path_exists": path_exists,
+            "env_var": "CSONE_ONEDRIVE_FOLDER",
+            "env_value_set": bool(os.environ.get("CSONE_ONEDRIVE_FOLDER")),
+        }), 200
+
+    # POST path -- writes settings.json.  Auth required.
+    auth_err = _r17_2_authorize_corpus_admin()
+    if auth_err is not None:
+        body, code = auth_err
+        return jsonify(body), code
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "invalid_json_payload"}), 400
+    raw_value = payload.get("folder_path")
+    # Empty string is the canonical "unset" sentinel and is accepted.
+    if raw_value is None:
+        raw_value = ""
+    if not isinstance(raw_value, str):
+        return jsonify({"ok": False, "error": "folder_path_must_be_string"}), 400
+    candidate = raw_value.strip()
+    if not _settings.is_valid_csone_folder_path(candidate):
+        return jsonify({
+            "ok": False,
+            "error": "invalid_folder_path",
+            "detail": (
+                "Allowed: empty string (clears override) OR an absolute "
+                "POSIX path (starts with /) OR a Windows drive-letter "
+                "path (e.g. C:\\...) OR a tilde-prefixed path (~/...). "
+                "Maximum 4096 bytes.  NUL bytes, control characters, "
+                "and shell metacharacters (| ; & ` $ < > * ? \") are "
+                "rejected."
+            ),
+        }), 400
+
+    # Persist via the standard settings.json contract.
+    try:
+        merged = dict(_settings.load_settings() or {})
+        merged["csone_onedrive_folder"] = candidate
+        _settings.save_settings(merged)
+    except Exception as save_err:  # noqa: BLE001
+        logger.exception(
+            "Round 88 / F5: settings.json write failed for csone_onedrive_folder"
+        )
+        return jsonify({
+            "ok": False,
+            "error": f"settings_write_failed: {type(save_err).__name__}",
+        }), 500
+
+    # Mutate Config.CSONE_ONEDRIVE_FOLDER in-process so the daily
+    # refresh worker and the autodiscovery probe see the new value
+    # on their next tick without a restart.
+    try:
+        _Config.CSONE_ONEDRIVE_FOLDER = _resolve_csone_onedrive_folder()
+    except Exception:  # noqa: BLE001 - persist already succeeded; in-process update is best-effort
+        pass  # noqa: PIE790
+
+    active_path, source = _resolve_with_source()
+    try:
+        path_exists = bool(active_path) and os.path.isdir(active_path)
+    except Exception:  # noqa: BLE001
+        path_exists = False
+    logger.info(
+        "Round 88 / F5: csone_onedrive_folder persisted (source=%s, persisted=%s, exists=%s)",
+        source, "(unset)" if not candidate else "(set)", path_exists,
+    )
+    return jsonify({
+        "ok": True,
+        "folder_path": active_path,
+        "source": source,
+        "persisted_value": candidate,
+        "path_exists": path_exists,
+        "env_var": "CSONE_ONEDRIVE_FOLDER",
+        "env_value_set": bool(os.environ.get("CSONE_ONEDRIVE_FOLDER")),
     }), 200
 
 
