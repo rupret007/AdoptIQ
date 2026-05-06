@@ -53,18 +53,23 @@ def test_r88_f2_compact_risk_summary_columns_list_carries_risk_score_0_10() -> N
     """The ``risk_summary_df = pd.DataFrame(...)`` column list must
     include ``'Risk_Score_0_10'`` so the artifact schema is stable
     across runs (R70/B6 contract).
+
+    Round 89 / F1: the legacy ``Risk_Score`` back-compat alias was
+    dropped from the Compact column list -- expected_cols below reflects
+    the post-R89 order.
     """
 
     text = _APP_PATH.read_text(encoding="utf-8")
     expected_cols = (
         "['Customer', 'Overall_Risk_Score', 'Risk_Score_0_10', "
-        "'Risk_Score', 'Risk_Level', 'Risk_Band', 'Adoption_Barriers', "
+        "'Risk_Level', 'Risk_Band', 'Adoption_Barriers', "
         "'Support_Cases']"
     )
     assert expected_cols in text, (
-        "Round 88 / F2: Compact risk_summary_df ``columns=`` list must "
-        "include ``'Risk_Score_0_10'`` slotted between ``Overall_Risk_Score`` "
-        "and the legacy ``Risk_Score`` alias."
+        "Round 88 / F2 + Round 89 / F1: Compact risk_summary_df "
+        "``columns=`` list must include ``'Risk_Score_0_10'`` immediately "
+        "after ``Overall_Risk_Score`` and MUST NOT include the legacy "
+        "``Risk_Score`` alias (R89/F1 dropped it)."
     )
 
 
@@ -148,6 +153,9 @@ def test_r88_f2_compact_risk_summary_dataframe_rows_have_matching_overall_and_0_
     """Behavior round-trip: build a synthetic ``risk_summary_data``
     payload and assert ``Overall_Risk_Score == Risk_Score_0_10`` for
     every row (the value is the same, only the column name differs).
+
+    Round 89 / F1: the synthetic rows no longer carry the legacy
+    ``Risk_Score`` back-compat alias (dropped from the writer).
     """
 
     rows = [
@@ -155,7 +163,6 @@ def test_r88_f2_compact_risk_summary_dataframe_rows_have_matching_overall_and_0_
             "Customer": "ALPHA",
             "Overall_Risk_Score": 7.2,
             "Risk_Score_0_10": 7.2,
-            "Risk_Score": 7.2,
             "Risk_Level": "HIGH",
             "Risk_Band": "HIGH",
             "Adoption_Barriers": 5,
@@ -165,7 +172,6 @@ def test_r88_f2_compact_risk_summary_dataframe_rows_have_matching_overall_and_0_
             "Customer": "BETA",
             "Overall_Risk_Score": 0.8,
             "Risk_Score_0_10": 0.8,
-            "Risk_Score": 0.8,
             "Risk_Level": "HEALTHY",
             "Risk_Band": "HEALTHY",
             "Adoption_Barriers": 0,
@@ -178,7 +184,6 @@ def test_r88_f2_compact_risk_summary_dataframe_rows_have_matching_overall_and_0_
             "Customer",
             "Overall_Risk_Score",
             "Risk_Score_0_10",
-            "Risk_Score",
             "Risk_Level",
             "Risk_Band",
             "Adoption_Barriers",
@@ -186,6 +191,10 @@ def test_r88_f2_compact_risk_summary_dataframe_rows_have_matching_overall_and_0_
         ],
     )
     assert "Risk_Score_0_10" in df.columns
+    assert "Risk_Score" not in df.columns, (
+        "Round 89 / F1: the legacy 'Risk_Score' back-compat alias must "
+        "NOT be present in the post-R89 Compact Risk_Summary schema."
+    )
     for _, row in df.iterrows():
         assert row["Overall_Risk_Score"] == row["Risk_Score_0_10"], (
             "Round 88 / F2: Risk_Score_0_10 must equal Overall_Risk_Score "

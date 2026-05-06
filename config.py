@@ -937,7 +937,7 @@ ADOPTIQ_VERSION = "1.0.4"
 # tests across validator, resolver, ``_r83_safe_share_url``,
 # preferences-page source-shape, analyze-card regression guard, and
 # cross-pin against the R35 + R81 fixtures).
-ADOPTIQ_BUILD = "64"  # Round 88 / Build 64
+ADOPTIQ_BUILD = "65"  # Round 89 / Build 65
 # Round 88 / Build 64: Build 63 acceptance audit + targeted fixes.
 # F1 strips literal markdown asterisks from Comprehensive narratives by
 # (a) extending the ``append_to_word_report.clean_and_format_text``
@@ -992,6 +992,26 @@ ADOPTIQ_BUILD = "64"  # Round 88 / Build 64
 #   - ``tests/test_round88_cssm_subscriptions_union.py``
 #   - ``tests/test_round88_csone_folder_override.py`` (44 tests)
 #   - ``tests/test_round88_csone_folder_override_ui.py`` (17 tests)
+# Round 89 / Build 65: post-Build-63 acceptance sweep + alias retirement.
+# F1 retires the R67/B6 ``Risk_Score`` back-compat alias from Compact
+# ``Risk_Summary`` (``app_simple.run_compact_analysis`` row dict +
+# ``columns=`` tuple + four reader sites: the canonical-high-risk sort,
+# the ``Risk_Band`` fallback sort, the bare-cutoff filter+sort, and the
+# mean fallback).  The R67/B6 contract said "kept as a back-compat
+# alias for one build then deprecated"; R88/F2 already shipped the
+# explicit ``Risk_Score_0_10`` column adjacent to ``Overall_Risk_Score``,
+# so the alias has no remaining consumers and removing it eliminates
+# the ambiguity that R86/F1 had to spend a round un-saturating
+# (operators were reading ``Risk_Score`` thinking it was the canonical
+# headline).  Future Compact ``Risk_Summary`` consumers MUST read
+# ``Overall_Risk_Score`` (canonical) or ``Risk_Score_0_10``
+# (explicit-scale).  The bake also re-runs the R88 fixes (markdown
+# asterisks, ``Risk_Score_0_10`` column, Renewal docx filename, Leader
+# CSSM UNION, CSOne folder override) into the production .app for the
+# first time -- pre-Build-65 those were source-only.  Pinned by
+# ``tests/test_round89_compact_risk_score_alias_removed.py`` plus
+# updated assertions in ``tests/test_round70_compact_risk_summary_overall_score.py``
+# + ``tests/test_round88_risk_score_0_10_populated.py``.
 # Round 87 / Build 63: corpus-tightening + upgrade-launch UX +
 # corpus-indexing UX + URL-card relocation.  Phase 1 adds an opt-in
 # ``ADOPTIQ_RELEASE_GATE=1`` block to ``build_mac_dmg.sh`` that

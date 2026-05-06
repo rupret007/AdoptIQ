@@ -10362,12 +10362,7 @@ def run_compact_analysis(analysis_id):
             )
             # Round 67 / Build 41 (B6): publish ``Overall_Risk_Score``
             # as the headline column for parity with Renewal
-            # ``Renewal_Summary.Overall_Risk_Score`` and keep
-            # ``Risk_Score`` as a back-compat alias for downstream
-            # tile consumers that have already pinned to that name
-            # (the sort/filter logic immediately below this block
-            # still reads ``Risk_Score`` for stable cross-row
-            # ordering -- both column values are identical).
+            # ``Renewal_Summary.Overall_Risk_Score``.
             # Round 67 / Build 41 (B1, vocab parity): re-map MEDIUM
             # -> MODERATE on the user-facing ``Risk_Level`` column so
             # the Compact and Renewal labels read the same word.
@@ -10388,6 +10383,14 @@ def run_compact_analysis(analysis_id):
             # byte-for-byte.  The user-facing vocabulary parity
             # contract is satisfied by the ``Risk_Level`` column
             # alone, which the operator reads first.
+            #
+            # Round 89 / F1: drop the ``Risk_Score`` back-compat alias  # Round 89
+            # entirely. The R67/B6 hedge for downstream tile consumers  # Round 89
+            # is no longer needed -- the only readers were the four  # Round 89
+            # internal sort/mean sites in this same function, and they  # Round 89
+            # have been retargeted to ``Overall_Risk_Score``. Future  # Round 89
+            # consumers should read ``Overall_Risk_Score`` (canonical)  # Round 89
+            # or ``Risk_Score_0_10`` (explicit-scale).  # Round 89
             _r67_b6_score = round(score, 1)
             _r67_b6_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
             _r67_b6_risk_level = _r67_b6_LABEL_REMAP.get(risk_level, risk_level)
@@ -10395,9 +10398,9 @@ def run_compact_analysis(analysis_id):
             # canonical column name ``Risk_Score_0_10`` so any consumer  # Round 88
             # that wants to know the scale can rely on the column name  # Round 88
             # alone -- no scale-guessing on the ``Overall_Risk_Score``  # Round 88
-            # alias. Mirrors the ``Risk_Score_0_100`` back-compat slot in  # Round 88
-            # ``renewal_summary_data`` so Compact and Renewal speak the  # Round 88
-            # same column-name vocabulary for the 0-10 scale.  # Round 88
+            # column.  Round 89 / F1: dropped the legacy ``Risk_Score``  # Round 89
+            # alias slot here since R88 already established the explicit  # Round 89
+            # 0-10-scale column.  # Round 89
             risk_summary_data.append({
                 # Round 49 / F-RP-COMPOSITE-KEY-BLEED: collapse merged
                 # Snowflake composite keys (``MARUBENI CORPORATION__
@@ -10408,29 +10411,24 @@ def run_compact_analysis(analysis_id):
                 'Customer': _normalize_composite_customer_key(customer),
                 'Overall_Risk_Score': _r67_b6_score,
                 'Risk_Score_0_10': _r67_b6_score,  # Round 88 / F2
-                'Risk_Score': _r67_b6_score,
                 'Risk_Level': _r67_b6_risk_level,
                 'Risk_Band': band,
                 'Adoption_Barriers': ab_count,
                 'Support_Cases': cs_count,
             })
 
-        # Round 70 / Phase 2 (#4): the column list explicitly carries
-        # BOTH ``Overall_Risk_Score`` (canonical, R67/B6) AND
-        # ``Risk_Score`` (legacy back-compat alias). Build 43 acceptance
-        # audit found ``Overall_Risk_Score`` had silently disappeared
-        # from the produced workbook -- pinning the column order in
-        # the explicit ``columns=`` arg defends against any future
-        # column-order regression that pandas might introduce when
-        # rows include extra keys (the loop's append shape adds keys
-        # in dict-insertion order, but the explicit ``columns=``
-        # contract here is the source of truth for the artifact).
-        # Round 88 / F2: ``Risk_Score_0_10`` slotted in BEFORE the  # Round 88
-        # legacy ``Risk_Score`` alias so readers see the explicit  # Round 88
-        # scale-named column first.  # Round 88
+        # Round 70 / Phase 2 (#4): the explicit ``columns=`` contract
+        # is the source of truth for the artifact -- pandas otherwise
+        # picks up keys in dict-insertion order, which can silently
+        # regress when rows include extra keys.
+        # Round 88 / F2: ``Risk_Score_0_10`` is slotted in immediately  # Round 88
+        # after ``Overall_Risk_Score`` so readers see the explicit  # Round 88
+        # scale-named column adjacent to the canonical headline.  # Round 88
+        # Round 89 / F1: removed ``Risk_Score`` from the column tuple --  # Round 89
+        # the R67/B6 back-compat alias has no remaining consumers.  # Round 89
         risk_summary_df = pd.DataFrame(
             risk_summary_data,
-            columns=['Customer', 'Overall_Risk_Score', 'Risk_Score_0_10', 'Risk_Score', 'Risk_Level', 'Risk_Band', 'Adoption_Barriers', 'Support_Cases']
+            columns=['Customer', 'Overall_Risk_Score', 'Risk_Score_0_10', 'Risk_Level', 'Risk_Band', 'Adoption_Barriers', 'Support_Cases']
         )
         logger.info(f"[[DATA]] Risk summary DataFrame created with {len(risk_summary_df)} rows")
 
@@ -10460,12 +10458,14 @@ def run_compact_analysis(analysis_id):
         if _canonical_high_risk_names is not None:
             if 'Customer' in risk_summary_df.columns and not risk_summary_df.empty:
                 # Round 12 / Phase 11.4: stable sort + ``Customer``
-                # tie-break so two accounts with the same Risk_Score
+                # tie-break so two accounts with the same risk score
                 # always render in the same order across runs.
+                # Round 89 / F1: sort by ``Overall_Risk_Score`` (was the  # Round 89
+                # ``Risk_Score`` back-compat alias pre-R89).  # Round 89
                 high_risk_customers = risk_summary_df[
                     risk_summary_df['Customer'].astype(str).isin(_canonical_high_risk_names)
                 ].sort_values(
-                    ['Risk_Score', 'Customer'],
+                    ['Overall_Risk_Score', 'Customer'],  # Round 89 / F1
                     ascending=[False, True],
                     kind='stable',
                 )
@@ -10473,10 +10473,11 @@ def run_compact_analysis(analysis_id):
                 high_risk_customers = risk_summary_df.head(0)
         elif 'Risk_Band' in risk_summary_df.columns:
             # Round 12 / Phase 11.4: stable sort + tie-break.
+            # Round 89 / F1: sort by ``Overall_Risk_Score``.  # Round 89
             high_risk_customers = risk_summary_df[
                 risk_summary_df['Risk_Band'].isin(['HIGH', 'CRITICAL'])
             ].sort_values(
-                ['Risk_Score'] + (['Customer'] if 'Customer' in risk_summary_df.columns else []),
+                ['Overall_Risk_Score'] + (['Customer'] if 'Customer' in risk_summary_df.columns else []),  # Round 89 / F1
                 ascending=[False] + ([True] if 'Customer' in risk_summary_df.columns else []),
                 kind='stable',
             )
@@ -10491,8 +10492,9 @@ def run_compact_analysis(analysis_id):
             except Exception:
                 _hrf_cut = 5.5
             # Round 12 / Phase 11.4: stable sort + ``Customer`` tie-break.
-            high_risk_customers = risk_summary_df[risk_summary_df['Risk_Score'] >= _hrf_cut].sort_values(
-                ['Risk_Score'] + (['Customer'] if 'Customer' in risk_summary_df.columns else []),
+            # Round 89 / F1: filter and sort on ``Overall_Risk_Score``.  # Round 89
+            high_risk_customers = risk_summary_df[risk_summary_df['Overall_Risk_Score'] >= _hrf_cut].sort_values(  # Round 89 / F1
+                ['Overall_Risk_Score'] + (['Customer'] if 'Customer' in risk_summary_df.columns else []),  # Round 89 / F1
                 ascending=[False] + ([True] if 'Customer' in risk_summary_df.columns else []),
                 kind='stable',
             )
@@ -10602,12 +10604,14 @@ def run_compact_analysis(analysis_id):
         # Round 10 / Phase 7.2: derive ``overall_risk_score`` directly
         # from the raw ``risk_scores`` dict (the same source the Word
         # executive dashboard uses on line ~5749) instead of taking the
-        # mean of ``risk_summary_df['Risk_Score']``.  Otherwise the two
-        # outputs can disagree whenever a row is dropped from
+        # mean of ``risk_summary_df['Overall_Risk_Score']``.  Otherwise
+        # the two outputs can disagree whenever a row is dropped from
         # ``risk_summary_df`` (e.g. missing Customer name) but is still
         # present in the raw ``risk_scores`` dict, producing a Word
         # headline ``5.4/10`` vs Excel headline ``5.7/10`` mismatch
         # that operators have flagged.
+        # Round 89 / F1: mean fallback reads ``Overall_Risk_Score``  # Round 89
+        # (was the ``Risk_Score`` back-compat alias pre-R89).  # Round 89
         try:
             _raw_scores = [
                 float(_v.get('score', 0))
@@ -10620,7 +10624,7 @@ def run_compact_analysis(analysis_id):
         if _raw_scores:
             overall_risk_score = float(np.mean(_raw_scores))
         elif not risk_summary_df.empty:
-            overall_risk_score = risk_summary_df['Risk_Score'].mean()
+            overall_risk_score = risk_summary_df['Overall_Risk_Score'].mean()  # Round 89 / F1
         else:
             overall_risk_score = 0
         # Round 2 / Phase 1.6: source HIGH/MEDIUM cuts from the

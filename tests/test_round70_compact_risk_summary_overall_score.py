@@ -8,8 +8,8 @@ Build 43 acceptance audit found:
   ``('Customer', 'Risk_Score', 'Risk_Level', 'Risk_Band',
   'Adoption_Barriers', 'Support_Cases')`` -- ``Overall_Risk_Score`` was
   silently dropped from the writer despite the R67/B6 contract that
-  ``Overall_Risk_Score`` is canonical and ``Risk_Score`` is the
-  back-compat alias.
+  ``Overall_Risk_Score`` is canonical and ``Risk_Score`` was the
+  back-compat alias (retired in Round 89 / F1).
 - 6 customers in the same sheet had ``Risk_Level='MEDIUM'`` despite the
   user-facing R67/B1 contract that the Compact and Renewal vocabulary
   must agree on ``MODERATE``.
@@ -31,6 +31,12 @@ remapped ``Risk_Band``.  The R67/B6 contract split is:
       the Compact ``Risk_Summary.Risk_Band`` column for the same scope).
     - ``Risk_Level`` carries the user-facing vocabulary remap
       (MODERATE in place of MEDIUM).
+
+Round 89 / F1: dropped the legacy ``Risk_Score`` back-compat alias from
+the Compact ``Risk_Summary`` writer.  The audit found the only readers
+were four internal sort/mean sites in the same function, all retargeted
+to ``Overall_Risk_Score``.  Tests below now assert ABSENCE of the alias
+column (forward-pinning the contract).
 
 These tests pin the source-shape AND assert the contract on a synthetic
 dataframe that mirrors the writer's input shape so the artifact contract
@@ -56,38 +62,45 @@ def _read_app_simple() -> str:
 
 
 def test_risk_summary_columns_carry_overall_risk_score_canonical() -> None:
-    """R70/Phase 2 (#4): the explicit ``columns=`` list on the
-    ``risk_summary_df`` constructor MUST list ``Overall_Risk_Score``
-    BEFORE ``Risk_Score`` (canonical first, alias second).
-
-    Round 88 / F2 inserted ``Risk_Score_0_10`` between the two so an
-    operator parsing the workbook downstream has an unambiguous
-    0-10 column name; the R70 ordering contract (canonical before
-    alias) is preserved."""
+    """R70/Phase 2 (#4) + R88/F2 + R89/F1: the explicit ``columns=`` list
+    on the ``risk_summary_df`` constructor MUST list
+    ``Overall_Risk_Score`` first (canonical), then ``Risk_Score_0_10``
+    (explicit-scale, R88/F2), and MUST NOT include the legacy
+    ``Risk_Score`` back-compat alias (R89/F1 retired it)."""
     src = _read_app_simple()
-    needle = "columns=['Customer', 'Overall_Risk_Score', 'Risk_Score_0_10', 'Risk_Score', 'Risk_Level', 'Risk_Band', 'Adoption_Barriers', 'Support_Cases']"
+    needle = "columns=['Customer', 'Overall_Risk_Score', 'Risk_Score_0_10', 'Risk_Level', 'Risk_Band', 'Adoption_Barriers', 'Support_Cases']"
     assert needle in src, (
-        "Round 70 / #4 + Round 88 / F2: the Compact Risk_Summary DataFrame "
-        "constructor MUST pin the column order with Overall_Risk_Score "
-        "FIRST and Risk_Score AFTER Risk_Score_0_10 so pandas can never "
-        "silently drop the canonical column AND the unambiguous 0-10 "
-        "scale column stays adjacent to Overall_Risk_Score for operator "
-        "readability."
+        "Round 70 / #4 + Round 88 / F2 + Round 89 / F1: the Compact "
+        "Risk_Summary DataFrame constructor MUST pin the column order "
+        "with Overall_Risk_Score canonical first, Risk_Score_0_10 "
+        "second, and NO Risk_Score alias slot (R89/F1 dropped it)."
     )
 
 
-def test_risk_summary_row_dict_publishes_both_score_columns() -> None:
-    """R70/Phase 2 (#4): the row-build site MUST emit BOTH
-    ``Overall_Risk_Score`` and ``Risk_Score`` keys with the same value
-    so the canonical and back-compat columns stay byte-identical."""
+def test_risk_summary_row_dict_no_longer_publishes_risk_score_alias() -> None:
+    """R89/F1: the row-build site MUST emit ``Overall_Risk_Score`` and
+    ``Risk_Score_0_10`` but MUST NOT emit the legacy ``Risk_Score`` alias.
+
+    This is the inverse of the R70 dual-write contract -- after R89/F1
+    cleared the back-compat-alias hedge (no external consumers), the
+    writer is single-source and the four internal sort/mean readers
+    have all been retargeted to ``Overall_Risk_Score``.
+    """
     src = _read_app_simple()
     assert "'Overall_Risk_Score': _r67_b6_score," in src, (
         "Round 70 / #4: row dict MUST include the canonical key "
         "'Overall_Risk_Score'."
     )
-    assert "'Risk_Score': _r67_b6_score," in src, (
-        "Round 70 / #4: row dict MUST include the back-compat alias "
-        "'Risk_Score' set to the same value."
+    assert "'Risk_Score_0_10': _r67_b6_score," in src, (
+        "Round 88 / F2: row dict MUST include the explicit 0-10 scale "
+        "column 'Risk_Score_0_10' set to the same value as "
+        "Overall_Risk_Score."
+    )
+    assert "'Risk_Score': _r67_b6_score," not in src, (
+        "Round 89 / F1: the legacy 'Risk_Score' back-compat alias MUST "
+        "NOT be in the Compact Risk_Summary row dict.  If you re-add it, "
+        "you also need to update the R67/B6 + R89/F1 critical rule in "
+        "CLAUDE.md."
     )
 
 
@@ -135,7 +148,12 @@ def test_risk_band_keeps_canonical_key_per_r67_b6_contract() -> None:
 
 def _build_synth_risk_summary() -> pd.DataFrame:
     """Mirror the row dict shape the Compact writer builds, with one
-    row in the MEDIUM band so the contract split is exercised."""
+    row in the MEDIUM band so the contract split is exercised.
+
+    Round 89 / F1: the legacy ``Risk_Score`` back-compat alias has been
+    dropped from both the row dict and the explicit ``columns=`` tuple;
+    the synthetic mirror reflects that.
+    """
     label_remap = {"MEDIUM": "MODERATE", "medium": "MODERATE", "Medium": "MODERATE"}
     rows = []
     for customer, score, band, raw_level in (
@@ -147,7 +165,7 @@ def _build_synth_risk_summary() -> pd.DataFrame:
         rows.append({
             "Customer": customer,
             "Overall_Risk_Score": score,
-            "Risk_Score": score,
+            "Risk_Score_0_10": score,
             "Risk_Level": label_remap.get(raw_level, raw_level),
             "Risk_Band": band,
             "Adoption_Barriers": 0,
@@ -158,7 +176,7 @@ def _build_synth_risk_summary() -> pd.DataFrame:
         columns=[
             "Customer",
             "Overall_Risk_Score",
-            "Risk_Score",
+            "Risk_Score_0_10",
             "Risk_Level",
             "Risk_Band",
             "Adoption_Barriers",
@@ -170,22 +188,36 @@ def _build_synth_risk_summary() -> pd.DataFrame:
 
 def test_synth_risk_summary_carries_overall_risk_score_column() -> None:
     """Contract: the produced DataFrame MUST carry ``Overall_Risk_Score``
-    in the column list."""
+    AND ``Risk_Score_0_10`` in the column list, but MUST NOT carry the
+    legacy ``Risk_Score`` back-compat alias (R89/F1 dropped it).
+    """
     df = _build_synth_risk_summary()
     assert "Overall_Risk_Score" in df.columns, (
         "Round 70 / #4: produced DataFrame MUST carry Overall_Risk_Score "
         "as a top-level column."
     )
-    assert "Risk_Score" in df.columns, "back-compat alias MUST stay present"
+    assert "Risk_Score_0_10" in df.columns, (
+        "Round 88 / F2: produced DataFrame MUST carry the explicit "
+        "0-10 scale column 'Risk_Score_0_10'."
+    )
+    assert "Risk_Score" not in df.columns, (
+        "Round 89 / F1: the legacy 'Risk_Score' back-compat alias MUST "
+        "NOT be in the produced DataFrame -- the alias was dropped in "
+        "R89/F1 after the audit confirmed no external consumers."
+    )
 
 
-def test_synth_risk_summary_overall_and_back_compat_agree() -> None:
-    """Contract: every row's ``Overall_Risk_Score`` MUST equal its
-    ``Risk_Score``."""
+def test_synth_risk_summary_overall_and_score_0_10_agree() -> None:
+    """R88/F2: every row's ``Overall_Risk_Score`` MUST equal its
+    ``Risk_Score_0_10`` (both are the canonical 0-10 value).
+
+    Replaces the pre-R89/F1 ``test_synth_risk_summary_overall_and_back_compat_agree``
+    which asserted parity between Overall_Risk_Score and the (now-retired)
+    Risk_Score alias."""
     df = _build_synth_risk_summary()
-    assert (df["Overall_Risk_Score"] == df["Risk_Score"]).all(), (
-        "Round 70 / #4: canonical and back-compat columns MUST stay byte-"
-        "identical so the wires-don't-cross test in R67/B1 is reachable."
+    assert (df["Overall_Risk_Score"] == df["Risk_Score_0_10"]).all(), (
+        "Round 88 / F2: Overall_Risk_Score and Risk_Score_0_10 MUST be "
+        "byte-identical (both publish the canonical 0-10 score)."
     )
 
 
