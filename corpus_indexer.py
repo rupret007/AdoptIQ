@@ -251,6 +251,7 @@ def enumerate_corpus_files(
     signal: Optional[IndexSignal] = None,
     filename_filter: Optional[re.Pattern[str]] = None,
     recursive: bool = True,
+    require_adoptiq_quality_gate: bool = False,
 ) -> list[CorpusFile]:
     """Walk ``root`` and return every supported file.
 
@@ -286,6 +287,12 @@ def enumerate_corpus_files(
                 continue
             if filename_filter is not None and not filename_filter.search(name):
                 continue
+            if (
+                require_adoptiq_quality_gate
+                and _round94_generated_report_needs_quality_gate(entry)
+                and not _round92_quality_sidecar_allows(entry)
+            ):
+                continue
             try:
                 stat = entry.stat()
             except OSError as stat_err:
@@ -315,6 +322,29 @@ def enumerate_corpus_files(
     return out
 
 
+def _round92_quality_sidecar_allows(path: Path) -> bool:
+    """Round 92: admit generated reports only when their sidecar passes.
+
+    The local ``AdoptIQ Reports`` source contains app-generated
+    artifacts.  Bad generated reports should remain visible to users but
+    must not pollute Ask AI's corpus, so the writer creates
+    ``<filename>.adoptiq_corpus.json`` with ``corpus_eligible=true`` only
+    after the strict runtime diagnostics policy passes.
+    """
+    try:
+        sidecar = path.with_name(path.name + ".adoptiq_corpus.json")
+        if not sidecar.is_file():
+            return False
+        if sidecar.stat().st_size > 16_384:
+            return False
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return False
+        return bool(data.get("corpus_eligible") is True)
+    except Exception:
+        return False
+
+
 # Round 17.1: ``~/Downloads`` walker that admits only AdoptIQ-named
 # reports.  The pattern matches three families we observed in the
 # wild:
@@ -327,6 +357,18 @@ _USER_REPORT_NAME_RE: re.Pattern[str] = re.compile(
     r"^AdoptIQ[\s_].+\.(?:xlsx|docx|csv)$",
     re.IGNORECASE,
 )
+_GENERATED_REPORT_NAME_RE: re.Pattern[str] = re.compile(
+    r"^AdoptIQ_(?:Report|Data)_.*\.(?:xlsx|docx|csv)$",
+    re.IGNORECASE,
+)
+
+
+def _round94_generated_report_needs_quality_gate(path: Path) -> bool:
+    """Round 94: app-generated reports need sidecar approval in every corpus source."""
+    try:
+        return bool(_GENERATED_REPORT_NAME_RE.search(path.name))
+    except Exception:
+        return False
 
 
 def enumerate_user_report_files(
@@ -334,6 +376,7 @@ def enumerate_user_report_files(
     *,
     signal: Optional[IndexSignal] = None,
     recursive: bool = False,
+    require_adoptiq_quality_gate: bool = False,
 ) -> list[CorpusFile]:
     """Round 17.1: enumerate AdoptIQ-named report files in the runtime
     user's ``~/Downloads`` directory.
@@ -354,6 +397,7 @@ def enumerate_user_report_files(
         signal=signal,
         filename_filter=_USER_REPORT_NAME_RE,
         recursive=bool(recursive),
+        require_adoptiq_quality_gate=bool(require_adoptiq_quality_gate),
     )
 
 

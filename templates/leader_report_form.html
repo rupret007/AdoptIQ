@@ -15,6 +15,9 @@
    parity here a future fetch added to this page would silently fall
    back to an empty string and be rejected by the CSRF middleware. #}
 <meta name="csrf-token" content="{{ csrf_token() }}">
+{# Round 91: reuse the live Report Jobs panel on the Leader form so
+   leader reports participate in the same single-window workflow. #}
+<script src="{{ url_for('static', filename='js/report_jobs_dashboard.js') }}"></script>
 {% endblock %}
 
 {% block content %}
@@ -36,6 +39,47 @@
                     Customer Pulse, and TAC cases for all your direct reports.
                 </p>
             </header>
+
+            <section class="card shadow-cisco fade-in mb-4"
+                     style="animation-delay: 0.25s;"
+                     data-report-jobs-panel
+                     aria-live="polite">
+                <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+                    <div>
+                        <h2 class="h5 mb-0">
+                            <i class="fas fa-tasks me-2" aria-hidden="true"></i>Report Jobs
+                        </h2>
+                        <p class="small text-muted mb-0">
+                            Generate this leader report while other reports continue.
+                            Active report model:
+                            <code data-report-model-current
+                                  data-default-model="{{ active_report_model or 'n/a' }}">{{ active_report_model or 'n/a' }}</code>
+                        </p>
+                    </div>
+                    <span class="badge rounded-pill bg-primary">
+                        <span data-report-jobs-count>0</span> active
+                    </span>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th scope="col">Report</th>
+                                    <th scope="col">Status</th>
+                                    <th scope="col">Progress</th>
+                                    <th scope="col">Runtime</th>
+                                    <th scope="col">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody data-report-jobs-body></tbody>
+                        </table>
+                    </div>
+                    <p class="text-muted small m-3" data-report-jobs-empty>
+                        No recent jobs yet. Start a report and it will appear here.
+                    </p>
+                </div>
+            </section>
 
             <!-- Form Card -->
             <div class="card shadow-cisco fade-in" style="animation-delay: 0.3s;">
@@ -239,6 +283,9 @@
 document.addEventListener('DOMContentLoaded', function() {
     const form = document.getElementById('leaderReportForm');
     const submitBtn = document.getElementById('submitBtn');
+    if (!form || !submitBtn) {
+        return; // Round 94: tolerate partial template renders.
+    }
 
     // Round 6 / Phase 2.4: re-entrancy guard.  Disabling the submit
     // button alone is not enough because the form ``submit`` event
@@ -278,7 +325,8 @@ document.addEventListener('DOMContentLoaded', function() {
             const formData = new FormData(form);
             
             // Submit the form
-            const csrfToken = document.getElementById('csrfToken').value;
+            const csrfInput = document.getElementById('csrfToken');
+            const csrfToken = csrfInput ? csrfInput.value : '';
             const response = await fetch('/start_leader_report', {
                 method: 'POST',
                 headers: { 'X-CSRFToken': csrfToken },
@@ -312,7 +360,22 @@ document.addEventListener('DOMContentLoaded', function() {
                     submitBtn.innerHTML = '<i class="fas fa-rocket me-2"></i>Generate Leader Report';
                     return;
                 }
-                window.location.href = url;
+                // Round 91: stay on the page and let the shared Report
+                // Jobs panel show progress, cancel, and download actions.
+                if (window.AdoptIQReportJobs && window.AdoptIQReportJobs.recordStartedJob) {
+                    window.AdoptIQReportJobs.recordStartedJob({
+                        analysis_id: result.analysis_id || url.split('/').pop(),
+                        status: 'starting',
+                        progress: 0,
+                        report_type: 'leader',
+                        manager: formData.get('manager') || '',
+                        days: formData.get('days') || '',
+                        active_report_model: document.querySelector('[data-report-model-current]')?.textContent || ''
+                    });
+                }
+                alert('Leader report started. Track it in Report Jobs or open the progress page from there.');
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<i class="fas fa-rocket me-2"></i>Generate Leader Report';
             } else {
                 // Show error
                 alert('Error: ' + (result.error || 'Unknown error occurred'));
@@ -339,28 +402,30 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // File input validation
     const fileInput = document.getElementById('csone_file');
-    fileInput.addEventListener('change', function() {
-        const file = this.files[0];
-        if (file) {
-            // Check file size (50MB max)
-            if (file.size > 50 * 1024 * 1024) {
-                alert('File too large. Maximum size is 50MB.');
-                this.value = '';
-                return;
+    if (fileInput) {
+        fileInput.addEventListener('change', function() {
+            const file = this.files[0];
+            if (file) {
+                // Check file size (50MB max)
+                if (file.size > 50 * 1024 * 1024) {
+                    alert('File too large. Maximum size is 50MB.');
+                    this.value = '';
+                    return;
+                }
+
+                // Check file extension
+                const validExtensions = ['.xlsx', '.xls'];
+                const fileName = file.name.toLowerCase();
+                const isValid = validExtensions.some(ext => fileName.endsWith(ext));
+
+                if (!isValid) {
+                    alert('Invalid file type. Please upload an Excel file (.xlsx or .xls).');
+                    this.value = '';
+                    return;
+                }
             }
-            
-            // Check file extension
-            const validExtensions = ['.xlsx', '.xls'];
-            const fileName = file.name.toLowerCase();
-            const isValid = validExtensions.some(ext => fileName.endsWith(ext));
-            
-            if (!isValid) {
-                alert('Invalid file type. Please upload an Excel file (.xlsx or .xls).');
-                this.value = '';
-                return;
-            }
-        }
-    });
+        });
+    }
 });
 </script>
 {% endblock %}

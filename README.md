@@ -4,6 +4,15 @@
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
+### What's New in Build 67 (Round 94 — full-sweep audit + Rounds 91-93 ship)
+
+Build 67 ships the Round 91-93 workflow changes and closes the Round 94 full-sweep findings. The full local quality gate is green at `5512 passed / 4 skipped / 6 deselected`; ruff is clean, bandit has 0 HIGH/MED findings, and pip-audit is clean. The release-gated macOS bake produced `OUTBOX/AdoptIQ-v1.0.4-build67.dmg`; the bake wrote 330,553 dense vectors and passed both positive and negative decrypt self-tests. Final live acceptance regenerated Compact, Renewal Portfolio, Comprehensive, and Leader reports from the installed `/Applications/AdoptIQ.app`, and the 8 produced artifacts passed the R76/R86/R88/R90 checklist.
+
+- **Round 91 — single-window report workflow.** The analyze and Leader pages now keep operators in one browser window with a live Report Jobs dashboard. Jobs can run concurrently, show real-time progress, expose the active report model and phase timings, and provide open/download/cancel actions without forcing a redirect to each progress page.
+- **Round 92 — TACTrack-style report storage and corpus quality gate.** Packaged builds save reports under `~/Documents/AdoptIQ Reports/<manager>/<report_type>/`, expose safe open-in-place actions, and write `.adoptiq_corpus.json` sidecars. Generated reports enter the local corpus only when strict quality policy marks them `corpus_eligible=true`; older or failed-quality reports remain visible and downloadable but are not indexed.
+- **Round 93 — strict All Contact Center AB scoping.** All Contact Center Adoption Barrier filtering now requires Contact Center evidence and no longer widens to account-only rows. Build 67 live acceptance confirmed the Comprehensive run kept 13 of 65 ABs and disclosed the 52 excluded non-Contact-Center rows in the report metadata.
+- **Round 94 — full-sweep stability fixes.** The sweep tightened citation-regex parity, phase timing bookkeeping, bake-time vector failure semantics, hybrid retrieval fallback, generated-report corpus sidecar gating, CSConsole technology filtering, formatter markdown/null safety, frontend null/failure handling, canonical Word footer audit fields, and Comprehensive `Report_Info` partial-warning rows.
+
 ### What's New in Build 62 (Round 86 — Build 61 acceptance audit + 3 fixes)
 
 Build 62 closes three correctness findings from the Build 61 acceptance audit. Net pytest delta `+22` (5289 → 5311). All four `make verify` gates green.

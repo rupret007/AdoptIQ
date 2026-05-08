@@ -204,6 +204,17 @@ def _safe_cell_text(cell, text: Any, *, max_len: int = 5000) -> None:
     cell.text = _safe_doc_text(text, max_len=max_len)
 
 
+def _r94_strip_markdown_chrome(value: Any, *, max_len: int = 5000) -> str:
+    """Round 94: strip simple markdown chrome from Snowflake free text."""
+    text = _safe_doc_text(value, max_len=max_len)
+    if not text:
+        return ""
+    text = re.sub(r"\*\*([^*\n]+?)\*\*", r"\1", text)
+    text = re.sub(r"(?<![*\w])\*([^*\n]+?)\*(?![*\w])", r"\1", text)
+    text = re.sub(r"\*{2,}", "", text)
+    return text
+
+
 def _ensure_inline_source_claim(
     text: Any,
     metric_name: str = "Derived Metric",
@@ -2007,6 +2018,8 @@ class CompactReportFormatter:
                         subj = barrier.get('SUBJECT_C', barrier.get('subject_c', barrier.get('title', 'No subject')))
                         customer = barrier.get('customer_name', 'Unknown')
                         sev = barrier.get(sev_col, 'Unknown')
+                        subj = _r94_strip_markdown_chrome(subj) or 'No subject'
+                        sev = _r94_strip_markdown_chrome(sev) or 'Unknown'
 
                         barrier_p = self.doc.add_paragraph()
                         # Round 8 / Phase 3.1: safe wrap.

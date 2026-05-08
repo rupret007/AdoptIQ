@@ -423,8 +423,11 @@
            ``_is_valid_analysis_id`` allow-list rejects HTML-special
            chars) and removes the manual escape from the route. #}
         <a id="docx-download" href="/download/{{ analysis_id }}/docx" data-format="docx">Download Word Report</a>
+        <button type="button" id="docx-open" data-open-target="docx">Open Word</button>
         <span id="docx-unavailable" style="display: none; color: var(--text-muted); font-size: 0.8125rem; margin-left: 0.5rem;">Word document not available for this report.</span>
         <a id="xlsx-download" href="/download/{{ analysis_id }}/xlsx" data-format="xlsx">Download Excel Data</a>
+        <button type="button" id="xlsx-open" data-open-target="xlsx">Open Excel</button>
+        <button type="button" id="folder-open" data-open-target="folder">Open Folder</button>
         <span id="xlsx-unavailable" style="display: none; color: var(--text-muted); font-size: 0.8125rem; margin-left: 0.5rem;">Excel data not available for this report.</span>
     </div>
 
@@ -623,7 +626,12 @@
                         var cs = document.getElementById('csone-status');
                         if (cs) {
                             cs.textContent = data.csone_import_message;
-                            cs.className = 'csone-status csone-' + data.csone_import_status;
+                            var allowedCsoneStatuses = {
+                                success: true, warning: true, error: true,
+                                invalid: true, uploaded: true, none: true
+                            };
+                            var safeCsoneStatus = allowedCsoneStatuses[data.csone_import_status] ? data.csone_import_status : 'warning';
+                            cs.className = 'csone-status csone-' + safeCsoneStatus;
                         }
                     }
 
@@ -679,26 +687,36 @@
                         var dl = document.getElementById('downloads');
                         if (dl) { dl.style.display = 'block'; }
                         var xlsLink = document.getElementById('xlsx-download');
+                        var xlsOpen = document.getElementById('xlsx-open');
                         var xlsNote = document.getElementById('xlsx-unavailable');
                         if (xlsLink && xlsNote) {
                             if (data.excel_available) {
                                 xlsLink.style.display = '';
+                                if (xlsOpen) { xlsOpen.style.display = ''; }
                                 xlsNote.style.display = 'none';
                             } else {
                                 xlsLink.style.display = 'none';
+                                if (xlsOpen) { xlsOpen.style.display = 'none'; }
                                 xlsNote.style.display = 'block';
                             }
                         }
                         var docLink = document.getElementById('docx-download');
+                        var docOpen = document.getElementById('docx-open');
                         var docNote = document.getElementById('docx-unavailable');
                         if (docLink && docNote) {
                             if (data.word_available) {
                                 docLink.style.display = '';
+                                if (docOpen) { docOpen.style.display = ''; }
                                 docNote.style.display = 'none';
                             } else {
                                 docLink.style.display = 'none';
+                                if (docOpen) { docOpen.style.display = 'none'; }
                                 docNote.style.display = 'block';
                             }
+                        }
+                        var folderOpen = document.getElementById('folder-open');
+                        if (folderOpen) {
+                            folderOpen.style.display = (data.word_available || data.excel_available) ? '' : 'none';
                         }
                         var cb = document.getElementById('cancel-btn');
                         if (cb) { cb.style.display = 'none'; }
@@ -759,6 +777,30 @@
             de.style.display = 'block';
             de.textContent = 'Downloading ' + format.toUpperCase() + ' file...';
             return true;
+        }
+
+        function openReportTarget(target, btn) {
+            if (!target) { return; }
+            if (btn) { btn.disabled = true; }
+            fetch('/open-report/' + encodeURIComponent(ANALYSIS_ID) + '/' + encodeURIComponent(target), {
+                method: 'POST',
+                headers: {
+                    'X-CSRFToken': CSRF_TOKEN,
+                    'X-CSRF-Token': CSRF_TOKEN,
+                    'Accept': 'application/json'
+                }
+            }).then(function (r) {
+                if (!r.ok) { throw new Error('HTTP ' + r.status); }
+                return r.json();
+            }).catch(function () {
+                var de = document.getElementById('download-error');
+                if (de) {
+                    de.style.display = 'block';
+                    de.textContent = 'Could not open report. Use Download instead.';
+                }
+            }).then(function () {
+                if (btn) { btn.disabled = false; }
+            });
         }
 
         // Round 33 / Build8 marker: ``ROUND33_PROGRESS_TIMER_WATCHDOG``.
@@ -841,6 +883,13 @@
             var xlsLink = document.getElementById('xlsx-download');
             if (docLink) { docLink.addEventListener('click', function () { noteDownload('docx'); }); }
             if (xlsLink) { xlsLink.addEventListener('click', function () { noteDownload('xlsx'); }); }
+            ['docx-open', 'xlsx-open', 'folder-open'].forEach(function (id) {
+                var btn = document.getElementById(id);
+                if (!btn) { return; }
+                btn.addEventListener('click', function () {
+                    openReportTarget(btn.getAttribute('data-open-target'), btn);
+                });
+            });
         }
 
         function init() {

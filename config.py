@@ -937,7 +937,7 @@ ADOPTIQ_VERSION = "1.0.4"
 # tests across validator, resolver, ``_r83_safe_share_url``,
 # preferences-page source-shape, analyze-card regression guard, and
 # cross-pin against the R35 + R81 fixtures).
-ADOPTIQ_BUILD = "66"  # Round 90 / Build 66
+ADOPTIQ_BUILD = "67"  # Round 94 / Build 67
 # Round 90 / Build 66: hyperfocused fix for the Build-65 acceptance bug
 # where the Compact Risk Summary tile rendered
 # ``"Score 4-6 (Watch, 0-10 [Source: AdoptIQ Report Data Sources] scale): 9"``

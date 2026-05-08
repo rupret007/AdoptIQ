@@ -642,7 +642,7 @@ def test_csconsole_filter_customer_pulse_account_scope_fallback_uses_sf15():
     assert filtered.iloc[0]["ACCOUNT__C"] == "001ABCDEF123456"
 
 
-def test_csconsole_filter_tech_falls_back_to_account_scope_when_text_missing():
+def test_csconsole_filter_tech_does_not_widen_to_account_scope_when_text_missing():
     from adoptiq_backend import _filter_csconsole_data_by_technology
     df = pd.DataFrame(
         [
@@ -655,11 +655,12 @@ def test_csconsole_filter_tech_falls_back_to_account_scope_when_text_missing():
         "Webex Contact Center",
         account_ids=["001ABCDEF123456AAA"],
     )
-    assert len(filtered) == 1
-    assert filtered.iloc[0]["ACCOUNT__C"] == "001ABCDEF123456"
+    # Round 94: if a named technology has no text evidence, do not
+    # silently widen back to account-only scope.
+    assert filtered.empty
 
 
-def test_csconsole_filter_account_scope_supports_account_column_variant():
+def test_csconsole_filter_account_column_variant_still_requires_tech_evidence():
     from adoptiq_backend import _filter_csconsole_data_by_technology
 
     df = pd.DataFrame(
@@ -673,8 +674,9 @@ def test_csconsole_filter_account_scope_supports_account_column_variant():
         "Webex Contact Center",
         account_ids=["001ABCDEF123456AAA"],
     )
-    assert len(filtered) == 1
-    assert filtered.iloc[0]["ACCOUNT"] == "001ABCDEF123456"
+    # Round 94: ACCOUNT is still recognised for account scoping, but it
+    # no longer overrides an empty technology predicate.
+    assert filtered.empty
 
 
 def test_customer_activity_includes_csconsole_only_data():

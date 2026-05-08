@@ -2,7 +2,7 @@
 
 Regression guard for the R67-class footgun in ``adoptiq_mac.spec`` that the
 Build 65 acceptance loop caught: even though ``config.py`` correctly carried
-``ADOPTIQ_VERSION = "1.0.4"`` and ``ADOPTIQ_BUILD = "65"``, the produced
+the then-current ``ADOPTIQ_VERSION`` / ``ADOPTIQ_BUILD`` values, the produced
 ``AdoptIQ.app``'s ``Info.plist`` reported ``CFBundleShortVersionString=1.0.3``
 and ``CFBundleVersion=1`` because the spec had hard-coded fallbacks
 (``os.environ.get("ADOPTIQ_VERSION", "1.0.3")``) and ``build_mac.sh`` did

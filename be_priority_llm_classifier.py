@@ -386,37 +386,64 @@ def classify_top_n_be_barriers(
             )
             return df, diag
 
-    try:
-        raw = llm_callable(_SYSTEM_PROMPT, briefing)
-    except Exception as exc:  # noqa: BLE001
-        df["be_llm_reason"] = f"LLM call raised ({type(exc).__name__})"
-        diag["llm_error"] = f"exception:{type(exc).__name__}"
-        logger.warning(
-            "Round 79 / B2: LLM call raised %s; all records UNCLASSIFIED; "
-            "correlation_id=%s",
-            type(exc).__name__,
-            correlation_id or "n/a",
-        )
-        return df, diag
+    parsed: Optional[List[Dict[str, Any]]] = None
+    raw: Any = ""
+    system_prompt = _SYSTEM_PROMPT
+    user_briefing = briefing
+    # Round 91: malformed JSON was observed in live Build 66 artifacts,
+    # leaving the deterministic top-N scored but 0 records classified.  Give
+    # the model one correction attempt that repeats the exact input and names
+    # the parse failure, while preserving the original fail-closed behavior if
+    # both attempts fail.
+    for attempt in range(1, 3):
+        diag["llm_attempts"] = attempt
+        try:
+            raw = llm_callable(system_prompt, user_briefing)
+        except Exception as exc:  # noqa: BLE001
+            df["be_llm_reason"] = f"LLM call raised ({type(exc).__name__})"
+            diag["llm_error"] = f"exception:{type(exc).__name__}"
+            logger.warning(
+                "Round 79 / B2: LLM call raised %s; all records UNCLASSIFIED; "
+                "correlation_id=%s",
+                type(exc).__name__,
+                correlation_id or "n/a",
+            )
+            return df, diag
 
-    if not raw or (isinstance(raw, str) and raw.startswith("ERROR:")):
-        df["be_llm_reason"] = "LLM returned empty or ERROR response"
-        diag["llm_error"] = str(raw or "empty")[:200]
-        logger.warning(
-            "Round 79 / B2: LLM returned %s; all records UNCLASSIFIED; "
-            "correlation_id=%s",
-            "ERROR" if isinstance(raw, str) and raw.startswith("ERROR:") else "empty",
-            correlation_id or "n/a",
-        )
-        return df, diag
+        if not raw or (isinstance(raw, str) and raw.startswith("ERROR:")):
+            df["be_llm_reason"] = "LLM returned empty or ERROR response"
+            diag["llm_error"] = str(raw or "empty")[:200]
+            logger.warning(
+                "Round 79 / B2: LLM returned %s; all records UNCLASSIFIED; "
+                "correlation_id=%s",
+                "ERROR" if isinstance(raw, str) and raw.startswith("ERROR:") else "empty",
+                correlation_id or "n/a",
+            )
+            return df, diag
 
-    parsed = _extract_json_array(str(raw))
+        parsed = _extract_json_array(str(raw))
+        if parsed is not None:
+            if attempt > 1:
+                diag["llm_recovered_after_json_retry"] = True
+            break
+        if attempt < 2:
+            system_prompt = (
+                _SYSTEM_PROMPT
+                + "\n\nThe previous response was not parseable JSON. "
+                "Retry now with ONLY the JSON array and no prose."
+            )
+            user_briefing = (
+                briefing
+                + "\n\nPrevious invalid response excerpt:\n"
+                + str(raw)[:1200]
+            )
+
     if parsed is None:
         df["be_llm_reason"] = "LLM response not parseable as JSON array"
         diag["llm_error"] = "json_parse_error"
         logger.warning(
-            "Round 79 / B2: LLM response not parseable as JSON array; "
-            "all records UNCLASSIFIED; correlation_id=%s",
+            "Round 91: BE-priority LLM JSON retry failed; all records "
+            "UNCLASSIFIED; correlation_id=%s",
             correlation_id or "n/a",
         )
         return df, diag

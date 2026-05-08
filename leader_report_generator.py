@@ -4643,8 +4643,12 @@ class LeaderReportGenerator:
         all_abs = []
 
         for cssm_name, data in team_data.items():
-            if not data['adoption_barriers'].empty:
-                abs_copy = data['adoption_barriers'].copy()
+            # Round 94: normalize malformed / partial team_data entries
+            # before touching .empty so a missing or None AB frame cannot
+            # crash the final Leader appendix.
+            ab_frame = data.get('adoption_barriers') if isinstance(data, dict) else None
+            if isinstance(ab_frame, pd.DataFrame) and not ab_frame.empty:
+                abs_copy = ab_frame.copy()
                 abs_copy['CSSM'] = cssm_name
                 all_abs.append(abs_copy)
 
@@ -4778,8 +4782,8 @@ class LeaderReportGenerator:
                     na_position='last',
                     kind='mergesort',
                 )
-        except Exception:  # Round 12 / Phase 9.3 defensive
-            pass
+        except Exception as _r94_sort_err:  # Round 12 / Phase 9.3 defensive
+            logger.debug("Round 94: detailed AB sort skipped: %s", _r94_sort_err)
 
         # Use .head(n).iterrows() so we don't materialize every row into a list.
         for row_idx, (_, ab) in enumerate(combined_abs.head(AB_LIST_DISPLAY_CAP).iterrows(), start=1):
@@ -4811,6 +4815,10 @@ class LeaderReportGenerator:
                             value = _norm
                     except Exception:
                         pass
+                elif value:
+                    # Round 94: free-text AB table cells should not leak
+                    # Snowflake/user-entered markdown chrome into Word.
+                    value = _strip_markdown_chrome(value) or value
 
                 row_cells[col_idx].text = value
                 if row_cells[col_idx].paragraphs and row_cells[col_idx].paragraphs[0].runs:
@@ -6004,7 +6012,7 @@ class LeaderReportGenerator:
         total_high_severity = sum(member['high_severity'] for member in team_summary_data)
         if total_high_severity > 0:
             severity_para = self.doc.add_paragraph()
-            severity_para.add_run('ERROR: High Severity Issues: ').font.bold = True
+            severity_para.add_run('High Severity Issues: ').font.bold = True  # Round 91
             severity_para.add_run(f"{total_high_severity} high/critical severity adoption barriers need priority resolution.\n")
 
         # Open adoption barriers

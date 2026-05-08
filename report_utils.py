@@ -406,17 +406,17 @@ def _render_risk_scoring_explanation() -> str:
 
     return (
         "\nRisk Score Methodology (0-100 scale):\n"
-        "* Deterministic weighted model (same across reports): "
+        "- Deterministic weighted model (same across reports): "  # Round 91
         "Adoption Barriers 28%, Support Cases 27%, Customer Pulse 15%, "
         "Action Plans 10%, Incidents 8%, Contract 8%, Engagement 4%.\n"
-        "* Adoption barriers use derived severity, open/closed state, "
+        "- Adoption barriers use derived severity, open/closed state, "  # Round 91
         "and aging (60+ day open barriers increase risk).\n"
-        "* Support cases use normalized priority (P1-P4), BEMS "
+        "- Support cases use normalized priority (P1-P4), BEMS "  # Round 91
         "detection, recency, and case-type mix (break-fix vs "
         "provisioning).\n"
-        "* Customer pulse uses Poor/Bad trend impact; action plans "
+        "- Customer pulse uses Poor/Bad trend impact; action plans "  # Round 91
         "use unresolved ratio.\n"
-        "* Missing fields are treated as unknown (neutral/"
+        "- Missing fields are treated as unknown (neutral/"  # Round 91
         "low-confidence), not auto-promoted to high severity.\n\n"
         f"{bands}\n"
     )

@@ -1783,6 +1783,213 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 
 **Trailer:** Made-with: Cursor
 
+## Round 94 — handoff 2026-05-08
+
+**What changed (plain English):**
+- Completed the full-codebase Round 94 sweep, fixed actionable P0/P1 findings, and raised the floor to Build 67.
+- Baked and installed `OUTBOX/AdoptIQ-v1.0.4-build67.dmg`; final live acceptance regenerated Compact, Renewal Portfolio, Comprehensive, and Leader reports and audited all 8 artifacts clean.
+- Hardened generated-report corpus gating so every configured generated-report source requires the strict sidecar path during corpus enumeration.
+- Extended Word build labels to keep the legacy prefix while adding all four canonical audit fields.
+- Threaded Comprehensive `partial_data_warnings` into XLSX `Report_Info` so R93 All Contact Center exclusions are visible in Excel metadata.
+- Updated README.md and CLAUDE.md with Build 67 / R91-R94 operator and maintenance contracts.
+
+**Files touched:**
+- `README.md` — prepended Build 67 "What's New" notes and acceptance status.
+- `CLAUDE.md` — bumped the test floor and documented R91/R92/R93/R94 critical contracts.
+- `QUALITY_AUDIT.md` — this Round 94 handoff.
+- `_r68_build_label.py` — Word footer now includes canonical audit fields while preserving the legacy regex-compatible prefix.
+- `adoptiq_backend.py` — `write_excel_workbook` accepts `partial_data_warnings` and writes `Partial_Data_Warning` rows into `Report_Info`.
+- `app_simple.py` — passes Comprehensive partial-data warnings into the XLSX writer and carries R91/R92/R93/R94 orchestration changes.
+- `ask_ai_grounded.py` — R94 hybrid-ranking fallback guard.
+- `compact_report_formatter.py` — R94 markdown stripping / formatter stability guard.
+- `config.py` — bumped `ADOPTIQ_BUILD` to `67`.
+- `corpus_bootstrap.py` — generated-report corpus sources carry strict quality-gate metadata.
+- `corpus_indexer.py` — strict sidecar quality-gate enumeration support.
+- `leader_report_generator.py` — R94 `None` / markdown stability guard.
+- `report_source_injector.py` — R94 gate/citation regex parity guard.
+- `scripts/bake_corpus.py` — bake vector failure remains nonzero and avoids persisting partial state.
+- `tests/test_round94_full_sweep_regressions.py` — new R94 regression suite.
+- `version_info.txt` — regenerated Build 67 metadata.
+- Round 91-93 files listed in their handoffs remain part of the final four-commit landing sequence.
+
+**SSoT modules touched:** report_utils, data_normalization, report_export_schema, config
+
+**Tests added/updated:**
+- `tests/test_round94_full_sweep_regressions.py::test_round94_injector_regex_matches_gate_and_rejects_case_ids` — pins citation/gate regex parity and case-ID rejection.
+- `tests/test_round94_full_sweep_regressions.py::test_round94_update_analysis_status_records_phase_timing_on_step_change` — pins phase timing bookkeeping.
+- `tests/test_round94_full_sweep_regressions.py::test_round94_bake_vector_failure_is_nonzero_and_does_not_persist` — pins bake-time vector failure semantics.
+- `tests/test_round94_full_sweep_regressions.py::test_round94_generated_reports_need_quality_sidecar_in_any_corpus_source` — pins strict generated-report sidecar gating.
+- `tests/test_round94_full_sweep_regressions.py::test_round94_rank_evidence_falls_back_when_hybrid_raises` — pins hybrid retrieval fallback to lexical.
+- `tests/test_round94_full_sweep_regressions.py::test_round94_csconsole_no_tech_match_does_not_account_fallback` — pins no account-only fallback for CSConsole tech misses.
+- `tests/test_round94_full_sweep_regressions.py::test_round94_leader_detailed_ab_handles_none_and_strips_markdown` — pins Leader AB `None` / markdown handling.
+- `tests/test_round94_full_sweep_regressions.py::test_round94_compact_voice_of_customer_strips_markdown_subjects` — pins Compact voice-of-customer markdown stripping.
+- `tests/test_round94_full_sweep_regressions.py::test_round94_frontend_source_shape_guards` — pins frontend safe-DOM / failure-state shape.
+- `tests/test_round94_full_sweep_regressions.py::test_round94_word_build_label_text_carries_canonical_audit_fields` — pins canonical Word footer fields.
+- `tests/test_round94_full_sweep_regressions.py::test_round94_comprehensive_xlsx_report_info_carries_partial_warnings` — pins Comprehensive XLSX partial warning rows.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5512 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- Build: `ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh` — pass; `OUTBOX/AdoptIQ-v1.0.4-build67.dmg` produced; bake vector count 330553; decrypt positive and negative self-tests passed; bundle Info.plist stamped 1.0.4 / 67.
+- Live acceptance: installed Build 67 to `/Applications/AdoptIQ.app`; regenerated Compact, Renewal Portfolio, Comprehensive, and Leader; audited 8 DOCX/XLSX artifacts clean.
+
+**Hot spots Claude should audit first:**
+1. `_r68_build_label.py:get_build_label_text` — confirm the legacy prefix plus canonical audit fields satisfies all report footer consumers and does not reintroduce stale-binary ambiguity.
+2. `adoptiq_backend.py:write_excel_workbook` — confirm `partial_data_warnings` rows are correctly bounded/sanitized in `Report_Info` and do not duplicate unrelated warning channels.
+3. `corpus_bootstrap.py` / `corpus_indexer.py` — confirm the strict generated-report quality gate is applied only where intended and cannot block non-generated corpus sources unexpectedly.
+4. `app_simple.py` — review the combined R91/R92/R93/R94 orchestration because this shared file carries cross-round hunks that intentionally land together in the R94 commit.
+
+**Known deferrals (intentional non-fixes):**
+- Existing Build 66 and older generated reports are not rewritten in place; corpus sidecar eligibility applies to newly generated reports unless an operator backfills sidecars.
+- DMG notarization remains out of scope; this build follows the existing codesign/non-notarized convention.
+- Master push is intentionally not performed; the plan stops after local commits.
+
+**Trailer:** Made-with: Cursor
+
+## Round 93 — handoff 2026-05-07
+
+**What changed (plain English):**
+- Fixed All Contact Center Adoption Barrier scoping so explicit non-Contact-Center rows (e.g. Webex Devices / Meetings) no longer survive as account-only AB rows in scoped Compact/Renewal/Comprehensive reports.
+- Added structured AB tech-scope diagnostics so reports disclose how many AB rows were excluded for missing Contact Center evidence instead of silently widening to the unfiltered set.
+- Added regression coverage for the Build 66 artifact shape where All Contact Center AB sheets retained Webex Devices rows.
+
+**Files touched:**
+- `adoptiq_backend.py` — replaced the All Contact Center AB early-return with strict Contact Center-family filtering via the existing enhanced technology matcher.
+- `app_simple.py` — added Round 93 partial-data-warning helpers and threaded AB tech-scope diagnostics into Compact, Renewal, and Comprehensive warning surfaces.
+- `tests/test_round93_all_contact_center_ab_scope.py` — new regression tests for strict ACC AB filtering, no widening, warning shape, and named-tech widening back-compat.
+- `QUALITY_AUDIT.md` — Round 93 handoff.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round93_all_contact_center_ab_scope.py::test_all_contact_center_ab_filter_drops_explicit_non_cc_products` — pins Contact Center positive rows and drops Webex Devices / unknown rows.
+- `tests/test_round93_all_contact_center_ab_scope.py::test_all_contact_center_ab_filter_does_not_widen_when_no_rows_match` — pins no unfiltered fallback for All Contact Center AB when zero rows match.
+- `tests/test_round93_all_contact_center_ab_scope.py::test_all_contact_center_ab_scope_warning_entry_shape` — pins the user/report warning payload shape.
+- `tests/test_round93_all_contact_center_ab_scope.py::test_named_technology_empty_match_keeps_existing_widening_contract` — preserves the pre-existing non-ACC widening contract.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5501 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `adoptiq_backend.py:_apply_scope_filter_ab` — confirm the Round 93 All Contact Center branch uses `_filter_tech_text_enhanced` and cannot fall through to the Round 4 unfiltered widening path.
+2. `app_simple.py:_r93_ab_scope_warning_entries` — confirm the new `tech_filter_scope_excluded` warning is informative but not treated as a fatal corpus-quality warning by Round 92 unless policy intentionally changes.
+3. `app_simple.py:run_customer_renewal_analysis` — confirm `_r93_renewal_ab_scope_warnings` reaches both the first Word artifact and the later Report_Info/analysis_status persistence path.
+
+**Known deferrals (intentional non-fixes):**
+- Existing attached Build 66 reports were audited read-only and not rewritten in place; the fix applies to newly generated reports.
+- Live packaged-app regeneration was not run in this session. Next acceptance should regenerate Compact/Renewal/Comprehensive All Contact Center reports and confirm Webex Devices / Meetings AB rows no longer appear in scoped AB sheets.
+- Leader AB scope remains intentionally cross-technology/owner-scoped; this round does not collapse Leader and portfolio scope predicates.
+
+**Trailer:** Made-with: Cursor
+
+## Round 92 — handoff 2026-05-07
+
+**What changed (plain English):**
+- Added TACTrack-style visible report storage: packaged builds now resolve reports to `~/Documents/AdoptIQ Reports` by default, preserving the existing `<manager>/<report_type>/` nested layout through the shared Round 81 helpers.
+- Added a Preferences report-folder card and `GET/POST /api/settings/report-outputs-folder` with syntactic validation plus a server-side write probe before saving.
+- Added secure POST+CSRF report open actions (`Open Word`, `Open Excel`, `Open Folder`) that resolve paths from server-side `analysis_status`, not client-supplied filesystem paths.
+- Added strict generated-report corpus admission sidecars: user reports remain downloadable/openable immediately, but the `local_outputs` corpus source only indexes artifacts with `corpus_eligible=true`.
+- Surfaced corpus eligibility in the jobs dashboard and preserved legacy App Support/download compatibility for older reports and tests.
+
+**Files touched:**
+- `report_output_paths.py` — new shared resolver for current/legacy output roots and Documents default.
+- `adoptiq_settings.py` — added `report_outputs_folder` schema key, validator wiring, and public alias.
+- `app_simple.py` — rewired `_r81_outputs_root`, downloads/history/preferences, added settings/open endpoints, strict corpus-admission helper, and sidecar writes at report completion.
+- `adoptiq_backend.py` — `_ensure_outputs()` delegates to the shared resolver.
+- `corpus_bootstrap.py` — `local_outputs` resolves through the shared output root and passes the strict quality-gate flag.
+- `corpus_indexer.py` — optional sidecar-based generated-report admission filter.
+- `templates/preferences.html` — added report-output folder Preferences card.
+- `templates/progress.html` — added open-in-place buttons for completed reports.
+- `static/js/report_jobs_dashboard.js` — added open actions and corpus eligibility display.
+- `static/js/r92_report_outputs_folder.js` — new safe Preferences-card JS module.
+- `tests/test_round92_report_storage.py` — new Round 92 regression suite.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round92_report_storage.py::test_round92_settings_schema_includes_report_outputs_folder` — pins settings schema/validator/export.
+- `tests/test_round92_report_storage.py::test_round92_resolver_prefers_settings_over_env` — pins settings.json precedence.
+- `tests/test_round92_report_storage.py::test_round92_frozen_default_is_documents_reports_folder` — pins packaged Documents default.
+- `tests/test_round92_report_storage.py::test_round92_report_outputs_endpoint_persists_after_write_probe` — pins POST validation/write-probe persistence.
+- `tests/test_round92_report_storage.py::test_round92_open_report_artifact_uses_server_side_status_path` — pins secure open action path source.
+- `tests/test_round92_report_storage.py::test_round92_corpus_indexer_requires_eligible_sidecar` — pins generated-report corpus gate.
+- `tests/test_round92_report_storage.py::test_round92_strict_corpus_admission_blocks_quality_failures` — pins strict policy failure reasons.
+- `tests/test_round92_report_storage.py::test_round92_preferences_ui_uses_safe_report_folder_module` — pins UI source shape and safe DOM rendering.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5497 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `report_output_paths.py:63` — confirm the precedence chain is correct for packaged builds: settings.json -> `ADOPTIQ_OUTPUTS_DIR` -> `~/Documents/AdoptIQ Reports` -> legacy App Support fallback, while dev mode stays local `./outputs`.
+2. `app_simple.py:2749` — review the strict corpus-admission policy. It intentionally blocks on any grounding rejection, per-customer fallback, portfolio drift attempt/escalation, hard portfolio fallback, or fatal partial-data warning.
+3. `app_simple.py:25410` — verify the open-report route never accepts arbitrary client file paths; it uses only `analysis_status` paths plus current/legacy output-root containment checks.
+4. `corpus_indexer.py:321` and `corpus_bootstrap.py:1762` — confirm local generated reports require `.adoptiq_corpus.json` sidecars, while OneDrive/intel-upload sources are not accidentally gated.
+5. `static/js/report_jobs_dashboard.js` — check the new open buttons and corpus eligibility text continue to use DOM APIs (`createElement` / `textContent`) and CSRF headers.
+
+**Known deferrals (intentional non-fixes):**
+- Live packaged-app regeneration was not run in this session; verification is unit/integration only. Next acceptance should run at least one report in a frozen build and confirm it lands under `~/Documents/AdoptIQ Reports`, opens from the page, downloads correctly, and emits the expected sidecar.
+- The strict corpus gate is status/sidecar-driven for reports generated after Round 92. Older reports without sidecars remain visible/downloadable but are not admitted through the `local_outputs` corpus source unless regenerated or backfilled with an eligible sidecar.
+
+**Trailer:** Made-with: Cursor
+
+## Round 91 — handoff 2026-05-07
+
+**What changed (plain English):**
+- Added a single-window Report Jobs dashboard so operators can start multiple reports from the analyze or Leader page without being forced into `/progress/<analysis_id>` redirects.
+- Snapshotted the active report model at job start, exposed it through the bulk status API, and recorded per-step phase timings so slow Comprehensive runs show which stage is consuming time.
+- Threaded the report-model snapshot into Comprehensive portfolio LLM retry calls so portfolio summaries no longer fall back to an implicit model path while per-customer report calls use the report resolver.
+- Fixed the concrete artifact-quality issues from the latest report audit: Renewal methodology bullets no longer emit markdown `*`, Leader no longer renders `ERROR: High Severity Issues`, and BE-priority classification now retries once when the LLM returns malformed JSON.
+
+**Files touched:**
+- `app_simple.py` — Round 91 model snapshot, phase timings, `/api/status/all` projection, no-redirect template context, and Comprehensive portfolio model threading.
+- `static/js/report_jobs_dashboard.js` — new textContent/createElement-only dashboard that polls `/api/status/all` and renders progress/download/cancel actions.
+- `templates/analyze.html` — adds the jobs panel and starts jobs in-place instead of auto-redirecting.
+- `templates/leader_report_form.html` — adds the shared jobs panel and in-place Leader job start behavior.
+- `be_priority_llm_classifier.py` — adds one correction retry for malformed JSON responses from the BE-priority LLM classifier.
+- `leader_report_generator.py` — removes the user-facing `ERROR:` prefix from the high-severity TAC label.
+- `report_utils.py` — converts Renewal risk methodology bullet text from markdown asterisks to plain hyphen bullets.
+- `tests/test_round91_jobs_workflow_and_accuracy.py` — new Round 91 regression suite.
+- `tests/test_round33_progress_watchdog_markers.py` — updates old redirect-fallback source-shape assertions to pin the new jobs-dashboard behavior.
+
+**SSoT modules touched:** report_utils
+
+**Tests added/updated:**
+- `tests/test_round91_jobs_workflow_and_accuracy.py` — pins jobs-dashboard API usage and safe DOM shape, no-redirect submit behavior, status model/timing projection, `_update_progress` phase timing, Comprehensive portfolio model threading, Renewal methodology bullet rendering, Leader high-severity label wording, and BE-priority malformed-JSON retry.
+- `tests/test_round33_progress_watchdog_markers.py::test_analyze_html_has_jobs_dashboard_instead_of_redirect_fallback` — replaces the old Round 33 redirect-fallback contract with the Round 91 jobs panel contract.
+- `tests/test_round33_progress_watchdog_markers.py::test_report_jobs_dashboard_uses_dom_api_for_dynamic_rows` — pins DOM-safe dynamic row rendering in the new dashboard module.
+
+**Verify status:**
+- `make verify` — pass.
+- pytest: 5486 passed / 4 skipped / 6 deselected.
+- ruff: 0 findings.
+- bandit HIGH/MED: 0.
+- pip-audit: clean.
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py:3361` — `_update_progress` now mutates `phase_timings` on step transitions; confirm lock assumptions and persisted `step_start_time` behavior are correct for all worker paths.
+2. `app_simple.py:17040` and `app_simple.py:17182` — Comprehensive portfolio LLM calls pass `model_name=_r91_portfolio_model`; confirm no report-narrative call site still accidentally uses the Ask AI resolver or implicit fallback.
+3. `static/js/report_jobs_dashboard.js:1` — new polling/rendering module; confirm cancel/download/progress actions are correct for all terminal states and that the UI never trusts server strings via HTML sinks.
+4. `templates/analyze.html:1630` and `templates/leader_report_form.html:359` — no-redirect job starts; confirm the UX still leaves an obvious manual progress-page escape hatch.
+5. `be_priority_llm_classifier.py:393` — malformed JSON retry prompt; confirm the retry remains bounded and cannot duplicate/accept classifications for unknown barrier IDs.
+
+**Known deferrals (intentional non-fixes):**
+- Live regeneration of all four report types from one browser window was not run in this Cursor session because it requires a live local app/browser workflow plus Snowflake/CircuIT connectivity and can take 20-30+ minutes. The code path is covered by focused regression tests and the full local `make verify` gate; the next acceptance pass should regenerate Comprehensive/Compact/Renewal/Leader from the new single-window dashboard and run the artifact audit over those fresh outputs.
+- No server-side serial queue was added. Round 91 intentionally reuses the existing background-thread/status APIs first; add a semaphore or explicit queue only if live testing shows concurrent report generation overloads Snowflake, CircuIT, memory, or the status lock.
+- The existing untracked `.cursor/plans/` files were not edited, per instruction.
+
+**Trailer:** Made-with: Cursor
+
 ## Round 53.1 — handoff 2026-04-29
 
 **What changed (plain English):**

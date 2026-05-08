@@ -7,8 +7,10 @@ documents that reproduce the gate's three failure modes (table KPI
 without adjacent citation, paragraph KPI without inline citation,
 narrative paragraph with short numeric tokens) and confirm:
 
-1. The injector adds the canonical ``[Source: AdoptIQ Report Data
-   Sources]`` chrome where the gate would otherwise complain.
+1. The injector adds source chrome where the gate would otherwise
+   complain: a generic ``[Source: AdoptIQ Report Data Sources]`` fallback
+   for mixed/unknown KPI lines and, after R82, per-system chrome for
+   canonical single-source KPI lines.
 2. The injection is idempotent (running twice changes nothing on the
    second pass).
 3. Already-cited content is preserved untouched (writers that called

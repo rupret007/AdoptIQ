@@ -224,6 +224,7 @@ def _configure_logging(verbose: bool) -> None:
 
 def _ensure_bake_dir(bake_dir: Path) -> None:
     bake_dir.mkdir(parents=True, exist_ok=True)
+    persist_on_close = True
     try:
         os.chmod(bake_dir, 0o700)
     except OSError as err:
@@ -602,27 +603,29 @@ def _index_into_encrypted_corpus(
         # store them in the chunk_vectors table BEFORE
         # commit_to_disk so the WAL checkpoint sweeps the vector
         # pages along with the BM25 pages into a single
-        # internally-consistent .enc snapshot.  Failure here is
-        # NON-fatal: the chunk_vectors table simply stays empty and
-        # the runtime degrades to lexical-only retrieval (the same
-        # behaviour as a build operator without fastembed installed).
+        # internally-consistent .enc snapshot.  Round 94 restores the
+        # documented bake-time hard-fail contract: a release bake that
+        # cannot write dense vectors must fail here, not ship a
+        # lexical-only corpus by accident.  Runtime still degrades to
+        # lexical when the user's machine cannot load the embedder.
         try:
             vectors_added, model_id, model_dim = _bake_chunk_vectors(handle.conn)
             logger.info(
                 "Round 66 / Pass 5: chunk_vectors written: rows=%d model=%s dim=%d",
                 vectors_added, model_id, model_dim,
             )
-        except Exception as vec_err:  # noqa: BLE001 - degrade not fail
-            logger.warning(
-                "Round 66 / Pass 5: chunk-vector bake failed (%s); "
-                "shipping a lexical-only corpus.  Hybrid retrieval will "
-                "fall back to lexical at runtime until the next bake.",
+        except Exception as vec_err:  # noqa: BLE001 - fail-loud release gate
+            persist_on_close = False
+            logger.error(
+                "Round 94: chunk-vector bake failed (%s); refusing to "
+                "ship a lexical-only baked corpus.",
                 vec_err,
             )
+            return 7
         handle.commit_to_disk()
     finally:
         try:
-            handle.close()
+            handle.close(persist=persist_on_close)
         except Exception as close_err:  # noqa: BLE001 - never bubble
             logger.warning("handle.close failed: %s", close_err)
 

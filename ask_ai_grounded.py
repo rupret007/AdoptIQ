@@ -328,53 +328,57 @@ def _hybrid_rank_evidence(
         return None
     if not records:
         return []
-    qvec = embed_query(question)
-    if qvec is None:
-        # Embedder not available; caller falls back.
+    try:
+        qvec = embed_query(question)
+        if qvec is None:
+            # Embedder not available; caller falls back.
+            return None
+        record_texts = [
+            f"{r.source_type} {r.customer} {r.text}".strip() for r in records
+        ]
+        dvecs = embed_texts(record_texts)
+        if dvecs is None or dvecs.shape[0] != len(records):
+            return None
+        # Per-record dense score (cosine; vectors already normalized).
+        dense_pairs: List[Tuple[int, float]] = []
+        for i in range(len(records)):
+            dense_pairs.append((i, dense_score(qvec, dvecs[i])))
+        dense_ranking = [
+            i for i, _ in sorted(dense_pairs, key=lambda kv: -kv[1])
+        ]
+        # BM25 ranking is the existing lexical scorer; we use indices into
+        # ``records`` as the doc IDs for both rankings so RRF fuses them.
+        lexical_ordered = _lexical_rank_evidence(records, question, domains)
+        bm25_ranking: List[int] = []
+        seen: Set[int] = set()
+        for r in lexical_ordered:
+            # Match-by-identity: the lexical ranker returns the same
+            # EvidenceRecord instances reordered, so id() works as the
+            # mapping key without us needing record-level keys.
+            for idx, original in enumerate(records):
+                if original is r and idx not in seen:
+                    bm25_ranking.append(idx)
+                    seen.add(idx)
+                    break
+        fused = hybrid_score(
+            bm25_ranking=bm25_ranking,
+            dense_ranking=dense_ranking,
+        )
+        # Stamp ranks onto the returned records via dataclasses.replace.
+        from dataclasses import replace as _dc_replace
+        out: List[EvidenceRecord] = []
+        for idx, rrf_score, bm25_rank, dense_rank in fused:
+            if 0 <= idx < len(records):
+                out.append(_dc_replace(
+                    records[idx],
+                    bm25_rank=int(bm25_rank) if bm25_rank else None,
+                    dense_rank=int(dense_rank) if dense_rank else None,
+                    rrf_score=float(rrf_score),
+                ))
+        return out
+    except Exception as e:  # noqa: BLE001 - Round 94 runtime degradation guard
+        logger.warning("Round 94: hybrid retrieval failed; falling back to lexical: %s", e)
         return None
-    record_texts = [
-        f"{r.source_type} {r.customer} {r.text}".strip() for r in records
-    ]
-    dvecs = embed_texts(record_texts)
-    if dvecs is None or dvecs.shape[0] != len(records):
-        return None
-    # Per-record dense score (cosine; vectors already normalized).
-    dense_pairs: List[Tuple[int, float]] = []
-    for i in range(len(records)):
-        dense_pairs.append((i, dense_score(qvec, dvecs[i])))
-    dense_ranking = [
-        i for i, _ in sorted(dense_pairs, key=lambda kv: -kv[1])
-    ]
-    # BM25 ranking is the existing lexical scorer; we use indices into
-    # ``records`` as the doc IDs for both rankings so RRF fuses them.
-    lexical_ordered = _lexical_rank_evidence(records, question, domains)
-    bm25_ranking: List[int] = []
-    seen: Set[int] = set()
-    for r in lexical_ordered:
-        # Match-by-identity: the lexical ranker returns the same
-        # EvidenceRecord instances reordered, so id() works as the
-        # mapping key without us needing record-level keys.
-        for idx, original in enumerate(records):
-            if original is r and idx not in seen:
-                bm25_ranking.append(idx)
-                seen.add(idx)
-                break
-    fused = hybrid_score(
-        bm25_ranking=bm25_ranking,
-        dense_ranking=dense_ranking,
-    )
-    # Stamp ranks onto the returned records via dataclasses.replace.
-    from dataclasses import replace as _dc_replace
-    out: List[EvidenceRecord] = []
-    for idx, rrf_score, bm25_rank, dense_rank in fused:
-        if 0 <= idx < len(records):
-            out.append(_dc_replace(
-                records[idx],
-                bm25_rank=int(bm25_rank) if bm25_rank else None,
-                dense_rank=int(dense_rank) if dense_rank else None,
-                rrf_score=float(rrf_score),
-            ))
-    return out
 
 
 def rank_evidence(

@@ -1,9 +1,9 @@
 """Round 33 / Build8: ``templates/progress.html`` watchdog markers and
-``templates/analyze.html`` redirect-fallback marker.
+``templates/analyze.html`` no-stranded-start behavior.
 
 Why marker tests
 ----------------
-The watchdog and the redirect-fallback live entirely in inline JS
+The watchdog and the analyze-page start-success behavior live in template JS
 inside Jinja templates -- there is no Python entry point we can
 unit-test directly.  These string-presence assertions guard against
 silent regressions that would re-introduce the "frozen elapsed
@@ -62,35 +62,26 @@ def test_progress_html_registers_elapsed_watchdog_interval():
     assert "elapsedWatchdogTick, 6000" in body
 
 
-def test_analyze_html_has_redirect_fallback_marker():
+def test_analyze_html_has_jobs_dashboard_instead_of_redirect_fallback():
     body = _read("templates/analyze.html")
-    assert "ROUND33_ANALYZE_REDIRECT_FALLBACK" in body, (
-        "Analyze-page redirect fallback marker missing -- without "
-        "this the user sits on /analyze with no indication that the "
-        "report is already running on the server when the auto-redirect "
-        "is silently blocked."
+    assert "data-report-jobs-panel" in body
+    assert "AdoptIQReportJobs.recordStartedJob" in body
+    assert "window.location.href = finalRedirectUrl" not in body, (
+        "Round 91 replaces the old auto-redirect + fallback link with "
+        "the live Report Jobs panel. Reintroducing this redirect would "
+        "send the user back to the four-window workflow."
     )
 
 
-def test_analyze_html_uses_dom_api_for_fallback_link():
-    """The fallback host must be built with ``createElement`` /
-    ``textContent`` -- never ``innerHTML`` with interpolated values.
-    Mirrors codeguard-0-client-side-web-security."""
-    body = _read("templates/analyze.html")
-    # Fallback host id must exist.
-    assert "analyze-redirect-fallback" in body
-    # Locate the fallback block and assert it does not assign innerHTML
-    # with template-string interpolation that includes finalRedirectUrl.
-    idx = body.find("ROUND33_ANALYZE_REDIRECT_FALLBACK")
-    assert idx != -1
-    # Inspect ~3 KB after the marker -- the entire fallback handler
-    # lives there.
-    snippet = body[idx:idx + 3000]
-    assert "innerHTML" not in snippet, (
-        "Fallback link must use createElement+textContent, not innerHTML; "
-        "interpolating finalRedirectUrl into innerHTML would re-introduce "
-        "the XSS vector that the rest of the analyze-page JS already "
-        "avoids."
-    )
-    assert "createElement" in snippet
-    assert "textContent" in snippet
+def test_report_jobs_dashboard_uses_dom_api_for_dynamic_rows():
+    """Dynamic job rows must be built with DOM APIs and textContent.
+
+    Round 91 moved the "analysis started" safety surface from an
+    auto-redirect fallback link to ``static/js/report_jobs_dashboard.js``.
+    Keep the same client-side-web-security contract: no interpolated
+    ``innerHTML`` from server-controlled status fields.
+    """
+    body = _read("static/js/report_jobs_dashboard.js")
+    assert "createElement" in body
+    assert "textContent" in body
+    assert "innerHTML" not in body

@@ -10,6 +10,9 @@
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <!-- Subscription Search Script -->
 <script src="{{ url_for('static', filename='js/subscription-search.js') }}"></script>
+{# Round 91: jobs dashboard lets operators start multiple reports from this
+   one page and watch / cancel / download them without opening four windows. #}
+<script src="{{ url_for('static', filename='js/report_jobs_dashboard.js') }}"></script>
 {# Round 87 / Phase 4: the corpus share URL card moved to
    /preferences -- it's a dedicated admin-config surface, not a
    per-run report tile, so it belongs on the Preferences hub
@@ -440,6 +443,47 @@
                the navbar).  This comment block intentionally remains
                so a future R69-style "we already wired the picker
                here" mistake fails this template grep. #}
+
+            <section class="card shadow-cisco fade-in mb-4"
+                     style="animation-delay: 0.29s;"
+                     data-report-jobs-panel
+                     aria-live="polite">
+                <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+                    <div>
+                        <h2 class="h5 mb-0">
+                            <i class="fas fa-tasks me-2" aria-hidden="true"></i>Report Jobs
+                        </h2>
+                        <p class="small text-muted mb-0">
+                            Start another report here while current jobs keep running.
+                            Active report model:
+                            <code data-report-model-current
+                                  data-default-model="{{ active_report_model or 'n/a' }}">{{ active_report_model or 'n/a' }}</code>
+                        </p>
+                    </div>
+                    <span class="badge rounded-pill bg-primary">
+                        <span data-report-jobs-count>0</span> active
+                    </span>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th scope="col">Report</th>
+                                    <th scope="col">Status</th>
+                                    <th scope="col">Progress</th>
+                                    <th scope="col">Runtime</th>
+                                    <th scope="col">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody data-report-jobs-body></tbody>
+                        </table>
+                    </div>
+                    <p class="text-muted small m-3" data-report-jobs-empty>
+                        No recent jobs yet. Start a report and it will appear here.
+                    </p>
+                </div>
+            </section>
 
             <!-- Analysis Form -->
             <div class="card shadow-cisco fade-in" style="animation-delay: 0.3s;" role="main">
@@ -1333,7 +1377,7 @@ const AnalysisFormManager = (() => {
 
         try {
             // Get report type
-            const reportType = document.querySelector('input[name="report_type"]:checked').value;
+            const reportType = document.querySelector('input[name="report_type"]:checked')?.value || 'comprehensive';
             // Normalize Subscription ID vs Customer Name from search field into form fields (for all report types)
             normalizeSubscriptionAndCustomerFields();
 
@@ -1583,72 +1627,29 @@ const AnalysisFormManager = (() => {
             console.log(`✅ Final validated analysis ID: ${finalAnalysisId}`);
 
             if (data.success) {
-                showNotification('Analysis started successfully! Redirecting to progress page...', 'success');
-                // Round 7 / Phase 4.1: keep ``isSubmitting = true`` and
-                // the button disabled across the 1s success window so a
-                // user cannot double-submit while we wait for the
-                // navigation to actually leave this page.  The previous
-                // ``finally`` block reset ``isSubmitting`` immediately
-                // after the success path scheduled ``setTimeout`` -- a
-                // determined click during that 1000ms delay would queue
-                // a second analysis even though the original was
-                // already accepted.  Returning here also skips the
-                // ``finally`` reset; if the navigation ever fails to
-                // happen (e.g. user blocks the redirect) the page is
-                // about to unload anyway, which is the safe state.
-                setTimeout(() => {
-                    window.location.href = finalRedirectUrl;
-                }, 1000);
-                // Round 33 / Build8: redirect-fallback safety net.  If
-                // ``window.location.href = ...`` is silently blocked
-                // (browser extension, SPA pushState bug, CSP
-                // ``frame-ancestors``-induced unload abort, etc.) the
-                // user previously sat on the analyze page with no
-                // indication that the analysis was already running on
-                // the server.  Render a visible "Open progress page"
-                // link 3.5s after success so they always have an
-                // escape hatch.  We use ``setTimeout`` rather than
-                // ``visibilitychange`` because the failure mode is
-                // exactly that the navigation never starts, so the
-                // page never hides.
-                // ROUND33_ANALYZE_REDIRECT_FALLBACK
-                setTimeout(() => {
-                    try {
-                        if (
-                            typeof window.location.pathname === 'string'
-                            && window.location.pathname.indexOf('/progress/') === 0
-                        ) {
-                            return;  // navigation succeeded
-                        }
-                        let host = document.getElementById('analyze-redirect-fallback');
-                        if (!host) {
-                            host = document.createElement('div');
-                            host.id = 'analyze-redirect-fallback';
-                            host.className = 'alert alert-info mt-3';
-                            host.setAttribute('role', 'status');
-                            const note = document.createElement('div');
-                            note.className = 'mb-2';
-                            note.textContent = 'Your analysis is running on the server. Auto-redirect did not fire.';
-                            const link = document.createElement('a');
-                            link.className = 'btn btn-sm btn-primary';
-                            link.href = finalRedirectUrl;
-                            link.rel = 'noopener noreferrer';
-                            link.textContent = 'Open progress page';
-                            host.appendChild(note);
-                            host.appendChild(link);
-                            const formEl = document.getElementById('analysisForm');
-                            if (formEl && formEl.parentNode) {
-                                formEl.parentNode.insertBefore(host, formEl);
-                            } else {
-                                document.body.appendChild(host);
-                            }
-                        }
-                    } catch (_fallbackErr) {
-                        try {
-                            console.warn('[adoptiq] analyze redirect fallback failed: ' + (_fallbackErr && _fallbackErr.message));
-                        } catch (_) { /* ignore */ }
-                    }
-                }, 3500);
+                // Round 91: stay on the analyze page after starting a
+                // server-side report job.  The Report Jobs panel now owns
+                // real-time progress, cancel, progress-link, and download
+                // actions, so the operator can start report #2/#3/#4
+                // without opening new windows.
+                showNotification('Analysis started successfully. It is now visible in Report Jobs.', 'success');
+                if (window.AdoptIQReportJobs && window.AdoptIQReportJobs.recordStartedJob) {
+                    window.AdoptIQReportJobs.recordStartedJob({
+                        analysis_id: finalAnalysisId,
+                        status: 'starting',
+                        progress: 0,
+                        report_type: reportType,
+                        manager: formData.get('manager') || '',
+                        technology: formData.get('technology') || '',
+                        tech: formData.get('technology') || '',
+                        days: formData.get('days') || '',
+                        active_report_model: document.querySelector('[data-report-model-current]')?.textContent || ''
+                    });
+                }
+                elements.submitBtn.innerHTML = originalButtonText;
+                elements.submitBtn.disabled = false;
+                elements.submitBtn.removeAttribute('aria-busy');
+                isSubmitting = false;
                 return;
             } else {
                 throw new Error(data.error || 'Unknown error occurred');

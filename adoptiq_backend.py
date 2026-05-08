@@ -886,7 +886,15 @@ OFFICIAL_CATEGORIES = {
 # --------------------------- Utilities ---------------------------
 
 def _ensure_outputs():
-    """Return outputs directory; when frozen, use platform app data dir so paths are stable for download."""
+    """Return outputs directory using the Round 92 shared resolver."""
+    try:
+        from report_output_paths import get_report_outputs_root  # noqa: PLC0415
+
+        out = Path(get_report_outputs_root(create=True))
+        out.mkdir(parents=True, exist_ok=True)
+        return out
+    except Exception:
+        pass
     if getattr(sys, "frozen", False):
         if sys.platform == "darwin":
             out = Path.home() / "Library" / "Application Support" / "AdoptIQ" / "outputs"
@@ -8774,7 +8782,15 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
 
     return doc
 
-def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: dict = None, manager: str = "Portfolio Manager", technology: str = "Technology Analysis", days: int = 90):
+def write_excel_workbook(
+    sheets_or_path,
+    title_or_sheets=None,
+    csconsole_data: dict = None,
+    manager: str = "Portfolio Manager",
+    technology: str = "Technology Analysis",
+    days: int = 90,
+    partial_data_warnings: list | None = None,  # Round 94
+):
     """Enhanced Excel workbook writer with professional formatting"""
 
     # Handle different parameter combinations for backward compatibility
@@ -8935,6 +8951,19 @@ def write_excel_workbook(sheets_or_path, title_or_sheets=None, csconsole_data: d
             _r68_append_pairs(_r66_b5_report_info_rows)
         except Exception as _r68_err:  # noqa: BLE001
             logger.debug("Round 68 / A1: build label append skipped: %s", _r68_err)
+        try:
+            for _r94_warning in partial_data_warnings or []:
+                if not isinstance(_r94_warning, dict):
+                    continue
+                _r94_dataset = str(_r94_warning.get("dataset") or "unknown")
+                _r94_kind = str(_r94_warning.get("kind") or "runtime")
+                _r94_error = str(_r94_warning.get("error") or "")
+                _r66_b5_report_info_rows.append([
+                    "Partial_Data_Warning",
+                    f"{_r94_dataset} ({_r94_kind}): {_r94_error}".strip(),
+                ])
+        except Exception as _r94_pdw_err:  # noqa: BLE001
+            logger.debug("Round 94: Report_Info partial warnings skipped: %s", _r94_pdw_err)
         try:
             _r66_b5_data_sheet_names: list[str] = []
             # Round 73 / Phase 3 (F8): pre-R73 the Sheet_Title row generator
@@ -12149,49 +12178,145 @@ def _apply_scope_filter_ab(df: pd.DataFrame, tech: str, days: int) -> pd.DataFra
 
     # tech
     if tech != "All":
-        if tech == "All Contact Center":
-            logger.warning("AB filter: Skipping tech filter for 'All Contact Center' (insufficient tech fields)")
-            logger.debug(f"AB filter: Final result: {len(use)} adoption barriers")
-            return use
         logger.debug(f"AB filter: Applying technology filter for '{tech}'")
         cols_to_search = [
             "PRODUCT_C", "PRODUCT_NAME_C", "CSS_PRE_UNLINK_TECHNOLOGY_NAME_C",
             "SUCCESS_TRACK_C", "SUBJECT_C", "DESCRIPTION_C",
             "NAME", "C_360_PRODUCT_SERVICE_NAME_C", "TASK_TYPE_C",
             "ACTION_TYPE_C", "ACTION_PLAN_TITLE_C", "USE_CASE_BU_NAME_C",
-            "PROGRAM_NAME_C", "BU_NICKNAME_C"
+            "PROGRAM_NAME_C", "BU_NICKNAME_C",
+            "TECHNOLOGY_C", "SUB_TECHNOLOGY_C", "SUB_TECHNOLOGY",
+            "Product", "Product Name", "Technology", "Sub_Technology",
+            "Sub Technology", "Tech.", "Product/Service",
         ]
         cols = [c for c in cols_to_search if c in use.columns]
         logger.debug(f"AB filter: Technology filter columns: {cols}")
-        mask = False
-        for c in cols:
-            mask = mask | use[c].astype(str).str.lower().apply(lambda t: _filter_tech_text(t, tech))
         before_tech_filter = len(use)
-        filtered = use[mask]
-        # If tech filter yields nothing (or unrealistically few) keep original to avoid blank report
-        min_expected = max(5, int(before_tech_filter * 0.1))
-        if before_tech_filter > 0 and (filtered.empty or (tech == "All Contact Center" and len(filtered) < min_expected)):
-            logger.warning(f"AB filter: Tech '{tech}' matched {len(filtered)} of {before_tech_filter}; using unfiltered ABs")
-            # Round 4 / Phase 4.6: stamp the widening on ``use.attrs``
-            # so downstream code (compact / comprehensive analysis,
-            # validators, prompts) can promote a ``partial_data_warnings``
-            # entry like "AB tech filter '<tech>' matched only X/Y;
-            # using unfiltered set" instead of silently surfacing the
-            # broader population as if it were the requested scope.
-            try:
-                use.attrs['tech_filter_widened'] = True
-                use.attrs['tech_filter_requested'] = str(tech)
-                use.attrs['tech_filter_matched'] = int(len(filtered))
-                use.attrs['tech_filter_total'] = int(before_tech_filter)
-                use.attrs['tech_filter_warning'] = (
-                    f"AB tech filter '{tech}' matched only {len(filtered)} of {before_tech_filter} "
-                    f"adoption barriers; widened to unfiltered set."
+        tech_field_cols = [
+            c for c in [
+                "PRODUCT_C", "PRODUCT_NAME_C", "CSS_PRE_UNLINK_TECHNOLOGY_NAME_C",
+                "SUCCESS_TRACK_C", "C_360_PRODUCT_SERVICE_NAME_C", "TASK_TYPE_C",
+                "ACTION_TYPE_C", "ACTION_PLAN_TITLE_C", "USE_CASE_BU_NAME_C",
+                "PROGRAM_NAME_C", "BU_NICKNAME_C", "TECHNOLOGY_C",
+                "Product", "Product Name", "Technology", "Tech.", "Product/Service",
+                "SUBJECT_C", "DESCRIPTION_C", "NAME",
+            ]
+            if c in use.columns
+        ]
+        sub_tech_field_cols = [
+            c for c in ["SUB_TECHNOLOGY_C", "SUB_TECHNOLOGY", "Sub_Technology", "Sub Technology"]
+            if c in use.columns
+        ]
+
+        def _r93_join_row_text(row: pd.Series, row_cols: list[str]) -> str:
+            parts: list[str] = []
+            for _col in row_cols:
+                value = row.get(_col)
+                if value is None:
+                    continue
+                try:
+                    if pd.isna(value):
+                        continue
+                except (TypeError, ValueError):
+                    pass
+                token = str(value).strip()
+                if not token or token.lower() in {"nan", "none", "null"}:
+                    continue
+                parts.append(token)
+            return " ".join(parts)
+
+        if tech == "All Contact Center":
+            # Round 93: All Contact Center is a real Contact Center family scope,
+            # not an account-only fallback. Build 66 reports leaked explicit
+            # Webex Devices / Meetings AB rows because this branch used to return
+            # before applying any technology predicate.
+
+            if tech_field_cols or sub_tech_field_cols:
+                mask = use.apply(
+                    lambda row: _filter_tech_text_enhanced(
+                        _r93_join_row_text(row, tech_field_cols),
+                        _r93_join_row_text(row, sub_tech_field_cols),
+                        tech,
+                    ),
+                    axis=1,
                 )
+                evidence_mask = use.apply(
+                    lambda row: bool(
+                        _r93_join_row_text(row, tech_field_cols)
+                        or _r93_join_row_text(row, sub_tech_field_cols)
+                    ),
+                    axis=1,
+                )
+            else:
+                mask = pd.Series([False] * len(use), index=use.index)
+                evidence_mask = pd.Series([False] * len(use), index=use.index)
+            filtered = use[mask].copy()
+            excluded_total = int(before_tech_filter - len(filtered))
+            unknown_total = int((~mask & ~evidence_mask).sum()) if before_tech_filter else 0
+            nonmatching_total = int((~mask & evidence_mask).sum()) if before_tech_filter else 0
+            try:
+                filtered.attrs["tech_filter_strict_applied"] = True
+                filtered.attrs["tech_filter_requested"] = str(tech)
+                filtered.attrs["tech_filter_matched"] = int(len(filtered))
+                filtered.attrs["tech_filter_total"] = int(before_tech_filter)
+                filtered.attrs["tech_filter_excluded_total"] = excluded_total
+                filtered.attrs["tech_filter_unknown_total"] = unknown_total
+                filtered.attrs["tech_filter_nonmatching_total"] = nonmatching_total
+                if excluded_total:
+                    filtered.attrs["tech_filter_warning"] = (
+                        f"AB tech filter '{tech}' kept {len(filtered)} of {before_tech_filter} "
+                        f"adoption barriers and excluded {excluded_total} without Contact Center evidence "
+                        f"({nonmatching_total} explicit non-matches, {unknown_total} unknown-tech rows)."
+                    )
             except Exception:
                 pass
-        else:
             use = filtered
-            logger.debug(f"AB filter: After technology filter: {len(use)} records (removed {before_tech_filter - len(use)})")
+            logger.debug(
+                "AB filter: After Round 93 All Contact Center filter: %d records (removed %d)",
+                len(use),
+                excluded_total,
+            )
+        else:
+            if tech_field_cols or sub_tech_field_cols:
+                # Round 94: use the same enhanced matcher for named scopes
+                # that CSOne/CSConsole paths use so WxCC/WxCCE and related
+                # product/sub-technology disambiguation does not drift.
+                mask = use.apply(
+                    lambda row: _filter_tech_text_enhanced(
+                        _r93_join_row_text(row, tech_field_cols),
+                        _r93_join_row_text(row, sub_tech_field_cols),
+                        tech,
+                    ),
+                    axis=1,
+                )
+            else:
+                mask = pd.Series([False] * len(use), index=use.index)
+                for c in cols:
+                    mask = mask | use[c].astype(str).str.lower().apply(lambda t: _filter_tech_text(t, tech))
+            filtered = use[mask]
+            # If tech filter yields nothing (or unrealistically few) keep original to avoid blank report
+            if before_tech_filter > 0 and filtered.empty:
+                logger.warning(f"AB filter: Tech '{tech}' matched {len(filtered)} of {before_tech_filter}; using unfiltered ABs")
+                # Round 4 / Phase 4.6: stamp the widening on ``use.attrs``
+                # so downstream code (compact / comprehensive analysis,
+                # validators, prompts) can promote a ``partial_data_warnings``
+                # entry like "AB tech filter '<tech>' matched only X/Y;
+                # using unfiltered set" instead of silently surfacing the
+                # broader population as if it were the requested scope.
+                try:
+                    use.attrs['tech_filter_widened'] = True
+                    use.attrs['tech_filter_requested'] = str(tech)
+                    use.attrs['tech_filter_matched'] = int(len(filtered))
+                    use.attrs['tech_filter_total'] = int(before_tech_filter)
+                    use.attrs['tech_filter_warning'] = (
+                        f"AB tech filter '{tech}' matched only {len(filtered)} of {before_tech_filter} "
+                        f"adoption barriers; widened to unfiltered set."
+                    )
+                except Exception:
+                    pass
+            else:
+                use = filtered
+                logger.debug(f"AB filter: After technology filter: {len(use)} records (removed {before_tech_filter - len(use)})")
     else:
         logger.debug("AB filter: Technology='All', skipping technology filter")
 
@@ -12540,13 +12665,11 @@ def _filter_csconsole_data_by_technology(
                             except Exception as _filter_err:
                                 logger.debug(f"Column filter '{col}' skipped: {_filter_err}")
                     if not mask.any():
-                        fallback_mask = _account_scope_mask(filtered_df)
-                        if fallback_mask is not None and fallback_mask.any():
-                            logger.warning(
-                                "[[FILTER]] CSConsole filter: no technology text matches; using account-scope fallback for %d rows",
-                                int(fallback_mask.sum()),
-                            )
-                            mask = fallback_mask
+                        logger.warning(
+                            "[[FILTER]] CSConsole filter: no technology text matches for '%s'; "
+                            "returning an empty tech-scoped frame instead of widening by account scope",
+                            technology,
+                        )
 
                 filtered_df = filtered_df[mask]
                 after_count = len(filtered_df)

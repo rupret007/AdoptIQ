@@ -450,6 +450,103 @@
                 </div>
             </section>
 
+            {# ----- Section: Report output folder (Round 92) --------- #}
+            <section id="prefs-report-outputs-folder-card"
+                     class="card shadow-cisco fade-in mb-4"
+                     data-report-outputs-folder-card
+                     style="animation-delay: 0.285s;"
+                     aria-labelledby="prefs-report-outputs-folder-heading"
+                     aria-live="polite"
+                     aria-atomic="true">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-report-outputs-folder-heading">
+                        <i class="fas fa-folder me-2" aria-hidden="true"></i>
+                        Report output folder
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-3">
+                        Choose where generated Word and Excel reports are saved.
+                        Packaged AdoptIQ builds default to
+                        <code>~/Documents/AdoptIQ Reports</code>, with the
+                        existing per-manager layout preserved underneath.
+                        Resolution precedence:
+                        <code>settings.json</code> (this card) &rarr;
+                        <code>ADOPTIQ_OUTPUTS_DIR</code> env &rarr;
+                        Documents default.
+                    </p>
+                    <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
+                        <span class="badge rounded-pill bg-secondary"
+                              data-report-outputs-folder-source-pill
+                              title="Which precedence tier produced the active path">
+                            <span data-report-outputs-folder-source-text>checking&hellip;</span>
+                        </span>
+                        <span class="badge rounded-pill bg-secondary"
+                              data-report-outputs-folder-exists
+                              title="Whether the active folder exists on disk right now">
+                            unknown
+                        </span>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-report-outputs-folder-current">
+                            Active folder
+                        </label>
+                        <code class="d-block small text-break"
+                              id="prefs-report-outputs-folder-current"
+                              data-report-outputs-folder-current
+                              aria-live="polite">(loading&hellip;)</code>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-report-outputs-folder-persisted">
+                            Persisted override
+                        </label>
+                        <code class="d-block small text-break"
+                              id="prefs-report-outputs-folder-persisted"
+                              data-report-outputs-folder-persisted
+                              aria-live="polite">(loading&hellip;)</code>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-report-outputs-folder-input">
+                            New report folder
+                            <span class="text-muted">
+                                (absolute path or <code>~/...</code>; leave
+                                blank to clear the override)
+                            </span>
+                        </label>
+                        <input type="text"
+                               class="form-control form-control-sm"
+                               id="prefs-report-outputs-folder-input"
+                               data-report-outputs-folder-input
+                               placeholder="~/Documents/AdoptIQ Reports"
+                               maxlength="4096"
+                               autocomplete="off"
+                               spellcheck="false">
+                    </div>
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        <button type="button"
+                                class="btn btn-sm btn-primary"
+                                data-report-outputs-folder-save
+                                title="Persist the new folder after a server-side write probe">
+                            <i class="fas fa-save me-1" aria-hidden="true"></i>
+                            Save
+                        </button>
+                        <button type="button"
+                                class="btn btn-sm btn-outline-warning"
+                                data-report-outputs-folder-clear
+                                title="Clear the override and fall back to env / Documents default">
+                            <i class="fas fa-undo me-1" aria-hidden="true"></i>
+                            Clear override
+                        </button>
+                        <span class="small ms-2"
+                              data-report-outputs-folder-feedback
+                              aria-live="polite"></span>
+                    </div>
+                </div>
+            </section>
+
             {# ----- Section: Theme (informational) ------------------- #}
             <section class="card shadow-cisco fade-in mb-4"
                      style="animation-delay: 0.3s;"
@@ -528,4 +625,6 @@
    markers bind without a second handler.  XSS posture identical
    (textContent rendering, no innerHTML, no eval). #}
 <script src="{{ url_for('static', filename='js/r88_csone_folder_override.js') }}"></script>
+{# Round 92: report-output folder override card; textContent-only rendering. #}
+<script src="{{ url_for('static', filename='js/r92_report_outputs_folder.js') }}"></script>
 {% endblock %}

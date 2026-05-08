@@ -1327,7 +1327,6 @@ def _accumulate_index_stats(target: IndexStats, source: IndexStats) -> None:
 def _r80_resolve_app_support_outputs_dir() -> Optional[Path]:
     """Round 80: return the absolute path to AdoptIQ's writable
     ``outputs/`` directory if it exists, else ``None``."""
-    # Round 80
     override = os.environ.get('ADOPTIQ_OUTPUTS_DIR')
     if override:
         try:
@@ -1335,6 +1334,17 @@ def _r80_resolve_app_support_outputs_dir() -> Optional[Path]:
             return override_path if override_path.is_dir() else None
         except Exception:
             return None
+    # Round 92: use the same Documents/default/settings/env resolver as
+    # the report writers so generated reports do not split away from
+    # corpus indexing when the operator changes the report folder.
+    try:
+        from report_output_paths import get_report_outputs_root  # noqa: PLC0415
+
+        resolved = Path(get_report_outputs_root(create=False))
+        return resolved if resolved.is_dir() else None
+    except Exception:
+        pass
+    # Round 80 fallback
     try:
         if sys.platform == 'darwin':
             base = Path.home() / 'Library' / 'Application Support' / 'AdoptIQ'
@@ -1411,6 +1421,7 @@ def _resolve_index_sources() -> list[dict[str, object]]:
                     "label": "onedrive",
                     "dir": str(onedrive_root),
                     "filter": "all_supported",
+                    "quality_gate": "strict_generated_report",  # Round 94
                 }
             )
         else:
@@ -1433,6 +1444,7 @@ def _resolve_index_sources() -> list[dict[str, object]]:
                 "label": "local_outputs",
                 "dir": str(outputs_dir),
                 "filter": "adoptiq_named",
+                "quality_gate": "strict_generated_report",  # Round 92
             }
         )
 
@@ -1447,6 +1459,7 @@ def _resolve_index_sources() -> list[dict[str, object]]:
                     "label": "user_downloads",
                     "dir": str(downloads_path),
                     "filter": "adoptiq_named",
+                    "quality_gate": "strict_generated_report",  # Round 94
                 }
             )
 
@@ -1472,6 +1485,7 @@ def _resolve_index_sources() -> list[dict[str, object]]:
                     "label": "intel_uploads",
                     "dir": str(intel_uploads_path),
                     "filter": "all_supported",
+                    "quality_gate": "strict_generated_report",  # Round 94
                 }
             )
     return sources
@@ -1748,6 +1762,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
                             src_dir,
                             signal=signal,
                             recursive=_r81_recursive,
+                            require_adoptiq_quality_gate=(label == "local_outputs"),  # Round 92
                         )
                     except TypeError:
                         # Older monkeypatched walker without the R81

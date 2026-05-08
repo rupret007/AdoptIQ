@@ -1007,6 +1007,8 @@ _SENSITIVE_ENDPOINTS = {
     'api_settings_report_model',
     'api_settings_corpus_share_url',  # Round 84 / Build 60
     'api_settings_csone_onedrive_folder',  # Round 88 / F5 (P1)
+    'api_settings_report_outputs_folder',  # Round 92
+    'open_report_artifact',  # Round 92
     'get_grounding_diagnostics',
     'get_ask_ai_diagnostics',
 }
@@ -1896,6 +1898,55 @@ def _redact_partial_warning_error(value: Any) -> str:
         return "<error-redacted>"
 
 
+def _r93_ab_scope_warning_entries(ab_df: Any) -> list[dict[str, Any]]:
+    """Build UI/report warnings from Round 93 AB technology-scope attrs."""
+    try:
+        attrs = getattr(ab_df, "attrs", None) or {}
+        if not isinstance(attrs, dict):
+            return []
+        entries: list[dict[str, Any]] = []
+        if attrs.get("tech_filter_widened"):
+            entries.append({
+                "dataset": "adoption_barriers",
+                "error": str(
+                    attrs.get("tech_filter_warning")
+                    or "AB tech filter widened due to insufficient matches."
+                ),
+                "kind": "tech_filter_widened",
+                "tech_requested": attrs.get("tech_filter_requested"),
+                "matched": attrs.get("tech_filter_matched"),
+                "total": attrs.get("tech_filter_total"),
+            })
+        excluded_total = attrs.get("tech_filter_excluded_total")
+        if excluded_total:
+            entries.append({
+                "dataset": "adoption_barriers",
+                "error": str(
+                    attrs.get("tech_filter_warning")
+                    or "AB tech filter excluded rows outside the selected technology scope."
+                ),
+                "kind": "tech_filter_scope_excluded",
+                "tech_requested": attrs.get("tech_filter_requested"),
+                "matched": attrs.get("tech_filter_matched"),
+                "total": attrs.get("tech_filter_total"),
+                "excluded": excluded_total,
+                "unknown": attrs.get("tech_filter_unknown_total"),
+                "nonmatching": attrs.get("tech_filter_nonmatching_total"),
+            })
+        return entries
+    except Exception:
+        return []
+
+
+def _r93_extend_partial_warnings_once(target: Any, entries: list[dict[str, Any]]) -> None:
+    """Append warning dicts once; callers pass either local or persisted lists."""
+    if not isinstance(target, list):
+        return
+    for entry in entries or []:
+        if entry not in target:
+            target.append(entry)
+
+
 def _redact_form_data(data: Any) -> Dict[str, Any]:
     """Round 8 / Phase 1.7: log-safe summary of an inbound JSON / form dict.
 
@@ -2619,6 +2670,245 @@ def _r81_sanitize_path_segment(name: object) -> str:
     return cleaned or _R81_UNKNOWN_SEGMENT
 
 
+def _r92_report_outputs_root(*, create: bool = True) -> Path:
+    """Round 92: canonical report-output root.
+
+    Delegates to ``report_output_paths`` so writers, downloads,
+    Preferences, and corpus indexing share the same Documents-default /
+    settings / env precedence.
+    """
+    try:
+        from report_output_paths import get_report_outputs_root  # noqa: PLC0415
+
+        return Path(get_report_outputs_root(create=create, frozen=_frozen))
+    except Exception as _r92_root_err:  # noqa: BLE001
+        logger.debug(
+            "Round 92: report output resolver failed, falling back to R81 path: %s",
+            type(_r92_root_err).__name__,
+        )
+        return (_APP_SUPPORT / "outputs") if _frozen else Path("outputs")
+
+
+def _r92_report_outputs_root_with_source(*, create: bool = True) -> tuple[Path, str]:
+    """Round 92: return ``(root, source_label)`` for Preferences/status UI."""
+    try:
+        from report_output_paths import get_report_outputs_root_with_source  # noqa: PLC0415
+
+        root, source = get_report_outputs_root_with_source(create=create, frozen=_frozen)
+        return Path(root), str(source)
+    except Exception as _r92_src_err:  # noqa: BLE001
+        logger.debug(
+            "Round 92: report output source resolution failed: %s",
+            type(_r92_src_err).__name__,
+        )
+        root = (_APP_SUPPORT / "outputs") if _frozen else Path("outputs")
+        return root, "fallback"
+
+
+def _r92_candidate_output_roots(*, create_current: bool = True) -> tuple[Path, ...]:
+    """Round 92: current + legacy output roots accepted by download/open routes."""
+    try:
+        from report_output_paths import candidate_output_roots  # noqa: PLC0415
+
+        roots = [Path(p) for p in candidate_output_roots(create_current=create_current)]
+    except Exception:  # noqa: BLE001
+        roots = [_r92_report_outputs_root(create=create_current)]
+    # Keep the app-local legacy root in this candidate list because
+    # tests and older runtime states may patch ``_APP_SUPPORT`` directly
+    # after ``report_output_paths`` has already resolved the platform
+    # default.  This preserves the pre-R92 download compatibility path.
+    roots.append((_APP_SUPPORT / "outputs") if _frozen else Path(os.path.abspath("outputs")))
+    out: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            key = os.path.realpath(str(root))
+        except Exception:
+            key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(root)
+    return tuple(out)
+
+
+def _r92_is_under_root(path: Path | str, root: Path | str) -> bool:
+    """Round 92: symlink-safe containment check via realpath/commonpath."""
+    try:
+        resolved = os.path.realpath(str(path))
+        root_real = os.path.realpath(str(root))
+        return os.path.commonpath([resolved, root_real]) == root_real
+    except Exception:
+        return False
+
+
+def _r92_resolve_output_artifact(raw_path: object, *, basename_hint: str | None = None) -> Optional[str]:
+    """Resolve an output artifact under current/legacy roots.
+
+    ``raw_path`` is server-side status metadata, not client input.  When
+    it is stale, fall back to an R81 recursive search by basename under
+    every allowed output root.
+    """
+    raw_text = str(raw_path or "").strip()
+    basename = secure_filename(basename_hint or os.path.basename(raw_text))
+    candidates: list[Path] = []
+    if raw_text:
+        candidates.append(Path(raw_text))
+    for root in _r92_candidate_output_roots(create_current=True):
+        if basename:
+            candidates.append(Path(root) / basename)
+            try:
+                candidates.extend(p for p in Path(root).rglob(basename) if p.is_file())
+            except OSError:
+                pass
+    for candidate in candidates:
+        try:
+            resolved = Path(os.path.realpath(str(candidate)))
+            if not resolved.is_file():
+                continue
+            if any(_r92_is_under_root(resolved, root) for root in _r92_candidate_output_roots(create_current=False)):
+                return str(resolved)
+        except Exception:
+            continue
+    return None
+
+
+_R92_FATAL_PARTIAL_WARNING_KINDS = {
+    "required_source_missing",
+    "source_validation_failed",
+    "validation_error",
+    "fatal",
+    "snowflake_required_source_missing",
+}
+
+
+def _r92_partial_warning_is_fatal(warning: object) -> bool:
+    """Round 92: identify partial-data warnings that should block corpus admission."""
+    if not isinstance(warning, dict):
+        return False
+    if warning.get("fatal") is True:
+        return True
+    severity = str(warning.get("severity") or warning.get("level") or "").strip().lower()
+    if severity in {"fatal", "error", "critical", "blocking"}:
+        return True
+    kind = str(warning.get("kind") or warning.get("code") or "").strip().lower()
+    return kind in _R92_FATAL_PARTIAL_WARNING_KINDS
+
+
+def _r92_corpus_admission_for_status(status: dict) -> dict:
+    """Round 92: strict generated-report corpus admission policy.
+
+    Generated artifacts are always available to the operator, but they
+    enter the local corpus only when runtime diagnostics show a clean
+    report: completed, no grounding rejections, no per-customer LLM
+    fallbacks, no portfolio drift retry/escalation, no hard portfolio
+    fallback, and no fatal partial-data warning.
+    """
+    reasons: list[str] = []
+    if not isinstance(status, dict):
+        return {"corpus_eligible": False, "reasons": ["missing_status"]}
+    if str(status.get("status") or "").lower() != "completed":
+        reasons.append("status_not_completed")
+    if str(status.get("error") or "").strip():
+        reasons.append("status_error_present")
+
+    try:
+        grounding = status.get("grounding_diagnostics") or {}
+        summary = grounding.get("rejection_summary") if isinstance(grounding, dict) else {}
+        rejected = int((summary or {}).get("rejected", 0) or 0) if isinstance(summary, dict) else 0
+        if rejected > 0:
+            reasons.append(f"grounding_rejections:{rejected}")
+    except Exception:
+        reasons.append("grounding_diag_unreadable")
+
+    try:
+        per_cust = status.get("per_customer_llm_diag") or {}
+        fallback_summary = per_cust.get("fallback_summary") if isinstance(per_cust, dict) else {}
+        fallback = int((fallback_summary or {}).get("fallback", 0) or 0) if isinstance(fallback_summary, dict) else 0
+        if fallback > 0:
+            reasons.append(f"per_customer_llm_fallbacks:{fallback}")
+    except Exception:
+        reasons.append("per_customer_diag_unreadable")
+
+    try:
+        portfolio_diag = status.get("portfolio_llm_diag") or {}
+        if isinstance(portfolio_diag, dict):
+            drift_attempts = portfolio_diag.get("drift_attempts") or []
+            if isinstance(drift_attempts, list) and drift_attempts:
+                reasons.append(f"portfolio_drift_attempts:{len(drift_attempts)}")
+            if portfolio_diag.get("escalated_to_deterministic") is True:
+                reasons.append("portfolio_drift_escalated")
+            final_outcome = str(portfolio_diag.get("final_outcome") or "").strip().lower()
+            last_kind = str(portfolio_diag.get("last_error_kind") or "").strip().lower()
+            if final_outcome in {"hard", "exception", "empty", "transient"}:
+                reasons.append(f"portfolio_llm_outcome:{final_outcome}")
+            if last_kind in {"content_filter", "credentials", "auth"}:
+                reasons.append(f"portfolio_llm_hard_fallback:{last_kind}")
+    except Exception:
+        reasons.append("portfolio_diag_unreadable")
+
+    try:
+        fatal_warnings = [
+            w for w in (status.get("partial_data_warnings") or [])
+            if _r92_partial_warning_is_fatal(w)
+        ]
+        if fatal_warnings:
+            reasons.append(f"fatal_partial_data_warnings:{len(fatal_warnings)}")
+    except Exception:
+        reasons.append("partial_warning_diag_unreadable")
+
+    return {
+        "corpus_eligible": not reasons,
+        "reasons": reasons,
+        "policy": "strict",
+        "evaluated_at": _now_utc_iso_z(),
+    }
+
+
+def _r92_write_corpus_sidecars(status: dict) -> dict:
+    """Round 92: persist per-artifact corpus-admission sidecars."""
+    admission = _r92_corpus_admission_for_status(status)
+    artifacts: list[str] = []
+    for key in ("word_report", "excel_report", "report_path"):
+        path = _r92_resolve_output_artifact(status.get(key))
+        if path and path not in artifacts:
+            artifacts.append(path)
+    written = 0
+    for artifact in artifacts:
+        try:
+            sidecar = Path(artifact).with_name(Path(artifact).name + ".adoptiq_corpus.json")
+            sidecar.write_text(
+                json.dumps(
+                    {
+                        "corpus_eligible": bool(admission.get("corpus_eligible")),
+                        "policy": admission.get("policy"),
+                        "reasons": admission.get("reasons") or [],
+                        "analysis_id_digest": _id_digest(str(status.get("analysis_id") or "")),
+                        "evaluated_at": admission.get("evaluated_at"),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            written += 1
+        except Exception as _r92_sidecar_err:  # noqa: BLE001
+            logger.debug(
+                "Round 92: corpus sidecar write failed for %s: %s",
+                artifact,
+                type(_r92_sidecar_err).__name__,
+            )
+    admission["artifact_count"] = len(artifacts)
+    admission["sidecars_written"] = written
+    status["corpus_admission"] = admission
+    status["corpus_eligible"] = bool(admission.get("corpus_eligible"))
+    status["corpus_admission_reason"] = (
+        "eligible" if admission.get("corpus_eligible") else "; ".join(admission.get("reasons") or ["not_eligible"])
+    )
+    return admission
+
+
 def _r81_outputs_root() -> Path:
     """Return the outputs root directory, creating it idempotently.
 
@@ -2629,10 +2919,7 @@ def _r81_outputs_root() -> Path:
     startup.  Dev mode preserves the legacy ``./outputs`` relative
     path so test harnesses that ``monkeypatch.chdir`` keep working.
     """
-    if _frozen:
-        out = _APP_SUPPORT / "outputs"
-    else:
-        out = Path("outputs")
+    out = _r92_report_outputs_root(create=True)  # Round 92
     try:
         out.mkdir(parents=True, exist_ok=True)
     except Exception as _r81_root_err:  # noqa: BLE001
@@ -3252,6 +3539,50 @@ def _now_utc_iso_z() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _r91_active_report_model_snapshot() -> str:
+    """Round 91: resolve the report-narrative model without breaking starts.
+
+    The preferences resolver intentionally does not cache. For report jobs we
+    snapshot the value at start time so the jobs dashboard can explain which
+    model a long-running Comprehensive report is actually using even if the
+    operator changes Preferences while it runs.
+    """
+    try:
+        from model_resolver import get_active_report_model  # noqa: PLC0415
+
+        return str(get_active_report_model() or "")
+    except Exception as _r91_model_err:  # noqa: BLE001
+        logger.debug(
+            "Round 91: active report model snapshot failed: %s",
+            type(_r91_model_err).__name__,
+        )
+        return ""
+
+
+def _r91_parse_status_dt(value: Any) -> Optional[datetime]:
+    """Round 91: parse persisted status datetimes for phase timing."""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            raw = str(value).strip()
+            if not raw:
+                return None
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _r91_iso_z_from_dt(value: datetime) -> str:
+    """Round 91: UTC ISO-Z with second precision for status phase timings."""
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _build_insights_payload(
     status_obj: Dict[str, Any],
     default_summary: str,
@@ -3314,6 +3645,28 @@ def _update_progress(status, progress, message, step, save=True):
     Must be called while holding analysis_status_lock.
     """
     prev_step = status.get('current_step')
+    # Round 91: close out the previous phase whenever a worker moves to
+    # a different step.  This gives the single-window jobs dashboard and
+    # post-run diagnostics enough timing data to answer "what made this
+    # Comprehensive report slow?" without scraping logs.
+    now = datetime.now(timezone.utc)
+    if prev_step and prev_step != step:
+        try:
+            phase_started = _r91_parse_status_dt(status.get('step_start_time'))
+            if phase_started is not None:
+                duration = max(0.0, (now - phase_started).total_seconds())
+                timings = status.setdefault('phase_timings', {})
+                if isinstance(timings, dict):
+                    timings[str(prev_step)] = {
+                        'started_at': _r91_iso_z_from_dt(phase_started),
+                        'completed_at': _r91_iso_z_from_dt(now),
+                        'duration_seconds': round(duration, 1),
+                    }
+        except Exception as _r91_timing_err:  # noqa: BLE001
+            logger.debug(
+                "Round 91: phase timing update skipped: %s",
+                type(_r91_timing_err).__name__,
+            )
     completed = status.get('completed_steps', [])
     if prev_step and prev_step != step and prev_step not in completed:
         completed.append(prev_step)
@@ -3323,6 +3676,8 @@ def _update_progress(status, progress, message, step, save=True):
     status['message'] = message
     status['current_step'] = step
     status['sub_step'] = message
+    if prev_step != step:
+        status['step_start_time'] = _r91_iso_z_from_dt(now)
 
     # Round 5 / Phase 6.4: previously this used ``datetime.now()`` (local
     # naive time) and parsed ``start_time`` with ``datetime.fromisoformat``
@@ -3332,7 +3687,6 @@ def _update_progress(status, progress, message, step, save=True):
     # and the entire ETA branch was silently swallowed by the
     # ``except`` -- so the UI never showed an ETA after the first
     # tz-aware status was persisted.  Normalize BOTH sides to UTC.
-    now = datetime.now(timezone.utc)
     start_time = status.get('start_time')
     if start_time and progress > 0:
         try:
@@ -3851,6 +4205,7 @@ def index():
         error_message=error_message,
         intel_status=intel_status_ctx,
         intel_upload_enabled=intel_upload_enabled,
+        active_report_model=_r91_active_report_model_snapshot(),  # Round 91
     )
 
 @app.route('/start_analysis', methods=['POST'])
@@ -4051,6 +4406,7 @@ def start_analysis():
                 analysis_id = f"{safe_report_type}_{safe_tech}_{days}d_{timestamp}"
 
         # Initialize status with enhanced messaging and timing (thread-safe)
+        active_report_model = _r91_active_report_model_snapshot()  # Round 91
         with analysis_status_lock:
             analysis_status[analysis_id] = {
                 'status': 'starting',
@@ -4062,6 +4418,9 @@ def start_analysis():
                 'sub_step': '',
                 'total_steps': 12,
                 'step_start_time': _now_utc_iso_z(),
+                'active_report_model': active_report_model,  # Round 91
+                'report_model_name': active_report_model,  # Round 91
+                'phase_timings': {},  # Round 91
                 'estimated_completion': None,
                 'manager': manager,
                 'tech': tech,
@@ -4162,7 +4521,29 @@ def update_analysis_status(analysis_id: str, updates: Dict[str, Any], save: bool
                 pass
     with analysis_status_lock:
         if analysis_id in analysis_status:
-            analysis_status[analysis_id].update(updates)
+            status = analysis_status[analysis_id]
+            # Round 94: raw update_analysis_status callers (notably the
+            # comprehensive worker) still need the R91 phase-timing /
+            # completed-step bookkeeping that _update_progress owns.
+            if (
+                isinstance(updates, dict)
+                and 'current_step' in updates
+                and ('progress' in updates or 'message' in updates)
+            ):
+                try:
+                    _update_progress(
+                        status,
+                        updates.get('progress', status.get('progress', 0)),
+                        updates.get('message', status.get('message', '')),
+                        updates.get('current_step', status.get('current_step', '')),
+                        save=False,
+                    )
+                except Exception as _r94_progress_err:  # noqa: BLE001
+                    logger.debug(
+                        "Round 94: update_analysis_status phase timing skipped: %s",
+                        type(_r94_progress_err).__name__,
+                    )
+            status.update(updates)
             # Round 13 / Phase 11.4: opportunistic TTL sweep on
             # mutation.  Self-throttles internally so we only pay
             # the sweep cost once per
@@ -8744,22 +9125,14 @@ def run_compact_analysis(analysis_id):
 
                 ab_scoped = _apply_scope_filter_ab(ab_raw, technology, days)
                 logger.info(f"[[DEBUG]] Scope filter applied, now preparing AB data...")
-                # Round 4 / Phase 4.6: if the tech filter widened
-                # itself (insufficient matches) propagate that as a
-                # ``partial_data_warnings`` entry so the report does
-                # not silently surface an unfiltered AB population.
+                # Round 93: propagate AB tech-scope diagnostics so an
+                # All Contact Center report does not silently count rows
+                # without Contact Center evidence.
                 try:
-                    _ab_attrs = getattr(ab_scoped, 'attrs', {}) or {}
-                    if _ab_attrs.get('tech_filter_widened'):
-                        partial_data_warnings.append({
-                            'dataset': 'adoption_barriers',
-                            'error': str(_ab_attrs.get('tech_filter_warning')
-                                          or 'AB tech filter widened due to insufficient matches.'),
-                            'kind': 'tech_filter_widened',
-                            'tech_requested': _ab_attrs.get('tech_filter_requested'),
-                            'matched': _ab_attrs.get('tech_filter_matched'),
-                            'total': _ab_attrs.get('tech_filter_total'),
-                        })
+                    _r93_extend_partial_warnings_once(
+                        partial_data_warnings,
+                        _r93_ab_scope_warning_entries(ab_scoped),
+                    )
                 except Exception:
                     # Round 4: non-fatal; suppressed silently in original code
                     pass  # noqa: PIE790
@@ -11561,6 +11934,8 @@ def run_compact_analysis(analysis_id):
                     "Could not persist partial_data_warnings on compact status: %s",
                     _pdw_err,
                 )
+            status['analysis_id'] = analysis_id  # Round 92
+            _r92_write_corpus_sidecars(status)  # Round 92
 
             # Round 5 / Phase 6.7: persist *under* the lock so the on-disk
             # JSON snapshot is a consistent view of the in-memory state at
@@ -13758,7 +14133,12 @@ def run_customer_renewal_analysis(analysis_id):
                     "AB re-annotate skipped: %s", _r49_ab_err,
                 )
 
+        _r93_renewal_ab_scope_warnings: list = []
         ab_scoped = _apply_scope_filter_ab(ab_raw, technology, days)
+        _r93_extend_partial_warnings_once(
+            _r93_renewal_ab_scope_warnings,
+            _r93_ab_scope_warning_entries(ab_scoped),
+        )
         ab_norm = _prepare_ab(ab_scoped, team_subs_df)
         logger.info(f"[[RENEWAL]] After Snowflake + scope + prepare: {len(ab_norm)} adoption barriers")
 
@@ -13785,6 +14165,10 @@ def run_customer_renewal_analysis(analysis_id):
                         _r49_csab_err,
                     )
                 csab_scoped = _apply_scope_filter_ab(csab_merged, technology, days)
+                _r93_extend_partial_warnings_once(
+                    _r93_renewal_ab_scope_warnings,
+                    _r93_ab_scope_warning_entries(csab_scoped),
+                )
                 csab_norm = _prepare_ab(csab_scoped, team_subs_df)
                 if not csab_norm.empty:
                     before_merge = len(ab_norm)
@@ -14575,7 +14959,10 @@ def run_customer_renewal_analysis(analysis_id):
         # This deduplicates the harvest into a small inline helper to
         # keep the two call sites in lockstep.
         def _r48_harvest_renewal_pdw():  # noqa: ANN202
-            _entries: list = []
+            # Round 93: include AB technology-scope diagnostics collected
+            # immediately after `_apply_scope_filter_ab` so the first Word
+            # artifact sees the same strict-scope warning as Report_Info.
+            _entries: list = list(_r93_renewal_ab_scope_warnings)
             for _ds_name, _ds_df in (
                 ("adoption_barriers", customer_ab if 'customer_ab' in locals() else None),
                 ("csone_tac_cases", customer_csone if 'customer_csone' in locals() else None),
@@ -15426,6 +15813,8 @@ def run_customer_renewal_analysis(analysis_id):
                 'customer': customer_name,
                 'analysis_date': analysis_date
             }
+            status['analysis_id'] = analysis_id  # Round 92
+            _r92_write_corpus_sidecars(status)  # Round 92
             # Round 5 / Phase 6.7: persist *under* the lock so the on-disk
             # JSON snapshot matches the in-memory completion state.
             save_analysis_status()
@@ -15823,21 +16212,14 @@ def run_comprehensive_analysis(analysis_id):
                     f"{len(csconsole_success_priorities)} success priorities, and {len(csconsole_adoption_barriers)} adoption barriers from CSConsole.")
 
         ab_scoped = _apply_scope_filter_ab(ab_raw, tech, days)
-        # Round 4 / Phase 4.6: comprehensive path -- propagate the AB
-        # tech-filter widening warning so the workbook documents that
-        # the unfiltered AB set was used instead of the requested tech.
+        # Round 93: comprehensive path -- propagate AB tech-scope
+        # diagnostics so the workbook documents excluded non-CC/unknown
+        # rows instead of silently widening an All Contact Center report.
         try:
-            _ab_attrs = getattr(ab_scoped, 'attrs', {}) or {}
-            if _ab_attrs.get('tech_filter_widened'):
-                partial_data_warnings.append({
-                    'dataset': 'adoption_barriers',
-                    'error': str(_ab_attrs.get('tech_filter_warning')
-                                  or 'AB tech filter widened due to insufficient matches.'),
-                    'kind': 'tech_filter_widened',
-                    'tech_requested': _ab_attrs.get('tech_filter_requested'),
-                    'matched': _ab_attrs.get('tech_filter_matched'),
-                    'total': _ab_attrs.get('tech_filter_total'),
-                })
+            _r93_extend_partial_warnings_once(
+                partial_data_warnings,
+                _r93_ab_scope_warning_entries(ab_scoped),
+            )
         except Exception:
             # Round 4: non-fatal; suppressed silently in original code
             pass  # noqa: PIE790
@@ -16953,6 +17335,11 @@ def run_comprehensive_analysis(analysis_id):
             # ``hard`` and short-circuits without burning the budget;
             # the structured ``diag`` dict captures attempt count and
             # last error kind for the operator-facing fallback below.
+            _r91_portfolio_model = (
+                status.get('active_report_model')
+                or status.get('report_model_name')
+                or _r91_active_report_model_snapshot()
+            )
             portfolio_summary, _r64_portfolio_diag = _r64_call_llm_with_retry(
                 generate_llm_response,
                 portfolio_prompt,
@@ -16960,6 +17347,7 @@ def run_comprehensive_analysis(analysis_id):
                 max_attempts=3,
                 backoff_base_seconds=1.0,
                 correlation_id=status.get('analysis_id'),
+                model_name=_r91_portfolio_model,  # Round 91
             )
             try:
                 status['portfolio_llm_diag'] = dict(_r64_portfolio_diag)
@@ -17101,6 +17489,7 @@ def run_comprehensive_analysis(analysis_id):
                             max_attempts=2,  # tighter inner-loop budget
                             backoff_base_seconds=1.0,
                             correlation_id=status.get('analysis_id'),
+                            model_name=_r91_portfolio_model,  # Round 91
                         )
                         try:
                             status['portfolio_llm_diag'].update(dict(_r64_portfolio_diag))
@@ -18311,7 +18700,7 @@ def run_comprehensive_analysis(analysis_id):
                 'customer_pulse': filtered_customer_pulse,
                 'success_priorities': filtered_success_priorities,
                 'adoption_barriers': filtered_adoption_barriers
-            }, status['manager'], status['tech'], status['days'])
+            }, status['manager'], status['tech'], status['days'], partial_data_warnings=partial_data_warnings)  # Round 94
             logger.info(f"[[OK]] Excel file written successfully: {xlsx_path}")
             status['progress'] = 97
             status['message'] = ' Excel workbook completed successfully!'
@@ -18415,6 +18804,8 @@ def run_comprehensive_analysis(analysis_id):
                     "Could not persist partial_data_warnings on status: %s",
                     _pdw_err,
                 )
+            status['analysis_id'] = analysis_id  # Round 92
+            _r92_write_corpus_sidecars(status)  # Round 92
             logger.info(f"[[OK]] Status updated successfully")
 
             # Round 5 / Phase 6.7: persist *under* the lock so the on-disk
@@ -19558,6 +19949,8 @@ def get_all_status():
                         continue
                     if isinstance(value, datetime):
                         status_copy[key] = value.isoformat()
+                    elif key == 'phase_timings' and isinstance(value, (dict, list)):
+                        status_copy[key] = _sanitize_for_json(value)  # Round 91
                     elif isinstance(value, (str, int, float, bool, type(None))):
                         status_copy[key] = value
                     else:
@@ -19586,6 +19979,26 @@ def get_all_status():
                 status_copy['word_available'] = bool(
                     status.get('word_report') or status.get('report_path')
                 )
+                # Round 91: mirror the per-id elapsed_seconds projection
+                # so the jobs dashboard can render a useful live runtime
+                # without fan-out polling every analysis_id.
+                try:
+                    _r91_start = _r91_parse_status_dt(status.get('start_time'))
+                    if _r91_start is not None:
+                        _r91_end = (
+                            _r91_parse_status_dt(status.get('completion_time'))
+                            or _r91_parse_status_dt(status.get('end_time'))
+                            or datetime.now(timezone.utc)
+                        )
+                        status_copy['elapsed_seconds'] = max(
+                            0,
+                            int((_r91_end - _r91_start).total_seconds()),
+                        )
+                except Exception as _r91_elapsed_err:  # noqa: BLE001
+                    logger.debug(
+                        "Round 91: bulk elapsed_seconds compute failed: %s",
+                        type(_r91_elapsed_err).__name__,
+                    )
 
                 # Round 66 / Pass 3 (B14): project the R64/B5 grounding
                 # diagnostics rollup into the bulk status payload so
@@ -20008,7 +20421,7 @@ def previous_reports():
         import re
 
         # Get all Word and Excel files from outputs directory (canonical when frozen)
-        outputs_dir = str(_APP_SUPPORT / "outputs") if _frozen else "outputs"
+        outputs_dir = str(_r92_report_outputs_root(create=True))  # Round 92
         if not os.path.exists(outputs_dir):
             os.makedirs(outputs_dir)
 
@@ -20262,7 +20675,7 @@ def preferences():
 
     outputs_dir_str = "-"
     try:
-        outputs_dir_str = str(_APP_SUPPORT / "outputs")
+        outputs_dir_str = str(_r92_report_outputs_root(create=True))  # Round 92
     except Exception as _out_err:  # noqa: BLE001
         logger.debug(
             "Round 73 / UX-1: outputs dir resolution failed: %s",
@@ -20490,7 +20903,7 @@ def _r68_build_suggestion_chips(
     # outputs/ directory; falls back gracefully if no reports exist.
     last_report_chip = None
     try:
-        outputs_dir = Path(_APP_SUPPORT) / "outputs"
+        outputs_dir = _r92_report_outputs_root(create=True)  # Round 92
         if outputs_dir.exists():
             # Bounded scan -- the outputs directory grows over time.
             # Take the 32 newest files to keep the sort cheap on
@@ -22449,6 +22862,99 @@ def api_settings_csone_onedrive_folder():
         "env_var": "CSONE_ONEDRIVE_FOLDER",
         "env_value_set": bool(os.environ.get("CSONE_ONEDRIVE_FOLDER")),
     }), 200
+
+
+@app.route('/api/settings/report-outputs-folder', methods=['GET', 'POST'])
+def api_settings_report_outputs_folder():
+    """Round 92: GET/POST the visible report-output folder preference."""
+    try:
+        import adoptiq_settings as _settings  # noqa: PLC0415
+        from report_output_paths import REPORT_OUTPUTS_ENV_VAR  # noqa: PLC0415
+    except Exception as imp_err:  # noqa: BLE001
+        logger.exception("Round 92: report outputs settings import failed")
+        return jsonify({
+            "ok": False,
+            "error": f"settings_import_failed: {type(imp_err).__name__}",
+        }), 500
+
+    def _payload() -> dict:
+        try:
+            persisted = _settings.get("report_outputs_folder", "") or ""
+        except Exception:
+            persisted = ""
+        root, source = _r92_report_outputs_root_with_source(create=True)
+        try:
+            exists = bool(root) and Path(root).is_dir()
+        except Exception:
+            exists = False
+        return {
+            "ok": True,
+            "folder_path": str(root),
+            "source": source,
+            "persisted_value": persisted,
+            "path_exists": exists,
+            "env_var": REPORT_OUTPUTS_ENV_VAR,
+            "env_value_set": bool(os.environ.get(REPORT_OUTPUTS_ENV_VAR)),
+        }
+
+    if request.method == "GET":
+        return jsonify(_payload()), 200
+
+    auth_err = _r17_2_authorize_corpus_admin()
+    if auth_err is not None:
+        body, code = auth_err
+        return jsonify(body), code
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "invalid_json_payload"}), 400
+    raw_value = payload.get("folder_path")
+    if raw_value is None:
+        raw_value = ""
+    if not isinstance(raw_value, str):
+        return jsonify({"ok": False, "error": "folder_path_must_be_string"}), 400
+    candidate = raw_value.strip()
+    if not _settings.is_valid_report_outputs_folder(candidate):
+        return jsonify({
+            "ok": False,
+            "error": "invalid_folder_path",
+            "detail": (
+                "Allowed: empty string (clears override) OR an absolute POSIX path "
+                "OR a Windows drive-letter path OR a tilde-prefixed path. "
+                "Control characters and shell metacharacters are rejected."
+            ),
+        }), 400
+
+    if candidate:
+        try:
+            target = Path(os.path.expanduser(candidate))
+            target.mkdir(parents=True, exist_ok=True)
+            probe = target / ".adoptiq-write-probe"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+        except Exception as probe_err:  # noqa: BLE001
+            return jsonify({
+                "ok": False,
+                "error": "folder_not_writable",
+                "detail": type(probe_err).__name__,
+            }), 400
+
+    try:
+        merged = dict(_settings.load_settings() or {})
+        merged["report_outputs_folder"] = candidate
+        _settings.save_settings(merged)
+    except Exception as save_err:  # noqa: BLE001
+        logger.exception("Round 92: report_outputs_folder settings write failed")
+        return jsonify({
+            "ok": False,
+            "error": f"settings_write_failed: {type(save_err).__name__}",
+        }), 500
+
+    logger.info(
+        "Round 92: report_outputs_folder persisted (persisted=%s)",
+        "(unset)" if not candidate else "(set)",
+    )
+    return jsonify(_payload()), 200
 
 
 @app.route('/api/llm/ping', methods=['POST'])
@@ -24939,34 +25445,8 @@ def download_file(filename):
         # both branches the resolved path is re-verified against
         # ``outputs_real`` via ``realpath`` so a symlink farm under
         # any subdirectory cannot escape the outputs root.
-        outputs_dir = str(_APP_SUPPORT / "outputs") if _frozen else os.path.abspath("outputs")
-        outputs_real = os.path.realpath(outputs_dir)
-        outputs_prefix = outputs_real + os.sep
-        flat_candidate = os.path.join(outputs_real, safe_filename)
-        resolved_path = os.path.realpath(flat_candidate)
-        if not os.path.isfile(resolved_path):
-            # Walk the new R81 nested layout for the safe filename.
-            # ``Path.rglob`` returns the first match; when multiple
-            # writers happened to land on the same filename (e.g.
-            # repeated runs at the same UTC second), the iteration
-            # order matches ``os.scandir`` so the response is stable
-            # within a single directory snapshot.
-            try:
-                _r81_match = next(
-                    (
-                        p for p in Path(outputs_real).rglob(safe_filename)
-                        if p.is_file()
-                    ),
-                    None,
-                )
-            except OSError:
-                _r81_match = None
-            if _r81_match is None:
-                return f"File not found: {safe_filename}", 404
-            resolved_path = os.path.realpath(str(_r81_match))
-        if not (resolved_path == outputs_real or resolved_path.startswith(outputs_prefix)):
-            return "Access denied", 403
-        if not os.path.isfile(resolved_path):
+        resolved_path = _r92_resolve_output_artifact(safe_filename, basename_hint=safe_filename)  # Round 92
+        if not resolved_path:
             return f"File not found: {safe_filename}", 404
 
         dl_name = secure_filename(os.path.basename(resolved_path)) or "download"
@@ -24978,6 +25458,79 @@ def download_file(filename):
     except Exception as e:
         logger.error(f"Error downloading file {filename}: {e}")
         return "Error downloading file. Please try again.", 500
+
+
+def _r92_open_path_in_default_app(path: str) -> None:
+    """Round 92: open a validated local path in the OS default app."""
+    if sys.platform == "darwin":
+        import subprocess  # noqa: PLC0415
+
+        subprocess.Popen(["open", path])  # noqa: S603,S607
+    elif sys.platform == "win32":
+        os.startfile(path)  # type: ignore[attr-defined]  # noqa: S606
+    else:
+        import subprocess  # noqa: PLC0415
+
+        subprocess.Popen(["xdg-open", path])  # noqa: S603,S607
+
+
+@app.route('/open-report/<analysis_id>/<target>', methods=['POST'])
+def open_report_artifact(analysis_id, target):
+    """Round 92: POST+CSRF open Word, Excel, or containing folder."""
+    from urllib.parse import unquote
+
+    analysis_id = unquote(analysis_id)
+    target = str(target or "").strip().lower()
+    if not _is_valid_analysis_id(analysis_id):
+        return jsonify({'ok': False, 'error': 'Invalid analysis ID'}), 400
+    if target not in {"docx", "xlsx", "folder"}:
+        return jsonify({'ok': False, 'error': 'Invalid open target'}), 400
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(
+                request.headers.get('X-CSRFToken')
+                or request.headers.get('X-CSRF-Token')
+                or request.form.get('csrf_token')
+            )
+        except Exception:
+            return jsonify({'ok': False, 'error': 'CSRF validation failed'}), 403
+
+    with analysis_status_lock:
+        status = dict(analysis_status.get(analysis_id) or {})
+    if not status:
+        return jsonify({'ok': False, 'error': 'Analysis not found'}), 404
+    if str(status.get('status') or '').lower() != 'completed':
+        return jsonify({'ok': False, 'error': 'Analysis is not completed'}), 400
+
+    word_report = status.get('word_report') or status.get('report_path')
+    excel_report = status.get('excel_report')
+    selected_path = None
+    if target == "docx":
+        selected_path = _r92_resolve_output_artifact(word_report)
+    elif target == "xlsx":
+        selected_path = _r92_resolve_output_artifact(excel_report)
+    else:
+        selected_path = _r92_resolve_output_artifact(word_report) or _r92_resolve_output_artifact(excel_report)
+        if selected_path:
+            selected_path = str(Path(selected_path).parent)
+    if not selected_path:
+        return jsonify({'ok': False, 'error': 'Report artifact not found'}), 404
+    if target == "folder":
+        try:
+            folder = Path(selected_path)
+            if not folder.is_dir():
+                return jsonify({'ok': False, 'error': 'Report folder not found'}), 404
+            if not any(_r92_is_under_root(folder, root) for root in _r92_candidate_output_roots(create_current=False)):
+                return jsonify({'ok': False, 'error': 'Access denied'}), 403
+        except Exception:
+            return jsonify({'ok': False, 'error': 'Report folder not found'}), 404
+
+    try:
+        _r92_open_path_in_default_app(str(selected_path))
+    except Exception as open_err:  # noqa: BLE001
+        logger.warning("Round 92: open-report failed: %s", type(open_err).__name__)
+        return jsonify({'ok': False, 'error': 'Open failed'}), 500
+    return jsonify({'ok': True, 'target': target}), 200
 
 @app.route('/cancel/<analysis_id>', methods=['POST'])
 def cancel_analysis(analysis_id):
@@ -25147,6 +25700,7 @@ def start_compact_analysis():
         )
 
         # Initialize status (subscription_id/customer_name allow single-customer filter)
+        active_report_model = _r91_active_report_model_snapshot()  # Round 91
         with analysis_status_lock:
             analysis_status[analysis_id] = {
                 'status': 'starting',
@@ -25169,6 +25723,9 @@ def start_compact_analysis():
                 'start_time': _now_utc_iso_z(),
                 'current_step': 'Initialization',
                 'step_start_time': _now_utc_iso_z(),
+                'active_report_model': active_report_model,  # Round 91
+                'report_model_name': active_report_model,  # Round 91
+                'phase_timings': {},  # Round 91
                 'estimated_completion': (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
                 'report_type': 'compact'
             }
@@ -25316,6 +25873,7 @@ def start_customer_renewal_analysis():
                 f"{_sanitize_analysis_id_part(technology)}_{days}d_{int(time.time())}"
             )
         # Initialize status
+        active_report_model = _r91_active_report_model_snapshot()  # Round 91
         with analysis_status_lock:
             analysis_status[analysis_id] = {
                 'status': 'starting',
@@ -25331,6 +25889,9 @@ def start_customer_renewal_analysis():
                 'start_time': _now_utc_iso_z(),
                 'current_step': 'Initialization',
                 'step_start_time': _now_utc_iso_z(),
+                'active_report_model': active_report_model,  # Round 91
+                'report_model_name': active_report_model,  # Round 91
+                'phase_timings': {},  # Round 91
                 'estimated_completion': (datetime.now(timezone.utc) + timedelta(minutes=5 if renewal_type == 'renewal_portfolio' else 3)).isoformat(),
                 'report_type': 'customer_renewal'
             }
@@ -25554,6 +26115,7 @@ def start_subscription_analysis():
         analysis_id = f"sub_{safe_subscription_id}_{int(time.time())}"
 
         # Initialize analysis status
+        active_report_model = _r91_active_report_model_snapshot()  # Round 91
         with analysis_status_lock:
             analysis_status[analysis_id] = {
                 'status': 'initializing',
@@ -25564,7 +26126,10 @@ def start_subscription_analysis():
                 'report_type': report_type,
                 'start_time': _now_utc_iso_z(),
                 'current_step': 'Initialization',
-                'step_start_time': _now_utc_iso_z()
+                'step_start_time': _now_utc_iso_z(),
+                'active_report_model': active_report_model,  # Round 91
+                'report_model_name': active_report_model,  # Round 91
+                'phase_timings': {},  # Round 91
             }
 
         # Start analysis in background thread
@@ -26523,6 +27088,8 @@ def run_subscription_analysis(analysis_id):
             start_time = status.get('start_time', '')
             end_time = status['end_time']
             insights_payload = _build_insights_payload(status, 'Subscription analysis completed')
+            status['analysis_id'] = analysis_id  # Round 92
+            _r92_write_corpus_sidecars(status)  # Round 92
 
         # Persist outside lock to reduce lock contention during file I/O.
         save_analysis_status()
@@ -26668,47 +27235,9 @@ def download_result(analysis_id, file_type):
         word_report, excel_report,
     )
 
-    # Canonical outputs dir (Application Support when frozen) so download works even if status stored wrong path
-    _out_dir = _APP_SUPPORT / "outputs" if _frozen else Path(os.path.abspath("outputs"))
-
-    def _resolve_safe_path(raw_path, out_dir):
-        """Resolve file path and verify it's under the outputs directory.
-
-        Round 81 / Build 57: when the legacy flat fallback misses
-        (because the file was migrated into a nested ``<Manager>/<Type>/``
-        subdir on first launch), walk the outputs tree once via
-        ``Path.rglob(<basename>)`` to pick the migrated file.  The
-        prefix containment check below still applies, so the rglob
-        fallback cannot escape the outputs root via a symlink.
-        """
-        out_abs = os.path.abspath(str(out_dir))
-        prefix = out_abs + os.sep
-        resolved = os.path.abspath(raw_path)
-        if not os.path.exists(resolved):
-            resolved = os.path.abspath(str(Path(out_dir) / os.path.basename(raw_path)))
-        if not os.path.exists(resolved):
-            try:
-                _r81_basename = os.path.basename(raw_path)
-                _r81_match = next(
-                    (
-                        p for p in Path(out_dir).rglob(_r81_basename)
-                        if p.is_file()
-                    ),
-                    None,
-                ) if _r81_basename else None
-            except OSError:
-                _r81_match = None
-            if _r81_match is not None:
-                resolved = os.path.abspath(str(_r81_match))
-        if not os.path.exists(resolved):
-            return None
-        if resolved == out_abs or resolved.startswith(prefix):
-            return resolved
-        return None
-
     try:
         if file_type == 'docx' and word_report:
-            file_path = _resolve_safe_path(word_report, _out_dir)
+            file_path = _r92_resolve_output_artifact(word_report)  # Round 92
             if not file_path:
                 logger.error(f"[[ERROR]] Word file not found or outside outputs dir")
                 return jsonify({'error': 'Word file not found'}), 404
@@ -26719,7 +27248,7 @@ def download_result(analysis_id, file_type):
                 return jsonify({'error': 'Word file no longer available'}), 404
 
         elif file_type == 'xlsx' and excel_report:
-            file_path = _resolve_safe_path(excel_report, _out_dir)
+            file_path = _r92_resolve_output_artifact(excel_report)  # Round 92
             if not file_path:
                 logger.error(f"[[ERROR]] Excel file not found or outside outputs dir")
                 return jsonify({'error': 'Excel file not found'}), 404
@@ -27002,6 +27531,7 @@ def start_leader_report():
         analysis_id = f"Leader_{_sanitize_analysis_id_part(manager)}_{days}d_{timestamp}"
 
         # Initialize status
+        active_report_model = _r91_active_report_model_snapshot()  # Round 91
         with analysis_status_lock:
             analysis_status[analysis_id] = {
                 'status': 'starting',
@@ -27009,6 +27539,10 @@ def start_leader_report():
                 'message': ' Initializing Leader Report Generation...',
                 'start_time': _now_utc_iso_z(),
                 'current_step': 'Initialization',
+                'step_start_time': _now_utc_iso_z(),  # Round 91
+                'active_report_model': active_report_model,  # Round 91
+                'report_model_name': active_report_model,  # Round 91
+                'phase_timings': {},  # Round 91
                 'manager': manager,
                 'days': days,
                 'report_type': 'leader',
@@ -28415,6 +28949,8 @@ def run_leader_report_generation(analysis_id):
                 'excel_report': excel_path if excel_path else None,
                 'success_message': success_msg
             }
+            status['analysis_id'] = analysis_id  # Round 92
+            _r92_write_corpus_sidecars(status)  # Round 92
             # Round 5 / Phase 6.7: persist *under* the lock so the on-disk
             # JSON snapshot matches the in-memory completion state.  See
             # the matching comment in the compact-report worker.
@@ -28476,7 +29012,11 @@ def leader_report_form():
     """Display leader report configuration form"""
     # Filter out "All Managers" from the list for leader reports
     manager_list = [m for m in MANAGERS if m != "All Managers"]
-    return render_template('leader_report_form.html', managers=manager_list)
+    return render_template(
+        'leader_report_form.html',
+        managers=manager_list,
+        active_report_model=_r91_active_report_model_snapshot(),  # Round 91
+    )
 
 
 @app.route('/bst_psirt_search')

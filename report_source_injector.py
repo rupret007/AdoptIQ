@@ -216,11 +216,11 @@ def _r82_chrome_for_paragraph(
     return fallback
 
 # Mirror of ``_PARAGRAPH_KPI_NUMERIC_RE`` from
-# ``report_iteration_loop.py``.  We import via duck-typing rather than
-# a hard dependency because the gate module is dev-side only and the
-# injector ships in production builds.
+# ``report_iteration_loop.py``.  Round 94 keeps the R61 case-ID
+# negative lookahead here too so the injector and gate segment the same
+# paragraphs.
 _PARAGRAPH_KPI_NUMERIC_RE = re.compile(
-    r"\b(?P<label>[A-Za-z][A-Za-z /()\-]{2,80}?)\s*[:\-]\s*(?P<value>-?\$?\d[\d,]*(?:\.\d+)?\s*%?)",
+    r"\b(?P<label>[A-Za-z][A-Za-z /()\-]{2,80}?)\s*[:\-]\s*(?P<value>-?\$?\d(?!\d{6})[\d,]*(?:\.\d+)?\s*%?)",
 )
 _NUMERIC_TOKEN_RE = re.compile(r"(?<![A-Za-z])[-+]?\d+(?:,\d{3})*(?:\.\d+)?%?")
 _NUMERIC_KPI_VALUE_RE = re.compile(r"^-?\$?\d[\d,]*(?:\.\d+)?\s*%?$")

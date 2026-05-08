@@ -143,7 +143,14 @@ def get_build_label_text() -> str:
     """Return the one-line label used in Word footers."""
 
     version, build = _resolve_version_build()
-    return f"AdoptIQ v{version} build {build} - generated {_now_iso_z()}"
+    generated_at = _now_iso_z()
+    return (  # Round 94: Word footers carry the same canonical audit fields as Report_Info.
+        f"AdoptIQ v{version} build {build} - generated {generated_at} | "
+        f"App_Version: {version} | "
+        f"App_Build: {build} | "
+        f"Process_Started_At_UTC: {_PROCESS_STARTED_AT_UTC} | "
+        f"Report_Generated_At_UTC: {generated_at}"
+    )
 
 
 def apply_word_footer(doc) -> bool:

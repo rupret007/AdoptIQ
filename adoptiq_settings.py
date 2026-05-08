@@ -111,6 +111,14 @@ _SCHEMA: Dict[str, tuple] = {
     # on save AND on load so a hand-edited / corrupt value cannot
     # land in ``settings.json``.
     "csone_onedrive_folder": (str, ""),
+    # Round 92: visible report-output folder override.  Packaged
+    # builds default to ``~/Documents/AdoptIQ Reports`` via
+    # ``report_output_paths.get_report_outputs_root``; this setting
+    # lets an operator point reports at another absolute / tilde path
+    # after the app verifies the directory is writable.  Empty string
+    # is the unset sentinel and falls through to ``ADOPTIQ_OUTPUTS_DIR``
+    # and then the packaged default.
+    "report_outputs_folder": (str, ""),
 }
 
 SETTINGS_FILENAME = "settings.json"
@@ -266,6 +274,7 @@ _VALIDATORS: Dict[str, Callable[[Any], bool]] = {
     "report_model_name": _is_valid_model_name,  # Round 69 / Build 43
     "corpus_share_url": _is_valid_sharepoint_url,  # Round 84 / Build 60
     "csone_onedrive_folder": _is_valid_csone_folder_path,  # Round 88 / F5
+    "report_outputs_folder": _is_valid_csone_folder_path,  # Round 92
 }
 
 
@@ -477,6 +486,17 @@ def is_valid_csone_folder_path(value: Any) -> bool:
     return _is_valid_csone_folder_path(value)
 
 
+def is_valid_report_outputs_folder(value: Any) -> bool:
+    """Round 92: public alias for report-output folder path validation.
+
+    The syntactic contract intentionally mirrors the R88 CSOne folder
+    validator: empty string is unset, and non-empty values must be
+    absolute or tilde-prefixed with no control / shell metacharacters.
+    The app's POST endpoint layers a write probe on top before saving.
+    """
+    return _is_valid_csone_folder_path(value)
+
+
 __all__ = [
     "SETTINGS_FILENAME",
     "load_settings",
@@ -487,4 +507,5 @@ __all__ = [
     "is_valid_sharepoint_url",
     "is_valid_model_name",  # Round 69 / Build 43
     "is_valid_csone_folder_path",  # Round 88 / F5
+    "is_valid_report_outputs_folder",  # Round 92
 ]
