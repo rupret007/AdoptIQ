@@ -2739,16 +2739,15 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                    ``tests/test_round53_admin_tile_blocked_state.py``. #}
                 {% if corpus_status.boot.source == 'blocked_no_onedrive' %}
                 <p style="margin-top: 0.6em; color: #856404; background: #fff3cd; border: 1px solid #ffeeba; padding: 0.6em 0.8em; border-radius: 4px;">
-                    <strong>Sign in to OneDrive required (Round 53):</strong>
-                    AdoptIQ cannot decrypt the bundled corpus snapshot
-                    until the canonical sentinel under
+                    <strong>Sign in to OneDrive required:</strong>
+                    AdoptIQ ships with no embedded corpus data. It cannot
+                    create or open the local corpus until the canonical
+                    sentinel under
                     <code>AdoptIQ_CSOne_Reports</code> is synced to
-                    disk by the OneDrive desktop client.  The corpus
-                    is encrypted-at-rest against a key that lives in
-                    that share -- without the OneDrive sync, the
-                    bundled snapshot is intentionally unopenable
-                    (this is the security boundary added in
-                    QUALITY_AUDIT.md Round 52.2 / Round 53).  The
+                    disk by the OneDrive desktop client. The corpus is
+                    encrypted-at-rest against a key that lives in that
+                    share; without OneDrive sync there is no authorized
+                    local index to serve. The
                     Re-index / Rebuild / Reset buttons below are
                     disabled while blocked because they would all
                     immediately fail with the same error.
@@ -2893,8 +2892,8 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                Round 52.1 / Build28: expose the existing ``/corpus_reset``
                admin proxy as a visible operator escape hatch.  It is
                deliberately confirm-gated and disabled while indexing,
-               because it replaces the user's local encrypted corpus
-               cache from the bundled snapshot. #}
+               because it preserves and rebuilds the user's local
+               encrypted corpus cache from authorized OneDrive data. #}
             {% set _corpus_busy = corpus_status.boot.in_progress %}
             {# Round 53 / Phase 53.4: gate the Re-index / Rebuild /
                Reset buttons on ``blocked_no_onedrive`` too -- not
@@ -2931,11 +2930,11 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 </button>
             </form>
             <form method="POST" action="/corpus_reset" style="display:inline;"
-                  onsubmit="return confirm('Reset the local encrypted corpus cache from the bundled snapshot? This preserves a broken copy for troubleshooting and may start a refresh.');">
+                  onsubmit="return confirm('Reset the local encrypted corpus cache? This preserves a broken copy for troubleshooting, then rebuilds from authorized OneDrive data.');">
                 <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
                 <button type="submit" class="btn btn-danger"
                         {% if _corpus_disabled %}disabled{% endif %}
-                        title="{% if _corpus_busy %}Indexing already in progress{% elif _corpus_blocked %}Sign in to OneDrive to unlock the corpus before resetting{% else %}Replace the local encrypted corpus cache from the bundled snapshot{% endif %}">
+                        title="{% if _corpus_busy %}Indexing already in progress{% elif _corpus_blocked %}Sign in to OneDrive to unlock the corpus before resetting{% else %}Preserve and rebuild the local encrypted corpus cache from OneDrive{% endif %}">
                     Reset corpus
                 </button>
             </form>
@@ -3861,13 +3860,12 @@ def corpus_reset_route():
     server-to-server HTTP call with the ``X-AdoptIQ-Internal`` header
     so the main app can authorize without us holding its CSRF token.
 
-    Round 54 / F3: short-circuit BEFORE the proxy call when the corpus
-    is in ``blocked_no_onedrive`` -- the reset would preserve the
-    bundled snapshot and trigger a refresh that would IMMEDIATELY
-    re-block on the same Round 53 fail-closed gate, wasting the
-    operator's click and producing a confusing "started" banner over
-    a corpus that is still blocked.  Surface a clear "Sign in to
-    OneDrive first" status instead.
+    Round 54 / F3, updated in Round 96: short-circuit BEFORE the proxy
+    call when the corpus is in ``blocked_no_onedrive``. Runtime-only
+    reset would still immediately re-block without the authorized
+    OneDrive folder/sentinel, wasting the operator's click and
+    producing a confusing "started" banner over a corpus that is still
+    blocked. Surface a clear "Sign in to OneDrive first" status instead.
     """
     _require_admin_csrf()
     if _r54_corpus_is_blocked_no_onedrive():

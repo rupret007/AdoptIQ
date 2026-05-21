@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 import sys
 import threading
 import time
@@ -57,10 +56,10 @@ logger = logging.getLogger(__name__)
 
 _BOOT_LOCK = threading.RLock()
 
-# Round 35 / native-corpus: 24h refresh cadence for the daily worker
-# that pulls updates from ``Config.ADOPTIQ_CORPUS_SHARE_URL`` on top
-# of the baked snapshot.  Hour-resolution ticks keep us responsive to
-# user sign-in events without hammering Graph.
+# Round 35 / native-corpus + Round 96 / runtime-only corpus: 24h
+# refresh cadence for the daily worker that pulls updates from the
+# authorized local OneDrive mirror. Hour-resolution ticks keep us
+# responsive to user sign-in events without hammering the filesystem.
 _DAILY_REFRESH_INTERVAL_S = 86400.0
 _DAILY_REFRESH_TICK_S = 3600.0
 _DAILY_REFRESH_RETRY_S = 3600.0
@@ -114,14 +113,10 @@ class CorpusBootState:
     # Round 35 / native-corpus: how the corpus was first materialized
     # on this install.
     #
-    #   * ``"baked"``  -- copied from ``<sys._MEIPASS>/baked_corpus/``
-    #                     on the first launch of a freshly-installed
-    #                     .app.  ``indexed_at`` reflects the build-time
-    #                     bake timestamp so the panel can show
-    #                     "Indexed (last bake YYYY-MM-DD)".
-    #   * ``"fresh"``  -- legacy / dev path: no baked corpus shipped,
-    #                     so the indexer creates an empty DB and waits
-    #                     for the user to sign in / refresh.
+    #   * ``"fresh"``  -- runtime-only path: no corpus data ships in
+    #                     the .app, so the indexer creates or refreshes
+    #                     the encrypted local DB from the user's
+    #                     authorized OneDrive mirror after sync.
     #
     # ``last_successful_refresh_ts`` and ``last_refresh_attempt_ts``
     # back the daily-refresh worker's ``_should_refresh()`` math; both
@@ -142,8 +137,8 @@ class CorpusBootState:
     #                         is a directory, and contains at least one
     #                         non-empty file.  Daily refresh enabled.
     #   * ``"not_synced"`` -- folder is missing, empty, or unreadable.
-    #                         Daily refresh paused; baked snapshot is
-    #                         the only source of truth.
+    #                         Daily refresh paused; corpus remains
+    #                         unavailable until OneDrive sync completes.
     #   * ``None``         -- check has not run yet (first boot, before
     #                         the bootstrap thread populates state).
     #
@@ -572,10 +567,10 @@ def _r68_onedrive_sentinel_present() -> bool:
 # so the Round 39 self-heal preserve / restore loops can still
 # rotate broken legacy artifacts on upgrade.  Do NOT use it for
 # install-time copying.
-_BAKED_CORPUS_FILES: tuple = (
-    "corpus.db.enc",
-    "corpus.db.salt",
-)
+# Round 96: shipping builds copy no corpus artifacts from the app
+# bundle.  The tuple remains as an explicit empty contract so tests can
+# pin that app-bundled corpus data is retired.
+_BAKED_CORPUS_FILES: tuple = ()
 _LEGACY_BAKED_CORPUS_FILES: tuple = (
     "corpus.db.enc",
     "sentinel.json",
@@ -585,42 +580,12 @@ _LEGACY_BAKED_CORPUS_FILES: tuple = (
 
 
 def _baked_corpus_dir() -> Optional[Path]:
-    """Return the directory containing the baked corpus, or ``None``
-    when the running build did not bundle one.
+    """Round 96: baked corpus lookup is retired.
 
-    Resolution order:
-
-    1. ``ADOPTIQ_BAKED_CORPUS_DIR`` env override (test path; lets the
-       test suite point at a fixture without monkey-patching
-       ``sys._MEIPASS``).
-    2. ``<sys._MEIPASS>/baked_corpus/`` -- the PyInstaller-mounted
-       resource location used by the shipping .app.
-    3. ``<repo_root>/bake/`` -- handy when running from a dev checkout
-       after a local ``scripts/bake_corpus.py`` invocation.
-
-    Returns ``None`` (rather than raising) when no candidate exists,
-    so callers can fall through to the legacy fresh-bootstrap path
-    cleanly.
+    Keep the helper as a compatibility stub for older tests/tools, but
+    always return ``None`` so no local development bake directory can be
+    accidentally treated as app-shipped data.
     """
-    override = os.environ.get("ADOPTIQ_BAKED_CORPUS_DIR")
-    if override:
-        candidate = Path(override)
-        if candidate.is_dir() and (candidate / "corpus.db.enc").exists():
-            return candidate
-
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        candidate = Path(meipass) / "baked_corpus"
-        if candidate.is_dir() and (candidate / "corpus.db.enc").exists():
-            return candidate
-
-    # Dev / source-tree path: only honored when a corpus.db.enc lives
-    # there (we never want to silently treat an empty ``bake/`` skip
-    # marker as a valid baked corpus).
-    repo_bake = Path(__file__).resolve().parent / "bake"
-    if repo_bake.is_dir() and (repo_bake / "corpus.db.enc").exists():
-        return repo_bake
-
     return None
 
 
@@ -781,171 +746,16 @@ def _preserve_broken_corpus(user_dir: Path) -> Optional[str]:
 
 
 def _install_baked_corpus_if_present() -> Optional[str]:
-    """If a baked corpus is bundled, ensure the writable user dir has a
-    healthy decryptable corpus.  Returns the bake timestamp (ISO-8601)
-    on success, ``None`` when no install happened (no bake bundled,
-    user already has a healthy corpus, or self-heal could not run).
+    """Round 96: legacy no-op.
 
-    Round 35 (initial behavior): on a clean install, copy the four
-    artifacts into the user dir.  Idempotent -- a healthy existing
-    corpus is left alone so the user's daily-refresh delta is
-    preserved across launches.
-
-    Round 39 (self-heal): if the user's existing ``corpus.db.enc``
-    fails to decrypt (auth-tag mismatch, missing matching sentinel,
-    etc.), preserve the broken artifacts as ``<name>.broken-<utc>``
-    (single rolling backup, ~280 MB cap) and reinstall the baked
-    snapshot.  This recovers the canonical upgrade-handoff failure
-    where a previous build's sentinel does not match the current
-    build's bundled crypto material.
-
-    Round 53 / Phase 53.3: the bake now ships only TWO artifacts
-    (``corpus.db.enc`` + ``corpus.db.salt``).  The encrypted
-    snapshot is keyed against the canonical OneDrive sentinel
-    living in ``Config.CSONE_ONEDRIVE_FOLDER`` -- so the install
-    is harmless even when OneDrive is not yet synced (the .enc is
-    encrypted at rest), but the open path will fail-closed until
-    the user's OneDrive client mirrors the sentinel.  Surfacing
-    that "blocked" state is the responsibility of ``_run_index_pass``
-    via ``_STATE.source = "blocked_no_onedrive"``.
-
-    Each copy is atomic (sibling tmp + ``os.replace``) and the
-    destination files are chmod 0600 so a multi-user host cannot read
-    another account's encrypted DB.
+    AdoptIQ no longer ships corpus data inside the app bundle.  The
+    runtime corpus is created only after the user's authorized OneDrive
+    sync exposes the corpus folder and sentinel, then the indexer walks
+    that local source.  Keep this symbol temporarily so older tests or
+    support tools that import it fail harmlessly instead of reinstalling
+    stale data from a local development bake directory.
     """
-    bake_dir = _baked_corpus_dir()
-    if bake_dir is None:
-        return None
-    user_dir = _user_corpus_dir()
-    user_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(user_dir, 0o700)
-    except OSError:
-        pass
-
-    user_db = user_dir / "corpus.db.enc"
-    self_healed = False
-    if user_db.exists():
-        # Round 39: probe-and-recover.  A healthy corpus short-circuits
-        # (existing happy path); a broken corpus is preserved aside
-        # and we fall through to the install loop.
-        if _probe_existing_corpus_decrypts(user_db):
-            # Round 39 UX: the user has a healthy corpus from a prior
-            # bake -- preserve that fact in ``_STATE`` so the analyze
-            # panel labels it "Active * OneDrive synced" rather than
-            # the misleading "Indexing OneDrive..." that the fresh
-            # path defaults to.  ``indexed_at`` comes from the
-            # user's lock (whichever build minted it) so the panel
-            # can still show the bake provenance.
-            with _BOOT_LOCK:
-                if _STATE.source is None:
-                    _STATE.source = "baked"
-                    minted = _read_lock_minted_at(user_dir)
-                    if minted and _STATE.indexed_at is None:
-                        _STATE.indexed_at = minted
-            return None
-        prior_minted_at = _read_lock_minted_at(user_dir)
-        broken_suffix = _preserve_broken_corpus(user_dir)
-        if broken_suffix is None:
-            # Preserve failed (e.g., permission denied).  We cannot
-            # safely overwrite the broken corpus, so leave it in
-            # place; the existing CorpusCryptoError surfaces in the
-            # UI and the user can use the new Reset button.
-            logger.warning(
-                "Round 39 / corpus_bootstrap: existing corpus failed "
-                "decrypt probe but preserve step failed; leaving "
-                "user_dir untouched (user_dir=%s)",
-                user_dir,
-            )
-            return None
-        new_lock_minted_at = _read_lock_minted_at(bake_dir)
-        logger.warning(
-            "Round 39 / corpus_bootstrap: event=corpus_self_heal_invalidtag "
-            "broken_suffix=%s bake_dir=%s prior_lock_minted_at=%s "
-            "new_lock_minted_at=%s",
-            broken_suffix, bake_dir, prior_minted_at, new_lock_minted_at,
-        )
-        self_healed = True
-
-    indexed_at: Optional[str] = None
-    for fname in _BAKED_CORPUS_FILES:
-        src = bake_dir / fname
-        if not src.exists():
-            # The artifacts ship together; missing any one means the
-            # bake is incomplete and the bake-source is unsafe to
-            # trust.  Round 53: roll back so we never leave a
-            # half-installed bundle on disk -- the runtime then
-            # surfaces ``_STATE.source = "blocked_no_onedrive"``
-            # (or "fresh" when OneDrive is also missing) so the
-            # panel guides the user toward the OneDrive sync flow
-            # instead of silently degrading.
-            logger.warning(
-                "Round 35 / corpus_bootstrap: baked corpus incomplete "
-                "(missing %s); rolling back partial install",
-                fname,
-            )
-            for cleanup in _BAKED_CORPUS_FILES:
-                try:
-                    (user_dir / cleanup).unlink(missing_ok=True)
-                except OSError:
-                    pass
-            return None
-        dest = user_dir / fname
-        tmp = dest.with_suffix(dest.suffix + ".install-tmp")
-        try:
-            shutil.copyfile(src, tmp)
-            try:
-                os.chmod(tmp, 0o600)
-            except OSError:
-                pass
-            os.replace(tmp, dest)
-        except OSError as copy_err:
-            logger.warning(
-                "Round 35 / corpus_bootstrap: baked corpus copy failed "
-                "name=%s err=%s",
-                fname, type(copy_err).__name__,
-            )
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-            return None
-        # Capture the build-time timestamp from the bake mtime so the
-        # UI can show "Last bake YYYY-MM-DD".  Use the earliest mtime
-        # across the bundled files (they are all written within
-        # seconds of one another at bake time).
-        try:
-            file_iso = datetime.fromtimestamp(
-                src.stat().st_mtime, tz=timezone.utc
-            ).strftime("%Y-%m-%dT%H:%M:%SZ")
-            if indexed_at is None or file_iso < indexed_at:
-                indexed_at = file_iso
-        except OSError:
-            pass
-    if self_healed:
-        _safe_log_info(
-            "Round 39 / corpus_bootstrap: self-healed baked corpus "
-            "into %s (bake_dir=%s indexed_at=%s)",
-            user_dir, bake_dir, indexed_at,
-        )
-    else:
-        _safe_log_info(
-            "Round 35 / corpus_bootstrap: installed baked corpus into %s "
-            "(bake_dir=%s indexed_at=%s)",
-            user_dir, bake_dir, indexed_at,
-        )
-    # Round 39: stash the self-heal flag on the module-level state so
-    # ``_run_index_pass`` can set ``_STATE.source = "self_healed_baked"``
-    # without changing this function's return type (callers that only
-    # check truthiness keep working).  We also set ``indexed_at`` here
-    # because the ``_run_index_pass`` block that normally writes it is
-    # guarded on ``_STATE.source is None`` and we just set source.
-    if self_healed:
-        with _BOOT_LOCK:
-            _STATE.source = "self_healed_baked"
-            if indexed_at is not None:
-                _STATE.indexed_at = indexed_at
-    return indexed_at
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1503,19 +1313,10 @@ def _run_index_pass(*, rebuild: bool) -> None:
     onedrive_root = getattr(Config, "CSONE_ONEDRIVE_FOLDER", None)
     encrypted_path = default_db_path().with_suffix(".db.enc")
 
-    # Round 35 / native-corpus: on first launch of a freshly-installed
-    # .app, copy the baked corpus into the writable user dir so the
-    # rest of this function opens an already-populated DB instead of
-    # starting from empty.  Idempotent: subsequent launches see an
-    # existing user_db and short-circuit.
-    try:
-        baked_indexed_at = _install_baked_corpus_if_present()
-    except Exception as install_err:  # noqa: BLE001 - never bubble
-        baked_indexed_at = None
-        logger.warning(
-            "Round 35 / corpus_bootstrap: baked corpus install failed: %s",
-            type(install_err).__name__,
-        )
+    # Round 96 / runtime-only corpus: do not install a corpus snapshot
+    # from the app bundle.  The encrypted DB is created or refreshed
+    # only after OneDrive + sentinel checks pass below, using the
+    # authorized local OneDrive mirror as the source of truth.
 
     # Round 36 / onedrive-sync-auth: probe sync status before the
     # index pass so the panel can render "synced" / "not_synced"
@@ -1539,10 +1340,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
         _STATE.last_error = None
         _STATE.last_error_kind = None
         _STATE.last_sources = None
-        if baked_indexed_at is not None and _STATE.source is None:
-            _STATE.source = "baked"
-            _STATE.indexed_at = baked_indexed_at
-        elif _STATE.source is None:
+        if _STATE.source is None:
             _STATE.source = "fresh"
 
     # Round 36 / onedrive-sync-auth: the legacy SharePoint cache pull
@@ -1902,6 +1700,9 @@ def _run_index_pass(*, rebuild: bool) -> None:
             _STATE.last_refresh_error = None
             _STATE.onedrive_status = post_status
             _STATE.onedrive_file_count = post_count
+            # Round 96: this timestamp now represents the runtime
+            # local-index pass, not a build-time bake.
+            _STATE.indexed_at = _STATE.last_finished_at
         _safe_log_info(
             "Round 17.1 / corpus_bootstrap: indexed files_parsed=%d chunks=%d sources=%d",
             int(aggregate.files_parsed),
@@ -2054,8 +1855,8 @@ def reset_user_corpus() -> tuple[Optional[str], int]:
     ``<name>.broken-<utc_iso>`` (single rolling backup) and returns
     ``(suffix, count_preserved)``.  When no corpus is present on disk
     returns ``(None, 0)``.  The caller is expected to follow up with
-    ``request_refresh(rebuild=True)`` so the bootstrap path then
-    reinstalls the baked snapshot and walks the index sources.
+    ``request_refresh(rebuild=True)`` so the bootstrap path rebuilds
+    the local encrypted corpus from the authorized OneDrive source.
 
     Closes the in-process handle (if any) before renaming so the
     sqlite plaintext temp file does not race against the rename.

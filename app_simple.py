@@ -21533,17 +21533,13 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             "encrypted_path": boot_state.encrypted_path,
             "onedrive_root": boot_state.onedrive_root,
             "sharepoint": boot_state.sharepoint,
-            # Round 35 / native-corpus: surface the bake provenance +
-            # daily-refresh timer state so ``static/js/intel_status.js``
-            # can render the new "Indexed (sign in to refresh)" /
-            # "Last bake YYYY-MM-DD" panel labels and so operators can
-            # debug a stalled refresh worker without grepping logs.
-            # ``source`` is "baked" when the .app shipped with a
-            # pre-indexed corpus and "fresh" when the runtime auto-
-            # minted one.  ``indexed_at`` is the bake timestamp (UTC
-            # ISO-8601).  The three ``*_refresh_*`` fields are
-            # populated by the daily-refresh worker and stay None
-            # until the first refresh attempt.
+            # Round 96 / runtime-only corpus: surface runtime-index
+            # provenance + daily-refresh timer state so
+            # ``static/js/intel_status.js`` can show that no corpus data
+            # is embedded in the app and that indexing happens only
+            # after OneDrive auth/sync exposes the local corpus folder.
+            # ``source`` remains "fresh" for runtime-created corpora;
+            # ``indexed_at`` is the latest local index timestamp.
             "source": getattr(boot_state, "source", None),
             "indexed_at": getattr(boot_state, "indexed_at", None),
             "last_successful_refresh_ts": getattr(
@@ -21816,8 +21812,8 @@ def api_corpus_reset():
          ``<name>.broken-<utc>`` (single rolling backup, ~280 MB cap;
          older ``.broken-*`` sidecars are pruned first so disk usage
          is bounded).
-      2. Trigger a refresh which, on the next bootstrap pass, copies
-         the bundled baked snapshot back into the user dir.
+      2. Trigger a refresh which, on the next bootstrap pass, rebuilds
+         the local encrypted corpus from the authorized OneDrive source.
 
     Never bubbles -- on internal failure returns
     ``{"ok": False, "reason": "..."}`` with HTTP 200 so the panel can
@@ -23398,10 +23394,13 @@ def ask_ai_portfolio():
                     'account_total': grounded_result.get('account_total'),
                     'partial_data_warnings': grounded_result.get('partial_data_warnings') or [],
                     'canonical_headline': grounded_result.get('canonical_headline') or {},
+                    'canonical_corrections': grounded_result.get('canonical_corrections') or [],
+                    'canonical_verified': grounded_result.get('canonical_verified') or [],
                     # Round 17 / Phase D.1: surface corpus availability to the UI.
                     'corpus': grounded_result.get('corpus') or {},
                     'query_id': _query_id,
                     'retrieval_method': str((_retrieval_diag or {}).get('method') or 'unknown'),
+                    'retrieval_diag': _retrieval_diag,
                     # Round 68 / Build 42 (C7): pass through the
                     # evidence index so the UI can render clickable
                     # citation badges with snippet popovers.
@@ -24472,6 +24471,7 @@ def _r74_run_grounded_for_streaming(question: str, manager: str,
             "answer": str,
             "query_id": str,
             "retrieval_method": str,
+            "retrieval_diag": dict,
             "model_name": str,
             "evidence_records": list,
             "evidence_index": list,
@@ -24484,6 +24484,7 @@ def _r74_run_grounded_for_streaming(question: str, manager: str,
             "account_total": int | None,
             "partial_data_warnings": list,
             "canonical_headline": dict,
+            "canonical_corrections": list,
             "corpus": dict,
         }
 
@@ -24497,6 +24498,7 @@ def _r74_run_grounded_for_streaming(question: str, manager: str,
         "answer": "",
         "query_id": "",
         "retrieval_method": "unknown",
+        "retrieval_diag": {},
         "model_name": "",
         "evidence_records": [],
         "evidence_index": [],
@@ -24509,6 +24511,8 @@ def _r74_run_grounded_for_streaming(question: str, manager: str,
         "account_total": None,
         "partial_data_warnings": [],
         "canonical_headline": {},
+        "canonical_corrections": [],
+        "canonical_verified": [],
         "corpus": {},
     }
     try:
@@ -24582,6 +24586,7 @@ def _r74_run_grounded_for_streaming(question: str, manager: str,
         out["answer"] = grounded_result.get("answer") or ""
         out["query_id"] = query_id
         out["retrieval_method"] = str(retrieval_diag.get("method") or "unknown")
+        out["retrieval_diag"] = retrieval_diag
         out["model_name"] = active_model
         out["evidence_records"] = grounded_result.get("evidence_records") or []
         out["evidence_index"] = grounded_result.get("evidence_index") or []
@@ -24594,6 +24599,8 @@ def _r74_run_grounded_for_streaming(question: str, manager: str,
         out["account_total"] = grounded_result.get("account_total")
         out["partial_data_warnings"] = grounded_result.get("partial_data_warnings") or []
         out["canonical_headline"] = grounded_result.get("canonical_headline") or {}
+        out["canonical_corrections"] = grounded_result.get("canonical_corrections") or []
+        out["canonical_verified"] = grounded_result.get("canonical_verified") or []
         out["corpus"] = grounded_result.get("corpus") or {}
         return out
     except Exception as exc:  # noqa: BLE001
@@ -24676,6 +24683,7 @@ def ask_ai_portfolio_stream():
             yield _r74_format_sse_event('meta', {
                 'query_id': pipeline.get('query_id') or '',
                 'retrieval_method': pipeline.get('retrieval_method') or 'unknown',
+                'retrieval_diag': pipeline.get('retrieval_diag') or {},
                 'model_name': pipeline.get('model_name') or '',
                 'context_summary': pipeline.get('context_summary') or '',
                 'evidence_truncated': bool(pipeline.get('evidence_truncated')),
@@ -24686,6 +24694,8 @@ def ask_ai_portfolio_stream():
                 'account_total': pipeline.get('account_total'),
                 'partial_data_warnings': pipeline.get('partial_data_warnings') or [],
                 'canonical_headline': pipeline.get('canonical_headline') or {},
+                'canonical_corrections': pipeline.get('canonical_corrections') or [],
+                'canonical_verified': pipeline.get('canonical_verified') or [],
                 'corpus': pipeline.get('corpus') or {},
                 'evidence_index': pipeline.get('evidence_index') or [],
                 'evidence_records': pipeline.get('evidence_records') or [],

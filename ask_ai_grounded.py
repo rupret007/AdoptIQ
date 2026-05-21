@@ -92,6 +92,11 @@ class EvidenceRecord:
     bm25_rank: Optional[int] = None
     dense_rank: Optional[int] = None
     rrf_score: Optional[float] = None
+    # Round 95 - optional second-stage reranker diagnostics. Defaults
+    # keep legacy constructors working while letting the diagnostics
+    # endpoint prove whether the reranker changed a query's order.
+    rerank_rank: Optional[int] = None
+    rerank_score: Optional[float] = None
 
 
 def is_grounded_ask_ai_enabled() -> bool:
@@ -375,6 +380,43 @@ def _hybrid_rank_evidence(
                     dense_rank=int(dense_rank) if dense_rank else None,
                     rrf_score=float(rrf_score),
                 ))
+        # Round 95: optional second-stage reranker over the top RRF
+        # candidates. If unavailable or disabled, preserve the RRF order
+        # and let ``compute_retrieval_diag`` surface ``rerank`` as
+        # ``not_applied``. This keeps runtime soft-fail while the bake
+        # self-test remains the hard release gate.
+        try:
+            from config import Config  # type: ignore
+
+            rerank_enabled = bool(getattr(Config, "ASK_AI_RERANK_ENABLED", True))
+            candidate_k = int(getattr(Config, "ASK_AI_RERANK_CANDIDATE_K", 30) or 30)
+        except Exception:  # noqa: BLE001
+            rerank_enabled = True
+            candidate_k = 30
+        if rerank_enabled and out:
+            try:
+                from ask_ai_reranker import rerank_scores
+
+                top_n = max(1, min(candidate_k, len(out)))
+                candidate_texts = [
+                    f"{r.source_type} {r.customer} {r.text}".strip()
+                    for r in out[:top_n]
+                ]
+                rerank = rerank_scores(question, candidate_texts)
+                if rerank is not None and len(rerank) == top_n:
+                    reranked_head: List[EvidenceRecord] = []
+                    for rank_zero, (record, score) in enumerate(
+                        sorted(zip(out[:top_n], rerank), key=lambda pair: -float(pair[1])),
+                        start=1,
+                    ):
+                        reranked_head.append(_dc_replace(
+                            record,
+                            rerank_rank=int(rank_zero),
+                            rerank_score=float(score),
+                        ))
+                    out = reranked_head + list(out[top_n:])
+            except Exception as _rerank_err:  # noqa: BLE001
+                logger.warning("Round 95: rerank stage failed; preserving RRF order: %s", _rerank_err)
         return out
     except Exception as e:  # noqa: BLE001 - Round 94 runtime degradation guard
         logger.warning("Round 94: hybrid retrieval failed; falling back to lexical: %s", e)
@@ -455,6 +497,7 @@ def compute_retrieval_diag(
     if not ranked:
         return {
             "method": method,
+            "rerank": "not_applicable",
             "top_k": int(top_k),
             "model": model_id,
             "bm25_top_id": None,
@@ -465,6 +508,9 @@ def compute_retrieval_diag(
     actual_method = "lexical"
     if any(getattr(r, "rrf_score", None) is not None for r in ranked):
         actual_method = "hybrid"
+    rerank_status = "not_applicable"
+    if actual_method == "hybrid":
+        rerank_status = "hybrid" if any(getattr(r, "rerank_score", None) is not None for r in ranked) else "not_applied"
     bm25_top: Optional[str] = None
     dense_top: Optional[str] = None
     if actual_method == "hybrid":
@@ -490,10 +536,13 @@ def compute_retrieval_diag(
             "bm25_rank": int(r.bm25_rank) if getattr(r, "bm25_rank", None) else None,
             "dense_rank": int(r.dense_rank) if getattr(r, "dense_rank", None) else None,
             "rrf_score": float(r.rrf_score) if getattr(r, "rrf_score", None) is not None else None,
+            "rerank_rank": int(r.rerank_rank) if getattr(r, "rerank_rank", None) else None,
+            "rerank_score": float(r.rerank_score) if getattr(r, "rerank_score", None) is not None else None,
         })
     return {
         "method": actual_method,
         "configured_method": method,
+        "rerank": rerank_status,
         "top_k": int(top_k),
         "model": model_id,
         "bm25_top_id": bm25_top,
@@ -854,6 +903,149 @@ def _strip_uncited_digit_sentences(
     if cursor < len(text):
         cleaned_sentences.append(text[cursor:])
     return ("".join(cleaned_sentences).strip(), dropped)
+
+
+@dataclass(frozen=True)
+class CrossCheckResult:
+    """Round 95 - post-LLM canonical metric cross-check result."""
+
+    corrections: List[Dict[str, Any]]
+    verified: List[str]
+
+
+_R95_CHECKED_KPIS = frozenset({
+    "total_customers",
+    "customers",
+    "open_adoption_barriers",
+    "total_barriers",
+    "adoption_barriers",
+    "open_action_plans",
+    "action_plans",
+    "high_severity_cases",
+    "total_arr",
+})
+
+_R95_KPI_LABELS: Dict[str, Tuple[str, ...]] = {
+    "total_customers": ("total customers", "customers in portfolio", "customers"),
+    "total_barriers": ("open adoption barriers", "adoption barriers", "total barriers", "barriers"),
+    "open_action_plans": ("open action plans", "action plans"),
+    "high_severity_cases": ("high severity cases", "p1/p2 cases", "p1 and p2 cases"),
+    "total_arr": ("total arr", "arr"),
+}
+
+
+def _r95_numeric_value(raw: Any) -> Optional[float]:
+    if raw is None:
+        return None
+    text = str(raw).strip().replace(",", "").replace("$", "")
+    multiplier = 1.0
+    if text.lower().endswith("m"):
+        multiplier = 1_000_000.0
+        text = text[:-1]
+    elif text.lower().endswith("k"):
+        multiplier = 1_000.0
+        text = text[:-1]
+    try:
+        return float(text) * multiplier
+    except ValueError:
+        return None
+
+
+def _r95_extract_answer_value(answer_text: str, labels: Sequence[str]) -> Optional[float]:
+    text = str(answer_text or "")
+    for label in labels:
+        escaped = re.escape(label)
+        patterns = (
+            rf"(?i)\b{escaped}\b[^\d$]{{0,24}}[$]?(\d[\d,]*(?:\.\d+)?[mkMK]?)",
+            rf"(?i)[$]?(\d[\d,]*(?:\.\d+)?[mkMK]?)[^\w]{{0,24}}\b{escaped}\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if not match:
+                continue
+            value = _r95_numeric_value(match.group(1))
+            if value is not None:
+                return value
+    return None
+
+
+def _r95_canonical_metric_value(metric: str, canonical_numbers: Dict[str, Any]) -> Optional[float]:
+    key = str(metric or "").strip()
+    if key in canonical_numbers:
+        return _r95_numeric_value(canonical_numbers.get(key))
+    if key == "total_barriers":
+        for alt in ("open_adoption_barriers", "adoption_barriers"):
+            if alt in canonical_numbers:
+                return _r95_numeric_value(canonical_numbers.get(alt))
+    if key == "open_action_plans":
+        for alt in ("action_plans", "action_plans_open", "open_action_plan_count"):
+            if alt in canonical_numbers:
+                return _r95_numeric_value(canonical_numbers.get(alt))
+    if key == "high_severity_cases":
+        if "high_severity_cases" in canonical_numbers:
+            return _r95_numeric_value(canonical_numbers.get("high_severity_cases"))
+        p1 = _r95_numeric_value(canonical_numbers.get("p1_cases"))
+        p2 = _r95_numeric_value(canonical_numbers.get("p2_cases"))
+        if p1 is not None or p2 is not None:
+            return float(p1 or 0.0) + float(p2 or 0.0)
+    return None
+
+
+def _r95_values_match(metric: str, actual: float, expected: float) -> bool:
+    if metric == "total_arr" or abs(expected) >= 100_000:
+        tolerance = max(abs(expected) * 0.01, 1.0)
+        return abs(actual - expected) <= tolerance
+    return int(round(actual)) == int(round(expected))
+
+
+def _r95_cross_check_answer_against_canonical(
+    answer_text: str,
+    scope: Optional[Dict[str, Any]],
+    canonical_numbers: Optional[Dict[str, Any]],
+) -> CrossCheckResult:
+    """Round 95 - verify selected answer KPIs against canonical metrics."""
+    del scope  # reserved for future per-scope refinements
+    canonical = dict(canonical_numbers or {})
+    corrections: List[Dict[str, Any]] = []
+    verified: List[str] = []
+    for metric, labels in _R95_KPI_LABELS.items():
+        expected = _r95_canonical_metric_value(metric, canonical)
+        if expected is None:
+            continue
+        actual = _r95_extract_answer_value(answer_text, labels)
+        if actual is None:
+            continue
+        if _r95_values_match(metric, actual, expected):
+            verified.append(metric)
+            continue
+        delta_pct = 0.0 if expected == 0 else abs(actual - expected) / abs(expected) * 100.0
+        corrections.append({
+            "kpi": metric,
+            "llm_value": actual,
+            "canonical_value": expected,
+            "delta_pct": delta_pct,
+        })
+    return CrossCheckResult(corrections=corrections, verified=verified)
+
+
+def _r95_apply_canonical_corrections(answer_text: str, corrections: Sequence[Dict[str, Any]]) -> str:
+    if not corrections:
+        return str(answer_text or "")
+    lines = [str(answer_text or "").strip(), "", "### Canonical Corrections"]
+    for correction in corrections[:5]:
+        kpi = str(correction.get("kpi") or "metric")
+        llm_value = correction.get("llm_value")
+        canonical_value = correction.get("canonical_value")
+        try:
+            llm_render = f"{float(llm_value):g}"
+        except (TypeError, ValueError):
+            llm_render = str(llm_value)
+        try:
+            canon_render = f"{float(canonical_value):g}"
+        except (TypeError, ValueError):
+            canon_render = str(canonical_value)
+        lines.append(f"- {kpi}: answer stated {llm_render}; canonical value is {canon_render}.")
+    return "\n".join(line for line in lines if line is not None).strip()
 
 
 def compose_grounded_answer(
@@ -1684,6 +1876,17 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             except (TypeError, ValueError):
                 _canonical_numbers.add(str(_v))
         answer, rejected = compose_grounded_answer(payload, allowed_ids, canonical_numbers=_canonical_numbers)
+        _r95_cross_check = _r95_cross_check_answer_against_canonical(
+            answer,
+            {
+                "manager": req.manager,
+                "technology": req.technology,
+                "days": req.days,
+            },
+            canonical_headline,
+        )
+        if _r95_cross_check.corrections:
+            answer = _r95_apply_canonical_corrections(answer, _r95_cross_check.corrections)
 
         # Phase 2.3: replace BU_NAME.nunique() with cm.count_customers so
         # the badge in the UI matches the headline numbers in the report
@@ -1813,6 +2016,8 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             "account_total": len(account_ids),
             "partial_data_warnings": partial_warnings,
             "canonical_headline": canonical_headline,
+            "canonical_corrections": _r95_cross_check.corrections,
+            "canonical_verified": _r95_cross_check.verified,
             "corpus": _corpus_payload,
             "retrieval_diag": retrieval_diag,
             # Round 68 / Build 42 (C7): see comment block above.

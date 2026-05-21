@@ -204,9 +204,9 @@ def test_evaluate_predicate_raise_does_not_poison():
 # ---------------------------------------------------------------------------
 
 
-def test_load_questions_returns_50_for_committed_golden_set():
+def test_load_questions_returns_75_for_committed_golden_set_after_round95():
     questions = _runner.load_questions()
-    assert len(questions) == 50
+    assert len(questions) == 75
     portfolios = {q.portfolio for q in questions}
     assert portfolios == {
         "p01_high_renewal_risk",

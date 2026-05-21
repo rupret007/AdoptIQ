@@ -358,6 +358,12 @@
                                   id="r69DebugChipModel" style="display:none;">model: -</span>
                             <span class="badge bg-light text-secondary border font-monospace"
                                   id="r68DebugChipId">debug: -</span>
+                            {# Round 95 / Build 68: per-answer confidence
+                               band derived from retrieval diagnostics and
+                               canonical metric corrections. #}
+                            <span class="badge bg-warning-subtle text-warning border"
+                                  id="r95ConfidenceBand"
+                                  style="display:none;">confidence: -</span>
                             {# Round 74 / Phase 3 (P3): streaming-mode
                                pill -- shown when the answer arrived
                                via the SSE endpoint, hidden when the
@@ -533,6 +539,7 @@
    asset so it executes under ``script-src 'self'`` without needing
    the unsafe-inline relaxation. #}
 <script src="{{ url_for('static', filename='js/ask_ai.js') }}"></script>
+<script src="{{ url_for('static', filename='js/r95_confidence_band.js') }}"></script>
 {# Round 73 / Phase 4 (UX-2): the shared static/js/r69_model_preferences.js
    module is no longer loaded on ask_ai.html because the picker moved
    to /preferences (UX-1).  Loading it here would download an inert

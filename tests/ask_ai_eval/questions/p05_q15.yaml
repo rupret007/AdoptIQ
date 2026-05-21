@@ -1,0 +1,8 @@
+id: p05_q15
+portfolio: p05_cross_compare
+category: canonical_metric
+question: Confirm the canonical total barrier count for this portfolio.
+predicates:
+  - type: must_match_canonical_metric
+    metric: total_barriers
+    tolerance: 0

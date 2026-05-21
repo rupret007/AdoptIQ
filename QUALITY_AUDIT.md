@@ -1889,6 +1889,7 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 
 **Trailer:** Made-with: Cursor
 
+
 ## Round 92 — handoff 2026-05-07
 
 **What changed (plain English):**
@@ -10417,3 +10418,65 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 
 **Trailer:** Made-with: Cursor
 
+
+## Round 96 — handoff 2026-05-21
+
+**What changed (plain English):**
+- AdoptIQ no longer bundles corpus data in the macOS app: `adoptiq_mac.spec` now refuses to append `corpus.db.enc`, `corpus.db.salt`, sentinel files, or a `baked_corpus` payload to PyInstaller data.
+- The macOS build wrapper defaults to skipping corpus baking and the release gate now enforces the inverse contract: shipping builds require `.bake-skipped` and fail if corpus DB/salt artifacts remain in `bake/`.
+- Runtime corpus bootstrap is authoritative: the legacy baked-corpus installer is a no-op, `_run_index_pass` no longer installs from app resources, and reset/self-heal copy now describes clearing local state before re-indexing from the authorized OneDrive corpus folder.
+- Corpus panel, admin, analyze-page, and preferences copy now describe local runtime indexing after Cisco OneDrive sync instead of a baked snapshot, including defensive legacy-state mapping for old `baked` / `self_healed_baked` source labels.
+- Baked-corpus regression tests were rewritten to pin the new no-bundled-data contract while preserving the sentinel-never-bundled and OneDrive-gated indexing expectations.
+
+**Files touched:**
+- `adoptiq_mac.spec` — remove corpus DB/salt data inclusion and document the runtime-only corpus package contract.
+- `build_mac_dmg.sh` — default `ADOPTIQ_BAKE_CORPUS` to skip; invert `ADOPTIQ_RELEASE_GATE=1` to forbid corpus data artifacts.
+- `corpus_bootstrap.py` — make baked install helpers legacy no-ops and remove runtime installation from app resources.
+- `app_simple.py` — update corpus status/reset comments for runtime-only provenance.
+- `enhanced_admin_dashboard_v2.py` — update admin corpus-reset / blocked-state copy.
+- `scripts/bake_corpus.py` — reframe bake as developer validation, not production DMG data shipment.
+- `static/js/intel_status.js` — runtime-only panel states/copy, reset confirmation, and legacy baked-source mapping.
+- `templates/analyze.html` — runtime-only panel docblock and reset tooltip.
+- `templates/preferences.html` — security/app-size copy now states the app ships no corpus data.
+- `config.py` — build bump to 69 and Round 96 summary comment.
+- `tests/test_round35_bake_script_smoke.py` — stub optional model bake checks so the corpus I/O smoke stays deterministic.
+- `tests/test_round35_baked_corpus_loaded_on_boot.py` — rewritten for no baked install / no bundled source.
+- `tests/test_round36_panel_renders_synced_state.py` — rewritten for runtime corpus UI states.
+- `tests/test_round39_self_heal_crypto_failure.py` — rewritten for no reinstall-from-bundle behavior.
+- `tests/test_round53_spec_no_sentinel.py` — widened to forbid all corpus artifacts, not only sentinels.
+- `tests/test_round54_f5_build30_to_build31_upgrade.py` — rewritten for runtime-only upgrade behavior.
+- `tests/test_round62_corpus_logger_module_wide.py` — adjusted safe-log callsite floor after deleting the baked-install success log.
+- `tests/test_round68_corpus_panel_self_healed_branch.py` — rewritten so legacy `self_healed_baked` is mapped defensively, not emitted.
+- `tests/test_round83_signed_in_no_corpus_panel.py` — updated docblock expectation for runtime-only state names.
+- `tests/test_round87_release_gate_corpus_bake.py` — rewritten for the inverted release gate.
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_round53_spec_no_sentinel.py::*` — pins that `adoptiq_mac.spec` never bundles corpus DB, salt, sentinel, lock, or `baked_corpus`.
+- `tests/test_round87_release_gate_corpus_bake.py::*` — pins shipping release gate requires skip marker and rejects corpus DB/salt artifacts.
+- `tests/test_round35_baked_corpus_loaded_on_boot.py::*` — pins `_BAKED_CORPUS_FILES=()`, `_baked_corpus_dir()` is `None`, installer is no-op, and `_run_index_pass` no longer calls it.
+- `tests/test_round39_self_heal_crypto_failure.py::*` and `tests/test_round54_f5_build30_to_build31_upgrade.py::*` — pin legacy local artifacts are preserved/reset without reinstalling from a bundle.
+- `tests/test_round36_panel_renders_synced_state.py::*`, `tests/test_round68_corpus_panel_self_healed_branch.py::*`, and `tests/test_round83_signed_in_no_corpus_panel.py::*` — pin runtime-only UI states/copy and legacy-state mapping.
+- `tests/test_round35_bake_script_smoke.py::_stub_optional_model_bake_checks` — keeps bake smoke independent of local dense/reranker model availability.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5507 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `adoptiq_mac.spec` — confirm no `baked_corpus` data tuple can be emitted for `corpus.db.enc`, `corpus.db.salt`, `sentinel.json`, or `corpus.sentinel.lock.json`; model assets remain separate and intentional.
+2. `build_mac_dmg.sh` — confirm release-gate order is still after `scripts/bake_corpus.py --no-bake` and before PyInstaller, and that stale local `bake/corpus.db.enc` / `bake/corpus.db.salt` fail the shipping build.
+3. `corpus_bootstrap.py` — confirm `_run_index_pass` can only open the corpus through `open_corpus_for_user(..., allow_local_sentinel=False)` once OneDrive/sentinel checks pass; no app-resource reinstall path remains.
+4. `static/js/intel_status.js` + `templates/analyze.html` — confirm first-run states are clear for "signed into OneDrive but no corpus shortcut", "not signed in", "indexing", "active", and "refresh failed", without mentioning a baked snapshot.
+5. `tests/test_round35_bake_script_smoke.py` — confirm the fixture stubs only optional model self-tests for this smoke file and does not weaken source-shape tests that pin bake-time vector/reranker behavior elsewhere.
+
+**Known deferrals (intentional non-fixes):**
+- A macOS DMG build/bundle inspection was not run in this session; `make verify` and packaging source-shape tests are green, but an actual `ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh` artifact inspection remains the live acceptance step.
+- Round 95 Ask AI reranker/confidence work is still in the dirty tree and was intentionally left untouched except where files already overlapped for corpus copy/comments; the corpus change is scoped by Round 96 markers and regression tests.
+- `scripts/bake_corpus.py` remains available as a developer validation tool; production shipment now skips and forbids its data artifacts rather than deleting the script outright.
+
+**Trailer:** Made-with: Cursor

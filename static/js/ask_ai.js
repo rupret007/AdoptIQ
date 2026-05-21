@@ -444,6 +444,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Round 69 / Build 43: model-name pill (may be null on older
     // ask_ai.html bundles -- handle gracefully like the rest of the chip).
     var r69DebugChipModel = document.getElementById('r69DebugChipModel');
+    var r95ConfidenceBand = document.getElementById('r95ConfidenceBand');
     var r68LastQueryId = '';
     var lastAskedQuestion = '';
 
@@ -457,6 +458,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // lands.  Otherwise a stale debug ID from the previous
         // answer would briefly show during the loading spinner.
         if (r68DebugChip) { r68DebugChip.style.display = 'none'; }
+        if (r95ConfidenceBand) { r95ConfidenceBand.style.display = 'none'; }
     }
 
     // Round 68 / Build 42 (C5): render the debug-chip footer when
@@ -837,6 +839,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 // chip on a successful answer so an operator can
                 // file a support ticket with the debug ID.
                 _r68RenderDebugChip(data);
+                try {
+                    if (window.AdoptIQConfidenceBand) {
+                        window.AdoptIQConfidenceBand.renderConfidenceBand(data);
+                    }
+                } catch (_) { /* noop */ }
                 // Round 74 / Phase 5 (P5): record the conversation
                 // turn AFTER we know the request succeeded.  When
                 // the conversation toggle is OFF this is a no-op.
@@ -1566,6 +1573,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     retrieval_method: metaPayload.retrieval_method || '',
                     model_name: metaPayload.model_name || ''
                 });
+                try {
+                    if (window.AdoptIQConfidenceBand) {
+                        window.AdoptIQConfidenceBand.renderConfidenceBand(metaPayload);
+                    }
+                } catch (_) { /* noop */ }
                 if (metaPayload.context_summary) {
                     contextInfo.style.display = '';
                     contextDetail.textContent = metaPayload.context_summary;

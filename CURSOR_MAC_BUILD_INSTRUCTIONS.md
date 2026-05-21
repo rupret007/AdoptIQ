@@ -86,8 +86,15 @@ chmod +x build_mac.sh build_mac_dmg.sh
 Optional DMG packaging:
 
 ```bash
-./build_mac_dmg.sh
+ADOPTIQ_RELEASE_GATE=1 ./build_mac_dmg.sh
 ```
+
+As of Round 96 / Build 69, release builds are runtime-only for corpus data.
+`ADOPTIQ_RELEASE_GATE=1` verifies that the DMG path skipped corpus baking and
+that stale `bake/corpus.db.enc` / `bake/corpus.db.salt` artifacts are absent
+before PyInstaller runs. The app indexes the authorized OneDrive corpus locally
+after launch; no corpus database, salt, sentinel, or `Resources/baked_corpus/`
+payload should ship in the app bundle.
 
 If no Mac script exists yet, ask Cursor:
 
@@ -124,6 +131,13 @@ hdiutil detach /tmp/adoptiq_dmg
 Also verify:
 - App starts and opens `http://localhost:5151`
 - No missing module errors at startup
+- The app bundle contains no corpus data:
+
+```bash
+test ! -e /tmp/adoptiq_dmg/AdoptIQ.app/Contents/Resources/baked_corpus
+find /tmp/adoptiq_dmg/AdoptIQ.app -name 'corpus.db.enc' -o -name 'corpus.db.salt' -o -name 'sentinel.json' -o -name 'corpus.sentinel.lock.json'
+# Expected: no output
+```
 
 ### Staging sync (OneDrive)
 

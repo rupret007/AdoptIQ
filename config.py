@@ -937,7 +937,11 @@ ADOPTIQ_VERSION = "1.0.4"
 # tests across validator, resolver, ``_r83_safe_share_url``,
 # preferences-page source-shape, analyze-card regression guard, and
 # cross-pin against the R35 + R81 fixtures).
-ADOPTIQ_BUILD = "67"  # Round 94 / Build 67
+ADOPTIQ_BUILD = "69"  # Round 96 / Build 69
+# Round 96 / Build 69: externalizes the AdoptIQ Knowledge Corpus from
+# the app bundle. Shipping builds carry no corpus database or salt; the
+# encrypted local corpus is created only after the user's Cisco OneDrive
+# sync exposes the authorized folder and sentinel.
 # Round 90 / Build 66: hyperfocused fix for the Build-65 acceptance bug
 # where the Compact Risk Summary tile rendered
 # ``"Score 4-6 (Watch, 0-10 [Source: AdoptIQ Report Data Sources] scale): 9"``
@@ -1549,6 +1553,18 @@ class Config:
     # default (Cormack, Clarke, and Buettcher 2009). Bounded
     # configurable for ablation experiments.
     ASK_AI_RRF_K = int(os.environ.get('ASK_AI_RRF_K', '60') or 60)
+
+    # Round 95 - optional second-stage Ask AI reranker. Runtime failures
+    # preserve the RRF order and surface in retrieval diagnostics; release
+    # bakes fail loud when the configured reranker cannot load.
+    ASK_AI_RERANK_ENABLED = (
+        str(os.environ.get('ASK_AI_RERANK_ENABLED', 'true')).strip().lower()
+        in {'1', 'true', 'yes', 'on'}
+    )
+    ASK_AI_RERANK_MODEL = str(
+        os.environ.get('ASK_AI_RERANK_MODEL', 'Xenova/ms-marco-MiniLM-L-6-v2')
+    ).strip()
+    ASK_AI_RERANK_CANDIDATE_K = int(os.environ.get('ASK_AI_RERANK_CANDIDATE_K', '30') or 30)
 
     # Round 79 / Build 55 - BE-engineering priority barrier analysis.
     # The deterministic scorer (``be_priority_scorer.compute_be_priority_score``)

@@ -217,8 +217,11 @@ def test_no_bare_logger_info_call_outside_helper_body():
 
 
 def test_safe_log_info_call_site_count_matches_expected_floor():
-    """Pin the expected number of ``_safe_log_info(`` call sites to the
-    Round 62 floor (11 callers).  If a future round legitimately adds
+    """Pin the expected number of ``_safe_log_info(`` call sites.
+
+    Round 96 retired the baked-corpus install helper, removing its
+    install-success log while preserving the no-bare-logger contract.
+    If a future round legitimately adds
     another ``logger.info`` call site routed through the helper, bump
     this floor to match.  If the floor drops, a call site was deleted
     or replaced -- cross-check that the deletion was intentional."""
@@ -233,8 +236,8 @@ def test_safe_log_info_call_site_count_matches_expected_floor():
             continue
         for _ in call_re.finditer(line):
             call_count += 1
-    assert call_count >= 11, (
-        f"Round 62 / A1 floor: expected >= 11 _safe_log_info(...) call sites, found {call_count}. "
+    assert call_count >= 10, (
+        f"Round 62 / A1 floor adjusted in Round 96: expected >= 10 _safe_log_info(...) call sites, found {call_count}. "
         "If a call site was intentionally removed, verify the original logger.info path is also "
         "gone (not reverted to a bare logger.info call), then update this floor."
     )

@@ -6,14 +6,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-# Round 35 + Round 36 / native-corpus: bake the AdoptIQ Knowledge
-# Corpus into an encrypted SQLite snapshot BEFORE PyInstaller runs so
-# the spec file can pick up the four artifacts (corpus.db.enc,
-# sentinel.json, corpus.db.salt, corpus.sentinel.lock.json) under
-# ``bake/``.  The salt filename is ``corpus.db.salt`` (NOT
-# ``salt.bin``) -- it is pinned by ``corpus_crypto._salt_path_for``
-# which derives the salt path from the encrypted DB via
-# ``with_suffix(".salt")``.
+# Round 96 / runtime-only corpus: shipping builds no longer bake or
+# bundle corpus data into the .app.  The app indexes the authorized
+# local OneDrive mirror after the user's Cisco OneDrive sync exposes
+# the corpus folder and sentinel.  ``scripts/bake_corpus.py`` remains
+# available as an explicit developer validation tool, but the default
+# DMG path skips it and removes stale bake artifacts before PyInstaller.
 #
 # Round 36: the MSAL/Graph device-code path was removed.  The bake
 # now reads a local directory (the OneDrive desktop client's mirror
@@ -24,25 +22,21 @@ cd "$ROOT_DIR"
 # Both must point at a real local directory containing parseable
 # files; the bake refuses to commit an empty corpus.
 #
-# Skip-mode controls (any one of these turns the bake into a no-op
-# that emits a marker file):
-#   * ADOPTIQ_BAKE_CORPUS=0  (env)
+# Optional developer bake controls:
+#   * ADOPTIQ_BAKE_CORPUS=1  (env)
+#   * ADOPTIQ_BAKE_FIXTURE_DIR=<path>
+#
+# Skip-mode controls (default shipping path; emits a marker file and
+# removes stale local bake artifacts):
+#   * ADOPTIQ_BAKE_CORPUS=0  (env, default)
 #   * pass --no-bake on the build command line via
 #     ADOPTIQ_BAKE_EXTRA_ARGS
-#
-# When skipped, the spec file's ``baked_corpus`` data entries
-# gracefully degrade because the bake artifacts are absent (the spec
-# file uses a ``Path.exists()`` check; see ``adoptiq_mac.spec``).
-# The runtime bootstrap then auto-mints a fresh local sentinel and
-# the daily refresh worker re-indexes from
-# Config.CSONE_ONEDRIVE_FOLDER once OneDrive sync catches up --
-# legacy / pre-Round-35 behavior.
 echo
 echo "=============================================="
-echo "  Round 35/36: Baking AdoptIQ Knowledge Corpus"
+echo "  Round 96: Runtime-only AdoptIQ Knowledge Corpus"
 echo "=============================================="
 echo
-BAKE_FLAG="${ADOPTIQ_BAKE_CORPUS:-1}"
+BAKE_FLAG="${ADOPTIQ_BAKE_CORPUS:-0}"
 BAKE_EXTRA_ARGS="${ADOPTIQ_BAKE_EXTRA_ARGS:-}"
 # Round 36: ADOPTIQ_BAKE_FIXTURE_DIR overrides the default
 # Config.CSONE_ONEDRIVE_FOLDER source.  Quoted explicitly because the
@@ -68,9 +62,11 @@ if [[ -x ".venv/bin/python" ]]; then
 fi
 BAKE_PYTHON_BIN="$PYTHON_BIN"
 if [[ "$BAKE_FLAG" == "0" || "$BAKE_FLAG" == "false" || "$BAKE_FLAG" == "no" ]]; then
-  echo "ADOPTIQ_BAKE_CORPUS=$BAKE_FLAG -- skipping corpus bake"
+  echo "ADOPTIQ_BAKE_CORPUS=$BAKE_FLAG -- skipping corpus data bake for runtime-only shipping"
   "$BAKE_PYTHON_BIN" scripts/bake_corpus.py --bake-dir bake --no-bake
 else
+  echo "WARNING: ADOPTIQ_BAKE_CORPUS=$BAKE_FLAG is a developer-only validation path."
+  echo "         Release builds must leave it disabled so no corpus data artifacts exist."
   if [[ -n "$BAKE_FIXTURE_DIR" ]]; then
     echo "Bake source: $BAKE_FIXTURE_DIR (ADOPTIQ_BAKE_FIXTURE_DIR override)"
     if ! "$BAKE_PYTHON_BIN" scripts/bake_corpus.py \
@@ -128,43 +124,34 @@ for c in _csone_onedrive_candidates():
 fi
 echo
 
-# Round 87 / Phase 1: opt-in release gate.  When ADOPTIQ_RELEASE_GATE=1
-# is set we hard-fail the build if the corpus bake was skipped or if
-# either of the two artifacts the .spec file relies on are missing.
-# Default-off so dev iteration (BAKE=0 or arbitrary --no-bake) still
-# works exactly as before; CI / shipping pipelines opt in by exporting
-# ADOPTIQ_RELEASE_GATE=1 BEFORE invoking this script.
-#
-# This closes the R86 audit's PARTIAL on the "baked corpus shipped
-# with DMG" requirement -- a future operator could otherwise run with
-# ADOPTIQ_BAKE_CORPUS=0 and silently ship a DMG that hits
-# blocked_no_onedrive on first launch for users without the OneDrive
-# folder synced.  The .bake-skipped marker is the SSoT that
-# scripts/bake_corpus.py writes from _emit_skip_marker (line ~233).
+# Round 96: opt-in release gate.  Shipping builds now hard-fail when
+# local bake data artifacts are present because corpus data must never
+# be embedded in the .app.  The .bake-skipped marker is expected on the
+# default path and proves stale bake artifacts were scrubbed before
+# PyInstaller runs.
 if [[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" ]]; then
   echo
   echo "=============================================="
-  echo "  Round 87: ADOPTIQ_RELEASE_GATE=1 active"
+  echo "  Round 96: ADOPTIQ_RELEASE_GATE=1 active"
   echo "=============================================="
-  if [[ -f "bake/.bake-skipped" ]]; then
+  if [[ ! -f "bake/.bake-skipped" ]]; then
     echo
-    echo "ERROR: ADOPTIQ_RELEASE_GATE=1 but bake/.bake-skipped is present."
-    echo "       The corpus bake was skipped (ADOPTIQ_BAKE_CORPUS=0 or"
-    echo "       --no-bake) -- shipping builds MUST carry a baked corpus."
-    echo "       Re-run without ADOPTIQ_BAKE_CORPUS=0 OR clear the"
-    echo "       release gate (unset ADOPTIQ_RELEASE_GATE) for a dev build."
+    echo "ERROR: ADOPTIQ_RELEASE_GATE=1 but bake/.bake-skipped is missing."
+    echo "       Shipping builds must skip the corpus data bake so the app"
+    echo "       contains no corpus database or salt."
+    echo "       Re-run with ADOPTIQ_BAKE_CORPUS=0, or clear the release gate"
+    echo "       for a developer-only validation build."
     exit 1
   fi
-  if [[ ! -f "bake/corpus.db.enc" || ! -f "bake/corpus.db.salt" ]]; then
+  if [[ -f "bake/corpus.db.enc" || -f "bake/corpus.db.salt" ]]; then
     echo
-    echo "ERROR: ADOPTIQ_RELEASE_GATE=1 but bake/corpus.db.enc or"
-    echo "       bake/corpus.db.salt is missing.  The .spec file ships"
-    echo "       these artifacts under Resources/baked_corpus/ so the"
-    echo "       runtime can install the encrypted corpus on first launch."
+    echo "ERROR: ADOPTIQ_RELEASE_GATE=1 found bake/corpus.db.enc or"
+    echo "       bake/corpus.db.salt.  Corpus data is runtime-only now and"
+    echo "       must not be present during a shipping build."
     echo "       Aborting release."
     exit 1
   fi
-  echo "  Bake artifacts present, gate satisfied."
+  echo "  No corpus data artifacts present, gate satisfied."
   echo
 fi
 

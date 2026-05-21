@@ -1,0 +1,18 @@
+{
+  "prompt_hash": "",
+  "question_id": "p02_q14",
+  "recorded_at": "synthetic-2026-05-08-round95",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "CASE-EVAL-201"
+        ],
+        "statement": "High Severity Cases: 9."
+      }
+    ],
+    "executive_summary": "",
+    "unknowns": []
+  }
+}

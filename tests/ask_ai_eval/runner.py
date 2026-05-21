@@ -325,7 +325,12 @@ def evaluate_question(
             allowed_ids,
             canonical_numbers=set(),
         )
-        results = _predicates.evaluate(answer, question.predicates, allowed_ids)
+        results = _predicates.evaluate(
+            answer,
+            question.predicates,
+            allowed_ids,
+            portfolio_bundle=bundle,
+        )
         all_passed = bool(results) and all(r.get("passed") for r in results)
         return QuestionResult(
             question_id=question.id,
@@ -405,6 +410,19 @@ def render_scorecard(
     lines.append(f"- Retrieval method: {method}")
     lines.append(f"- Total questions: {total}")
     lines.append(f"- Pass rate: {passed}/{total} ({pass_rate:.1f}%)")
+    canonical_total = sum(
+        1
+        for r in results
+        for pr in (r.predicate_results or [])
+        if pr.get("type") == "must_match_canonical_metric"
+    )
+    canonical_passed = sum(
+        1
+        for r in results
+        for pr in (r.predicate_results or [])
+        if pr.get("type") == "must_match_canonical_metric" and pr.get("passed")
+    )
+    lines.append(f"- Canonical metric predicates: {canonical_passed}/{canonical_total}")
     lines.append("")
     lines.append("## Per-category")
     lines.append("")

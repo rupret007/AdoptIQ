@@ -249,8 +249,10 @@
                         Operator-rotatable SharePoint share URL used by the
                         <strong>Add corpus share to my OneDrive</strong>
                         button on the Knowledge Corpus panel.  Changing
-                        this value does NOT alter the encryption contract:
-                        a DMG without OneDrive auth is still useless ciphertext.
+                        this value does NOT alter the security contract:
+                        the app ships no corpus data, and indexing starts
+                        only after OneDrive auth/sync exposes the
+                        authorized folder and sentinel.
                         Resolution precedence:
                         <code>settings.json</code> (this page) &rarr;
                         <code>ADOPTIQ_CORPUS_SHARE_URL</code> env &rarr;
@@ -333,10 +335,9 @@
                ``AI Projects/AdoptIQ_CSOne_Reports`` shape that the
                R36 / R83 ``_csone_onedrive_candidates`` auto-discovery
                looks for, so AdoptIQ falls through to "no CSOne folder
-               found" and corpus indexing degrades to the bundled
-               baked artifact only.  This card lets the operator
-               point AdoptIQ at the actual sync path WITHOUT a DMG
-               rebuild.  Resolution precedence:
+               found" and corpus indexing stays blocked.  This card lets
+               the operator point AdoptIQ at the actual sync path WITHOUT
+               a DMG rebuild.  Resolution precedence:
                ``settings.json`` (this card) &rarr;
                ``CSONE_ONEDRIVE_FOLDER`` env &rarr;
                auto-discovery candidates.  Threat model: the path

@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Round 35 + Round 36 + Round 53 / native-corpus: bake the AdoptIQ
-Knowledge Corpus into a ship-ready encrypted SQLite snapshot during
-the macOS DMG build.
+"""Round 35 + Round 36 + Round 53 / native-corpus bake helper.
 
-Invoked by ``build_mac_dmg.sh`` BEFORE ``pyinstaller`` so the two
-output artifacts can be picked up by the PyInstaller ``datas=[]``
-section in ``adoptiq_mac.spec`` and shipped inside the .app at
-``Resources/baked_corpus/``.
+Round 96 changes this script from a production DMG input into an
+explicit developer validation tool. Shipping builds no longer embed
+corpus data in the app; runtime indexing creates the encrypted local
+corpus only after the user's Cisco OneDrive sync exposes the authorized
+folder and sentinel.
 
 Round 53 / Phase 53.1 -- shrink to 2 artifacts (was 4):
 
@@ -74,6 +73,8 @@ Exit codes:
         artifacts decrypted with allow_local_sentinel=True+root=None,
         which proves the bake is offline-decryptable.  Artifacts
         deleted so a leaky bake cannot ship.
+* 8  -- Round 95 reranker self-test failed; the bake host cannot load
+        or score with the configured Ask AI reranker.
 
 (Exit code 2 is reserved for the legacy auth/Graph path and no
 longer emitted; ``main`` never returns that value.)
@@ -246,13 +247,11 @@ def _emit_skip_marker(bake_dir: Path) -> int:
     finally:
         os.close(fd)
     logger.info("bake skipped; wrote marker %s", marker)
-    # Remove any prior baked artifacts so PyInstaller does not pick
-    # up a stale corpus from a previous bake.  The build script /
-    # spec MUST tolerate the absence of these files when skip is
-    # active.  The list deliberately includes the legacy Round 33/34
-    # files (sentinel.json + corpus.sentinel.lock.json) so a dev
-    # iteration coming from a pre-Round-53 bake cannot leak the
-    # sentinel into the .app even if --no-bake is used.
+    # Round 96: remove any prior bake artifacts so the runtime-only
+    # shipping path cannot accidentally carry local corpus data into
+    # packaging.  The list deliberately includes the legacy Round 33/34
+    # files (sentinel.json + corpus.sentinel.lock.json) so old dev
+    # artifacts are scrubbed too.
     for stale in (
         "corpus.db.enc",
         "sentinel.json",
@@ -489,6 +488,19 @@ def _bake_chunk_vectors(conn) -> tuple[int, str, int]:
     return (written, model_id, model_dim)
 
 
+def _bake_reranker_self_test() -> tuple[bool, str]:
+    """Round 95 - fail release bakes when the Ask AI reranker is absent."""
+    try:
+        from ask_ai_reranker import bake_self_test
+    except Exception as err:  # noqa: BLE001
+        return (False, f"ask_ai_reranker import failed: {type(err).__name__}: {err}")
+    try:
+        ok, message = bake_self_test()
+    except Exception as err:  # noqa: BLE001
+        return (False, f"reranker self-test raised: {type(err).__name__}: {err}")
+    return (bool(ok), str(message or "unknown"))
+
+
 def _index_into_encrypted_corpus(
     downloads_dir: Path,
     bake_dir: Path,
@@ -603,11 +615,11 @@ def _index_into_encrypted_corpus(
         # store them in the chunk_vectors table BEFORE
         # commit_to_disk so the WAL checkpoint sweeps the vector
         # pages along with the BM25 pages into a single
-        # internally-consistent .enc snapshot.  Round 94 restores the
-        # documented bake-time hard-fail contract: a release bake that
-        # cannot write dense vectors must fail here, not ship a
-        # lexical-only corpus by accident.  Runtime still degrades to
-        # lexical when the user's machine cannot load the embedder.
+        # internally-consistent .enc snapshot.  Round 94 restored the
+        # hard-fail contract for this developer validation path: a bake
+        # that cannot write dense vectors fails here. Runtime still
+        # degrades to lexical when the user's machine cannot load the
+        # embedder.
         try:
             vectors_added, model_id, model_dim = _bake_chunk_vectors(handle.conn)
             logger.info(
@@ -618,10 +630,20 @@ def _index_into_encrypted_corpus(
             persist_on_close = False
             logger.error(
                 "Round 94: chunk-vector bake failed (%s); refusing to "
-                "ship a lexical-only baked corpus.",
+                "produce a lexical-only validation corpus.",
                 vec_err,
             )
             return 7
+        rerank_ok, rerank_message = _bake_reranker_self_test()
+        if not rerank_ok:
+            persist_on_close = False
+            logger.error(
+                "Round 95: reranker bake self-test failed (%s); refusing "
+                "to ship a build without rerank support.",
+                rerank_message,
+            )
+            return 8
+        logger.info("Round 95: reranker bake self-test ok: %s", rerank_message)
         handle.commit_to_disk()
     finally:
         try:

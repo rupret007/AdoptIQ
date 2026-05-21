@@ -1,0 +1,8 @@
+id: p04_q13
+portfolio: p04_quiet_portfolio
+category: canonical_metric
+question: How many open action plans are present in this scope?
+predicates:
+  - type: must_match_canonical_metric
+    metric: open_action_plans
+    tolerance: 0

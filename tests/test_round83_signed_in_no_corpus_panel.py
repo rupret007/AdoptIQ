@@ -404,6 +404,7 @@ def test_analyze_html_docblock_mentions_signed_in_no_corpus():
     template = Path(__file__).parent.parent / "templates" / "analyze.html"
     src = template.read_text(encoding="utf-8")
     assert "signed_in_no_corpus" in src
-    # Defensive: the state count claim in the docblock should reflect
-    # the new total (NINE states post-R83).
-    assert "NINE states" in src or "9 states" in src
+    # Round 96 retired baked/self-healed states; the docblock should
+    # now describe the runtime-only state machine explicitly.
+    assert "runtime_synced" in src
+    assert "fresh_indexing" in src

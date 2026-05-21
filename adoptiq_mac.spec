@@ -21,42 +21,11 @@ def _datas():
     except Exception:
         pass
 
-    # Round 35 + Round 53 / native-corpus: bundle the bake artifacts
-    # produced by ``scripts/bake_corpus.py`` (invoked by
-    # ``build_mac_dmg.sh`` BEFORE PyInstaller).  Each entry ships
-    # under ``AdoptIQ.app/Contents/Resources/baked_corpus/`` and is
-    # read at runtime by ``corpus_bootstrap``, which copies the
-    # encrypted database to a writable user dir on first launch.
-    #
-    # Each artifact is opt-in: when ``ADOPTIQ_BAKE_CORPUS=0`` (or the
-    # bake script crashes), the files are absent and PyInstaller would
-    # otherwise abort with "missing source file".  ``os.path.exists``
-    # gates each one so a skipped/failed bake still produces a working
-    # .app -- the user just sees "Sign in to OneDrive to unlock the
-    # corpus" on first run and the corpus refreshes from their own
-    # OneDrive sentinel once it syncs.
-    #
-    # Round 53 / Phase 53.2 -- this loop now bundles ONLY 2 files:
-    # ``corpus.db.enc`` (encrypted snapshot) and ``corpus.db.salt``
-    # (HKDF salt).  Pre-Round-53 the loop also shipped
-    # ``sentinel.json`` (the AES key material) and
-    # ``corpus.sentinel.lock.json`` (the digest pin), which made the
-    # corpus offline-decryptable by anyone who obtained the DMG (see
-    # QUALITY_AUDIT.md Round 52.2 -- HIGH severity).  Both files are
-    # now resolved at runtime against the user's own OneDrive sync of
-    # ``AI Projects/AdoptIQ_CSOne_Reports``; Microsoft's tenant ACL
-    # on that share is the actual access boundary.  ``corpus.db.salt``
-    # is NOT a secret (HKDF salt -- only the sentinel is) so shipping
-    # it is intentional and pinned by ``corpus_crypto._salt_path_for``
-    # which derives ``<db>.with_suffix(".salt")``.
-    bake_dir = os.path.join(root, 'bake')
-    for fname in (
-        'corpus.db.enc',
-        'corpus.db.salt',
-    ):
-        candidate = os.path.join(bake_dir, fname)
-        if os.path.exists(candidate):
-            datas.append((candidate, 'baked_corpus'))
+    # Round 96 / runtime-only corpus: do NOT bundle corpus data in the
+    # app. Each user indexes the authorized OneDrive mirror locally
+    # after Cisco OneDrive sync exposes the corpus folder and sentinel.
+    # This keeps customer data out of the DMG and avoids carrying stale
+    # encrypted snapshots on machines whose operator later leaves Cisco.
 
     # Round 66 / Pass 5 - bundle the fastembed model cache produced
     # by ``scripts/bake_corpus.py`` (or pre-staged by the build
@@ -162,9 +131,15 @@ hidden_imports = [
     # corpus-bootstrap without a runtime ImportError that silently
     # forces lexical-only retrieval.
     'ask_ai_embeddings',
+    # Round 95 / Build 68: second-stage Ask AI reranker.  The runtime
+    # wrapper soft-falls to RRF order, but release bakes hard-fail if
+    # the configured cross-encoder model cannot score a known pair.
+    'ask_ai_reranker',
     'fastembed',
     'fastembed.text',
     'fastembed.text.text_embedding',
+    'fastembed.rerank',
+    'fastembed.rerank.text_cross_encoder',
     'onnxruntime',
     'tokenizers',
     # Round 17.2 -> Round 36: SharePoint Microsoft Graph pull retired.

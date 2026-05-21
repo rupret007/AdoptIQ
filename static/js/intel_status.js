@@ -42,12 +42,12 @@
 
     var STATUS_URL = '/api/intel/status';
     var REFRESH_URL = '/api/intel/refresh';
-    // Round 39 / corpus crypto self-heal: manual escape hatch endpoint.
-    // Wired up to [data-intel-reset], which the paint() wrapper unhides
-    // only when boot.last_error_kind === 'crypto'.  Confirms via a
-    // native confirm() prompt before POSTing -- the action preserves
-    // the user's current encrypted DB as <name>.broken-<utc> and
-    // reinstalls the bundled baked snapshot.
+    // Round 39 / corpus crypto self-heal, updated in Round 96 for the
+    // runtime-only corpus model.  Wired up to [data-intel-reset], which
+    // the paint() wrapper unhides only when boot.last_error_kind ===
+    // 'crypto'. Confirms via a native confirm() prompt before POSTing:
+    // the current encrypted DB is preserved as <name>.broken-<utc>,
+    // then the next refresh rebuilds from authorized OneDrive data.
     var RESET_URL = '/api/intel/reset';
     // Round 32 / Phase 2.E: persistent on/off toggle for AdoptIQ
     // Intelligence.  POSTs JSON {"enabled": bool} to the server,
@@ -98,7 +98,10 @@
         // contradicting the corpus panel sitting just below it.
         // Map the blocked source to a dedicated state so the badge,
         // banner, and panel all agree.
-        if (payload.boot && payload.boot.source === 'blocked_no_onedrive') {
+        if (payload.boot && (
+            payload.boot.source === 'blocked_no_onedrive'
+            || payload.boot.source === 'signed_in_no_corpus'
+        )) {
             return 'blocked';
         }
         if (payload.boot && payload.boot.last_error) { return 'error'; }
@@ -408,9 +411,8 @@
             var ok = window.confirm(
                 'Reset the local corpus?  Your current encrypted '
                 + 'database will be preserved on disk as a .broken '
-                + 'backup, then replaced from the bundled snapshot.  '
-                + 'The next refresh will pick up any newer OneDrive '
-                + 'files.  Continue?'
+                + 'backup, then rebuilt from your authorized OneDrive '
+                + 'corpus folder.  Continue?'
             );
             if (!ok) { return; }
             btn.disabled = true;
@@ -619,33 +621,22 @@
         el.textContent = String(message == null ? '' : message);
     }
 
-    // Computes one of eight panel states from the status payload.
+    // Computes one of the runtime-only panel states from the status payload.
     // Exposed (via window.__adoptiqCorpusPanelState) so the unit
     // tests can pin the rendering logic without touching the DOM.
     //
-    //   * baked_synced         -- Active. OneDrive synced (N files).
-    //                             Daily refresh enabled.
-    //   * baked_not_synced     -- Active (baked snapshot).  OneDrive
-    //                             folder not detected.
+    //   * runtime_synced       -- Active. Corpus indexed locally from
+    //                             authorized OneDrive data.
     //   * fresh_indexing       -- Indexing OneDrive folder...
     //   * fresh_not_synced     -- OneDrive sync required.
     //   * refreshing           -- Daily refresh in progress.
     //   * refresh_failed       -- Last refresh raised an error
-    //                             (baked snapshot still served).
+    //                             (last good local corpus still served).
     //   * blocked_no_onedrive  -- Round 53 / Phase 53.4: corpus
     //                             unlock requires the canonical
     //                             OneDrive sentinel which is not
     //                             yet synced.  Buttons disabled;
     //                             clickable deep-link offered.
-    //   * self_healed_baked    -- Round 68 / Build 42 (B2): the
-    //                             upgrade-handoff bake from
-    //                             corpus_bootstrap._STATE.source =
-    //                             "self_healed_baked" rendered the
-    //                             same as ``baked_synced`` pre-R68
-    //                             so the operator never knew a
-    //                             healing cycle ran. Now distinct
-    //                             so the panel can carry the
-    //                             diagnostic.
     //   * unknown              -- pre-poll / no payload yet.
     function classifyCorpusPanel(payload) {
         var boot = (payload && payload.boot) || null;
@@ -673,16 +664,18 @@
         if (boot.last_refresh_error) {
             return 'refresh_failed';
         }
-        // Round 68 / Build 42 (B2): self_healed_baked is a healthy
-        // state semantically (the bundled bake was reinstalled to
-        // recover from a crypto failure on upgrade), but operators
-        // benefit from knowing a heal happened so they can verify
-        // the next refresh.  Falls through to baked_synced labeling
-        // when OneDrive is synced (so the daily-refresh promise
-        // still holds) and to baked_not_synced when not.
-        if (source === 'self_healed_baked') { return 'self_healed_baked'; }
-        if (source === 'baked' && od === 'synced') { return 'baked_synced'; }
-        if (source === 'baked') { return 'baked_not_synced'; }
+        // Round 96: legacy baked/self-healed source labels are no
+        // longer emitted, but map them defensively so stale in-memory
+        // states don't resurrect baked-snapshot UI copy.
+        if ((source === 'self_healed_baked' || source === 'baked') && od === 'synced') {
+            return 'runtime_synced';
+        }
+        if (source === 'self_healed_baked' || source === 'baked') {
+            return 'fresh_not_synced';
+        }
+        if (source === 'fresh' && od === 'synced' && boot.completed) {
+            return 'runtime_synced';
+        }
         if (source === 'fresh' && od === 'synced') { return 'fresh_indexing'; }
         if (source === 'fresh') { return 'fresh_not_synced'; }
         return 'unknown';
@@ -690,9 +683,7 @@
 
     function corpusPanelLabel(state) {
         switch (state) {
-            case 'baked_synced':        return 'Active \u2022 OneDrive synced';
-            case 'baked_not_synced':    return 'Active \u2022 baked snapshot';
-            case 'self_healed_baked':   return 'Active \u2022 self-healed bake';
+            case 'runtime_synced':      return 'Active \u2022 local OneDrive corpus';
             case 'fresh_indexing':      return 'Indexing OneDrive\u2026';
             case 'fresh_not_synced':    return 'OneDrive sync required';
             case 'refreshing':          return 'Refreshing\u2026';
@@ -708,9 +699,7 @@
 
     function corpusPanelPillClass(state) {
         switch (state) {
-            case 'baked_synced':        return 'bg-success';
-            case 'baked_not_synced':    return 'bg-info text-dark';
-            case 'self_healed_baked':   return 'bg-info text-dark';
+            case 'runtime_synced':      return 'bg-success';
             case 'fresh_indexing':      return 'bg-primary';
             case 'fresh_not_synced':    return 'bg-warning text-dark';
             case 'refreshing':          return 'bg-primary';
@@ -729,13 +718,13 @@
         var fileCount = (typeof boot.onedrive_file_count === 'number')
             ? boot.onedrive_file_count : null;
         switch (state) {
-            case 'baked_synced':
+            case 'runtime_synced':
                 if (fileCount != null && fileCount > 0) {
-                    return 'OneDrive synced (\u2265 ' + fileCount
+                    return 'Corpus indexed locally from authorized OneDrive data (\u2265 ' + fileCount
                         + ' file' + (fileCount === 1 ? '' : 's')
-                        + ').  Daily refresh enabled.';
+                        + ').  No corpus data is embedded in the app.';
                 }
-                return 'OneDrive synced.  Daily refresh enabled.';
+                return 'Corpus indexed locally from authorized OneDrive data.  No corpus data is embedded in the app.';
             // Round 80: panel messaging now points users at the
             // canonical SharePoint share + "Add shortcut to OneDrive"
             // workflow. Pre-R80 the message asked them to sync
@@ -743,44 +732,21 @@
             // corpus owner can sync. The clickable SharePoint deep
             // link is rendered separately via [data-onedrive-deep-link]
             // (Round 53.4.1) backed by Config.ADOPTIQ_CORPUS_ONEDRIVE_DEEP_LINK.
-            case 'baked_not_synced':
-                return 'OneDrive shortcut not detected.  '
-                    + 'Open the AdoptIQ corpus folder in SharePoint and '
-                    + 'click \u201CAdd shortcut to OneDrive\u201D so the '
-                    + 'daily reports sync to your Mac.  '
-                    + '(You must be signed in to OneDrive on this '
-                    + 'device first.)';
-            case 'self_healed_baked':
-                if (fileCount != null && fileCount > 0) {
-                    return 'Bundled snapshot was reinstalled to recover '
-                        + 'from a crypto failure on upgrade.  OneDrive '
-                        + 'synced (\u2265 ' + fileCount + ' file'
-                        + (fileCount === 1 ? '' : 's')
-                        + '); next refresh will pick up newer files.';
-                }
-                return 'Bundled snapshot was reinstalled to recover '
-                    + 'from a crypto failure on upgrade.  Sign in to '
-                    + 'OneDrive to enable the next daily refresh.';
             case 'fresh_indexing':
-                return 'Indexing OneDrive folder for the first time\u2026';
-            // Round 80: same SharePoint shortcut workflow as
-            // baked_not_synced (no bundled snapshot to fall back on
-            // here, but the user-facing fix is identical -- add the
-            // shortcut so the OneDrive client syncs the folder).
+                return 'Indexing authorized OneDrive corpus data locally for the first time\u2026';
             case 'fresh_not_synced':
-                return 'No bundled snapshot is present and the OneDrive '
-                    + 'shortcut is not detected.  '
-                    + 'Open the AdoptIQ corpus folder in SharePoint and '
+                return 'The app ships with no corpus data.  Open the '
+                    + 'AdoptIQ corpus folder in SharePoint and '
                     + 'click \u201CAdd shortcut to OneDrive\u201D to '
-                    + 'populate the corpus.  (You must be signed in to '
-                    + 'OneDrive on this device first.)';
+                    + 'sync authorized data to this Mac before indexing.  '
+                    + '(You must be signed in to OneDrive on this device first.)';
             case 'refreshing':
                 return 'Refreshing knowledge corpus from OneDrive\u2026';
             case 'refresh_failed':
                 var detail = boot.last_refresh_error
                     ? String(boot.last_refresh_error) : 'unknown';
                 return 'Last refresh failed (' + detail
-                    + ').  The baked snapshot is still being served.';
+                    + ').  The last good local corpus is still being served.';
             // Round 83 / Build 59: signed in to OneDrive but the
             // corpus share isn't in the user's tree yet.  Distinct
             // from blocked_no_onedrive: the OneDrive client is
@@ -800,7 +766,7 @@
             // other two not-synced branches. The corpus is encrypted
             // against a key that lives in the synced shortcut folder,
             // so until the shortcut is added + sync completes
-            // AdoptIQ cannot decrypt the bundled snapshot.
+            // AdoptIQ cannot create or open the local corpus.
             case 'blocked_no_onedrive':
                 return 'AdoptIQ needs you to add the AdoptIQ corpus '
                     + 'shortcut to OneDrive to unlock the corpus.  '
@@ -809,9 +775,9 @@
                     + 'OneDrive client syncs it to your Mac.  The '
                     + 'corpus is encrypted against a key that lives '
                     + 'in that synced folder, so until the shortcut '
-                    + 'is added AdoptIQ cannot decrypt the bundled '
-                    + 'snapshot.  (You must be signed in to OneDrive '
-                    + 'on this device first.)';
+                    + 'is added AdoptIQ cannot build the local index.  '
+                    + 'No corpus data is embedded in the app.  (You '
+                    + 'must be signed in to OneDrive on this device first.)';
             default:
                 return '';
         }
@@ -967,8 +933,8 @@
         var acctEl = panel.querySelector(SHAREPOINT_ACCOUNT);
         if (acctEl) {
             var boot = (payload && payload.boot) || {};
-            if (boot.source === 'baked' && boot.indexed_at) {
-                acctEl.textContent = 'Last bake ' + String(boot.indexed_at);
+            if (state === 'runtime_synced' && boot.indexed_at) {
+                acctEl.textContent = 'Last local index ' + String(boot.indexed_at);
             } else {
                 acctEl.textContent = '';
             }

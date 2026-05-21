@@ -207,137 +207,24 @@
                                     data-intel-reset
                                     data-disabled-when="blocked_no_onedrive"
                                     hidden
-                                    title="Replace the local encrypted corpus from the bundled snapshot">
+                                    title="Preserve and rebuild the local encrypted corpus from authorized OneDrive data">
                                 <i class="fas fa-undo me-1" aria-hidden="true"></i>
                                 Reset corpus
                             </button>
                         </div>
                     </div>
-                    {# Round 36 / onedrive-sync-auth (extended Round 53 /
-                       Phase 53.4 fail-closed semantics, expanded
-                       Round 68 / Build 42 (B3) self-healed branch,
-                       extended Round 83 / Build 59 signed_in_no_corpus
-                       branch): AdoptIQ Knowledge Corpus sub-panel.
-                       The corpus is baked into the .app at build time
-                       and refreshed daily from the OneDrive desktop
-                       client's local mirror at
-                       Config.CSONE_ONEDRIVE_FOLDER -- no MSAL, no
-                       device-code prompt, no buttons.  The pill below
-                       reflects NINE states driven by ``boot.source``
-                       x ``boot.onedrive_status`` x
-                       ``boot.signed_in_proxy`` (the JS-side state
-                       machine lives in
+                    {# Round 96 / runtime-only corpus: the app ships no
+                       corpus data.  After Cisco OneDrive sync exposes
+                       the authorized folder and sentinel, AdoptIQ
+                       builds the encrypted local corpus from that
+                       source.  The JS-side state machine lives in
                        ``static/js/intel_status.js::classifyCorpusPanel``
-                       and MUST stay in sync with this comment):
-
-                         * baked + synced            -- Active.  OneDrive
-                                                        synced.  Daily
-                                                        refresh enabled.
-                         * baked + not_synced        -- Active (baked
-                                                        snapshot).  OneDrive
-                                                        folder not
-                                                        detected; sign in
-                                                        to OneDrive to
-                                                        enable daily
-                                                        refresh.  Reports
-                                                        from this state
-                                                        DO NOT include
-                                                        any post-bake
-                                                        OneDrive content
-                                                        because the local
-                                                        OneDrive mirror
-                                                        was missing on
-                                                        boot.
-                         * self_healed_baked         -- Active.  The
-                                                        bundled snapshot
-                                                        was reinstalled
-                                                        to recover from a
-                                                        crypto failure on
-                                                        upgrade (Round 39
-                                                        self-heal).  Same
-                                                        content guarantee
-                                                        as ``baked +
-                                                        synced``; surfaces
-                                                        as a distinct
-                                                        pill so the
-                                                        operator knows a
-                                                        heal happened.
-                         * fresh + synced            -- Indexing OneDrive
-                                                        folder for the
-                                                        first time.
-                         * fresh + not_synced        -- OneDrive sync
-                                                        required (no
-                                                        baked snapshot
-                                                        AND no local
-                                                        mirror).
-                         * refreshing                -- Daily refresh in
-                                                        progress.
-                         * refresh_failed            -- Last refresh
-                                                        raised an error;
-                                                        the prior
-                                                        snapshot is
-                                                        still being
-                                                        served (R39
-                                                        commit-or-revert
-                                                        guarantee --
-                                                        the corpus on
-                                                        disk is
-                                                        byte-identical
-                                                        to the last
-                                                        known-good
-                                                        commit).
-                         * blocked_no_onedrive       -- Round 53 / Phase
-                                                        53.4 fail-closed
-                                                        semantics: the
-                                                        corpus is
-                                                        encrypted against
-                                                        a sentinel that
-                                                        lives in the
-                                                        OneDrive folder.
-                                                        Until that
-                                                        folder is synced,
-                                                        AdoptIQ refuses
-                                                        to serve the
-                                                        corpus -- the
-                                                        only fix is to
-                                                        sign in to
-                                                        OneDrive (the
-                                                        clickable
-                                                        deep-link below
-                                                        helps).
-                         * signed_in_no_corpus       -- Round 83 / Build
-                                                        59 OneDrive
-                                                        sign-in proxy:
-                                                        emitted when the
-                                                        OneDrive desktop
-                                                        client IS signed
-                                                        in to a Cisco
-                                                        account but the
-                                                        canonical AdoptIQ
-                                                        share is not in
-                                                        the user's tree.
-                                                        Distinct copy +
-                                                        a one-click
-                                                        "Add corpus
-                                                        share to my
-                                                        OneDrive"
-                                                        button so the
-                                                        user does not
-                                                        have to
-                                                        re-authenticate
-                                                        OneDrive (they
-                                                        are already
-                                                        signed in -- the
-                                                        SharePoint URL
-                                                        SSO completes
-                                                        automatically
-                                                        and the share
-                                                        lands as a
-                                                        shortcut).
-
-                       The ``data-sharepoint-*`` selectors are kept
-                       for back-compat with the JS module name;
-                       renaming them is a follow-up. #}
+                       and distinguishes runtime_synced,
+                       fresh_indexing, fresh_not_synced, refreshing,
+                       refresh_failed, blocked_no_onedrive, and
+                       signed_in_no_corpus.  The ``data-sharepoint-*``
+                       selectors are kept for back-compat with the JS
+                       module name; renaming them is a follow-up. #}
                     <div class="mt-3 pt-3 border-top"
                          id="adoptiq-corpus-panel"
                          data-sharepoint-panel

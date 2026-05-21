@@ -47,6 +47,8 @@ import stat
 import sys
 from pathlib import Path
 
+import pytest
+
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -60,6 +62,27 @@ from scripts import bake_corpus as bake_module  # noqa: E402
 # ---------------------------------------------------------------------------
 # Fixture helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _stub_optional_model_bake_checks(monkeypatch):
+    """Keep the Round 35 bake smoke focused on corpus I/O.
+
+    Round 66/95 added dense-vector and reranker self-tests that require
+    local model dependencies. Those paths have their own source-shape
+    tests; this smoke uses deterministic stubs so ``make verify`` does
+    not depend on a developer workstation having the model cache loaded.
+    """
+    monkeypatch.setattr(
+        bake_module,
+        "_bake_chunk_vectors",
+        lambda conn: (1, "test-model", 384),
+    )
+    monkeypatch.setattr(
+        bake_module,
+        "_bake_reranker_self_test",
+        lambda: (True, "stubbed"),
+    )
 
 
 _SAMPLE_CSV = (

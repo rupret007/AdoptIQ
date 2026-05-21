@@ -1,0 +1,18 @@
+{
+  "prompt_hash": "",
+  "question_id": "p05_q12",
+  "recorded_at": "synthetic-2026-05-08-round95",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "AB-EVAL-501"
+        ],
+        "statement": "Total Customers: 4."
+      }
+    ],
+    "executive_summary": "",
+    "unknowns": []
+  }
+}

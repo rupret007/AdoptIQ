@@ -142,9 +142,80 @@ def must_render_number_within_tolerance(
     return (False, f"no number within {tol_pct}% of {expected}; got {nums[:5]}")
 
 
+def _bundle_metric_value(metric: str, portfolio_bundle: Any) -> Tuple[bool, str, float]:
+    if portfolio_bundle is None:
+        return False, "portfolio_bundle unavailable", 0.0
+    metric_key = _coerce_str(metric).strip().lower()
+    try:
+        import canonical_metrics as cm
+        import pandas as pd
+    except Exception as exc:  # noqa: BLE001
+        return False, f"canonical_metrics import failed: {exc}", 0.0
+
+    ab_df = getattr(portfolio_bundle, "adoption_barriers", pd.DataFrame())
+    csone_df = getattr(portfolio_bundle, "support_cases", pd.DataFrame())
+    pulse_df = getattr(portfolio_bundle, "customer_pulse", pd.DataFrame())
+    ap_df = getattr(portfolio_bundle, "action_plans", pd.DataFrame())
+    sp_df = getattr(portfolio_bundle, "success_priorities", pd.DataFrame())
+    try:
+        if metric_key in {"open_adoption_barriers", "adoption_barriers", "total_barriers"}:
+            return True, "open_adoption_barriers", float(cm.count_total_barriers(ab_df))
+        if metric_key in {"total_customers", "customers"}:
+            value = cm.count_customers(
+                ab_df=ab_df,
+                csone_df=csone_df,
+                extra_frames=[f for f in (pulse_df, ap_df, sp_df) if hasattr(f, "empty") and not f.empty],
+            )
+            return True, "total_customers", float(value)
+        if metric_key in {"open_action_plans", "action_plans"}:
+            try:
+                value = cm.count_open_action_plans(ab_df, ap_df=ap_df)
+            except TypeError:
+                value = cm.count_open_action_plans(ab_df)
+            return True, "open_action_plans", float(value)
+        if metric_key in {"high_severity_cases", "p1_p2_cases"}:
+            buckets = cm.count_priority_breakdown(csone_df)
+            return True, "high_severity_cases", float(buckets.get("P1", 0) + buckets.get("P2", 0))
+    except Exception as exc:  # noqa: BLE001 - predicate should fail, not raise
+        return False, f"metric {metric_key!r} computation failed: {exc}", 0.0
+    return False, f"unsupported canonical metric {metric_key!r}", 0.0
+
+
+def must_match_canonical_metric(
+    answer: str,
+    metric: Any,
+    tolerance: Any = 0,
+    portfolio_bundle: Any = None,
+    **_: Any,
+) -> PredicateResult:
+    """Pass when the answer renders the same value as canonical_metrics."""
+    ok, resolved_metric, expected = _bundle_metric_value(_coerce_str(metric), portfolio_bundle)
+    if not ok:
+        return (False, resolved_metric)
+    answer_nums = _extract_numbers(_coerce_str(answer))
+    if not answer_nums:
+        return (False, f"no numeric token in answer; expected {resolved_metric}={expected:g}")
+    try:
+        tol = float(tolerance)
+    except (TypeError, ValueError):
+        tol = 0.0
+    if abs(expected) >= 100_000 and tol > 0:
+        bound = abs(expected) * (tol / 100.0)
+    else:
+        bound = max(tol, 0.0)
+    for number in answer_nums:
+        if abs(float(number) - expected) <= bound:
+            return (True, f"{resolved_metric} matched canonical value {expected:g}")
+    return (
+        False,
+        f"{resolved_metric} expected {expected:g}; answer numbers were {answer_nums[:5]}",
+    )
+
+
 PREDICATE_REGISTRY: Dict[str, Any] = {
     "must_contain_phrase": must_contain_phrase,
     "must_cite_source_id": must_cite_source_id,
+    "must_match_canonical_metric": must_match_canonical_metric,
     "must_not_render_pii": must_not_render_pii,
     "must_render_number_within_tolerance": must_render_number_within_tolerance,
 }
@@ -154,6 +225,7 @@ def evaluate(
     answer: str,
     predicate_specs: Iterable[Dict[str, Any]],
     sources_seen: Iterable[str] = (),
+    portfolio_bundle: Any = None,
 ) -> List[Dict[str, Any]]:
     """Evaluate every predicate against the answer; return per-predicate
     results. Never raises - unknown predicate types fail with a reason."""
@@ -170,6 +242,7 @@ def evaluate(
         try:
             kwargs = {k: v for k, v in spec.items() if k != "type"}
             kwargs["sources_seen"] = sources_seen
+            kwargs["portfolio_bundle"] = portfolio_bundle
             passed, reason = fn(answer, **kwargs)
         except Exception as e:  # noqa: BLE001 - intentional broad catch; never poison scorecard
             results.append({"type": kind, "passed": False, "reason": f"predicate raised: {type(e).__name__}: {e}"})
@@ -184,6 +257,7 @@ __all__ = [
     "evaluate",
     "must_contain_phrase",
     "must_cite_source_id",
+    "must_match_canonical_metric",
     "must_not_render_pii",
     "must_render_number_within_tolerance",
 ]
