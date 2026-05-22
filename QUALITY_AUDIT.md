@@ -10480,3 +10480,54 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - `scripts/bake_corpus.py` remains available as a developer validation tool; production shipment now skips and forbids its data artifacts rather than deleting the script outright.
 
 **Trailer:** Made-with: Cursor
+
+## Round 96.1 — handoff 2026-05-21
+
+**What changed (plain English):**
+- Runtime corpus indexing now clears stale blocked source labels on success, so a user who adds/syncs the OneDrive corpus share in the same process gets a healthy `fresh`/runtime-active payload instead of a lingering blocked UI state.
+- Admin corpus refresh/reset proxy guards now treat `signed_in_no_corpus` as blocked server-side, matching the existing template button disabling.
+- `/api/corpus/bootstrap-shortcut` is now included in `_SENSITIVE_ENDPOINTS` as local-only operational bootstrap metadata.
+- Current-facing baked-corpus comments were cleaned to reflect the Round 96 runtime-only corpus model without rewriting historical audit records.
+- Documentation now captures the Round 96.1 guardrails and separates future repository-structure work into `REPO_STRUCTURE_PLAN.md` rather than moving modules in this release commit.
+
+**Files touched:**
+- `corpus_bootstrap.py` — normalize `_STATE.source = "fresh"` after successful runtime indexing and clean stale baked-corpus comments.
+- `enhanced_admin_dashboard_v2.py` — widen admin proxy blocked-state helper and redirect copy to cover `signed_in_no_corpus`.
+- `app_simple.py` — add `api_corpus_bootstrap_shortcut` to the sensitive endpoint set.
+- `config.py` — clean current-facing corpus security/release-gate comments.
+- `scripts/round53_security_smoke.sh` — clarify the script is a legacy/developer sentinel smoke, not evidence of bundled corpus data.
+- `README.md` — add Round 96.1 operator-facing note under Build 69 and corpus behavior.
+- `CLAUDE.md` — update the test floor and add Round 96.1 critical-rule guidance.
+- `REPO_STRUCTURE_PLAN.md` — new phased plan for future repo organization work without disrupting the flat-module/PyInstaller contract.
+- `.gitignore` — ignore local `.cursor/plans/` artifacts.
+- `tests/test_round54_f1_toctou_blocked_no_onedrive.py` — add successful-runtime-index source-normalization regression.
+- `tests/test_round54_f3_admin_reset_gate.py` — add `signed_in_no_corpus` admin proxy gate regressions.
+- `tests/test_round71_sensitive_endpoints_complete.py` — pin `api_corpus_bootstrap_shortcut` in `_SENSITIVE_ENDPOINTS`.
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_round54_f1_toctou_blocked_no_onedrive.py::test_successful_runtime_index_normalizes_stale_blocked_source` — pins stale `blocked_no_onedrive` / `signed_in_no_corpus` source labels are cleared to `fresh` after a successful runtime index.
+- `tests/test_round54_f3_admin_reset_gate.py::test_probe_returns_true_when_status_payload_says_signed_in_no_corpus` — pins server-side admin proxy helper gates the signed-in-but-no-corpus-share state.
+- `tests/test_round54_f3_admin_reset_gate.py::test_refresh_short_circuits_when_signed_in_no_corpus` — pins refresh proxy does not forward in the signed-in-no-corpus state.
+- `tests/test_round54_f3_admin_reset_gate.py::test_reset_short_circuits_when_signed_in_no_corpus` — pins reset proxy does not forward in the signed-in-no-corpus state.
+- `tests/test_round71_sensitive_endpoints_complete.py::test_round71_sensitive_endpoints_covers_corpus_apis` — pins `api_corpus_bootstrap_shortcut` in the local-only sensitive endpoint set.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5512 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `corpus_bootstrap.py:1686` — confirm success normalization to `_STATE.source = "fresh"` is only in the post-commit success branch and cannot mask crypto/indexer/commit failures.
+2. `enhanced_admin_dashboard_v2.py:3756` — confirm the helper still fails open on status-probe errors but gates both blocked states when the main app returns a valid status payload.
+3. `app_simple.py:1005` — confirm adding the read-only bootstrap shortcut endpoint to `_SENSITIVE_ENDPOINTS` does not break local UI fetches and still follows the desktop local-only posture.
+4. `REPO_STRUCTURE_PLAN.md` — confirm the recommended repo-organization work is explicitly deferred into phases and does not imply module moves happened in Round 96.1.
+
+**Known deferrals (intentional non-fixes):**
+- No macOS DMG rebuild was run for this follow-up; scope was runtime/admin/security guardrails plus `make verify`, not packaging.
+- Deep repository restructuring is intentionally deferred to `REPO_STRUCTURE_PLAN.md`; this commit does not move modules, tests, docs archives, or PyInstaller specs.
+
+**Trailer:** Made-with: Cursor

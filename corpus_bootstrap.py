@@ -539,37 +539,20 @@ def _r68_onedrive_sentinel_present() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Round 35 / native-corpus: baked-corpus discovery + install
+# Round 96 / runtime-only corpus: app-bundled corpus install retired
 # ---------------------------------------------------------------------------
 
 
-# Names mirror the artifacts ``scripts/bake_corpus.py`` writes
-# (and ``adoptiq_mac.spec`` ships under ``Resources/baked_corpus/``).
-# ``corpus.db.salt`` follows ``corpus_crypto._salt_path_for`` which
-# derives ``<encrypted_path>.with_suffix(".salt")`` -- changing this
-# tuple without updating both the bake script and the spec would
-# silently break the install path.
-#
-# Round 53 / Phase 53.3 -- shrunk from 4 to 2 entries.  The
-# Round 33/Build8 ``sentinel.json`` (local-mint AES key material)
-# and the Round 34/A1 ``corpus.sentinel.lock.json`` (digest pin)
-# are NO LONGER bundled, because shipping them with the .app made
-# the corpus offline-decryptable (QUALITY_AUDIT.md Round 52.2 --
-# HIGH severity).  At runtime we resolve the sentinel against the
-# user's own OneDrive sync of ``AI Projects/AdoptIQ_CSOne_Reports``
-# and re-mint the lock locally on first successful open; both
-# ``sentinel.json`` and ``corpus.sentinel.lock.json`` may still
-# exist in ``user_dir`` because ``open_corpus_for_user`` writes
-# the lock sidecar after a successful open -- but they originate
-# at runtime, not from the .app bundle.
-#
-# ``_LEGACY_BAKED_CORPUS_FILES`` retains the pre-Round-53 4-tuple
-# so the Round 39 self-heal preserve / restore loops can still
-# rotate broken legacy artifacts on upgrade.  Do NOT use it for
-# install-time copying.
 # Round 96: shipping builds copy no corpus artifacts from the app
 # bundle.  The tuple remains as an explicit empty contract so tests can
-# pin that app-bundled corpus data is retired.
+# pin that app-bundled corpus data is retired.  ``corpus.db.salt`` still
+# follows ``corpus_crypto._salt_path_for`` when a runtime corpus is
+# created locally, but the app bundle must not provide either artifact.
+#
+# ``_LEGACY_BAKED_CORPUS_FILES`` retains the historical 4-tuple so
+# reset/preserve loops can rotate broken legacy artifacts that already
+# exist in a user's App Support directory.  Do NOT use it for
+# install-time copying or app-resource discovery.
 _BAKED_CORPUS_FILES: tuple = ()
 _LEGACY_BAKED_CORPUS_FILES: tuple = (
     "corpus.db.enc",
@@ -829,7 +812,7 @@ def _daily_refresh_loop() -> None:
     Triggers an incremental refresh on each tick when:
 
       * the feature flag is on,
-      * a baked corpus install or prior refresh has populated
+      * a successful runtime index or prior refresh has populated
         ``_STATE.last_successful_refresh_ts``, AND
       * ``_should_refresh()`` says we're past the 24h window, AND
       * the OneDrive desktop client has the canonical AdoptIQ folder
@@ -1700,6 +1683,11 @@ def _run_index_pass(*, rebuild: bool) -> None:
             _STATE.last_refresh_error = None
             _STATE.onedrive_status = post_status
             _STATE.onedrive_file_count = post_count
+            # Round 96.1: a successful runtime index supersedes any
+            # prior blocked source label from the same process.  The
+            # JS panel maps ``fresh`` + synced + completed to
+            # ``runtime_synced``.
+            _STATE.source = "fresh"
             # Round 96: this timestamp now represents the runtime
             # local-index pass, not a build-time bake.
             _STATE.indexed_at = _STATE.last_finished_at

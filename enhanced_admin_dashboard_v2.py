@@ -3729,12 +3729,10 @@ def enhanced_admin_dashboard():
 # Round 54 / F3 -- shared blocked-state probe used by the corpus
 # refresh + reset proxies.  Re-fetches ``/api/corpus/status`` (the
 # same endpoint the dashboard tile uses) and returns True when
-# ``boot.source == "blocked_no_onedrive"`` -- meaning the corpus is
-# fail-closed waiting for OneDrive sync and any refresh / reset
-# request would just immediately re-block on the same gate inside
-# ``corpus_bootstrap._run_index_pass``.  Defense in depth on top of
-# the template-level ``{% if _corpus_disabled %}disabled{% endif %}``
-# gating: a curl / devtools bypass also gets the same short-circuit.
+# ``boot.source`` is a corpus-open blocked state.  Round 96.1 extends
+# the original ``blocked_no_onedrive`` check to include
+# ``signed_in_no_corpus`` so the server-side proxy gate matches the
+# template-level button disabling.
 # Pinned by ``tests/test_round54_f3_admin_reset_gate.py``.
 def _r54_corpus_is_blocked_no_onedrive() -> bool:
     try:
@@ -3755,7 +3753,7 @@ def _r54_corpus_is_blocked_no_onedrive() -> bool:
     boot = data.get('boot')
     if not isinstance(boot, dict):
         return False
-    return boot.get('source') == 'blocked_no_onedrive'
+    return boot.get('source') in {'blocked_no_onedrive', 'signed_in_no_corpus'}
 
 
 @admin_app.route('/corpus_refresh', methods=['POST'])
@@ -3769,14 +3767,13 @@ def corpus_refresh_route():
     only when the form field is set so the default action is the
     cheaper incremental refresh.
 
-    Round 54 / F3: short-circuit BEFORE the proxy call when the corpus
-    is in ``blocked_no_onedrive`` -- the refresh would just trip the
-    same Round 53 fail-closed gate inside
-    ``corpus_bootstrap._run_index_pass`` and the operator would see no
-    progress.  Surface a clear "Sign in to OneDrive first" status
-    instead.  Defense in depth on top of the template's disabled
-    state for the case where an operator hits this URL via curl or
-    devtools rather than the dashboard button.
+    Round 54 / F3, widened in Round 96.1: short-circuit BEFORE the
+    proxy call when the corpus is in a OneDrive/corpus-share blocked
+    state -- the refresh would just trip the same fail-closed gate
+    inside ``corpus_bootstrap._run_index_pass`` and the operator would
+    see no progress.  Defense in depth on top of the template's
+    disabled state for the case where an operator hits this URL via
+    curl or devtools rather than the dashboard button.
     """
     _require_admin_csrf()
     if _r54_corpus_is_blocked_no_onedrive():
@@ -3784,7 +3781,7 @@ def corpus_refresh_route():
             'enhanced_admin_dashboard',
             message=(
                 'Corpus refresh: blocked -- sign in to OneDrive and '
-                'sync AI Projects/AdoptIQ_CSOne_Reports first.'
+                'add/sync the AdoptIQ corpus share first.'
             ),
             message_type='warning',
         ))
@@ -3860,12 +3857,12 @@ def corpus_reset_route():
     server-to-server HTTP call with the ``X-AdoptIQ-Internal`` header
     so the main app can authorize without us holding its CSRF token.
 
-    Round 54 / F3, updated in Round 96: short-circuit BEFORE the proxy
-    call when the corpus is in ``blocked_no_onedrive``. Runtime-only
-    reset would still immediately re-block without the authorized
-    OneDrive folder/sentinel, wasting the operator's click and
-    producing a confusing "started" banner over a corpus that is still
-    blocked. Surface a clear "Sign in to OneDrive first" status instead.
+    Round 54 / F3, widened in Round 96.1: short-circuit BEFORE the
+    proxy call when the corpus is in a OneDrive/corpus-share blocked
+    state. Runtime-only reset would still immediately re-block without
+    the authorized OneDrive folder/sentinel, wasting the operator's
+    click and producing a confusing "started" banner over a corpus that
+    is still blocked.
     """
     _require_admin_csrf()
     if _r54_corpus_is_blocked_no_onedrive():
@@ -3873,7 +3870,7 @@ def corpus_reset_route():
             'enhanced_admin_dashboard',
             message=(
                 'Corpus reset: blocked -- sign in to OneDrive and '
-                'sync AI Projects/AdoptIQ_CSOne_Reports first.'
+                'add/sync the AdoptIQ corpus share first.'
             ),
             message_type='warning',
         ))

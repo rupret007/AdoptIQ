@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
-# Round 53 / Phase 53.6 -- security smoke test for the corpus
-# offline-decryption hardening.
+# Round 53 / Phase 53.6 -- legacy/developer security smoke test for
+# the corpus offline-decryption hardening.
+#
+# Round 96: shipping builds no longer bundle corpus data.  This script
+# still validates the cryptographic sentinel contract against a
+# developer-created temporary corpus artifact, but it is NOT a proof
+# that the current .app embeds a corpus snapshot.
 #
 # Validates the four end-to-end acceptance scenarios that the
 # Round 53 hardening was built to satisfy:
 #
 #   1. POSITIVE / authorized: bake -> spec -> install -> open
 #      succeeds when the OneDrive sentinel is present.
-#   2. NEGATIVE / unauthorized: extracting the .app bundle on a
-#      machine without the OneDrive sentinel MUST fail to decrypt
-#      the bundled corpus (this is the QUALITY_AUDIT.md Round 52.2
-#      regression we are pinning).
+#   2. NEGATIVE / unauthorized: copying a temporary encrypted corpus
+#      artifact to a machine without the OneDrive sentinel MUST fail
+#      to decrypt (the old app-bundle exfiltration model is gone in
+#      Round 96, but the sentinel gate still matters for local files).
 #   3. ROTATION: rotating the OneDrive sentinel MUST brick a
 #      pre-rotation install (no silent acceptance of the new key).
 #   4. UI BLOCKED STATE: when the OneDrive sentinel is unavailable,
@@ -137,15 +142,16 @@ PY
 echo
 
 # --------------------------------------------------------------------------
-# Scenario 2: NEGATIVE -- extract DMG on unauthorized machine
+# Scenario 2: NEGATIVE -- copied runtime corpus on unauthorized machine
 # --------------------------------------------------------------------------
 
 echo "Scenario 2: NEGATIVE / unauthorized open"
 S2="$SCRATCH/scenario_2_negative"
 mkdir -p "$S2/exfil"
 
-# Simulate "attacker copies the .app bundle's baked_corpus dir to
-# their own machine" by copying ONLY what the spec ships (2 files).
+# Simulate "attacker copies encrypted runtime corpus files to their own
+# machine" by copying ONLY the ciphertext + salt.  Round 96 release
+# builds do not ship these files in the app bundle.
 cp "$S1/bake/corpus.db.enc" "$S2/exfil/"
 cp "$S1/bake/corpus.db.salt" "$S2/exfil/"
 
@@ -163,13 +169,13 @@ try:
         allow_local_sentinel=False,
     )
     handle.close(persist=False)
-    print('  FAIL: bundled corpus opened WITHOUT OneDrive sentinel.')
+    print('  FAIL: copied corpus opened WITHOUT OneDrive sentinel.')
     print('        This is the QUALITY_AUDIT.md Round 52.2 regression.')
     print('        Round 53 hardening is NOT in effect.')
     sys.exit(1)
 except CorpusCryptoError as e:
     print(f'  negative open fails-closed as expected: {type(e).__name__}')
-    print('  bundled corpus is NOT offline-decryptable  PASS')
+    print('  copied corpus is NOT offline-decryptable  PASS')
 PY
 
 echo

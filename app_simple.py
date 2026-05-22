@@ -983,6 +983,8 @@ _SENSITIVE_ENDPOINTS = {
     #   - ``api_corpus_status`` / ``api_corpus_refresh`` /
     #     ``api_corpus_reset`` (R17/R39): expose / mutate the
     #     encrypted knowledge corpus state.
+    #   - ``api_corpus_bootstrap_shortcut`` (R83/R96.1): exposes
+    #     operational bootstrap metadata for the corpus OneDrive share.
     #   - ``api_intel_status`` / ``api_intel_refresh`` /
     #     ``api_intel_reset`` (R26): user-facing aliases for the
     #     above three.
@@ -1000,6 +1002,7 @@ _SENSITIVE_ENDPOINTS = {
     #     retrieval diagnostics; same operator-only posture.
     'api_shutdown',
     'api_corpus_status', 'api_corpus_refresh', 'api_corpus_reset',
+    'api_corpus_bootstrap_shortcut',  # Round 96.1
     'api_intel_status', 'api_intel_refresh', 'api_intel_reset',
     'api_intel_upload',
     'api_settings_intelligence',

@@ -1,6 +1,9 @@
 # macOS
 .DS_Store
 
+# Cursor local planning artifacts
+.cursor/plans/
+
 # Build artifacts
 dist/
 build/

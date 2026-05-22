@@ -924,13 +924,14 @@ ADOPTIQ_VERSION = "1.0.4"
 # surface; both cards bind to the same ``[data-corpus-share-url-card]``
 # data marker via the existing ``static/js/corpus_share_url.js`` IIFE
 # module (idempotent single-querySelector init, one card per page).
-# THE R83 ENCRYPTION CONTRACT IS UNCHANGED:
+# THE R96 RUNTIME-ONLY CORPUS CONTRACT:
 # ``corpus_bootstrap._run_index_pass`` still calls
 # ``open_corpus_for_user(..., allow_local_sentinel=False)``; the
-# bundled DMG still ships only ``corpus.db.enc`` + ``corpus.db.salt``
-# (sentinel still NOT bundled).  Without OneDrive sync to the
-# canonical Cisco-managed share, the corpus is opaque ciphertext.
-# The URL is not a secret -- Cisco SharePoint ACL gates the share.
+# bundled DMG ships no corpus database, salt, sentinel, or lock file.
+# Without OneDrive sync to the canonical Cisco-managed share, no local
+# corpus can be opened or indexed.  The URL is not a secret -- Cisco
+# SharePoint ACL gates the share and the local sentinel unlocks the
+# encrypted runtime corpus.
 # Pinned by the rewritten ``tests/test_round35_corpus_url_hardcoded.py``
 # + ``tests/test_round81_sharepoint_url_refresh.py`` + a new
 # ``tests/test_round85_url_refresh_and_preferences_card.py`` (~19
@@ -1037,12 +1038,10 @@ ADOPTIQ_BUILD = "69"  # Round 96 / Build 69
 # updated assertions in ``tests/test_round70_compact_risk_summary_overall_score.py``
 # + ``tests/test_round88_risk_score_0_10_populated.py``.
 # Round 87 / Build 63: corpus-tightening + upgrade-launch UX +
-# corpus-indexing UX + URL-card relocation.  Phase 1 adds an opt-in
-# ``ADOPTIQ_RELEASE_GATE=1`` block to ``build_mac_dmg.sh`` that
-# hard-fails the build when ``bake/.bake-skipped`` is present OR the
-# ``bake/corpus.db.enc`` + ``bake/corpus.db.salt`` artifacts are
-# missing -- closes the R86 audit's PARTIAL on the "baked corpus
-# shipped with DMG" requirement.  Phase 2 adds a "Corpus security
+# corpus-indexing UX + URL-card relocation.  Phase 1 originally added
+# an opt-in ``ADOPTIQ_RELEASE_GATE=1`` block to require baked artifacts;
+# Round 96 inverted that release gate so shipping builds now fail if
+# corpus artifacts are present.  Phase 2 adds a "Corpus security
 # model" subsection to README.md documenting the at-rest AES-256-GCM
 # contract (durable artifacts in ``~/Library/Application Support/AdoptIQ/knowledge``),
 # the access-gate via OneDrive sentinel + Microsoft tenant ACL, and

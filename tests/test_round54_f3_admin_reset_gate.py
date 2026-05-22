@@ -56,13 +56,14 @@ def _read_admin_source() -> str:
         return fh.read()
 
 
-def _make_status_payload(blocked: bool) -> dict:
+def _make_status_payload(blocked: bool, source: str | None = None) -> dict:
+    boot_source = source or ("blocked_no_onedrive" if blocked else "fresh")
     return {
         "ok": True, "enabled": True, "available": not blocked,
         "boot": {
             "completed": True,
             "in_progress": False,
-            "source": "blocked_no_onedrive" if blocked else "fresh",
+            "source": boot_source,
             "onedrive_status": "not_synced" if blocked else "synced",
             "onedrive_file_count": 0 if blocked else 47,
         },
@@ -91,6 +92,20 @@ def test_probe_returns_true_when_status_payload_says_blocked(monkeypatch):
     fake_get = MagicMock()
     fake_get.return_value.status_code = 200
     fake_get.return_value.json.return_value = _make_status_payload(blocked=True)
+    monkeypatch.setattr(adm.requests, "get", fake_get)
+    assert adm._r54_corpus_is_blocked_no_onedrive() is True
+
+
+def test_probe_returns_true_when_status_payload_says_signed_in_no_corpus(monkeypatch):
+    """Round 96.1: server-side admin proxy gate must match the UI's
+    disabled state for users signed in to OneDrive but missing the
+    corpus shortcut/sentinel."""
+    fake_get = MagicMock()
+    fake_get.return_value.status_code = 200
+    fake_get.return_value.json.return_value = _make_status_payload(
+        blocked=True,
+        source="signed_in_no_corpus",
+    )
     monkeypatch.setattr(adm.requests, "get", fake_get)
     assert adm._r54_corpus_is_blocked_no_onedrive() is True
 
@@ -162,6 +177,24 @@ def test_refresh_short_circuits_when_blocked(admin_client, monkeypatch):
     fake_post.assert_not_called()
 
 
+def test_refresh_short_circuits_when_signed_in_no_corpus(admin_client, monkeypatch):
+    fake_get = MagicMock()
+    fake_get.return_value.status_code = 200
+    fake_get.return_value.json.return_value = _make_status_payload(
+        blocked=True,
+        source="signed_in_no_corpus",
+    )
+    monkeypatch.setattr(adm.requests, "get", fake_get)
+
+    fake_post = MagicMock()
+    monkeypatch.setattr(adm.requests, "post", fake_post)
+
+    resp = admin_client.post("/corpus_refresh", data={})
+    assert resp.status_code == 302
+    assert "blocked" in (resp.headers.get("Location") or "").lower()
+    fake_post.assert_not_called()
+
+
 def test_refresh_proxies_through_when_not_blocked(admin_client, monkeypatch):
     """When NOT in blocked_no_onedrive, the refresh route must proxy
     through to the main app's ``/api/corpus/refresh`` endpoint -- the
@@ -206,6 +239,24 @@ def test_reset_short_circuits_when_blocked(admin_client, monkeypatch):
     location = resp.headers.get("Location") or ""
     assert "blocked" in location.lower()
     assert "OneDrive" in location or "onedrive" in location.lower()
+    fake_post.assert_not_called()
+
+
+def test_reset_short_circuits_when_signed_in_no_corpus(admin_client, monkeypatch):
+    fake_get = MagicMock()
+    fake_get.return_value.status_code = 200
+    fake_get.return_value.json.return_value = _make_status_payload(
+        blocked=True,
+        source="signed_in_no_corpus",
+    )
+    monkeypatch.setattr(adm.requests, "get", fake_get)
+
+    fake_post = MagicMock()
+    monkeypatch.setattr(adm.requests, "post", fake_post)
+
+    resp = admin_client.post("/corpus_reset", data={})
+    assert resp.status_code == 302
+    assert "blocked" in (resp.headers.get("Location") or "").lower()
     fake_post.assert_not_called()
 
 

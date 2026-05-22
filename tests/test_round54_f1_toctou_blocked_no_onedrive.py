@@ -331,3 +331,54 @@ def test_toctou_recovery_runs_only_when_open_raised(
         f"last_error_kind={state.last_error_kind!r}"
     )
     assert state.source != "blocked_no_onedrive"
+
+
+@pytest.mark.parametrize(
+    "stale_source",
+    ("blocked_no_onedrive", "signed_in_no_corpus"),
+)
+def test_successful_runtime_index_normalizes_stale_blocked_source(
+    tmp_path, monkeypatch, stale_source,
+):
+    """Round 96.1: a healthy runtime index must clear any prior blocked
+    ``_STATE.source`` from the same process so the JS panel can classify
+    the next payload as runtime_synced."""
+    onedrive_root = tmp_path / "onedrive"
+    _seed_synced_onedrive_with_sentinel(onedrive_root)
+    _wire_onedrive(monkeypatch, onedrive_root)
+
+    class FakeHandle:
+        conn = object()
+
+        def commit_to_disk(self):
+            return None
+
+    monkeypatch.setattr(
+        corpus_bootstrap,
+        "_resolve_index_sources",
+        lambda: [{"label": "onedrive", "dir": onedrive_root, "filter": "all_supported"}],
+    )
+    monkeypatch.setattr(
+        corpus_bootstrap,
+        "open_corpus_for_user",
+        lambda **_kwargs: FakeHandle(),
+    )
+    monkeypatch.setattr(corpus_bootstrap, "configure_connection", lambda _conn: None)
+    monkeypatch.setattr(
+        corpus_bootstrap,
+        "index_folder",
+        lambda *_args, **_kwargs: corpus_bootstrap.IndexStats(
+            files_seen=1,
+            files_parsed=1,
+            chunks_added=1,
+        ),
+    )
+    with corpus_bootstrap._BOOT_LOCK:
+        corpus_bootstrap._STATE.source = stale_source
+
+    corpus_bootstrap._run_index_pass(rebuild=False)
+
+    state = corpus_bootstrap.get_state()
+    assert state.completed is True
+    assert state.last_error_kind is None
+    assert state.source == "fresh"

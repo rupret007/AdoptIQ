@@ -23,6 +23,7 @@ REQUIRED_R71_ENDPOINTS = (
     "api_corpus_status",
     "api_corpus_refresh",
     "api_corpus_reset",
+    "api_corpus_bootstrap_shortcut",
     "api_intel_status",
     "api_intel_refresh",
     "api_intel_reset",
@@ -47,7 +48,12 @@ def test_round71_sensitive_endpoints_includes_api_shutdown() -> None:
 
 def test_round71_sensitive_endpoints_covers_corpus_apis() -> None:
     """Corpus status / refresh / reset endpoints must all be gated."""
-    for name in ("api_corpus_status", "api_corpus_refresh", "api_corpus_reset"):
+    for name in (
+        "api_corpus_status",
+        "api_corpus_refresh",
+        "api_corpus_reset",
+        "api_corpus_bootstrap_shortcut",
+    ):
         assert name in _SENSITIVE_ENDPOINTS, (
             f"Round 71 / Phase 1 (#6): {name} must be in _SENSITIVE_ENDPOINTS."
         )
