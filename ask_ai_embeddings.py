@@ -32,6 +32,8 @@ from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from _logging_helpers import safe_log_warning
+
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +149,8 @@ def get_embedder() -> Optional[Any]:
             from fastembed import TextEmbedding  # type: ignore
         except Exception as e:  # noqa: BLE001 - intentional broad catch
             _EMBED_LOAD_ERROR = f"fastembed import failed: {type(e).__name__}: {e}"
-            logger.warning(
+            safe_log_warning(
+                logger,
                 "Round 66 / Pass 5: %s; falling back to lexical retrieval",
                 _EMBED_LOAD_ERROR,
             )
@@ -167,7 +170,8 @@ def get_embedder() -> Optional[Any]:
             _EMBED = TextEmbedding(**kwargs)
         except Exception as e:  # noqa: BLE001
             _EMBED_LOAD_ERROR = f"fastembed model load failed: {type(e).__name__}: {e}"
-            logger.warning(
+            safe_log_warning(
+                logger,
                 "Round 66 / Pass 5: %s; falling back to lexical retrieval",
                 _EMBED_LOAD_ERROR,
             )
@@ -191,7 +195,7 @@ def embed_query(text: str) -> Optional[np.ndarray]:
     try:
         vec = next(iter(embedder.embed([text])))
     except Exception as e:  # noqa: BLE001
-        logger.warning("Round 66 / Pass 5: embed_query failed: %s", e)
+        safe_log_warning(logger, "Round 66 / Pass 5: embed_query failed: %s", e)
         return None
     return _normalize_vector(np.asarray(vec, dtype=np.float32))
 
@@ -208,7 +212,7 @@ def embed_texts(texts: Sequence[str]) -> Optional[np.ndarray]:
     try:
         vecs = list(embedder.embed(list(texts)))
     except Exception as e:  # noqa: BLE001
-        logger.warning("Round 66 / Pass 5: embed_texts failed: %s", e)
+        safe_log_warning(logger, "Round 66 / Pass 5: embed_texts failed: %s", e)
         return None
     if not vecs:
         return None

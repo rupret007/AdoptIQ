@@ -583,6 +583,58 @@ def _jaccard_similarity(left: set[str], right: set[str]) -> float:
     return len(left & right) / float(len(union))
 
 
+def _parse_numeric_token_for_tolerance(value: str) -> Optional[float]:
+    try:
+        return float(str(value).replace(",", "").replace("%", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _jaccard_numeric_similarity_with_tolerance(
+    left: set[str],
+    right: set[str],
+    *,
+    absolute_tolerance: float = 0.15,
+) -> float:
+    """Jaccard-like numeric similarity that treats tiny rounded decimals as equal."""
+
+    if not left and not right:
+        return 1.0
+    if not left or not right:
+        return 0.0
+
+    matched_left: set[str] = set(left & right)
+    matched_right: set[str] = set(left & right)
+    remaining_right = [value for value in right if value not in matched_right]
+
+    for left_value in sorted(left - matched_left):
+        left_num = _parse_numeric_token_for_tolerance(left_value)
+        if left_num is None:
+            continue
+        left_is_percent = str(left_value).strip().endswith("%")
+        for right_value in list(remaining_right):
+            if str(right_value).strip().endswith("%") != left_is_percent:
+                continue
+            right_num = _parse_numeric_token_for_tolerance(right_value)
+            if right_num is None:
+                continue
+            # Round 97.3: live comprehensive BE-priority table scores are
+            # one-decimal aggregates that can wobble by 0.1 between runs while
+            # all integer KPI counts remain stable. Count those rounded-score
+            # equivalents as matches; larger numeric drift still fails.
+            if abs(left_num - right_num) <= absolute_tolerance:
+                matched_left.add(left_value)
+                matched_right.add(right_value)
+                remaining_right.remove(right_value)
+                break
+
+    matches = len(matched_left)
+    union_size = len(left) + len(right) - matches
+    if union_size <= 0:
+        return 1.0
+    return matches / float(union_size)
+
+
 def _extract_docx_text(path: Path) -> str:
     with zipfile.ZipFile(path, "r") as archive:
         body = archive.read("word/document.xml").decode("utf-8", errors="ignore")
@@ -746,7 +798,7 @@ def compare_docx_against_baseline(
         baseline_table_text = _extract_docx_table_text(baseline_path)
         current_table_numbers = _numeric_fingerprint(current_table_text)
         baseline_table_numbers = _numeric_fingerprint(baseline_table_text)
-        table_numeric_similarity = _jaccard_similarity(
+        table_numeric_similarity = _jaccard_numeric_similarity_with_tolerance(
             current_table_numbers, baseline_table_numbers
         )
         table_numeric_passed = (
@@ -987,8 +1039,15 @@ _PARAGRAPH_KPI_NUMERIC_RE = re.compile(
 # spent"``; expand the list only when a new false-negative is observed.
 _PARAGRAPH_KPI_PREFIX_NUMERIC_RE = re.compile(
     r"\b(?P<value>\d{1,5})\s+(?P<label>"
-    r"(?:Open\s+|Active\s+|Total\s+)?Action\s+Plans?"
-    r"|(?:Total\s+)?Adoption\s+Barriers?"
+    # Round 97.3: require an explicit total qualifier for AP/AB prefix
+    # matches. Live comprehensive / compact narratives contain per-customer
+    # prose like "5 active adoption barriers" and recommendation text like
+    # "14 open adoption barriers"; those are not stable top-level portfolio
+    # KPI rows and must not drift against workbook detail-sheet counts.
+    # Direct label/value shapes such as "Open Adoption Barriers: 13" still
+    # flow through _PARAGRAPH_KPI_NUMERIC_RE above.
+    r"(?:Total\s+)Action\s+Plans?"
+    r"|(?:Total\s+)Adoption\s+Barriers?"
     r"|(?:Total\s+)?Customer\s+Pulse(?:\s+records?)?"
     r"|Direct\s+Reports?"
     r")\b",
@@ -1014,6 +1073,23 @@ _PARAGRAPH_KPI_TEXT_RE = re.compile(
     r"^\s*(?P<label>(?:Manager(?:\s+scope)?|Technology(?:\s+scope)?|Technology\s+Focus|Risk\s+Category))\s*[:\-]\s*(?P<value>[A-Za-z][^|;\n]{0,120}?)\s*(?:[|;]|$)",
     re.IGNORECASE,
 )
+
+
+def _r97_3_skip_paragraph_kpi_scan(text: str) -> bool:
+    """Return True for diagnostic prose that mentions KPIs but is not a KPI row."""
+
+    clean = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    if not clean:
+        return True
+    # Round 97.3: partial-data warnings intentionally carry both kept and
+    # excluded counts ("kept 14 of 183 adoption barriers"). Treating the
+    # larger denominator as the rendered KPI caused false live parity
+    # failures even though the report body correctly showed 14 in-scope rows.
+    if "tech_filter_scope_excluded" in clean:
+        return True
+    if "ab tech filter" in clean and " kept " in clean and " excluded " in clean:
+        return True
+    return False
 
 # Round 52 / ship: corpus-context tells.  When the source paragraph
 # contains ANY of these markers, the line is part of a per-customer
@@ -1059,6 +1135,8 @@ def _select_multicolumn_value_rows(rows: list[list[str]]) -> list[list[str]]:
 def _scan_paragraph_for_kpis(text: str, values: dict[str, str]) -> None:
     """Pick out 'Label: 12' style phrases from a paragraph string."""
     if not text:
+        return
+    if _r97_3_skip_paragraph_kpi_scan(text):
         return
     # Round 61 / Phase 2.D: the canonical "Label: 12" shape requires a
     # ``:`` or ``-`` separator; the secondary "12 Label" shape does
@@ -1438,6 +1516,25 @@ def extract_xlsx_kpis(path: Path) -> dict[str, Any]:
                 _extract_renewal_summary_sheet(sheet, values)
             elif handler == "horizontal_label_value":
                 _extract_horizontal_label_value_sheet(sheet, values)
+        if "Team_Summary" in workbook.sheetnames:
+            # Round 97.3: for Leader reports, Team_Summary is the semantic
+            # counterpart of selected Word executive rollups. The Action_Plans
+            # detail sheet is de-duplicated by ID for the ledger view and can
+            # have a lower count than the per-CSSM workload total; restore that
+            # rollup after detail-sheet extraction. Keep Adoption_Barriers from
+            # the de-duplicated detail ledger, matching the Word AB rollup.
+            _team_summary_values: dict[str, str] = {}
+            _extract_team_summary_sheet(workbook["Team_Summary"], _team_summary_values)
+            for _team_key in (
+                "action_plans",
+                "bems",
+                "customer_pulse",
+                "support_cases",
+                "team_members",
+                "total_customers",
+            ):
+                if _team_key in _team_summary_values:
+                    values[_team_key] = _team_summary_values[_team_key]
         return {"scanned_sheets": scanned_sheets, "values": values}
     finally:
         workbook.close()
@@ -1703,7 +1800,16 @@ def evaluate_report_quality(
     try:
         doc = Document(str(docx_path))
         full_text = _docx_full_text(doc)
-        paragraphs = [p.text.strip() for p in doc.paragraphs if (p.text or "").strip()]
+        paragraph_entries = [
+            {
+                "paragraph_index": idx,
+                "text": p.text.strip(),
+                "style": str(getattr(p.style, "name", "") or "").lower(),
+            }
+            for idx, p in enumerate(doc.paragraphs)
+            if (p.text or "").strip()
+        ]
+        paragraphs = [entry["text"] for entry in paragraph_entries]
         headings = [
             p.text.strip()
             for p in doc.paragraphs
@@ -1716,7 +1822,9 @@ def evaluate_report_quality(
                 "numbers": _numeric_tokens_requiring_source(text),
                 "excerpt": text[:240],
             }
-            for idx, text in enumerate(paragraphs)
+            for entry in paragraph_entries
+            for idx, text in [(entry["paragraph_index"], entry["text"])]
+            if not entry["style"].startswith(("heading", "title"))
             if _numeric_tokens_requiring_source(text)
         ]
         unbacked_metric_claims = [
@@ -2156,6 +2264,121 @@ def build_environment_summary() -> dict[str, Any]:
     }
 
 
+def _r97_2_probe_text_endpoint(
+    session: requests.Session,
+    base_url: str,
+    path: str,
+    *,
+    expected_text: str | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    """Round 97.2: lightweight app-health probe for text endpoints."""
+    url = f"{base_url.rstrip('/')}{path}"
+    started = _utc_now()
+    try:
+        response = session.get(url, timeout=timeout)
+        text = (response.text or "").strip()
+        ok = response.status_code == 200
+        if expected_text is not None:
+            ok = ok and text == expected_text
+        return {
+            "path": path,
+            "ok": ok,
+            "status_code": response.status_code,
+            "elapsed_ms": max(int((_utc_now() - started).total_seconds() * 1000), 0),
+            "text": text[:120],
+        }
+    except Exception as exc:  # noqa: BLE001 - health probe should summarize failures
+        return {
+            "path": path,
+            "ok": False,
+            "status_code": None,
+            "elapsed_ms": max(int((_utc_now() - started).total_seconds() * 1000), 0),
+            "error_kind": type(exc).__name__,
+            "error": str(exc)[:240],
+        }
+
+
+def _r97_2_probe_json_endpoint(
+    session: requests.Session,
+    base_url: str,
+    path: str,
+    *,
+    required_keys: Iterable[str] = (),
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    """Round 97.2: lightweight app-health probe for JSON endpoints."""
+    url = f"{base_url.rstrip('/')}{path}"
+    started = _utc_now()
+    try:
+        response = session.get(url, timeout=timeout)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            return {
+                "path": path,
+                "ok": False,
+                "status_code": response.status_code,
+                "elapsed_ms": max(int((_utc_now() - started).total_seconds() * 1000), 0),
+                "error_kind": "invalid_json",
+                "error": str(exc)[:240],
+                "body_excerpt": (response.text or "")[:240],
+            }
+        missing = [key for key in required_keys if not isinstance(payload, dict) or key not in payload]
+        return {
+            "path": path,
+            "ok": response.status_code == 200 and not missing,
+            "status_code": response.status_code,
+            "elapsed_ms": max(int((_utc_now() - started).total_seconds() * 1000), 0),
+            "payload_keys": sorted(str(key) for key in payload.keys())[:40] if isinstance(payload, dict) else [],
+            "missing_required_keys": missing,
+        }
+    except Exception as exc:  # noqa: BLE001 - health probe should summarize failures
+        return {
+            "path": path,
+            "ok": False,
+            "status_code": None,
+            "elapsed_ms": max(int((_utc_now() - started).total_seconds() * 1000), 0),
+            "error_kind": type(exc).__name__,
+            "error": str(exc)[:240],
+        }
+
+
+def evaluate_app_health(session: requests.Session, base_url: str) -> tuple[dict[str, Any], GateResult]:
+    """Round 97.2: preflight stability endpoints before expensive report runs.
+
+    Corpus may be blocked on a user's OneDrive state, so we validate endpoint
+    shape rather than require an active corpus.
+    """
+    probes = [
+        _r97_2_probe_text_endpoint(session, base_url, "/ping", expected_text="OK"),
+        _r97_2_probe_json_endpoint(
+            session,
+            base_url,
+            "/api/version",
+            required_keys=("ok", "version", "build", "process_started_at_utc", "restart_required"),
+        ),
+        _r97_2_probe_json_endpoint(session, base_url, "/api/status/all"),
+        _r97_2_probe_json_endpoint(session, base_url, "/api/corpus/status", required_keys=("boot",)),
+        _r97_2_probe_json_endpoint(session, base_url, "/api/intel/status", required_keys=("boot",)),
+    ]
+    failed = [probe for probe in probes if not probe.get("ok")]
+    payload = {
+        "base_url": base_url.rstrip("/"),
+        "checked_at_utc": _utc_now_str(),
+        "probes": probes,
+        "failed_required_paths": [probe["path"] for probe in failed],
+    }
+    return payload, GateResult(
+        passed=not failed,
+        details={
+            "reason": "app_health_preflight",
+            "failed_required_paths": payload["failed_required_paths"],
+            "probe_count": len(probes),
+        },
+    )
+
+
 def thresholds_summary(config: RunnerConfig) -> dict[str, Any]:
     return {
         "strict": config.strict,
@@ -2215,8 +2438,19 @@ class LiveReportRunner:
                 raise ValueError("baseline_mode=manifest requires --baseline-manifest")
             self.manifest = load_baseline_manifest(self.config.baseline_manifest_path)
         self._init_captured: dict[str, dict[str, Path]] = {}
+        self.app_health: dict[str, Any] = {}
+        self.app_health_gate: GateResult = GateResult(False, {"reason": "not_checked"})
 
     def bootstrap_session(self) -> None:
+        self.app_health, self.app_health_gate = evaluate_app_health(
+            self.session,
+            self.config.base_url,
+        )
+        if not self.app_health_gate.passed:
+            raise RuntimeError(
+                "App health preflight failed before report run: %s"
+                % json.dumps(self.app_health_gate.details, sort_keys=True)
+            )
         url = f"{self.config.base_url.rstrip('/')}/"
         response = self.session.get(url, timeout=30)
         response.raise_for_status()
@@ -2777,6 +3011,8 @@ def run_iterations(config: RunnerConfig) -> dict[str, Any]:
         "all_passed": all(result.all_passed for result in all_results) if all_results else False,
         "environment": build_environment_summary(),
         "thresholds": thresholds_summary(config),
+        "app_health": runner.app_health,
+        "app_health_gate": asdict(runner.app_health_gate),
         "partial_data_warning_summary": {
             result.scenario: partial_data_warning_summary(result.final_status)
             for result in all_results

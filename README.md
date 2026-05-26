@@ -4,13 +4,17 @@
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
-### What's New in Build 69 (Rounds 95-96 — Ask AI confidence + runtime-only corpus)
+### What's New in Build 69 (Rounds 95-99 — Ask AI confidence, runtime-only corpus, startup/report sweep)
 
 Build 69 keeps the Round 95 Ask AI retrieval work and moves the AdoptIQ Knowledge Corpus to a runtime-only model. The shipped `.app` / DMG contains no corpus database, no corpus salt, no sentinel, and no baked snapshot. Each user must have Cisco OneDrive signed in and the authorized corpus shortcut synced; AdoptIQ then builds or refreshes the encrypted local runtime corpus under that user's app-support directory.
 
 - **Round 95 — Ask AI reranker, canonical self-check, eval expansion, and confidence UI.** Hybrid retrieval can apply an optional second-stage cross-encoder reranker, answer diagnostics expose rerank state, canonical KPI self-checks append correction callouts when generated answers drift from known scope metrics, the offline eval set now includes canonical-metric predicates, and the Ask AI page shows a low/medium/high confidence badge derived from retrieval method, rerank signal, coverage, and corrections.
 - **Round 96 — runtime-only corpus release model.** `adoptiq_mac.spec` no longer bundles `bake/corpus.db.enc`, `bake/corpus.db.salt`, sentinels, locks, or `Resources/baked_corpus/`. `build_mac_dmg.sh` defaults `ADOPTIQ_BAKE_CORPUS=0`; when `ADOPTIQ_RELEASE_GATE=1` is set, the build fails if corpus DB/salt artifacts are present. `scripts/bake_corpus.py` remains available as an explicit developer validation tool only.
 - **Round 96.1 — TACTrack-style corpus guardrail follow-up.** A successful local runtime index now clears stale `blocked_no_onedrive` / `signed_in_no_corpus` source labels so the UI immediately shows the active runtime corpus state. The admin refresh/reset proxies also gate `signed_in_no_corpus` server-side, and `/api/corpus/bootstrap-shortcut` follows the same local-only sensitive-endpoint posture as the rest of the corpus operator surface.
+- **Round 97 — TACTrack-style startup parity.** macOS builds now install a tiny launcher wrapper that opens an AdoptIQ startup splash immediately, polls the lightweight `/ping` health endpoint, and redirects to the local app only after Flask is responding. The Python startup path recognizes the `ADOPTIQ_LAUNCHER_SPLASH_SHOWN` marker so it does not open a duplicate browser tab. Existing stale-instance auto-quit, SIGTERM shutdown, admin autostart, and runtime-only corpus behavior are unchanged.
+- **Round 97.2 — report accuracy and stability sweep.** The live report iteration harness now preflights `/ping`, `/api/version`, `/api/status/all`, `/api/corpus/status`, and `/api/intel/status` before starting expensive report scenarios, and the Mac smoke script checks the same startup/status endpoints. The local gate is green at `5529 passed / 4 skipped / 6 deselected`; the live report sweep was blocked in this environment by missing Snowflake credentials rather than a report-generation accuracy failure.
+- **Round 98 — accuracy and stability scrub.** Renewal portfolio scoring now uses normalized customer slicing and threads Customer Pulse / Action Plans into the per-customer risk profile, named-tech AB filters return an explicit empty scoped set instead of silently widening, Ask AI evidence drawers are populated from the actually allowed/cited evidence, admin proxies use the live main-app URL, and download/open resolution prefers server-known analysis artifacts. The local gate is green at `5550 passed / 4 skipped / 6 deselected`; live all-scenario repeatability passed against a fresh Round 98 manifest.
+- **Round 99 — launch bounce and corpus crypto recovery.** The macOS launcher now starts `AdoptIQ.bin` in the background after opening the splash page, then exits so Finder/Launch Services can finish the launch instead of leaving the Dock icon bouncing. If a runtime-only install has stale local encrypted corpus artifacts sealed under an older sentinel, `corpus_bootstrap` preserves them as `.broken-<utc>` sidecars and retries a clean index from the synced Cisco OneDrive corpus. The local gate is green at `5552 passed / 4 skipped / 6 deselected`; packaged corpus recovery was verified with `303` parsed files and `379,615` chunks.
 - **First-run behavior is intentionally gated.** Ask AI grounding waits until OneDrive exposes the corpus folder and sentinel and the local index pass finishes. Reports remain safe to run while indexing is in progress; the analyze-page Intelligence panel and Admin tile explain whether the app is waiting for OneDrive sign-in, waiting for the corpus shortcut, indexing, active, or failed.
 
 ### What's New in Build 67 (Round 94 — full-sweep audit + Rounds 91-93 ship)
@@ -642,8 +646,8 @@ If you are actively coding on both machines, use the branch-first process in `BR
 
 ## CSOne Report
 
-**Required report:** **AdoptIQ Enhanced/Premium Collab Summary** (Cases with Case Engagement)  
-Link: https://csone.lightning.force.com/lightning/r/Report/00OfX000001Nnh2UAC/view?queryScope=userFolders  
+**Required report:** **AdoptIQ Enhanced/Premium Collab Summary** (Cases with Case Engagement)
+Link: https://csone.lightning.force.com/lightning/r/Report/00OfX000001Nnh2UAC/view?queryScope=userFolders
 
 **How to get the report:**
 1. Click **Access latest AdoptIQ Export from CSOne** (link above the file upload) to open the shared folder in your browser

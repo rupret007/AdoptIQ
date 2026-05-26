@@ -160,7 +160,7 @@ def test_case_id_in_same_paragraph_does_not_drown_real_kpi():
 def test_prefix_regex_extracts_zero_action_plans():
     """The R58 / iter2 phrasing the canonical regex misses."""
     text = (
-        "Per the briefing book, there are 0 Action Plans and "
+        "Per the briefing book, there are 0 Total Action Plans and "
         "0 Success Priorities for this scope."
     )
     out = _canonical_matches(text)
@@ -172,7 +172,7 @@ def test_prefix_regex_extracts_zero_action_plans():
 
 def test_prefix_regex_extracts_nonzero_action_plans():
     """Larger counts also extract correctly."""
-    text = "The portfolio shows 354 Action Plans across 38 customers."
+    text = "The portfolio shows 354 Total Action Plans across 38 customers."
     out = _canonical_matches(text)
     assert out.get("action_plans") == "354", out
 
@@ -193,6 +193,9 @@ def test_prefix_regex_does_not_match_unrelated_phrases():
         "100 customers participated in the survey.",
         "5 minutes to render the report.",
         "47 cases were escalated last week.",
+        # Round 97.3: per-customer prose is not a stable portfolio KPI.
+        "5 active adoption barriers need attention.",
+        "14 open action barriers were mentioned in recommendations.",
     ]
     from report_iteration_loop import _PARAGRAPH_KPI_PREFIX_NUMERIC_RE
     for text in samples_no_match:
@@ -206,7 +209,7 @@ def test_prefix_regex_does_not_match_unrelated_phrases():
 def test_prefix_regex_extracts_adoption_barriers_idiom():
     """Symmetric to action_plans -- the same phrasing pattern often
     appears for adoption barriers in narrative prose."""
-    out = _canonical_matches("The portfolio carries 12 Adoption Barriers.")
+    out = _canonical_matches("The portfolio carries 12 Total Adoption Barriers.")
     assert out.get("adoption_barriers") == "12", out
 
 

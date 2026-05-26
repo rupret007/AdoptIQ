@@ -36,6 +36,7 @@ from pandas import to_datetime, Timestamp, Timedelta
 from docx import Document
 from data_normalization import (
     ACCOUNT_COLUMN_CANDIDATES,
+    _clean_name_for_key,
     add_case_lifecycle_fields,
     build_customer_lookup,
     detect_bems_mask,
@@ -12293,30 +12294,30 @@ def _apply_scope_filter_ab(df: pd.DataFrame, tech: str, days: int) -> pd.DataFra
                 mask = pd.Series([False] * len(use), index=use.index)
                 for c in cols:
                     mask = mask | use[c].astype(str).str.lower().apply(lambda t: _filter_tech_text(t, tech))
-            filtered = use[mask]
-            # If tech filter yields nothing (or unrealistically few) keep original to avoid blank report
+            filtered = use[mask].copy()
+            # Round 98: if a named tech filter yields nothing, keep the empty
+            # scoped result and stamp an explicit warning instead of widening
+            # to the full unfiltered AB set. Widening silently inflated scoped
+            # KPIs and drifted from CSConsole/AP/Pulse filters.
             if before_tech_filter > 0 and filtered.empty:
-                logger.warning(f"AB filter: Tech '{tech}' matched {len(filtered)} of {before_tech_filter}; using unfiltered ABs")
-                # Round 4 / Phase 4.6: stamp the widening on ``use.attrs``
-                # so downstream code (compact / comprehensive analysis,
-                # validators, prompts) can promote a ``partial_data_warnings``
-                # entry like "AB tech filter '<tech>' matched only X/Y;
-                # using unfiltered set" instead of silently surfacing the
-                # broader population as if it were the requested scope.
+                logger.warning(
+                    "AB filter: Tech '%s' matched 0 of %d; returning empty scoped AB set",
+                    tech,
+                    before_tech_filter,
+                )
                 try:
-                    use.attrs['tech_filter_widened'] = True
-                    use.attrs['tech_filter_requested'] = str(tech)
-                    use.attrs['tech_filter_matched'] = int(len(filtered))
-                    use.attrs['tech_filter_total'] = int(before_tech_filter)
-                    use.attrs['tech_filter_warning'] = (
-                        f"AB tech filter '{tech}' matched only {len(filtered)} of {before_tech_filter} "
-                        f"adoption barriers; widened to unfiltered set."
+                    filtered.attrs['tech_filter_empty_after_scope'] = True
+                    filtered.attrs['tech_filter_requested'] = str(tech)
+                    filtered.attrs['tech_filter_matched'] = 0
+                    filtered.attrs['tech_filter_total'] = int(before_tech_filter)
+                    filtered.attrs['tech_filter_warning'] = (
+                        f"AB tech filter '{tech}' matched 0 of {before_tech_filter} "
+                        "adoption barriers; returning an empty scoped set instead of widening."
                     )
                 except Exception:
                     pass
-            else:
-                use = filtered
-                logger.debug(f"AB filter: After technology filter: {len(use)} records (removed {before_tech_filter - len(use)})")
+            use = filtered
+            logger.debug(f"AB filter: After technology filter: {len(use)} records (removed {before_tech_filter - len(use)})")
     else:
         logger.debug("AB filter: Technology='All', skipping technology filter")
 
@@ -12348,6 +12349,23 @@ def _apply_scope_filter_csone(
     logger.debug(f"CSOne filter: Subscription column='{sub_col}', Customer column='{cust_col}'")
 
     filtered_dfs = []
+    normalized_team_customer_names = {
+        _clean_name_for_key(normalize_customer_name(name))
+        for name in (team_customer_names or [])
+        if normalize_customer_name(name) != "Unknown"
+    }
+
+    def _r98_customer_name_mask(frame: pd.DataFrame) -> pd.Series:
+        if cust_col not in frame.columns or not normalized_team_customer_names:
+            return pd.Series([False] * len(frame), index=frame.index)
+        return (
+            frame[cust_col]
+            .fillna("")
+            .astype(str)
+            .apply(lambda value: _clean_name_for_key(normalize_customer_name(value)))
+            .isin(normalized_team_customer_names)
+        )
+
     if sub_col and sub_ids:
         use[sub_col] = use[sub_col].astype(str)
         sub_ids_str = [str(s) for s in sub_ids]
@@ -12364,12 +12382,12 @@ def _apply_scope_filter_csone(
         no_valid_sub_df = use[~valid_sub_mask]
         if not no_valid_sub_df.empty and cust_col in no_valid_sub_df.columns:
             logger.info(f"Falling back to Customer Name filter for {len(no_valid_sub_df)} CSOne rows with non-standard Subscription IDs.")
-            by_name = no_valid_sub_df[no_valid_sub_df[cust_col].isin(team_customer_names)]
+            by_name = no_valid_sub_df[_r98_customer_name_mask(no_valid_sub_df)]
             logger.debug(f"CSOne filter: Found {len(by_name)} rows matching team customer names")
             filtered_dfs.append(by_name)
     elif cust_col in use.columns:
         logger.warning("No subscription ID column found in Excel. Falling back to filtering by Customer Name.")
-        by_name = use[use[cust_col].isin(team_customer_names)]
+        by_name = use[_r98_customer_name_mask(use)]
         logger.debug(f"CSOne filter: Found {len(by_name)} rows matching team customer names")
         filtered_dfs.append(by_name)
     else:

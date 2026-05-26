@@ -32,9 +32,9 @@ touching boot order or any Round 36 / Round 37 / Round 38 code paths:
   shown (for the rare non-AdoptIQ port-collision case) the dialog
   actually surfaces to the front.
 
-Together with a ``webbrowser.open`` short-circuit + ``sys.exit(0)`` in
-the duplicate-AdoptIQ path, the second double-click now silently routes
-the user to the existing tab instead of bouncing into a void.
+Together with a browser-open short-circuit + ``sys.exit(0)`` in the
+duplicate-AdoptIQ path, the second double-click now silently routes the
+user to the existing tab instead of bouncing into a void.
 """
 from __future__ import annotations
 
@@ -155,7 +155,7 @@ def test_duplicate_launch_short_circuits_to_existing_adoptiq():
     """The ``if not available:`` block must call
     ``_probe_existing_adoptiq`` BEFORE printing the port-in-use message
     or showing any dialog, and on a True result must
-    ``webbrowser.open`` then ``sys.exit(0)``.  Otherwise the user sees
+    ``_open_browser_url`` then ``sys.exit(0)``.  Otherwise the user sees
     the original "bounce and stop" symptom on second double-click.
 
     Round 87 / Phase 3 expanded this block by adding the
@@ -181,7 +181,7 @@ def test_duplicate_launch_short_circuits_to_existing_adoptiq():
         'block so the existing AdoptIQ instance is detected before the '
         'osascript dialog or sys.exit fallback.'
     )
-    assert "webbrowser.open('http://localhost:%s/' % PORT)" in block, (
+    assert "_open_browser_url('http://localhost:%s/' % PORT)" in block, (
         'On detected duplicate launch we MUST open the browser to the '
         'existing instance instead of leaving the user with no UI.'
     )

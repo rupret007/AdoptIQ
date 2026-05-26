@@ -208,6 +208,26 @@
         return serverJobs;
     }
 
+    function setPanelPollError(message) {
+        document.querySelectorAll('[data-report-jobs-panel]').forEach(function (panel) {
+            var alert = panel.querySelector('[data-report-jobs-error]');
+            if (!message) {
+                if (alert) { alert.hidden = true; }
+                return;
+            }
+            if (!alert) {
+                alert = document.createElement('div');
+                alert.className = 'alert alert-warning small m-3 mb-0';
+                alert.setAttribute('role', 'status');
+                alert.setAttribute('data-report-jobs-error', '');
+                var body = panel.querySelector('.card-body') || panel;
+                body.insertBefore(alert, body.firstChild);
+            }
+            alert.hidden = false;
+            alert.textContent = message;
+        });
+    }
+
     function render(jobs) {
         var panels = document.querySelectorAll('[data-report-jobs-panel]');
         if (!panels.length) { return false; }
@@ -243,8 +263,10 @@
             var response = await fetch(STATUS_URL, { headers: { 'Accept': 'application/json' } });
             if (!response.ok) { throw new Error('status ' + response.status); }
             var payload = await response.json();
+            setPanelPollError('');
             active = render(normalizePayload(payload));
-        } catch (_) {
+        } catch (err) {
+            setPanelPollError('Unable to refresh report jobs; showing last local start state only.');
             active = render(Object.keys(optimisticJobs).map(function (aid) { return optimisticJobs[aid]; }));
         } finally {
             schedule(active ? FAST_MS : SLOW_MS);

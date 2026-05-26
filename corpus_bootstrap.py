@@ -36,6 +36,7 @@ from typing import Optional
 
 from _logging_helpers import exit_log_streams_open as _shared_exit_log_streams_open
 from _logging_helpers import safe_log_info as _shared_safe_log_info
+from _logging_helpers import safe_log_warning as _shared_safe_log_warning
 from config import Config
 from corpus_crypto import (
     CorpusCryptoError,
@@ -1004,6 +1005,12 @@ def _safe_log_info(msg: str, *args: object) -> None:
     _shared_safe_log_info(logger, msg, *args)
 
 
+def _safe_log_warning(msg: str, *args: object) -> None:
+    """Round 98: warning-level closed-stream sibling for pytest/app teardown."""
+
+    _shared_safe_log_warning(logger, msg, *args)
+
+
 def _exit_log_streams_open() -> bool:
     """Round 63: thin wrapper around
     ``_logging_helpers.exit_log_streams_open``.  Wrapper name preserved
@@ -1484,17 +1491,62 @@ def _run_index_pass(*, rebuild: bool) -> None:
                 )
                 configure_connection(None)
                 return
-            with _BOOT_LOCK:
-                _STATE.last_error = str(crypto_err)
-                _STATE.last_error_kind = "crypto"
-                _STATE.in_progress = False
-                _STATE.last_finished_at = _utc_now_iso()
-            logger.warning(
-                "Round 17 / corpus_bootstrap: corpus unavailable (%s)",
-                _STATE.last_error_kind,
-            )
-            configure_connection(None)
-            return
+            # Round 99: runtime-only corpus recovery.  A synced OneDrive
+            # folder plus present sentinel means this is not the Round 54
+            # "sentinel disappeared" race.  The common upgrade failure is a
+            # stale local encrypted corpus sealed under an older sentinel.  Keep
+            # a bounded forensic sidecar set, then retry the open so the
+            # runtime indexer can rebuild from the authorized OneDrive mirror.
+            preserved_suffix = _preserve_broken_corpus(encrypted_path.parent)
+            if preserved_suffix:
+                _safe_log_warning(
+                    "Round 99 / corpus_bootstrap: preserved stale runtime "
+                    "corpus artifacts as .broken-%s after crypto mismatch; "
+                    "retrying clean runtime index",
+                    preserved_suffix,
+                )
+                try:
+                    handle = open_corpus_for_user(
+                        onedrive_root=onedrive_root,
+                        encrypted_path=encrypted_path,
+                        create_if_missing=True,
+                        allow_local_sentinel=False,
+                    )
+                except CorpusCryptoError as retry_err:
+                    with _BOOT_LOCK:
+                        _STATE.last_error = (
+                            "corpus decrypt failed after stale-artifact "
+                            f"preserve: {retry_err}"
+                        )
+                        _STATE.last_error_kind = "crypto"
+                        _STATE.in_progress = False
+                        _STATE.last_finished_at = _utc_now_iso()
+                        _STATE.completed = False
+                    _safe_log_warning(
+                        "Round 99 / corpus_bootstrap: runtime corpus "
+                        "crypto retry failed (%s)",
+                        _STATE.last_error_kind,
+                    )
+                    configure_connection(None)
+                    return
+            else:
+                _safe_log_warning(
+                    "Round 99 / corpus_bootstrap: crypto mismatch had no "
+                    "local runtime corpus artifacts to preserve; surfacing "
+                    "crypto failure"
+                )
+                with _BOOT_LOCK:
+                    _STATE.last_error = str(crypto_err)
+                    _STATE.last_error_kind = "crypto"
+                    _STATE.in_progress = False
+                    _STATE.last_finished_at = _utc_now_iso()
+                    _STATE.completed = False
+                _safe_log_warning(
+                    "Round 99 / corpus_bootstrap: corpus unavailable (%s)",
+                    _STATE.last_error_kind,
+                )
+                configure_connection(None)
+                return
 
         signal = IndexSignal()
         with _BOOT_LOCK:

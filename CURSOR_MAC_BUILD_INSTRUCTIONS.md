@@ -105,17 +105,26 @@ Create a macOS build script equivalent to build_pc.bat that installs deps, runs 
 ## 6) Verify build outputs
 
 `build_mac.sh` should produce:
-- `OUTBOX/AdoptIQ.app`
+- `dist/AdoptIQ.app`
 - `OUTBOX/README.md`
-- `OUTBOX/build_info.txt`
-
-If you run `build_mac_dmg.sh`, also confirm:
 - `OUTBOX/AdoptIQ-v<version>-build<build>.dmg`
+
+Run the packaged-app smoke against the rebuilt app bundle:
+
+```bash
+scripts/test_build_smoke.sh
+```
+
+The smoke polls `/ping`, then checks `/`, `/api/version`, `/api/status/all`, `/api/corpus/status`, and confirms the port is free after quit. If you need to smoke a mounted DMG or copied app instead, pass the app path explicitly:
+
+```bash
+scripts/test_build_smoke.sh /Applications/AdoptIQ.app
+```
 
 Verify the build output before shipping the DMG to anyone:
 
 ```bash
-codesign --verify --deep --strict OUTBOX/AdoptIQ.app
+codesign --verify --deep --strict dist/AdoptIQ.app
 ```
 
 Mount the DMG and confirm it contains all four user-facing items:
@@ -129,7 +138,8 @@ hdiutil detach /tmp/adoptiq_dmg
 ```
 
 Also verify:
-- App starts and opens `http://localhost:5151`
+- App shows the TACTrack-style startup splash, polls `http://localhost:5151/ping`, then redirects to `http://localhost:5151` once Flask is ready.
+- The Dock icon does not keep bouncing after Flask is ready. Round 99 backgrounds `AdoptIQ.bin` from the launcher wrapper and exits the wrapper so Finder/Launch Services can complete the app launch.
 - No missing module errors at startup
 - The app bundle contains no corpus data:
 
@@ -260,6 +270,8 @@ both the build operator and the auditor see it.
   - Windows `%APPDATA%\\AdoptIQ`
   - macOS `~/Library/Application Support/AdoptIQ`
 - SmartScreen notes are Windows-only; ignore on Mac.
+- **App starts and the browser works, but the Dock icon keeps bouncing:** ensure the installed app came from a Round 99+ DMG. The launcher script inside `Contents/MacOS/AdoptIQ` should start `AdoptIQ.bin` with `nohup ... &` and exit; older Build 69 launchers used `exec`, which left the browser-only server as the foreground app process.
+- **Corpus panel shows `authentication tag mismatch` after an upgrade:** a stale local encrypted corpus may have been sealed under an older OneDrive sentinel. Round 99+ preserves the stale artifacts as `.broken-<utc>` sidecars and retries a clean runtime index from the synced OneDrive corpus. If the error persists, use the app's Reset Corpus action and confirm `~/Library/CloudStorage/OneDrive-Cisco/.../adoptiq_corpus_sentinel.json` is present and non-empty.
 - **App bounces in the Dock and exits after dragging to Applications:** This is macOS Gatekeeper / AMFI killing the adhoc-signed bundle because of `com.apple.quarantine`. Two ways to confirm and recover:
   1. Run the `Unblock AdoptIQ.command` helper that ships in the DMG window — it strips the quarantine attribute and launches the app.
   2. Or, manually in Terminal:

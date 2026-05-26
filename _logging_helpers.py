@@ -76,6 +76,20 @@ def exit_log_streams_open(target_logger: logging.Logger) -> bool:
     return True
 
 
+def _safe_log_level(
+    target_logger: logging.Logger,
+    level_name: str,
+    msg: str,
+    *args: object,
+) -> None:
+    """Round 97.2: shared closed-stream gate for logger level methods."""
+    if exit_log_streams_open(target_logger):
+        try:
+            getattr(target_logger, level_name)(msg, *args)
+        except (ValueError, OSError):
+            pass
+
+
 def safe_log_info(target_logger: logging.Logger, msg: str, *args: object) -> None:
     """Emit ``target_logger.info(msg, *args)`` only when every reachable
     ``StreamHandler`` has an open underlying stream.
@@ -92,8 +106,9 @@ def safe_log_info(target_logger: logging.Logger, msg: str, *args: object) -> Non
     are swallowed silently because by definition we are mid-shutdown
     and cannot recover.
     """
-    if exit_log_streams_open(target_logger):
-        try:
-            target_logger.info(msg, *args)
-        except (ValueError, OSError):
-            pass
+    _safe_log_level(target_logger, "info", msg, *args)
+
+
+def safe_log_warning(target_logger: logging.Logger, msg: str, *args: object) -> None:
+    """Round 97.2: warning-level sibling for shutdown/teardown races."""
+    _safe_log_level(target_logger, "warning", msg, *args)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -121,3 +122,10 @@ def test_round95_bake_reranker_self_test_fails_loud_on_missing_reranker():
         ok, message = _bake_reranker_self_test()
     assert ok is False
     assert "missing model" in message
+
+
+def test_round98_mac_spec_pins_existing_fastembed_reranker_module() -> None:
+    spec_text = Path("adoptiq_mac.spec").read_text(encoding="utf-8")
+
+    assert "'fastembed.rerank.cross_encoder'" in spec_text
+    assert "'fastembed.rerank.text_cross_encoder'" not in spec_text

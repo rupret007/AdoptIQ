@@ -635,6 +635,80 @@ def build_evidence_context(
     return text, allowed_ids, used
 
 
+def _r98_evidence_record_to_dict(record: EvidenceRecord) -> Dict[str, Any]:
+    """Round 98: serialize a bounded evidence record for UI drawers/diag."""
+
+    text = str(getattr(record, "text", "") or "").strip()
+    snippet = text[:277].rstrip() + "..." if len(text) > 280 else text
+    return {
+        "source_id": str(getattr(record, "source_id", "") or "").strip(),
+        "source_type": str(getattr(record, "source_type", "") or ""),
+        "customer": str(getattr(record, "customer", "") or "")[:120],
+        "timestamp": str(getattr(record, "timestamp", "") or ""),
+        "text": text[:32_000] + "...[truncated]" if len(text) > 32_000 else text,
+        "snippet": snippet,
+        "confidence": getattr(record, "confidence", None),
+        "bm25_rank": getattr(record, "bm25_rank", None),
+        "dense_rank": getattr(record, "dense_rank", None),
+        "rrf_score": getattr(record, "rrf_score", None),
+        "rerank_rank": getattr(record, "rerank_rank", None),
+        "rerank_score": getattr(record, "rerank_score", None),
+    }
+
+
+def _r98_used_evidence_records(
+    ranked_records: Sequence[EvidenceRecord],
+    allowed_ids: Set[str],
+    *,
+    cap: int = 200,
+) -> List[Dict[str, Any]]:
+    """Round 98: keep only evidence whose SourceID was actually allowed."""
+
+    used: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    allowed_norm = {_normalize_claim_id(x) for x in (allowed_ids or set()) if str(x).strip()}
+    for rec in ranked_records or []:
+        sid = str(getattr(rec, "source_id", "") or "").strip()
+        norm_sid = _normalize_claim_id(sid)
+        if not sid or norm_sid not in allowed_norm or norm_sid in seen:
+            continue
+        seen.add(norm_sid)
+        used.append(_r98_evidence_record_to_dict(rec))
+        if len(used) >= cap:
+            break
+    return used
+
+
+_R98_CORPUS_LINE_RE = re.compile(r"^\s*-\s*\[(CORPUS:\d{3})\]\s*(?P<body>.*)$")
+
+
+def _r98_corpus_evidence_records(corpus_block: str, allowed_ids: Iterable[str], *, cap: int = 40) -> List[Dict[str, Any]]:
+    """Round 98: expose corpus SourceIDs in the clickable evidence index."""
+
+    allowed_norm = {_normalize_claim_id(x) for x in (allowed_ids or [])}
+    out: List[Dict[str, Any]] = []
+    for line in str(corpus_block or "").splitlines():
+        match = _R98_CORPUS_LINE_RE.match(line)
+        if not match:
+            continue
+        sid = match.group(1)
+        if _normalize_claim_id(sid) not in allowed_norm:
+            continue
+        text = match.group("body").strip()
+        rec = EvidenceRecord(
+            source_type="Corpus",
+            source_id=sid,
+            customer="Corpus",
+            timestamp="",
+            text=text,
+            confidence=0.75,
+        )
+        out.append(_r98_evidence_record_to_dict(rec))
+        if len(out) >= cap:
+            break
+    return out
+
+
 def _extract_json_object(raw: str) -> Optional[Dict[str, Any]]:
     text = str(raw or "").strip()
     if not text:
@@ -1969,27 +2043,41 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         # marker, which was opaque -- they had no way to read the
         # underlying record without filing a ticket.
         evidence_index: list[dict] = []
+        evidence_records: list[dict] = []
         try:
             _seen_ids: set = set()
-            for rec in (_ranked_for_diag or [])[: int(used_records or 0)]:
+            evidence_records = _r98_used_evidence_records(
+                _ranked_for_diag or [],
+                allowed_ids,
+                cap=200,
+            )
+            _corpus_evidence_records = _r98_corpus_evidence_records(
+                getattr(_corpus_ctx, "block", "") or "",
+                getattr(_corpus_ctx, "allowed_ids", ()) or (),
+            )
+            for _corpus_rec in _corpus_evidence_records:
+                _sid = str(_corpus_rec.get("source_id") or "")
+                if _sid and all(str(r.get("source_id") or "") != _sid for r in evidence_records):
+                    evidence_records.append(_corpus_rec)
+            for rec in evidence_records:
                 try:
-                    sid = str(getattr(rec, "source_id", "")).strip()
+                    sid = str(rec.get("source_id") or "").strip()
                     if not sid or sid in _seen_ids:
                         continue
                     _seen_ids.add(sid)
-                    snippet_text = str(getattr(rec, "text", "") or "").strip()
+                    snippet_text = str(rec.get("snippet") or rec.get("text") or "").strip()
                     # Bound snippet length; preserve full sentences
                     # at the cap when possible.
                     if len(snippet_text) > 280:
                         snippet_text = snippet_text[:277].rstrip() + "..."
-                    customer = str(getattr(rec, "customer", "") or "").strip()
+                    customer = str(rec.get("customer") or "").strip()
                     if len(customer) > 80:
                         customer = customer[:77] + "..."
                     evidence_index.append({
                         "source_id": sid,
-                        "source_type": str(getattr(rec, "source_type", "") or ""),
+                        "source_type": str(rec.get("source_type") or ""),
                         "customer": customer,
-                        "timestamp": str(getattr(rec, "timestamp", "") or ""),
+                        "timestamp": str(rec.get("timestamp") or ""),
                         "snippet": snippet_text,
                     })
                     # Defensive cap: never inflate the payload past
@@ -2022,6 +2110,9 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             "retrieval_diag": retrieval_diag,
             # Round 68 / Build 42 (C7): see comment block above.
             "evidence_index": evidence_index,
+            # Round 98: full evidence drawer records mirror the same
+            # SourceIDs as evidence_index, plus bounded text/details.
+            "evidence_records": evidence_records,
         }
     except Exception as exc:
         logger.error("Grounded Ask AI portfolio pipeline failed: %s", exc, exc_info=True)

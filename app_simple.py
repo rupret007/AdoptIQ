@@ -15,6 +15,8 @@ import math
 import secrets
 import shutil  # Round 81: outputs-by-manager migration uses shutil.move
 import signal  # Round 60: SIGTERM-based graceful shutdown for /api/shutdown
+import subprocess
+import tempfile
 import time
 import threading
 import re
@@ -388,6 +390,7 @@ from compact_report_formatter import calculate_renewal_risk_scores
 from advanced_renewal_analyzer import AdvancedRenewalAnalyzer, generate_advanced_renewal_analysis
 from data_normalization import (
     ACCOUNT_COLUMN_CANDIDATES,
+    _clean_name_for_key,
     add_case_lifecycle_fields,
     build_customer_lookup,
     detect_bems_mask,
@@ -1920,6 +1923,18 @@ def _r93_ab_scope_warning_entries(ab_df: Any) -> list[dict[str, Any]]:
                 "matched": attrs.get("tech_filter_matched"),
                 "total": attrs.get("tech_filter_total"),
             })
+        if attrs.get("tech_filter_empty_after_scope"):
+            entries.append({
+                "dataset": "adoption_barriers",
+                "error": str(
+                    attrs.get("tech_filter_warning")
+                    or "AB tech filter returned no scoped rows."
+                ),
+                "kind": "tech_filter_empty_after_scope",
+                "tech_requested": attrs.get("tech_filter_requested"),
+                "matched": attrs.get("tech_filter_matched"),
+                "total": attrs.get("tech_filter_total"),
+            })
         excluded_total = attrs.get("tech_filter_excluded_total")
         if excluded_total:
             entries.append({
@@ -2774,6 +2789,27 @@ def _r92_resolve_output_artifact(raw_path: object, *, basename_hint: str | None 
         except Exception:
             continue
     return None
+
+
+def _r98_resolve_download_filename(filename: str) -> Optional[str]:
+    """Round 98: prefer server-known analysis artifacts before basename search."""
+
+    safe_filename = secure_filename(os.path.basename(str(filename or "")))
+    if not safe_filename:
+        return None
+    with analysis_status_lock:
+        statuses = list(analysis_status.values())
+    for status in statuses:
+        if not isinstance(status, dict):
+            continue
+        for key in ("word_report", "excel_report", "report_path"):
+            raw = status.get(key)
+            if not raw or os.path.basename(str(raw)) != safe_filename:
+                continue
+            resolved = _r92_resolve_output_artifact(raw)
+            if resolved:
+                return resolved
+    return _r92_resolve_output_artifact(safe_filename, basename_hint=safe_filename)
 
 
 _R92_FATAL_PARTIAL_WARNING_KINDS = {
@@ -12120,9 +12156,41 @@ def _r65_filter_customer_tagged_incidents(
     return matched
 
 
+def _r98_slice_customer_frame(
+    df: Optional[pd.DataFrame],
+    customer_name: str,
+    candidate_cols: tuple[str, ...],
+) -> pd.DataFrame:
+    """Round 98: normalized per-customer slicing for portfolio report loops."""
+
+    if df is None or df.empty or not customer_name:
+        return pd.DataFrame()
+    target = _clean_name_for_key(normalize_customer_name(customer_name))
+    if not target or target == "Unknown":
+        return pd.DataFrame()
+    for col in candidate_cols:
+        if col not in df.columns:
+            continue
+        try:
+            mask = (
+                df[col]
+                .fillna("")
+                .astype(str)
+                .apply(lambda value: _clean_name_for_key(normalize_customer_name(value)))
+                .eq(target)
+            )
+            if mask.any():
+                return df[mask].copy()
+        except Exception as exc:  # noqa: BLE001 - defensive helper for report loops
+            logger.debug("Round 98: normalized customer slice failed for %s.%s: %s", type(df).__name__, col, exc)
+    return pd.DataFrame()
+
+
 def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame,
                                    customer_csone: pd.DataFrame, team_subs_df: pd.DataFrame,
-                                   days: int, ext_incidents: List[Dict] = None) -> Dict:
+                                   days: int, ext_incidents: List[Dict] = None,
+                                   customer_pulse: Optional[pd.DataFrame] = None,
+                                   customer_action_plans: Optional[pd.DataFrame] = None) -> Dict:
     """
     Calculate renewal risk score from available data (adoption barriers + CSOne cases + service incidents).
     This avoids the Snowflake schema issues in the AdvancedRenewalAnalyzer.
@@ -12131,10 +12199,10 @@ def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame
         ext_incidents: List of service incidents from status.webex.com (optional)
     """
     logger.info(f"[RENEWAL] Calculating simple renewal risk for: {customer_name}")
-    customer_subs = (
-        team_subs_df[team_subs_df['BU_NAME'] == customer_name].copy()
-        if team_subs_df is not None and not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns
-        else pd.DataFrame()
+    customer_subs = _r98_slice_customer_frame(
+        team_subs_df,
+        customer_name,
+        ('BU_NAME', 'Customer Name', 'CUSTOMER_NAME'),
     )
     normalized_csone = add_case_lifecycle_fields(customer_csone)
     # Round 65 / R-2: filter portfolio-shared incidents to those
@@ -12148,8 +12216,8 @@ def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame
         customer_name=customer_name,
         customer_ab=customer_ab if customer_ab is not None else pd.DataFrame(),
         customer_csone=normalized_csone,
-        customer_pulse=pd.DataFrame(),
-        customer_action_plans=pd.DataFrame(),
+        customer_pulse=customer_pulse if customer_pulse is not None else pd.DataFrame(),
+        customer_action_plans=customer_action_plans if customer_action_plans is not None else pd.DataFrame(),
         customer_subs=customer_subs,
         ext_incidents=_r65_per_customer_incidents,
         # Round 3 / Phase 4.2: thread the report's analysis horizon
@@ -14378,6 +14446,28 @@ def run_customer_renewal_analysis(analysis_id):
                     all_customers = team_subs_df['BU_NAME'].dropna().unique().tolist() if not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns else []
                 # Portfolio: use all cases, not filtered by customer
                 customer_csone = csone_df.copy() if not csone_df.empty else pd.DataFrame()
+                try:
+                    _r98_all_set = _get_all_customers_from_all_sources(
+                        ab_norm=customer_ab if customer_ab is not None else None,
+                        csone_df=customer_csone,
+                        team_subs_df=team_subs_df,
+                        csconsole_action_plans=csconsole_action_plans,
+                        csconsole_customer_pulse=csconsole_customer_pulse,
+                        csconsole_success_priorities=csconsole_success_priorities,
+                        csconsole_adoption_barriers=csconsole_adoption_barriers,
+                    )
+                    _r98_all_customers = sorted([c for c in _r98_all_set if c])
+                    if _r98_all_customers:
+                        all_customers = _r98_all_customers
+                        logger.info(
+                            "[[CUSTOMER_COUNT]] Round 98: Portfolio renewal refreshed customer universe after CSOne load: %d customers",
+                            len(all_customers),
+                        )
+                except Exception as _r98_universe_err:  # noqa: BLE001
+                    logger.debug(
+                        "[[CUSTOMER_COUNT]] Round 98: post-CSOne universe refresh skipped: %s",
+                        _r98_universe_err,
+                    )
             else:
                 # Single customer: filter for specific customer.
                 # Round 6 / Phase 5.4: in addition to exact and
@@ -14616,9 +14706,29 @@ def run_customer_renewal_analysis(analysis_id):
                     status['progress'] = 60 + int((idx / len(all_customers)) * 15)  # 60-75%
                     status['message'] = f' Analyzing renewal risk for {cust_name} ({idx+1}/{len(all_customers)})...'
 
-                # Filter data for this customer
-                cust_ab = customer_ab[customer_ab['customer_name'] == cust_name] if not customer_ab.empty else pd.DataFrame()
-                cust_csone = customer_csone[customer_csone['customer_name'] == cust_name] if not customer_csone.empty else pd.DataFrame()
+                # Round 98: use the same normalized customer matching as
+                # single-customer renewal so punctuation/suffix variants do
+                # not drop AB/TAC/Pulse/AP rows from portfolio scoring.
+                cust_ab = _r98_slice_customer_frame(
+                    customer_ab,
+                    cust_name,
+                    ('customer_name', 'BU_NAME', 'Customer Name', 'CUSTOMER_NAME'),
+                )
+                cust_csone = _r98_slice_customer_frame(
+                    customer_csone,
+                    cust_name,
+                    ('customer_name', 'BU_NAME', 'Customer Name', 'CUSTOMER_NAME'),
+                )
+                cust_pulse = _r98_slice_customer_frame(
+                    customer_customer_pulse,
+                    cust_name,
+                    ('customer_name', 'BU_NAME', 'Customer Name', 'CUSTOMER_NAME__C', 'CUSTOMER_NAME'),
+                )
+                cust_action_plans = _r98_slice_customer_frame(
+                    customer_action_plans,
+                    cust_name,
+                    ('customer_name', 'BU_NAME', 'Customer Name', 'CUSTOMER_BU_NAME__C', 'RELATED_CUSTOMER__C'),
+                )
 
                 # Calculate risk for this customer (include incidents for portfolio analysis)
                 cust_risk = _calculate_simple_renewal_risk(
@@ -14627,7 +14737,9 @@ def run_customer_renewal_analysis(analysis_id):
                     customer_csone=cust_csone,
                     team_subs_df=team_subs_df,
                     days=days,
-                    ext_incidents=ext_incidents  # Pass incidents for risk calculation
+                    ext_incidents=ext_incidents,  # Pass incidents for risk calculation
+                    customer_pulse=cust_pulse,
+                    customer_action_plans=cust_action_plans,
                 )
                 portfolio_renewal_analyses[cust_name] = cust_risk
 
@@ -20214,6 +20326,17 @@ def verbose_debug_api():
         return jsonify({'ok': False, 'success': False, 'error': 'Failed to update verbose debug mode'}), 500
 
 
+@app.route('/ping', methods=['GET'])
+def ping():
+    """Round 97: lightweight startup readiness probe for the macOS splash."""
+    return 'OK', 200, {
+        'Content-Type': 'text/plain',
+        # Round 98: the macOS launcher splash is opened as a local file,
+        # so it must be allowed to read the exact /ping body before redirecting.
+        'Access-Control-Allow-Origin': '*',
+    }
+
+
 @app.route('/api/version', methods=['GET'])
 def api_version():
     """Round 68 / Build 42 (A2): expose the running binary's identity.
@@ -25458,7 +25581,7 @@ def download_file(filename):
         # both branches the resolved path is re-verified against
         # ``outputs_real`` via ``realpath`` so a symlink farm under
         # any subdirectory cannot escape the outputs root.
-        resolved_path = _r92_resolve_output_artifact(safe_filename, basename_hint=safe_filename)  # Round 92
+        resolved_path = _r98_resolve_download_filename(safe_filename)
         if not resolved_path:
             return f"File not found: {safe_filename}", 404
 
@@ -29567,6 +29690,147 @@ def _force_quit_existing_adoptiq(port, *, pid=None, timeout=10.0, poll_interval=
     return False
 
 
+# Round 97: TACTrack-style startup splash helpers.  These are intentionally
+# separate from the R87 duplicate/stale-instance helpers above: the splash only
+# improves first-launch feedback, while R87 continues to own process safety.
+def _open_browser_url(url: str) -> bool:
+    """Best-effort browser handoff for AdoptIQ's local web UI."""
+    target = str(url or '').strip()
+    if not target:
+        return False
+    try:
+        if sys.platform == 'darwin':
+            # Round 97: fixed executable with structured args; no shell.
+            subprocess.Popen(  # noqa: S603  # nosec B603
+                ['/usr/bin/open', target],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        return bool(webbrowser.open(target))
+    except Exception as open_err:  # noqa: BLE001 - startup UX best effort
+        logger.debug("_open_browser_url failed for %r: %s", target, open_err)
+        return False
+
+
+def _launcher_splash_already_shown(environ=None) -> bool:
+    """Return True when the macOS bundle launcher already opened the splash."""
+    env = os.environ if environ is None else environ
+    marker = str(env.get('ADOPTIQ_LAUNCHER_SPLASH_SHOWN') or '').strip().lower()
+    return marker in {'1', 'true', 'yes', 'on'}
+
+
+def _startup_splash_html(port: int) -> str:
+    """Return the local startup splash page shown before Flask is ready."""
+    app_url = f"http://localhost:{port}/"
+    ping_url = f"http://localhost:{port}/ping"
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AdoptIQ is starting</title>
+  <style>
+    :root {{
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    body {{
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      background: #06172b;
+      color: #ffffff;
+    }}
+    main {{
+      max-width: 34rem;
+      padding: 2rem;
+      text-align: center;
+    }}
+    .spinner {{
+      width: 2.75rem;
+      height: 2.75rem;
+      margin: 0 auto 1.25rem;
+      border: 0.3rem solid rgba(255,255,255,0.3);
+      border-top-color: #35c7ff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }}
+    @keyframes spin {{
+      to {{ transform: rotate(360deg); }}
+    }}
+    p {{
+      color: #d7dde8;
+      line-height: 1.45;
+    }}
+    a {{
+      color: #35c7ff;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="spinner" aria-hidden="true"></div>
+    <h1>AdoptIQ is starting...</h1>
+    <p>Your browser will open AdoptIQ automatically when it is ready.</p>
+    <p>Reports remain safe to run while the knowledge corpus indexes in the background.</p>
+    <p>If this page does not redirect, <a href="{app_url}">open AdoptIQ</a>.</p>
+  </main>
+  <script>
+    const appUrl = "{app_url}";
+    const pingUrl = "{ping_url}";
+    async function waitForAdoptIQ() {{
+      try {{
+        const response = await fetch(pingUrl, {{ cache: "no-store" }});
+        if (!response.ok) {{ throw new Error("status " + response.status); }}
+        const body = await response.text();
+        if (body.trim() !== "OK") {{ throw new Error("unexpected ping body"); }}
+        window.location.replace(appUrl);
+      }} catch (error) {{
+        window.setTimeout(waitForAdoptIQ, 1000);
+      }}
+    }}
+    waitForAdoptIQ();
+  </script>
+</body>
+</html>
+"""
+
+
+def _open_startup_splash(port: int) -> bool:
+    """Open a local browser splash page while frozen macOS startup completes."""
+    try:
+        port_int = int(port)
+    except (TypeError, ValueError):
+        return False
+    if port_int < 1 or port_int > 65535:
+        return False
+    if sys.platform != 'darwin' or not getattr(sys, 'frozen', False):
+        return False
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            'w',
+            suffix='.html',
+            prefix='adoptiq-starting-',
+            delete=False,
+            encoding='utf-8',
+        ) as splash_file:
+            splash_file.write(_startup_splash_html(port_int))
+            splash_path = splash_file.name
+        # Round 97: fixed executable with structured args; no shell.
+        subprocess.Popen(  # noqa: S603  # nosec B603
+            ['/usr/bin/open', splash_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except Exception as splash_err:  # noqa: BLE001 - startup UX best effort
+        logger.debug("_open_startup_splash failed; continuing: %s", splash_err)
+        return False
+
+
 # Round 17.3: resolve the main-app TCP port from the environment so
 # operators can move AdoptIQ off a contested port without a rebuild.
 # 5151 is adjacent to the user's other 5150 ("Van Halen") app and out
@@ -29737,14 +30001,7 @@ if __name__ == '__main__':
                             "force-quit; re-routing to localhost as a "
                             "fallback." % PORT
                         )
-                        try:
-                            webbrowser.open('http://localhost:%s/' % PORT)
-                        except Exception as _r87_open_err:
-                            logger.debug(
-                                "Round 87 / fallback re-route: "
-                                "webbrowser.open failed: %s",
-                                _r87_open_err,
-                            )
+                        _open_browser_url('http://localhost:%s/' % PORT)
                         sys.exit(0)
                     # Fall through to normal boot below; ``available``
                     # is now True so the in-use dialog block is skipped.
@@ -29753,28 +30010,14 @@ if __name__ == '__main__':
                         "AdoptIQ: could not force-quit stale instance; "
                         "falling back to re-route."
                     )
-                    try:
-                        webbrowser.open('http://localhost:%s/' % PORT)
-                    except Exception as _r87_open_err:
-                        logger.debug(
-                            "Round 87 / fallback re-route: "
-                            "webbrowser.open failed: %s",
-                            _r87_open_err,
-                        )
+                    _open_browser_url('http://localhost:%s/' % PORT)
                     sys.exit(0)
             else:
                 # Not frozen, not stale, or version probe failed --
                 # preserve R38.1 / Build13 re-route to existing instance.
                 print("AdoptIQ is already running on http://localhost:%s/ -- "
                       "opening that instance." % PORT)
-                try:
-                    webbrowser.open('http://localhost:%s/' % PORT)
-                except Exception as _open_err:
-                    logger.debug(
-                        "Round 38.1: webbrowser.open failed for existing "
-                        "AdoptIQ instance on port %s: %s",
-                        PORT, _open_err,
-                    )
+                _open_browser_url('http://localhost:%s/' % PORT)
                 sys.exit(0)
 
     # Round 87 / Phase 3: the in-use dialog logic only runs when the
@@ -29911,15 +30154,18 @@ if __name__ == '__main__':
             print("Run AdoptIQ from Command Prompt (or Terminal) to choose: kill the process or quit.")
             sys.exit(1)
 
-    # Launch browser after server starts (like Mac version)
-    def _open_browser():
-        time.sleep(BROWSER_LAUNCH_DELAY_SECONDS)  # Give server time to bind
-        try:
-            webbrowser.open('http://localhost:%s/' % PORT)
-        except Exception as _e:
-            logger.debug("browser launch failed: %s", _e)
+    launcher_splash_shown = _launcher_splash_already_shown()
+    if not launcher_splash_shown:
+        _open_startup_splash(PORT)
 
-    threading.Thread(target=_open_browser, daemon=True).start()
+        # Launch browser after server starts (like Mac version).  Round 97:
+        # when the app-bundle launcher already opened the polling splash, this
+        # direct opener is suppressed so users do not get a duplicate tab.
+        def _open_browser():
+            time.sleep(BROWSER_LAUNCH_DELAY_SECONDS)  # Give server time to bind
+            _open_browser_url('http://localhost:%s/' % PORT)
+
+        threading.Thread(target=_open_browser, daemon=True).start()
 
     # Round 8 / Phase 1.13: bind-address sanity check.  ``_SENSITIVE_ENDPOINTS``
     # is gated by ``_is_local_client`` (loopback only), but if the bind host

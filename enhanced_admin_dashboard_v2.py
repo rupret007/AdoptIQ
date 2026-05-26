@@ -3576,7 +3576,13 @@ def enhanced_admin_dashboard():
         import requests
         response = requests.get(f'{_live_main_url()}/api/status/all', timeout=2)
         if response.status_code == 200:
-            all_reports = response.json()
+            all_reports_payload = response.json()
+            if isinstance(all_reports_payload, dict):
+                all_reports = all_reports_payload.get('statuses') or []
+            elif isinstance(all_reports_payload, list):
+                all_reports = all_reports_payload
+            else:
+                all_reports = []
             running_reports = [r for r in all_reports if r.get('status') in ['running', 'starting']]
         else:
             running_reports_failed = True
@@ -3677,7 +3683,7 @@ def enhanced_admin_dashboard():
     corpus_status_failed = True
     try:
         _r17_corpus_resp = requests.get(
-            f'{MAIN_APP_URL.rstrip("/")}/api/corpus/status',
+            f'{_live_main_url()}/api/corpus/status',
             timeout=2,
         )
         if _r17_corpus_resp.status_code == 200:
@@ -3737,7 +3743,7 @@ def enhanced_admin_dashboard():
 def _r54_corpus_is_blocked_no_onedrive() -> bool:
     try:
         resp = requests.get(
-            f'{MAIN_APP_URL.rstrip("/")}/api/corpus/status',
+            f'{_live_main_url()}/api/corpus/status',
             timeout=2,
         )
     except Exception:  # noqa: BLE001 - probe must never bubble
@@ -3805,7 +3811,7 @@ def corpus_refresh_route():
             headers['X-AdoptIQ-Internal'] = _internal_tok
         body = {'rebuild': rebuild} if rebuild else {}
         resp = _r17_req.post(
-            f'{MAIN_APP_URL.rstrip("/")}/api/corpus/refresh',
+            f'{_live_main_url()}/api/corpus/refresh',
             data=body,
             headers=headers,
             timeout=5,
@@ -3882,7 +3888,7 @@ def corpus_reset_route():
         if _internal_tok:
             headers['X-AdoptIQ-Internal'] = _internal_tok
         resp = _r39_req.post(
-            f'{MAIN_APP_URL.rstrip("/")}/api/corpus/reset',
+            f'{_live_main_url()}/api/corpus/reset',
             data={},
             headers=headers,
             timeout=10,
@@ -3959,7 +3965,7 @@ def admin_quit_route():
             headers['X-AdoptIQ-Internal'] = _internal_tok
         body = {'force': force_form} if force_form else {}
         resp = _r60_req.post(
-            f'{MAIN_APP_URL.rstrip("/")}/api/shutdown',
+            f'{_live_main_url()}/api/shutdown',
             data=body,
             headers=headers,
             timeout=5,
@@ -4010,7 +4016,7 @@ def _r69_admin_proxy_post(upstream_path: str, body: Dict[str, Any], timeout: int
         if _internal_tok:
             headers['X-AdoptIQ-Internal'] = _internal_tok
         resp = _r69_req.post(
-            f'{MAIN_APP_URL.rstrip("/")}{upstream_path}',
+            f'{_live_main_url()}{upstream_path}',
             json=body or {},
             headers=headers,
             timeout=timeout,
@@ -4236,7 +4242,7 @@ def api_debug_verbose():
     # dashboard tile.
     if request.method == 'POST':
         _require_admin_csrf()
-    main_url = f'{MAIN_APP_URL.rstrip("/")}/api/debug/verbose'
+    main_url = f'{_live_main_url()}/api/debug/verbose'
     try:
         if request.method == 'GET':
             resp = requests.get(main_url, timeout=3)
@@ -4280,7 +4286,7 @@ def api_diag_connectivity_proxy():
     (45s) because the full chain can legitimately take ~25s when Snowflake
     login is slow.
     """
-    main_url = f'{MAIN_APP_URL.rstrip("/")}/api/diag/connectivity'
+    main_url = f'{_live_main_url()}/api/diag/connectivity'
     try:
         resp = requests.get(main_url, timeout=45)
         return jsonify(resp.json()), resp.status_code

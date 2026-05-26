@@ -108,16 +108,17 @@ document.addEventListener('DOMContentLoaded', function() {
     // explicitly, so user/answer text can never become live HTML.
     //
     // Round 68 / Build 42 (C7): the regex now also matches
-    // ``[Source: <IDs>]`` markers and replaces them with clickable
+    // ``[Source: <IDs>]`` / ``[Sources: <IDs>]`` / ``[SourceID: <IDs>]``
+    // markers and replaces them with clickable
     // citation badges.  IDs may be comma-separated (the LLM emits
     // ``[Source: A, B, C]`` for compound claims).
     function appendInline(parent, text) {
         if (text === '' || text == null) return;
         var idx = 0;
         // Triple-arm regex: bold | code | source citation.  Citation
-        // is greedy on the inner ``[Source: ...]`` content so a
-        // multi-id citation gets one badge per id.
-        var re = /(\*\*([^*]+?)\*\*|`([^`]+)`|\[Source:\s*([^\]]+)\])/g;
+        // is greedy on the inner source marker content so a multi-id
+        // citation gets one badge per id.
+        var re = /(\*\*([^*]+?)\*\*|`([^`]+)`|\[(?:Source|Sources|SourceID):\s*([^\]]+)\])/g;
         var m;
         while ((m = re.exec(text)) !== null) {
             if (m.index > idx) {
@@ -255,7 +256,8 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // Round 74 / Phase 2 (P2): walk a freshly-rendered DOM subtree and
-    // replace ``[Source: ID]`` (or ``[Source: A, B, C]``) text-node
+    // replace source markers like ``[Source: ID]``,
+    // ``[Sources: A, B]``, or ``[SourceID: ID]`` text-node
     // matches with the new R74 source-badge spans.  Citations may
     // appear inside paragraphs, list items, table cells, blockquotes,
     // etc. -- we recursively walk every text node and split it on the
@@ -272,7 +274,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // already carries the ``r74-source-badge`` class).
     function _r74PostProcessSourceBadges(rootEl) {
         if (!rootEl) { return; }
-        var citationRe = /\[Source:\s*([^\]]+)\]/g;
+        var citationRe = /\[(?:Source|Sources|SourceID):\s*([^\]]+)\]/g;
         function visit(node) {
             if (!node) { return; }
             if (node.nodeType === 3) { // Node.TEXT_NODE
@@ -284,7 +286,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     return;
                 }
                 var text = node.nodeValue;
-                if (!text || text.indexOf('[Source:') < 0) { return; }
+                if (!text || text.indexOf('[Source') < 0) { return; }
                 var idx = 0;
                 var frag = document.createDocumentFragment();
                 var m;

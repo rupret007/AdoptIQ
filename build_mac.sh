@@ -66,6 +66,124 @@ if [[ ! -d "$APP_PATH" ]]; then
 fi
 
 echo
+echo "Installing TACTrack-style startup splash launcher..."
+# Round 97: mirror TACTrack's macOS launch UX.  The shell launcher opens a
+# tiny local splash immediately, then starts the PyInstaller binary.  The Python
+# process sees ADOPTIQ_LAUNCHER_SPLASH_SHOWN=1 and suppresses its delayed
+# webbrowser.open call so users do not get duplicate tabs.
+MACOS_DIR="$APP_PATH/Contents/MacOS"
+APP_EXECUTABLE="$MACOS_DIR/AdoptIQ"
+APP_BINARY="$MACOS_DIR/AdoptIQ.bin"
+if [[ ! -x "$APP_EXECUTABLE" ]]; then
+  echo "Build failed: expected executable $APP_EXECUTABLE not found."
+  exit 1
+fi
+mv "$APP_EXECUTABLE" "$APP_BINARY"
+cat > "$APP_EXECUTABLE" <<'LAUNCHER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+PORT="${ADOPTIQ_PORT:-5151}"
+case "$PORT" in
+  ''|*[!0-9]*) PORT="5151" ;;
+esac
+if (( PORT < 1 || PORT > 65535 )); then
+  PORT="5151"
+fi
+
+TMP_PARENT="${TMPDIR:-/tmp}"
+TMP_PARENT="${TMP_PARENT%/}"
+SPLASH_BASE="$(mktemp "$TMP_PARENT/adoptiq-starting.XXXXXX")"
+SPLASH_FILE="${SPLASH_BASE}.html"
+mv "$SPLASH_BASE" "$SPLASH_FILE"
+
+cat > "$SPLASH_FILE" <<HTML
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AdoptIQ is starting</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      background: #06172b;
+      color: #ffffff;
+    }
+    main {
+      max-width: 34rem;
+      padding: 2rem;
+      text-align: center;
+    }
+    .spinner {
+      width: 2.75rem;
+      height: 2.75rem;
+      margin: 0 auto 1.25rem;
+      border: 0.3rem solid rgba(255,255,255,0.3);
+      border-top-color: #35c7ff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    p {
+      color: #d7dde8;
+      line-height: 1.45;
+    }
+    a {
+      color: #35c7ff;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="spinner" aria-hidden="true"></div>
+    <h1>AdoptIQ is starting...</h1>
+    <p>Your browser will open AdoptIQ automatically when it is ready.</p>
+    <p>If this page does not redirect, open <a href="http://localhost:${PORT}/">http://localhost:${PORT}/</a>.</p>
+  </main>
+  <script>
+    const appUrl = "http://localhost:${PORT}/";
+    const pingUrl = appUrl + "ping";
+    async function waitForAdoptIQ() {
+      try {
+        const response = await fetch(pingUrl, { cache: "no-store" });
+        if (!response.ok) { throw new Error("status " + response.status); }
+        const body = await response.text();
+        if (body.trim() !== "OK") { throw new Error("unexpected ping body"); }
+        window.location.replace(appUrl);
+      } catch (error) {
+        window.setTimeout(waitForAdoptIQ, 1000);
+      }
+    }
+    waitForAdoptIQ();
+  </script>
+</body>
+</html>
+HTML
+
+/usr/bin/open "$SPLASH_FILE" >/dev/null 2>&1 || true
+export ADOPTIQ_LAUNCHER_SPLASH_SHOWN=1
+# Round 99: do not exec the long-running browser-only Flask process from the
+# Finder-launched wrapper.  Exiting the wrapper lets Launch Services finish the
+# app launch promptly (so the Dock icon stops bouncing) while the real server
+# continues independently for the splash page and browser UI.
+nohup "$APP_DIR/AdoptIQ.bin" "$@" >/dev/null 2>&1 &
+disown "$!" 2>/dev/null || true
+exit 0
+LAUNCHER
+chmod +x "$APP_EXECUTABLE"
+
+echo
 echo "Signing dist/AdoptIQ.app..."
 # Strip stray extended attributes (e.g. com.apple.provenance, quarantine) that
 # would otherwise invalidate the deep code signature.

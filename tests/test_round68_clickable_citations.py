@@ -52,9 +52,8 @@ def test_r68_evidence_index_built_from_ranked_records() -> None:
     context), not from the full record set.  Including unranked
     records would surface evidence the LLM never saw."""
     src = _ask_ai_grounded()
-    # The build loop iterates _ranked_for_diag.
-    assert "for rec in (_ranked_for_diag or [])" in src, (
-        "evidence_index built from a different source than _ranked_for_diag"
+    assert "_r98_used_evidence_records(" in src and "_ranked_for_diag or []" in src, (
+        "evidence_index/evidence_records built from a different source than _ranked_for_diag"
     )
 
 
@@ -64,8 +63,8 @@ def test_r68_evidence_index_capped_to_used_records() -> None:
     ``evidence_records_used``.  Otherwise the operator could see
     snippets for records the LLM was budget-dropped from."""
     src = _ask_ai_grounded()
-    assert "[: int(used_records or 0)]" in src, (
-        "evidence_index doesn't respect the used_records cap"
+    assert "allowed_ids" in src and "_r98_used_evidence_records(" in src, (
+        "evidence_index doesn't respect the actual allowed SourceID set"
     )
 
 
@@ -177,8 +176,8 @@ def test_r68_appendInline_regex_matches_source_pattern() -> None:
     badges instead of staying as plain text."""
     src = _ask_ai_js()
     # The new regex shape includes the citation arm.
-    assert r"\[Source:\s*([^\]]+)\]" in src, (
-        "appendInline regex doesn't match [Source: ...] markers"
+    assert r"(?:Source|Sources|SourceID)" in src, (
+        "appendInline regex doesn't match source citation markers"
     )
 
 

@@ -90,6 +90,29 @@ def test_safe_log_info_skipped_when_stream_closed_no_stderr_traceback(isolated_l
     assert "ValueError" not in captured.err
 
 
+def test_safe_log_warning_skipped_when_stream_closed_no_stderr_traceback(isolated_logger, capsys):
+    """Round 97.2: embedder warmup logs warnings during shutdown races."""
+    buf = io.StringIO()
+    _attach_stream_handler(isolated_logger, buf)
+    buf.close()
+    _logging_helpers.safe_log_warning(
+        isolated_logger, "Round 97.2 test: %s", "closed-warning-suppressed"
+    )
+    captured = capsys.readouterr()
+    assert "Logging error" not in captured.err
+    assert "I/O operation on closed file" not in captured.err
+    assert "ValueError" not in captured.err
+
+
+def test_round97_2_ask_ai_embeddings_uses_safe_warning_helper():
+    import ask_ai_embeddings
+
+    src = open(ask_ai_embeddings.__file__, encoding="utf-8").read()
+    assert "from _logging_helpers import safe_log_warning" in src
+    assert "logger.warning(" not in src
+    assert "safe_log_warning(logger," in src
+
+
 # ---------------------------------------------------------------------------
 # exit_log_streams_open contract
 # ---------------------------------------------------------------------------

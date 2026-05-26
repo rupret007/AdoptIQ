@@ -1783,6 +1783,56 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 
 **Trailer:** Made-with: Cursor
 
+## Round 99 — handoff 2026-05-26
+
+**What changed (plain English):**
+- Packaged macOS launches no longer `exec` the long-running browser-only Flask server from the Finder wrapper; the wrapper opens the splash, starts `AdoptIQ.bin` in the background, and exits so Launch Services can stop the Dock bounce.
+- Runtime corpus bootstrap now handles a synced-OneDrive crypto mismatch by preserving stale local encrypted corpus artifacts as `.broken-<utc>` sidecars and retrying a clean runtime index from the authorized OneDrive mirror.
+- Rebuilt package was smoke-tested and the corpus recovered from the live `authentication tag mismatch` state to an available corpus.
+
+**Files touched:**
+- `build_mac.sh` — adjust generated macOS launcher wrapper to background `AdoptIQ.bin` instead of `exec`ing it.
+- `corpus_bootstrap.py` — add guarded runtime crypto preserve-and-retry recovery for stale local corpus artifacts.
+- `tests/test_round39_self_heal_crypto_failure.py` — add Round 99 corpus recovery regressions.
+- `tests/test_round97_startup_splash.py` — update launcher source-shape expectations for the non-`exec` wrapper.
+- `README.md` — document Round 99 launch-bounce and runtime corpus recovery behavior.
+- `CLAUDE.md` — update the local test floor and Round 97/Round 99 launcher/corpus contracts.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — add Mac troubleshooting notes for persistent Dock bounce and stale corpus crypto recovery.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round39_self_heal_crypto_failure.py::test_round99_runtime_crypto_failure_preserves_and_retries` — pins archive-and-retry recovery when OneDrive and sentinel are present.
+- `tests/test_round39_self_heal_crypto_failure.py::test_round99_runtime_crypto_retry_failure_stays_loud` — pins retry failure remains surfaced as `last_error_kind="crypto"`.
+- `tests/test_round97_startup_splash.py::test_build_mac_installs_launcher_wrapper` — pins launcher starts `AdoptIQ.bin` in the background and no longer `exec`s it.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5552 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- `make eval-ask-ai` — pass (6 eval tests)
+- focused tests — pass (`tests/test_round39_self_heal_crypto_failure.py`, `tests/test_round97_startup_splash.py`, `tests/test_round98_runtime_stability.py`; 23 passed)
+- `bash build_mac.sh` — pass; rebuilt `OUTBOX/AdoptIQ-v1.0.4-build69.dmg`
+- `bash scripts/test_build_smoke.sh` — pass (`/ping`, `/`, `/api/version`, `/api/status/all`, `/api/corpus/status`, shutdown frees 5151)
+- packaged corpus recovery check — pass (`available=true`, `last_error_kind=None`, `files_parsed=303`, `chunks=379615`)
+- embedded Keeper/Snowflake smoke — pass (`_connect_with_keeper()` succeeded with bundled Keeper fields and no direct `SNOWFLAKE_PASSWORD`)
+
+**Hot spots Claude should audit first:**
+1. `corpus_bootstrap.py` — confirm Round 99 recovery only runs after the Round 54 TOCTOU re-probe proves OneDrive is still synced and the sentinel is present.
+2. `corpus_bootstrap.py` — confirm `_preserve_broken_corpus` bounded-backup semantics remain acceptable now that runtime self-heal can invoke it automatically.
+3. `build_mac.sh` — confirm backgrounding `AdoptIQ.bin` is compatible with Finder launches, `scripts/test_build_smoke.sh` cleanup, and macOS app lifecycle expectations.
+4. `tests/test_round39_self_heal_crypto_failure.py` — confirm the fake-open regressions cover the real `InvalidTag` / sentinel-changed failure class without masking other OS-level failures.
+
+**Known deferrals (intentional non-fixes):**
+- I did not overwrite the installed `/Applications/AdoptIQ.app`; the rebuilt `dist/AdoptIQ.app` and DMG were validated, and the user still needs to install the regenerated DMG for the fixed launcher in `/Applications`.
+- No full live report-generation run was executed after the rebuild; validation covered startup, corpus recovery, Snowflake/Keeper connectivity, and package smoke endpoints.
+- `git diff --check` still reports trailing whitespace in pre-existing unrelated dirty files outside the Round 99 touched file set; `git diff --check -- corpus_bootstrap.py build_mac.sh tests/test_round39_self_heal_crypto_failure.py tests/test_round97_startup_splash.py` is clean.
+
+**Trailer:** Made-with: Cursor
+
 ## Round 94 — handoff 2026-05-08
 
 **What changed (plain English):**
@@ -10529,5 +10579,230 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 **Known deferrals (intentional non-fixes):**
 - No macOS DMG rebuild was run for this follow-up; scope was runtime/admin/security guardrails plus `make verify`, not packaging.
 - Deep repository restructuring is intentionally deferred to `REPO_STRUCTURE_PLAN.md`; this commit does not move modules, tests, docs archives, or PyInstaller specs.
+
+**Trailer:** Made-with: Cursor
+
+## Round 97 — handoff 2026-05-22
+
+**What changed (plain English):**
+- AdoptIQ now has a TACTrack-style lightweight `GET /ping` health endpoint and startup splash helpers for macOS launch readiness.
+- The macOS build installs a shell launcher wrapper that opens a temp splash page immediately, exports `ADOPTIQ_LAUNCHER_SPLASH_SHOWN=1`, then execs the PyInstaller binary as `AdoptIQ.bin`.
+- The Python startup browser opener now honors the launcher marker so packaged launches do not produce duplicate browser tabs, while keeping R87 stale-instance handling and R60 SIGTERM shutdown intact.
+- Docs now describe the startup splash alongside the existing runtime-only corpus model.
+
+**Files touched:**
+- `app_simple.py` — add `/ping`, splash/browser helpers, and marker-aware startup browser handoff.
+- `build_mac.sh` — wrap the PyInstaller executable with a TACTrack-style macOS splash launcher before signing/staging.
+- `tests/test_round97_startup_splash.py` — new focused regression suite for startup health, splash helpers, marker handling, and build wrapper source shape.
+- `tests/test_round38_1_duplicate_launch_routes_to_existing.py` — align duplicate-launch source-shape pin with `_open_browser_url`.
+- `README.md` — add Round 97 user-facing startup behavior note.
+- `CLAUDE.md` — update verification floor and add Round 97 startup contract.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — update Mac smoke checklist for splash + `/ping`.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round97_startup_splash.py::test_ping_returns_plain_ok` — pins the lightweight plain-text health endpoint.
+- `tests/test_round97_startup_splash.py::*open_browser*` — pins macOS `/usr/bin/open`, blank-url no-op, and non-mac `webbrowser.open` fallback.
+- `tests/test_round97_startup_splash.py::*startup_splash*` — pins splash HTML, frozen-mac launch behavior, and invalid-port no-op behavior.
+- `tests/test_round97_startup_splash.py::test_build_mac_installs_launcher_wrapper` — pins build-script wrapper source shape.
+- `tests/test_round97_startup_splash.py::test_main_startup_uses_launcher_marker_to_suppress_duplicate_browser_tab` — pins marker-aware startup browser suppression.
+- `tests/test_round38_1_duplicate_launch_routes_to_existing.py::test_duplicate_launch_short_circuits_to_existing_adoptiq` — updated for the helper wrapper around browser launch.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5523 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py` — confirm `/ping` remains lightweight and the splash helpers cannot affect report or corpus execution paths.
+2. `app_simple.py` — confirm marker handling suppresses only the delayed browser opener and does not bypass duplicate/stale-instance logic.
+3. `build_mac.sh` — confirm the wrapper is installed before codesign/staging and does not alter runtime-only corpus gates or version stamping.
+4. `tests/test_round97_startup_splash.py` — confirm source-shape tests pin the correct behavior without overfitting harmless HTML/CSS details.
+
+**Known deferrals (intentional non-fixes):**
+- No macOS DMG build or installed-app live smoke was run in this session; source-shape tests and `make verify` are green, but the actual launcher UX should be confirmed during the next Mac packaging pass.
+
+**Trailer:** Made-with: Cursor
+
+## Round 97.2 — handoff 2026-05-22
+
+**What changed (plain English):**
+- The live report harness now runs an app-health preflight before expensive report jobs, checking `/ping`, `/api/version`, `/api/status/all`, `/api/corpus/status`, and `/api/intel/status`.
+- Report-iteration summary JSON now records `app_health` and `app_health_gate` so readiness failures are distinguishable from report accuracy failures.
+- The Mac build smoke script now defaults to `dist/AdoptIQ.app`, validates startup/status endpoints including `/ping`, and verifies shutdown frees port 5151.
+- Warning-level Ask AI embedder fallback logs now use the shared closed-stream logging guard, preventing pytest/app shutdown races from printing `I/O operation on closed file` tracebacks.
+- `.tmp/` is ignored as local harness scratch space; live report artifacts remain available locally but are not source artifacts.
+
+**Files touched:**
+- `report_iteration_loop.py` — add Round 97.2 app-health endpoint probes and summary fields.
+- `scripts/test_build_smoke.sh` — check `/ping`, `/api/version`, `/api/status/all`, `/api/corpus/status`; default to `dist/AdoptIQ.app` with an `OUTBOX/AdoptIQ.app` fallback.
+- `_logging_helpers.py` — add `safe_log_warning` over the existing closed-stream gate.
+- `ask_ai_embeddings.py` — route warning fallback logs through `safe_log_warning`.
+- `tests/test_round51_report_iteration_loop.py` — add app-health preflight regressions.
+- `tests/test_round63_logging_helpers.py` — add warning-level closed-stream and embedder source-shape regressions.
+- `tests/test_round97_startup_splash.py` — add smoke-script source-shape checks.
+- `.gitignore` — ignore `.tmp/` harness scratch artifacts.
+- `README.md` — document the Round 97.2 report stability sweep and live-service limitation.
+- `CLAUDE.md` — update the pytest floor and add Round 97.2 harness/logging contract.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — document current `dist/AdoptIQ.app` smoke workflow and endpoints.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round51_report_iteration_loop.py::test_round97_2_app_health_preflight_passes_with_required_endpoints` — pins successful preflight probe shape.
+- `tests/test_round51_report_iteration_loop.py::test_round97_2_app_health_preflight_fails_closed_on_bad_ping` — pins fail-closed startup readiness behavior.
+- `tests/test_round51_report_iteration_loop.py::test_round97_2_bootstrap_session_runs_health_before_homepage` — pins bootstrap ordering before CSRF homepage fetch.
+- `tests/test_round63_logging_helpers.py::test_safe_log_warning_skipped_when_stream_closed_no_stderr_traceback` — pins warning-level closed-stream quieting.
+- `tests/test_round63_logging_helpers.py::test_round97_2_ask_ai_embeddings_uses_safe_warning_helper` — pins no bare `logger.warning(...)` in `ask_ai_embeddings.py`.
+- `tests/test_round97_startup_splash.py::test_round97_2_build_smoke_checks_startup_and_status_endpoints` — pins smoke-script endpoint coverage and default app path.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5529 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- `make eval-ask-ai` — pass (6 eval tests)
+- focused harness tests — pass (`tests/test_round51_report_iteration_loop.py`, `tests/test_round53_report_accuracy.py`, `tests/test_round61_harness_hardening.py`)
+- report surface regressions — pass (`tests/test_reports_extensive.py`, `tests/test_report_consistency_deep.py`, `tests/test_cross_report_parity.py`, `tests/test_round94_full_sweep_regressions.py`)
+- live report harness baseline — blocked after app-health preflight passed; summary: `.tmp/round97-report-sweep/live-downloads/AdoptIQ_ReportIterationSummary__data-loop-round97-baseline__ts-20260522T151542Z.json`; failure was missing Snowflake credentials.
+- `bash build_mac.sh` — pass; rebuilt `dist/AdoptIQ.app` and `OUTBOX/AdoptIQ-v1.0.4-build69.dmg`.
+- `scripts/test_build_smoke.sh` — pass (`/ping`, `/`, `/api/version`, `/api/status/all`, `/api/corpus/status`, shutdown; defaulted to `dist/AdoptIQ.app`).
+
+**Hot spots Claude should audit first:**
+1. `report_iteration_loop.py` — confirm `evaluate_app_health` validates endpoint shape without requiring an active corpus, and that `run_iterations` persists app-health details in summary JSON.
+2. `scripts/test_build_smoke.sh` — confirm defaulting to `dist/AdoptIQ.app` matches `build_mac.sh` outputs and the endpoint checks fail on stale builds that lack `/ping`.
+3. `_logging_helpers.py` + `ask_ai_embeddings.py` — confirm `safe_log_warning` preserves normal warnings while suppressing closed-stream shutdown races only.
+4. `QUALITY_AUDIT.md` live-harness status — confirm missing Snowflake credentials are documented as a blocked live-service check, not as a report accuracy pass.
+
+**Known deferrals (intentional non-fixes):**
+- Strict live repeatability loop (`--baseline-mode manifest --iterations 2 --scenarios all`) was not runnable because the baseline capture failed before report generation with missing Snowflake credentials (`SNOWFLAKE_USER`, `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_PASSWORD`, or Keeper auth not set).
+- No installed `/Applications/AdoptIQ.app` smoke was run; the rebuilt `dist/AdoptIQ.app` smoke passed and the DMG was produced, but drag-install verification remains a live acceptance step.
+
+**Trailer:** Made-with: Cursor
+
+## Round 97.3 — handoff 2026-05-22
+
+**What changed (plain English):**
+- The live report harness now ignores partial-data warning denominator text and per-customer AP/AB narrative prose when extracting portfolio KPIs from DOCX reports.
+- Leader XLSX KPI extraction now prefers the `Team_Summary` rollup for workload counts while retaining detail-ledger extraction for source-backed AB counts.
+- DOCX quality review now ignores numeric heading/title labels, and the strict DOCX table numeric gate tolerates tiny one-decimal aggregate-score wobble while preserving larger drift detection.
+
+**Files touched:**
+- `report_iteration_loop.py` — tighten DOCX/XLSX KPI extraction and table numeric baseline comparison.
+- `tests/test_round51_report_iteration_loop.py` — add focused regressions for the Round 97.3 extractor/quality-gate fixes.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round51_report_iteration_loop.py::test_round97_3_docx_table_numeric_gate_tolerates_tiny_decimal_wobble` — pins the 175.8 vs 175.9 table-score tolerance found in live repeatability.
+- `tests/test_round51_report_iteration_loop.py::test_round97_3_kpi_scan_ignores_partial_data_warning_denominator` — pins warning prose not becoming an AB KPI denominator.
+- `tests/test_round51_report_iteration_loop.py::test_round97_3_kpi_scan_ignores_per_customer_action_plan_prose` — pins per-customer action-plan prose not becoming portfolio AP count.
+- `tests/test_round51_report_iteration_loop.py::test_round97_3_kpi_scan_ignores_open_active_ab_prefix_prose` — pins per-customer/recommendation AB prose not becoming open-AB parity evidence.
+- `tests/test_round51_report_iteration_loop.py::test_round97_3_leader_xlsx_prefers_team_summary_rollup_over_detail_ledger` — pins Leader `Team_Summary` rollup precedence.
+- `tests/test_round51_report_iteration_loop.py::test_round97_3_quality_gate_ignores_numeric_heading_labels` — pins numeric headings/titles out of uncited paragraph failures.
+
+**Verify status:**
+- `make verify` — not run
+- pytest: 20 passed (`python3 -m pytest tests/test_round51_report_iteration_loop.py -v`)
+- ruff: 0 findings (`make lint`)
+- bandit HIGH/MED: not run
+- pip-audit: not run
+- live report harness baseline/repeatability — pass: `.tmp/round97-report-sweep/vpn-hour-downloads/AdoptIQ_ReportIterationSummary__data-loop-round97-vpn-repeatability-postfix2__ts-20260522T163511Z.json` (`all_passed=True`; comprehensive/compact/renewal/leader operational, parity, and quality all passed).
+
+**Hot spots Claude should audit first:**
+1. `report_iteration_loop.py` — confirm the tolerant numeric table comparison only treats tiny rounded decimal wobble as equal and cannot hide integer KPI drift.
+2. `report_iteration_loop.py` — confirm restricting AP/AB prefix extraction to `Total ...` does not drop legitimate top-level KPIs that are still available through table or label/value extraction.
+3. `tests/test_round51_report_iteration_loop.py` — confirm the new regressions represent live false positives without overfitting to one artifact's wording.
+
+**Known deferrals (intentional non-fixes):**
+- Full `make verify` was not rerun after this harness-only follow-up; the focused harness test file, `make lint`, and the Snowflake-backed live all-scenario repeatability sweep passed.
+- No new DMG build was run in this follow-up; scope was live report-harness accuracy and stability validation.
+
+**Trailer:** Made-with: Cursor
+
+## Round 98 — handoff 2026-05-22
+
+**What changed (plain English):**
+- Renewal portfolio scoring now uses normalized per-customer slices and passes Customer Pulse / Action Plans into `compute_customer_risk_profile`, so Renewal no longer drops available components due to punctuation/case/name variants.
+- CSOne fallback scoping now normalizes customer names, and named-technology AB filters now return an explicit empty scoped set with warnings instead of silently widening to unfiltered metrics.
+- Ask AI now builds evidence drawer records from the actual allowed/cited evidence, including reachable corpus SourceIDs, and the browser renders `[Source:]`, `[Sources:]`, and `[SourceID:]` consistently.
+- Runtime stability fixes landed for admin `/api/status/all` envelope parsing, live main-app URL proxying, startup `/ping` readiness, jobs-dashboard poll errors, artifact resolution, and closed-stream corpus warning logs.
+- Mac packaging now pins the current fastembed reranker module so PyInstaller no longer emits the missing `fastembed.rerank.text_cross_encoder` hidden-import error.
+
+**Files touched:**
+- `.gitignore` — ignore local harness scratch artifacts.
+- `README.md` — document Round 98 accuracy/stability outcomes and current test floor.
+- `CLAUDE.md` — update current verification floor and preserve Round guidance.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — keep Mac smoke/startup instructions aligned with `/ping` and build smoke.
+- `QUALITY_AUDIT.md` — this handoff.
+- `_logging_helpers.py` — warning-level safe logging helper used by shutdown-prone paths.
+- `ask_ai_embeddings.py` — route embedder fallback warnings through the safe warning helper.
+- `corpus_bootstrap.py` — route the crypto-unavailable warning through `_safe_log_warning`.
+- `adoptiq_backend.py` — fail named-tech AB empty matches explicitly and normalize CSOne fallback customer matching.
+- `app_simple.py` — add normalized customer slicing, Renewal pulse/AP threading, CSOne universe refresh, `/ping` CORS/readiness handling, and server-known download resolution.
+- `ask_ai_grounded.py` — serialize used evidence records and corpus evidence records for Ask AI citations/drawer data.
+- `static/js/ask_ai.js` — render Source/Sources/SourceID markers through the same citation badge path.
+- `enhanced_admin_dashboard_v2.py` — parse status envelopes and use `_live_main_url()` for main-app proxies.
+- `static/js/report_jobs_dashboard.js` — surface status polling failures instead of showing stale optimistic jobs silently.
+- `report_iteration_loop.py` — preserve Round 97.2/97.3 harness health and KPI-extractor hardening used by the live sweep.
+- `scripts/test_build_smoke.sh` — smoke packaged startup/status endpoints and shutdown.
+- `build_mac.sh` — launcher splash waits for a real `/ping` OK response before redirecting.
+- `adoptiq_mac.spec` — pin `fastembed.rerank.cross_encoder` instead of the absent reranker module.
+- `tests/test_round38_1_duplicate_launch_routes_to_existing.py` — align duplicate-launch expectations with startup-browser helper routing.
+- `tests/test_round51_report_iteration_loop.py` — harness health, readiness, and KPI extractor regressions.
+- `tests/test_round61_harness_hardening.py` — align prefix-KPI tests with the Round 97.3 `Total ...` qualifier contract.
+- `tests/test_round63_logging_helpers.py` — warning-level closed-stream regressions.
+- `tests/test_round68_clickable_citations.py` — Ask AI clickable citation expectations for the new evidence record path.
+- `tests/test_round93_all_contact_center_ab_scope.py` — named-tech empty-match no-widen regression.
+- `tests/test_round95_a_cross_encoder_rerank.py` — Mac spec hidden-import regression for current fastembed reranker module.
+- `tests/test_round97_startup_splash.py` — startup splash, `/ping`, and build-smoke source-shape tests.
+- `tests/test_round98_report_accuracy.py` — new report accuracy regressions.
+- `tests/test_round98_ask_ai_trust.py` — new Ask AI citation/evidence regressions.
+- `tests/test_round98_runtime_stability.py` — new runtime/operator stability regressions.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round98_report_accuracy.py::*` — pins Renewal pulse/AP threading, normalized customer slicing, normalized CSOne fallback scoping, and named-tech AB no-widen behavior.
+- `tests/test_round98_ask_ai_trust.py::*` — pins used-evidence serialization, corpus SourceID evidence records, `[Sources:]` answer rendering, and JS marker compatibility.
+- `tests/test_round98_runtime_stability.py::*` — pins admin status envelope handling, real `/ping` checks, CORS readability for file splash, jobs-dashboard poll errors, and download path precedence.
+- `tests/test_round93_all_contact_center_ab_scope.py::test_named_technology_empty_match_returns_empty_with_warning` — updates the old widening contract to Round 98 fail-loud empty behavior.
+- `tests/test_round61_harness_hardening.py::*prefix*` — keeps prefix numeric extraction scoped to explicit total portfolio KPIs.
+- `tests/test_round95_a_cross_encoder_rerank.py::test_round98_mac_spec_pins_existing_fastembed_reranker_module` — prevents reintroducing the missing PyInstaller hidden import.
+- `tests/test_round63_logging_helpers.py::*safe_log_warning*` — pins warning-level closed-stream shutdown behavior.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5550 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- `make eval-ask-ai` — pass (6 eval tests)
+- focused Round 98 regression cluster — pass (56 passed)
+- live strict harness against Round 97 manifest — fail due live Snowflake drift only (`Comprehensive` DOCX table numeric `175.3` vs manifest `175.8`; app health, structure, XLSX sheet overlap, and row deltas passed).
+- live current-baseline capture — pass: `.tmp/round98-accuracy-scrub/baseline-downloads/AdoptIQ_ReportIterationSummary__data-loop-round98-current-baseline__ts-20260522T201409Z.json`
+- live current-manifest repeatability — pass: `.tmp/round98-accuracy-scrub/repeatability-downloads/AdoptIQ_ReportIterationSummary__data-loop-round98-repeatability-current__ts-20260522T202136Z.json`
+- `bash build_mac.sh` — pass; produced `OUTBOX/AdoptIQ-v1.0.4-build69.dmg`
+- `bash scripts/test_build_smoke.sh` — pass (`/ping`, `/`, `/api/version`, `/api/status/all`, `/api/corpus/status`, shutdown frees 5151)
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py:12159` — confirm `_r98_slice_customer_frame` normalization is conservative enough to match cosmetic variants without merging unrelated customers.
+2. `app_simple.py:12192` and `app_simple.py:14459` — confirm Renewal portfolio loops pass customer-specific pulse/AP slices and refresh the customer universe after CSOne load.
+3. `adoptiq_backend.py:12309` and `app_simple.py:1926` — confirm named-tech AB empty-scope warnings surface clearly and no caller silently treats the empty frame as full-scope data.
+4. `ask_ai_grounded.py:659` and `ask_ai_grounded.py:685` — confirm evidence records are built only from allowed/cited IDs and corpus snippets remain bounded/non-PII.
+5. `app_simple.py:2794` — confirm download resolution prefers server-known artifacts but still preserves safe basename fallback behavior.
+6. `adoptiq_mac.spec:143` — confirm `fastembed.rerank.cross_encoder` is correct for the packaged fastembed version and Windows packaging does not need a matching reranker pin.
+
+**Known deferrals (intentional non-fixes):**
+- The old Round 97 live manifest is not a stable acceptance baseline after Snowflake data moved; Round 98 captured a fresh live baseline and repeatability passed against that current manifest.
+- No drag-install smoke from the DMG into `/Applications` was run; the rebuilt `dist/AdoptIQ.app` smoke passed and the DMG was produced.
+- Comprehensive live runs still recorded grounding rejections in `analysis_status` and therefore marked generated reports as corpus-ineligible by policy; this is honest gating, not a report-generation failure, but it remains a useful follow-up audit target.
 
 **Trailer:** Made-with: Cursor

@@ -139,7 +139,12 @@ hidden_imports = [
     'fastembed.text',
     'fastembed.text.text_embedding',
     'fastembed.rerank',
-    'fastembed.rerank.text_cross_encoder',
+    # Round 98: current fastembed exposes the reranker at
+    # fastembed.rerank.cross_encoder.  The runtime wrapper still probes
+    # older module names defensively, but pinning a module absent from
+    # the installed fastembed release makes PyInstaller emit a noisy
+    # non-fatal "Hidden import not found" error during every build.
+    'fastembed.rerank.cross_encoder',
     'onnxruntime',
     'tokenizers',
     # Round 17.2 -> Round 36: SharePoint Microsoft Graph pull retired.

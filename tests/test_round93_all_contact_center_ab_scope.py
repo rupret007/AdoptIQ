@@ -86,7 +86,7 @@ def test_all_contact_center_ab_scope_warning_entry_shape() -> None:
     ]
 
 
-def test_named_technology_empty_match_keeps_existing_widening_contract() -> None:
+def test_named_technology_empty_match_returns_empty_with_warning() -> None:
     df = _ab_frame(
         [
             {"ID": f"AB-MEETINGS-{i}", "PRODUCT_C": "Webex Meetings"}
@@ -96,6 +96,9 @@ def test_named_technology_empty_match_keeps_existing_widening_contract() -> None
 
     out = ab._apply_scope_filter_ab(df, tech="Webex Calling", days=365)
 
-    assert len(out) == 20
-    assert out.attrs.get("tech_filter_widened") is True
+    assert out.empty
+    assert out.attrs.get("tech_filter_empty_after_scope") is True
     assert out.attrs.get("tech_filter_requested") == "Webex Calling"
+    assert out.attrs.get("tech_filter_matched") == 0
+    assert out.attrs.get("tech_filter_total") == 20
+    assert "returning an empty scoped set instead of widening" in out.attrs.get("tech_filter_warning", "")
