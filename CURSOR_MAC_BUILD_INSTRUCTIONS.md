@@ -121,6 +121,12 @@ The smoke polls `/ping`, then checks `/`, `/api/version`, `/api/status/all`, `/a
 scripts/test_build_smoke.sh /Applications/AdoptIQ.app
 ```
 
+Round 102 / Build 70 reminder: the packaged app must not request
+Downloads-folder access during startup or corpus refresh. The retired
+`CSONE_INCLUDE_USER_DOWNLOADS` setting is ignored; corpus sources are
+authorized OneDrive data, sidecar-gated generated reports, and explicit
+Intelligence uploads.
+
 For demo-readiness or release-candidate soak validation, launch the rebuilt app
 and run the Round 101 time-boxed live report supervisor:
 

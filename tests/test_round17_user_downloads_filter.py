@@ -1,14 +1,11 @@
-"""Round 17.1 -- user-downloads filename filter contracts.
+"""Round 17.1 -- legacy user-report filename filter contracts.
 
-The corpus indexer also walks the runtime user's Downloads folder so
-AdoptIQ-rendered reports (Word + Excel) feed Ask AI, Customer 360, and
-Playbook RAG.  But Downloads is shared with the user's personal files
-(resumes, screenshots, vendor exports, ...), so we must:
+Round 102 retired the runtime Downloads corpus source. The low-level
+``enumerate_user_report_files`` helper remains in use for AdoptIQ-managed
+report directories, so it still needs to be privacy-preserving:
 
 * Only admit ``AdoptIQ`` filenames (allow-list, not deny-list).
 * Walk the top level only -- never recurse into subfolders.
-* Honor ``CSONE_INCLUDE_USER_DOWNLOADS=false`` to skip Downloads
-  entirely without changing other code paths.
 
 Pinning these contracts here protects the user's privacy.
 """
@@ -53,9 +50,8 @@ def test_user_downloads_filter_admits_only_adoptiq_named_files(tmp_path: Path):
 
 
 def test_user_downloads_filter_does_not_recurse(tmp_path: Path):
-    """Files nested in subdirectories must be ignored -- AdoptIQ
-    writes reports to the root of Downloads, and recursing risks
-    opening unrelated archives the user dropped into a sub-folder."""
+    """Files nested in subdirectories must be ignored for callers that
+    intentionally request top-level-only enumeration."""
     (tmp_path / "AdoptIQ_Top.docx").write_bytes(b"x" * 16)
     nested = tmp_path / "Photos"
     nested.mkdir()

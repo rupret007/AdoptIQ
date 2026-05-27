@@ -1172,8 +1172,8 @@ def _resolve_index_sources() -> list[dict[str, object]]:
     sources do incremental upserts on top of the rows the first
     source wrote.
 
-    Priority (Round 80 -- local_outputs added, user_downloads
-    deprecated by default):
+    Priority (Round 102 -- local_outputs retained, user_downloads
+    retired):
 
     1. ``onedrive`` -- the synced OneDrive folder
        (``Config.CSONE_ONEDRIVE_FOLDER``); appended only when the
@@ -1184,18 +1184,10 @@ def _resolve_index_sources() -> list[dict[str, object]]:
     2. ``local_outputs`` (Round 80, NEW) -- ``_APP_SUPPORT/outputs/``
        filtered to AdoptIQ report names, so reports the running app
        generates are picked up by the next refresh tick without
-       requiring the user to manually drop them into ``~/Downloads``
-       or ``intel_uploads``.  Always present (the .app creates the
-       directory at startup) and permission-clean (no macOS Files-
-       and-Folders prompt).
-    3. ``user_downloads`` -- ``~/Downloads`` filtered to AdoptIQ
-       report names.  Round 80 flipped the default to OFF because
-       the macOS Files-and-Folders permission prompt confused
-       users; the source can still be opted in via
-       ``CSONE_INCLUDE_USER_DOWNLOADS=true`` for one build, with a
-       deprecation warning logged at config-import time.  Slated
-       for full removal in Round 81.
-    4. ``intel_uploads`` (Round 26) -- per-user drop folder
+       requiring the user to manually drop them into another folder.
+       Always present (the .app creates the directory at startup) and
+       permission-clean (no macOS Files-and-Folders prompt).
+    3. ``intel_uploads`` (Round 26) -- per-user drop folder
        populated by ``/api/intel/upload``.  Walked when the
        directory exists.  Pre-create is gated on
        ``ADOPTIQ_INTEL_UPLOAD_ENABLED`` (Round 26 review /
@@ -1240,10 +1232,9 @@ def _resolve_index_sources() -> list[dict[str, object]]:
 
     # 2) Round 80: AdoptIQ's own _APP_SUPPORT/outputs/ folder.  This
     # is where every generated report lands so it's always present
-    # and always permission-clean (no macOS Files-and-Folders prompt
-    # the way ~/Downloads triggers).  Slotted between OneDrive and
-    # Downloads so the OneDrive source remains the primary signal
-    # for the corpus walker's rebuild decision.
+    # and always permission-clean.  Slotted after OneDrive so the
+    # OneDrive source remains the primary signal for the corpus walker's
+    # rebuild decision.
     outputs_dir = _r80_resolve_app_support_outputs_dir()
     if outputs_dir is not None:
         sources.append(
@@ -1255,22 +1246,7 @@ def _resolve_index_sources() -> list[dict[str, object]]:
             }
         )
 
-    # 3) Downloads (Round 80: deprecated, opt-in only).
-    include_downloads = bool(getattr(Config, "CSONE_INCLUDE_USER_DOWNLOADS", False))
-    downloads_dir = getattr(Config, "CSONE_USER_DOWNLOADS_DIR", None)
-    if include_downloads and downloads_dir:
-        downloads_path = Path(downloads_dir)
-        if downloads_path.exists() and downloads_path.is_dir():
-            sources.append(
-                {
-                    "label": "user_downloads",
-                    "dir": str(downloads_path),
-                    "filter": "adoptiq_named",
-                    "quality_gate": "strict_generated_report",  # Round 94
-                }
-            )
-
-    # 4) Round 26: per-user uploaded CSOne reports.  We walk this
+    # 3) Round 26: per-user uploaded CSOne reports.  We walk this
     # source unconditionally when the directory exists -- not gated
     # on ``ADOPTIQ_INTEL_UPLOAD_ENABLED`` -- so admin-pre-seeded
     # files are still ingested even when the live upload endpoint
@@ -1591,10 +1567,9 @@ def _run_index_pass(*, rebuild: bool) -> None:
                 # Round 81 / Build 57: ``local_outputs`` (the
                 # AdoptIQ-managed ``<APP_SUPPORT>/outputs/`` tree) is
                 # walked recursively so the new ``<Manager>/<Type>/``
-                # nested layout is fully picked up.  ``user_downloads``
-                # remains top-level only (R17 contract): we MUST NOT
-                # walk arbitrary user subdirectories under
-                # ``~/Downloads``.
+                # nested layout is fully picked up. Round 102 retires
+                # the old Downloads source entirely, so no user home
+                # folder is walked as part of corpus bootstrap.
                 if filter_kind == "adoptiq_named":
                     _r81_recursive = label == "local_outputs"
                     try:

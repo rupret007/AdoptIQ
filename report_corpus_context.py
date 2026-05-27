@@ -589,9 +589,8 @@ def render_to_word(doc: object, context: HistoricalContext) -> None:
         add_paragraph(
             "Drawn from the AdoptIQ Knowledge Corpus (prior daily "
             "reports). Sourced from the local OneDrive sync of "
-            "'AI Projects/AdoptIQ_CSOne_Reports' (with the user's "
-            "Downloads folder and ad-hoc Intelligence uploads as "
-            "fallbacks)."
+            "'AI Projects/AdoptIQ_CSOne_Reports', generated AdoptIQ "
+            "reports, and ad-hoc Intelligence uploads."
         )
 
         if not context.available or not context.entries:

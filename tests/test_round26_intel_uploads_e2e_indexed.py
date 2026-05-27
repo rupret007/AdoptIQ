@@ -98,7 +98,7 @@ def _build_csone_fixture(path: Path) -> None:
 
 
 def _common_intel_uploads_only_setup(monkeypatch, tmp_path: Path) -> Path:
-    """Disable the other sources (onedrive, user_downloads) and
+    """Disable the other sources (onedrive, local outputs) and
     point ``CSONE_INTEL_UPLOADS_FOLDER`` at
     ``tmp_path / "intel_uploads"`` so this test is the sole driver
     of the indexer.

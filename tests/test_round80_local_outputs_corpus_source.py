@@ -9,11 +9,7 @@ confused users (Brian's bug B).
 from __future__ import annotations
 
 import importlib
-import logging
-import os
 from pathlib import Path
-
-import pytest
 
 # Round 80
 
@@ -139,57 +135,82 @@ def test_user_downloads_default_off_in_round_80(monkeypatch):
         importlib.reload(config)
 
 
-def test_deprecation_warning_emitted_when_env_opts_in(monkeypatch, caplog):
-    """Setting ``CSONE_INCLUDE_USER_DOWNLOADS=true`` via env MUST
-    re-enable the deprecated source for one build BUT MUST also
-    emit a one-shot ``logger.warning`` so the operator sees the
-    deprecation notice and the regression to the new R81 default
-    is scheduled."""
+def test_user_downloads_env_true_is_ignored_in_round_102(monkeypatch, tmp_path):
+    """Round 102: the Downloads corpus source is fully retired.
+
+    Even if an old launcher environment or bundled secret still sets
+    ``CSONE_INCLUDE_USER_DOWNLOADS=true``, config and corpus bootstrap
+    must leave Downloads disabled so macOS never prompts for the
+    user's Downloads folder during normal startup.
+    """
     monkeypatch.setenv("CSONE_INCLUDE_USER_DOWNLOADS", "true")
+    monkeypatch.setenv("CSONE_USER_DOWNLOADS_DIR", str(tmp_path / "downloads"))
+    monkeypatch.setenv("ADOPTIQ_OUTPUTS_DIR", str(tmp_path / "outputs"))
+    (tmp_path / "downloads").mkdir()
+    (tmp_path / "outputs").mkdir()
+
     import config
-    with caplog.at_level(logging.WARNING, logger="config"):
-        importlib.reload(config)
+    import corpus_bootstrap as cb
+
+    importlib.reload(config)
     try:
-        assert config.Config.CSONE_INCLUDE_USER_DOWNLOADS is True, (
-            "Round 80: env=true must still opt the source in for one build."
+        assert config.Config.CSONE_INCLUDE_USER_DOWNLOADS is False, (
+            "Round 102: env=true must not re-enable Downloads indexing."
         )
-        # The warning text MUST name 'CSONE_INCLUDE_USER_DOWNLOADS',
-        # 'DEPRECATED', and 'Round 81' so the operator knows what
-        # is going away and when.
-        msgs = [r.getMessage() for r in caplog.records]
-        text = "\n".join(msgs)
-        assert "CSONE_INCLUDE_USER_DOWNLOADS" in text
-        assert "DEPRECATED" in text
-        assert "Round 81" in text
+        monkeypatch.setattr(cb.Config, "CSONE_ONEDRIVE_FOLDER", None, raising=False)
+        monkeypatch.setattr(
+            cb.Config, "CSONE_INCLUDE_USER_DOWNLOADS", True, raising=False
+        )
+        monkeypatch.setattr(
+            cb.Config,
+            "CSONE_USER_DOWNLOADS_DIR",
+            str(tmp_path / "downloads"),
+            raising=False,
+        )
+        monkeypatch.setattr(cb.Config, "CSONE_INTEL_UPLOADS_FOLDER", None, raising=False)
+        labels = [s["label"] for s in cb._resolve_index_sources()]
+        assert "user_downloads" not in labels
+        assert labels == ["local_outputs"]
     finally:
         monkeypatch.delenv("CSONE_INCLUDE_USER_DOWNLOADS", raising=False)
+        monkeypatch.delenv("CSONE_USER_DOWNLOADS_DIR", raising=False)
+        monkeypatch.delenv("ADOPTIQ_OUTPUTS_DIR", raising=False)
         importlib.reload(config)
 
 
 def test_no_deprecation_warning_when_env_unset_or_false(monkeypatch, caplog):
-    """When the env var is unset OR explicitly set to a falsy value,
-    NO deprecation warning fires (we don't want every cold start
-    to log a deprecation warning when nobody opted in)."""
+    """Round 102: config no longer logs the old deprecation branch."""
     monkeypatch.delenv("CSONE_INCLUDE_USER_DOWNLOADS", raising=False)
     import config
-    with caplog.at_level(logging.WARNING, logger="config"):
-        importlib.reload(config)
+    importlib.reload(config)
     msgs = "\n".join(r.getMessage() for r in caplog.records)
     assert "CSONE_INCLUDE_USER_DOWNLOADS" not in msgs or "DEPRECATED" not in msgs, (
-        f"Round 80: deprecation warning must NOT fire when env is unset. "
+        f"Round 102: deprecation warning must NOT fire when env is unset. "
         f"Got log records: {msgs!r}"
     )
 
     monkeypatch.setenv("CSONE_INCLUDE_USER_DOWNLOADS", "false")
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="config"):
-        importlib.reload(config)
+    importlib.reload(config)
     try:
         msgs = "\n".join(r.getMessage() for r in caplog.records)
         assert "DEPRECATED" not in msgs, (
-            f"Round 80: deprecation warning must NOT fire when env=false. "
+            f"Round 102: deprecation warning must NOT fire when env=false. "
             f"Got log records: {msgs!r}"
         )
     finally:
         monkeypatch.delenv("CSONE_INCLUDE_USER_DOWNLOADS", raising=False)
         importlib.reload(config)
+
+
+def test_round102_user_facing_copy_no_longer_mentions_downloads_fallback():
+    """Round 102: visible corpus copy must not ask users to trust Downloads."""
+    repo = Path(__file__).resolve().parent.parent
+    for relative in (
+        "templates/customer_360.html",
+        "report_corpus_context.py",
+        "static/js/intel_status.js",
+    ):
+        text = (repo / relative).read_text(encoding="utf-8")
+        assert "Downloads folder" not in text
+        assert "~/Downloads" not in text

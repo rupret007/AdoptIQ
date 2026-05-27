@@ -1782,7 +1782,6 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 - `# Round 19.1` source markers — no source files were modified, so no `# Round 19.1` markers exist; the per-file footprint is just the one new test file.
 
 **Trailer:** Made-with: Cursor
-
 ## Round 99 — handoff 2026-05-26
 
 **What changed (plain English):**
@@ -10910,5 +10909,62 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - The two-hour soak used `--baseline-mode off` because the historical Round 72 manifest is stale against live Snowflake data; this was an operational stability soak, not a historical-manifest parity claim.
 - No `/Applications/AdoptIQ.app` drag-install smoke was run; the rebuilt `dist/AdoptIQ.app` smoke passed and the DMG was produced.
 - Ask AI eval was not rerun; scope was live report generation soak and package readiness.
+
+**Trailer:** Made-with: Cursor
+
+## Round 102 — handoff 2026-05-27
+
+**What changed (plain English):**
+- Retired the deprecated Downloads corpus source so stale `CSONE_INCLUDE_USER_DOWNLOADS=true` settings cannot trigger macOS Downloads-folder permission prompts.
+- Updated corpus startup/status copy to say the app builds the local Ask AI corpus from authorized OneDrive data, generated reports, and explicit Intelligence uploads.
+- Updated Build 70 docs and rebuilt/smoked the macOS package.
+
+**Files touched:**
+- `config.py` — hard-disable the old Downloads env opt-in and bump build metadata to Build 70.
+- `corpus_bootstrap.py` — remove `user_downloads` source registration and update source-order comments.
+- `corpus_indexer.py` — update legacy Downloads helper comments to reflect generated-report/upload callers.
+- `app_simple.py` — remove the startup log's resolved Downloads path from the visible banner.
+- `static/js/intel_status.js` — replace "Refreshing" corpus copy with clearer local-corpus build copy.
+- `templates/customer_360.html` — remove Downloads fallback wording.
+- `report_corpus_context.py` — remove Downloads fallback wording from Historical Context source text.
+- `enhanced_admin_dashboard_v2.py` — update admin per-source comment to the current source set.
+- `tests/test_round80_local_outputs_corpus_source.py` — add Round 102 regression coverage for ignored env opt-in and copy cleanup.
+- `tests/test_round26_intel_uploads_source_gated.py` — update expected corpus source ordering after Downloads retirement.
+- `tests/test_round26_intel_uploads_e2e_indexed.py` — update stale helper docstring.
+- `tests/test_round17_user_downloads_filter.py` — update legacy helper docstring after runtime source retirement.
+- `tests/test_round36_panel_renders_synced_state.py` — update panel copy source-shape pin.
+- `README.md` — Build 70 summary and current corpus-source docs.
+- `CLAUDE.md` — Build 70 test floor and Downloads-retirement operating contract.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — Build 70 reminder for packaged smoke/release checks.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_round80_local_outputs_corpus_source.py::test_user_downloads_env_true_is_ignored_in_round_102` — pins that env=true cannot register `user_downloads`.
+- `tests/test_round80_local_outputs_corpus_source.py::test_round102_user_facing_copy_no_longer_mentions_downloads_fallback` — pins Customer 360, Historical Context, and corpus panel copy.
+- `tests/test_round26_intel_uploads_source_gated.py` — pins OneDrive/local_outputs/intel_uploads ordering without Downloads.
+- `tests/test_round36_panel_renders_synced_state.py::test_panel_label_and_detail_copy[Building local corpus]` — pins the new corpus in-progress label.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5570 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- focused tests — pass (`tests/test_round80_local_outputs_corpus_source.py`, `tests/test_round26_intel_uploads_source_gated.py`, `tests/test_round26_intel_uploads_e2e_indexed.py`, `tests/test_round81_outputs_per_manager_layout.py`; 37 passed)
+- panel/copy retest — pass (`tests/test_round36_panel_renders_synced_state.py`, `tests/test_round80_local_outputs_corpus_source.py`; 28 passed)
+- `bash build_mac.sh` — pass; produced `OUTBOX/AdoptIQ-v1.0.4-build70.dmg`
+- `scripts/test_build_smoke.sh` — pass (`/ping`, `/`, `/api/version`, `/api/status/all`, `/api/corpus/status`, shutdown frees 5151)
+
+**Hot spots Claude should audit first:**
+1. `corpus_bootstrap.py` — confirm no alternate source path can still add `user_downloads` or touch `~/Downloads`.
+2. `config.py` — confirm the hard-disabled compatibility constants are the right balance between backwards compatibility and no prompt.
+3. `static/js/intel_status.js` — confirm the new in-progress copy matches actual runtime behavior and does not imply report generation is blocked.
+
+**Known deferrals (intentional non-fixes):**
+- The low-level `enumerate_user_report_files` helper remains because `local_outputs` and explicit upload paths still use the AdoptIQ-name allow-list; only the runtime Downloads source was retired.
+- No drag-install smoke from the DMG into `/Applications` was run; the rebuilt `dist/AdoptIQ.app` smoke passed and the DMG was produced.
+- Live Snowflake report regeneration was not rerun for this UI/source cleanup; Round 101's two-hour soak remains the latest live report-generation evidence.
 
 **Trailer:** Made-with: Cursor

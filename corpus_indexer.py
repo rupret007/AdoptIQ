@@ -345,14 +345,14 @@ def _round92_quality_sidecar_allows(path: Path) -> bool:
         return False
 
 
-# Round 17.1: ``~/Downloads`` walker that admits only AdoptIQ-named
-# reports.  The pattern matches three families we observed in the
-# wild:
+# Round 17.1 + 102: named-report walker that admits only AdoptIQ-named
+# files.  The runtime Downloads source is retired, but the allow-list
+# still protects AdoptIQ-managed local outputs and explicit upload
+# directories. The pattern matches three families we observed in the wild:
 #   * ``AdoptIQ_Report_*.docx`` / ``AdoptIQ_Data_*.xlsx``    (rendered)
 #   * ``AdoptIQ Enhanced Premium Collab Summary-*.xlsx``     (CSOne dump)
 #   * ``AdoptIQ_*.csv`` for any future CSV exports
-# Anything else in Downloads (resumes, screenshots, vendor exports, ...)
-# is rejected so we never silently slurp unrelated user files.
+# Anything else is rejected so we never silently slurp unrelated user files.
 _USER_REPORT_NAME_RE: re.Pattern[str] = re.compile(
     r"^AdoptIQ[\s_].+\.(?:xlsx|docx|csv)$",
     re.IGNORECASE,
@@ -378,13 +378,13 @@ def enumerate_user_report_files(
     recursive: bool = False,
     require_adoptiq_quality_gate: bool = False,
 ) -> list[CorpusFile]:
-    """Round 17.1: enumerate AdoptIQ-named report files in the runtime
-    user's ``~/Downloads`` directory.
+    """Round 17.1 + 102: enumerate AdoptIQ-named report files in a
+    caller-provided directory.
 
     Filename allow-list: ``^AdoptIQ[\\s_].+\\.(xlsx|docx|csv)$`` so
-    unrelated downloads are never opened.  Defaults to top-level only
-    (``recursive=False``) -- the historical Downloads-folder source
-    must NOT walk arbitrary user subdirectories.
+    unrelated user files are never opened. Defaults to top-level only
+    (``recursive=False``); callers must opt in explicitly before walking
+    nested directories.
 
     Round 81 / Build 57: callers indexing the AdoptIQ-managed
     ``<APP_SUPPORT>/outputs/`` tree pass ``recursive=True`` so the
@@ -1329,10 +1329,9 @@ def index_folder(
     on the admin tile.  Idempotent: re-running with the same folder
     skips files whose ``(path, mtime, sha256)`` triple is unchanged.
 
-    Round 17.1: callers that need a custom filename filter (e.g. the
-    ``~/Downloads`` walker, which only admits ``AdoptIQ*`` files) can
-    pass a pre-built ``files`` list and ``root`` is used purely for
-    logging / state tracking.
+    Round 17.1 + 102: callers that need a custom filename filter (for
+    example, sidecar-gated generated-report sources) can pass a pre-built
+    ``files`` list and ``root`` is used purely for logging / state tracking.
     """
     stats = IndexStats(started_at=_utc_now_iso())
     if conn is None:

@@ -12,11 +12,11 @@ updates the docstring.
 
 These tests pin the new contract:
 
-  * Flag OFF + dir absent -> 3-source list (onedrive + local_outputs +
-    user_downloads, no ``intel_uploads``).  Round 80: local_outputs
-    source added between onedrive and user_downloads.
-  * Flag OFF + admin pre-seeded the dir -> 4-source list.
-  * Flag ON + dir present -> 4-source list.
+  * Flag OFF + dir absent -> 2-source list (onedrive + local_outputs,
+    no ``intel_uploads``).  Round 102 removes the retired user_downloads
+    source entirely.
+  * Flag OFF + admin pre-seeded the dir -> 3-source list.
+  * Flag ON + dir present -> 3-source list.
 
 The startup pre-create itself is not directly covered by a pytest
 fixture (it runs at module import time on the live process); we
@@ -31,12 +31,12 @@ from pathlib import Path
 
 
 def _common_two_source_setup(monkeypatch, tmp_path: Path):
-    """Round 36 + 80: set up OneDrive + local_outputs + Downloads so
+    """Round 36 + 80 + 102: set up OneDrive + local_outputs so
     the base source list is the canonical R80 shape (the legacy
     ``sharepoint_csone`` entry was retired with the MSAL/Graph runtime
-    path; the new ``local_outputs`` source was added in R80 and slots
-    between ``onedrive`` and ``user_downloads``).  Tests then layer on
-    the intel_uploads expectations.
+    path; the new ``local_outputs`` source was added in R80 and the
+    ``user_downloads`` source was retired in R102). Tests then layer
+    on the intel_uploads expectations.
 
     Round 80: this helper now also pins ``ADOPTIQ_OUTPUTS_DIR`` to a
     tmp dir so the new ``local_outputs`` source is always present
@@ -66,7 +66,7 @@ def _common_two_source_setup(monkeypatch, tmp_path: Path):
 
     overrides = {
         "CSONE_ONEDRIVE_FOLDER": str(od_dir),
-        "CSONE_INCLUDE_USER_DOWNLOADS": True,
+        "CSONE_INCLUDE_USER_DOWNLOADS": False,
         "CSONE_USER_DOWNLOADS_DIR": str(dl_dir),
     }
     for name, value in overrides.items():
@@ -82,7 +82,7 @@ def test_intel_uploads_absent_when_flag_off_and_dir_missing(
     monkeypatch, tmp_path: Path
 ):
     """Disabled installs that never pre-seeded the directory keep
-    the original 3-source ordering.  This is the production default."""
+    the Round 102 2-source ordering.  This is the production default."""
     import config as _live_config
     import corpus_bootstrap as cb
 
@@ -99,8 +99,8 @@ def test_intel_uploads_absent_when_flag_off_and_dir_missing(
     labels = [s["label"] for s in cb._resolve_index_sources()]
     assert "intel_uploads" not in labels
     # Round 36: sharepoint_csone source retired.
-    # Round 80: local_outputs source added between onedrive and user_downloads.
-    assert labels == ["onedrive", "local_outputs", "user_downloads"]
+    # Round 102: user_downloads source retired.
+    assert labels == ["onedrive", "local_outputs"]
 
 
 def test_intel_uploads_picked_up_when_flag_off_but_admin_pre_seeded(
@@ -128,11 +128,10 @@ def test_intel_uploads_picked_up_when_flag_off_but_admin_pre_seeded(
 
     labels = [s["label"] for s in cb._resolve_index_sources()]
     # Round 36: sharepoint_csone source retired.
-    # Round 80: local_outputs source added between onedrive and user_downloads.
+    # Round 102: user_downloads source retired.
     assert labels == [
         "onedrive",
         "local_outputs",
-        "user_downloads",
         "intel_uploads",
     ]
 
@@ -218,7 +217,7 @@ def test_intel_uploads_present_when_flag_on_and_dir_exists(
     monkeypatch, tmp_path: Path
 ):
     """The happy path: operator enabled the upload endpoint and
-    the bootstrap walker exposes the 4-entry source list."""
+    the bootstrap walker exposes the 3-entry source list."""
     import config as _live_config
     import corpus_bootstrap as cb
 
@@ -237,10 +236,9 @@ def test_intel_uploads_present_when_flag_on_and_dir_exists(
 
     labels = [s["label"] for s in cb._resolve_index_sources()]
     # Round 36: sharepoint_csone source retired.
-    # Round 80: local_outputs source added between onedrive and user_downloads.
+    # Round 102: user_downloads source retired.
     assert labels == [
         "onedrive",
         "local_outputs",
-        "user_downloads",
         "intel_uploads",
     ]

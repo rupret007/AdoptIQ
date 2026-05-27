@@ -938,7 +938,7 @@ ADOPTIQ_VERSION = "1.0.4"
 # tests across validator, resolver, ``_r83_safe_share_url``,
 # preferences-page source-shape, analyze-card regression guard, and
 # cross-pin against the R35 + R81 fixtures).
-ADOPTIQ_BUILD = "69"  # Round 96 / Build 69
+ADOPTIQ_BUILD = "70"  # Round 102 / Build 70
 # Round 96 / Build 69: externalizes the AdoptIQ Knowledge Corpus from
 # the app bundle. Shipping builds carry no corpus database or salt; the
 # encrypted local corpus is created only after the user's Cisco OneDrive
@@ -1112,13 +1112,9 @@ ADOPTIQ_BUILD = "69"  # Round 96 / Build 69
 # now dogfoods the same shortcut workflow so there is no owner /
 # user code path drift.  (4) Reports-folder indexing: pre-R80
 # ``corpus_bootstrap`` indexed ``~/Downloads`` (triggered the macOS
-# Files-and-Folders permission prompt that confused users); R80
-# adds ``_APP_SUPPORT/outputs/`` (where every generated report
-# lands) as a new ``local_outputs`` index source slotted between
-# OneDrive and Downloads, AND flips ``CSONE_INCLUDE_USER_DOWNLOADS``
-# default ``true -> false`` with a one-shot deprecation warning when
-# env=true is detected.  Downloads source is preserved for one
-# build via env opt-in and slated for full removal in Round 81.
+# Files-and-Folders permission prompt that confused users); R80 added
+# ``_APP_SUPPORT/outputs/`` as a permission-clean source, and Round 102
+# retires the old Downloads opt-in path completely.
 # Pinned by tests/test_round80_team_roster_includes_new_managers.py
 # (6) + tests/test_round80_admin_back_link_uses_live_url.py (3)
 # + tests/test_round80_onedrive_shared_folder_only.py (6)
@@ -1181,7 +1177,6 @@ load_dotenv()
 # user dirs.  Pinned by ``tests/test_round81_outputs_per_manager_layout.py``
 # (~19 tests) and ``tests/test_round81_sharepoint_url_refresh.py``
 # (3 tests + the existing R35 URL pin updated to the new token).
-import logging  # Round 80: needed for CSONE_INCLUDE_USER_DOWNLOADS deprecation warning
 import os
 import secrets
 from pathlib import Path
@@ -1430,41 +1425,14 @@ class Config:
     # for the priority list; the first existing directory wins.
     CSONE_ONEDRIVE_FOLDER = _resolve_csone_onedrive_folder()
 
-    # Round 17.1: corpus also indexes the runtime user's Downloads
-    # folder, filtered to ``AdoptIQ_*`` / ``AdoptIQ Enhanced ...``
-    # filenames (see ``corpus_indexer._USER_REPORT_NAME_RE``).  The
-    # walker is non-recursive so unrelated user files in nested
-    # directories (e.g. ``~/Downloads/Photos/``) are never opened.
-    # Round 80: default flipped ``true`` -> ``false``.  ``~/Downloads``
-    # triggered a macOS Files-and-Folders permission prompt that
-    # confused users (Brian's bug B); reports now land in
-    # ``_APP_SUPPORT/outputs/`` which is permission-clean and
-    # indexed via the new ``local_outputs`` corpus source registered
-    # by ``corpus_bootstrap._resolve_index_sources``.  Operators who
-    # relied on the old behaviour can opt back in via env, but get a
-    # one-shot deprecation log warning so the regression to the new
-    # default is scheduled.  Env opt-in is preserved for one build
-    # and slated for full removal in Round 81.
-    # ``CSONE_USER_DOWNLOADS_DIR`` overrides the default
-    # ``~/Downloads`` location for the rare site-specific case where
-    # reports land elsewhere.
-    _R80_DOWNLOADS_ENV_RAW = os.environ.get('CSONE_INCLUDE_USER_DOWNLOADS')
-    _R80_DOWNLOADS_TRUTHY = (
-        str(_R80_DOWNLOADS_ENV_RAW or 'false').strip().lower()
-        in {'1', 'true', 'yes', 'on'}
-    )
-    CSONE_INCLUDE_USER_DOWNLOADS = _R80_DOWNLOADS_TRUTHY
-    if _R80_DOWNLOADS_ENV_RAW is not None and _R80_DOWNLOADS_TRUTHY:
-        # Round 80
-        logging.getLogger(__name__).warning(
-            "Round 80: CSONE_INCLUDE_USER_DOWNLOADS=true is DEPRECATED. "
-            "Reports now land in _APP_SUPPORT/outputs/ which is "
-            "indexed via the 'local_outputs' corpus source. The "
-            "~/Downloads indexing path will be removed in Round 81."
-        )
-    CSONE_USER_DOWNLOADS_DIR = os.environ.get('CSONE_USER_DOWNLOADS_DIR') or str(
-        Path.home() / 'Downloads'
-    )
+    # Round 102: the deprecated Downloads corpus source is fully retired.
+    # Even if an old environment or bundled secret still sets
+    # CSONE_INCLUDE_USER_DOWNLOADS=true, the runtime must not touch
+    # ~/Downloads because macOS surfaces that as an alarming Files-and-Folders
+    # permission prompt. Generated reports are indexed through the
+    # permission-clean local_outputs source instead.
+    CSONE_INCLUDE_USER_DOWNLOADS = False
+    CSONE_USER_DOWNLOADS_DIR = os.environ.get('CSONE_USER_DOWNLOADS_DIR') or ''
 
     # Round 26 / Phase D: user-uploaded CSOne report drop folder.
     #

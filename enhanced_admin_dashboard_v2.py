@@ -2773,8 +2773,8 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                    (Round 37 / Phase 4) covers the manual refresh
                    path. #}
 
-                {# Round 17.1 + 17.2: per-source breakdown (OneDrive
-                   sync, the runtime user's Downloads, and any opt-in
+                {# Round 17.1 + 17.2 + 102: per-source breakdown (OneDrive
+                   sync, local generated reports, and any opt-in
                    intel-uploads pre-seed). Rendered only when the
                    bootstrap recorded source-level stats; otherwise
                    the summary stats above are sufficient.  Note:

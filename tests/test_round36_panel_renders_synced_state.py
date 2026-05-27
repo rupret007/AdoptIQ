@@ -59,7 +59,7 @@ def test_panel_state_has_label_branch(state: str) -> None:
         "Active \\u2022 local OneDrive corpus",
         "Indexing OneDrive",
         "OneDrive sync required",
-        "Refreshing",
+        "Building local corpus",
         "Last refresh failed",
         "Add corpus share to OneDrive",
         "Sign in to OneDrive",

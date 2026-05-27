@@ -2527,11 +2527,10 @@ app.config['CSONE_SHARED_FOLDER_URL'] = Config.CSONE_SHARED_FOLDER_URL
 try:
     _r17_2_log_file = locals().get('_log_path') or '<stderr only>'
     logger.info(
-        "Round 17.2 / startup: log_file=%s corpus_onedrive=%s "
-        "corpus_downloads=%s sharepoint_enabled=%s sharepoint_cache=%s",
+        "Round 102 / startup: log_file=%s corpus_onedrive=%s "
+        "corpus_downloads_source=retired sharepoint_enabled=%s sharepoint_cache=%s",
         _r17_2_log_file,
         Config.CSONE_ONEDRIVE_FOLDER,
-        getattr(Config, 'CSONE_USER_DOWNLOADS_DIR', '<unset>'),
         getattr(Config, 'ADOPTIQ_SHAREPOINT_ENABLED', False),
         getattr(Config, 'ADOPTIQ_SHAREPOINT_CACHE_DIR', '<unset>'),
     )

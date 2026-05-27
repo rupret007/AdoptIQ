@@ -140,7 +140,7 @@
             return 'Idle — intelligence indexing is disabled.';
         }
         if (state === 'running') {
-            return 'Indexing CSOne reports…';
+            return 'Building the local Ask AI corpus from authorized OneDrive data and generated reports…';
         }
         if (state === 'blocked') {
             // Round 53.3: surface the actionable remediation message
@@ -686,7 +686,7 @@
             case 'runtime_synced':      return 'Active \u2022 local OneDrive corpus';
             case 'fresh_indexing':      return 'Indexing OneDrive\u2026';
             case 'fresh_not_synced':    return 'OneDrive sync required';
-            case 'refreshing':          return 'Refreshing\u2026';
+            case 'refreshing':          return 'Building local corpus\u2026';
             case 'refresh_failed':      return 'Last refresh failed';
             // Round 83 / Build 59: distinct from blocked_no_onedrive
             // -- the user IS signed in to OneDrive, they just need
@@ -741,7 +741,7 @@
                     + 'sync authorized data to this Mac before indexing.  '
                     + '(You must be signed in to OneDrive on this device first.)';
             case 'refreshing':
-                return 'Refreshing knowledge corpus from OneDrive\u2026';
+                return 'Building the local knowledge corpus from authorized OneDrive data, generated AdoptIQ reports, and Intelligence uploads. Reports remain safe to run while this finishes.';
             case 'refresh_failed':
                 var detail = boot.last_refresh_error
                     ? String(boot.last_refresh_error) : 'unknown';
