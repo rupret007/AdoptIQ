@@ -22560,6 +22560,10 @@ def _r69_handle_model_setting(setting_key: str, env_var: str) -> Any:
             "ok": False,
             "error": f"resolver_import_failed: {type(imp_err).__name__}",
         }), 500
+    try:
+        _settings.migrate_round103_model_defaults()
+    except Exception:  # noqa: BLE001
+        pass
 
     if request.method == "GET":
         # Read-only path -- no auth, mirrors ``/api/intel/status``

@@ -122,7 +122,7 @@ def test_r69_circuit_config_env_override_distinct(monkeypatch):
     import config as _c
     importlib.reload(_c)
     cfg = _c.Config.CIRCUIT_CONFIG
-    assert cfg["model_name"] == "gpt-5-nano"
+    assert cfg["model_name"] == "gemini-3.1-flash-lite"
     assert cfg["model_name_ask_ai"] == "gemini-3.1-flash-lite"
     assert cfg["model_name_report"] == "gpt-4o-mini"
 
@@ -161,10 +161,10 @@ def test_r69_resolver_settings_layer_wins_over_env_layer(monkeypatch, tmp_path):
     monkeypatch.setenv("CIRCUIT_MODEL_NAME_ASK_AI", "gemini-3.1-flash-lite")
     import adoptiq_settings as _s
     monkeypatch.setattr(_s, "_app_support_dir", lambda: tmp_path)
-    _s.save_settings({"ask_ai_model_name": "gpt-5-nano"})
+    _s.save_settings({"ask_ai_model_name": "gpt-4o-mini"})
     import model_resolver as _mr
     importlib.reload(_mr)
-    assert _mr.get_active_ask_ai_model() == "gpt-5-nano"
+    assert _mr.get_active_ask_ai_model() == "gpt-4o-mini"
 
 
 def test_r69_resolver_drops_malformed_env_silently(monkeypatch, tmp_path):

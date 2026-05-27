@@ -43,14 +43,15 @@
             <section class="card shadow-cisco fade-in mb-4"
                      style="animation-delay: 0.25s;"
                      data-report-jobs-panel
+                     data-report-jobs-current-only
                      aria-live="polite">
                 <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
                     <div>
                         <h2 class="h5 mb-0">
-                            <i class="fas fa-tasks me-2" aria-hidden="true"></i>Report Jobs
+                            <i class="fas fa-tasks me-2" aria-hidden="true"></i>Current Running Reports
                         </h2>
                         <p class="small text-muted mb-0">
-                            Generate this leader report while other reports continue.
+                            Running and queued jobs stay here while you generate this leader report.
                             Active report model:
                             <code data-report-model-current
                                   data-default-model="{{ active_report_model or 'n/a' }}">{{ active_report_model or 'n/a' }}</code>
@@ -76,7 +77,7 @@
                         </table>
                     </div>
                     <p class="text-muted small m-3" data-report-jobs-empty>
-                        No recent jobs yet. Start a report and it will appear here.
+                        No reports are running right now. Start a report and it will appear here.
                     </p>
                 </div>
             </section>
@@ -226,6 +227,48 @@
                     </div>
                 </div>
             </div>
+
+            <section class="card shadow-cisco fade-in mt-4"
+                     style="animation-delay: 0.45s;"
+                     data-report-history-panel
+                     aria-labelledby="leader-historical-reports-heading">
+                <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+                    <div>
+                        <h2 id="leader-historical-reports-heading" class="h6 mb-0">
+                            <i class="fas fa-history me-2" aria-hidden="true"></i>Historical Reports
+                        </h2>
+                        <p class="small text-muted mb-0">
+                            Recent completed jobs are kept out of the main running-jobs panel.
+                        </p>
+                    </div>
+                    <div class="d-flex flex-wrap gap-2 align-items-center">
+                        <span class="badge rounded-pill bg-secondary">
+                            <span data-report-history-count>0</span> recent
+                        </span>
+                        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('history') }}">Open History</a>
+                        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('previous_reports') }}">Previous Reports</a>
+                    </div>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th scope="col">Report</th>
+                                    <th scope="col">Status</th>
+                                    <th scope="col">Progress</th>
+                                    <th scope="col">Runtime</th>
+                                    <th scope="col">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody data-report-history-body></tbody>
+                        </table>
+                    </div>
+                    <p class="text-muted small m-3" data-report-history-empty>
+                        Completed report history appears here after a job finishes.
+                    </p>
+                </div>
+            </section>
         </div>
     </div>
 </div>
@@ -298,6 +341,28 @@ document.addEventListener('DOMContentLoaded', function() {
     var isSubmitting = false;
     var inflightController = null;
 
+    function showLeaderNotification(message, type) {
+        const notification = document.createElement('div');
+        notification.className = 'alert alert-' + (type === 'error' ? 'danger' : (type || 'info')) +
+                                 ' alert-dismissible fade show position-fixed';
+        notification.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
+        const messageSpan = document.createElement('span');
+        messageSpan.textContent = message;
+        notification.appendChild(messageSpan);
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.className = 'btn-close';
+        closeBtn.setAttribute('data-bs-dismiss', 'alert');
+        closeBtn.setAttribute('aria-label', 'Close notification');
+        notification.appendChild(closeBtn);
+        document.body.appendChild(notification);
+        window.setTimeout(function() {
+            if (notification.parentNode) {
+                notification.remove();
+            }
+        }, 5000);
+    }
+
     form.addEventListener('submit', async function(e) {
         e.preventDefault();
 
@@ -355,7 +420,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (result.success) {
                 const url = result.redirect_url || '';
                 if (!url.startsWith('/progress/')) {
-                    alert('Unexpected redirect URL received.');
+                    showLeaderNotification('Unexpected redirect URL received.', 'error');
                     submitBtn.disabled = false;
                     submitBtn.innerHTML = '<i class="fas fa-rocket me-2"></i>Generate Leader Report';
                     return;
@@ -373,12 +438,15 @@ document.addEventListener('DOMContentLoaded', function() {
                         active_report_model: document.querySelector('[data-report-model-current]')?.textContent || ''
                     });
                 }
-                alert('Leader report started. Track it in Report Jobs or open the progress page from there.');
+                showLeaderNotification(
+                    'Leader report started successfully. It is now visible in Current Running Reports.',
+                    'success'
+                );
                 submitBtn.disabled = false;
                 submitBtn.innerHTML = '<i class="fas fa-rocket me-2"></i>Generate Leader Report';
             } else {
                 // Show error
-                alert('Error: ' + (result.error || 'Unknown error occurred'));
+                showLeaderNotification('Error: ' + (result.error || 'Unknown error occurred'), 'error');
                 submitBtn.disabled = false;
                 submitBtn.innerHTML = '<i class="fas fa-rocket me-2"></i>Generate Leader Report';
             }
@@ -388,7 +456,7 @@ document.addEventListener('DOMContentLoaded', function() {
             // stale request from a duplicate submit; do not yell at
             // the user about it.
             if (error && error.name !== 'AbortError') {
-                alert('Error submitting form: ' + error.message);
+                showLeaderNotification('Error submitting form: ' + error.message, 'error');
             }
             submitBtn.disabled = false;
             submitBtn.innerHTML = '<i class="fas fa-rocket me-2"></i>Generate Leader Report';
@@ -408,7 +476,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (file) {
                 // Check file size (50MB max)
                 if (file.size > 50 * 1024 * 1024) {
-                    alert('File too large. Maximum size is 50MB.');
+                    showLeaderNotification('File too large. Maximum size is 50MB.', 'error');
                     this.value = '';
                     return;
                 }
@@ -419,7 +487,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 const isValid = validExtensions.some(ext => fileName.endsWith(ext));
 
                 if (!isValid) {
-                    alert('Invalid file type. Please upload an Excel file (.xlsx or .xls).');
+                    showLeaderNotification('Invalid file type. Please upload an Excel file (.xlsx or .xls).', 'error');
                     this.value = '';
                     return;
                 }

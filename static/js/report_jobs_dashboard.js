@@ -80,6 +80,29 @@
         }
     }
 
+    function isActiveJob(job) {
+        return !!ACTIVE_STATUSES[String((job && job.status) || '').toLowerCase()];
+    }
+
+    function jobTimeValue(job) {
+        var fields = ['updated_at', 'end_time', 'completed_at', 'start_time', 'created_at'];
+        for (var i = 0; i < fields.length; i += 1) {
+            var raw = job && job[fields[i]];
+            if (!raw) { continue; }
+            var parsed = Date.parse(String(raw));
+            if (Number.isFinite(parsed)) { return parsed; }
+        }
+        return 0;
+    }
+
+    function sortJobsForDisplay(jobs) {
+        return (jobs || []).slice().sort(function (a, b) {
+            var activeDelta = (isActiveJob(b) ? 1 : 0) - (isActiveJob(a) ? 1 : 0);
+            if (activeDelta) { return activeDelta; }
+            return jobTimeValue(b) - jobTimeValue(a);
+        });
+    }
+
     function appendText(parent, tag, className, text) {
         var el = document.createElement(tag);
         if (className) { el.className = className; }
@@ -121,6 +144,7 @@
         var aid = safeText(job.analysis_id);
         var status = safeText(job.status, 'unknown').toLowerCase();
         var progress = Math.max(0, Math.min(100, parseInt(job.progress || 0, 10) || 0));
+        if (ACTIVE_STATUSES[status]) { tr.className = 'table-primary'; }
 
         var reportCell = document.createElement('td');
         appendText(reportCell, 'div', 'fw-semibold', reportLabel(job));
@@ -231,11 +255,10 @@
     function render(jobs) {
         var panels = document.querySelectorAll('[data-report-jobs-panel]');
         if (!panels.length) { return false; }
-        jobs = mergeOptimistic(jobs || []);
-        var activeCount = 0;
-        jobs.forEach(function (job) {
-            if (ACTIVE_STATUSES[String(job.status || '').toLowerCase()]) { activeCount += 1; }
-        });
+        jobs = sortJobsForDisplay(mergeOptimistic(jobs || []));
+        var activeJobs = jobs.filter(isActiveJob);
+        var historyJobs = jobs.filter(function (job) { return !isActiveJob(job); });
+        var activeCount = activeJobs.length;
         panels.forEach(function (panel) {
             var body = panel.querySelector('[data-report-jobs-body]');
             var empty = panel.querySelector('[data-report-jobs-empty]');
@@ -248,9 +271,19 @@
             }
             if (!body) { return; }
             body.textContent = '';
-            var visible = jobs.slice(0, 12);
+            var visible = panel.hasAttribute('data-report-jobs-current-only') ? activeJobs.slice(0, 6) : jobs.slice(0, 12);
             visible.forEach(function (job) { body.appendChild(renderRow(job)); });
             if (empty) { empty.hidden = visible.length > 0; }
+        });
+        document.querySelectorAll('[data-report-history-panel]').forEach(function (panel) {
+            var body = panel.querySelector('[data-report-history-body]');
+            var empty = panel.querySelector('[data-report-history-empty]');
+            var count = panel.querySelector('[data-report-history-count]');
+            if (count) { count.textContent = String(historyJobs.length); }
+            if (!body) { return; }
+            body.textContent = '';
+            historyJobs.slice(0, 6).forEach(function (job) { body.appendChild(renderRow(job)); });
+            if (empty) { empty.hidden = historyJobs.length > 0; }
         });
         return activeCount > 0;
     }

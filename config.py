@@ -938,7 +938,7 @@ ADOPTIQ_VERSION = "1.0.4"
 # tests across validator, resolver, ``_r83_safe_share_url``,
 # preferences-page source-shape, analyze-card regression guard, and
 # cross-pin against the R35 + R81 fixtures).
-ADOPTIQ_BUILD = "70"  # Round 102 / Build 70
+ADOPTIQ_BUILD = "71"  # Round 103 / Build 71
 # Round 96 / Build 69: externalizes the AdoptIQ Knowledge Corpus from
 # the app bundle. Shipping builds carry no corpus database or salt; the
 # encrypted local corpus is created only after the user's Cisco OneDrive
@@ -1715,11 +1715,10 @@ class Config:
     # ``model_name_ask_ai`` and ``model_name_report`` so the operator
     # can flip the Ask AI model independently of the report-narrative
     # model (different validation surfaces, different tuning targets).
-    # Both default to the legacy ``CIRCUIT_MODEL_NAME`` so an existing
-    # deployment with only ``CIRCUIT_MODEL_NAME`` set keeps its current
-    # behaviour byte-for-byte.  Resolution at request time goes through
-    # ``model_resolver.get_active_*_model()`` which layers the
-    # ``settings.json`` UI override on top of these env defaults.
+    # Both normally default through the legacy ``CIRCUIT_MODEL_NAME``.
+    # Round 103 maps a stale ``gpt-5-nano`` env/bundled default back to
+    # Gemini so demo installs do not start on the old model unless the
+    # operator deliberately picks it in settings.json after migration.
     # Round 77 / Build 53: hardcoded fallback flipped from ``gpt-5-nano``
     # to ``gemini-3.1-flash-lite``.  MUST track ``model_resolver._HARDCODED_DEFAULT``
     # so the env-fallback path and the resolver-level fallback agree
@@ -1728,19 +1727,28 @@ class Config:
     # ``model_resolver.get_active_*_model()`` returned another, producing
     # silent inconsistencies in per-call diagnostic records).  See R77
     # tests for the parity guard.
+    @staticmethod
+    def _r103_model_default_from_env(*names, default='gemini-3.1-flash-lite'):
+        for name in names:
+            value = (os.environ.get(name) or '').strip()
+            if not value:
+                continue
+            if value == 'gpt-5-nano':
+                return default
+            return value
+        return default
+
     CIRCUIT_CONFIG = {
         "client_id": os.environ.get('CIRCUIT_CLIENT_ID') or '',
         "client_secret": os.environ.get('CIRCUIT_CLIENT_SECRET') or '',
         "app_key": os.environ.get('CIRCUIT_APP_KEY') or '',
-        "model_name": os.environ.get('CIRCUIT_MODEL_NAME', 'gemini-3.1-flash-lite'),  # Round 77
-        "model_name_ask_ai": (
-            os.environ.get('CIRCUIT_MODEL_NAME_ASK_AI')
-            or os.environ.get('CIRCUIT_MODEL_NAME', 'gemini-3.1-flash-lite')
-        ),  # Round 69 / Build 43, default flipped Round 77
-        "model_name_report": (
-            os.environ.get('CIRCUIT_MODEL_NAME_REPORT')
-            or os.environ.get('CIRCUIT_MODEL_NAME', 'gemini-3.1-flash-lite')
-        ),  # Round 69 / Build 43, default flipped Round 77
+        "model_name": _r103_model_default_from_env.__func__('CIRCUIT_MODEL_NAME'),  # Round 103
+        "model_name_ask_ai": _r103_model_default_from_env.__func__(
+            'CIRCUIT_MODEL_NAME_ASK_AI', 'CIRCUIT_MODEL_NAME'
+        ),  # Round 69 / Build 43, stale default mapped Round 103
+        "model_name_report": _r103_model_default_from_env.__func__(
+            'CIRCUIT_MODEL_NAME_REPORT', 'CIRCUIT_MODEL_NAME'
+        ),  # Round 69 / Build 43, stale default mapped Round 103
     }
 
     # Database Table Names

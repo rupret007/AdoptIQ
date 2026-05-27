@@ -65,6 +65,7 @@ logger = logging.getLogger(__name__)
 # ``[data-r69-model-input]`` dropdowns on the analyze + ask-ai pages
 # AND the admin console (R69 / Build 43 + R73 / UX-3 contracts).
 _HARDCODED_DEFAULT = "gemini-3.1-flash-lite"  # Round 77
+_R103_STALE_DEFAULT_MODEL = "gpt-5-nano"
 
 # Round 71 / Phase 5 (#28): inline allow-list regex used as a
 # defense-in-depth fallback when ``adoptiq_settings`` is unimportable.
@@ -107,6 +108,10 @@ def _read_settings_value(key: str) -> Optional[str]:
     except Exception:  # noqa: BLE001
         return None
     try:
+        _settings.migrate_round103_model_defaults()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         raw = _settings.get(key, "")
     except Exception:  # noqa: BLE001
         return None
@@ -125,6 +130,24 @@ def _read_settings_value(key: str) -> Optional[str]:
             return None
     except Exception:  # noqa: BLE001
         return None
+    return raw
+
+
+def _r103_coerce_stale_default(raw: str, source: str) -> str:
+    """Map stale gpt-5-nano defaults to Gemini for demo-ready builds.
+
+    The UI still allows a deliberate post-migration gpt-5-nano selection
+    through settings.json. This coercion applies to stale env/bundled
+    defaults where no settings override exists.
+    """
+    if raw == _R103_STALE_DEFAULT_MODEL:
+        logger.info(
+            "model_resolver: Round 103 mapped stale %s=%s to %s",
+            source,
+            _R103_STALE_DEFAULT_MODEL,
+            _HARDCODED_DEFAULT,
+        )
+        return _HARDCODED_DEFAULT
     return raw
 
 
@@ -160,7 +183,7 @@ def _read_env_value(env_var: str) -> Optional[str]:
                 env_var, _short_digest(raw),
             )
             return None
-    return raw
+    return _r103_coerce_stale_default(raw, env_var)
 
 
 def _short_digest(value: str) -> str:

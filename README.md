@@ -4,6 +4,10 @@
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
+### What's New in Build 71 (Round 103 — UX cleanup)
+
+Build 71 cleans up the launch/report UX for demos. Existing installs that still carried `gpt-5-nano` as the saved Ask AI or report model are migrated once to `gemini-3.1-flash-lite`; operators can still deliberately switch back to `gpt-5-nano` from Preferences after the migration marker is written. The launch pages now keep current/running report jobs near the top, move recent completed jobs into a lower “Historical Reports” card, and replace the leader-report blocking success alert with the same non-blocking notification flow used by other report starts. The local gate is green at `5575 passed / 4 skipped / 6 deselected`.
+
 ### What's New in Build 70 (Round 102 — no Downloads permission prompt)
 
 Build 70 removes the last deprecated corpus path that could ask macOS for Downloads-folder access. Generated reports continue to save under `~/Documents/AdoptIQ Reports` in packaged builds and enter the corpus through the sidecar-gated `local_outputs` source; corpus refresh now uses authorized OneDrive data, generated AdoptIQ reports, and explicit Intelligence uploads only. The local gate is green at `5570 passed / 4 skipped / 6 deselected`, and the rebuilt packaged app passed smoke.

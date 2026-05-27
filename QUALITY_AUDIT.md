@@ -10968,3 +10968,62 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - Live Snowflake report regeneration was not rerun for this UI/source cleanup; Round 101's two-hour soak remains the latest live report-generation evidence.
 
 **Trailer:** Made-with: Cursor
+
+## Round 103 — handoff 2026-05-27
+
+**What changed (plain English):**
+- Migrated stale saved `gpt-5-nano` Ask AI/report model preferences to `gemini-3.1-flash-lite` once while preserving deliberate post-migration back-toggle.
+- Mapped stale env/bundled `CIRCUIT_MODEL_NAME*="gpt-5-nano"` defaults to Gemini when no settings override exists.
+- Split report jobs UX into top-of-page current/running jobs and lower Historical Reports cards on the analyze and leader pages.
+- Replaced the leader-report blocking success/error alerts with a non-blocking notification helper that matches the other report start flow.
+- Bumped the packaged build to Build 71 and documented the Round 103 UX cleanup.
+
+**Files touched:**
+- `adoptiq_settings.py` — add Round 103 model-default migration marker/helper.
+- `model_resolver.py` — run migration before reading settings and map stale env defaults to Gemini.
+- `config.py` — bump build metadata and map stale Circuit model env defaults in `CIRCUIT_CONFIG`.
+- `app_simple.py` — ensure settings API GET/POST observes the Round 103 model migration before reading or saving preferences.
+- `static/js/report_jobs_dashboard.js` — sort active jobs first, render current-only panels, and render lower historical panels.
+- `templates/analyze.html` — rename top panel to Current Running Reports and add lower Historical Reports card.
+- `templates/leader_report_form.html` — same jobs/history layout plus non-blocking leader notifications.
+- `tests/test_round103_ux_cleanup.py` — new Round 103 regression suite.
+- `tests/test_round69_model_preferences.py` — update model-default expectations after stale env mapping.
+- `tests/test_round77_default_model_flip.py` — preserve gpt back-toggle only after the migration marker exists.
+- `README.md` — Build 71 summary.
+- `CLAUDE.md` — Build 71 test floor and Round 103 operating contract.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — Build 71 model/jobs UX smoke reminder.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_round103_ux_cleanup.py::test_round103_migrates_stale_gpt_settings_once` — pins one-time settings migration.
+- `tests/test_round103_ux_cleanup.py::test_round103_resolver_maps_stale_env_default_to_gemini` — pins stale env/bundled default mapping.
+- `tests/test_round103_ux_cleanup.py::test_round103_post_migration_gpt_back_toggle_still_works` — pins deliberate gpt back-toggle after migration.
+- `tests/test_round103_ux_cleanup.py::test_round103_jobs_dashboard_splits_current_and_history` — pins current jobs/history split.
+- `tests/test_round103_ux_cleanup.py::test_round103_leader_success_path_uses_non_blocking_notification` — pins no blocking leader alert.
+- `tests/test_round69_model_preferences.py::test_r69_circuit_config_env_override_distinct` — updates stale generic env behavior.
+- `tests/test_round69_model_preferences.py::test_r69_resolver_settings_layer_wins_over_env_layer` — avoids using stale default as the settings-wins sentinel.
+- `tests/test_round77_default_model_flip.py::test_round77_gpt_5_nano_resolver_returns_legacy_when_persisted` — models a post-migration UI back-toggle.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5575 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- focused tests — pass (`tests/test_round103_ux_cleanup.py`, `tests/test_round69_model_preferences.py`, `tests/test_round77_default_model_flip.py`, `tests/test_round91_jobs_workflow_and_accuracy.py`; 73 passed)
+- `bash build_mac.sh` — pass after detaching stale mounted Build 69/70 DMGs; produced `OUTBOX/AdoptIQ-v1.0.4-build71.dmg`
+- `scripts/test_build_smoke.sh` — pass (`/ping`, `/`, `/api/version`, `/api/status/all`, `/api/corpus/status`, shutdown frees 5151)
+
+**Hot spots Claude should audit first:**
+1. `adoptiq_settings.py` — confirm the one-time migration marker cannot overwrite a deliberate post-migration `gpt-5-nano` UI selection.
+2. `model_resolver.py` + `config.py` — confirm stale env/default mapping is scoped to exact `gpt-5-nano` and does not block settings-layer overrides.
+3. `static/js/report_jobs_dashboard.js` — confirm active-job filtering/history rendering keeps completed rows available without crowding first load.
+4. `templates/leader_report_form.html` — confirm the non-blocking notification path preserves useful validation/error feedback.
+
+**Known deferrals (intentional non-fixes):**
+- No live Snowflake report regeneration was run; scope was launch/report UX and model-default cleanup, with packaged smoke coverage.
+- No drag-install smoke from the DMG into `/Applications` was run; the rebuilt `dist/AdoptIQ.app` smoke passed and the DMG was produced.
+
+**Trailer:** Made-with: Cursor

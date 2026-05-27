@@ -129,12 +129,20 @@ def test_round77_gpt_5_nano_round_trips_through_settings(monkeypatch, tmp_path):
 def test_round77_gpt_5_nano_resolver_returns_legacy_when_persisted(monkeypatch, tmp_path):
     """When the operator persists ``gpt-5-nano`` via the UI, the
     resolver MUST return that value (not the new R77 hardcoded
-    default) -- the override is what makes the UI flip honest."""
+    default) -- the override is what makes the UI flip honest.
+
+    Round 103 migrates pre-existing stale settings once, so this test
+    marks that migration as complete before simulating a deliberate
+    post-migration UI back-toggle.
+    """
     monkeypatch.delenv("CIRCUIT_MODEL_NAME", raising=False)
     monkeypatch.delenv("CIRCUIT_MODEL_NAME_REPORT", raising=False)
     import adoptiq_settings as _s
     monkeypatch.setattr(_s, "_app_support_dir", lambda: tmp_path)
-    _s.save_settings({"report_model_name": R77_LEGACY_DEFAULT})
+    _s.save_settings({
+        "r103_model_default_migrated": True,
+        "report_model_name": R77_LEGACY_DEFAULT,
+    })
     import model_resolver as _mr
     importlib.reload(_mr)
     assert _mr.get_active_report_model() == R77_LEGACY_DEFAULT

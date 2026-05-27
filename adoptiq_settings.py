@@ -70,6 +70,13 @@ logger = logging.getLogger(__name__)
 # 1-128 chars) so a typo or shell-injection attempt cannot land
 # in the on-disk settings file or be passed to ``CircuitChatClient``.
 #
+# Round 103 / Build 71 adds a one-time migration marker so demo installs
+# that still carry the pre-R77 ``gpt-5-nano`` value in settings.json are
+# moved back to the current Gemini default exactly once.  The marker
+# preserves the post-migration back-toggle: after startup has marked the
+# migration complete, an operator can still deliberately choose
+# ``gpt-5-nano`` from the UI and it will persist normally.
+#
 # Round 84 / Build 60 adds ``corpus_share_url`` so the operator can
 # rotate the SharePoint share URL (used by the analyze-page
 # bootstrap-shortcut button + the optional ``odopen://`` deep link)
@@ -91,6 +98,7 @@ _SCHEMA: Dict[str, tuple] = {
     "corpus_knowledge_enabled": (bool, False),
     "ask_ai_model_name": (str, ""),  # Round 69 / Build 43
     "report_model_name": (str, ""),  # Round 69 / Build 43
+    "r103_model_default_migrated": (bool, False),  # Round 103 / Build 71
     "corpus_share_url": (str, ""),  # Round 84 / Build 60
     # Round 88 / F5 (P1): OneDrive CSOne folder override.  When the
     # OneDrive desktop client materializes a SHARED folder (someone
@@ -162,6 +170,9 @@ def _is_valid_sharepoint_url(value: Any) -> bool:
 # is the sentinel for "unset -- fall back to env / config default"
 # and is accepted unchanged.
 _MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_R103_STALE_DEFAULT_MODEL = "gpt-5-nano"
+_R103_CURRENT_DEFAULT_MODEL = "gemini-3.1-flash-lite"
+_R103_MODEL_MIGRATION_KEY = "r103_model_default_migrated"
 
 
 def _is_valid_model_name(value: Any) -> bool:
@@ -179,6 +190,11 @@ def _is_valid_model_name(value: Any) -> bool:
     if not isinstance(value, str):
         return False
     return bool(_MODEL_NAME_RE.match(value))
+
+
+def _r103_model_value_needs_migration(value: Any) -> bool:
+    """Return True for the exact stale model default retired in R103."""
+    return isinstance(value, str) and value.strip() == _R103_STALE_DEFAULT_MODEL
 
 
 # Round 88 / F5 (P1): OneDrive CSOne folder path validator.
@@ -427,6 +443,39 @@ def save_settings(settings: Mapping[str, Any]) -> Path:
             pass
         raise
     return target
+
+
+def migrate_round103_model_defaults() -> bool:
+    """One-time migration from stale gpt-5-nano defaults to Gemini.
+
+    Returns True when either model preference was changed.  The migration
+    marker is persisted even when no stale value is found so a later,
+    deliberate UI selection of ``gpt-5-nano`` survives restarts.
+    """
+    try:
+        current = load_settings()
+    except Exception:  # noqa: BLE001
+        return False
+    if current.get(_R103_MODEL_MIGRATION_KEY) is True:
+        return False
+
+    changed_model = False
+    next_settings = dict(current)
+    for key in ("ask_ai_model_name", "report_model_name"):
+        if _r103_model_value_needs_migration(next_settings.get(key)):
+            next_settings[key] = _R103_CURRENT_DEFAULT_MODEL
+            changed_model = True
+    next_settings[_R103_MODEL_MIGRATION_KEY] = True
+
+    try:
+        save_settings(next_settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "adoptiq_settings: Round 103 model-default migration skipped: %s",
+            exc,
+        )
+        return False
+    return changed_model
 
 
 def get(key: str, default: Optional[Any] = None) -> Any:
