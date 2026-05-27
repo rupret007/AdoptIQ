@@ -1,8 +1,12 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 72).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 73).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 73 (Round 104 — live report audit)
+
+Build 73 corrects the live report model preference back to `gemini-3.1-flash-lite` and hardens Compact risk scoring after the Build 72 artifact audit. Compact incident filtering now stays inside the formatter instead of importing `app_simple` during scoring, and the threaded Compact XLSX writer captures the incident list explicitly so Compact/Renewal risk parity keeps the same external-incident input. The local gate is green at `5579 passed / 4 skipped / 6 deselected`.
 
 ### What's New in Build 72 (Round 103.1 — theme cleanup)
 

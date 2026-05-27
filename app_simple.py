@@ -10567,7 +10567,7 @@ def run_compact_analysis(analysis_id):
         try:
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
-            def generate_excel(_ctx=_r23_ctx):  # Round 23 / R22-NEXT-001
+            def generate_excel(_ctx=_r23_ctx, _r104_ext_incidents=ext_incidents):  # Round 23 / R22-NEXT-001
                 """Generate the Excel report in a separate thread"""
                 try:
                     logger.info(" Calculating risk scores...")
@@ -10620,7 +10620,7 @@ def run_compact_analysis(analysis_id):
                             # so the XLSX Risk_Summary sheet agrees
                             # with the Compact Word narrative AND with
                             # the Renewal report for the same scope.
-                            ext_incidents=ext_incidents if ext_incidents else None,
+                            ext_incidents=_r104_ext_incidents if _r104_ext_incidents else None,  # Round 104
                         )
                     except Exception as _xl_rs_err:
                         logger.debug(
@@ -10634,7 +10634,7 @@ def run_compact_analysis(analysis_id):
                             # Round 67 / Build 41 (B1): parity on the
                             # fallback path too (mirrors the Word path
                             # at L8755).
-                            ext_incidents=ext_incidents if ext_incidents else None,
+                            ext_incidents=_r104_ext_incidents if _r104_ext_incidents else None,  # Round 104
                         )
                     logger.info(f"[[CHART]] Risk scores calculated for {len(risk_scores)} customers")
                     # Phase 1.2: floor assertion vs total_customers.

@@ -2717,6 +2717,46 @@ def _r66_b8_classify_extra_frames(
     return (pulse_df, action_plans_df, subs_df)
 
 
+def _r104_filter_customer_tagged_incidents(
+    ext_incidents: Optional[List[Dict[str, Any]]],
+    customer_name: str,
+) -> List[Dict[str, Any]]:
+    """Round 104: local parity copy of the R65 customer incident filter.
+
+    ``compact_report_formatter`` is imported by ``app_simple`` at startup, so
+    importing ``app_simple`` back from this module during scoring can execute a
+    second copy of app startup in packaged runs. Keep the small filtering rule
+    local instead.
+    """
+    if not ext_incidents or not customer_name:
+        return list(ext_incidents or [])
+    norm_target = normalize_customer_name(customer_name)
+    if not norm_target:
+        return list(ext_incidents)
+    has_tagging_field = False
+    for inc in ext_incidents:
+        if not isinstance(inc, dict):
+            continue
+        for field in ("customer_id", "customer_name", "BU_NAME"):
+            if inc.get(field):
+                has_tagging_field = True
+                break
+        if has_tagging_field:
+            break
+    if not has_tagging_field:
+        return list(ext_incidents)
+    matched: List[Dict[str, Any]] = []
+    for inc in ext_incidents:
+        if not isinstance(inc, dict):
+            continue
+        for field in ("customer_id", "customer_name", "BU_NAME"):
+            value = inc.get(field)
+            if value and normalize_customer_name(str(value)) == norm_target:
+                matched.append(inc)
+                break
+    return matched
+
+
 def calculate_renewal_risk_scores(
     ab_data: pd.DataFrame,
     csone_data: pd.DataFrame,
@@ -2839,16 +2879,10 @@ def calculate_renewal_risk_scores(
             # so a long ext_incidents list cannot saturate the score.
             _r67_cust_incidents: Optional[List[Dict[str, Any]]] = None
             if ext_incidents:
-                try:
-                    from app_simple import _r65_filter_customer_tagged_incidents as _r67_filter
-                    _r67_cust_incidents = _r67_filter(ext_incidents, customer)
-                except Exception as _r67_err:
-                    logger.debug(
-                        "Round 67 / B1: _r65_filter_customer_tagged_incidents "
-                        "unavailable (%s); passing unfiltered ext_incidents",
-                        _r67_err,
-                    )
-                    _r67_cust_incidents = list(ext_incidents)
+                # Round 104: use the local copy to avoid importing app_simple
+                # during compact scoring, which can rerun app startup side
+                # effects in packaged/local contexts.
+                _r67_cust_incidents = _r104_filter_customer_tagged_incidents(ext_incidents, customer)
             profile = compute_customer_risk_profile(
                 customer_name=customer,
                 customer_ab=customer_ab,

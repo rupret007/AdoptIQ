@@ -46,7 +46,8 @@ pip install pyinstaller
 2. Fill required values (Snowflake, CircuIT, PSIRT, and **ADOPTIQ_ADMIN_SECRET_KEY** for packaged builds—the app will not start without it).
 3. CircuIT model selection: as of Round 103 / Build 71 the demo default is enforced as `gemini-3.1-flash-lite`. Stale saved settings or bundled env values that still say `gpt-5-nano` are migrated/mapped to Gemini on startup; to deliberately use `gpt-5-nano`, let the operator flip it via the **Preferences** UI page (test-before-save) or the Admin Console settings tile after launch.
 4. Round 103.1 / Build 72 ships the Report Jobs theme cleanup. During smoke, confirm Current Running Reports and Historical Reports stay on the existing dark/orange theme and active rows use an orange accent rather than gray/light Bootstrap row styling.
-5. Generate bundled secrets:
+5. Round 104 / Build 73 ships the live report audit fix. During smoke, confirm `/api/settings/report-model` and `/api/settings/ask-ai-model` both resolve to `gemini-3.1-flash-lite`, and prefer a fresh Compact/Renewal same-scope run when time allows to verify risk-score parity after the incident-scoring fix.
+6. Generate bundled secrets:
 
 ```bash
 python embed_credentials.py

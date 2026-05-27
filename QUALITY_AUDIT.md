@@ -11071,3 +11071,54 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - No drag-install smoke from the DMG into `/Applications` was run; the rebuilt `dist/AdoptIQ.app` smoke passed and the DMG was produced.
 
 **Trailer:** Made-with: Cursor
+
+## Round 104 — handoff 2026-05-27
+
+**What changed (plain English):**
+- Corrected the running packaged app's saved report-model preference so both report narratives and Ask AI resolve to `gemini-3.1-flash-lite`.
+- Audited the latest Build 72 live report artifacts and found Compact/Renewal risk-score drift tied to Compact incident-scoring stability.
+- Moved Compact per-customer incident filtering local to the formatter so scoring no longer imports `app_simple` and re-triggers startup side effects.
+- Captured the Compact XLSX worker's incident list in the nested function defaults so threaded scoring keeps the same external-incident input.
+- Bumped the package to Build 73, refreshed docs, rebuilt the macOS DMG, and smoked the packaged app.
+
+**Files touched:**
+- `config.py` — bump build metadata to Build 73.
+- `app_simple.py` — capture Compact XLSX `ext_incidents` in the nested worker default args before threaded scoring.
+- `compact_report_formatter.py` — add local Round 104 incident filter and remove the `app_simple` lazy import from Compact scoring.
+- `tests/test_round67_compact_renewal_score_parity.py` — add Round 104 incident-filter/import and worker-capture regressions.
+- `tests/test_round20_in_locals_simplification.py` — update the existing nested-signature source-shape pin for the new captured argument.
+- `README.md` — Build 73 summary and current verify floor.
+- `CLAUDE.md` — Build 73 test floor and Round 104 operating contract.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — Build 73 smoke reminder for model settings and Compact/Renewal parity.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_round67_compact_renewal_score_parity.py::test_round104_compact_incident_filter_does_not_import_app_simple` — pins Compact scoring without importing `app_simple`.
+- `tests/test_round67_compact_renewal_score_parity.py::test_round104_compact_formatter_source_has_no_app_simple_filter_import` — pins removal of the old lazy import shape.
+- `tests/test_round67_compact_renewal_score_parity.py::test_round104_compact_excel_worker_captures_ext_incidents` — pins the Compact XLSX worker's captured incident input.
+- `tests/test_round20_in_locals_simplification.py::test_closure_binding_pattern_inside_nested_functions_is_gone` — updated to preserve the R22/R23 default-capture invariant with the new Round 104 argument.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5579 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- focused tests — pass (`python3 -m pytest tests/test_round20_in_locals_simplification.py::test_closure_binding_pattern_inside_nested_functions_is_gone tests/test_round67_compact_renewal_score_parity.py -v`; 12 passed)
+- `git diff --check` — pass
+- `bash build_mac.sh` — pass; produced `OUTBOX/AdoptIQ-v1.0.4-build73.dmg`
+- `scripts/test_build_smoke.sh` — pass (`/ping`, `/`, `/api/version`, `/api/status/all`, `/api/corpus/status`, shutdown frees 5151)
+
+**Hot spots Claude should audit first:**
+1. `compact_report_formatter.py` — confirm the local `_r104_filter_customer_tagged_incidents` preserves the R65 portfolio-wide vs customer-tagged incident semantics without drifting from `app_simple.py` unexpectedly.
+2. `app_simple.py` — confirm the nested `generate_excel(..., _r104_ext_incidents=ext_incidents)` capture is sufficient for both primary and fallback Compact scoring branches.
+3. `tests/test_round67_compact_renewal_score_parity.py` — confirm the Round 104 regressions cover the live drift class rather than only source shape.
+
+**Known deferrals (intentional non-fixes):**
+- The running Build 72 app's report-model override was corrected directly in `settings.json` after the API POST was blocked by CSRF/test-before-save mechanics; GET checks confirmed both report and Ask AI models resolved to Gemini.
+- The latest live artifacts audited were generated before the Build 73 code fix and still carry `active_report_model: gpt-5-nano`; a fresh same-scope live Compact/Renewal regeneration after installing Build 73 remains the acceptance follow-up.
+- No drag-install smoke from the DMG into `/Applications` was run; the rebuilt `dist/AdoptIQ.app` smoke passed and the DMG was produced.
+
+**Trailer:** Made-with: Cursor

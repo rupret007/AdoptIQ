@@ -25,7 +25,9 @@ Round 67 / B1 fixes both:
 """
 from __future__ import annotations
 
+import builtins
 import inspect
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -223,3 +225,49 @@ def test_round100_compact_curated_customer_pulse_is_scored() -> None:
     assert "Acme Corp" in out
     assert out["Acme Corp"]["score"] > 0.0
     assert any("poor/bad customer pulse" in factor for factor in out["Acme Corp"]["risk_factors"])
+
+
+def test_round104_compact_incident_filter_does_not_import_app_simple(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 104: Compact scoring must not import ``app_simple`` at runtime.
+
+    Build 72 live audit reproduced that importing ``app_simple`` from inside
+    ``calculate_renewal_risk_scores`` can execute app startup side effects
+    during a scoring-only call.  The incident filter now lives locally in the
+    compact formatter.
+    """
+    original_import = builtins.__import__
+    attempted_app_simple_imports: list[str] = []
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):  # noqa: ANN001
+        if name == "app_simple":
+            attempted_app_simple_imports.append(name)
+            raise AssertionError("compact scoring must not import app_simple")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    out = calculate_renewal_risk_scores(
+        pd.DataFrame([{"customer_name": "Acme Corp"}]),
+        pd.DataFrame(),
+        ext_incidents=[{"title": "Webex outage", "status": "investigating"}],
+        recent_window_days=90,
+    )
+
+    assert attempted_app_simple_imports == []
+    assert out["Acme Corp"]["score"] > 0.0
+
+
+def test_round104_compact_formatter_source_has_no_app_simple_filter_import() -> None:
+    """Round 104 source-shape guard for the no-side-effect filter."""
+    import compact_report_formatter
+
+    src = inspect.getsource(compact_report_formatter.calculate_renewal_risk_scores)
+    assert "from app_simple import _r65_filter_customer_tagged_incidents" not in src
+    assert "_r104_filter_customer_tagged_incidents" in src
+
+
+def test_round104_compact_excel_worker_captures_ext_incidents() -> None:
+    """Round 104: threaded Compact XLSX scoring must carry incident input."""
+    src = Path("app_simple.py").read_text(encoding="utf-8")
+    assert "def generate_excel(_ctx=_r23_ctx, _r104_ext_incidents=ext_incidents)" in src
+    assert "ext_incidents=_r104_ext_incidents if _r104_ext_incidents else None" in src

@@ -288,7 +288,7 @@ def test_closure_binding_pattern_inside_nested_functions_is_gone() -> None:
     # 3. Both nested functions must accept _ctx=_r23_ctx as default arg.
     nested_signatures = (
         "def generate_report(_ctx=_r23_ctx):  # Round 23 / R22-NEXT-001",
-        "def generate_excel(_ctx=_r23_ctx):  # Round 23 / R22-NEXT-001",
+        "def generate_excel(_ctx=_r23_ctx, _r104_ext_incidents=ext_incidents):  # Round 23 / R22-NEXT-001",
     )
     for sig in nested_signatures:
         assert sig in src, (
