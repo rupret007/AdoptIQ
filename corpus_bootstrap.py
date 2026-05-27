@@ -608,13 +608,10 @@ def _probe_existing_corpus_decrypts(user_db: Path) -> bool:
             onedrive_root=onedrive_root,
             encrypted_path=user_db,
             create_if_missing=False,
-            # Round 53 / Phase 53.3 -- fail-closed.  The probe must
-            # exercise the same hardening contract the runtime open
-            # uses; otherwise an upgrade from a pre-Round-53 install
-            # whose user_dir still has a local sentinel on disk would
-            # decrypt cleanly via the legacy path and the self-heal
-            # branch would never run.
-            allow_local_sentinel=False,
+            # Round 106: runtime opens can use the local per-user
+            # sentinel again, so the probe must exercise that same
+            # contract instead of the retired OneDrive-only path.
+            allow_local_sentinel=True,
         )
     except CorpusCryptoError:
         return False
@@ -877,75 +874,23 @@ def _daily_refresh_loop() -> None:
             with _BOOT_LOCK:
                 _STATE.onedrive_status = od_status
                 _STATE.onedrive_file_count = od_count
-            # Round 83 / Build 59: ``signed_in_no_corpus`` is the new
-            # blocked state added when the OneDrive desktop client is
-            # signed in to a Cisco account but the corpus share is
-            # not in the user's tree yet. Same transition semantics
-            # as ``blocked_no_onedrive`` -- the user takes action
-            # (adds the share via the panel button), the OneDrive
-            # client mirrors it locally, the next tick observes
-            # ``onedrive_status == 'synced'`` and ``sentinel_present``,
-            # and the worker fires an immediate refresh.
+            # Round 106: stale pre-Build-75 blocked source labels are
+            # treated as immediately refreshable. OneDrive/sentinel is
+            # diagnostic context now, not a prerequisite for local
+            # indexing.
             blocked_now = (
                 source_at_tick_start == "blocked_no_onedrive"
                 or source_at_tick_start == "signed_in_no_corpus"
             )
-            # Round 53: blocked-to-synced transition detection.  When
-            # the loop sees the user just synced, kick an immediate
-            # refresh regardless of the 24h window so the corpus
-            # unlocks promptly.  ``_should_refresh()`` would otherwise
-            # gate this for fresh installs whose
-            # ``last_successful_refresh_ts`` is still None.
-            #
-            # Round 68 / Build 42 (B5): the OneDrive folder can flip
-            # to ``synced`` (folder exists + >=1 non-zero file) several
-            # ticks BEFORE the canonical sentinel finishes downloading
-            # to disk.  Pre-R68 we'd happily fire ``request_refresh``
-            # at that window, ``open_corpus_for_user`` would raise
-            # ``CorpusCryptoError("corpus sentinel not found ...")``,
-            # and the operator would see ``Last refresh failed`` for
-            # ~24h until the daily worker's window-based refresh
-            # naturally re-fired.  Mitigation: when the OneDrive folder
-            # is synced but the sentinel has not landed yet, treat the
-            # tick as still-blocked so we keep the accelerated 5s
-            # cadence and re-check on the next tick.
             sentinel_present = _r68_onedrive_sentinel_present()
-            transition_unblocked = (
-                blocked_now and od_status == "synced" and sentinel_present
-            )
-            if blocked_now and od_status == "synced" and not sentinel_present:
-                blocked_streak += 1
-                logger.debug(
-                    "Round 68 / Build 42 (B5): OneDrive folder is synced "
-                    "but sentinel has not landed yet -- keeping the "
-                    "accelerated tick cadence (blocked_streak=%d "
-                    "source=%s)",
-                    blocked_streak, source_at_tick_start,
-                )
-                continue
-            if blocked_now and not transition_unblocked:
-                blocked_streak += 1
-                # While still blocked we only need to keep ticking;
-                # there is nothing the indexer can do until the user
-                # finishes either the OneDrive sign-in (legacy
-                # ``blocked_no_onedrive``) or the share-shortcut add
-                # (Round 83 ``signed_in_no_corpus``).
-                continue
+            transition_unblocked = blocked_now
             if not transition_unblocked:
                 if not _should_refresh(last_refresh_ts=last_ts):
                     blocked_streak = 0
                     continue
-                if od_status != "synced":
-                    logger.debug(
-                        "Round 36 / corpus_bootstrap: daily refresh skipped "
-                        "(onedrive_status=%s)",
-                        od_status,
-                    )
-                    blocked_streak = 0
-                    continue
             blocked_streak = 0
             _safe_log_info(
-                "Round 53 / corpus_bootstrap: triggering refresh "
+                "Round 106 / corpus_bootstrap: triggering refresh "
                 "(last_successful=%s onedrive_files=%s "
                 "transition_unblocked=%s sentinel_present=%s)",
                 last_ts, od_count, transition_unblocked, sentinel_present,
@@ -1327,13 +1272,11 @@ def _run_index_pass(*, rebuild: bool) -> None:
 
     sources = _resolve_index_sources()
 
-    # Round 53 / Phase 53.3 -- fail-closed pre-flight gate.  If the
-    # OneDrive desktop client has not synced the canonical AdoptIQ
-    # folder OR the canonical sentinel is not present inside that
-    # folder, we cannot derive the AES key (allow_local_sentinel=False
-    # at runtime).  Surface a dedicated ``blocked_no_onedrive`` source
-    # so the analyze panel can render a clear "Sign in to OneDrive"
-    # CTA instead of a generic crypto error.
+    # Round 106 / Build 75: OneDrive/sentinel is no longer a runtime
+    # prerequisite.  We still probe and expose the status for diagnostics,
+    # but missing OneDrive now only narrows the source list.  The local
+    # encrypted corpus is keyed by the per-user App Support sentinel so
+    # generated reports and Intelligence uploads can be indexed immediately.
     sentinel_present = False
     if onedrive_root:
         try:
@@ -1346,70 +1289,21 @@ def _run_index_pass(*, rebuild: bool) -> None:
             )
         except CorpusCryptoError:
             sentinel_present = False
-        except Exception:  # noqa: BLE001 - defensive; fail-closed
+        except Exception:  # noqa: BLE001 - defensive; diagnostics only
             sentinel_present = False
     if od_status != "synced" or not sentinel_present:
-        with _BOOT_LOCK:
-            # Round 83 / Build 59: split the legacy
-            # ``blocked_no_onedrive`` state in two so the panel can
-            # render different copy + a different bootstrap button:
-            #
-            #   * ``signed_in_no_corpus`` -- the OneDrive client is
-            #     signed in with a Cisco account but the canonical
-            #     AdoptIQ share is not in the user's tree yet. The
-            #     panel surfaces a "Add the AdoptIQ share to your
-            #     OneDrive" button that opens the SharePoint URL
-            #     in the user's browser; SSO completes via Cisco
-            #     IdP, the share lands as a shortcut, the OneDrive
-            #     client mirrors it locally, and the next daily
-            #     refresh tick picks it up.
-            #   * ``blocked_no_onedrive`` -- the OneDrive client is
-            #     not signed in at all (or signed in only with a
-            #     non-Cisco account). The user must complete the
-            #     OneDrive desktop client sign-in BEFORE the
-            #     bootstrap shortcut button is meaningful, so the
-            #     panel keeps the legacy "Sign in to OneDrive"
-            #     copy.
-            if signed_in_proxy == "signed_in_cisco":
-                _STATE.source = "signed_in_no_corpus"
-                _STATE.last_error = (
-                    "OneDrive is signed in but the AdoptIQ corpus "
-                    "share is not in your OneDrive tree yet.  Click "
-                    "\"Add corpus share to my OneDrive\" to open the "
-                    "share in your browser; OneDrive will mirror it "
-                    "locally and AdoptIQ will pick it up on the next "
-                    "refresh."
-                )
-                _STATE.last_error_kind = "no_corpus_share"
-            else:
-                _STATE.source = "blocked_no_onedrive"
-                _STATE.last_error = (
-                    "OneDrive sync of AI Projects/AdoptIQ_CSOne_Reports "
-                    "is required to unlock the corpus.  Open the OneDrive "
-                    "desktop client, sign in with your Cisco account, and "
-                    "sync the folder."
-                )
-                _STATE.last_error_kind = "no_onedrive_sentinel"
-            _STATE.in_progress = False
-            _STATE.last_finished_at = _utc_now_iso()
-            _STATE.completed = False
         _safe_log_info(
-            "Round 53 / corpus_bootstrap: corpus open blocked "
-            "(onedrive_status=%s sentinel_present=%s signed_in_proxy=%s "
-            "source=%s)",
-            od_status, sentinel_present, signed_in_proxy,
-            "signed_in_no_corpus" if signed_in_proxy == "signed_in_cisco"
-            else "blocked_no_onedrive",
+            "Round 106 / corpus_bootstrap: continuing without OneDrive "
+            "sentinel (onedrive_status=%s sentinel_present=%s "
+            "signed_in_proxy=%s sources=%d)",
+            od_status, sentinel_present, signed_in_proxy, len(sources),
         )
-        configure_connection(None)
-        return
 
     # Round 36 / onedrive-sync-auth: ``sharepoint_root`` is no longer
     # passed to ``open_corpus_for_user`` -- the SharePoint cache dir
-    # has been retired.  Round 53: ``allow_local_sentinel=False`` so
-    # we fail-closed when the OneDrive sentinel is unavailable
-    # (defense in depth on top of the gate above; covers the race
-    # where the sentinel disappears between the gate and the open).
+    # has been retired.  Round 106 flips runtime keying back to the
+    # local sentinel fallback so corpus availability does not depend on
+    # the OneDrive shortcut/sentinel rollout.
     handle: Optional[EncryptedCorpusHandle] = None
     try:
         try:
@@ -1417,24 +1311,14 @@ def _run_index_pass(*, rebuild: bool) -> None:
                 onedrive_root=onedrive_root,
                 encrypted_path=encrypted_path,
                 create_if_missing=True,
-                allow_local_sentinel=False,
+                allow_local_sentinel=True,
             )
         except CorpusCryptoError as crypto_err:
-            # Round 54 / F1 -- TOCTOU race UX fix.  If the OneDrive
-            # sentinel disappeared between the Round 53 pre-flight
-            # gate above and this open (the OneDrive desktop client
-            # evicted the file, the user signed out, the share was
-            # un-shared, etc.), the open fails-closed with a generic
-            # CorpusCryptoError.  Pre-Round-54 the user-facing UI
-            # then surfaced the legacy ``crypto`` path (Reset Corpus
-            # button, no actionable remediation), even though the
-            # actual root cause is "OneDrive is no longer providing
-            # the sentinel".  Re-probe the gate; if it now fails,
-            # re-emit as ``blocked_no_onedrive`` so the user sees
-            # the same Sign-in CTA + clickable deep link they would
-            # have seen if the gate had caught it on the first pass.
-            # Security is unaffected (open already fails-closed); this
-            # is purely UX clarity.
+            # Round 106: stale installs may still carry a corpus sealed
+            # under an older OneDrive-delivered sentinel lock. Preserve
+            # those artifacts for forensics, then retry against the
+            # local-sentinel fallback so the user gets a fresh index
+            # instead of a permanent OneDrive setup blocker.
             post_status, post_count, _ = _check_onedrive_sync_status()
             post_sentinel_present = False
             if onedrive_root:
@@ -1448,52 +1332,28 @@ def _run_index_pass(*, rebuild: bool) -> None:
                     )
                 except CorpusCryptoError:
                     post_sentinel_present = False
-                except Exception:  # noqa: BLE001 - defensive; fail-closed
+                except Exception:  # noqa: BLE001 - defensive; diagnostics only
                     post_sentinel_present = False
-            if post_status != "synced" or not post_sentinel_present:
-                with _BOOT_LOCK:
-                    _STATE.source = "blocked_no_onedrive"
-                    _STATE.last_error = (
-                        "OneDrive sync of AI Projects/AdoptIQ_CSOne_Reports "
-                        "is required to unlock the corpus.  Open the OneDrive "
-                        "desktop client, sign in with your Cisco account, and "
-                        "sync the folder."
-                    )
-                    _STATE.last_error_kind = "no_onedrive_sentinel"
-                    _STATE.onedrive_status = post_status
-                    _STATE.onedrive_file_count = post_count
-                    _STATE.in_progress = False
-                    _STATE.last_finished_at = _utc_now_iso()
-                    _STATE.completed = False
-                _safe_log_info(
-                    "Round 54 / F1 corpus_bootstrap: TOCTOU race -- "
-                    "open raised CorpusCryptoError and re-probe shows "
-                    "(onedrive_status=%s sentinel_present=%s); "
-                    "surfacing blocked_no_onedrive instead of generic crypto",
-                    post_status, post_sentinel_present,
-                )
-                configure_connection(None)
-                return
-            # Round 99: runtime-only corpus recovery.  A synced OneDrive
-            # folder plus present sentinel means this is not the Round 54
-            # "sentinel disappeared" race.  The common upgrade failure is a
-            # stale local encrypted corpus sealed under an older sentinel.  Keep
-            # a bounded forensic sidecar set, then retry the open so the
-            # runtime indexer can rebuild from the authorized OneDrive mirror.
+            with _BOOT_LOCK:
+                _STATE.onedrive_status = post_status
+                _STATE.onedrive_file_count = post_count
             preserved_suffix = _preserve_broken_corpus(encrypted_path.parent)
             if preserved_suffix:
                 _safe_log_warning(
-                    "Round 99 / corpus_bootstrap: preserved stale runtime "
-                    "corpus artifacts as .broken-%s after crypto mismatch; "
-                    "retrying clean runtime index",
+                    "Round 106 / corpus_bootstrap: preserved stale runtime "
+                    "corpus artifacts as .broken-%s after crypto mismatch "
+                    "(onedrive_status=%s sentinel_present=%s); retrying "
+                    "with local sentinel",
                     preserved_suffix,
+                    post_status,
+                    post_sentinel_present,
                 )
                 try:
                     handle = open_corpus_for_user(
                         onedrive_root=onedrive_root,
                         encrypted_path=encrypted_path,
                         create_if_missing=True,
-                        allow_local_sentinel=False,
+                        allow_local_sentinel=True,
                     )
                 except CorpusCryptoError as retry_err:
                     with _BOOT_LOCK:

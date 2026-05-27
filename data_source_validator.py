@@ -62,6 +62,31 @@ def _has_any_alias(df: pd.DataFrame, dataset: str, slot: str, *legacy_fallbacks:
     return False
 
 
+def _r106_ab_empty_after_technology_scope(ab_data: pd.DataFrame) -> bool:
+    """Round 106: strict technology scoping can produce a valid empty AB slice.
+
+    A zero-row scoped frame that carries the `_apply_scope_filter_ab`
+    diagnostics is not the same as an unavailable adoption-barrier source.
+    Keep fetch failures and genuinely empty upstream fetches fail-loud, but
+    let reports proceed when the selected technology simply has no scoped ABs.
+    """
+    if ab_data is None or not getattr(ab_data, "empty", True):
+        return False
+    attrs = getattr(ab_data, "attrs", {}) or {}
+    if not isinstance(attrs, dict):
+        return False
+    if attrs.get("fetch_error"):
+        return False
+    if attrs.get("tech_filter_empty_after_scope"):
+        return True
+    try:
+        total = int(attrs.get("tech_filter_total") or 0)
+        matched = int(attrs.get("tech_filter_matched") or 0)
+    except (TypeError, ValueError):
+        return False
+    return total > 0 and matched == 0
+
+
 class DataSourceValidationError(Exception):
     """Custom exception for data source validation failures"""
     def __init__(self, message: str, missing_sources: List[str], details: Dict = None):
@@ -198,8 +223,8 @@ def validate_data_sources_for_report(
         except Exception:
             _ab_fetch_err = None
         if ab_data is None or ab_data.empty:
-            missing_sources.append('adoption_barriers')
             if _ab_fetch_err:
+                missing_sources.append('adoption_barriers')
                 error_details['adoption_barriers'] = (
                     f"Adoption barrier fetch FAILED: {_ab_fetch_err}. "
                     "This is NOT a 'no barriers in window' result -- the upstream "
@@ -207,7 +232,14 @@ def validate_data_sources_for_report(
                     "DataFrame. Investigate the source system before treating "
                     "the empty result as a clean signal."
                 )
+            elif _r106_ab_empty_after_technology_scope(ab_data):
+                logger.warning(
+                    "Round 106: adoption barriers are empty after technology "
+                    "scope filtering; treating this as partial data instead "
+                    "of a missing required source"
+                )
             else:
+                missing_sources.append('adoption_barriers')
                 error_details['adoption_barriers'] = (
                     "No adoption barrier data found. "
                     "This could be due to:\n"

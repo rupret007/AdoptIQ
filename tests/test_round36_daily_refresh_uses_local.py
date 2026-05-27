@@ -144,19 +144,19 @@ def test_daily_refresh_calls_local_presence_check_not_msal(monkeypatch):
         "cannot tell whether OneDrive is synced and may push refreshes "
         "against an unmounted folder."
     )
-    assert not refresh_calls, (
-        "request_refresh was invoked even though presence reported "
-        "'not_synced' -- the worker MUST silently skip when the "
-        "OneDrive folder is missing/empty."
+    assert refresh_calls, (
+        "Round 106 / Build 75: request_refresh MUST still run when the "
+        "OneDrive presence probe reports 'not_synced' because generated "
+        "reports and Intelligence uploads are valid local corpus sources."
     )
 
 
-def test_daily_refresh_skips_when_onedrive_not_synced(monkeypatch):
-    """When the presence probe says ``not_synced`` the worker MUST
-    NOT call ``request_refresh`` and MUST NOT bump
-    ``last_refresh_attempt_ts`` -- skipping a tick because the
-    folder is unavailable is not an "attempted refresh" (otherwise
-    the panel would falsely report "Last refresh: just now")."""
+def test_daily_refresh_runs_when_onedrive_not_synced(monkeypatch):
+    """Round 106 / Build 75: ``not_synced`` is diagnostic only.
+
+    The daily worker still calls ``request_refresh`` so local generated
+    reports and Intelligence uploads can enter the corpus without OneDrive.
+    """
     monkeypatch.setattr(corpus_bootstrap, "is_enabled", lambda: True)
     monkeypatch.setattr(
         corpus_bootstrap, "_should_refresh", lambda **kw: True
@@ -185,14 +185,13 @@ def test_daily_refresh_skips_when_onedrive_not_synced(monkeypatch):
     finally:
         corpus_bootstrap.stop()
 
-    assert refresh_calls == [], (
-        "request_refresh was called despite onedrive_status='not_synced'"
+    assert refresh_calls, (
+        "request_refresh was not called despite onedrive_status='not_synced'"
     )
     state = corpus_bootstrap.get_state()
-    # last_refresh_attempt_ts must remain None (never bumped on skip).
-    assert state.last_refresh_attempt_ts is None, (
-        "last_refresh_attempt_ts was bumped on a skipped tick -- the "
-        "panel will falsely report 'Last refresh: just now'."
+    assert state.last_refresh_attempt_ts is not None, (
+        "last_refresh_attempt_ts should be bumped for the local corpus refresh "
+        "attempt even when OneDrive is absent."
     )
 
 

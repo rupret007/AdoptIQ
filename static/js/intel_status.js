@@ -673,7 +673,10 @@
         if (source === 'self_healed_baked' || source === 'baked') {
             return 'fresh_not_synced';
         }
-        if (source === 'fresh' && od === 'synced' && boot.completed) {
+        // Round 106 / Build 75: completed local corpus indexes are active
+        // even when OneDrive is absent. OneDrive is now one possible source,
+        // not a prerequisite for Ask AI grounding.
+        if (source === 'fresh' && boot.completed) {
             return 'runtime_synced';
         }
         if (source === 'fresh' && od === 'synced') { return 'fresh_indexing'; }
@@ -683,9 +686,9 @@
 
     function corpusPanelLabel(state) {
         switch (state) {
-            case 'runtime_synced':      return 'Active \u2022 local OneDrive corpus';
-            case 'fresh_indexing':      return 'Indexing OneDrive\u2026';
-            case 'fresh_not_synced':    return 'OneDrive sync required';
+            case 'runtime_synced':      return 'Active \u2022 local corpus';
+            case 'fresh_indexing':      return 'Indexing local corpus\u2026';
+            case 'fresh_not_synced':    return 'Local corpus pending';
             case 'refreshing':          return 'Building local corpus\u2026';
             case 'refresh_failed':      return 'Last refresh failed';
             // Round 83 / Build 59: distinct from blocked_no_onedrive
@@ -720,11 +723,11 @@
         switch (state) {
             case 'runtime_synced':
                 if (fileCount != null && fileCount > 0) {
-                    return 'Corpus indexed locally from authorized OneDrive data (\u2265 ' + fileCount
+                    return 'Corpus indexed locally from available AdoptIQ sources, including OneDrive when present (\u2265 ' + fileCount
                         + ' file' + (fileCount === 1 ? '' : 's')
-                        + ').  No corpus data is embedded in the app.';
+                        + ').';
                 }
-                return 'Corpus indexed locally from authorized OneDrive data.  No corpus data is embedded in the app.';
+                return 'Corpus indexed locally from generated AdoptIQ reports and Intelligence uploads. OneDrive sync is optional.';
             // Round 80: panel messaging now points users at the
             // canonical SharePoint share + "Add shortcut to OneDrive"
             // workflow. Pre-R80 the message asked them to sync
@@ -733,15 +736,11 @@
             // link is rendered separately via [data-onedrive-deep-link]
             // (Round 53.4.1) backed by Config.ADOPTIQ_CORPUS_ONEDRIVE_DEEP_LINK.
             case 'fresh_indexing':
-                return 'Indexing authorized OneDrive corpus data locally for the first time\u2026';
+                return 'Indexing the local knowledge corpus for the first time\u2026';
             case 'fresh_not_synced':
-                return 'The app ships with no corpus data.  Open the '
-                    + 'AdoptIQ corpus folder in SharePoint and '
-                    + 'click \u201CAdd shortcut to OneDrive\u201D to '
-                    + 'sync authorized data to this Mac before indexing.  '
-                    + '(You must be signed in to OneDrive on this device first.)';
+                return 'The local corpus will build from generated AdoptIQ reports, Intelligence uploads, and OneDrive data if that folder is available. You can run reports now; Ask AI grounding activates after the first index pass.';
             case 'refreshing':
-                return 'Building the local knowledge corpus from authorized OneDrive data, generated AdoptIQ reports, and Intelligence uploads. Reports remain safe to run while this finishes.';
+                return 'Building the local knowledge corpus from generated AdoptIQ reports, Intelligence uploads, and available OneDrive data. Reports remain safe to run while this finishes.';
             case 'refresh_failed':
                 var detail = boot.last_refresh_error
                     ? String(boot.last_refresh_error) : 'unknown';
@@ -946,8 +945,7 @@
             // text reinforce that this is an action required by the
             // user, not a transient hiccup.
             var feedbackKind = (
-                state === 'fresh_not_synced'
-                || state === 'refresh_failed'
+                state === 'refresh_failed'
                 || state === 'blocked_no_onedrive'
             ) ? 'error' : 'pending';
             setSharepointFeedback(feedbackKind, detail);

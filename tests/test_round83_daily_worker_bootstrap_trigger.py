@@ -127,20 +127,14 @@ def test_daily_refresh_loop_recognises_signed_in_no_corpus_in_blocked_disjunctio
     )
 
 
-def test_daily_refresh_loop_preserves_r68_sentinel_gate():
-    """The R68 sentinel-presence gate MUST still be present in
-    the loop AFTER the R83 disjunction widening. Pre-R83 a sloppy
-    refactor could have replaced the disjunction without
-    re-checking the sentinel call.  Pin the source-shape so any
-    such regression fires the alarm."""
-    # Round 83
+def test_daily_refresh_loop_round106_sentinel_is_diagnostic_only():
+    """Round 106 keeps the sentinel probe for diagnostics but no
+    longer gates refresh on it."""
     src_path = REPO_ROOT / "corpus_bootstrap.py"
     src = src_path.read_text(encoding="utf-8")
     assert "_r68_onedrive_sentinel_present()" in src
-    # The sentinel call MUST guard the transition_unblocked
-    # decision (R68 contract preserved).
-    assert "transition_unblocked = (" in src
-    assert "and sentinel_present" in src
+    assert "transition_unblocked = blocked_now" in src
+    assert "and sentinel_present" not in src
 
 
 def test_daily_refresh_loop_emits_round83_marker():

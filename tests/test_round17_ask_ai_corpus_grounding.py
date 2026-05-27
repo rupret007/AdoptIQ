@@ -93,7 +93,10 @@ def test_unconfigured_corpus_returns_unavailable_banner():
     out = build_corpus_block(question="What barriers does Synthetic Alpha hit?", enabled=True)
     assert out.block == ""
     assert out.allowed_ids == ()
-    assert "OneDrive" in out.banner or "not connected" in out.banner.lower()
+    # Round 106 / Build 75: corpus availability is local-first; OneDrive is no longer
+    # the required remediation path for an empty corpus.
+    assert "local" in out.banner.lower()
+    assert "index" in out.banner.lower()
     assert out.stats["available"] is False
 
 

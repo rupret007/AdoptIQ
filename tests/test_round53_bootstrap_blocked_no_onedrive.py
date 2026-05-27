@@ -1,5 +1,4 @@
-"""Round 53 / Phase 53.3: pin the runtime fail-closed gate that
-surfaces the new ``blocked_no_onedrive`` boot state.
+"""Round 106 / Build 75: pin local corpus bootstrap without OneDrive.
 
 Background
 ----------
@@ -22,7 +21,9 @@ unsynced one.  Round 53 adds a new fail-closed contract on top:
   ``_STATE.source = "blocked_no_onedrive"`` along with a
   remediation ``last_error`` and ``last_error_kind="no_onedrive_sentinel"``.
 
-These tests pin every branch of that gate.
+Build 75 temporarily removes the OneDrive/sentinel prerequisite so the
+local corpus can index generated reports and Intelligence uploads before
+the OneDrive rollout is reintroduced.
 """
 
 from __future__ import annotations
@@ -87,11 +88,11 @@ def _seed_synced_onedrive(root: Path, *, with_sentinel: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_blocked_no_onedrive_when_csone_folder_unconfigured(
+def test_local_corpus_runs_when_csone_folder_unconfigured(
     tmp_path, monkeypatch,
 ):
-    """No ``CSONE_ONEDRIVE_FOLDER`` configured at all -> the pre-flight
-    gate fires and we surface ``blocked_no_onedrive``."""
+    """No ``CSONE_ONEDRIVE_FOLDER`` configured at all still creates the
+    local encrypted corpus."""
     import config as _live_config
     monkeypatch.setattr(
         _live_config.Config, "CSONE_ONEDRIVE_FOLDER", None,
@@ -105,21 +106,16 @@ def test_blocked_no_onedrive_when_csone_folder_unconfigured(
     corpus_bootstrap._run_index_pass(rebuild=False)
 
     state = corpus_bootstrap.get_state()
-    assert state.source == "blocked_no_onedrive", (
-        f"unconfigured OneDrive must yield blocked_no_onedrive; "
-        f"got {state.source!r}"
-    )
-    assert state.last_error_kind == "no_onedrive_sentinel"
+    assert state.source == "fresh"
+    assert state.last_error_kind is None
     assert state.in_progress is False
-    assert state.completed is False
+    assert state.completed is True
 
 
-def test_blocked_no_onedrive_when_folder_missing_on_disk(
+def test_local_corpus_runs_when_folder_missing_on_disk(
     tmp_path, monkeypatch,
 ):
-    """``CSONE_ONEDRIVE_FOLDER`` configured but the directory does
-    not exist on disk -> ``onedrive_status="not_synced"`` -> gate
-    fires."""
+    """A missing configured OneDrive folder no longer blocks indexing."""
     import config as _live_config
     missing_root = tmp_path / "no_such_onedrive"
     monkeypatch.setattr(
@@ -134,17 +130,16 @@ def test_blocked_no_onedrive_when_folder_missing_on_disk(
     corpus_bootstrap._run_index_pass(rebuild=False)
 
     state = corpus_bootstrap.get_state()
-    assert state.source == "blocked_no_onedrive"
+    assert state.source == "fresh"
     assert state.onedrive_status == "not_synced"
-    assert state.last_error_kind == "no_onedrive_sentinel"
+    assert state.last_error_kind is None
 
 
-def test_blocked_no_onedrive_when_folder_synced_but_sentinel_absent(
+def test_local_corpus_runs_when_folder_synced_but_sentinel_absent(
     tmp_path, monkeypatch,
 ):
-    """OneDrive folder is synced (has real files) but the canonical
-    sentinel was never minted into it -> the gate still fires
-    because we cannot derive the AES key without the sentinel."""
+    """A synced OneDrive folder without the canonical sentinel is still
+    indexed using the local per-user corpus key."""
     import config as _live_config
     onedrive_root = tmp_path / "onedrive_no_sentinel"
     _seed_synced_onedrive(onedrive_root, with_sentinel=False)
@@ -160,21 +155,17 @@ def test_blocked_no_onedrive_when_folder_synced_but_sentinel_absent(
     corpus_bootstrap._run_index_pass(rebuild=False)
 
     state = corpus_bootstrap.get_state()
-    assert state.source == "blocked_no_onedrive", (
-        "synced OneDrive WITHOUT a sentinel must still fail-closed -- "
-        "the sentinel is the actual access boundary."
-    )
+    assert state.source == "fresh"
     assert state.onedrive_status == "synced"
-    assert state.last_error_kind == "no_onedrive_sentinel"
+    assert state.last_error_kind is None
 
 
-def test_blocked_no_onedrive_when_folder_only_zero_byte_stubs(
+def test_local_corpus_runs_when_folder_only_zero_byte_stubs(
     tmp_path, monkeypatch,
 ):
     """OneDrive Files-On-Demand placeholders are 0-byte stubs.  The
-    sync-status heuristic must NOT count them as 'synced' -- if it
-    did the gate would let through a folder where the sentinel is a
-    placeholder we cannot read."""
+    sync-status heuristic must NOT count them as 'synced', but that
+    diagnostic no longer blocks the local corpus."""
     import config as _live_config
     onedrive_root = tmp_path / "onedrive_stubs"
     onedrive_root.mkdir(parents=True)
@@ -192,15 +183,14 @@ def test_blocked_no_onedrive_when_folder_only_zero_byte_stubs(
     corpus_bootstrap._run_index_pass(rebuild=False)
 
     state = corpus_bootstrap.get_state()
-    assert state.source == "blocked_no_onedrive"
+    assert state.source == "fresh"
     assert state.onedrive_status == "not_synced"
 
 
-def test_blocked_no_onedrive_records_remediation_message(
+def test_local_corpus_without_onedrive_records_no_remediation_error(
     tmp_path, monkeypatch,
 ):
-    """The user-visible ``last_error`` must point the user at the
-    OneDrive desktop client -- not show a raw crypto error."""
+    """Missing OneDrive should not emit a user-action-required error."""
     import config as _live_config
     monkeypatch.setattr(
         _live_config.Config, "CSONE_ONEDRIVE_FOLDER", None,
@@ -214,16 +204,8 @@ def test_blocked_no_onedrive_records_remediation_message(
     corpus_bootstrap._run_index_pass(rebuild=False)
 
     state = corpus_bootstrap.get_state()
-    msg = state.last_error or ""
-    # Sanity-check the remediation language without coupling to exact
-    # wording (tests should not break on a small copy edit).
-    assert "OneDrive" in msg, (
-        f"remediation message must mention OneDrive; got: {msg!r}"
-    )
-    assert "AI Projects/AdoptIQ_CSOne_Reports" in msg, (
-        f"remediation message must name the canonical share folder; "
-        f"got: {msg!r}"
-    )
+    assert state.last_error is None
+    assert state.last_error_kind is None
 
 
 # ---------------------------------------------------------------------------
@@ -269,10 +251,9 @@ def test_gate_passes_when_onedrive_synced_and_sentinel_present(
 # ---------------------------------------------------------------------------
 
 
-def test_gate_failure_does_not_open_handle(tmp_path, monkeypatch):
-    """When the gate fires, ``_HANDLE`` must remain None -- otherwise
-    a stale handle from a prior pass could leak the prior key into
-    the indexer."""
+def test_local_corpus_without_onedrive_opens_handle(tmp_path, monkeypatch):
+    """The local sentinel path should configure a corpus handle even
+    when OneDrive is unavailable."""
     import config as _live_config
     monkeypatch.setattr(
         _live_config.Config, "CSONE_ONEDRIVE_FOLDER", None,
@@ -285,15 +266,11 @@ def test_gate_failure_does_not_open_handle(tmp_path, monkeypatch):
 
     corpus_bootstrap._run_index_pass(rebuild=False)
 
-    # The module-level handle must NOT be set when the gate fires.
-    assert corpus_bootstrap._HANDLE is None, (
-        "gate firing must leave _HANDLE == None"
-    )
+    assert corpus_bootstrap._HANDLE is not None
 
 
-def test_gate_failure_clears_in_progress_flag(tmp_path, monkeypatch):
-    """If the gate fires, ``_STATE.in_progress`` must be False so the
-    UI does not show a perpetual spinner."""
+def test_local_corpus_without_onedrive_clears_in_progress_flag(tmp_path, monkeypatch):
+    """The local corpus path must clear ``in_progress`` after indexing."""
     import config as _live_config
     monkeypatch.setattr(
         _live_config.Config, "CSONE_ONEDRIVE_FOLDER", None,
@@ -308,10 +285,10 @@ def test_gate_failure_clears_in_progress_flag(tmp_path, monkeypatch):
 
     state = corpus_bootstrap.get_state()
     assert state.in_progress is False, (
-        "gate firing must clear in_progress so the panel does not "
+        "local indexing must clear in_progress so the panel does not "
         "show a perpetual 'Indexing...' spinner."
     )
     assert state.last_finished_at is not None, (
-        "gate firing must stamp last_finished_at so the panel can "
-        "render the timestamp of the failed attempt."
+        "local indexing must stamp last_finished_at so the panel can "
+        "render the timestamp of the attempt."
     )

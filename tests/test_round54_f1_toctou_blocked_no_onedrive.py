@@ -96,17 +96,17 @@ def _wire_onedrive(monkeypatch, root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# F1 happy paths -- TOCTOU recovery surfaces blocked_no_onedrive
+# Round 106 -- TOCTOU no longer surfaces blocked_no_onedrive
 # ---------------------------------------------------------------------------
 
 
-def test_toctou_sentinel_evicted_between_gate_and_open_yields_blocked(
+def test_toctou_sentinel_evicted_between_gate_and_open_keeps_crypto_kind(
     tmp_path, monkeypatch,
 ):
     """Sentinel is present at gate time but disappears before the
-    actual ``open_corpus_for_user`` call.  Round 54 / F1: the catch
-    re-probes the gate, sees the sentinel is gone, and surfaces
-    ``blocked_no_onedrive`` instead of the generic ``crypto`` path."""
+    actual ``open_corpus_for_user`` call. Round 106 no longer treats
+    missing OneDrive as a user-action blocker; without preserved stale
+    artifacts this stays on the crypto path."""
     onedrive_root = tmp_path / "onedrive"
     sentinel_path = _seed_synced_onedrive_with_sentinel(onedrive_root)
     _wire_onedrive(monkeypatch, onedrive_root)
@@ -125,28 +125,18 @@ def test_toctou_sentinel_evicted_between_gate_and_open_yields_blocked(
     corpus_bootstrap._run_index_pass(rebuild=False)
 
     state = corpus_bootstrap.get_state()
-    assert state.source == "blocked_no_onedrive", (
-        f"TOCTOU race must re-emit blocked_no_onedrive; got source="
-        f"{state.source!r}"
-    )
-    assert state.last_error_kind == "no_onedrive_sentinel", (
-        f"TOCTOU race must use the no_onedrive_sentinel kind so the "
-        f"UI matches the gate path; got {state.last_error_kind!r}"
-    )
-    # The user-visible message must point at OneDrive, not the
-    # raw CorpusCryptoError text.
-    msg = state.last_error or ""
-    assert "OneDrive" in msg
-    assert "AI Projects/AdoptIQ_CSOne_Reports" in msg
+    assert state.source != "blocked_no_onedrive"
+    assert state.last_error_kind == "crypto"
+    assert "simulated TOCTOU" in (state.last_error or "")
 
 
-def test_toctou_whole_folder_unmounted_between_gate_and_open_yields_blocked(
+def test_toctou_whole_folder_unmounted_between_gate_and_open_keeps_crypto_kind(
     tmp_path, monkeypatch,
 ):
     """Whole OneDrive folder unmounts between gate and open (e.g. the
     OneDrive client signs out and removes the local mirror).  The
-    re-probe sees ``onedrive_status="not_synced"`` and surfaces
-    ``blocked_no_onedrive``."""
+    re-probe sees ``onedrive_status="not_synced"``, but Round 106
+    does not convert that into a blocked OneDrive state."""
     onedrive_root = tmp_path / "onedrive"
     _seed_synced_onedrive_with_sentinel(onedrive_root)
     _wire_onedrive(monkeypatch, onedrive_root)
@@ -173,8 +163,8 @@ def test_toctou_whole_folder_unmounted_between_gate_and_open_yields_blocked(
     corpus_bootstrap._run_index_pass(rebuild=False)
 
     state = corpus_bootstrap.get_state()
-    assert state.source == "blocked_no_onedrive"
-    assert state.last_error_kind == "no_onedrive_sentinel"
+    assert state.source != "blocked_no_onedrive"
+    assert state.last_error_kind == "crypto"
     assert state.onedrive_status == "not_synced"
 
 

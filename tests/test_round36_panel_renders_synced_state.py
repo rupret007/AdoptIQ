@@ -56,14 +56,14 @@ def test_panel_state_has_label_branch(state: str) -> None:
 @pytest.mark.parametrize(
     "fragment",
     [
-        "Active \\u2022 local OneDrive corpus",
-        "Indexing OneDrive",
-        "OneDrive sync required",
+        "Active \\u2022 local corpus",
+        "Indexing local corpus",
+        "Local corpus pending",
         "Building local corpus",
         "Last refresh failed",
         "Add corpus share to OneDrive",
         "Sign in to OneDrive",
-        "No corpus data is embedded in the app",
+        "OneDrive sync is optional",
     ],
 )
 def test_panel_label_and_detail_copy(fragment: str) -> None:

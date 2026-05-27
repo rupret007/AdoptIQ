@@ -114,37 +114,29 @@ def test_daily_worker_calls_sentinel_helper(bootstrap_source: str) -> None:
     )
 
 
-def test_transition_unblocked_requires_sentinel_present(bootstrap_source: str) -> None:
-    """The ``transition_unblocked`` boolean must conjunct
-    ``sentinel_present`` so a synced-folder-without-sentinel does NOT
-    flip the transition flag.
-    """
+def test_transition_unblocked_no_longer_requires_sentinel_present(bootstrap_source: str) -> None:
+    """Round 106 / Build 75: the sentinel probe is diagnostic only."""
     snippet = (
         "transition_unblocked = (\n"
         "                blocked_now and od_status == \"synced\" and sentinel_present\n"
         "            )"
     )
-    assert snippet in bootstrap_source, (
-        "Round 68 / Build 42 (B5): transition_unblocked MUST AND "
-        "sentinel_present so the daily worker does not fire refresh "
-        "before the sentinel has landed on disk."
+    assert snippet not in bootstrap_source, (
+        "Round 106 / Build 75: transition_unblocked must not require "
+        "sentinel_present because OneDrive is no longer a corpus prerequisite."
     )
+    assert "transition_unblocked = blocked_now" in bootstrap_source
 
 
-def test_synced_folder_without_sentinel_keeps_blocked_streak(bootstrap_source: str) -> None:
-    """The ``synced && !sentinel_present`` branch must stay on the
-    accelerated tick cadence (continue + blocked_streak += 1) instead
-    of falling through to the refresh trigger.
-    """
+def test_synced_folder_without_sentinel_does_not_keep_blocked_streak(bootstrap_source: str) -> None:
+    """Round 106 / Build 75: a missing sentinel cannot keep the worker blocked."""
     expected = (
         "if blocked_now and od_status == \"synced\" and not sentinel_present:\n"
         "                blocked_streak += 1"
     )
-    assert expected in bootstrap_source, (
-        "Round 68 / Build 42 (B5): when OneDrive is synced but the "
-        "sentinel has not landed yet, the worker MUST keep the "
-        "accelerated tick cadence so a sentinel that arrives within "
-        "the next ~5s window unlocks the corpus promptly."
+    assert expected not in bootstrap_source, (
+        "Round 106 / Build 75: synced-without-sentinel should fall through to "
+        "the local refresh path instead of preserving the pre-Build-75 block."
     )
 
 

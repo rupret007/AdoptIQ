@@ -156,7 +156,11 @@ def build_corpus_block(
         return CorpusContext(
             block="",
             allowed_ids=(),
-            banner="Corpus knowledge is not connected. Sign in to the SharePoint share AdoptIQ_CSOne_Reports from the admin tile, or confirm OneDrive sync.",
+            banner=(
+                "Corpus knowledge is still indexing or has no eligible local "
+                "files yet. Run or upload an AdoptIQ report, then refresh the "
+                "local corpus."
+            ),
             stats=dict(_EMPTY_STATS),
         )
 

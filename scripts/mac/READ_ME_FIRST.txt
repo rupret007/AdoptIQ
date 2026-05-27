@@ -1,6 +1,13 @@
 AdoptIQ for macOS - Install (about 1 minute)
 ============================================
 
+0) If macOS blocks opening the DMG with "Apple could not verify..."
+   or "cannot check it for malicious software":
+   - Click Done.
+   - Open System Settings > Privacy & Security.
+   - In the Security section, click Open Anyway / Allow for AdoptIQ.
+   - Open the DMG again.
+
 1) Drag AdoptIQ to the Applications folder (the icons in this DMG window).
 
 2) In this same DMG window, double-click "Unblock AdoptIQ.command".
@@ -32,8 +39,13 @@ You can run those two commands manually in Terminal instead if you prefer.
 Troubleshooting
 ---------------
 
-- "cannot be opened because Apple cannot check it for malicious software"
-  -> Click Done, then run "Unblock AdoptIQ.command" again.
+- "Apple could not verify..." or "cannot be opened because Apple cannot
+  check it for malicious software" while opening the DMG
+  -> Open System Settings > Privacy & Security and click Open Anyway /
+     Allow for AdoptIQ, then open the DMG again.
+
+- Same warning after dragging AdoptIQ.app to Applications
+  -> Run "Unblock AdoptIQ.command" from this DMG window.
 
 - "Operation not permitted" when running the unblock script
   -> Open System Settings > Privacy & Security > Files and Folders, give

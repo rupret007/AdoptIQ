@@ -256,11 +256,14 @@ verify step even if the app "looks fine."
 
 [ ] 2. INSTALL the new DMG.
        - Open OUTBOX/AdoptIQ-v<version>-build<N>.dmg
+       - If macOS says "Apple could not verify..." while opening the DMG,
+         click Done, open System Settings > Privacy & Security, click
+         Open Anyway / Allow for AdoptIQ, then open the DMG again.
        - If the previous /Applications/AdoptIQ.app is still present,
          either drag the new one over it ("Replace") or rm -rf the old
          one first.
-       - If macOS warns about Gatekeeper, double-click the
-         "Unblock AdoptIQ.command" helper in the DMG window first.
+       - After dragging the app to Applications, double-click the
+         "Unblock AdoptIQ.command" helper in the DMG window once.
 
 [ ] 3. RE-LAUNCH the app.
        open /Applications/AdoptIQ.app
@@ -299,8 +302,9 @@ both the build operator and the auditor see it.
   - Windows `%APPDATA%\\AdoptIQ`
   - macOS `~/Library/Application Support/AdoptIQ`
 - SmartScreen notes are Windows-only; ignore on Mac.
+- **macOS blocks the DMG with "Apple could not verify..." before you can drag the app:** this is expected for adhoc, non-notarized internal builds. Click Done, open System Settings > Privacy & Security, click Open Anyway / Allow for AdoptIQ, then open the DMG again. This DMG-level approval is separate from the post-install `Unblock AdoptIQ.command` step.
 - **App starts and the browser works, but the Dock icon keeps bouncing:** ensure the installed app came from a Round 99+ DMG. The launcher script inside `Contents/MacOS/AdoptIQ` should start `AdoptIQ.bin` with `nohup ... &` and exit; older Build 69 launchers used `exec`, which left the browser-only server as the foreground app process.
-- **Corpus panel shows `authentication tag mismatch` after an upgrade:** a stale local encrypted corpus may have been sealed under an older OneDrive sentinel. Round 99+ preserves the stale artifacts as `.broken-<utc>` sidecars and retries a clean runtime index from the synced OneDrive corpus. If the error persists, use the app's Reset Corpus action and confirm `~/Library/CloudStorage/OneDrive-Cisco/.../adoptiq_corpus_sentinel.json` is present and non-empty.
+- **Corpus panel shows `authentication tag mismatch` after an upgrade:** a stale local encrypted corpus may have been sealed under an older key. Round 106+ preserves the stale artifacts as `.broken-<utc>` sidecars and retries a clean local index. If the error persists, use the app's Reset Corpus action.
 - **App bounces in the Dock and exits after dragging to Applications:** This is macOS Gatekeeper / AMFI killing the adhoc-signed bundle because of `com.apple.quarantine`. Two ways to confirm and recover:
   1. Run the `Unblock AdoptIQ.command` helper that ships in the DMG window — it strips the quarantine attribute and launches the app.
   2. Or, manually in Terminal:

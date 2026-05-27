@@ -236,8 +236,8 @@ def test_safe_log_info_call_site_count_matches_expected_floor():
             continue
         for _ in call_re.finditer(line):
             call_count += 1
-    assert call_count >= 10, (
-        f"Round 62 / A1 floor adjusted in Round 96: expected >= 10 _safe_log_info(...) call sites, found {call_count}. "
+    assert call_count >= 9, (
+        f"Round 62 / A1 floor adjusted in Round 106: expected >= 9 _safe_log_info(...) call sites, found {call_count}. "
         "If a call site was intentionally removed, verify the original logger.info path is also "
         "gone (not reverted to a bare logger.info call), then update this floor."
     )

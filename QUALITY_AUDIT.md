@@ -1783,6 +1783,73 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 
 **Trailer:** Made-with: Cursor
 
+## Round 106 — handoff 2026-05-27
+
+**What changed (plain English):**
+- Allowed Comprehensive runs with zero adoption barriers after strict technology scoping to proceed as partial-data runs while preserving hard failures for missing/fetch-error AB sources.
+- Re-opened the local/bundled corpus path for Build 75 by treating OneDrive and sentinel presence as diagnostics rather than prerequisites.
+- Updated Intelligence panel and Ask AI corpus unavailable copy so users see local corpus indexing guidance instead of OneDrive-only remediation.
+- Hardened the macOS DMG packaging contract so Gatekeeper unblock assets are required and first-run Privacy & Security guidance is explicit.
+- Bumped the package to Build 75, refreshed release docs, rebuilt the macOS DMG, and smoked the packaged binary.
+
+**Files touched:**
+- `data_source_validator.py` — distinguish scope-empty AB data from genuinely missing/fetch-failed AB data.
+- `corpus_bootstrap.py` — remove OneDrive/sentinel preflight blocking, allow local sentinel use, and keep diagnostics truthful on crypto retry.
+- `ask_ai_corpus.py` — update unavailable corpus banner to local-first guidance.
+- `static/js/intel_status.js` — update corpus status classification/copy for local-first indexing.
+- `build_mac_dmg.sh` — require macOS unblock assets and write Gatekeeper install notes.
+- `scripts/mac/READ_ME_FIRST.txt` — document DMG Privacy & Security approval before app unblock.
+- `config.py` — bump build metadata to Build 75.
+- `README.md` — Build 75 release summary and local corpus contract.
+- `CLAUDE.md` — Build 75 operating contract and test floor.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — Build 75 Gatekeeper/corpus install guidance.
+- `tests/test_data_source_validator.py` — Round 106 AB validation regressions.
+- `tests/test_round106_mac_gatekeeper_unblock_contract.py` — new Gatekeeper/unblock packaging contract tests.
+- `tests/test_round17_ask_ai_corpus_grounding.py` — update empty-corpus banner expectation.
+- `tests/test_round36_daily_refresh_uses_local.py` — update daily refresh contract for local sources without OneDrive.
+- `tests/test_round36_panel_renders_synced_state.py` — update Intelligence panel copy expectations.
+- `tests/test_round39_self_heal_crypto_failure.py` — update local-sentinel retry expectation.
+- `tests/test_round53_bootstrap_blocked_no_onedrive.py` — update no-OneDrive bootstrap behavior.
+- `tests/test_round54_f1_toctou_blocked_no_onedrive.py` — update TOCTOU/crypto diagnostics after removing the block.
+- `tests/test_round62_corpus_logger_module_wide.py` — lower safe-log call floor after removing a stale block.
+- `tests/test_round68_daily_worker_sentinel_gate.py` — update sentinel gate from prerequisite to diagnostic-only.
+- `tests/test_round83_daily_worker_bootstrap_trigger.py` — update refresh transition source-shape contract.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_data_source_validator.py::test_round106_scope_empty_adoption_barriers_pass_when_required` — pins scoped-empty AB required-source pass.
+- `tests/test_data_source_validator.py::test_round106_scope_empty_heuristic_passes_when_required` — pins metadata-free scoped-empty heuristic.
+- `tests/test_data_source_validator.py::test_round106_fetch_error_still_fails_when_ab_required` — preserves fail-loud fetch-error AB behavior.
+- `tests/test_data_source_validator.py::test_round106_genuinely_empty_ab_still_fails_when_required` — preserves fail-loud genuinely empty AB behavior.
+- `tests/test_round106_mac_gatekeeper_unblock_contract.py` — pins unblock helper, README, build script, and build-info Gatekeeper guidance.
+- Updated corpus bootstrap/status tests listed above to pin local-first indexing and diagnostic-only OneDrive/sentinel behavior.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5590 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- focused tests — pass (`tests/test_round17_ask_ai_corpus_grounding.py::test_unconfigured_corpus_returns_unavailable_banner`, `tests/test_round36_daily_refresh_uses_local.py` selected Round 106 cases, `tests/test_round62_corpus_logger_module_wide.py::test_safe_log_info_call_site_count_matches_expected_floor`, `tests/test_round68_daily_worker_sentinel_gate.py`; 15 passed)
+- `git diff --check` — pass
+- `bash build_mac_dmg.sh` — pass; produced `OUTBOX/AdoptIQ-v1.0.4-build75.dmg`
+- packaged smoke — pass (`dist/AdoptIQ.app/Contents/MacOS/AdoptIQ.bin` on port 15176: `/ping`, `/`, `/api/version` build 75, `/api/corpus/status`)
+
+**Hot spots Claude should audit first:**
+1. `data_source_validator.py` — confirm the scope-empty AB heuristic cannot mask a real fetch failure or genuinely missing AB source.
+2. `corpus_bootstrap.py` — confirm `allow_local_sentinel=True` and diagnostic-only OneDrive/sentinel handling do not weaken the intended encrypted-at-rest local corpus behavior for Build 75.
+3. `static/js/intel_status.js` — confirm local-first corpus panel copy matches the actual `_STATE.source` transitions and does not overpromise Ask AI readiness.
+4. `build_mac_dmg.sh` + `scripts/mac/READ_ME_FIRST.txt` — confirm Gatekeeper instructions cover both DMG approval and installed-app quarantine unblock without implying notarization.
+
+**Known deferrals (intentional non-fixes):**
+- No live Snowflake four-report regeneration was run after Build 75; this round closed acceptance blockers with focused regressions, full local gate, mac DMG build, and packaged endpoint smoke.
+- No drag-install smoke from the DMG into `/Applications` was run; the rebuilt packaged binary smoked cleanly from `dist/AdoptIQ.app`.
+- Build 75 intentionally skips the corpus bake (`ADOPTIQ_BAKE_CORPUS=0`) for runtime/local-source indexing; OneDrive bootstrap will be revisited later as a lower-friction optional enhancement.
+
+**Trailer:** Made-with: Cursor
+
 ## Round 99 — handoff 2026-05-26
 
 **What changed (plain English):**

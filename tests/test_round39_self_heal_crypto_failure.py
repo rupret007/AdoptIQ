@@ -127,8 +127,8 @@ def test_round99_runtime_crypto_failure_preserves_and_retries(
         state = corpus_bootstrap.get_state()
 
         assert len(open_calls) == 2
-        assert open_calls[0]["allow_local_sentinel"] is False
-        assert open_calls[1]["allow_local_sentinel"] is False
+        assert open_calls[0]["allow_local_sentinel"] is True
+        assert open_calls[1]["allow_local_sentinel"] is True
         assert handle.committed is True
         assert state.completed is True
         assert state.last_error_kind is None

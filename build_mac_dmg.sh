@@ -6,12 +6,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-# Round 96 / runtime-only corpus: shipping builds no longer bake or
-# bundle corpus data into the .app.  The app indexes the authorized
-# local OneDrive mirror after the user's Cisco OneDrive sync exposes
-# the corpus folder and sentinel.  ``scripts/bake_corpus.py`` remains
-# available as an explicit developer validation tool, but the default
-# DMG path skips it and removes stale bake artifacts before PyInstaller.
+# Round 106 / Build 75: shipping builds still do not bake or bundle
+# corpus data into the .app, but runtime indexing no longer requires
+# the OneDrive sentinel.  The app indexes generated AdoptIQ reports,
+# Intelligence uploads, and OneDrive files when that local folder is
+# available. ``scripts/bake_corpus.py`` remains available as an
+# explicit developer validation tool, but the default DMG path skips it
+# and removes stale bake artifacts before PyInstaller.
 #
 # Round 36: the MSAL/Graph device-code path was removed.  The bake
 # now reads a local directory (the OneDrive desktop client's mirror
@@ -242,10 +243,14 @@ if [[ -f "$UNBLOCK_SRC" ]]; then
   bash -n "$STAGING_DIR/Unblock AdoptIQ.command" \
     || { echo "ERROR: staged Unblock command has bash syntax errors"; exit 1; }
 else
-  echo "WARNING: $UNBLOCK_SRC missing; DMG will not include the unblock helper."
+  echo "ERROR: $UNBLOCK_SRC missing; release DMG cannot ship without the unblock helper."
+  exit 1
 fi
 if [[ -f "$README_FIRST_SRC" ]]; then
   tr -d '\r' < "$README_FIRST_SRC" > "$STAGING_DIR/READ_ME_FIRST.txt"
+else
+  echo "ERROR: $README_FIRST_SRC missing; release DMG cannot ship without READ_ME_FIRST.txt."
+  exit 1
 fi
 
 if [[ -f "OUTBOX/README.md" ]]; then
@@ -275,6 +280,7 @@ BUILD_INFO_PATH="OUTBOX/build_info.txt"
   echo "AdoptIQ v${VERSION} build ${BUILD}"
   echo "Built: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   echo "Artifact: $(basename "$DMG_PATH")"
+  echo "Install notes: if macOS blocks the DMG, approve it in System Settings > Privacy & Security; then drag AdoptIQ.app to Applications and run Unblock AdoptIQ.command from the DMG."
 } > "$BUILD_INFO_PATH"
 echo "Wrote build info: $BUILD_INFO_PATH"
 

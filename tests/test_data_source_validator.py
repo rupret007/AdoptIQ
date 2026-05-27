@@ -119,6 +119,86 @@ class TestValidateDataSources:
         assert ok is False
         assert missing == ['snowflake']
 
+    def test_round106_scope_empty_adoption_barriers_pass_when_required(self):
+        # Round 106: an empty post-scope AB frame with explicit tech-filter
+        # diagnostics means the selected technology has no scoped ABs. It is
+        # partial data, not an unavailable adoption-barriers source.
+        scoped_empty_ab = pd.DataFrame()
+        scoped_empty_ab.attrs.update(
+            {
+                'tech_filter_empty_after_scope': True,
+                'tech_filter_requested': 'Webex Calling',
+                'tech_filter_total': 18,
+                'tech_filter_matched': 0,
+            }
+        )
+
+        ok, missing, details = validate_data_sources_for_report(
+            'comprehensive',
+            snowflake_ctx=object(),
+            team_subs_df=self._make_team_subs(),
+            ab_data=scoped_empty_ab,
+            csone_data=self._make_csone(),
+            required_sources=['snowflake', 'team_subscriptions', 'adoption_barriers'],
+        )
+
+        assert ok is True
+        assert 'adoption_barriers' not in missing
+        assert 'adoption_barriers' not in details
+
+    def test_round106_scope_empty_heuristic_passes_when_required(self):
+        scoped_empty_ab = pd.DataFrame()
+        scoped_empty_ab.attrs.update(
+            {
+                'tech_filter_strict_applied': True,
+                'tech_filter_total': 18,
+                'tech_filter_matched': 0,
+            }
+        )
+
+        ok, missing, _ = validate_data_sources_for_report(
+            'comprehensive',
+            snowflake_ctx=object(),
+            team_subs_df=self._make_team_subs(),
+            ab_data=scoped_empty_ab,
+            csone_data=self._make_csone(),
+            required_sources=['snowflake', 'team_subscriptions', 'adoption_barriers'],
+        )
+
+        assert ok is True
+        assert 'adoption_barriers' not in missing
+
+    def test_round106_fetch_error_still_fails_when_ab_required(self):
+        failed_ab = pd.DataFrame()
+        failed_ab.attrs['fetch_error'] = 'timeout while fetching AB data'
+
+        ok, missing, details = validate_data_sources_for_report(
+            'comprehensive',
+            snowflake_ctx=object(),
+            team_subs_df=self._make_team_subs(),
+            ab_data=failed_ab,
+            csone_data=self._make_csone(),
+            required_sources=['snowflake', 'team_subscriptions', 'adoption_barriers'],
+        )
+
+        assert ok is False
+        assert 'adoption_barriers' in missing
+        assert 'fetch FAILED' in details['adoption_barriers']
+
+    def test_round106_genuinely_empty_ab_still_fails_when_required(self):
+        ok, missing, details = validate_data_sources_for_report(
+            'comprehensive',
+            snowflake_ctx=object(),
+            team_subs_df=self._make_team_subs(),
+            ab_data=pd.DataFrame(),
+            csone_data=self._make_csone(),
+            required_sources=['snowflake', 'team_subscriptions', 'adoption_barriers'],
+        )
+
+        assert ok is False
+        assert 'adoption_barriers' in missing
+        assert 'No adoption barrier data found' in details['adoption_barriers']
+
 
 class TestRaiseValidationError:
     """Test raise_validation_error_if_invalid."""

@@ -1,8 +1,12 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 73).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 75).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 75 (Round 106 — acceptance blockers)
+
+Build 75 addresses the post-Build-74 acceptance blockers. Comprehensive reports now treat a selected technology with zero scoped Adoption Barriers as partial data instead of a fatal missing-source error, while real AB fetch failures still stop the run. Ask AI corpus indexing no longer requires the OneDrive shortcut/sentinel before creating the local encrypted corpus; it indexes generated AdoptIQ reports, Intelligence uploads, and OneDrive data when available. The macOS DMG now hard-requires the unblock helper and install guide, and the install notes explicitly cover the Privacy & Security approval needed for adhoc-signed DMGs.
 
 ### What's New in Build 74 (Round 105 — live report stability audit)
 
@@ -41,7 +45,7 @@ Build 69 keeps the Round 95 Ask AI retrieval work and moves the AdoptIQ Knowledg
 - **Round 99 — launch bounce and corpus crypto recovery.** The macOS launcher now starts `AdoptIQ.bin` in the background after opening the splash page, then exits so Finder/Launch Services can finish the launch instead of leaving the Dock icon bouncing. If a runtime-only install has stale local encrypted corpus artifacts sealed under an older sentinel, `corpus_bootstrap` preserves them as `.broken-<utc>` sidecars and retries a clean index from the synced Cisco OneDrive corpus. Packaged corpus recovery was verified with `303` parsed files and `379,615` chunks.
 - **Round 100 — Compact/Renewal curated AP/Pulse scoring parity.** Compact risk scoring now recognizes the curated `Action_Plans` and `Customer_Pulse` workbook columns and threads those per-customer slices into `compute_customer_risk_profile`, preserving parity with Renewal when the report harness exercises generated XLSX artifacts.
 - **Round 101 — two-hour live report soak supervisor.** `scripts/run_report_soak.py` wraps the real report iteration harness with a time budget, per-scenario child logs, status preflight, and a final `soak_summary.json`. The local gate is green at `5569 passed / 4 skipped / 6 deselected`; the rebuilt packaged app passed smoke; the live soak ran 64 real report scenarios (`comprehensive`, `compact`, `renewal`, `leader`) with 64/64 passing and no failures.
-- **First-run behavior is intentionally gated.** Ask AI grounding waits until OneDrive exposes the corpus folder and sentinel and the local index pass finishes. Reports remain safe to run while indexing is in progress; the analyze-page Intelligence panel and Admin tile explain whether the app is waiting for OneDrive sign-in, waiting for the corpus shortcut, indexing, active, or failed.
+- **First-run behavior (Build 69 through Build 74) was intentionally gated.** Those builds waited until OneDrive exposed the corpus folder and sentinel before Ask AI grounding could index. Build 75 temporarily removes that prerequisite and indexes the local corpus from generated reports, Intelligence uploads, and OneDrive data when available.
 
 ### What's New in Build 67 (Round 94 — full-sweep audit + Rounds 91-93 ship)
 
@@ -412,15 +416,15 @@ These improvements are now packaged as **v1.0.4 build 1**; v1.0.3 was the previo
 - **Runtime indexing is authoritative.** On first launch, AdoptIQ waits in a clear OneDrive/corpus-shortcut state until the authorized local folder and sentinel are present. Once available, a background index pass creates or refreshes the encrypted local runtime corpus under `~/Library/Application Support/AdoptIQ/knowledge/`. A daemon thread refreshes from the local OneDrive mirror when the 24-hour window elapses and the folder remains synced.
 - **Healthy indexing clears onboarding state.** Round 96.1 normalizes the corpus boot source back to runtime-active after a successful index, so a user who signs into OneDrive or adds the corpus shortcut while AdoptIQ is already running does not stay stuck on stale blocked copy.
 - **Build command for release artifacts.** Use `ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh` for release builds. The script defaults to skipping corpus data bake (`ADOPTIQ_BAKE_CORPUS=0`) and the release gate fails if stale `bake/corpus.db.enc` or `bake/corpus.db.salt` artifacts are present. `scripts/bake_corpus.py` remains available for explicit developer validation only; its output is not shipped.
-- **Generated reports feed the corpus without Downloads access.** The corpus indexer auto-detects CSOne/export layouts, reads the header from the right row in each, and indexes authorized OneDrive data plus sidecar-gated generated AdoptIQ reports. Round 102 fully retires the old Downloads source so the app does not request Downloads-folder access during startup or refresh.
+- **Generated reports feed the corpus without Downloads access.** The corpus indexer auto-detects CSOne/export layouts, reads the header from the right row in each, and indexes sidecar-gated generated AdoptIQ reports plus OneDrive data when that folder is available. Round 102 fully retires the old Downloads source so the app does not request Downloads-folder access during startup or refresh.
 - **Per-source breakdown on the admin Corpus tile.** The status payload records per-source counts (OneDrive sync, generated local reports, intel uploads: files seen, parsed, skipped, failed, chunks added) so the admin UI shows exactly where indexed rows came from.
-- **Persistent customer & troubleshooting knowledge.** AdoptIQ builds a local, encrypted index from the synced corpus folder (with generated-report sidecar-gated local outputs and intel-upload sources available), so Ask AI, report pre-fill, the Customer 360 page, and the Troubleshooting Playbook page have rich historical context after the runtime index completes.
+- **Persistent customer & troubleshooting knowledge.** AdoptIQ builds a local, encrypted index from generated-report sidecar-gated local outputs, intel-upload sources, and the synced corpus folder when present, so Ask AI, report pre-fill, the Customer 360 page, and the Troubleshooting Playbook page have rich historical context after the runtime index completes.
 - **Customer 360 page (`/customer/<name>`).** Server-side rendered cases timeline, recurring barriers, top resolutions, and a sentiment direction badge for any indexed customer.
 - **Troubleshooting Playbook page (`/playbook`).** Browse recurring barriers and historical resolutions across the corpus by technology, theme, or free-text query.
 - **Historical Context in reports.** Executive and Leader reports get a "Historical Context" section listing prior occurrences of focused customers and their recurring themes, sourced from the corpus and cited by source filename.
-- **Admin Corpus tile.** Live status (file counts, schema version, last-indexed timestamp), CSRF-protected refresh action, and a clear "OneDrive not synced" banner when daily refresh is unavailable.
-- **Encrypted-at-rest.** The local cache lives under `~/Library/Application Support/AdoptIQ/knowledge/`, encrypted with AES-256-GCM. Key derivation requires the OneDrive-synced corpus sentinel (`allow_local_sentinel=False` on the runtime path), file mode is `0600`, and plaintext is scrubbed on close.
-- **Feature flag.** Enabled by default. Set `CORPUS_KNOWLEDGE_ENABLED=false` to disable corpus indexing and retrieval. When disabled or when OneDrive is not synced, existing non-corpus flows continue to work.
+- **Admin Corpus tile.** Live status (file counts, schema version, last-indexed timestamp), CSRF-protected refresh action, and per-source visibility for local outputs, uploads, and OneDrive when available.
+- **Encrypted-at-rest.** The local cache lives under `~/Library/Application Support/AdoptIQ/knowledge/`, encrypted with AES-256-GCM. Build 75 uses the per-user local corpus sentinel when the OneDrive sentinel is absent, file mode is `0600`, and plaintext is scrubbed on close.
+- **Feature flag.** Enabled by default. Set `CORPUS_KNOWLEDGE_ENABLED=false` to disable corpus indexing and retrieval. When disabled, existing non-corpus flows continue to work.
 - **Validator pipeline.** Every corpus chunk that reaches the LLM, the Customer 360 page, the Playbook page, or the report pre-fill helper is filtered through the Round 16 narrative validator (`ai_narrative_validator.is_corpus_chunk_safe`) so a hostile corpus entry cannot inject HTML/JS or prompt-injection payloads.
 
 #### Reports — accuracy and polish
@@ -575,14 +579,14 @@ Use the packaged app for your platform. No Python or development tools are requi
 - Grounded retrieval reuses run-scoped prefetch context to avoid repeating the same Snowflake fetches in a single analysis run.
 - Rollback toggle: set `ADOPTIQ_ASK_AI_V2=0` to force legacy Ask AI behavior.
 
-### CSOne Knowledge Corpus (Round 96: runtime-only, OneDrive sync as auth signal)
+### CSOne Knowledge Corpus (Round 106: local runtime index, OneDrive optional)
 
 - The shipped app contains **no corpus data artifact**: no `corpus.db.enc`, no `corpus.db.salt`, no sentinel, and no baked snapshot under app resources.
-- AdoptIQ no longer depends on `msal` / `keyring` / device-code OAuth at runtime; the OneDrive desktop client handles SSO/MFA/admin consent and AdoptIQ verifies by `Path.is_dir()` + counting non-empty files at `Config.CSONE_ONEDRIVE_FOLDER` plus the OneDrive-synced sentinel.
-- A daily refresh worker keeps the corpus current after the first runtime index pass. It wakes hourly, checks OneDrive sync presence, and re-indexes from the local mirror when the 24-hour window has elapsed and the folder is synced.
-- The local runtime index lives at `~/Library/Application Support/AdoptIQ/knowledge/` (macOS) and is encrypted with AES-256-GCM. Runtime opens require the OneDrive sentinel (`allow_local_sentinel=False`); deleting or losing OneDrive access means the app cannot unlock or rebuild corpus content.
+- AdoptIQ no longer depends on `msal` / `keyring` / device-code OAuth at runtime. The OneDrive desktop client can still provide source files, but Build 75 does not require the OneDrive shortcut or sentinel before local indexing starts.
+- A daily refresh worker keeps the corpus current after the first runtime index pass. It wakes hourly and re-indexes generated AdoptIQ reports, Intelligence uploads, and OneDrive files when the local folder is available.
+- The local runtime index lives at `~/Library/Application Support/AdoptIQ/knowledge/` (macOS) and is encrypted with AES-256-GCM. Build 75 opens with the per-user local sentinel fallback (`allow_local_sentinel=True`) when the OneDrive sentinel is absent.
 - Build-time controls: release builds should use `ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh`. The shipping path defaults `ADOPTIQ_BAKE_CORPUS=0`, writes a `.bake-skipped` marker, and fails if stale `bake/corpus.db.enc` or `bake/corpus.db.salt` artifacts exist. `scripts/bake_corpus.py --source ...` remains available for developer validation only.
-- **End-user setup:** sign in to your IT-managed OneDrive account in the OneDrive desktop client and add/sync the AdoptIQ corpus shortcut. AdoptIQ detects the folder automatically, shows the appropriate waiting/indexing/active state on the analyze-page panel, and refreshes daily from the local mirror.
+- **End-user setup:** no OneDrive setup is required for the local corpus to start. OneDrive remains useful as an optional source: if the configured folder exists, AdoptIQ indexes it alongside generated reports and uploads.
 - Initial indexing runs in a background thread on first launch; the rest of the app remains responsive. The analyze-page Knowledge Corpus panel renders runtime states such as `runtime_synced`, `fresh_indexing`, `fresh_not_synced`, `refreshing`, `refresh_failed`, and `unknown`, with defensive mapping for legacy `baked` labels. The admin Corpus tile shows the per-source breakdown, schema version, and last-indexed timestamp.
 - Configure source visibility:
   - `CSONE_ONEDRIVE_FOLDER` — override the OneDrive sync path (auto-discovered from the standard `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/AdoptIQ_CSOne_Reports` and `~/OneDrive - Cisco/AI Projects/AdoptIQ_CSOne_Reports` candidates).
@@ -590,14 +594,14 @@ Use the packaged app for your platform. No Python or development tools are requi
   - `ADOPTIQ_INTEL_UPLOAD_ENABLED` — opt-in for the user-facing per-customer upload route (default `false`); admin-pre-seeded `~/.adoptiq/intel_uploads/` content is still indexed when the dir exists.
   - `ADOPTIQ_CORPUS_SHARE_URL` — preserved for documentation / bake logging; the runtime never opens this URL (it walks `CSONE_ONEDRIVE_FOLDER`). `ADOPTIQ_SHAREPOINT_FOLDER_URL` is a back-compat alias.
   - **Retired in Round 36 (no-op if set):** `ADOPTIQ_SHAREPOINT_ENABLED`, `ADOPTIQ_SHAREPOINT_CLIENT_ID`, `ADOPTIQ_SHAREPOINT_AUTHORITY`, `ADOPTIQ_SHAREPOINT_CACHE_DIR`, `ADOPTIQ_SHAREPOINT_MAX_FILE_BYTES` — the MSAL/Graph runtime path was removed; these settings have no effect.
-- When the OneDrive folder is not synced, the feature flag is off, or the sentinel cannot be read, all surfaces degrade gracefully with a clear "OneDrive sync required" banner. Every existing non-corpus flow continues to work, but Ask AI/report grounding waits for runtime indexing.
+- When the feature flag is off or no eligible local files have been indexed yet, corpus surfaces degrade gracefully with a local-indexing banner. Every existing non-corpus flow continues to work, and Ask AI/report grounding activates after runtime indexing has eligible content.
 - Every corpus chunk is filtered through the Round 16 narrative validator before reaching the LLM or any rendered surface.
 
 #### How do I keep the corpus fresh? (Round 96)
 
-1. Sign in to the OneDrive desktop client with your Cisco-managed Microsoft account.
-2. Add/sync the AdoptIQ corpus shortcut so the configured folder lands locally. Non-owner installs normally use the shared-folder shortcut leaf under `~/Library/CloudStorage/OneDrive-Cisco/`; the corpus owner may resolve through the owner-style `AI Projects/AdoptIQ_CSOne_Reports` fallback. The Preferences page also lets operators override `CSONE_ONEDRIVE_FOLDER`.
-3. The first index pass builds the encrypted local runtime corpus. Later, the daily refresh worker re-indexes from the local mirror every 24 hours. The runtime path requires the OneDrive sentinel (`<onedrive_root>/.adoptiq_corpus_sentinel.json`); it does not auto-mint local sentinel material for corpus access.
+1. Run or upload AdoptIQ reports so the sidecar-gated `local_outputs` / `intel_uploads` sources have eligible files.
+2. Optionally sign in to the OneDrive desktop client and sync the AdoptIQ corpus shortcut. The Preferences page also lets operators override `CSONE_ONEDRIVE_FOLDER`.
+3. The first index pass builds the encrypted local runtime corpus. Later, the daily refresh worker re-indexes available local sources every 24 hours. Build 75 uses the local per-user sentinel when the OneDrive sentinel is absent.
 4. There is no "Connect to Microsoft" / device-code prompt anywhere in AdoptIQ; the OneDrive client owns the auth flow.
 
 #### Corpus security model (Round 87)
