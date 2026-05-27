@@ -253,6 +253,55 @@ def test_llm_classification_threads_into_be_class_column():
     assert classes["AB002"] == "TRAINING_GAP"
 
 
+def test_round105_leader_raw_ab_columns_feed_be_classifier_prompt():
+    """Round 105: Leader passes curated/raw AB columns, not ``ab_norm``.
+
+    The live Build 73 Leader run classified 34/34 rows as AMBIGUOUS
+    because the BE prompt had blank Title/Description. The pipeline must
+    coalesce NAME/Comments/Age fields before scoring and classification.
+    """
+    llm, captured = _llm_callable_factory(
+        [
+            {
+                "id": "AB001",
+                "class": "TRUE_BLOCKER",
+                "reason": "Customer cannot proceed with migration.",
+                "confidence": "high",
+            }
+        ]
+    )
+    raw_leader_ab = pd.DataFrame(
+        [
+            {
+                "ID": "AB001",
+                "Customer Name": "Acme Corp",
+                "NAME": "Migration blocked by missing 5K webinar support",
+                "Comments": "Customer cannot complete rollout until the feature is available.",
+                "Severity": "High",
+                "Status": "Open",
+                "Age (Days)": 45,
+                "Product Name": "Webex Contact Center",
+                "Barrier Category": "Feature Gap",
+            }
+        ]
+    )
+
+    barriers, _, diag = bpp.build_be_priority_outputs(
+        raw_leader_ab,
+        llm_callable=llm,
+        use_llm=True,
+        llm_top_n=1,
+    )
+
+    prompt = captured["user"]
+    assert "Title: Migration blocked by missing 5K webinar support" in prompt
+    assert "Description: Customer cannot complete rollout" in prompt
+    assert barriers.loc[0, "Title"] == "Migration blocked by missing 5K webinar support"
+    assert barriers.loc[0, "Description"].startswith("Customer cannot complete rollout")
+    assert barriers.loc[0, "BE_Class"] == "TRUE_BLOCKER"
+    assert diag["llm_diag"]["classified_count"] == 1
+
+
 def test_llm_failure_falls_back_to_unclassified_with_diag():
     def _broken_llm(system_prompt: str, user_prompt: str) -> str:
         raise RuntimeError("LLM down")

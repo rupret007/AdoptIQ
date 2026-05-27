@@ -1782,6 +1782,7 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 - `# Round 19.1` source markers — no source files were modified, so no `# Round 19.1` markers exist; the per-file footprint is just the one new test file.
 
 **Trailer:** Made-with: Cursor
+
 ## Round 99 — handoff 2026-05-26
 
 **What changed (plain English):**
@@ -11120,5 +11121,56 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - The running Build 72 app's report-model override was corrected directly in `settings.json` after the API POST was blocked by CSRF/test-before-save mechanics; GET checks confirmed both report and Ask AI models resolved to Gemini.
 - The latest live artifacts audited were generated before the Build 73 code fix and still carry `active_report_model: gpt-5-nano`; a fresh same-scope live Compact/Renewal regeneration after installing Build 73 remains the acceptance follow-up.
 - No drag-install smoke from the DMG into `/Applications` was run; the rebuilt `dist/AdoptIQ.app` smoke passed and the DMG was produced.
+
+**Trailer:** Made-with: Cursor
+
+## Round 105 — handoff 2026-05-27
+
+**What changed (plain English):**
+- Closed the live Build 73 audit findings by recovering Compact status incidents before threaded Word/XLSX risk scoring.
+- Mirrored Compact partial-data warnings into the workbook `Report_Info` sheet so scope exclusions visible in status/Word are not hidden in Excel.
+- Normalized raw Leader adoption-barrier exports before BE priority scoring/classification so Gemini sees populated title/description fields instead of blank prompts.
+- Bumped the package to Build 74, refreshed release docs, rebuilt the macOS DMG, and smoked the packaged app.
+
+**Files touched:**
+- `config.py` — bump build metadata to Build 74.
+- `app_simple.py` — add Compact incident recovery helper, thread it into Word/XLSX scoring, and merge Compact partial-data warnings into `Report_Info`.
+- `be_priority_pipeline.py` — normalize raw Leader AB columns and project normalized descriptions into `BE_Priority_Barriers`.
+- `tests/test_round67_compact_renewal_score_parity.py` — pin Compact incident recovery wiring in both workers.
+- `tests/test_round67_compact_xlsx_report_info_schema.py` — pin Compact `Report_Info` warning propagation.
+- `tests/test_round79_b4_be_xlsx_sheets.py` — pin Leader raw AB normalization for BE priority prompts/output.
+- `README.md` — Build 74 release summary and verify floor.
+- `CLAUDE.md` — Build 74 test floor and Round 105 operating contract.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — Build 74 smoke/remediation reminder.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_round67_compact_renewal_score_parity.py::test_round104_compact_excel_worker_captures_ext_incidents` — updated to pin the Round 105 recovery helper in the Compact Excel worker.
+- `tests/test_round67_compact_renewal_score_parity.py::test_round105_compact_incident_recovery_is_wired_into_both_workers` — pins recovery wiring in both Compact Word and Excel scoring paths.
+- `tests/test_round67_compact_xlsx_report_info_schema.py::test_round105_compact_report_info_merges_status_partial_warnings` — pins status/local partial-warning propagation into Compact `Report_Info`.
+- `tests/test_round79_b4_be_xlsx_sheets.py::test_round105_leader_raw_ab_columns_feed_be_classifier_prompt` — pins raw Leader AB column normalization into BE priority classifier prompts and output projection.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5582 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- focused tests — pass (`tests/test_round67_compact_renewal_score_parity.py`, `tests/test_round67_compact_xlsx_report_info_schema.py`, `tests/test_round79_b4_be_xlsx_sheets.py`; 43 passed)
+- `git diff --check` — pass
+- `bash build_mac.sh` — pass; produced `OUTBOX/AdoptIQ-v1.0.4-build74.dmg`
+- `scripts/test_build_smoke.sh` — pass (`/ping`, `/`, `/api/version`, `/api/status/all`, `/api/corpus/status`, shutdown frees 5151)
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py` — confirm `_r105_compact_incidents_for_scoring` recovers incidents without hiding fetch failures or double-counting tagged incidents.
+2. `app_simple.py` — confirm Compact `Report_Info` warning merge is deduped and preserves the status/Word warning contract.
+3. `be_priority_pipeline.py` — confirm raw Leader AB normalization covers the live column shapes without overriding already-normalized Comprehensive AB rows.
+
+**Known deferrals (intentional non-fixes):**
+- No new same-scope live Snowflake four-report regeneration was run after Build 74; this round shipped focused fixes from confirmed artifact defects with full local gate, mac build, and packaged smoke coverage.
+- No drag-install smoke from the DMG into `/Applications` was run; the rebuilt `dist/AdoptIQ.app` smoke passed and the DMG was produced.
+- `README.md` and `CURSOR_MAC_BUILD_INSTRUCTIONS.md` were normalized to LF because `git diff --check` flagged CRLF endings as trailing whitespace in touched hunks.
 
 **Trailer:** Made-with: Cursor

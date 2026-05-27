@@ -4,6 +4,10 @@
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
+### What's New in Build 74 (Round 105 — live report stability audit)
+
+Build 74 closes the remaining live Build 73 audit findings. Compact risk scoring now recovers the status-incident feed before both threaded Word and XLSX score calculations, so Compact/Renewal same-scope risk scores no longer drop the incidents component. Compact `Report_Info` now mirrors the partial-data warnings already shown in status/Word, and Leader BE priority normalizes raw leader adoption-barrier columns before Gemini classification so titles/descriptions do not collapse to all `AMBIGUOUS`. The local gate is green at `5582 passed / 4 skipped / 6 deselected`.
+
 ### What's New in Build 73 (Round 104 — live report audit)
 
 Build 73 corrects the live report model preference back to `gemini-3.1-flash-lite` and hardens Compact risk scoring after the Build 72 artifact audit. Compact incident filtering now stays inside the formatter instead of importing `app_simple` during scoring, and the threaded Compact XLSX writer captures the incident list explicitly so Compact/Renewal risk parity keeps the same external-incident input. The local gate is green at `5579 passed / 4 skipped / 6 deselected`.

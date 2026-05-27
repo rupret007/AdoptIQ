@@ -938,7 +938,7 @@ ADOPTIQ_VERSION = "1.0.4"
 # tests across validator, resolver, ``_r83_safe_share_url``,
 # preferences-page source-shape, analyze-card regression guard, and
 # cross-pin against the R35 + R81 fixtures).
-ADOPTIQ_BUILD = "73"  # Round 104 / Build 73
+ADOPTIQ_BUILD = "74"  # Round 105 / Build 74
 # Round 96 / Build 69: externalizes the AdoptIQ Knowledge Corpus from
 # the app bundle. Shipping builds carry no corpus database or salt; the
 # encrypted local corpus is created only after the user's Cisco OneDrive

@@ -112,6 +112,77 @@ def _column_pick(row: pd.Series, *candidates: str) -> Any:
     return None
 
 
+def _r105_first_nonblank_series(df: pd.DataFrame, candidates: Tuple[str, ...]) -> Optional[pd.Series]:
+    """Round 105: coalesce raw/curated AB columns into one series."""
+    out: Optional[pd.Series] = None
+    for cand in candidates:
+        if cand not in df.columns:
+            continue
+        series = df[cand]
+        try:
+            clean = series.where(
+                series.notna()
+                & series.astype(str).str.strip().ne("")
+                & ~series.astype(str).str.strip().str.lower().isin({"nan", "none", "null"})
+            )
+        except Exception:
+            clean = series
+        if out is None:
+            out = clean
+        else:
+            out = out.combine_first(clean)
+    return out
+
+
+def _r105_prepare_ab_for_be_priority(ab_df: pd.DataFrame) -> pd.DataFrame:
+    """Round 105: make raw Leader AB exports readable by the BE pipeline.
+
+    Comprehensive passes ``ab_norm`` with ``title`` / ``description``.
+    Leader passes its curated ``Adoption_Barriers`` sheet shape
+    (``NAME``, ``Comments``, ``Age (Days)``, etc.).  Without this
+    normalization the LLM classifier sees blank title/description and
+    returns all ``AMBIGUOUS``.
+    """
+    out = ab_df.copy()
+    mappings: Dict[str, Tuple[str, ...]] = {
+        "title": ("title", "Title", "Subject", "SUBJECT_C", "NAME", "Name"),
+        "description": (
+            "description",
+            "Description",
+            "Problem Description",
+            "problem_description",
+            "Comments",
+            "Current Status / Notes",
+            "Reason",
+        ),
+        "customer_name": ("customer_name", "Customer Name", "BU_NAME", "CUSTOMER_NAME"),
+        "technology": ("technology", "Technology", "Product", "Product Name"),
+        "sub_technology": ("sub_technology", "Sub_Technology", "Product", "Product Name", "Related Product"),
+        "ab_category_final": ("ab_category_final", "Barrier Category", "Barrier Type", "Reason"),
+        "open_age_days": ("open_age_days", "Age (Days)", "Days_Open", "Days Open"),
+        "severity_norm": ("severity_norm", "Severity", "CSConsole_Severity", "SEVERITY_C"),
+        "status_norm": ("status_norm", "Status", "Adoption Barrier Status", "AB_STATUS_C"),
+    }
+    for target, candidates in mappings.items():
+        series = _r105_first_nonblank_series(out, candidates)
+        if series is None:
+            continue
+        if target in out.columns:
+            try:
+                existing = out[target]
+                missing = (
+                    existing.isna()
+                    | existing.astype(str).str.strip().eq("")
+                    | existing.astype(str).str.strip().str.lower().isin({"nan", "none", "null"})
+                )
+                out.loc[missing, target] = series.loc[missing]
+            except Exception:
+                out[target] = out[target].combine_first(series)
+        else:
+            out[target] = series
+    return out
+
+
 def _build_barriers_dataframe(
     scored: pd.DataFrame,
     classified_lookup: Dict[str, Dict[str, Any]],
@@ -229,6 +300,7 @@ def _build_barriers_dataframe(
                         row,
                         "Problem Description",
                         "problem_description",
+                "description",  # Round 105
                         "Description",
                     ),
                     max_len=2000,
@@ -343,7 +415,9 @@ def build_be_priority_outputs(
 
     try:
         scored = bes.compute_be_priority_scores_for_frame(
-            ab_norm, risk_profiles=risk_profiles, pulse_df=pulse_df
+            _r105_prepare_ab_for_be_priority(ab_norm),  # Round 105
+            risk_profiles=risk_profiles,
+            pulse_df=pulse_df,
         )
     except Exception as scorer_err:  # noqa: BLE001
         # Round 79 / B2: hoist sheet assignment OUT of the broad

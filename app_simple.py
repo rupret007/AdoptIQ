@@ -10217,6 +10217,7 @@ def run_compact_analysis(analysis_id):
             'software_defects': software_defects,
             'psirt_vulns': psirt_vulns,
             'partial_data_warnings': partial_data_warnings,
+            'ext_incidents': ext_incidents,  # Round 105
             'data_retrieved_at': locals().get('data_retrieved_at'),
             'days': days,
             # Round 30 / M2: forward the derived truncation flags to
@@ -10271,6 +10272,9 @@ def run_compact_analysis(analysis_id):
                             if isinstance(_val, pd.DataFrame) and not _val.empty:
                                 _ei_extra_frames.append(_val)
                         _r23_days = _ctx.get('days')  # Round 23 / R22-NEXT-001
+                        _r105_incidents = _r105_compact_incidents_for_scoring(
+                            _ctx.get('ext_incidents'), _r23_days,
+                        )
                         risk_scores = calculate_renewal_risk_scores(
                             ab_norm,
                             csone_df,
@@ -10283,13 +10287,16 @@ def run_compact_analysis(analysis_id):
                             # ext_incidents that Renewal scoring uses
                             # so Compact and Renewal scores converge
                             # for the same customer in the same scope.
-                            ext_incidents=ext_incidents if ext_incidents else None,
+                            ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
                         )
                     except Exception as _ei_rs_err:
                         logger.debug(
                             f"[EXEC-REPORT] Falling back to AB+CSOne-only risk universe: {_ei_rs_err}"
                         )
                         _r23_days = _ctx.get('days')  # Round 23 / R22-NEXT-001
+                        _r105_incidents = _r105_compact_incidents_for_scoring(
+                            _ctx.get('ext_incidents'), _r23_days,
+                        )
                         risk_scores = calculate_renewal_risk_scores(
                             ab_norm,
                             csone_df,
@@ -10298,7 +10305,7 @@ def run_compact_analysis(analysis_id):
                             # ext_incidents on the fallback path too so
                             # the parity guarantee holds even when the
                             # extra_frames lookup raises.
-                            ext_incidents=ext_incidents if ext_incidents else None,
+                            ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
                         )
                     # Phase 1.2: assert risk row count >= total_customers floor.
                     try:
@@ -10606,6 +10613,9 @@ def run_compact_analysis(analysis_id):
                             if isinstance(_val, pd.DataFrame) and not _val.empty:
                                 _xl_extra_frames.append(_val)
                         _r23_days = _ctx.get('days')  # Round 23 / R22-NEXT-001
+                        _r105_incidents = _r105_compact_incidents_for_scoring(
+                            _r104_ext_incidents or _ctx.get('ext_incidents'), _r23_days,
+                        )
                         risk_scores = calculate_renewal_risk_scores(
                             ab_norm,
                             csone_df,
@@ -10620,13 +10630,16 @@ def run_compact_analysis(analysis_id):
                             # so the XLSX Risk_Summary sheet agrees
                             # with the Compact Word narrative AND with
                             # the Renewal report for the same scope.
-                            ext_incidents=_r104_ext_incidents if _r104_ext_incidents else None,  # Round 104
+                            ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
                         )
                     except Exception as _xl_rs_err:
                         logger.debug(
                             f"[EXCEL] Falling back to AB+CSOne-only risk universe: {_xl_rs_err}"
                         )
                         _r23_days = _ctx.get('days')  # Round 23 / R22-NEXT-001
+                        _r105_incidents = _r105_compact_incidents_for_scoring(
+                            _r104_ext_incidents or _ctx.get('ext_incidents'), _r23_days,
+                        )
                         risk_scores = calculate_renewal_risk_scores(
                             ab_norm,
                             csone_df,
@@ -10634,7 +10647,7 @@ def run_compact_analysis(analysis_id):
                             # Round 67 / Build 41 (B1): parity on the
                             # fallback path too (mirrors the Word path
                             # at L8755).
-                            ext_incidents=_r104_ext_incidents if _r104_ext_incidents else None,  # Round 104
+                            ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
                         )
                     logger.info(f"[[CHART]] Risk scores calculated for {len(risk_scores)} customers")
                     # Phase 1.2: floor assertion vs total_customers.
@@ -11845,6 +11858,24 @@ def run_compact_analysis(analysis_id):
                     _excel_partial_warnings = locals().get('_excel_partial_warnings') or []
                 except Exception:
                     _excel_partial_warnings = []
+                # Round 105: include the same local/status partial-data warnings
+                # that the Compact Word banner and running-job API expose. The
+                # live Build 73 audit showed ACC scope exclusions in status but
+                # no Compact Report_Info row, making the workbook look cleaner
+                # than the run actually was.
+                try:
+                    for _w in (partial_data_warnings or []):
+                        _ds = (_w.get('dataset') if isinstance(_w, dict) else None) or 'unknown'
+                        _kind = (_w.get('kind') if isinstance(_w, dict) else None) or 'runtime'
+                        _err = (_w.get('error') if isinstance(_w, dict) else str(_w))
+                        _msg = f"{_ds} ({_kind}): {str(_err)[:440]}"
+                        if _msg not in _excel_partial_warnings:
+                            _excel_partial_warnings.append(_msg)
+                except Exception as _r105_pdw_err:  # noqa: BLE001
+                    logger.debug(
+                        "Round 105: Compact Report_Info partial warning merge failed: %s",
+                        _r105_pdw_err,
+                    )
                 # Round 6 / Phase 1.18: append a truncation footnote
                 # if any cell exceeded the 32767-char Excel cap, so the
                 # reader knows the workbook clipped some long text
@@ -12180,6 +12211,42 @@ def _r65_filter_customer_tagged_incidents(
                 matched.append(inc)
                 break
     return matched
+
+
+def _r105_compact_incidents_for_scoring(
+    ext_incidents: Optional[List[Dict]],
+    days: Any,
+) -> List[Dict]:
+    """Round 105: ensure Compact risk scoring sees the incident feed.
+
+    The live Build 73 audit showed Compact/Renewal score drift matching
+    the exact incident-component delta even though the earlier external
+    intelligence step succeeded.  Treat a missing/empty captured list as
+    a scoring-input defect and recover from the same status incident
+    fetcher used by the report orchestration.
+    """
+    if ext_incidents:
+        return list(ext_incidents)
+    try:
+        _days = int(days) if days else 365
+    except (TypeError, ValueError):
+        _days = 365
+    try:
+        recovered = fetch_status_incidents(days_back=_days)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Round 105: Compact incident scoring recovery failed; "
+            "continuing with zero incident component: %s",
+            exc,
+        )
+        return []
+    if recovered:
+        logger.warning(
+            "Round 105: recovered %d status incident(s) for Compact risk scoring "
+            "after the captured external-intelligence list was empty",
+            len(recovered),
+        )
+    return list(recovered or [])
 
 
 def _r98_slice_customer_frame(

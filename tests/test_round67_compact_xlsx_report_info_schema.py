@@ -80,6 +80,15 @@ def test_compact_report_info_partial_warning_rows_keyed() -> None:
     )
 
 
+def test_round105_compact_report_info_merges_status_partial_warnings() -> None:
+    """Round 105: Compact Report_Info must include warnings already exposed
+    in status/Word, including ACC scope-exclusion warnings."""
+    src = _read_app_simple()
+    assert "Round 105: include the same local/status partial-data warnings" in src
+    assert "for _w in (partial_data_warnings or [])" in src
+    assert "_excel_partial_warnings.append(_msg)" in src
+
+
 def test_compact_report_info_truncation_rows_keyed() -> None:
     """Excel truncation events are persisted as keyed Item/Value rows."""
     src = _read_app_simple()

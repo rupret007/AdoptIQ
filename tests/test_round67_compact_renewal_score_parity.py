@@ -270,4 +270,15 @@ def test_round104_compact_excel_worker_captures_ext_incidents() -> None:
     """Round 104: threaded Compact XLSX scoring must carry incident input."""
     src = Path("app_simple.py").read_text(encoding="utf-8")
     assert "def generate_excel(_ctx=_r23_ctx, _r104_ext_incidents=ext_incidents)" in src
-    assert "ext_incidents=_r104_ext_incidents if _r104_ext_incidents else None" in src
+    assert "_r105_compact_incidents_for_scoring" in src
+    assert "ext_incidents=_r105_incidents if _r105_incidents else None" in src
+
+
+def test_round105_compact_incident_recovery_is_wired_into_both_workers() -> None:
+    """Round 105: live Build 73 still drifted because Compact scored with
+    an empty incident list. Both threaded workers must recover a missing
+    captured list before calling the shared scorer."""
+    src = Path("app_simple.py").read_text(encoding="utf-8")
+    assert "'ext_incidents': ext_incidents" in src
+    assert src.count("_r105_compact_incidents_for_scoring(") >= 5
+    assert "Round 105: recovered %d status incident(s) for Compact risk scoring" in src
