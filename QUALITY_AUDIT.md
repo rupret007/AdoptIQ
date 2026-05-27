@@ -11027,3 +11027,47 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - No drag-install smoke from the DMG into `/Applications` was run; the rebuilt `dist/AdoptIQ.app` smoke passed and the DMG was produced.
 
 **Trailer:** Made-with: Cursor
+
+## Round 103.1 — handoff 2026-05-27
+
+**What changed (plain English):**
+- Restored the Report Jobs tables to the AdoptIQ dark/orange theme by removing the Bootstrap `table-primary` active-row styling.
+- Added scoped jobs/history table CSS that uses existing theme tokens and highlights active jobs with an orange accent.
+- Added a Round 103 regression pin so the Bootstrap gray row class does not return.
+- Bumped the packaged build to Build 72 and refreshed release docs.
+
+**Files touched:**
+- `config.py` — bump build metadata to Build 72.
+- `static/js/report_jobs_dashboard.js` — replace Bootstrap active-row class with a scoped AdoptIQ class.
+- `templates/base.html` — add theme-token CSS for jobs/history tables.
+- `tests/test_round103_ux_cleanup.py` — add source-shape regression for theme-token styling and no `table-primary`.
+- `README.md` — Build 72 summary.
+- `CLAUDE.md` — Build 72 test floor and Report Jobs theme contract.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — Build 72 smoke reminder.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_round103_ux_cleanup.py::test_round103_jobs_dashboard_uses_theme_tokens_not_bootstrap_gray_rows` — pins no Bootstrap gray row class and theme-token CSS for jobs/history tables.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5576 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- focused tests — pass (`python3 -m pytest tests/test_round103_ux_cleanup.py -v`; 6 passed)
+- `bash build_mac.sh` — pass after detaching stale mounted DMG; produced `OUTBOX/AdoptIQ-v1.0.4-build72.dmg`
+- `scripts/test_build_smoke.sh` — pass (`/ping`, `/`, `/api/version`, `/api/status/all`, `/api/corpus/status`, shutdown frees 5151)
+
+**Hot spots Claude should audit first:**
+1. `templates/base.html` — confirm the scoped table CSS does not unintentionally affect unrelated Bootstrap tables.
+2. `static/js/report_jobs_dashboard.js` — confirm the active-job class remains scoped to running rows and avoids Bootstrap row variants.
+3. `config.py` — confirm Build 72 is the intended shipping build for this UI-only follow-up.
+
+**Known deferrals (intentional non-fixes):**
+- No live Snowflake report regeneration was run; scope was report-jobs visual theme cleanup with full local gate and packaged smoke coverage.
+- No drag-install smoke from the DMG into `/Applications` was run; the rebuilt `dist/AdoptIQ.app` smoke passed and the DMG was produced.
+
+**Trailer:** Made-with: Cursor

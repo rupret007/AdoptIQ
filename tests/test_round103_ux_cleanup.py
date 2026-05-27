@@ -77,6 +77,25 @@ def test_round103_jobs_dashboard_splits_current_and_history():
         assert "data-report-history-panel" in src
 
 
+def test_round103_jobs_dashboard_uses_theme_tokens_not_bootstrap_gray_rows():
+    js = _read("static/js/report_jobs_dashboard.js")
+    base = _read("templates/base.html")
+
+    assert "table-primary" not in js
+    assert "adoptiq-report-job-active" in js
+    assert "[data-report-jobs-panel] .table" in base
+    assert "[data-report-history-panel] .table" in base
+    for token in (
+        "var(--bg-surface)",
+        "var(--bg-surface-raised)",
+        "var(--border-subtle)",
+        "var(--text-primary)",
+        "var(--text-muted)",
+        "var(--accent-primary)",
+    ):
+        assert token in base
+
+
 def test_round103_leader_success_path_uses_non_blocking_notification():
     src = _read("templates/leader_report_form.html")
     assert "alert(" not in src

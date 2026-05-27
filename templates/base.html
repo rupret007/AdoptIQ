@@ -566,6 +566,49 @@
             background: var(--bg-surface);
             color: var(--text-primary);
         }
+
+        /* Round 103 theme cleanup: keep Report Jobs tables on the
+           app's dark/orange theme instead of Bootstrap's light row
+           variants. */
+        [data-report-jobs-panel] .table,
+        [data-report-history-panel] .table {
+            --bs-table-bg: var(--bg-surface);
+            --bs-table-color: var(--text-primary);
+            --bs-table-border-color: var(--border-subtle);
+            --bs-table-striped-bg: var(--bg-surface-raised);
+            --bs-table-hover-bg: var(--bg-surface-raised);
+            color: var(--text-primary);
+        }
+
+        [data-report-jobs-panel] .table thead,
+        [data-report-history-panel] .table thead {
+            --bs-table-bg: var(--card-header-bg);
+            --bs-table-color: var(--accent-primary);
+            color: var(--accent-primary);
+        }
+
+        [data-report-jobs-panel] .table td,
+        [data-report-jobs-panel] .table th,
+        [data-report-history-panel] .table td,
+        [data-report-history-panel] .table th {
+            border-color: var(--border-subtle);
+            color: var(--text-primary);
+        }
+
+        [data-report-jobs-panel] .table th,
+        [data-report-history-panel] .table th {
+            color: var(--accent-primary);
+        }
+
+        [data-report-jobs-panel] tr.adoptiq-report-job-active {
+            --bs-table-bg: color-mix(in srgb, var(--accent-primary) 8%, var(--bg-surface));
+            --bs-table-accent-bg: color-mix(in srgb, var(--accent-primary) 8%, var(--bg-surface));
+            box-shadow: inset 4px 0 0 var(--accent-primary);
+        }
+
+        [data-report-jobs-panel] tr.adoptiq-report-job-active td {
+            color: var(--text-primary);
+        }
         
         /* Enhanced Progress Bars */
         .progress {

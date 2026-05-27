@@ -144,7 +144,7 @@
         var aid = safeText(job.analysis_id);
         var status = safeText(job.status, 'unknown').toLowerCase();
         var progress = Math.max(0, Math.min(100, parseInt(job.progress || 0, 10) || 0));
-        if (ACTIVE_STATUSES[status]) { tr.className = 'table-primary'; }
+        if (ACTIVE_STATUSES[status]) { tr.className = 'adoptiq-report-job-active'; }
 
         var reportCell = document.createElement('td');
         appendText(reportCell, 'div', 'fw-semibold', reportLabel(job));

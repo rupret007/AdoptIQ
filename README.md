@@ -1,8 +1,12 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 70).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 72).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 72 (Round 103.1 — theme cleanup)
+
+Build 72 keeps the Round 103 current-jobs and Historical Reports layout, but restores the Report Jobs tables to the existing AdoptIQ dark/orange visual scheme. Active running rows now use a subtle orange accent highlight instead of Bootstrap's light `table-primary` row styling. The local gate is green at `5576 passed / 4 skipped / 6 deselected`.
 
 ### What's New in Build 71 (Round 103 — UX cleanup)
 
