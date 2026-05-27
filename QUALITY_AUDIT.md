@@ -10806,3 +10806,109 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - Comprehensive live runs still recorded grounding rejections in `analysis_status` and therefore marked generated reports as corpus-ineligible by policy; this is honest gating, not a report-generation failure, but it remains a useful follow-up audit target.
 
 **Trailer:** Made-with: Cursor
+
+## Round 100 — handoff 2026-05-26
+
+**What changed (plain English):**
+- Compact renewal-risk scoring now recognizes curated workbook Action Plan and Customer Pulse columns when classifying/slicing `extra_frames`, so AP/Pulse rows reach `compute_customer_risk_profile`.
+- The shared pulse scorer now treats curated `rating`, `Customer Pulse`, and `Customer Pulse Color` columns as pulse ratings, preserving parity with Renewal when Compact receives curated exports.
+- Focused regressions pin the observed 2026-05-27 Compact vs Renewal drift class: curated AP/Pulse rows now raise Compact risk and emit the expected risk factors.
+
+**Files touched:**
+- `compact_report_formatter.py` — classify curated pulse headers and slice AP/Pulse frames by curated customer-name columns.
+- `risk_scoring.py` — recognize curated pulse rating columns in the shared scorer.
+- `tests/test_round67_compact_renewal_score_parity.py` — add Round 100 curated AP/Pulse regression tests.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** risk_scoring
+
+**Tests added/updated:**
+- `tests/test_round67_compact_renewal_score_parity.py::test_round100_compact_curated_action_plans_are_scored` — pins curated `Customer Name`/`Status` Action Plan rows flowing into Compact risk.
+- `tests/test_round67_compact_renewal_score_parity.py::test_round100_compact_curated_customer_pulse_is_scored` — pins curated `Customer Name`/`rating` Pulse rows flowing into Compact risk.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5554 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- focused tests — pass (`tests/test_round67_compact_renewal_score_parity.py`; 8 passed)
+- `bash build_mac.sh` — pass; rebuilt `OUTBOX/AdoptIQ-v1.0.4-build69.dmg`
+- `bash scripts/test_build_smoke.sh` — pass (`/ping`, `/`, `/api/version`, `/api/status/all`, `/api/corpus/status`, shutdown frees 5151)
+
+**Hot spots Claude should audit first:**
+1. `compact_report_formatter.py` — confirm the curated pulse markers are narrow enough not to misclassify unrelated `Status`-bearing frames as Pulse or AP.
+2. `compact_report_formatter.py` — confirm the expanded customer-column list is conservative and mirrors the generated Compact workbook headers without merging unrelated customer labels.
+3. `risk_scoring.py` — confirm accepting `Customer Pulse Color` as a rating is appropriate for all callers that pass curated Pulse exports.
+
+**Known deferrals (intentional non-fixes):**
+- Existing generated Compact/Renewal XLSX artifacts were not rewritten; the fix applies to newly generated reports after the rebuilt app is installed/run.
+- No full live report regeneration was executed after the rebuild; validation covered focused scoring regressions, full local verify, package build, and packaged startup smoke.
+- I did not commit these changes; the current branch remains ahead of remote from the prior Round 99 commit plus this uncommitted working tree.
+
+**Trailer:** Made-with: Cursor
+
+
+## Round 101 — handoff 2026-05-27
+
+**What changed (plain English):**
+- Added a time-boxed live report soak supervisor that loops real report scenarios, preserves child logs/summaries, and writes a final soak rollup.
+- Hardened the live harness and Flask runtime for long report runs: configurable request/download timeouts, threaded server, pytest-safe corpus startup guard, and direct artifact resolution before recursive output search.
+- Fixed the Compact Word failure found during the soak by preserving the Compact 0-10 high-risk scale through the formatter-owned consistency metrics.
+- Documented the Round 101 soak workflow and Build 69 close-out evidence.
+
+**Files touched:**
+- `scripts/run_report_soak.py` — new time-budgeted live soak supervisor.
+- `report_iteration_loop.py` — configurable request/download timeouts for live report polling and artifact downloads.
+- `app_simple.py` — pytest corpus-startup guard, threaded local server, direct artifact resolution, Compact high-risk scale declaration.
+- `report_consistency.py` — honor declared high-risk scale in the consistency gate.
+- `executive_intelligence_formatter.py` — preserve Compact high-risk scale when rebuilding portfolio metrics before validation.
+- `_logging_helpers.py` — shared safe exception logging helper.
+- `corpus_bootstrap.py` — route exception logs through the closed-stream-safe helper.
+- `tests/test_round101_report_soak.py` — soak supervisor and Compact consistency regressions.
+- `README.md` — Build 69 / Round 101 summary and live soak evidence.
+- `CLAUDE.md` — current test floor and Round 101 operating contract.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — report soak release-candidate workflow.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round101_report_soak.py::test_round101_runner_command_uses_strict_manifest_mode` — pins strict child command construction.
+- `tests/test_round101_report_soak.py::test_round101_runner_command_can_disable_stale_baseline_manifest` — pins operational soak mode without stale manifests.
+- `tests/test_round101_report_soak.py::test_round101_iteration_harness_download_timeout_is_configurable` — pins request/download timeout threading.
+- `tests/test_round101_report_soak.py::test_round101_soak_aborts_when_reports_already_running` — pins no-stacked-running-jobs preflight.
+- `tests/test_round101_report_soak.py::test_round101_status_url_rejects_non_local_targets` — pins local-only status probing.
+- `tests/test_round101_report_soak.py::test_round101_extract_running_reports_supports_statuses_envelope` — pins `/api/status/all` envelope parsing.
+- `tests/test_round101_report_soak.py::test_round101_soak_runs_until_remaining_time_is_too_small` — pins deadline behavior.
+- `tests/test_round101_report_soak.py::test_round101_soak_stops_on_first_failed_child` — pins fail-fast behavior.
+- `tests/test_round101_report_soak.py::test_round101_app_import_does_not_start_corpus_background_under_pytest` — pins pytest startup safety.
+- `tests/test_round101_report_soak.py::test_round101_main_app_run_is_explicitly_threaded` — pins threaded Flask serving for live report runs.
+- `tests/test_round101_report_soak.py::test_round101_download_resolver_tries_direct_path_before_recursive_search` — pins fast artifact resolution.
+- `tests/test_round101_report_soak.py::test_round101_compact_summary_declares_high_risk_scale_for_consistency_gate` — pins Compact high-risk scale declaration and formatter forwarding.
+- `tests/test_round101_report_soak.py::test_round101_consistency_gate_honors_declared_high_risk_scale` — pins validator behavior for Compact's 0-10 high-risk scale.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5569 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- focused Round 101 tests — pass (`python3 -m pytest tests/test_round101_report_soak.py -v`; 13 passed)
+- `bash build_mac.sh` — pass; produced `OUTBOX/AdoptIQ-v1.0.4-build69.dmg`
+- `bash scripts/test_build_smoke.sh` — pass (`/ping`, `/`, `/api/version`, `/api/status/all`, `/api/corpus/status`, shutdown frees 5151)
+- focused packaged Compact slice — pass (`3/3` Compact runs, baseline mode off)
+- two-hour operational live soak — pass: `/Users/jestory/Downloads/adoptiq_report_soak_round101-live-soak-fixed/soak_summary.json` (`64/64` events passed; 16 cycles of comprehensive, compact, renewal, leader; ended with `deadline_remaining_too_small`)
+
+**Hot spots Claude should audit first:**
+1. `scripts/run_report_soak.py` — confirm the supervisor cannot stack jobs and that `baseline-mode off` is appropriate for operational live-data soaks when older manifests drift.
+2. `report_consistency.py` + `executive_intelligence_formatter.py` — confirm the declared high-risk scale path cannot hide true cross-report high-risk drift outside Compact's intentional 0-10/color-aware contract.
+3. `app_simple.py` — confirm direct output-artifact resolution remains path-safe and that `threaded=True` does not violate any shared-state lock assumptions.
+4. `_logging_helpers.py` + `corpus_bootstrap.py` — confirm safe exception logging preserves useful diagnostics while avoiding closed-stream pytest/app-shutdown races.
+
+**Known deferrals (intentional non-fixes):**
+- The two-hour soak used `--baseline-mode off` because the historical Round 72 manifest is stale against live Snowflake data; this was an operational stability soak, not a historical-manifest parity claim.
+- No `/Applications/AdoptIQ.app` drag-install smoke was run; the rebuilt `dist/AdoptIQ.app` smoke passed and the DMG was produced.
+- Ask AI eval was not rerun; scope was live report generation soak and package readiness.
+
+**Trailer:** Made-with: Cursor

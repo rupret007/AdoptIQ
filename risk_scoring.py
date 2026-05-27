@@ -511,7 +511,22 @@ def _score_customer_pulse(customer_pulse: pd.DataFrame) -> Dict[str, Any]:
                 },
             }
 
-    rating_col = next((c for c in ("PULSE_RATING__C", "PULSE_RATING", "Rating", "RATING") if c in use.columns), None)
+    rating_col = next(
+        (
+            c
+            for c in (
+                "PULSE_RATING__C",
+                "PULSE_RATING",
+                "Rating",
+                "RATING",
+                "rating",  # Round 100: curated Compact Customer_Pulse export.
+                "Customer Pulse",
+                "Customer Pulse Color",
+            )
+            if c in use.columns
+        ),
+        None,
+    )
     if not rating_col:
         # Round 2 / Phase 3.2: missing rating column is a metadata
         # gap (the upstream feed did not return a rating field), NOT

@@ -104,6 +104,32 @@ def test_safe_log_warning_skipped_when_stream_closed_no_stderr_traceback(isolate
     assert "ValueError" not in captured.err
 
 
+def test_safe_log_exception_skipped_when_stream_closed_no_stderr_traceback(isolated_logger, capsys):
+    """Round 101: corpus bootstrap exception logs can fire during teardown."""
+    buf = io.StringIO()
+    _attach_stream_handler(isolated_logger, buf)
+    buf.close()
+    try:
+        raise RuntimeError("round101 synthetic failure")
+    except RuntimeError:
+        _logging_helpers.safe_log_exception(
+            isolated_logger, "Round 101 test: %s", "closed-exception-suppressed"
+        )
+    captured = capsys.readouterr()
+    assert "Logging error" not in captured.err
+    assert "I/O operation on closed file" not in captured.err
+    assert "ValueError" not in captured.err
+
+
+def test_round101_corpus_bootstrap_exception_paths_use_safe_helper():
+    import corpus_bootstrap
+
+    src = open(corpus_bootstrap.__file__, encoding="utf-8").read()
+    assert "from _logging_helpers import safe_log_exception" in src
+    assert "logger.exception(" not in src
+    assert "_safe_log_exception(" in src
+
+
 def test_round97_2_ask_ai_embeddings_uses_safe_warning_helper():
     import ask_ai_embeddings
 

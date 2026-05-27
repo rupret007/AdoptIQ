@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 from _logging_helpers import exit_log_streams_open as _shared_exit_log_streams_open
+from _logging_helpers import safe_log_exception as _shared_safe_log_exception
 from _logging_helpers import safe_log_info as _shared_safe_log_info
 from _logging_helpers import safe_log_warning as _shared_safe_log_warning
 from config import Config
@@ -1011,6 +1012,12 @@ def _safe_log_warning(msg: str, *args: object) -> None:
     _shared_safe_log_warning(logger, msg, *args)
 
 
+def _safe_log_exception(msg: str, *args: object) -> None:
+    """Round 101: exception-level closed-stream sibling for pytest/app teardown."""
+
+    _shared_safe_log_exception(logger, msg, *args)
+
+
 def _exit_log_streams_open() -> bool:
     """Round 63: thin wrapper around
     ``_logging_helpers.exit_log_streams_open``.  Wrapper name preserved
@@ -1668,7 +1675,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
                     _STATE.in_progress = False
                     _STATE.last_finished_at = _utc_now_iso()
                     _HANDLE = None
-                logger.exception(
+                _safe_log_exception(
                     "Round 17 / corpus_bootstrap: indexer raised on source=%s",
                     label,
                 )
@@ -1755,7 +1762,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
             _STATE.last_error_kind = "bootstrap"
             _STATE.in_progress = False
             _STATE.last_finished_at = _utc_now_iso()
-        logger.exception("Round 17 / corpus_bootstrap: bootstrap raised")
+        _safe_log_exception("Round 17 / corpus_bootstrap: bootstrap raised")
 
 
 def _warm_embedder_in_background() -> None:

@@ -81,11 +81,12 @@ def _safe_log_level(
     level_name: str,
     msg: str,
     *args: object,
+    **kwargs: object,
 ) -> None:
     """Round 97.2: shared closed-stream gate for logger level methods."""
     if exit_log_streams_open(target_logger):
         try:
-            getattr(target_logger, level_name)(msg, *args)
+            getattr(target_logger, level_name)(msg, *args, **kwargs)
         except (ValueError, OSError):
             pass
 
@@ -112,3 +113,8 @@ def safe_log_info(target_logger: logging.Logger, msg: str, *args: object) -> Non
 def safe_log_warning(target_logger: logging.Logger, msg: str, *args: object) -> None:
     """Round 97.2: warning-level sibling for shutdown/teardown races."""
     _safe_log_level(target_logger, "warning", msg, *args)
+
+
+def safe_log_exception(target_logger: logging.Logger, msg: str, *args: object) -> None:
+    """Round 101: exception-level sibling for shutdown/teardown races."""
+    _safe_log_level(target_logger, "exception", msg, *args)

@@ -121,6 +121,26 @@ The smoke polls `/ping`, then checks `/`, `/api/version`, `/api/status/all`, `/a
 scripts/test_build_smoke.sh /Applications/AdoptIQ.app
 ```
 
+For demo-readiness or release-candidate soak validation, launch the rebuilt app
+and run the Round 101 time-boxed live report supervisor:
+
+```bash
+open dist/AdoptIQ.app
+python3 scripts/run_report_soak.py \
+  --base-url http://127.0.0.1:5151 \
+  --duration-seconds 7200 \
+  --scenarios comprehensive,compact,renewal,leader \
+  --baseline-mode off \
+  --request-timeout 180 \
+  --download-timeout 600
+```
+
+Use `--baseline-mode manifest` when a fresh manifest exists for the current
+Snowflake data. Use `--baseline-mode off` for operational stability soaks when
+older manifests have drifted; strict report generation, downloads, structure,
+and quality checks still run. The supervisor writes child logs and
+`soak_summary.json` under `~/Downloads/adoptiq_report_soak_<run-id>/`.
+
 Verify the build output before shipping the DMG to anyone:
 
 ```bash

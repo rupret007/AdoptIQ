@@ -713,9 +713,18 @@ def validate_report_consistency(
         try:
             from canonical_metrics import (
                 compute_high_risk_count as _cm_count_high,
+                RISK_SCALE_0_TO_10 as _CM_RISK_0_10,
                 RISK_SCALE_0_TO_100 as _CM_RISK_0_100,
             )
-            canonical_high = int(_cm_count_high(risk_data, scale=_CM_RISK_0_100))
+            # Round 101: Compact still renders its high-risk headline and
+            # table through the legacy 0-10/color-aware predicate. Let callers
+            # declare the scale they render so this gate checks the same
+            # contract instead of failing live soaks on an internal 0-10 vs
+            # 0-100 mismatch.
+            requested_scale = str(portfolio_metrics.get("high_risk_scale") or _CM_RISK_0_100)
+            if requested_scale not in {_CM_RISK_0_10, _CM_RISK_0_100}:
+                requested_scale = _CM_RISK_0_100
+            canonical_high = int(_cm_count_high(risk_data, scale=requested_scale))
         except Exception as _cm_err:
             warnings.append(
                 f"Round 7 / Phase 3.7: could not compute canonical high-risk count "

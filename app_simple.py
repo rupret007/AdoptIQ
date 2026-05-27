@@ -2544,7 +2544,16 @@ except Exception:
 # downstream callers handle ``CorpusUnavailable`` from the retriever.
 try:
     import corpus_bootstrap as _r17_corpus_bootstrap
-    if _r17_corpus_bootstrap.is_enabled():
+    # Round 101: pytest imports can happen before PYTEST_CURRENT_TEST is
+    # populated.  Starting corpus/index/embedder daemon threads during
+    # collection races interpreter teardown and can segfault in native
+    # dependencies.  Runtime app launches still start the corpus normally.
+    _r101_under_pytest = (
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("ADOPTIQ_TESTING") == "1"
+        or "pytest" in sys.modules
+    )
+    if _r17_corpus_bootstrap.is_enabled() and not _r101_under_pytest:
         _r17_corpus_bootstrap.start_background()
 except Exception as _r17_corpus_err:  # noqa: BLE001 - never block boot
     logger.warning(
@@ -2769,25 +2778,38 @@ def _r92_resolve_output_artifact(raw_path: object, *, basename_hint: str | None 
     """
     raw_text = str(raw_path or "").strip()
     basename = secure_filename(basename_hint or os.path.basename(raw_text))
-    candidates: list[Path] = []
+    current_roots = tuple(_r92_candidate_output_roots(create_current=True))
+    allowed_roots = tuple(_r92_candidate_output_roots(create_current=False))
+    direct_candidates: list[Path] = []
     if raw_text:
-        candidates.append(Path(raw_text))
-    for root in _r92_candidate_output_roots(create_current=True):
+        direct_candidates.append(Path(raw_text))
+    for root in current_roots:
         if basename:
-            candidates.append(Path(root) / basename)
-            try:
-                candidates.extend(p for p in Path(root).rglob(basename) if p.is_file())
-            except OSError:
-                pass
-    for candidate in candidates:
+            direct_candidates.append(Path(root) / basename)
+
+    # Round 101: check server-known direct paths before the expensive R81
+    # recursive basename fallback. The old eager rglob walked the full
+    # Documents output tree before serving every download, which made
+    # completed reports look like ReadTimeout failures in live soaks.
+    for candidate in direct_candidates:
         try:
             resolved = Path(os.path.realpath(str(candidate)))
             if not resolved.is_file():
                 continue
-            if any(_r92_is_under_root(resolved, root) for root in _r92_candidate_output_roots(create_current=False)):
+            if any(_r92_is_under_root(resolved, root) for root in allowed_roots):
                 return str(resolved)
         except Exception:
             continue
+
+    if basename:
+        for root in current_roots:
+            try:
+                for candidate in Path(root).rglob(basename):
+                    resolved = Path(os.path.realpath(str(candidate)))
+                    if resolved.is_file() and any(_r92_is_under_root(resolved, allowed) for allowed in allowed_roots):
+                        return str(resolved)
+            except OSError:
+                pass
     return None
 
 
@@ -10358,6 +10380,11 @@ def run_compact_analysis(analysis_id):
                     # narratives can select the right denominator.
                     risk_summary = {
                         'overall_risk_score': round(overall_risk_score, 1),
+                        # Round 101: Compact's Word narrative and risk table
+                        # intentionally use the legacy 0-10/color-aware
+                        # predicate. Declare that scale so the consistency
+                        # gate validates the same count the report renders.
+                        'high_risk_scale': cm.RISK_SCALE_0_TO_10,
                         'high_risk_customers': len(high_risk_customers),
                         'moderate_risk_customers': len(moderate_risk_customers),
                         'medium_risk_customers': len(medium_band_customers),
@@ -30218,4 +30245,6 @@ if __name__ == '__main__':
     except Exception:
         logger.exception("Round 32 / Phase 2.D: admin auto-start raised; "
                          "main app continuing")
-    app.run(debug=False, host=_bind_host, port=PORT, use_reloader=False)
+    # Round 101: explicit threaded server so slow report downloads or browser
+    # keep-alive sockets cannot starve /status and /ping during live soaks.
+    app.run(debug=False, host=_bind_host, port=PORT, use_reloader=False, threaded=True)

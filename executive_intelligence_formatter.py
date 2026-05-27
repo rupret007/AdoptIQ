@@ -234,14 +234,14 @@ class ExecutiveIntelligenceFormatter:
     Executive Intelligence Formatter for compact, insight-driven reports.
     Focuses on actionable intelligence and risk assessment.
     """
-    
+
     def __init__(self, output_path: str = None):
         """Initialize the formatter"""
         self.doc = Document()
         self.output_path = output_path
         self._setup_document_settings()
         self._create_professional_styles()
-    
+
     def _setup_document_settings(self):
         """Configure document-wide settings"""
         sections = self.doc.sections
@@ -250,11 +250,11 @@ class ExecutiveIntelligenceFormatter:
             section.bottom_margin = Inches(0.8)
             section.left_margin = Inches(1.0)
             section.right_margin = Inches(1.0)
-    
+
     def _create_professional_styles(self):
         """Create professional document styles"""
         styles = self.doc.styles
-        
+
         # Executive Title
         if 'Executive Title' not in [s.name for s in styles]:
             title_style = styles.add_style('Executive Title', WD_STYLE_TYPE.PARAGRAPH)
@@ -264,7 +264,7 @@ class ExecutiveIntelligenceFormatter:
             title_style.font.color.rgb = CISCO_BLUE
             title_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
             title_style.paragraph_format.space_after = Pt(20)
-        
+
         # Section Header
         if 'Section Header' not in [s.name for s in styles]:
             header_style = styles.add_style('Section Header', WD_STYLE_TYPE.PARAGRAPH)
@@ -274,12 +274,12 @@ class ExecutiveIntelligenceFormatter:
             header_style.font.color.rgb = CISCO_DARK_BLUE
             header_style.paragraph_format.space_before = Pt(16)
             header_style.paragraph_format.space_after = Pt(8)
-    
+
     def _clean_text(self, text: str) -> str:
         """Clean markdown and formatting from text"""
         if not text:
             return ""
-        
+
         # Remove markdown
         text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)
         text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
@@ -287,9 +287,9 @@ class ExecutiveIntelligenceFormatter:
         text = re.sub(r'`(.*?)`', r'\1', text)
         text = re.sub(r'---+\s*', '', text)
         text = re.sub(r'\n{3,}', '\n\n', text)
-        
+
         return text.strip()
-    
+
     def add_title_page(self, manager: str, technology: str, days: int,
                         data_retrieved_at: Optional[datetime] = None):
         """Add executive title page.
@@ -308,9 +308,9 @@ class ExecutiveIntelligenceFormatter:
         logo_run.font.size = Pt(16)
         logo_run.font.color.rgb = CISCO_BLUE
         logo_run.font.bold = True
-        
+
         self.doc.add_paragraph()
-        
+
         # Main Title
         title_para = self.doc.add_paragraph()
         title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -319,7 +319,7 @@ class ExecutiveIntelligenceFormatter:
         title_run.font.size = Pt(24)
         title_run.font.bold = True
         title_run.font.color.rgb = CISCO_BLUE
-        
+
         # Subtitle
         subtitle_para = self.doc.add_paragraph()
         subtitle_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -327,7 +327,7 @@ class ExecutiveIntelligenceFormatter:
         subtitle_run.font.name = 'Segoe UI'
         subtitle_run.font.size = Pt(14)
         subtitle_run.font.color.rgb = CISCO_GRAY
-        
+
         # Date
         self.doc.add_paragraph()
         date_para = self.doc.add_paragraph()
@@ -366,7 +366,7 @@ class ExecutiveIntelligenceFormatter:
             data_run.font.name = 'Segoe UI'
             data_run.font.size = Pt(10)
             data_run.font.color.rgb = CISCO_GRAY
-    
+
     def add_executive_dashboard(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame,
                                risk_scores: Dict[str, Any], risk_summary: Dict[str, Any],
                                team_subs_df: pd.DataFrame = None,
@@ -381,16 +381,16 @@ class ExecutiveIntelligenceFormatter:
         if ab_data is None:
             ab_data = pd.DataFrame()
         self.doc.add_paragraph()
-        
+
         # Dashboard header
         header = self.doc.add_heading('At-a-Glance Dashboard', level=1)
         if header.runs:
             header.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         # Create metrics table - expanded to include software defects and vulnerabilities (7 columns total)
         metrics_table = self.doc.add_table(rows=2, cols=7)
         metrics_table.style = 'Light Grid Accent 1'
-        
+
         # CRITICAL FIX: Use comprehensive function to get ALL customers from ALL available data sources
         # This ensures consistent customer counts across all report types
         # team_subs_df is the PRIMARY source (unfiltered, contains all customers assigned to manager)
@@ -460,7 +460,7 @@ class ExecutiveIntelligenceFormatter:
         p1_count = cm.count_p1(csone_norm)
         p2_count = cm.count_p2(csone_norm)
         bems_count = cm.count_bems(csone_norm)
-        
+
         # Extract software defects and PSIRT vulnerabilities counts
         defect_count = 0
         vuln_count = 0
@@ -468,7 +468,7 @@ class ExecutiveIntelligenceFormatter:
             defect_count = software_defects.get('total_defects', 0)
         if psirt_vulns:
             vuln_count = psirt_vulns.get('total_vulnerabilities', 0)
-        
+
         # Header row - expanded to include software defects and vulnerabilities
         headers = ['Total Customers', 'Support Cases', 'Critical (P1)', 'High (P2)', 'BEMS Escalations', 'Software Defects', 'Security Vulnerabilities']
         for i, header_text in enumerate(headers):
@@ -479,11 +479,11 @@ class ExecutiveIntelligenceFormatter:
                     run.bold = True
                     run.font.size = Pt(10)
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+
         # Values row - expanded to include software defects and vulnerabilities
         values = [str(total_customers), str(total_cases), str(p1_count), str(p2_count), str(bems_count), str(defect_count), str(vuln_count)]
         colors = [None, None, DANGER_RED if p1_count > 0 else None, WARNING_ORANGE if p2_count > 0 else None, CRITICAL_RED if bems_count > 0 else None, WARNING_ORANGE if defect_count > 0 else None, DANGER_RED if vuln_count > 0 else None]
-        
+
         for i, (value, color) in enumerate(zip(values, colors)):
             cell = metrics_table.rows[1].cells[i]
             cell.text = value
@@ -494,7 +494,7 @@ class ExecutiveIntelligenceFormatter:
                     if color:
                         run.font.color.rgb = color
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+
         # Inline source-backed metrics for dashboard facts
         src_para = self.doc.add_paragraph()
         src_para.add_run("Metric source backing:\n").bold = True
@@ -533,7 +533,7 @@ class ExecutiveIntelligenceFormatter:
             bullet.add_run(fact)
 
         self.doc.add_paragraph()
-        
+
         # Risk Summary
         if risk_summary:
             # Round 7 / Phase 1.4: route counts/scores through the
@@ -591,13 +591,13 @@ class ExecutiveIntelligenceFormatter:
                 risk_para.add_run(
                     f"Score 4-6 (Watch, 0-10 scale): {format_number(risk_summary.get('moderate_risk_customers', 0), decimals=0)}"
                 )
-    
+
     def add_executive_summary(self, ai_insights: Dict[str, Any]):
         """Add AI-generated executive summary"""
         header = self.doc.add_heading('Executive Summary', level=1)
         if header.runs:
             header.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         summary_text = ""
         if ai_insights:
             if 'executive_summary' in ai_insights:
@@ -606,7 +606,7 @@ class ExecutiveIntelligenceFormatter:
                 summary_text = ai_insights['portfolio_summary']['executive_summary']
             elif 'raw_response' in ai_insights:
                 summary_text = ai_insights['raw_response']
-        
+
         if summary_text:
             clean_text = self._clean_text(summary_text)
             # Round 50 / F-COMP-BEMS-MD-LEAK-EI-PATH: compact production
@@ -664,25 +664,25 @@ class ExecutiveIntelligenceFormatter:
             # columns.  Severity already uses the friendly form.
             f" {format_inline_source('Derived Metric', fields=['Severity', 'Pulse Rating', 'Created Date'])}"
         )
-    
+
     def _parse_and_add_content(self, text: str):
         """Parse text content and add to document with proper formatting"""
         if not text:
             return
-        
+
         sections = text.split('\n\n')
-        
+
         for section in sections:
             if not section.strip():
                 continue
-            
+
             lines = section.strip().split('\n')
-            
+
             for line in lines:
                 line = line.strip()
                 if not line:
                     continue
-                
+
                 # Round 11 / Phase 9.5: previous rule treated *any*
                 # short line ending in ``:`` as an H2 heading, so LLM
                 # prose like ``Caution:`` or ``Note:`` got promoted
@@ -718,7 +718,7 @@ class ExecutiveIntelligenceFormatter:
                     if header.runs:
                         header.runs[0].font.color.rgb = CISCO_DARK_BLUE
                         header.runs[0].font.size = Pt(12)
-                
+
                 # Bullet points
                 elif line.startswith(('•', '-', '*')):
                     bullet_text = line.lstrip('•-* ')
@@ -732,7 +732,7 @@ class ExecutiveIntelligenceFormatter:
                     )
                     run.font.name = 'Segoe UI'
                     run.font.size = Pt(11)
-                
+
                 # Numbered items
                 elif re.match(r'^\d+[\.\)]\s', line):
                     number_text = re.sub(r'^\d+[\.\)]\s*', '', line)
@@ -746,7 +746,7 @@ class ExecutiveIntelligenceFormatter:
                     )
                     run.font.name = 'Segoe UI'
                     run.font.size = Pt(11)
-                
+
                 # Regular paragraph
                 else:
                     para = self.doc.add_paragraph()
@@ -759,13 +759,13 @@ class ExecutiveIntelligenceFormatter:
                     )
                     run.font.name = 'Segoe UI'
                     run.font.size = Pt(11)
-    
+
     def add_risk_analysis_section(self, risk_scores: Dict[str, Any], ab_data: pd.DataFrame, csone_data: pd.DataFrame):
         """Add detailed risk analysis section"""
         header = self.doc.add_heading('Risk Analysis', level=1)
         if header.runs:
             header.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         # High-risk customers — Round 3: route through the canonical
         # predicate so the table contents always match the headline /
         # dashboard count produced by ``cm.compute_high_risk_count``.
@@ -775,17 +775,17 @@ class ExecutiveIntelligenceFormatter:
             k: v for k, v in (risk_scores or {}).items()
             if cm.is_high_risk_profile(v, scale=cm.RISK_SCALE_0_TO_10)
         }
-        
+
         if high_risk:
             subheader = self.doc.add_heading('High-Risk Customers Requiring Immediate Attention', level=2)
             if subheader.runs:
                 subheader.runs[0].font.color.rgb = DANGER_RED
-            
+
             # Create table for high-risk customers
             if len(high_risk) > 0:
                 table = self.doc.add_table(rows=1, cols=3)
                 table.style = 'Light Grid Accent 1'
-                
+
                 # Header
                 headers = ['Customer', 'Risk Score', 'Key Issues']
                 for i, h in enumerate(headers):
@@ -794,7 +794,7 @@ class ExecutiveIntelligenceFormatter:
                         cell_para = table.rows[0].cells[i].paragraphs[0]
                         if cell_para.runs:
                             cell_para.runs[0].font.bold = True
-                
+
                 # FIXED: Show ALL high-risk customers
                 # Round 18 / Phase 2.1: tuple sort key with a casefolded
                 # name secondary tiebreaker so two customers tied on the
@@ -842,7 +842,7 @@ class ExecutiveIntelligenceFormatter:
                         row[1].text = "N/A"
                     else:
                         row[1].text = f"{format_number(_score, decimals=1)}/10"
-                    
+
                     # Key issues
                     issues = []
                     if data.get('ab_count', 0) > 0:
@@ -853,18 +853,18 @@ class ExecutiveIntelligenceFormatter:
         else:
             para = self.doc.add_paragraph()
             para.add_run("No high-risk customers identified in this analysis period.")
-    
+
     def add_bems_escalation_section(self, csone_data: pd.DataFrame):
         """Add BEMS escalation analysis section - CRITICAL for executive visibility"""
         header = self.doc.add_heading('🚨 BEMS Escalation Analysis', level=1)
         if header.runs:
             header.runs[0].font.color.rgb = DANGER_RED
-        
+
         # Intro paragraph
         intro = self.doc.add_paragraph()
         intro.add_run("BEMS (Back-End Engineering Management System) escalations indicate complex technical issues "
                      "requiring specialized backend engineering attention. These are critical indicators of customer risk.")
-        
+
         # Extract BEMS data
         total_bems = 0
         bems_by_customer = {}
@@ -872,7 +872,7 @@ class ExecutiveIntelligenceFormatter:
         break_fix_total = 0
         provisioning_total = 0
         csone_norm = pd.DataFrame()
-        
+
         if csone_data is not None and not csone_data.empty:
             csone_norm = add_case_lifecycle_fields(csone_data)
             bems_mask = detect_bems_mask(csone_norm)
@@ -892,7 +892,7 @@ class ExecutiveIntelligenceFormatter:
             else:
                 break_fix_total = 0
                 provisioning_total = 0
-            
+
             # Group by customer
             if not bems_cases.empty and 'customer_name' in bems_cases.columns:
                 # Round 7 / Phase 1.5: normalize customer_name before
@@ -907,11 +907,11 @@ class ExecutiveIntelligenceFormatter:
                     _bems_norm['customer_name'].apply(normalize_customer_name)
                 )
                 bems_by_customer = _bems_norm.groupby('customer_name').size().to_dict()
-                
+
                 # Extract BEMS IDs
                 for _, row in bems_cases.iterrows():
                     bems_ids.extend(extract_bems_ids_from_row(row))
-        
+
         # Summary metrics
         metrics_para = self.doc.add_paragraph()
         metrics_para.add_run('Summary Metrics:\n').bold = True
@@ -1021,7 +1021,7 @@ class ExecutiveIntelligenceFormatter:
                     "(table truncated; full set available in raw exports)."
                 )
                 _trunc_run.italic = True
-        
+
         if bems_ids:
             metrics_para.add_run(f'• BEMS IDs: ')
             # Round 48 / F-COMP-BEMS-MD-LEAK: emit comma-separated BEMS
@@ -1036,13 +1036,13 @@ class ExecutiveIntelligenceFormatter:
             # rendered Word output.
             ids_run = metrics_para.add_run(', '.join(str(bid) for bid in bems_ids))
             ids_run.font.color.rgb = CISCO_GRAY
-        
+
         # Customer breakdown
         if bems_by_customer:
             self.doc.add_paragraph()
             breakdown_para = self.doc.add_paragraph()
             breakdown_para.add_run('BEMS Escalations by Customer:\n').bold = True
-            
+
             # FIXED: Show ALL customers with BEMS escalations
             # Round 13 / Phase 9.3: previously this rendered each
             # ``customer`` raw via ``add_run(f'• {customer}: ')`` and
@@ -1075,20 +1075,20 @@ class ExecutiveIntelligenceFormatter:
         else:
             no_bems = self.doc.add_paragraph()
             no_bems.add_run('✅ No BEMS escalations detected in this analysis period - positive indicator.')
-    
+
     def add_software_defects_section(self, software_defects: Dict):
         """Add Software Defects section - BST/CSC IDs extracted from data"""
         header = self.doc.add_heading('Software Defects (BST/CSC IDs)', level=1)
         if header.runs:
             header.runs[0].font.color.rgb = DANGER_RED
-        
+
         defect_count = software_defects.get('total_defects', 0)
         cases_with_defects = software_defects.get('total_cases_with_defects', 0)
-        
+
         summary_para = self.doc.add_paragraph()
         summary_para.add_run(f'Total Software Defects Identified: ').bold = True
         summary_para.add_run(f'{defect_count} unique BST/CSC defects found in {cases_with_defects} support cases.')
-        
+
         defect_by_customer = software_defects.get('defect_by_customer', {})
         if defect_by_customer:
             self.doc.add_paragraph()
@@ -1132,17 +1132,17 @@ class ExecutiveIntelligenceFormatter:
                     row = table.rows[r_idx].cells
                     for c_idx, v in enumerate(row_vals):
                         row[c_idx].text = v
-    
+
     def add_psirt_vulnerabilities_section(self, psirt_vulns: Dict):
         """Add PSIRT Vulnerabilities section - CVEs and PSIRT advisories extracted from data"""
         header = self.doc.add_heading('Security Vulnerabilities (CVEs & PSIRT)', level=1)
         if header.runs:
             header.runs[0].font.color.rgb = DANGER_RED
-        
+
         vuln_count = psirt_vulns.get('total_vulnerabilities', 0)
         cve_ids = psirt_vulns.get('cve_ids', set())
         psirt_advisories = psirt_vulns.get('psirt_advisories', set())
-        
+
         summary_para = self.doc.add_paragraph()
         summary_para.add_run(f'Total Vulnerability References: ').bold = True
         # Round 10 / Phase 4.3: ``vuln_count`` (``total_vulnerabilities``)
@@ -1158,19 +1158,19 @@ class ExecutiveIntelligenceFormatter:
             f'{vuln_count} reference(s) across cases / extracts; '
             f'{len(cve_ids)} distinct CVEs and {len(psirt_advisories)} distinct PSIRT advisories.'
         )
-        
+
         if cve_ids:
             self.doc.add_paragraph()
             cve_para = self.doc.add_paragraph()
             cve_para.add_run('CVE IDs: ').bold = True
             cve_para.add_run(', '.join([f'[{cve}]' for cve in sorted(cve_ids)]))
-        
+
         if psirt_advisories:
             self.doc.add_paragraph()
             psirt_para = self.doc.add_paragraph()
             psirt_para.add_run('PSIRT Advisories: ').bold = True
             psirt_para.add_run(', '.join([f'[{psirt}]' for psirt in sorted(psirt_advisories)]))
-        
+
         vulnerability_by_customer = psirt_vulns.get('vulnerability_by_customer', {})
         if vulnerability_by_customer:
             self.doc.add_paragraph()
@@ -1188,7 +1188,7 @@ class ExecutiveIntelligenceFormatter:
                 customer_para = self.doc.add_paragraph()
                 customer_para.add_run(f'• {customer}: ').bold = True
                 customer_para.add_run(', '.join([f'[{v}]' for v in vuln_list]))
-    
+
     def add_known_defects_section(
         self,
         ext_bugs: List = None,
@@ -1206,10 +1206,10 @@ class ExecutiveIntelligenceFormatter:
         header = self.doc.add_heading('Known Software Defects (help.webex.com)', level=1)
         if header.runs:
             header.runs[0].font.color.rgb = WARNING_ORANGE
-        
+
         intro = self.doc.add_paragraph()
         intro.add_run("Known software defects from help.webex.com that may be impacting portfolio customers:")
-        
+
         if ext_bugs and len(ext_bugs) > 0:
             # Summary
             summary_para = self.doc.add_paragraph()
@@ -1237,14 +1237,14 @@ class ExecutiveIntelligenceFormatter:
                     )
                 _trunc_run = _trunc_para.add_run(_msg)
                 _trunc_run.italic = True
-            
+
             # FIXED: Display ALL defects for complete visibility
             self.doc.add_paragraph()
             for bug in ext_bugs:
                 bug_id = bug.get('bug_id', 'Unknown')
                 title = bug.get('title', 'No description available')
                 source = bug.get('source_url', '')
-                
+
                 bug_para = self.doc.add_paragraph()
                 # Format defect ID for easy citation and verification
                 bug_run = bug_para.add_run(f'• [{bug_id}]: ')
@@ -1266,7 +1266,7 @@ class ExecutiveIntelligenceFormatter:
                 no_defects.add_run(render_empty_state_message(
                     _state, source_label='Software defects feed (help.webex.com)'
                 ))
-    
+
     def add_service_incidents_section(
         self,
         ext_incidents: List = None,
@@ -1283,10 +1283,10 @@ class ExecutiveIntelligenceFormatter:
         header = self.doc.add_heading('Recent Service Incidents', level=1)
         if header.runs:
             header.runs[0].font.color.rgb = WARNING_ORANGE
-        
+
         intro = self.doc.add_paragraph()
         intro.add_run("Recent service incidents from status.webex.com that may have impacted portfolio customers:")
-        
+
         if ext_incidents and len(ext_incidents) > 0:
             # Round 4 / Phase 5.5: surface "served from local cache" so
             # readers know the live status.webex feed was unreachable
@@ -1346,7 +1346,7 @@ class ExecutiveIntelligenceFormatter:
                 inc_id = incident.get('id', incident.get('pub_id', 'Unknown'))
                 title = incident.get('title', 'No description')
                 date = incident.get('published', incident.get('date', 'Unknown date'))
-                
+
                 inc_para = self.doc.add_paragraph()
                 inc_run = inc_para.add_run(f'• {inc_id}: ')
                 inc_run.bold = True
@@ -1362,7 +1362,7 @@ class ExecutiveIntelligenceFormatter:
                 no_incidents.add_run(render_empty_state_message(
                     _state, source_label='Service incidents feed (status.webex.com)'
                 ))
-    
+
     def add_recommendations_section(self, ai_insights: Dict[str, Any]):
         """Add strategic recommendations section.
 
@@ -1434,16 +1434,16 @@ class ExecutiveIntelligenceFormatter:
             run = para.add_run(rec)
             run.font.name = 'Segoe UI'
             run.font.size = Pt(11)
-    
+
     def add_data_citations_section(self, ab_data: pd.DataFrame, csone_data: pd.DataFrame):
         """Add Data Citations section – uses canonical data sources (same across all AdoptIQ reports)."""
         header = self.doc.add_heading('Report Data Sources', level=1)
         if header.runs:
             header.runs[0].font.color.rgb = CISCO_BLUE
-        
+
         intro = self.doc.add_paragraph()
         intro.add_run("All data in this report is traceable. Same canonical sources used across all AdoptIQ reports.")
-        
+
         try:
             from report_utils import get_data_sources_paragraph_text, get_data_sources_list
         except ImportError:
@@ -1489,7 +1489,7 @@ class ExecutiveIntelligenceFormatter:
         note = self.doc.add_paragraph()
         note.add_run("🔗 Verifiable IDs: ").bold = True
         note.add_run("All [BEMSxxxxxxxx], [CSCxxxxxxx], and TAC case numbers can be validated in their source systems.")
-    
+
     def save(self, filepath: str = None):
         """Save the document"""
         save_path = filepath or self.output_path
@@ -1629,10 +1629,10 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
         )
 
     formatter = ExecutiveIntelligenceFormatter(output_path)
-    
+
     # Add title page
     formatter.add_title_page(manager, technology, days, data_retrieved_at=data_retrieved_at)
-    
+
     # Add page break after title
     formatter.doc.add_page_break()
 
@@ -1666,7 +1666,7 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
                 type(_banner_err).__name__, _banner_err,
                 exc_info=True,
             )
-    
+
     # Add executive dashboard with all data sources for accurate customer counting
     formatter.add_executive_dashboard(ab_data, csone_data, risk_scores or {}, risk_summary or {},
                                      team_subs_df=team_subs_df if team_subs_df is not None else pd.DataFrame(),
@@ -1676,7 +1676,7 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
                                      csconsole_adoption_barriers=csconsole_adoption_barriers if csconsole_adoption_barriers is not None else pd.DataFrame(),
                                      software_defects=software_defects if software_defects is not None else {'total_defects': 0, 'total_cases_with_defects': 0, 'defect_by_customer': {}},
                                      psirt_vulns=psirt_vulns if psirt_vulns is not None else {'total_vulnerabilities': 0, 'cve_ids': set(), 'psirt_advisories': set(), 'vulnerability_by_customer': {}})
-    
+
     # Add executive summary
     formatter.add_executive_summary(ai_insights)
 
@@ -1773,32 +1773,32 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
     # Add risk analysis
     if risk_scores:
         formatter.add_risk_analysis_section(risk_scores, ab_data, csone_data)
-    
+
     # Add BEMS escalation analysis (CRITICAL section that was missing)
     formatter.add_bems_escalation_section(csone_data)
-    
+
     # Add Software Defects section (extracted from data - BST/CSC IDs)
     if software_defects and software_defects.get('total_defects', 0) > 0:
         formatter.add_software_defects_section(software_defects)
-    
+
     # Add PSIRT Vulnerabilities section (extracted from data - CVEs/PSIRT)
     if psirt_vulns and psirt_vulns.get('total_vulnerabilities', 0) > 0:
         formatter.add_psirt_vulnerabilities_section(psirt_vulns)
-    
+
     # Add Known Defects section (from help.webex.com)
     formatter.add_known_defects_section(
         ext_bugs,
         intel_truncated=intel_truncated,
         intel_fetch_limit=intel_fetch_limit,
     )
-    
+
     # Add Service Incidents section (from status.webex.com)
     formatter.add_service_incidents_section(
         ext_incidents,
         intel_truncated=intel_truncated,
         intel_fetch_limit=intel_fetch_limit,
     )
-    
+
     # Add recommendations
     formatter.add_recommendations_section(ai_insights)
 
@@ -1955,6 +1955,13 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
         risk_scale=cm.RISK_SCALE_0_TO_10,
         extra_customer_frames=_ei_extra_frames,
     )
+    # Round 101: preserve the report path's declared high-risk scale when
+    # this formatter rebuilds portfolio_metrics for the consistency gate.
+    # Compact renders the legacy 0-10/color-aware high-risk count; dropping
+    # this key made the validator compare that count against the default
+    # 0-100 helper and abort otherwise valid live reports.
+    if isinstance(risk_summary, dict) and risk_summary.get("high_risk_scale"):
+        portfolio_metrics["high_risk_scale"] = risk_summary.get("high_risk_scale")
     # Re-run total_customers via cm.count_customers with the account map
     # because build_portfolio_metrics' count_customers call doesn't
     # expose account_to_customer; route this single value through the
@@ -2021,7 +2028,7 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
         raise ValueError(f"Executive consistency checks failed: {'; '.join(consistency['errors'])}")
     if consistency["warnings"]:
         logger.warning("[[CONSISTENCY]] Executive report warnings: %s", consistency["warnings"])
-    
+
     # Save and return
     return formatter.save(output_path)
 

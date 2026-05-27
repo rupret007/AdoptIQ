@@ -173,3 +173,53 @@ def test_compact_and_renewal_score_agree_on_same_inputs() -> None:
     assert compact["risk_band"] == direct["risk_band"], (
         "Risk band MUST match (canonical CRITICAL/HIGH/MEDIUM/LOW/HEALTHY)"
     )
+
+
+def test_round100_compact_curated_action_plans_are_scored() -> None:
+    """Round 100: Compact XLSX writes curated Action_Plans columns.
+
+    The live 2026-05-27 Compact/Renewal pair showed Compact stuck at
+    the 0.7 baseline for customers whose curated Action_Plans rows were
+    present in the workbook.  The classifier already recognised raw
+    Snowflake APs, but the per-customer slicer ignored the curated
+    ``Customer Name`` column, so AP rows never reached the scorer.
+    """
+    action_plans = pd.DataFrame([
+        {"Customer Name": "Acme Corp", "Status": "Open", "Action Plan Title": "Onboard"},
+        {"Customer Name": "Acme Corp", "Status": "In Progress", "Action Plan Title": "Train"},
+    ])
+
+    out = calculate_renewal_risk_scores(
+        pd.DataFrame(),
+        pd.DataFrame(),
+        extra_frames=[action_plans],
+        recent_window_days=90,
+    )
+
+    assert "Acme Corp" in out
+    assert out["Acme Corp"]["score"] > 0.0
+    assert any("unresolved action plans" in factor for factor in out["Acme Corp"]["risk_factors"])
+
+
+def test_round100_compact_curated_customer_pulse_is_scored() -> None:
+    """Round 100: Compact XLSX writes curated Customer_Pulse columns.
+
+    Curated pulse rows use ``Customer Name`` plus lower-case ``rating``.
+    Both the Compact extra-frame classifier and the shared risk scorer
+    must understand that shape, otherwise Compact ignores pulse risk
+    that Renewal includes.
+    """
+    pulse = pd.DataFrame([
+        {"Customer Name": "Acme Corp", "rating": "Poor", "Customer Pulse": "Poor"},
+    ])
+
+    out = calculate_renewal_risk_scores(
+        pd.DataFrame(),
+        pd.DataFrame(),
+        extra_frames=[pulse],
+        recent_window_days=90,
+    )
+
+    assert "Acme Corp" in out
+    assert out["Acme Corp"]["score"] > 0.0
+    assert any("poor/bad customer pulse" in factor for factor in out["Acme Corp"]["risk_factors"])

@@ -2686,8 +2686,11 @@ def _r66_b8_classify_extra_frames(
         cols = set(frame.columns)
         # Pulse: characteristic marker is the rating/score columns.
         # CSConsole emits ``PULSE_RATING__C`` and ``SCORE__C``;
-        # legacy fixtures use ``PULSE_RATING``.
-        if pulse_df is None and ({"PULSE_RATING__C", "PULSE_RATING", "SCORE__C", "PULSE_SCORE"} & cols):
+        # legacy fixtures use ``PULSE_RATING``. Round 100 keeps the
+        # curated XLSX export shape wired too (`rating`, `Customer Pulse`).
+        if pulse_df is None and (
+            {"PULSE_RATING__C", "PULSE_RATING", "SCORE__C", "PULSE_SCORE", "rating", "Customer Pulse"} & cols
+        ):
             pulse_df = frame
             continue
         # Subscriptions: characteristic marker is the renewal-risk
@@ -2699,7 +2702,15 @@ def _r66_b8_classify_extra_frames(
         # the absence of pulse / subs / AB markers (AB has SEVERITY_C
         # or AB_STATUS_C).
         ap_marker = bool({"STATUS_C", "STATUS__C", "Status"} & cols)
-        ap_disqualifier = bool({"PULSE_RATING__C", "SCORE__C", "RENEWAL_RISK_CATEGORY", "SEVERITY_C", "AB_STATUS_C"} & cols)
+        ap_disqualifier = bool({
+            "PULSE_RATING__C",
+            "SCORE__C",
+            "rating",
+            "Customer Pulse",
+            "RENEWAL_RISK_CATEGORY",
+            "SEVERITY_C",
+            "AB_STATUS_C",
+        } & cols)
         if action_plans_df is None and ap_marker and not ap_disqualifier:
             action_plans_df = frame
             continue
@@ -2795,7 +2806,16 @@ def calculate_renewal_risk_scores(
             def _r66_b8_slice(df: Optional[pd.DataFrame], cust: str) -> pd.DataFrame:
                 if df is None or df.empty:
                     return pd.DataFrame()
-                for col in ("customer_name", "BU_NAME", "CUSTOMER_NAME", "RELATED_CUSTOMER__C"):
+                for col in (
+                    "customer_name",
+                    "Customer Name",  # Round 100: curated Compact AP/Pulse exports.
+                    "customer",
+                    "BU_NAME",
+                    "CUSTOMER_NAME",
+                    "CUSTOMER_NAME__C",
+                    "RELATED_CUSTOMER__C",
+                    "CUSTOMER_BU_NAME__C",
+                ):
                     if col in df.columns:
                         try:
                             mask = df[col].fillna("").astype(str).apply(normalize_customer_name) == cust

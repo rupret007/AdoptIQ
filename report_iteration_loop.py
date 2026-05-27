@@ -420,6 +420,8 @@ class RunnerConfig:
     init_baseline: bool = False
     init_baseline_dir: Optional[Path] = None
     init_baseline_label: Optional[str] = None
+    request_timeout_seconds: int = 120
+    download_timeout_seconds: int = 300
 
 
 def _utc_now() -> datetime:
@@ -2452,7 +2454,7 @@ class LiveReportRunner:
                 % json.dumps(self.app_health_gate.details, sort_keys=True)
             )
         url = f"{self.config.base_url.rstrip('/')}/"
-        response = self.session.get(url, timeout=30)
+        response = self.session.get(url, timeout=self.config.request_timeout_seconds)
         response.raise_for_status()
         self.csrf_token = extract_csrf_token(response.text)
         # Round 51: local dev often runs over plain HTTP while Flask sets
@@ -2483,14 +2485,14 @@ class LiveReportRunner:
                 url,
                 json=request_payload,
                 headers=self._headers(include_json_content_type=True),
-                timeout=60,
+                timeout=self.config.request_timeout_seconds,
             )
         else:
             response = self.session.post(
                 url,
                 data=request_payload,
                 headers=self._headers(include_json_content_type=False),
-                timeout=60,
+                timeout=self.config.request_timeout_seconds,
             )
         try:
             data = response.json()
@@ -2514,7 +2516,7 @@ class LiveReportRunner:
         deadline = time.monotonic() + self.config.scenario_timeout_seconds
         snapshots: list[dict[str, Any]] = []
         while True:
-            response = self.session.get(status_url, timeout=30)
+            response = self.session.get(status_url, timeout=self.config.request_timeout_seconds)
             response.raise_for_status()
             payload = response.json()
             snapshots.append(
@@ -2538,7 +2540,9 @@ class LiveReportRunner:
 
     def _download_artifact(self, analysis_id: str, file_type: str) -> tuple[str, bytes]:
         url = f"{self.config.base_url.rstrip('/')}/download/{quote(analysis_id)}/{file_type}"
-        response = self.session.get(url, timeout=120)
+        # Round 101: large live DOCX downloads can legitimately take longer
+        # than the old fixed 120s harness timeout on a busy packaged app.
+        response = self.session.get(url, timeout=self.config.download_timeout_seconds)
         if response.status_code != 200:
             raise RuntimeError(f"Download failed for {analysis_id} {file_type}: HTTP {response.status_code} {response.text[:200]}")
         fallback = f"{analysis_id}.{file_type}"
@@ -2942,6 +2946,8 @@ def build_runner_config(args: argparse.Namespace) -> RunnerConfig:
         iterations=max(args.iterations, 1),
         poll_interval_seconds=max(args.poll_interval, 1.0),
         scenario_timeout_seconds=max(args.timeout, 60),
+        request_timeout_seconds=max(getattr(args, "request_timeout", 120), 30),
+        download_timeout_seconds=max(getattr(args, "download_timeout", 300), 60),
         run_id=args.run_id or _default_run_id(),
         stop_on_failure=bool(args.stop_on_failure),
         scenario_keys=keys,
@@ -3056,6 +3062,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--poll-interval", type=float, default=5.0, help="Seconds between /status polls")
     parser.add_argument("--timeout", type=int, default=1800, help="Max seconds per scenario")
+    parser.add_argument(
+        "--request-timeout",
+        type=int,
+        default=120,
+        help="Max seconds for app health, start, and status HTTP requests",
+    )
+    parser.add_argument(
+        "--download-timeout",
+        type=int,
+        default=300,
+        help="Max seconds for each DOCX/XLSX artifact download",
+    )
     parser.add_argument("--run-id", default="", help="Optional run identifier for artifact names")
     parser.add_argument("--stop-on-failure", action="store_true", help="Stop immediately when any scenario fails")
     parser.add_argument(
