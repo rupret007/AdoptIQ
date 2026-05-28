@@ -935,7 +935,99 @@ ADOPTIQ_VERSION = "1.0.4"
 # tests across validator, resolver, ``_r83_safe_share_url``,
 # preferences-page source-shape, analyze-card regression guard, and
 # cross-pin against the R35 + R81 fixtures).
-ADOPTIQ_BUILD = "80"  # Round 111 / Build 80
+ADOPTIQ_BUILD = "81"  # Round 112 / Build 81
+# Round 112 / Build 81: Build 80 acceptance audit + 6-finding fix loop.
+# 1 P0 + 4 P1 + 1 P2 found by the parallel multi-agent audit on the
+# four fresh Build 80 report pairs (Comprehensive / Compact /
+# Renewal Portfolio / Leader, all on the All Contact Center / 90d
+# scope).  The R111 cross-format Risk_Score_0_10 parity fix held
+# (max delta 0.04 across 257 common customers; ZERO MEDIUM/MODERATE
+# vocab leaks; ZERO 0-100 saturation) -- this round closes the
+# remaining gaps surfaced by that audit.
+#
+# F1 (P0 / SECURITY): Compact docx P25 leaked the upstream CircuIT
+# 429 rate-limit response body containing ``appkey=...`` +
+# ``session_id=...`` + a stringified ``user`` JSON blob -- enough
+# for an attacker to attempt session-replay against the upstream API.
+# Root cause: the ``llm_error`` payload at ``app_simple.py:5776`` was
+# concatenated raw into the "Non-AI fallback summary" paragraph
+# instead of routed through the existing ``_r69_sanitize_llm_error``
+# helper, AND that helper's regex pattern set lacked CircuIT-specific
+# coverage (only Bearer / JWT / api_key / Authorization were
+# redacted).  Fix: route the call site through the sanitizer AND
+# extend the redaction set with three new patterns (appkey,
+# session_id, full ``user`` JSON blob).  Pinned by the new
+# ``tests/test_round112_build80_acceptance_fixes.py::TestF1*``
+# (6 tests).
+#
+# F2 (P1): Renewal docx mixed 0-10 (executive-summary scale) with
+# 0-100 (main KPI box + focus-table cells), violating the R67/B1 +
+# R88/F2 + R111 cross-format parity contract.  Root cause: the
+# Renewal Word writer in ``app_simple.py`` had two display sites
+# (the score-summary box at L12970 and the focus-table cells at
+# L13089) that hard-coded the 0-100 scale even after R111 made
+# 0-10 canonical for the published columns.  Fix: convert at the
+# render site (``score_value / 10.0`` for the box, scale the
+# focus-row value before formatting); preserve the 0-100 reference
+# parenthetically in the box for back-compat readability.  Pinned
+# by ``TestF2RenewalScoreScale`` (2 tests).
+#
+# F3 (P1): Leader docx P117 ``"Total Activities: 42 [Source: ...]
+# (APs: 18, ABs: 3, CPs: 1, TAC: 20) [Source: ...]"`` -- the wrapper
+# KPI's citation interrupted the embedded paren cluster as if the
+# wrapper and cluster were two separate semantic units.  They aren't:
+# ``"Total Activities: 42 (APs: 18, ABs: 3, ...)"`` is one assertion.
+# Fix: in ``report_source_injector._rewrite_paragraph_with_inline_citations``,
+# when the next match is in an embedded paren cluster AND the
+# wrapper-KPI value sits IMMEDIATELY before the cluster's open paren
+# (whitespace only between value-end and ``(``), suppress the wrapper's
+# citation -- the cluster's post-``)`` citation already covers BOTH.
+# When the boundary contains non-whitespace (e.g. ``"42 then breakdown
+# (APs: ...)"``), preserve pre-R112 behavior.  Pinned by
+# ``TestF3CitationInjectorWrapperSuppression`` (3 tests) +
+# updated ``test_round76_build51_embedded_paren_cluster.py`` (1 test).
+#
+# F4 (P1): Comprehensive docx P210 rendered ``"the top 11 barriers
+# were also tagged by an LLM classifier"`` while
+# ``analysis_status['be_classifier_diag']['classified_count'] == 0``
+# AND ``llm_error`` carried the rate-limit body.  The narrative
+# was honest about which barriers were ranked deterministically but
+# hallucinated about LLM tagging that never happened.  Fix:
+# ``be_priority_word_section._intro_text`` now reads the diag's
+# ``classified_count``, ``llm_disabled``, and ``llm_error`` fields
+# and emits one of three honest variants: success ("the top N were
+# tagged"), disabled ("LLM classification was disabled"), or failed
+# ("LLM classification was attempted on the top N but did not
+# return any tags").  Pinned by ``TestF4BEClassifierHonesty`` (3 tests).
+#
+# F5 (P1): Renewal + Compact docx partial-data warning paragraphs
+# said ``"One or more upstream data sources failed to load..."``
+# even when the underlying ``partial_data_warnings`` carried only
+# ``kind='tech_filter_scope_excluded'`` (R93 contract) -- a SCOPE
+# decision, not a data-loading failure.  Fix: detect when ALL
+# warnings are scope-kind (the new ``_r112_scope_kinds`` set:
+# ``tech_filter_scope_excluded``, ``manager_filter_scope_excluded``,
+# ``time_window_scope_excluded``, ``no_onedrive_sync``,
+# ``autodiscovered_empty_after_scope``) and emit an honest preamble
+# (``"data was filtered out by the requested scope"``); preserve
+# the legacy preamble for genuine load failures or mixed warnings.
+# Pinned by ``TestF5PartialDataWarningKindAware`` (1 test).
+#
+# F6 (P2): Report titles for the literal sentinel ``"All Managers"``
+# rendered as ``"All Managers's Portfolio"`` (double possessive --
+# ``All Managers`` is already pluralised; appending apostrophe-s
+# is ungrammatical).  Fix: new ``report_utils.r112_smart_possessive``
+# helper that returns the bare name for the literal ``"All Managers"``
+# / ``"all"`` / ``"portfolio"`` sentinels (case-insensitive),
+# apostrophe-only for sibilant-final names (``Alex'``), and
+# apostrophe-s for everything else (``Brian Frazier's``).  Wired
+# into the 5 ``app_simple.py`` call sites + 2 ``adoptiq_backend.py``
+# call sites that produced the bug.  Pinned by
+# ``TestF6SmartPossessive`` (7 tests).
+#
+# All 4 ``make verify`` gates green: ruff clean, bandit 0 HIGH/MED,
+# pip-audit no vulnerabilities, 5664 pytest passed (R94 floor was
+# 5512; +152 net).
 # Round 111 / Build 80: Compact <-> Renewal Risk_Score_0_10 parity (R67/B1
 # root-cause fix). Build 79 acceptance audit measured 182 of 257 common
 # customers (~70%) with Renewal ``Overall_Risk_Score`` higher than Compact

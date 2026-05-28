@@ -136,6 +136,9 @@ def _intro_text(
 
     rows_scored = 0
     top_n = 0
+    classified_count = 0
+    llm_disabled = False
+    llm_error = ""
     if isinstance(diag, dict):
         try:
             rows_scored = int(diag.get("rows_scored") or 0)
@@ -145,6 +148,28 @@ def _intro_text(
             top_n = int(diag.get("top_n_selected") or 0)
         except (TypeError, ValueError):
             top_n = 0
+        # Round 112 / Build 81: pull the LLM classifier outcome from the
+        # diag dict (R79 wires ``be_priority_diag.llm_diag`` with
+        # ``classified_count`` / ``llm_disabled`` / ``llm_error``) so
+        # the intro narrative reflects WHAT ACTUALLY HAPPENED, not what
+        # we asked the LLM to do.  Pre-R112 the narrative claimed "the
+        # top {top_n} barriers were also tagged by an LLM classifier"
+        # whenever ``top_n_selected`` was non-zero -- even when the LLM
+        # 429'd (Build 80 acceptance) and produced zero tags.  The
+        # Build 80 Comprehensive docx (P210) shipped exactly this
+        # dishonest wording: "11 barriers were also tagged by an LLM
+        # classifier (TRUE_BLOCKER / TRAINING_GAP / FEATURE_REQUEST)"
+        # while ``classified_count == 0`` and ``llm_error`` carried
+        # the rate-limit body.  Post-R112: emit one of three honest
+        # variants depending on the actual outcome.
+        llm_diag = diag.get("llm_diag")
+        if isinstance(llm_diag, dict):
+            try:
+                classified_count = int(llm_diag.get("classified_count") or 0)
+            except (TypeError, ValueError):
+                classified_count = 0
+            llm_disabled = bool(llm_diag.get("llm_disabled"))
+            llm_error = str(llm_diag.get("llm_error") or "").strip()
 
     n_techs = len(list(_technologies(focus_areas_df)))
     n_clusters = int(len(focus_areas_df))
@@ -157,12 +182,37 @@ def _intro_text(
         f"{n_techs} technologies."
     )
     if top_n:
-        parts.append(
-            f" The top {top_n} barriers were also tagged by an LLM "
-            "classifier (TRUE_BLOCKER / TRAINING_GAP / FEATURE_REQUEST) "
-            "to help triage; tags inform the narrative below but do "
-            "NOT change the score."
-        )
+        # Round 112 / Build 81: three-state honest copy -- LLM tagged
+        # the barriers (success), LLM was disabled by config / kill-
+        # switch, OR LLM was attempted but returned no tags (rate
+        # limit, content filter, transient error).  In the third case
+        # the deterministic ranking is still valid -- tags are merely
+        # absent for this run.
+        if classified_count > 0:
+            parts.append(
+                f" The top {classified_count} of {top_n} barriers were also tagged "
+                "by an LLM classifier (TRUE_BLOCKER / TRAINING_GAP / "
+                "FEATURE_REQUEST) to help triage; tags inform the "
+                "narrative below but do NOT change the score."
+            )
+        elif llm_disabled:
+            parts.append(
+                f" LLM classification was disabled for this run; the {top_n} "
+                "barriers shown were ranked by the deterministic BE-engineering "
+                "priority formula without LLM tagging."
+            )
+        else:
+            # LLM was attempted but produced zero tags (e.g. CircuIT 429
+            # rate-limit on Build 80).  Name the failure mode honestly
+            # so the operator can root-cause; the deterministic ranking
+            # is unaffected.
+            parts.append(
+                f" LLM classification was attempted on the top {top_n} barriers "
+                "but did not return any tags for this run (likely upstream LLM "
+                "unavailability such as a 429 rate-limit). The deterministic "
+                "ranking remains valid; tags will reappear once the LLM is "
+                "reachable."
+            )
     parts.append(
         " Within each technology section, clusters are sorted by "
         "Cluster_Focus_Score (composite of summed priority, true-blocker "

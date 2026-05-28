@@ -8252,7 +8252,9 @@ def create_executive_title_page(doc, manager: str, technology: str, days: int, p
         doc.add_paragraph()
 
         # Main title
-        title = doc.add_heading(f"{manager}'s Portfolio", level=1)
+        # Round 112 / Build 81: smart possessive for portfolio heading.
+        from report_utils import r112_smart_possessive as _r112_poss
+        title = doc.add_heading(f"{_r112_poss(manager)} Portfolio", level=1)
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
         if title.runs:
             title.runs[0].font.size = Pt(28)
@@ -13213,7 +13215,9 @@ def main():
         engagement['total_engagements'] = engagement['ab_count'] + engagement['csone_count']
         engagement_summary = engagement.sort_values('total_engagements', ascending=False)
 
-        portfolio_briefing = _create_briefing_book(f"{manager}'s Portfolio", ab_norm, csone_df, ext_bugs, ext_incidents, [], pd.DataFrame(), None, engagement_summary, {
+        # Round 112 / Build 81: smart possessive for portfolio briefing label.
+        from report_utils import r112_smart_possessive as _r112_poss
+        portfolio_briefing = _create_briefing_book(f"{_r112_poss(manager)} Portfolio", ab_norm, csone_df, ext_bugs, ext_incidents, [], pd.DataFrame(), None, engagement_summary, {
             'action_plans': filtered_action_plans,
             'customer_pulse': filtered_customer_pulse,
             'success_priorities': filtered_success_priorities,

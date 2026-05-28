@@ -833,6 +833,43 @@ def _rewrite_paragraph_with_inline_citations(
             # ...)"``) instead of bleeding the citation into the
             # paren cluster.
             if (i + 1) in in_cluster:
+                # Round 112 / Build 81: when the wrapper KPI's value sits
+                # IMMEDIATELY before the embedded paren cluster's open
+                # paren (whitespace only between value-end and ``(``),
+                # suppress this match's citation -- the cluster's
+                # post-``)`` citation already covers BOTH the wrapper
+                # KPI and the cluster body as a single semantic unit
+                # (``"Total Activities: 42 (APs: 18, ABs: 3, CPs: 1,
+                # TAC: 20)"`` is one assertion, not two).  Pre-R112 the
+                # wrapper got its own citation and the line rendered
+                # ``"Total Activities: 42 [Source: ...](APs: 18, ...,
+                # TAC: 20) [Source: ...]"`` -- two adjacent citations
+                # interrupting the semantic unit.  Post-R112: ONE
+                # citation immediately after the closing paren.  When
+                # the boundary contains non-whitespace (e.g. the
+                # wrapper sits before some other text + then the
+                # cluster), preserve the pre-R112 behavior.
+                next_match_start = line_matches[i + 1].start()
+                cluster_open_pos = line.rfind("(", value_end, next_match_start)
+                if cluster_open_pos > 0:
+                    boundary_pre_paren = line[value_end:cluster_open_pos]
+                    if boundary_pre_paren.strip() == "":
+                        # suppress wrapper citation; advance cursor to
+                        # ``value_end`` (NOT ``m.end()`` -- the regex's
+                        # match span includes trailing whitespace via
+                        # ``\s*%?`` and consuming it would eat the
+                        # space between ``"42"`` and ``"("``).  The
+                        # cluster-end branch later in the loop picks
+                        # up from this cursor and flushes
+                        # ``" (cluster_body) [Source: ...]"`` in one go,
+                        # so the rendered output is
+                        # ``"Total Activities: 42 (APs: 18, ABs: 3, CPs: 1,
+                        # TAC: 20) [Source: ...]"`` -- one citation, value
+                        # and paren still adjacent with their original
+                        # whitespace.
+                        out_parts.append(line[cursor:value_end])
+                        cursor = value_end
+                        continue
                 # value-end placement preserves the natural paren attach
                 out_parts.append(line[cursor:value_end])
                 out_parts.append(f" {citation_chrome}")

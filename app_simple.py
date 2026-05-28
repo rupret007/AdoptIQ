@@ -5773,7 +5773,19 @@ def _generate_comprehensive_fallback_insights(
         "from the canonical metrics (no model inference)."
     ]
     if llm_error:
-        header_lines.append(f"[LLM error] {str(llm_error).strip()}")
+        # Round 112 / Build 81: route the LLM error through the R69/R71
+        # sanitizer before embedding it in the user-facing fallback
+        # narrative.  Pre-R112 ``str(llm_error).strip()`` echoed the raw
+        # CircuIT 429 body verbatim -- and the body carries a
+        # ``'user': '{"appkey": "...", "session_id": "..."}'`` blob that
+        # an attacker could use for session-replay against the upstream
+        # API.  R112 widened the sanitizer to redact appkey/session_id/
+        # the full user-blob too; using a 400-char cap (vs the default
+        # 200) so the operator still sees enough context to root-cause
+        # without leaking auth identifiers.
+        header_lines.append(
+            f"[LLM error] {_r69_sanitize_llm_error(llm_error, max_len=400)}"
+        )
     return " ".join(header_lines + [""] + insights)
 
 def _parse_markdown_for_fallback(doc, ai_text: str):
@@ -7562,12 +7574,44 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
     if partial_data_warnings:
         try:
             doc.add_heading("\u26a0 Partial Data Warning", level=1)
-            doc.add_paragraph(
-                "One or more upstream data sources failed to load for this run. "
-                "Sections that depend on the affected sources are marked "
-                "\"unavailable\" rather than rendered as zero. Rerun once the "
-                "source is reachable for a complete picture."
+            # Round 112 / Build 81: kind-aware preamble.  Pre-R112 every
+            # partial-data warning rendered the generic "upstream data
+            # sources failed to load" boilerplate -- but the Build 80
+            # acceptance run hit ``kind='tech_filter_scope_excluded'``
+            # warnings (the AB scope filter dropped 169/183 barriers
+            # because they were not Contact Center technology) which
+            # are scope filters, NOT load failures.  The data loaded
+            # fine; the filter excluded most of it.  Saying "failed
+            # to load" misled the operator.  Post-R112 we detect the
+            # all-scope case and emit a scope-aware preamble.
+            _r112_scope_kinds = {
+                'tech_filter_scope_excluded',
+                'manager_filter_scope_excluded',
+                'time_window_scope_excluded',
+                'no_onedrive_sync',
+                'autodiscovered_empty_after_scope',
+            }
+            _r112_all_scope = bool(partial_data_warnings) and all(
+                str((w or {}).get('kind') or '') in _r112_scope_kinds
+                or str((w or {}).get('kind') or '').startswith('tech_filter_scope')
+                for w in partial_data_warnings
             )
+            if _r112_all_scope:
+                doc.add_paragraph(
+                    "One or more upstream data sources returned data that was "
+                    "filtered out by the requested scope (technology filter, "
+                    "manager filter, or time window). The data loaded "
+                    "successfully; the bulleted list below names what was "
+                    "excluded and why. Sections affected by the filter are "
+                    "reduced rather than missing."
+                )
+            else:
+                doc.add_paragraph(
+                    "One or more upstream data sources failed to load for this run. "
+                    "Sections that depend on the affected sources are marked "
+                    "\"unavailable\" rather than rendered as zero. Rerun once the "
+                    "source is reachable for a complete picture."
+                )
             for _w in partial_data_warnings:
                 _ds = str((_w or {}).get('dataset') or 'unknown')
                 _err = str((_w or {}).get('error') or 'unknown error')
@@ -12677,14 +12721,42 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     if partial_data_warnings:
         try:
             doc.add_heading("\u26a0 Partial Data Warning", level=1)
-            doc.add_paragraph(
-                "One or more upstream data sources failed to load for this "
-                "renewal run. Sections that depend on the affected sources "
-                "are marked \"unavailable\" rather than rendered as zero. "
-                "The Excel workbook's Report_Info sheet lists the same "
-                "warnings; rerun once the source is reachable for a "
-                "complete picture."
+            # Round 112 / Build 81: kind-aware preamble (same fix as the
+            # compact-path banner above).  The Build 80 Renewal docx (P6)
+            # rendered "One or more upstream data sources failed to load"
+            # while the only warning was ``tech_filter_scope_excluded``
+            # (AB scope filter) -- a scope exclusion, NOT a load failure.
+            # See the compact banner above (~L7560) for the rationale.
+            _r112_scope_kinds = {
+                'tech_filter_scope_excluded',
+                'manager_filter_scope_excluded',
+                'time_window_scope_excluded',
+                'no_onedrive_sync',
+                'autodiscovered_empty_after_scope',
+            }
+            _r112_all_scope = bool(partial_data_warnings) and all(
+                str((w or {}).get('kind') or '') in _r112_scope_kinds
+                or str((w or {}).get('kind') or '').startswith('tech_filter_scope')
+                for w in partial_data_warnings
             )
+            if _r112_all_scope:
+                doc.add_paragraph(
+                    "One or more upstream data sources returned data that was "
+                    "filtered out by the requested scope (technology filter, "
+                    "manager filter, or time window). The data loaded "
+                    "successfully; the bulleted list below names what was "
+                    "excluded and why. The Excel workbook's Report_Info sheet "
+                    "lists the same warnings."
+                )
+            else:
+                doc.add_paragraph(
+                    "One or more upstream data sources failed to load for this "
+                    "renewal run. Sections that depend on the affected sources "
+                    "are marked \"unavailable\" rather than rendered as zero. "
+                    "The Excel workbook's Report_Info sheet lists the same "
+                    "warnings; rerun once the source is reachable for a "
+                    "complete picture."
+                )
             for _r48_w in partial_data_warnings:
                 _r48_ds = str((_r48_w or {}).get('dataset') or 'unknown')
                 _r48_err = str((_r48_w or {}).get('error') or 'unknown error')
@@ -12967,7 +13039,18 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     # renewal narrative vocabulary.
     _r70_rsbox_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
     _r70_rsbox_label = _r70_rsbox_LABEL_REMAP.get(risk_category, risk_category)
-    score_run = summary.add_run(f'{risk_score:.1f}/100 ({_r70_rsbox_label})')
+    # Round 112 / Build 81: align the Renewal Risk Score box with the
+    # R67/B1 cross-format display contract -- 0-10 is the primary user-
+    # facing scale; 0-100 is preserved as a secondary parenthetical for
+    # legacy back-compat.  Pre-R112 this run rendered ``12.5/100
+    # (HEALTHY)`` next to the executive summary's
+    # ``1.2/10 (HEALTHY; 12.5/100)`` -- two different scales for the
+    # SAME score within the same docx.  Post-R112 both surfaces show
+    # 0-10 first.
+    _r112_score_10 = float(risk_score) / 10.0
+    score_run = summary.add_run(
+        f'{_r112_score_10:.1f}/10  ({_r70_rsbox_label}; {risk_score:.1f}/100)'
+    )
     score_run.bold = True
     score_run.font.color.rgb = color
     score_run.font.size = Pt(14)
@@ -13086,7 +13169,18 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             row = focus_table.rows[idx].cells
             row[0].text = str(idx)
             row[1].text = str(cust)
-            row[2].text = f"{ana.get('renewal_risk_score', ana.get('overall_risk_score', 0)):.1f}/100"
+            # Round 112 / Build 81: align the focus-table risk-score column
+            # with the R67/B1 cross-format display contract.  Pre-R112 this
+            # cell rendered ``12.5/100`` while the executive summary block
+            # rendered the same score as ``1.2/10`` -- inconsistent scales
+            # within the same docx.  Post-R112 the cell uses 0-10 primary
+            # form so Compact and Renewal both publish a single canonical
+            # scale to the user.
+            _r112_focus_score_100 = float(
+                ana.get('renewal_risk_score', ana.get('overall_risk_score', 0)) or 0
+            )
+            _r112_focus_score_10 = _r112_focus_score_100 / 10.0
+            row[2].text = f"{_r112_focus_score_10:.1f}/10"
             _r70_cat = str(ana.get('renewal_risk_category', 'N/A'))
             row[3].text = _r70_focus_LABEL_REMAP.get(_r70_cat, _r70_cat)
         # Round 13 / Phase 6.3: emit a "+M more" footnote whenever the
@@ -15045,7 +15139,15 @@ def run_customer_renewal_analysis(analysis_id):
             renewal_analysis['provisioning_cases_count'] = sum(
                 a.get('provisioning_cases_count', 0) for a in portfolio_renewal_analyses.values()
             )
-            customer_name_for_report = f"{manager}'s Portfolio"
+            # Round 112 / Build 81: route through the smart-possessive
+            # helper so the literal "All Managers" sentinel renders as
+            # "All Managers Portfolio" (collective aggregate) instead of
+            # the pre-R112 double-possessive shape (``All Managers``
+            # already pluralised, so adding apostrophe-s produces an
+            # ungrammatical title).  See
+            # ``report_utils.r112_smart_possessive`` for the contract.
+            from report_utils import r112_smart_possessive as _r112_poss
+            customer_name_for_report = f"{_r112_poss(manager)} Portfolio"
         else:
             # Single customer renewal
             renewal_analysis = _calculate_simple_renewal_risk(
@@ -17544,7 +17646,9 @@ def run_comprehensive_analysis(analysis_id):
             # for the "Risk Level" labels in the trouble-spot block and
             # free-styles compound labels like "HIGH/CRITICAL" that
             # disagree with the dashboard tile.
-            portfolio_briefing = _create_briefing_book(f"{status['manager']}'s Portfolio", ab_norm, csone_df, ext_bugs, ext_incidents, [], pd.DataFrame(), None, engagement_summary, {
+            # Round 112 / Build 81: smart possessive for portfolio briefing label.
+            from report_utils import r112_smart_possessive as _r112_poss
+            portfolio_briefing = _create_briefing_book(f"{_r112_poss(status['manager'])} Portfolio", ab_norm, csone_df, ext_bugs, ext_incidents, [], pd.DataFrame(), None, engagement_summary, {
                 'action_plans': filtered_action_plans,
                 'customer_pulse': filtered_customer_pulse,
                 'success_priorities': filtered_success_priorities,
@@ -17950,7 +18054,9 @@ def run_comprehensive_analysis(analysis_id):
                 # helper.
                 _r64_attempts = int(_r64_portfolio_diag.get("attempts", 0) or 0)
                 _r64_kind = str(_r64_portfolio_diag.get("last_error_kind") or "unknown")
-                report_builder.add_heading(f"AdoptIQ Executive Analysis: {status['manager']}'s Portfolio", level=1)
+                # Round 112 / Build 81: smart possessive for portfolio heading.
+                from report_utils import r112_smart_possessive as _r112_poss
+                report_builder.add_heading(f"AdoptIQ Executive Analysis: {_r112_poss(status['manager'])} Portfolio", level=1)
                 report_builder.add_heading("Portfolio Overview", level=2)
                 report_builder.add_paragraph(
                     "Portfolio-level AI summary unavailable for this run "
@@ -18014,7 +18120,9 @@ def run_comprehensive_analysis(analysis_id):
                     "numeric drift detected" if _r65_drift_kind == "numeric"
                     else f"{_r65_drift_kind} drift detected"
                 )
-                report_builder.add_heading(f"AdoptIQ Executive Analysis: {status['manager']}'s Portfolio", level=1)
+                # Round 112 / Build 81: smart possessive for portfolio heading.
+                from report_utils import r112_smart_possessive as _r112_poss
+                report_builder.add_heading(f"AdoptIQ Executive Analysis: {_r112_poss(status['manager'])} Portfolio", level=1)
                 report_builder.add_heading("Portfolio Overview", level=2)
                 report_builder.add_paragraph(
                     "Portfolio-level AI summary withheld: "
@@ -18031,7 +18139,9 @@ def run_comprehensive_analysis(analysis_id):
                 report_builder.add_paragraph(f"Technology Focus: {status['tech']}")
                 report_builder.add_paragraph(f"Analysis Period: {status['days']} days")
             else:
-                report_builder.add_heading(f"AdoptIQ Executive Analysis: {status['manager']}'s Portfolio", level=1)
+                # Round 112 / Build 81: smart possessive for portfolio heading.
+                from report_utils import r112_smart_possessive as _r112_poss
+                report_builder.add_heading(f"AdoptIQ Executive Analysis: {_r112_poss(status['manager'])} Portfolio", level=1)
                 report_builder.add_heading("Portfolio Overview", level=2)
                 report_builder.add_paragraph(
                     "Portfolio-level AI summary unavailable for this run "
@@ -22713,6 +22823,24 @@ def _r69_sanitize_llm_error(raw: Any, *, max_len: int = 200) -> str:
     s = _re69.sub(r"(?i)\bapi[_-]?key\s*[:=]\s*\S+", "api_key=<redacted>", s)
     s = _re69.sub(r"\bsk-[A-Za-z0-9_-]{16,}", "<api-key-redacted>", s)
     s = _re69.sub(r"(?i)authorization:\s*\S+\s+\S+", "Authorization: <redacted>", s)
+    # Round 112 / Build 81: extend the credential redaction set to cover
+    # CircuIT-specific identifiers that surfaced in the Build 80 acceptance
+    # audit.  When CircuIT returns a 429 the upstream error JSON includes
+    # a ``'user': '{...}'`` blob (Python repr of a dict) that carries the
+    # tenant ``appkey`` + ``session_id`` correlation pair.  Pre-R112 those
+    # values flowed straight into the Compact "Non-AI fallback summary"
+    # paragraph (P25 of the Build 80 Compact docx) -- enough for an
+    # attacker to attempt session-replay against the upstream API.  Three
+    # patterns added here:
+    #   * appkey=<value> / "appkey": "..." / 'appkey': '...'
+    #   * session_id=<value> / "session_id": "..." / 'session_id': '...'
+    #   * 'user': '{...}' (collapse the entire stringified-JSON blob -
+    #     always carries appkey + session_id plus internal correlation
+    #     IDs).  Both ASCII single-quote and double-quote variants
+    #     covered for whichever serialiser produced the upstream string.
+    s = _re69.sub(r"(?i)['\"]?appkey['\"]?\s*[:=]\s*['\"]?[^'\",\s}]+['\"]?", "appkey=<redacted>", s)
+    s = _re69.sub(r"(?i)['\"]?session[_-]?id['\"]?\s*[:=]\s*['\"]?[^'\",\s}]+['\"]?", "session_id=<redacted>", s)
+    s = _re69.sub(r"(?i)['\"]user['\"]\s*:\s*['\"]\{[^{}]*\}['\"]", "'user': '<redacted>'", s)
     if len(s) > max_len:
         s = s[: max_len - 3].rstrip() + "..."
     return s

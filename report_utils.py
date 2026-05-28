@@ -677,6 +677,47 @@ def get_report_metadata_footer(
 _R66_B12_DEFAULT_BARRIER_CATEGORIES: Tuple[str, ...] = ("technical", "adoption", "process")
 
 
+def r112_smart_possessive(name: Any) -> str:
+    """Round 112 / Build 81: render a smart possessive-form prefix for
+    portfolio / report titles.
+
+    Pre-R112 every report writer used ``f"{manager}'s Portfolio"``
+    which produced ``"All Managers's Portfolio"`` (double possessive)
+    when the manager value was the literal sentinel ``"All Managers"``.
+    English Strunk-and-White convention: a name ending in ``s`` /
+    ``z`` / ``x`` (sibilant-final) takes ONLY an apostrophe, not
+    ``'s``.  And the literal sentinel ``"All Managers"`` is a portfolio-
+    wide aggregate, not a single-owner possessive -- "All Managers
+    Portfolio" reads as a collective view, which is what the user
+    asked for.
+
+    Returns the prefix WITHOUT the trailing word "Portfolio" so the
+    caller can compose ``f"{r112_smart_possessive(manager)} Portfolio"``
+    or any other suffix.  Three branches:
+
+      * empty / falsy -> empty string
+      * literal "All Managers" / "All" / "Portfolio" sentinels -> bare
+        ``name`` (no apostrophe; the noun is plural-aggregate already)
+      * sibilant-final (``s`` / ``S`` / ``x`` / ``X`` / ``z`` / ``Z``)
+        -> ``f"{name}'"`` (apostrophe only)
+      * otherwise -> ``f"{name}'s"`` (apostrophe + s)
+
+    Pinned by ``tests/test_round112_smart_possessive.py``.
+    """
+    if not name or not isinstance(name, str):
+        return ""
+    s = name.strip()
+    if not s:
+        return ""
+    # Aggregate sentinels: bare name, no possessive marker.
+    if s.casefold() in ("all managers", "all", "portfolio"):
+        return s
+    # Sibilant-final names take just an apostrophe.
+    if s[-1] in "sSxXzZ":
+        return f"{s}'"
+    return f"{s}'s"
+
+
 def _r66_b12_safe_int(value: Any, *, default: int = 0) -> int:
     """Coerce ``value`` to a non-negative integer for template
     substitution.  Used by the recommendation helpers so the caller

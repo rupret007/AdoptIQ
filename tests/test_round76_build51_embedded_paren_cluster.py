@@ -72,23 +72,46 @@ def test_embedded_paren_cluster_detected_in_build50_reproducer() -> None:
 
 
 def test_embedded_paren_cluster_rewrite_collapses_to_single_citation() -> None:
-    """Round-trip the Build 50 reproducer through the rewriter."""
+    """Round-trip the Build 50 reproducer through the rewriter.
+
+    Round 112 / Build 81 update: the pre-R112 contract emitted a
+    citation immediately after the wrapper KPI's value (``"45 [Source:
+    ...]"``) AND another after the closing paren -- two adjacent
+    citations interrupting the semantic unit.  R112/F3 collapsed this
+    into ONE citation immediately after the closing paren, because the
+    wrapper + cluster ``"Total Activities: 45 (APs: 16, ABs: 3, CPs:
+    1, TAC: 25)"`` is one assertion, not two.  The trailing
+    ``"BEMS Escalations: 4"`` still gets its own citation (separate
+    KPI, separate semantic unit).  This test was updated to assert
+    the new R112 shape; the buggy mid-paren guard is unchanged.
+    """
     line = (
         "Total Activities: 45 (APs: 16, ABs: 3, CPs: 1, TAC: 25) | "
         "Warning: BEMS Escalations: 4"
     )
     ms = _matches(line)
     out = _rewrite_paragraph_with_inline_citations(line, ms, _CITATION_BARE)
-    # The buggy mid-paren citations MUST NOT appear
+    # The buggy mid-paren citations MUST NOT appear (R76/Build 51 guard).
     assert ("16, " + _CITATION_BARE) not in out, f"mid-paren citation leaked: {out!r}"
     assert ("3, " + _CITATION_BARE) not in out, f"mid-paren citation leaked: {out!r}"
     assert ("1, " + _CITATION_BARE) not in out, f"mid-paren citation leaked: {out!r}"
-    # The cluster MUST emit ONE post-paren citation
+    # The cluster MUST emit ONE post-paren citation (R76/Build 51 contract).
     assert (") " + _CITATION_BARE) in out, f"missing post-paren citation: {out!r}"
-    # The pre-paren KPI (Total Activities: 45) MUST get its own citation
-    assert ("45 " + _CITATION_BARE) in out, f"missing pre-paren citation: {out!r}"
-    # The post-paren KPI (BEMS Escalations: 4) MUST get its own citation
+    # Round 112 / F3: wrapper KPI does NOT get its own citation when
+    # it sits immediately before the embedded cluster -- the post-paren
+    # citation covers BOTH wrapper and cluster as one semantic unit.
+    assert ("45 " + _CITATION_BARE) not in out, (
+        f"R112/F3: wrapper KPI emitted citation before cluster (regression): {out!r}"
+    )
+    # The post-cluster KPI (BEMS Escalations: 4) MUST still get its own
+    # citation -- it's a separate KPI separated by ``| Warning:``.
     assert ("4 " + _CITATION_BARE) in out, f"missing post-cluster citation: {out!r}"
+    # Total citation count: ONE after the cluster, ONE after the trailing
+    # KPI = TWO citations (NOT three as in pre-R112).
+    assert out.count(_CITATION_BARE) == 2, (
+        f"R112/F3: expected exactly 2 citations on the line, "
+        f"got {out.count(_CITATION_BARE)}: {out!r}"
+    )
 
 
 def test_no_embedded_cluster_for_plain_sentence() -> None:
