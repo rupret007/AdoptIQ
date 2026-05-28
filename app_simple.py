@@ -4261,6 +4261,22 @@ def index():
     # Set manager choices dynamically from team_config.json
     form.manager.choices = [(m, m) for m in MANAGERS]
 
+    # Round 113 / C3: pre-select the operator's persisted default scope
+    # (manager / technology / days) when one is set + still valid.
+    # Stale values were already dropped to "" / 0 by the resolver, so
+    # the legacy WTForms defaults (first manager, days=90) win when
+    # nothing is persisted.
+    try:
+        _r113_defaults = _r113_resolve_report_defaults()
+        if _r113_defaults.get("default_manager"):
+            form.manager.data = _r113_defaults["default_manager"]
+        if _r113_defaults.get("default_technology"):
+            form.technology.data = _r113_defaults["default_technology"]
+        if _r113_defaults.get("default_days"):
+            form.days.data = _r113_defaults["default_days"]
+    except Exception as _r113_form_err:  # noqa: BLE001
+        logger.debug("Round 113 / C3: analyze default pre-select failed: %s", _r113_form_err)
+
     # Round 26 / Phase C: server-side seed for the AdoptIQ
     # Intelligence banner.  We render a usable summary even when JS
     # is disabled so users see real state (idle/running/last run)
@@ -21100,12 +21116,27 @@ def preferences():
             type(_corpus_err).__name__,
         )
 
+    # Round 113 / C3: managers / technologies for the default-scope
+    # card's selects.  The JS module fills the persisted/effective
+    # values via GET /api/settings/report-defaults; these lists just
+    # populate the dropdown options.
+    try:
+        _r113_managers = list(MANAGERS)
+    except Exception:  # noqa: BLE001
+        _r113_managers = []
+    try:
+        _r113_techs = list(TECH_CHOICES)
+    except Exception:  # noqa: BLE001
+        _r113_techs = []
+
     return render_template(
         'preferences.html',
         intel_status=intel_status_ctx,
         settings_path=settings_path_str,
         outputs_dir=outputs_dir_str,
         corpus_dir=corpus_dir_str,
+        managers=_r113_managers,  # Round 113 / C3
+        technologies=_r113_techs,  # Round 113 / C3
     )
 
 
@@ -21185,10 +21216,21 @@ def history():
 @app.route('/ask-ai')
 def ask_ai_page():
     """Page for asking AI questions with live Snowflake data context."""
+    # Round 113 / C3: surface the operator's persisted default scope so
+    # the manager / technology selects pre-pick it (stale values are
+    # already dropped to "" by the resolver, so the legacy "All"
+    # default wins when nothing is persisted).
+    try:
+        _r113_defaults = _r113_resolve_report_defaults()
+    except Exception:  # noqa: BLE001
+        _r113_defaults = {"default_days": 0, "default_manager": "", "default_technology": ""}
     return render_template(
         'ask_ai.html',
         managers=MANAGERS,
         technologies=TECH_CHOICES,
+        default_manager=_r113_defaults.get("default_manager", ""),
+        default_technology=_r113_defaults.get("default_technology", ""),
+        default_days=_r113_defaults.get("default_days", 0),
     )
 
 
@@ -21276,15 +21318,39 @@ def _r68_build_suggestion_chips(
         scope_label = "my portfolio"
 
     # Chip 1: top-risk customer (scoped to the operator's selection).
-    chips.append({
-        "category": "top_risk",
-        "label": "Top risk",
-        "question": (
-            f"Which customer in {scope_label} carries the highest renewal risk "
-            f"right now, and what are the top three open issues driving that risk "
-            f"in the last {days} days?"
-        ),
-    })
+    # Round 113 / B2: when a prior Ask AI answer for this exact scope
+    # warmed the per-scope risk cache, name the ACTUAL top-risk
+    # customer in the chip.  Cold cache -> the generic template chip.
+    # The lookup is in-memory only (no Snowflake), so the sub-100ms
+    # contract is preserved.
+    _r113_top_customer = ""
+    try:
+        from ask_ai_grounded import get_top_risk_customers_for_scope as _r113_get_top
+        _r113_names = _r113_get_top(manager, technology, days, top_n=1)
+        if _r113_names:
+            _r113_top_customer = str(_r113_names[0]).strip()
+    except Exception:  # noqa: BLE001
+        _r113_top_customer = ""
+    if _r113_top_customer:
+        chips.append({
+            "category": "top_risk",
+            "label": "Top risk",
+            "question": (
+                f"Why is {_r113_top_customer} the highest renewal risk in {scope_label}, "
+                f"and what are the top three open issues driving that risk "
+                f"in the last {days} days?"
+            ),
+        })
+    else:
+        chips.append({
+            "category": "top_risk",
+            "label": "Top risk",
+            "question": (
+                f"Which customer in {scope_label} carries the highest renewal risk "
+                f"right now, and what are the top three open issues driving that risk "
+                f"in the last {days} days?"
+            ),
+        })
 
     # Chip 2: stale barriers in the selected scope.
     chips.append({
@@ -23168,6 +23234,201 @@ def api_settings_corpus_share_url():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Round 113 / C3: persisted default analysis scope.
+# ---------------------------------------------------------------------------
+#
+# Reads ``settings.json`` (``default_days`` / ``default_manager`` /
+# ``default_technology``) and RE-VALIDATES the manager + technology
+# against the LIVE roster / ``TECH_CHOICES`` so a stale saved value
+# (roster change, tech rename) degrades gracefully to "unset" instead
+# of pre-selecting nothing.  ``default_days`` is range-gated 1-365.
+# Used by ``index`` (analyze page), ``ask_ai_page``, and the
+# suggestion-chip endpoint so a saved default pre-selects on both
+# pages (resolving the analyze-vs-ask-ai asymmetry where analyze
+# picked the first manager and ask-ai picked "All").
+def _r113_resolve_report_defaults() -> Dict[str, Any]:
+    """Return the effective + raw persisted default scope.
+
+    Shape::
+
+        {
+          "default_days": int,          # 0 == unset
+          "default_manager": str,       # "" == unset / stale-and-dropped
+          "default_technology": str,    # "" == unset / stale-and-dropped
+          "persisted": { ...raw values from settings.json... },
+        }
+
+    Never raises -- any failure yields the all-unset shape so the
+    callers fall through to their legacy per-page defaults.
+    """
+    persisted_days: int = 0
+    persisted_manager: str = ""
+    persisted_technology: str = ""
+    try:
+        import adoptiq_settings as _settings  # noqa: PLC0415
+        _s = _settings.load_settings() or {}
+        try:
+            persisted_days = int(_s.get("default_days", 0) or 0)
+        except (TypeError, ValueError):
+            persisted_days = 0
+        persisted_manager = str(_s.get("default_manager", "") or "").strip()
+        persisted_technology = str(_s.get("default_technology", "") or "").strip()
+    except Exception as _r113_def_err:  # noqa: BLE001
+        logger.debug("Round 113 / C3: report-defaults read failed: %s", _r113_def_err)
+
+    eff_days = persisted_days if (isinstance(persisted_days, int) and 1 <= persisted_days <= 365) else 0
+    # Roster gate -- graceful fallback to "" when the saved manager is
+    # no longer on the live roster.
+    try:
+        eff_manager = persisted_manager if persisted_manager in set(MANAGERS) else ""
+    except Exception:  # noqa: BLE001
+        eff_manager = ""
+    # TECH_CHOICES gate -- graceful fallback to "" on a stale tech name.
+    try:
+        eff_tech = persisted_technology if persisted_technology in set(TECH_CHOICES) else ""
+    except Exception:  # noqa: BLE001
+        eff_tech = ""
+    return {
+        "default_days": eff_days,
+        "default_manager": eff_manager,
+        "default_technology": eff_tech,
+        "persisted": {
+            "default_days": persisted_days,
+            "default_manager": persisted_manager,
+            "default_technology": persisted_technology,
+        },
+    }
+
+
+@app.route('/api/settings/report-defaults', methods=['GET', 'POST'])
+def api_settings_report_defaults():
+    """Round 113 / C3: GET (read) / POST (persist) the operator's
+    default analysis scope (days / manager / technology).
+
+    GET response shape: ``{ok: true, default_days: int,
+    default_manager: str, default_technology: str, persisted: {...},
+    managers: [...], technologies: [...]}``.  ``default_*`` are the
+    EFFECTIVE values after roster / TECH_CHOICES re-validation;
+    ``persisted`` carries the raw on-disk values so the UI can tell
+    the operator when a saved value was dropped as stale.
+
+    POST request shape: ``{"default_days": int, "default_manager":
+    str, "default_technology": str}``.  Each field is optional; 0 /
+    empty string clears that field's override.  Validated via the
+    ``adoptiq_settings`` allow-list helpers BEFORE write; a malformed
+    value returns 400.  A manager / technology that passes the
+    syntactic gate but is not on the live roster / TECH_CHOICES is
+    accepted on write (so a roster change later does not lock the
+    operator out) but will be dropped on READ via
+    ``_r113_resolve_report_defaults`` -- the GET response surfaces
+    that as ``persisted`` != effective.
+
+    Atomic write via ``adoptiq_settings.save_settings``; CSRF dual-path
+    auth on POST mirrors the other settings routes.
+    """
+    try:
+        import adoptiq_settings as _settings  # noqa: PLC0415
+    except Exception as imp_err:  # noqa: BLE001
+        logger.exception("Round 113 / C3: settings import failed")
+        return jsonify({
+            "ok": False,
+            "error": f"settings_import_failed: {type(imp_err).__name__}",
+        }), 500
+
+    if request.method == "GET":
+        resolved = _r113_resolve_report_defaults()
+        try:
+            _managers = list(MANAGERS)
+        except Exception:  # noqa: BLE001
+            _managers = []
+        try:
+            _techs = list(TECH_CHOICES)
+        except Exception:  # noqa: BLE001
+            _techs = []
+        return jsonify({
+            "ok": True,
+            "default_days": resolved["default_days"],
+            "default_manager": resolved["default_manager"],
+            "default_technology": resolved["default_technology"],
+            "persisted": resolved["persisted"],
+            "managers": _managers,
+            "technologies": _techs,
+        }), 200
+
+    # POST path -- writes settings.json.  Auth required.
+    auth_err = _r17_2_authorize_corpus_admin()
+    if auth_err is not None:
+        body, code = auth_err
+        return jsonify(body), code
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "invalid_json_payload"}), 400
+
+    # default_days: accept 0 / missing as "unset"; else int 1-365.
+    raw_days = payload.get("default_days", None)
+    if raw_days in (None, ""):
+        days_val = 0
+    else:
+        try:
+            days_val = int(raw_days)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "default_days_must_be_int"}), 400
+    if not _settings.is_valid_default_days(days_val):
+        return jsonify({
+            "ok": False,
+            "error": "invalid_default_days",
+            "detail": "default_days must be 0 (unset) or an integer in [1, 365].",
+        }), 400
+
+    raw_manager = payload.get("default_manager", "")
+    if raw_manager is None:
+        raw_manager = ""
+    if not isinstance(raw_manager, str):
+        return jsonify({"ok": False, "error": "default_manager_must_be_string"}), 400
+    manager_val = raw_manager.strip()
+    if not _settings.is_valid_default_scope_str(manager_val):
+        return jsonify({"ok": False, "error": "invalid_default_manager"}), 400
+
+    raw_tech = payload.get("default_technology", "")
+    if raw_tech is None:
+        raw_tech = ""
+    if not isinstance(raw_tech, str):
+        return jsonify({"ok": False, "error": "default_technology_must_be_string"}), 400
+    tech_val = raw_tech.strip()
+    if not _settings.is_valid_default_scope_str(tech_val):
+        return jsonify({"ok": False, "error": "invalid_default_technology"}), 400
+
+    try:
+        merged = dict(_settings.load_settings() or {})
+        merged["default_days"] = days_val
+        merged["default_manager"] = manager_val
+        merged["default_technology"] = tech_val
+        _settings.save_settings(merged)
+    except Exception as save_err:  # noqa: BLE001
+        logger.exception("Round 113 / C3: settings.json write failed for report-defaults")
+        return jsonify({
+            "ok": False,
+            "error": f"settings_write_failed: {type(save_err).__name__}",
+        }), 500
+
+    resolved = _r113_resolve_report_defaults()
+    logger.info(
+        "Round 113 / C3: report-defaults persisted (days=%s, manager=%s, tech=%s)",
+        days_val,
+        "(unset)" if not manager_val else "(set)",
+        "(unset)" if not tech_val else "(set)",
+    )
+    return jsonify({
+        "ok": True,
+        "default_days": resolved["default_days"],
+        "default_manager": resolved["default_manager"],
+        "default_technology": resolved["default_technology"],
+        "persisted": resolved["persisted"],
+    }), 200
+
+
 @app.route('/api/settings/csone-onedrive-folder', methods=['GET', 'POST'])
 def api_settings_csone_onedrive_folder():
     """Round 88 / F5 (P1): GET (read) / POST (persist) the
@@ -23787,6 +24048,21 @@ def ask_ai_portfolio():
             days = min(max(int(data.get('days') or 90), 1), 365)
         except (ValueError, TypeError):
             days = 90
+
+        # Round 113 / A1: thread conversation_history through the
+        # SYNCHRONOUS path too.  Pre-R113 only the streaming endpoint
+        # (~L25134) called ``_r74_apply_conversation_history``; the
+        # sync path silently dropped the field, so the "Continue
+        # conversation" toggle was a no-op whenever streaming was
+        # disabled or fell back (the most common path).  History is
+        # prepended to the question STRING only -- it never enters the
+        # evidence set, so citation enforcement is unchanged.
+        try:
+            _r113_history = data.get('conversation_history') or []
+            if _r113_history and isinstance(_r113_history, list):
+                question = _r74_apply_conversation_history(question, _r113_history)
+        except Exception as _r113_hist_err:  # noqa: BLE001
+            logger.debug("Round 113 / A1: sync conversation history apply failed: %s", _r113_hist_err)
 
         if is_grounded_ask_ai_enabled():
             grounded_result = run_portfolio_grounded_ask_ai(
@@ -24934,6 +25210,57 @@ def _r74_format_sse_event(event_name: str, payload: dict) -> str:
     return f"event: {safe_event}\ndata: {body}\n\n"
 
 
+def _r113_build_retrieval_summary(canonical_headline, evidence_total, account_total) -> str:
+    """Round 113 / A3: build a human-readable one-line summary of what
+    the grounded pipeline scanned, surfaced in the SSE ``meta`` event
+    so the user sees the retrieval footprint the instant the answer
+    starts to land (the CircuIT proxy does not stream tokens, so the
+    pipeline completes before chunking begins -- this is the earliest
+    honest progress signal we can emit).
+
+    Defensive: any malformed input returns ``''`` so the meta event
+    never fails to serialise.  Counts are read from the canonical
+    headline (the SSoT for portfolio totals) with a graceful fallback
+    to the evidence / account counts.
+    """
+    try:
+        ch = canonical_headline if isinstance(canonical_headline, dict) else {}
+        parts = []
+
+        def _as_int(v):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+
+        barriers = _as_int(ch.get('total_barriers'))
+        cases = _as_int(ch.get('total_cases'))
+        customers = _as_int(ch.get('total_customers'))
+        if barriers is not None:
+            parts.append(f"{barriers:,} adoption barrier" + ('' if barriers == 1 else 's'))
+        if cases is not None:
+            parts.append(f"{cases:,} support case" + ('' if cases == 1 else 's'))
+        scope = ""
+        if customers is not None:
+            scope = f" across {customers:,} customer" + ('' if customers == 1 else 's')
+
+        if parts:
+            summary = "Scanned " + " / ".join(parts) + scope + "; ranking evidence..."
+        else:
+            ev = _as_int(evidence_total)
+            acc = _as_int(account_total)
+            if ev:
+                summary = f"Ranked {ev:,} evidence record" + ('' if ev == 1 else 's')
+                if acc:
+                    summary += f" across {acc:,} account" + ('' if acc == 1 else 's')
+                summary += "..."
+            else:
+                summary = ""
+        return summary
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _r74_run_grounded_for_streaming(question: str, manager: str,
                                     technology: str, days: int) -> dict:
     """Synchronous wrapper around ``run_portfolio_grounded_ask_ai``.
@@ -25155,11 +25482,22 @@ def ask_ai_portfolio_stream():
             # 1. meta event -- everything the UI needs to render
             #    debug chip + grounding context + evidence records
             #    BEFORE the answer chunks land.
+            # Round 113 / A3: build a human-readable retrieval summary
+            # from the canonical headline + evidence counts so the
+            # client can surface "Scanned N barriers / M cases across K
+            # customers; ranking evidence..." the instant the meta
+            # event lands (before the answer chunks materialise).
+            _r113_retrieval_summary = _r113_build_retrieval_summary(
+                pipeline.get('canonical_headline') or {},
+                pipeline.get('evidence_records_total'),
+                pipeline.get('account_total'),
+            )
             yield _r74_format_sse_event('meta', {
                 'query_id': pipeline.get('query_id') or '',
                 'retrieval_method': pipeline.get('retrieval_method') or 'unknown',
                 'retrieval_diag': pipeline.get('retrieval_diag') or {},
                 'model_name': pipeline.get('model_name') or '',
+                'retrieval_summary': _r113_retrieval_summary,
                 'context_summary': pipeline.get('context_summary') or '',
                 'evidence_truncated': bool(pipeline.get('evidence_truncated')),
                 'account_batch_truncated': bool(pipeline.get('account_batch_truncated')),

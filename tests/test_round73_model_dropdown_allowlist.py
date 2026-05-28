@@ -171,20 +171,52 @@ def test_preferences_template_carries_both_option_values():
         )
 
 
+def _r73_model_select_blocks(src):
+    """Return the inner HTML of every ``<select ... data-r69-model-input>``
+    element in ``src``.
+
+    Round 113 / C3 added an unrelated "default analysis scope" card
+    whose manager/technology selects legitimately carry an
+    ``<option value="">`` unset sentinel.  The R73 contract is
+    specifically about the MODEL picker (the strict 2-option form), so
+    the no-sentinel assertion must be scoped to the model selects
+    rather than the whole template (which would false-positive on the
+    C3 card).
+    """
+    blocks = []
+    idx = 0
+    while True:
+        marker = src.find("data-r69-model-input", idx)
+        if marker == -1:
+            break
+        # Walk back to the opening <select and forward to </select>.
+        open_tag = src.rfind("<select", 0, marker)
+        close_tag = src.find("</select>", marker)
+        if open_tag != -1 and close_tag != -1:
+            blocks.append(src[open_tag:close_tag])
+        idx = (close_tag + 1) if close_tag != -1 else (marker + 1)
+    return blocks
+
+
 def test_preferences_template_has_no_default_sentinel_option():
     """The user explicitly picked the strict 2-option form over a
     3-option (Default + N) form.  Pin the absence of any "Default"
     or empty-value sentinel option so a future revert that adds one
-    fails this test."""
+    fails this test.
+
+    Scoped to the model-picker selects only (Round 113 / C3): the
+    default-analysis-scope card's manager/technology selects carry a
+    legitimate ``<option value="">`` unset sentinel that is unrelated
+    to the model picker's strict 2-option contract."""
     src = _read("templates/preferences.html")
-    # Common "default sentinel" patterns: <option value=""> or
-    # <option value="" selected>, often paired with text "Default"
-    # or "Use env / config default".
-    assert '<option value=""' not in src, (
-        "Round 73 / UX-3: /preferences carries a <option value=''> "
-        "sentinel -- the user picked the strict 2-option form, no "
-        "Default option is allowed"
-    )
+    model_blocks = _r73_model_select_blocks(src)
+    assert model_blocks, "expected at least one data-r69-model-input select"
+    for block in model_blocks:
+        assert '<option value=""' not in block, (
+            "Round 73 / UX-3: a model-picker <select data-r69-model-input> "
+            "carries an <option value=''> sentinel -- the user picked the "
+            "strict 2-option form, no Default option is allowed"
+        )
 
 
 def test_admin_template_uses_select_dropdowns():
@@ -450,7 +482,13 @@ def test_preferences_route_dropdown_carries_no_default_sentinel(client):
     resp = client.get("/preferences")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
-    assert '<option value=""' not in body, (
-        "Round 73 / UX-3: rendered /preferences body carries an "
-        '<option value=""> sentinel'
-    )
+    # Scoped to the model-picker selects (Round 113 / C3): the
+    # default-analysis-scope card legitimately renders an unset
+    # <option value=""> on its manager/technology selects.
+    model_blocks = _r73_model_select_blocks(body)
+    assert model_blocks, "rendered /preferences has no data-r69-model-input select"
+    for block in model_blocks:
+        assert '<option value=""' not in block, (
+            "Round 73 / UX-3: rendered model-picker select carries an "
+            '<option value=""> sentinel'
+        )

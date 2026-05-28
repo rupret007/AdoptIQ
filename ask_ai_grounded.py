@@ -13,10 +13,12 @@ This module provides a retrieval-first pipeline for Ask AI responses:
 
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -32,6 +34,99 @@ from snowflake_prefetch import (
 import canonical_metrics as cm
 
 logger = logging.getLogger(__name__)
+
+# -------------------------------------------------------------------
+# Round 113 / B2: bounded in-memory per-scope top-risk-customer cache.
+#
+# ``run_portfolio_grounded_ask_ai`` stamps this with the top-N risk
+# customers for a (manager, technology, days) scope AFTER it computes
+# the per-customer risk profiles.  The Ask AI suggestion-chip endpoint
+# (``app_simple._r68_build_suggestion_chips``) reads it via
+# ``get_top_risk_customers_for_scope`` to name an ACTUAL top-risk
+# customer in a chip when the cache is warm, falling back to the
+# template chip when cold -- keeping the suggestions route fully
+# Snowflake-free (sub-100ms contract preserved).
+#
+# Bounded (FIFO, max 64 scopes) + in-memory only -- no disk, and the
+# cache holds only customer NAMES (which the report itself already
+# renders), so this is not a new PII surface beyond what the answer
+# already shows.  Lock-protected for the multi-threaded Flask server.
+# -------------------------------------------------------------------
+_R113_TOP_RISK_CACHE_LOCK = threading.Lock()
+_R113_TOP_RISK_CACHE: "collections.OrderedDict[str, Dict[str, Any]]" = collections.OrderedDict()
+_R113_TOP_RISK_CACHE_MAX = 64
+_R113_TOP_RISK_TOP_N = 5
+
+
+def _r113_scope_key(manager: Any, technology: Any, days: Any) -> str:
+    """Normalised cache key for a scope triple."""
+    try:
+        _d = int(days)
+    except (TypeError, ValueError):
+        _d = 0
+    return f"{str(manager or '').strip().lower()}|{str(technology or '').strip().lower()}|{_d}"
+
+
+def _r113_stamp_top_risk_customers(manager: Any, technology: Any, days: Any,
+                                   risk_profiles: Optional[Dict[str, Any]]) -> None:
+    """Round 113 / B2: record the top-N risk customer names for a scope.
+
+    ``risk_profiles`` maps customer_name -> profile dict (the output of
+    ``compute_customer_risk_profile``).  We sort by ``risk_score_0_100``
+    DESC with a name-ASC tiebreak (the SSoT determinism rule) and cache
+    only the names.  Defensive: any failure is swallowed -- a cache miss
+    just falls back to the template chip.
+    """
+    if not isinstance(risk_profiles, dict) or not risk_profiles:
+        return
+    try:
+        def _score(item):
+            name, prof = item
+            sc = 0.0
+            if isinstance(prof, dict):
+                raw = prof.get("risk_score_0_100")
+                if raw is None:
+                    raw = prof.get("composite_risk")
+                try:
+                    sc = float(raw)
+                except (TypeError, ValueError):
+                    sc = 0.0
+            return (-sc, str(name))
+
+        ranked = sorted(risk_profiles.items(), key=_score)
+        names = [str(n) for n, _ in ranked[:_R113_TOP_RISK_TOP_N] if str(n).strip()]
+        if not names:
+            return
+        key = _r113_scope_key(manager, technology, days)
+        with _R113_TOP_RISK_CACHE_LOCK:
+            _R113_TOP_RISK_CACHE[key] = {"customers": names}
+            _R113_TOP_RISK_CACHE.move_to_end(key)
+            while len(_R113_TOP_RISK_CACHE) > _R113_TOP_RISK_CACHE_MAX:
+                _R113_TOP_RISK_CACHE.popitem(last=False)
+    except Exception as _stamp_err:  # noqa: BLE001
+        logger.debug("Round 113 / B2: top-risk stamp failed: %s", _stamp_err)
+
+
+def get_top_risk_customers_for_scope(manager: Any, technology: Any, days: Any,
+                                     top_n: int = 3) -> List[str]:
+    """Round 113 / B2: read cached top-risk customer names for a scope.
+
+    Returns ``[]`` on a cold cache (caller falls back to template
+    chips).  Read-only + lock-protected; never touches Snowflake.
+    """
+    try:
+        key = _r113_scope_key(manager, technology, days)
+        with _R113_TOP_RISK_CACHE_LOCK:
+            entry = _R113_TOP_RISK_CACHE.get(key)
+            if entry:
+                _R113_TOP_RISK_CACHE.move_to_end(key)
+        if not entry:
+            return []
+        names = entry.get("customers") or []
+        return list(names[: max(0, int(top_n))])
+    except Exception as _read_err:  # noqa: BLE001
+        logger.debug("Round 113 / B2: top-risk read failed: %s", _read_err)
+        return []
 
 _STOP_WORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "in", "is", "it",
@@ -1122,6 +1217,60 @@ def _r95_apply_canonical_corrections(answer_text: str, corrections: Sequence[Dic
     return "\n".join(line for line in lines if line is not None).strip()
 
 
+def _r113_renewal_headline_fields(bundle: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Round 113 / B1: extract renewal / expiry / ARR headline fields
+    from the already-prefetched ``enhanced_account_insights`` block so
+    they can be merged into CANONICAL_HEADLINE without a new Snowflake
+    fetch.
+
+    ``enhanced_account_insights`` is prefetched for renewal/risk-domain
+    questions (``snowflake_prefetch.prefetch_ask_ai_grounded``); pre-R113
+    the grounded composer never surfaced it, so the LLM had no
+    authoritative renewal/expiry signal and routinely answered "renewal
+    data unavailable" even when the prefetch had it.
+
+    Multi-currency aware: ``expiring_arr`` is ``None`` when the portfolio
+    spans currencies -- in that case we emit ``expiring_arr_by_currency``
+    (a per-currency breakdown string) instead of a misleading single
+    number.  Any malformed input returns ``{}`` so a bad bundle never
+    breaks the headline.
+    """
+    out: Dict[str, Any] = {}
+    try:
+        eai = (bundle or {}).get("enhanced_account_insights") or {}
+        if not isinstance(eai, dict):
+            return out
+        contracts = eai.get("contracts") or {}
+        renewals = eai.get("renewals") or {}
+        if isinstance(contracts, dict):
+            exp = contracts.get("expiring_within_90d")
+            if isinstance(exp, (int, float)) and not isinstance(exp, bool):
+                out["contracts_expiring_90d"] = int(exp)
+            arr = contracts.get("expiring_arr")
+            ccy = contracts.get("expiring_arr_currency")
+            by_ccy = contracts.get("expiring_arr_by_currency") or {}
+            is_multi = bool(contracts.get("is_multi_currency"))
+            if (isinstance(arr, (int, float)) and not isinstance(arr, bool)
+                    and not is_multi):
+                cur_code = str(ccy).strip() if ccy else ""
+                out["expiring_arr"] = (f"{cur_code} {arr:,.0f}").strip()
+            elif isinstance(by_ccy, dict) and by_ccy:
+                parts = [
+                    f"{c} {float(v):,.0f}"
+                    for c, v in sorted(by_ccy.items())
+                    if isinstance(v, (int, float)) and not isinstance(v, bool)
+                ]
+                if parts:
+                    out["expiring_arr_by_currency"] = "; ".join(parts)
+        if isinstance(renewals, dict):
+            at_risk = renewals.get("at_risk_total")
+            if isinstance(at_risk, (int, float)) and not isinstance(at_risk, bool):
+                out["renewals_at_risk"] = int(at_risk)
+    except Exception:  # noqa: BLE001
+        return {}
+    return out
+
+
 def compose_grounded_answer(
     payload: Dict[str, Any],
     allowed_ids: Set[str],
@@ -1625,6 +1774,39 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             _RISK_PROFILE_CAP = int(os.environ.get(
                 "ADOPTIQ_ASK_AI_RISK_PROFILE_CAP", "500"
             ))
+
+        # Round 113 / B2: stamp the per-scope top-risk cache so the
+        # suggestion-chip endpoint can name a real top-risk customer.
+        # No-op when streaming mode skipped per-customer scoring (the
+        # profiles dict is empty) -- the chip endpoint falls back to
+        # the template in that case.
+        try:
+            _r113_stamp_top_risk_customers(
+                getattr(req, "manager", None),
+                getattr(req, "technology", None),
+                getattr(req, "days", None),
+                _risk_profiles_canon,
+            )
+        except Exception as _r113_stamp_err:  # noqa: BLE001
+            logger.debug("Round 113 / B2: scope stamp failed: %s", _r113_stamp_err)
+
+        # Round 113 / B1: merge the already-prefetched renewal / expiry /
+        # ARR aggregates into the canonical headline so the LLM has an
+        # authoritative renewal signal (no new Snowflake fetch -- this
+        # reads ``bundle["enhanced_account_insights"]`` which the
+        # prefetch already populated for renewal/risk-domain questions).
+        try:
+            _r113_renewal_fields = _r113_renewal_headline_fields(bundle)
+            if _r113_renewal_fields:
+                if not isinstance(canonical_headline, dict):
+                    canonical_headline = {}
+                for _r113_k, _r113_v in _r113_renewal_fields.items():
+                    # Don't clobber an existing canonical key (the
+                    # SSoT portfolio metrics win); only fill gaps.
+                    if _r113_k not in canonical_headline:
+                        canonical_headline[_r113_k] = _r113_v
+        except Exception as _r113_err:  # noqa: BLE001
+            logger.debug("Round 113 / B1: renewal headline merge failed: %s", _r113_err)
 
         # Render an authoritative CANONICAL_HEADLINE table that the prompt
         # tells the model is non-negotiable. Using a fixed key=value block

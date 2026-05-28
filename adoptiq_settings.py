@@ -127,6 +127,22 @@ _SCHEMA: Dict[str, tuple] = {
     # is the unset sentinel and falls through to ``ADOPTIQ_OUTPUTS_DIR``
     # and then the packaged default.
     "report_outputs_folder": (str, ""),
+    # Round 113 / C3: persisted default analysis scope.  Lets the
+    # operator pin a preferred manager / technology / window so both
+    # the analyze page (``/``) and Ask AI (``/ask-ai``) pre-select it
+    # instead of the asymmetric hardcoded defaults (analyze picks the
+    # first manager, ask-ai picks "All").  Empty string / 0 is the
+    # "unset" sentinel and falls through to the legacy per-page
+    # default.  ``default_days`` is gated 1-365 (matching the
+    # report-window range checks elsewhere); ``default_manager`` and
+    # ``default_technology`` are gated to a safe string here and
+    # RE-VALIDATED against the live roster / ``TECH_CHOICES`` at READ
+    # time in ``app_simple`` so a stale saved value (roster change,
+    # tech rename) degrades gracefully to the legacy default instead
+    # of selecting nothing.
+    "default_days": (int, 0),
+    "default_manager": (str, ""),
+    "default_technology": (str, ""),
 }
 
 SETTINGS_FILENAME = "settings.json"
@@ -232,6 +248,47 @@ _CSONE_FOLDER_FORBIDDEN_CHARS_RE = re.compile(
 )
 
 
+# Round 113 / C3: default-scope validators.
+#
+# ``default_days``: 0 is the unset sentinel; otherwise must be an
+# integer in [1, 365] (the report-window range used across the app).
+#
+# ``default_manager`` / ``default_technology``: empty string is the
+# unset sentinel.  A non-empty value must be a short string (<=200
+# chars) with no control characters / shell metacharacters.  Semantic
+# validation against the live roster / ``TECH_CHOICES`` happens at READ
+# time in ``app_simple`` (this module must stay import-cycle-free), so
+# here we only enforce a syntactic safety gate.
+_DEFAULT_SCOPE_FORBIDDEN_CHARS_RE = re.compile(r"[\x00-\x1f|;&`$<>\"]")
+
+
+def _is_valid_default_days(value: Any) -> bool:
+    """Return True if ``value`` is the 0 sentinel or an int in [1, 365]."""
+    if value is None:
+        return True
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return False
+    if n == 0:
+        return True
+    return 1 <= n <= 365
+
+
+def _is_valid_default_scope_str(value: Any) -> bool:
+    """Return True if ``value`` is empty (= unset) or a short, safe string."""
+    if value is None or value == "":
+        return True
+    if not isinstance(value, str):
+        return False
+    candidate = value.strip()
+    if not candidate:
+        return True
+    if len(candidate) > 200:
+        return False
+    return not bool(_DEFAULT_SCOPE_FORBIDDEN_CHARS_RE.search(candidate))
+
+
 def _is_valid_csone_folder_path(value: Any) -> bool:
     """Return True if ``value`` is empty (= unset) OR a syntactically
     valid absolute / tilde-prefixed path with no shell-injection
@@ -292,6 +349,9 @@ _VALIDATORS: Dict[str, Callable[[Any], bool]] = {
     "corpus_share_url": _is_valid_sharepoint_url,  # Round 84 / Build 60
     "csone_onedrive_folder": _is_valid_csone_folder_path,  # Round 88 / F5
     "report_outputs_folder": _is_valid_csone_folder_path,  # Round 92
+    "default_days": _is_valid_default_days,  # Round 113 / C3
+    "default_manager": _is_valid_default_scope_str,  # Round 113 / C3
+    "default_technology": _is_valid_default_scope_str,  # Round 113 / C3
 }
 
 
@@ -596,6 +656,16 @@ def is_valid_report_outputs_folder(value: Any) -> bool:
     return _is_valid_csone_folder_path(value)
 
 
+def is_valid_default_days(value: Any) -> bool:
+    """Round 113 / C3: public alias for the default-days range check."""
+    return _is_valid_default_days(value)
+
+
+def is_valid_default_scope_str(value: Any) -> bool:
+    """Round 113 / C3: public alias for the default manager/technology gate."""
+    return _is_valid_default_scope_str(value)
+
+
 __all__ = [
     "SETTINGS_FILENAME",
     "load_settings",
@@ -610,4 +680,6 @@ __all__ = [
     "is_valid_model_name",  # Round 69 / Build 43
     "is_valid_csone_folder_path",  # Round 88 / F5
     "is_valid_report_outputs_folder",  # Round 92
+    "is_valid_default_days",  # Round 113 / C3
+    "is_valid_default_scope_str",  # Round 113 / C3
 ]

@@ -64,9 +64,17 @@ document.addEventListener('DOMContentLoaded', function() {
             typeBadge.textContent = String(rec.source_type || 'evidence');
             headerRow.appendChild(typeBadge);
             if (rec.customer) {
-                var custBadge = document.createElement('span');
-                custBadge.className = 'badge bg-info text-dark';
-                custBadge.textContent = String(rec.customer);
+                // Round 113 / B3: customer drill-through (citation
+                // popover).  Link to the Customer 360 route; XSS-safe
+                // via textContent + encodeURIComponent.
+                var _r113Cust = String(rec.customer);
+                var custBadge = document.createElement('a');
+                custBadge.className = 'badge bg-info text-dark text-decoration-none';
+                custBadge.href = '/customer/' + encodeURIComponent(_r113Cust);
+                custBadge.target = '_blank';
+                custBadge.rel = 'noopener noreferrer';
+                custBadge.title = 'Open Customer 360 for ' + _r113Cust;
+                custBadge.textContent = _r113Cust;
                 headerRow.appendChild(custBadge);
             }
             if (rec.timestamp) {
@@ -449,6 +457,97 @@ document.addEventListener('DOMContentLoaded', function() {
     var r95ConfidenceBand = document.getElementById('r95ConfidenceBand');
     var r68LastQueryId = '';
     var lastAskedQuestion = '';
+    // Round 113 / A5: track the last rendered answer (raw markdown) +
+    // its question so the copy/download controls can export it.
+    var _r113LastAnswerText = '';
+    var _r113LastAnswerQuestion = '';
+    var r113AnswerActions = document.getElementById('r113AnswerActions');
+
+    function _r113SetLastAnswer(question, answerText) {
+        _r113LastAnswerQuestion = String(question || '');
+        _r113LastAnswerText = String(answerText || '');
+        if (r113AnswerActions) {
+            r113AnswerActions.style.display = _r113LastAnswerText.trim() ? '' : 'none';
+        }
+    }
+
+    function _r113BuildExportText() {
+        // Markdown export: question header + answer body.
+        var q = _r113LastAnswerQuestion.trim();
+        var a = _r113LastAnswerText.trim();
+        var lines = [];
+        if (q) {
+            lines.push('# Question');
+            lines.push('');
+            lines.push(q);
+            lines.push('');
+        }
+        lines.push('# AdoptIQ Answer');
+        lines.push('');
+        lines.push(a);
+        return lines.join('\n');
+    }
+
+    function _r113DownloadAnswer(ext) {
+        var text = _r113BuildExportText();
+        if (!text.trim()) { return; }
+        try {
+            var mime = (ext === 'md') ? 'text/markdown' : 'text/plain';
+            var blob = new Blob([text], { type: mime + ';charset=utf-8' });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            var stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+            a.href = url;
+            a.download = 'adoptiq-ask-ai-' + stamp + '.' + ext;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.setTimeout(function () {
+                try { URL.revokeObjectURL(url); } catch (_) { /* noop */ }
+            }, 1000);
+        } catch (err) {
+            try { _r68ShowToast('Download failed.', 'danger'); } catch (_) { /* noop */ }
+        }
+    }
+
+    function _r113CopyAnswer() {
+        var text = _r113BuildExportText();
+        if (!text.trim()) { return; }
+        function _ok() { try { _r68ShowToast('Answer copied to clipboard.', 'success'); } catch (_) { /* noop */ } }
+        function _fail() { try { _r68ShowToast('Copy failed -- select the answer and copy manually.', 'danger'); } catch (_) { /* noop */ } }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(_ok).catch(function () {
+                _r113CopyFallback(text) ? _ok() : _fail();
+            });
+        } else {
+            _r113CopyFallback(text) ? _ok() : _fail();
+        }
+    }
+
+    function _r113CopyFallback(text) {
+        try {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            var ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return ok;
+        } catch (_) {
+            return false;
+        }
+    }
+
+    (function _r113WireAnswerActions() {
+        var copyBtn = document.getElementById('r113CopyAnswerBtn');
+        var mdBtn = document.getElementById('r113DownloadMdBtn');
+        var txtBtn = document.getElementById('r113DownloadTxtBtn');
+        if (copyBtn) { copyBtn.addEventListener('click', _r113CopyAnswer); }
+        if (mdBtn) { mdBtn.addEventListener('click', function () { _r113DownloadAnswer('md'); }); }
+        if (txtBtn) { txtBtn.addEventListener('click', function () { _r113DownloadAnswer('txt'); }); }
+    })();
 
     function hideAllBanners() {
         ungroundedBanner.style.display = 'none';
@@ -461,6 +560,9 @@ document.addEventListener('DOMContentLoaded', function() {
         // answer would briefly show during the loading spinner.
         if (r68DebugChip) { r68DebugChip.style.display = 'none'; }
         if (r95ConfidenceBand) { r95ConfidenceBand.style.display = 'none'; }
+        // Round 113 / A5: hide the copy/export controls until the new
+        // answer lands.
+        if (r113AnswerActions) { r113AnswerActions.style.display = 'none'; }
     }
 
     // Round 68 / Build 42 (C5): render the debug-chip footer when
@@ -666,6 +768,14 @@ document.addEventListener('DOMContentLoaded', function() {
         if (opts.allow_legacy_fallback) {
             payload.allow_legacy_fallback = true;
         }
+        // Round 113 / A1: attach conversation history on the SYNC path
+        // too (pre-R113 only the streaming payload carried it, so the
+        // "Continue conversation" toggle was a no-op whenever the sync
+        // path ran -- streaming disabled or fell back).  Mirrors the
+        // streaming payload build at _r74AskStreaming.
+        if (_r74ConversationActive() && _r74ConversationHistory.length) {
+            payload.conversation_history = _r74ConversationHistory.slice();
+        }
 
         var steps = [
             'Connecting to Snowflake...',
@@ -837,6 +947,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     );
                 } catch (_) { /* noop */ }
                 formatAnswerInto(answerContent, (data.answer && data.answer.trim()) ? data.answer : 'No answer was returned. Please try rephrasing your question.');
+                // Round 113 / A5: track the rendered answer so the
+                // copy/export controls can export it.
+                if (data.answer && data.answer.trim()) {
+                    _r113SetLastAnswer(lastAskedQuestion, data.answer);
+                }
                 // Round 68 / Build 42 (C5): always render the debug
                 // chip on a successful answer so an operator can
                 // file a support ticket with the debug ID.
@@ -1000,6 +1115,7 @@ document.addEventListener('DOMContentLoaded', function() {
             _r74ConversationHistory.shift();
         }
         _r74RenderConversationCount();
+        _r113RenderConversationThread();  // Round 113 / A2
     }
 
     function _r74RenderConversationCount() {
@@ -1017,9 +1133,68 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
+    // Round 113 / A2: render prior Q/A turns as a visible thread above
+    // the live answer pane.  Reuses the browser-local
+    // _r74ConversationHistory store (no server session).  XSS-safe:
+    // the question is rendered via textContent; the answer reuses
+    // _r74RenderMarkdownSafe (marked + DOMPurify) and falls back to
+    // textContent when those libs are unavailable.
+    var r113ConversationThread = document.getElementById('r113ConversationThread');
+
+    function _r113RenderConversationThread() {
+        if (!r113ConversationThread) { return; }
+        while (r113ConversationThread.firstChild) {
+            r113ConversationThread.removeChild(r113ConversationThread.firstChild);
+        }
+        if (!_r74ConversationActive() || !_r74ConversationHistory.length) {
+            r113ConversationThread.style.display = 'none';
+            return;
+        }
+        var heading = document.createElement('div');
+        heading.className = 'small text-muted fw-semibold mb-2';
+        heading.textContent = 'Conversation';
+        r113ConversationThread.appendChild(heading);
+
+        _r74ConversationHistory.forEach(function (turn) {
+            if (!turn || typeof turn !== 'object') { return; }
+            var card = document.createElement('div');
+            card.className = 'card border-0 shadow-sm mb-2 r113-convo-turn';
+
+            var body = document.createElement('div');
+            body.className = 'card-body py-2 px-3';
+
+            var qLine = document.createElement('div');
+            qLine.className = 'fw-semibold small text-primary mb-1';
+            var qIcon = document.createElement('i');
+            qIcon.className = 'fas fa-circle-question me-1';
+            qLine.appendChild(qIcon);
+            var qText = document.createElement('span');
+            qText.textContent = String(turn.q || '');
+            qLine.appendChild(qText);
+            body.appendChild(qLine);
+
+            var aWrap = document.createElement('div');
+            aWrap.className = 'small text-body r113-convo-answer';
+            var rawAnswer = String(turn.a || '');
+            var safeHtml = null;
+            try { safeHtml = _r74RenderMarkdownSafe(rawAnswer); } catch (_) { safeHtml = null; }
+            if (safeHtml) {
+                aWrap.innerHTML = safeHtml;
+            } else {
+                aWrap.textContent = rawAnswer;
+            }
+            body.appendChild(aWrap);
+
+            card.appendChild(body);
+            r113ConversationThread.appendChild(card);
+        });
+        r113ConversationThread.style.display = '';
+    }
+
     function _r74ResetConversation() {
         _r74ConversationHistory = [];
         _r74RenderConversationCount();
+        _r113RenderConversationThread();
         _r68ShowToast('Conversation reset.', 'success');
     }
 
@@ -1036,6 +1211,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 _r74ConversationHistory = [];
                 _r74RenderConversationCount();
             }
+            _r113RenderConversationThread();  // Round 113 / A2
         });
     }
 
@@ -1138,11 +1314,22 @@ document.addEventListener('DOMContentLoaded', function() {
         typePill.textContent = String(record.source_type || record.record_type || 'evidence');
         headerRow.appendChild(typePill);
         if (record.customer || record.customer_name || record.bu_name) {
-            var custPill = document.createElement('span');
-            custPill.className = 'badge bg-info text-dark';
-            custPill.textContent = String(
+            // Round 113 / B3: customer drill-through.  Render the
+            // customer as a link to the corpus-backed Customer 360
+            // route (/customer/<name>).  XSS-safe: the visible label
+            // is set via textContent and the href is built with
+            // encodeURIComponent, so a malicious customer string can
+            // neither inject markup nor break out of the URL.
+            var custName = String(
                 record.customer || record.customer_name || record.bu_name
             );
+            var custPill = document.createElement('a');
+            custPill.className = 'badge bg-info text-dark text-decoration-none';
+            custPill.href = '/customer/' + encodeURIComponent(custName);
+            custPill.target = '_blank';
+            custPill.rel = 'noopener noreferrer';
+            custPill.title = 'Open Customer 360 for ' + custName;
+            custPill.textContent = custName;
             headerRow.appendChild(custPill);
         }
         if (record.timestamp || record.recorded_at) {
@@ -1464,6 +1651,13 @@ document.addEventListener('DOMContentLoaded', function() {
                             data.evidence_records,
                             data.query_id
                         );
+                        // Round 113 / A3: surface the retrieval summary in
+                        // the loading detail line the instant meta lands,
+                        // so the user sees what was scanned while the
+                        // answer chunks render.
+                        if (data.retrieval_summary && loadingDetail) {
+                            loadingDetail.textContent = String(data.retrieval_summary);
+                        }
                     } catch (_) { /* noop */ }
                 } else if (event === 'data') {
                     var chunk = (data && typeof data.chunk === 'string')
@@ -1618,6 +1812,12 @@ document.addEventListener('DOMContentLoaded', function() {
             var pill = document.getElementById('r74StreamingPill');
             if (pill) { pill.style.display = ''; }
         } catch (_) { /* noop */ }
+        // Round 113 / A5: track the streamed answer for copy/export.
+        try {
+            if (answerText && answerText.trim()) {
+                _r113SetLastAnswer(lastAskedQuestion, answerText);
+            }
+        } catch (_) { /* noop */ }
         // History + conversation tracking.
         try {
             var qid = (metaPayload && metaPayload.query_id) || '';
@@ -1685,7 +1885,13 @@ document.addEventListener('DOMContentLoaded', function() {
 
     askBtn.addEventListener('click', function() { askAI(questionInput.value); });
     questionInput.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter') { e.preventDefault(); askAI(this.value); }
+        // Round 113 / A4: the question input is now a <textarea>.
+        // Enter submits; Shift+Enter (and the IME composition key)
+        // inserts a newline so multi-line questions are possible.
+        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+            e.preventDefault();
+            askAI(this.value);
+        }
     });
     if (legacyOptInBtn) {
         legacyOptInBtn.addEventListener('click', function() {

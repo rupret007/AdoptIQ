@@ -11598,3 +11598,67 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - F4 narrative variants are currently hard-coded English strings in `be_priority_word_section._intro_text`. If the report ever ships in a localised form, those strings need to flow through the localisation layer; out of scope for this round.
 
 **Trailer:** Made-with: Cursor
+
+## Round 113 — handoff 2026-05-28
+
+**What changed (plain English):**
+- Combined Ask AI usability + accuracy uplift and a Preferences fix-and-polish pass, in one phased round (A: Ask AI UX, B: Ask AI accuracy, C: Preferences, D: ship). Mirrors the R66.2/Build 40 multi-pass-single-build precedent.
+- **A1** — unified conversation history across the sync + stream Ask AI paths. Pre-R113 only `/api/ask-ai-portfolio/stream` applied `_r74_apply_conversation_history`; the sync `/api/ask-ai-portfolio` route never did, so the "Continue conversation" toggle was a silent no-op whenever streaming was off / fell back. Both routes now apply it. History augments ONLY the question string (never evidence/citation enforcement), so grounding is unchanged.
+- **A2** — visible conversation thread: prior Q/A turns render above the current answer (reusing the existing browser-local history store; no server session).
+- **A3** — progressive retrieval feedback: the SSE `meta` event now carries `retrieval_summary` ("Scanned N adoption barriers / M support cases across K customers; ranking evidence…") built by `_r113_build_retrieval_summary` from the canonical headline (graceful fallback to evidence/account counts). True LLM token streaming stays a documented non-goal (retrieval must complete before the LLM call).
+- **A4** — multi-line textarea question input (Enter sends, Shift+Enter newline) replacing the single-line `#aiQuestion` input.
+- **A5** — per-answer Copy (markdown to clipboard) + Download (.md / .txt) controls.
+- **B1** — renewal/expiry/ARR grounding in CANONICAL_HEADLINE (no new Snowflake fetch). `_r113_renewal_headline_fields(bundle)` serializes `contracts_expiring_90d` / `expiring_arr` / `renewals_at_risk` from the already-prefetched `enhanced_account_insights`. Multi-currency aware: emits `expiring_arr_by_currency` (per-currency breakdown) instead of a misleading single number when the portfolio spans currencies. Bools rejected as numeric. Gap-fill merge (SSoT portfolio metrics win).
+- **B2** — live suggestion chips: bounded in-memory per-scope top-risk cache (`OrderedDict`, cap 64, FIFO, names-only, no PII to disk). `run_portfolio_grounded_ask_ai` stamps it after `_risk_profiles_canon`; `/api/ask-ai/suggestions` names a real top-risk customer when warm and falls back to the template chip when cold (route stays Snowflake-free).
+- **B3** — customer drill-through: Ask AI customer names (evidence drawer pill + citation popover badge) link to `/customer/<encodeURIComponent(name)>`, label via `.textContent` (XSS-safe). The `/customer/<name>` route already existed but had zero nav links.
+- **C1** — CSOne folder card display bug: `r88_csone_folder_override.js` read `payload.active_path` but `GET /api/settings/csone-onedrive-folder` returns `folder_path`, so the card always showed "(no path resolved)". One-line field-name fix (`folder_path || active_path`).
+- **C2** — Intelligence-toggle feedback on `/preferences`: `setRefreshFeedback` targeted `[data-intel-banner]` (analyze page only); added a standalone `[data-intel-banner-summary]` target on the Preferences Intelligence card + a fallback selector so the POST result is surfaced.
+- **C3** — persisted default analysis scope: `default_days` / `default_manager` / `default_technology` in `adoptiq_settings._SCHEMA` with validators (`is_valid_default_days` 0|[1,365]; `is_valid_default_scope_str` empty|≤200-char shell-meta-free). `_r113_resolve_report_defaults()` re-validates manager against `MANAGERS` + tech against `TECH_CHOICES` on READ (stale value → "", graceful). New `GET|POST /api/settings/report-defaults` (CSRF dual-path on POST). Wired into `index` (analyze), `ask_ai_page`, the ask-ai template option pre-select, and (via the pre-selected select values) the suggestion-chip fetch. New Preferences card + `static/js/r113_report_defaults.js`.
+- **C4** — guarded `intel_status.js` polling: `_intelPollSurfacePresent()` checks for `[data-intel-banner]` OR `[data-sharepoint-panel]` and guards `scheduleNextPoll()` + the initial `pollOnce()` in `init()` so the recurring poll never starts on `/preferences`; the one-shot toggle `pollOnce()` stays unguarded so the navbar badge still updates.
+
+**Files touched:**
+- `app_simple.py` — A1 (sync-route history apply); A3 (`_r113_build_retrieval_summary` + meta event); B2 (suggestion-chip cache read); C3 (`_r113_resolve_report_defaults` + `/api/settings/report-defaults` endpoint + analyze/ask-ai route wiring + preferences route managers/technologies context).
+- `ask_ai_grounded.py` — B1 (`_r113_renewal_headline_fields` + headline merge); B2 (`_r113_scope_key` / `_r113_stamp_top_risk_customers` / `get_top_risk_customers_for_scope` + cache + stamp in `run_portfolio_grounded_ask_ai`).
+- `static/js/ask_ai.js` — A2 (`_r113RenderConversationThread`); A3 (surface retrieval_summary); A5 (`_r113CopyAnswer` / `_r113DownloadAnswer` + answer-actions wiring); A1 (attach conversation_history on sync path); B3 (customer drill-through links, XSS-safe).
+- `templates/ask_ai.html` — A2 (thread container); A4 (textarea); A5 (answer-action controls); C3 (default manager/tech/days pre-select).
+- `static/js/r88_csone_folder_override.js` — C1 (`folder_path` read).
+- `static/js/intel_status.js` — C2 (standalone summary feedback target); C4 (`_intelPollSurfacePresent` poll guard).
+- `templates/preferences.html` — C2 (`data-intel-banner-summary` target); C3 (default-scope card + script tag).
+- `adoptiq_settings.py` — C3 (schema keys + `_is_valid_default_days` / `_is_valid_default_scope_str` validators + public aliases).
+- `static/js/r113_report_defaults.js` — C3 (new Preferences default-scope card module).
+- `tests/test_round113_ask_ai_and_prefs.py` — new file, 49 tests (one block per A1-A5 / B1-B3 / C1-C4).
+- `tests/test_round73_model_dropdown_allowlist.py` — 2 tests narrowed to scope the "no default sentinel" assertion to the model-picker `<select data-r69-model-input>` blocks only (C3's default-scope card legitimately carries an `<option value="">` unset sentinel). Helper `_r73_model_select_blocks` added. The R73 contract (model picker stays strict 2-option) is preserved.
+- `config.py` — `ADOPTIQ_BUILD = "81"` → `"82"` + explanatory block comment.
+- `CLAUDE.md` — pytest floor 5664 → 5713; eight new Critical Rule entries (A1/B1/B2/B3/C1/C3/C4 + the C3 schema note).
+- `README.md` — new "What's New in Build 82" section.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — new Round 113 smoke item #9.1 (operator validation steps for A1-A5 / B1-B3 / C1-C4).
+- `QUALITY_AUDIT.md` — this handoff entry.
+
+**SSoT modules touched:** canonical_metrics (indirect — A3 retrieval summary reads canonical totals); risk_scoring (indirect — B2 reads `risk_score_0_100` from `compute_customer_risk_profile` output); config (ADOPTIQ_BUILD bump). No direct edits to the canonical scoring/export/styling modules — B1/B2 read already-computed values; A/C are UX + settings.
+
+**Tests added/updated:**
+- `tests/test_round113_ask_ai_and_prefs.py` (49 new tests): `TestA1ConversationHistory` (4 — prepend, no-op, malformed-drop, sync-route source-shape ≥2 apply sites), `TestA2ConversationThread` (2), `TestA3RetrievalSummary` (5 — headline-derived, singular grammar, evidence fallback, no-raise, stream wiring), `TestA4Textarea` (2 — is-textarea, no-input), `TestA5CopyExport` (2), `TestB1RenewalHeadline` (5 — single-ccy, multi-ccy breakdown, malformed, bool-reject, merge-wiring), `TestB2TopRiskCache` (9 — roundtrip, cold-empty, scope-key norm, empty-no-stamp, FIFO bound, composite fallback, warm+cold endpoint), `TestB3CustomerDrillthrough` (3 — encodeURIComponent link, textContent, route exists), `TestC1CsoneFolderCard` (2 — JS reads folder_path, endpoint returns folder_path), `TestC2IntelFeedback` (2), `TestC3DefaultScopeValidators` (3), `TestC3DefaultScopeResolver` (3 — stale-drop, keep-valid, never-raises), `TestC3DefaultScopeEndpoint` (6 — GET shape, reject-bad-days, reject-injection, persist-valid, card-js, prefs-template), `TestC4PollGuard` (2).
+- `tests/test_round73_model_dropdown_allowlist.py` — 2 tests narrowed (model-picker scoped) in lockstep with C3; the other 18 tests in the file pass unmodified.
+
+**Verify status:**
+- `make verify` — pass (`make lint` ruff clean, `make security` bandit 0 HIGH/MED, `make audit` pip-audit no vulnerabilities, full pytest with `-m "not eval"` 5713 passed / 4 skipped / 6 deselected in ~210s — R112 floor was 5664, +49 net).
+- `make eval-ask-ai` — 6 passed (re-run because Phase A/B touched the grounded pipeline; synthetic replay scorecard unchanged).
+- pytest narrow: 49 R113 tests pass; 20 R73 model-dropdown tests pass (2 narrowed).
+- ruff: 0 findings. bandit HIGH/MED: 0. pip-audit: clean.
+- gated macOS rebuild: NOT RUN in this session — `ADOPTIQ_RELEASE_GATE=1 ADOPTIQ_VERSION=1.0.4 ADOPTIQ_BUILD=82 ./build_mac_dmg.sh` is the remaining operator step (it is a ~40-minute codesign + DMG + baked-corpus pipeline that requires the operator's signing identity and OneDrive corpus on the bake host; the produced DMG is a >1 GB artifact that must NOT be committed). Operator must then verify `CFBundleVersion=82` + codesign + `Resources/baked_corpus/{corpus.db.enc,corpus.db.salt,sentinel.json}` present + `corpus.sentinel.lock.json` absent (R87 contract), run `scripts/test_build_smoke.sh`, and close the live acceptance loop per CURSOR_MAC_BUILD_INSTRUCTIONS.md item #9.1.
+
+**Hot spots Claude should audit first:**
+1. `ask_ai_grounded.py` B1 merge (~L1799) — the renewal headline merge MUST be gap-fill only (`if _r113_k not in canonical_headline`) so SSoT portfolio metrics always win. The multi-currency branch in `_r113_renewal_headline_fields` (~L1253) is the risk: confirm `expiring_arr` is emitted ONLY when `not is_multi` AND a numeric (non-bool) `expiring_arr` is present; otherwise `expiring_arr_by_currency` must carry the breakdown.
+2. `ask_ai_grounded.py` B2 cache — `_r113_stamp_top_risk_customers` / `get_top_risk_customers_for_scope` are lock-protected and bounded; confirm no PII path persists names to disk (the cache is process-memory only and stamps names, never scores/financials). The stamp is best-effort try/except so a failure degrades to template chips.
+3. `app_simple.py` C3 `_r113_resolve_report_defaults` (~L23250) — the roster/TECH_CHOICES re-validation on READ is the graceful-degrade contract. A future settings reader that trusts the persisted manager/tech value without re-validating re-introduces the stale-selection bug.
+4. `app_simple.py` A1 sync-route history apply (~L24061) — confirm history augments ONLY the question string and never flows into evidence/allowed-IDs. Pinned by `TestA1ConversationHistory::test_sync_route_applies_conversation_history` (source-shape: ≥2 apply sites).
+5. `static/js/ask_ai.js` B3 — both the evidence-drawer pill (~L1317) AND the citation-popover badge (~L67) MUST use `encodeURIComponent` for the href + `.textContent` for the label. A future surface that uses `.innerHTML` for a customer name re-opens the XSS hole.
+
+**Known deferrals (intentional non-fixes):**
+- **ARR-by-risk-band in headline** — needs a new `fetch_arr_data(ctx, account_ids)` call + name join from `risk_profiles` to `BU_NAME`/`ACCOUNT_ID_C`; adds Snowflake latency. B1 ships the no-new-fetch renewal grounding first; promote only if acceptance shows it's needed.
+- **Server-side conversation sessions** — A1/A2 keep history browser-local (already stored); a server session store is larger scope, not justified yet.
+- **True LLM token streaming** — the grounded pipeline must complete retrieval before the LLM call; A3 ships progressive *retrieval* feedback instead.
+- **Unifying the two citation UIs** (R68 popover vs R74 drawer) — a trust/cleanup item, out of scope this round.
+- **Gated macOS DMG rebuild + live regen** — deferred to the operator (signing identity + bake-host corpus + >1 GB artifact). All code/tests/docs are landed; the build is the only remaining D-phase step.
+
+**Trailer:** Made-with: Cursor

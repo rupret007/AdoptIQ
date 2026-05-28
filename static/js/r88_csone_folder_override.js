@@ -101,8 +101,14 @@
     function paintCsoneFolderCard(payload) {
         var current = document.querySelector(CURRENT_SELECTOR);
         if (current) {
-            if (payload && payload.active_path) {
-                current.textContent = payload.active_path;
+            // Round 113 / C1: the GET /api/settings/csone-onedrive-folder
+            // endpoint returns the active path under ``folder_path``
+            // (not ``active_path``).  Pre-R113 this read the wrong key,
+            // so the card always showed "(no path resolved)" even when
+            // a path WAS resolved.  Accept both for back-compat.
+            var resolvedPath = (payload && (payload.folder_path || payload.active_path)) || '';
+            if (resolvedPath) {
+                current.textContent = resolvedPath;
             } else {
                 current.textContent = '(no path resolved)';
             }

@@ -935,7 +935,28 @@ ADOPTIQ_VERSION = "1.0.4"
 # tests across validator, resolver, ``_r83_safe_share_url``,
 # preferences-page source-shape, analyze-card regression guard, and
 # cross-pin against the R35 + R81 fixtures).
-ADOPTIQ_BUILD = "81"  # Round 112 / Build 81
+ADOPTIQ_BUILD = "82"  # Round 113 / Build 82
+# Round 113 / Build 82: Ask AI uplift + Preferences fix-and-polish.
+# Phase A (Ask AI UX): unified conversation history across the sync +
+# stream paths (A1), visible browser-local conversation thread (A2),
+# progressive retrieval-footprint feedback in the SSE meta event (A3),
+# multi-line textarea question input (A4), per-answer copy/download
+# controls (A5).  Phase B (Ask AI accuracy): renewal/expiry/ARR
+# aggregates serialized into CANONICAL_HEADLINE from the already-
+# prefetched enhanced_account_insights, multi-currency aware (B1); a
+# bounded in-memory per-scope top-risk cache so the suggestion chips
+# name a real top-risk customer when warm and fall back to templates
+# when cold (B2); customer drill-through wiring Ask AI customer names
+# to the /customer/<name> Customer 360 route, XSS-safe (B3).  Phase C
+# (Preferences): fixed the CSOne folder card display bug (active_path
+# -> folder_path) (C1); Intelligence-toggle feedback target on the
+# Preferences page (C2); persisted default analysis scope
+# (default_days / default_manager / default_technology) with schema +
+# validators + a re-validating resolver + GET|POST
+# /api/settings/report-defaults + a Preferences card, wired into the
+# analyze + ask-ai pages and the suggestion-chip fetch (C3); guarded
+# intel_status.js polling so the recurring loop only runs on pages
+# that carry the banner/panel DOM (C4).
 # Round 112 / Build 81: Build 80 acceptance audit + 6-finding fix loop.
 # 1 P0 + 4 P1 + 1 P2 found by the parallel multi-agent audit on the
 # four fresh Build 80 report pairs (Comprehensive / Compact /

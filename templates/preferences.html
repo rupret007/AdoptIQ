@@ -216,6 +216,14 @@
                         <code>POST /api/settings/intelligence</code>.  Same control as
                         the analyze-page banner; both stay in sync.
                     </div>
+                    {# Round 113 / C2: feedback target for the toggle on the
+                       Preferences page.  intel_status.js::setRefreshFeedback
+                       writes the POST /api/settings/intelligence result here
+                       (the analyze-page banner's summary line does not exist
+                       on this page, so pre-R113 the result was silently
+                       dropped).  Empty until the toggle is flipped. #}
+                    <div class="small mt-2" data-intel-banner-summary
+                         aria-live="polite"></div>
                 </div>
             </section>
 
@@ -547,6 +555,92 @@
                 </div>
             </section>
 
+            {# ----- Section: Default analysis scope (Round 113 / C3) - #}
+            <section id="prefs-report-defaults-card"
+                     class="card shadow-cisco fade-in mb-4"
+                     data-report-defaults-card
+                     style="animation-delay: 0.29s;"
+                     aria-labelledby="prefs-report-defaults-heading"
+                     aria-live="polite"
+                     aria-atomic="true">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-report-defaults-heading">
+                        <i class="fas fa-sliders-h me-2" aria-hidden="true"></i>
+                        Default analysis scope
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-3">
+                        Pre-select a preferred manager, technology, and time
+                        window so the analyze page and Ask AI open on your
+                        scope.  Leave a field blank / unset to fall back to the
+                        per-page default (analyze uses the first manager,
+                        Ask AI uses &ldquo;All&rdquo;).  Saved manager /
+                        technology values are re-checked against the live
+                        roster on load, so a roster change degrades gracefully
+                        instead of selecting nothing.
+                    </p>
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-1"
+                                   for="prefs-report-defaults-manager">Manager</label>
+                            <select class="form-select form-select-sm"
+                                    id="prefs-report-defaults-manager"
+                                    data-report-defaults-manager>
+                                <option value="">(no default — first manager / All)</option>
+                                {% for m in managers %}
+                                <option value="{{ m }}">{{ m }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-1"
+                                   for="prefs-report-defaults-technology">Technology</label>
+                            <select class="form-select form-select-sm"
+                                    id="prefs-report-defaults-technology"
+                                    data-report-defaults-technology>
+                                <option value="">(no default — All)</option>
+                                {% for t in technologies %}
+                                <option value="{{ t }}">{{ t }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-1"
+                                   for="prefs-report-defaults-days">Time window</label>
+                            <select class="form-select form-select-sm"
+                                    id="prefs-report-defaults-days"
+                                    data-report-defaults-days>
+                                <option value="0">(no default — 90 days)</option>
+                                <option value="30">Last 30 days</option>
+                                <option value="90">Last 90 days</option>
+                                <option value="180">Last 180 days</option>
+                                <option value="365">Last year</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        <button type="button"
+                                class="btn btn-sm btn-primary"
+                                data-report-defaults-save
+                                title="Persist the default scope to settings.json">
+                            <i class="fas fa-save me-1" aria-hidden="true"></i>
+                            Save
+                        </button>
+                        <button type="button"
+                                class="btn btn-sm btn-outline-warning"
+                                data-report-defaults-clear
+                                title="Clear all defaults and fall back to per-page defaults">
+                            <i class="fas fa-undo me-1" aria-hidden="true"></i>
+                            Clear defaults
+                        </button>
+                        <span class="small ms-2"
+                              data-report-defaults-feedback
+                              aria-live="polite"></span>
+                    </div>
+                </div>
+            </section>
+
             {# ----- Section: Theme (informational) ------------------- #}
             <section class="card shadow-cisco fade-in mb-4"
                      style="animation-delay: 0.3s;"
@@ -627,4 +721,8 @@
 <script src="{{ url_for('static', filename='js/r88_csone_folder_override.js') }}"></script>
 {# Round 92: report-output folder override card; textContent-only rendering. #}
 <script src="{{ url_for('static', filename='js/r92_report_outputs_folder.js') }}"></script>
+{# Round 113 / C3: persisted default analysis scope card.  IIFE module,
+   reads GET /api/settings/report-defaults to paint, POSTs on Save.
+   Option values are server-rendered + matched by value, so no XSS sink. #}
+<script src="{{ url_for('static', filename='js/r113_report_defaults.js') }}"></script>
 {% endblock %}

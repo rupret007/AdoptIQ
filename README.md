@@ -1,8 +1,12 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 80).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 82).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 82 (Round 113 — Ask AI uplift + Preferences fix-and-polish)
+
+Build 82 makes Ask AI genuinely useful for multi-turn work and fixes the confirmed Preferences defects, in one phased round. **Ask AI UX (Phase A):** the "Continue conversation" toggle now actually works on the non-streaming path too (pre-R82 it was a silent no-op when streaming was off); prior Q/A turns render as a visible conversation thread; the SSE progress event now reports the retrieval footprint ("Scanned N adoption barriers / M support cases across K customers; ranking evidence…") so the 15-30s wait isn't a blank spinner; the question box is now a multi-line textarea (Enter sends, Shift+Enter for a newline); and every answer has Copy + Download (.md / .txt) controls. **Ask AI accuracy (Phase B):** renewal/expiry/ARR aggregates that were already prefetched are now surfaced in the answer's authoritative headline (multi-currency aware — a portfolio spanning currencies shows a per-currency breakdown instead of a misleading single number); the suggestion chips now name a real top-risk customer when the data is warm (and fall back to a template chip when cold); and customer names in answers + evidence are now clickable links to the Customer 360 page (XSS-safe). **Preferences (Phase C):** the CSOne folder card now shows the resolved path (was always "(no path resolved)"); the Intelligence on/off toggle now shows success/error feedback on the Preferences page; a new "Default analysis scope" card lets you pin a default manager / technology / time window that pre-selects on both the analyze and Ask AI pages (stale saved values degrade gracefully if the roster changes); and the background Intelligence status poll no longer runs on pages that don't show the Intelligence panel. Pinned by 49 new R113 tests + 2 updated R73 tests (narrowed to the model picker). All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **5713 pytest passed (R112 floor was 5664; +49 net)**; `make eval-ask-ai` 6 passed.
 
 ### What's New in Build 81 (Round 112 — Build 80 acceptance audit + 6-finding fix loop)
 

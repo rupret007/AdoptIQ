@@ -75,6 +75,29 @@
     var POLL_SLOW_MS = 60000;
     var REFRESH_DEBOUNCE_MS = 2000;
 
+    // Round 113 / C4: only the analyze page carries the full intel
+    // banner ([data-intel-banner]) and/or the corpus panel
+    // ([data-sharepoint-panel]).  Pages like /preferences, /history,
+    // /ask-ai load this same script (it's in base.html) but have
+    // neither surface, so the recurring /api/intel/status poll there
+    // was pure redundant traffic.  Gate the recurring poll on the
+    // presence of one of those surfaces.  The navbar badge
+    // ([data-intel-badge], present on every page) is rendered
+    // server-side on load and only reflects boot state, which does
+    // not change mid-session on a page without the corpus controls --
+    // so a one-shot refresh (e.g. after the Preferences toggle) is
+    // still allowed, but the recurring loop is not started.
+    function _intelPollSurfacePresent() {
+        try {
+            return !!(
+                document.querySelector('[data-intel-banner]')
+                || document.querySelector('[data-sharepoint-panel]')
+            );
+        } catch (_) {
+            return false;
+        }
+    }
+
     function getCsrfToken() {
         try {
             var meta = document.querySelector('meta[name="csrf-token"]');
@@ -256,6 +279,14 @@
         var summary = document.querySelector(
             '[data-intel-banner] [data-intel-banner-summary]'
         );
+        // Round 113 / C2: the Preferences page has no [data-intel-banner]
+        // wrapper, so fall through to a standalone
+        // [data-intel-banner-summary] feedback target there.  Without
+        // this the POST /api/settings/intelligence result was silently
+        // dropped on /preferences.
+        if (!summary) {
+            summary = document.querySelector('[data-intel-banner-summary]');
+        }
         if (!summary) { return; }
         var i;
         for (i = 0; i < REFRESH_FEEDBACK_CLASSES.length; i += 1) {
@@ -278,6 +309,11 @@
             window.clearTimeout(pollHandle);
             pollHandle = null;
         }
+        // Round 113 / C4: never start the recurring loop on a page
+        // without the banner/panel.  A one-shot pollOnce (e.g. the
+        // Preferences toggle's badge refresh) is still allowed -- it
+        // just won't schedule a follow-up tick here.
+        if (!_intelPollSurfacePresent()) { return; }
         var hidden = (typeof document.hidden === 'boolean') ? document.hidden : false;
         var delay = (state === 'running' && !hidden) ? POLL_FAST_MS : POLL_SLOW_MS;
         pollHandle = window.setTimeout(pollOnce, delay);
@@ -1047,6 +1083,13 @@
         bindResetButton();
         bindUploadForm();
         bindEnableToggle();
+        // Round 113 / C4: only start the recurring poll (and the
+        // visibility-change re-sync) on pages that actually render the
+        // intel banner or corpus panel.  bindEnableToggle() above is
+        // intentionally still wired on every page so the Preferences
+        // toggle keeps working (and its post-toggle pollOnce refreshes
+        // the navbar badge once without starting a loop).
+        if (!_intelPollSurfacePresent()) { return; }
         if (typeof document.addEventListener === 'function') {
             document.addEventListener('visibilitychange', function () {
                 // When the tab becomes visible again, re-sync state
