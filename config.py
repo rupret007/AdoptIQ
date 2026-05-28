@@ -935,7 +935,23 @@ ADOPTIQ_VERSION = "1.0.4"
 # tests across validator, resolver, ``_r83_safe_share_url``,
 # preferences-page source-shape, analyze-card regression guard, and
 # cross-pin against the R35 + R81 fixtures).
-ADOPTIQ_BUILD = "78"  # Round 109 / Build 78
+ADOPTIQ_BUILD = "79"  # Round 110 / Build 79
+# Round 110 / Build 79: Leader Report_Info schema parity (latent-bug fix).
+# Pre-R110 the Leader writer's two dynamic-loop branches in app_simple.py
+# (Partial_Data_Warning_<n> rows and Failed_Sheet rows) appended dicts
+# keyed on ``'Field':`` while every other row in the same _info_rows list
+# used the canonical ``'Item':`` key per Round 73 / F6.
+# ``pd.DataFrame(_info_rows)`` builds the union of all dict keys, so any
+# Leader run with a partial-data warning OR a failed sheet silently grew
+# a stray fifth ``Field`` column with NaN on every other row, violating
+# R73/F6's promise that ``pd.read_excel("Report_Info")[["Item", "Value"]]``
+# projects cleanly across every report format. Today's clean Build 78
+# Brian Frazier 90d Leader cohort had ``Partial_Data_Warning_Count=0``
+# and ``_failed_sheets=[]`` so the buggy rows never fired and the audit
+# verdict was clean -- the latent defect was found on inspection. R110
+# normalises both dynamic-loop branches onto the canonical ``'Item':``
+# key so the four-column schema holds in every Leader run.
+#
 # Round 109 / Build 78: fix indexing hang. Runtime dense-vector upsert
 # is bounded by ``ask_ai_vector_store._runtime_max_chunks_default``
 # (default 2,000, env-overridable via

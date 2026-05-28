@@ -29139,13 +29139,27 @@ def run_leader_report_generation(analysis_id):
                             _r68_append_4col(_info_rows)
                         except Exception as _r68_err:  # noqa: BLE001
                             logger.debug("Round 68 / A1: Leader build label skipped: %s", _r68_err)
+                        # Round 110 / Build 79 (latent-bug fix): the partial-warning
+                        # and failed-sheet append blocks below previously used
+                        # ``'Field':`` as the first-column key while every other
+                        # row in this block uses ``'Item':`` (R73 / Phase 3 / F6).
+                        # ``pd.DataFrame(_info_rows)`` builds the union of all dict
+                        # keys so any partial warning OR failed sheet would silently
+                        # add a stray fifth ``Field`` column with NaN on every other
+                        # row, violating R73/F6's "first two columns are the
+                        # canonical Item / Value subset" promise. Today's clean
+                        # Build 78 cohort did not trip the bug because Brian
+                        # Frazier's run had ``Partial_Data_Warning_Count=0`` AND
+                        # ``_failed_sheets=[]``; Build 79 normalises both branches
+                        # onto the canonical ``'Item':`` key so the four-column
+                        # schema holds in every Leader run.
                         for _i, _w in enumerate(_leader_pdw, 1):
                             try:
                                 _ds = (_w.get('dataset') if isinstance(_w, dict) else None) or 'n/a'
                                 _kind = (_w.get('kind') if isinstance(_w, dict) else None) or 'n/a'
                                 _err = (_w.get('error') if isinstance(_w, dict) else str(_w))
                                 _info_rows.append({
-                                    'Field': f'Partial_Data_Warning_{_i}',
+                                    'Item': f'Partial_Data_Warning_{_i}',  # Round 110: was 'Field' (R73/F6 schema parity)
                                     'Value': _ds,
                                     'Detail': f'{_kind}: {str(_err)[:200]}',
                                     'Generated_At': '',
@@ -29154,7 +29168,7 @@ def run_leader_report_generation(analysis_id):
                                 continue
                         for fs in _failed_sheets:
                             _info_rows.append({
-                                'Field': 'Failed_Sheet',
+                                'Item': 'Failed_Sheet',  # Round 110: was 'Field' (R73/F6 schema parity)
                                 'Value': fs['sheet'],
                                 'Detail': fs['error'],
                                 'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),

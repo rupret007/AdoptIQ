@@ -1,8 +1,12 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 78).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 79).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 79 (Round 110 — Leader Report_Info schema parity)
+
+Build 79 fixes a latent schema-drift defect in the Leader report's `Report_Info` xlsx sheet. Pre-Build 79, when a Leader run produced any partial-data warning (e.g. tech-filter scope excluded all rows) OR any failed sheet, the writer's two dynamic loops appended dicts keyed on `'Field'` while every other row in the sheet used the canonical `'Item'` key per the Round 73 / F6 schema. `pd.DataFrame` then built the union of all keys, silently growing a stray fifth `Field` column with NaN on every other row — violating the contract that `Report_Info` projects cleanly as `(Item, Value)` across every report format. Build 78's clean Brian Frazier 90d cohort never tripped the bug because it had zero partial warnings and zero failed sheets, so existing Build 78 artifacts are unaffected; Build 79 normalizes both dynamic-loop branches onto `'Item'` so the four-column `(Item, Value, Detail, Generated_At)` schema holds in every Leader run. Build 79 also carries forward all Build 78 fixes (bounded runtime dense-vector backfill, jobs-dashboard model label resolution).
 
 ### What's New in Build 78 (Round 109 — Fix Indexing Hang)
 

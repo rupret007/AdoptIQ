@@ -48,7 +48,8 @@ pip install pyinstaller
 4. Round 103.1 / Build 72 ships the Report Jobs theme cleanup. During smoke, confirm Current Running Reports and Historical Reports stay on the existing dark/orange theme and active rows use an orange accent rather than gray/light Bootstrap row styling.
 5. Round 104 / Build 73 ships the first live report audit fix. During smoke, confirm `/api/settings/report-model` and `/api/settings/ask-ai-model` both resolve to `gemini-3.1-flash-lite`.
 6. Round 105 / Build 74 ships the follow-up live artifact closeout. Prefer a fresh Compact/Renewal same-scope run when time allows to verify risk-score parity after incident recovery, confirm Compact `Report_Info` carries ACC partial warnings, and spot-check Leader `BE_Priority_Barriers` titles/descriptions are populated instead of all `AMBIGUOUS`.
-7. Generate bundled secrets:
+7. Round 110 / Build 79 ships a Leader `Report_Info` xlsx schema-parity fix. During smoke, regenerate any Leader scope that produces a `partial_data_warning` (e.g. a tech filter that excludes the entire scope, or a scope known to leave a sheet empty) and confirm the resulting `Report_Info` sheet has exactly four columns `(Item, Value, Detail, Generated_At)` with no stray `Field` column. Pre-Build 79 the partial-warning and failed-sheet rows were keyed on `'Field'` while everything else used `'Item'`, silently producing a 5-column NaN-leaked sheet on any non-trivial run.
+8. Generate bundled secrets:
 
 ```bash
 python embed_credentials.py
@@ -191,6 +192,18 @@ test ! -f /tmp/adoptiq_dmg/AdoptIQ.app/Contents/Resources/baked_corpus/corpus.se
   vector pass leaves a backlog, the panel should render the corpus as
   "Active" and surface "Dense retrieval is warming • backfilling N chunks"
   as a quality note (status payload exposes `boot.dense_rows_remaining`).
+- Round 110 Leader Report_Info schema-parity smoke (Build 79+): generate
+  any Leader report whose scope produces at least one `partial_data_warning`
+  (the easiest trigger is a tech filter that excludes every row in scope,
+  surfacing as a `tech_filter_scope_excluded` warning per Round 93) OR any
+  failed sheet. Open the resulting xlsx, navigate to the `Report_Info`
+  sheet, and confirm the header is exactly `(Item, Value, Detail,
+  Generated_At)` with no stray `Field` column. Pre-Build 79 the dynamic-
+  loop row builders for `Partial_Data_Warning_<n>` and `Failed_Sheet`
+  used `'Field'` as the first-column key, silently growing a fifth
+  `Field` column with NaN on every other row whenever those branches
+  fired. `pd.read_excel("Report_Info")[["Item", "Value"]]` must succeed
+  cleanly across every report format (the R73/F6 contract).
 
 ### Staging sync (OneDrive)
 

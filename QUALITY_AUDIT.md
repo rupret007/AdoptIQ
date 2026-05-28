@@ -11427,3 +11427,54 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - The 2000-row default cap is intentionally conservative; operators with fast hosts can raise it via `ADOPTIQ_RUNTIME_VECTOR_MAX_CHUNKS` without rebuilding.
 
 **Trailer:** Made-with: Cursor
+
+## Round 110 — handoff 2026-05-28
+
+**What changed (plain English):**
+- Latent-bug fix in the Leader `Report_Info` writer in `app_simple.py`. Two dynamic-loop branches that append `Partial_Data_Warning_<n>` rows (when `partial_data_warnings` is non-empty) and `Failed_Sheet` rows (when sheets fail to write) used `'Field':` as the first-column key while every other row in the same `_info_rows` list used the canonical `'Item':` key per Round 73 / F6. `pd.DataFrame(_info_rows)` builds the union of all dict keys, so any Leader run with a partial warning OR a failed sheet would have silently grown a stray fifth `Field` column with NaN on every other row, violating R73/F6's promise that `pd.read_excel("Report_Info")[["Item", "Value"]]` projects cleanly across every report format.
+- The defect was found on inspection during the post-Build-78 four-report audit; today's clean Build 78 cohort (Brian Frazier 90d Leader, 2026-05-28) had `Partial_Data_Warning_Count=0` AND `_failed_sheets=[]` so the buggy rows never fired and the audit verdict on the actual artifacts was clean (70+ contracts checked across docx + xlsx for all four report formats — 0 mid-string injections, 0 stub bullets, 0 markdown leakage, 0 duplicate IDs, MODERATE vocabulary, 6.8% R27 grounding rejection rate GREEN, 0.49% per-customer LLM fallback rate well under R68/A5 threshold).
+- Two single-line code edits in `app_simple.py`: change `'Field':` to `'Item':` on the partial-warning loop append (~line 29148) and the failed-sheet loop append (~line 29157), with a Round 110 explanatory block-comment naming the latent-bug class fixed. No behavior change beyond the column-key correction on the path that fires when partial warnings or failed sheets exist.
+
+**Files touched:**
+- `app_simple.py` — Leader `Report_Info` writer dynamic-loop branches: `'Field':` → `'Item':` plus a Round 110 explanatory block-comment naming the latent-bug class.
+- `tests/test_round110_leader_report_info_schema_parity.py` — new file, 6 tests pinning the source shape (negative + positive), the R110 marker, the round-trip behavior with N>0 partial warnings + N>0 failed sheets, plus a negative-control pin that reproduces the pre-R110 5-column NaN-leak so a future "simplification" of pandas' union behavior would also fail loud.
+- `config.py` — `ADOPTIQ_BUILD = "78"` → `"79"` plus a Round 110 explanatory block-comment.
+- `CLAUDE.md` — pytest floor 5624 → 5630; new Critical Rule entry for Round 110 / Build 79 capturing the contract, the latent-bug failure mode, and the **future-writers MUST** rule.
+- `QUALITY_AUDIT.md` — this handoff entry.
+
+**SSoT modules touched:** report_export_schema (indirect — the `Report_Info` schema is the SSoT this fix restores parity with), config (build number bump only).
+
+**Tests added/updated:**
+- `tests/test_round110_leader_report_info_schema_parity.py::test_round110_no_legacy_field_key_in_partial_warning_branch` — source-shape negative pin for the Partial_Data_Warning row builder.
+- `tests/test_round110_leader_report_info_schema_parity.py::test_round110_no_legacy_field_key_in_failed_sheet_branch` — source-shape negative pin for the Failed_Sheet row builder.
+- `tests/test_round110_leader_report_info_schema_parity.py::test_round110_canonical_item_key_present_in_dynamic_branches` — source-shape positive pin for both canonical `'Item':` literals.
+- `tests/test_round110_leader_report_info_schema_parity.py::test_round110_source_marker_present` — Round 110 marker pin so `git diff app_simple.py | grep 'Round 110'` gives the per-file footprint.
+- `tests/test_round110_leader_report_info_schema_parity.py::test_round110_dynamic_branch_rows_produce_clean_4col_schema` — end-to-end behavior pin: build a Leader-shape `_info_rows` list with 2 partial warnings + 1 failed sheet, run through `pd.DataFrame` → in-memory xlsx → re-read with `openpyxl`, assert the header is exactly `(Item, Value, Detail, Generated_At)` and no `Field` column appears.
+- `tests/test_round110_leader_report_info_schema_parity.py::test_round110_pre_fix_pattern_would_have_produced_5_columns` — negative-control: prove pandas DOES produce a 5-column DataFrame with NaN-leaked Item cells when the dynamic rows use `'Field':` so a future refactor that "simplifies" the union behavior would also fail loud.
+- Existing R73 tests (`tests/test_round73_report_info_canonical_schema.py`, 10 tests) re-verified — all still pass; the R73 pins only covered the static rows, which is exactly why R110's defect went undetected for 37 builds.
+
+**Verify status:**
+- `make verify` — pass (see entry under tests below).
+- pytest: 5630 passed / 4 skipped / 6 deselected (R109 floor 5624 + 6 new R110 tests).
+- ruff: 0 findings.
+- bandit HIGH/MED: 0.
+- pip-audit: clean.
+- focused tests — pass (`python3 -m pytest tests/test_round110_leader_report_info_schema_parity.py tests/test_round73_report_info_canonical_schema.py -v`; 16 passed).
+- gated macOS rebuild — not run this round. The change is a behavior-preserving correctness fix on a path that didn't fire in Build 78 (clean Brian Frazier 90d cohort had no partial warnings / no failed sheets), so the next routine rebuild — or the next round that needs a binary — picks up Build 79. The R74 → R109 chain of release-gate tests still pass with `ADOPTIQ_RELEASE_GATE=1`.
+- packaged smoke — not run this round (pending DMG rebuild; deferred per the plan note that no DMG rebuild is required for this code-only correctness fix).
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py::_info_rows` construction in the Leader writer — confirm both dynamic-loop branches use `'Item':` as the first key (R110 marker comment makes this trivially greppable). The R73 static rows are unchanged; only the loop branches at ~line 29148 and ~line 29157 moved. Specifically: R73's `test_leader_report_info_source_uses_item_key` covered `Status` / `Manager` / `Sheets_Written`; R110 closes the gap on the dynamic loop branches that consume `_leader_pdw` and `_failed_sheets`.
+2. **Audit verdict deferrals (Round 78 docx + xlsx audit, Build 78 reports — these are NOT R110 fixes; they are noted-but-not-fixed observations):**
+   - **(a) 14 invented_entity rejections / 6.8% grounding rate (GREEN)**: per the R64/B5 + R65/C-3 rollup, the rejection rate sits well within the R66/B14 GREEN band (≤10%). The 14 rejections are dominated by short LLM-generated entity strings (customer names slightly perturbed, e.g. "WORLD BANK GROUP UA" vs canonical "WORLD BANK GROUP US"). Investigating whether to widen `_R65_CANONICAL_NAME_FUZZY_THRESHOLD` to absorb these is deferred to a future round; the current threshold is conservative on purpose to keep cross-customer name confusion impossible.
+   - **(b) IBM US Comprehensive customer narrative single-attempt fallback (per-customer LLM fallback rate 0.49% — well under R68/A5's 5.0% threshold)**: one customer hit a 125s CircuIT timeout on the first attempt and the placeholder `"AI analysis temporarily unavailable"` rendered; `_r68_record_per_customer_llm_outcome` correctly captured `first_error_kind=timeout, attempts=1` on `analysis_status['per_customer_llm_diag']`. Investigating whether to add a single retry layer (attempt budget 2 for transient timeouts) on the per-customer path is deferred — the current single-attempt contract is the R68/A5 baseline and the rollup rate stays GREEN.
+   - **(c) Renewal Recommendations Premium-support / upsell KPI-specific helpers (R66/B12 explicit deferral)**: the four highest-leverage branches (CSM engagement, training, engagement cadence, high-severity barriers) already use the new helpers; Premium support and upsell still emit the legacy generic strings. This was an explicit R66/B12 deferral and remains so for Round 110.
+   - **(d) Four optional Comprehensive sheets absent from today's run**: data-driven by Webex Calling 90d scope having no rows in those source tables — NOT a defect. The R67/B2 always-present sheet contract applies to mandatory sheets only.
+3. **R98 tech-filter behavior (Webex Calling 0 of 183 ABs)**: surfaced as `tech_filter_empty_after_scope` in `partial_data_warnings`, then routed into the `Report_Info` sheet via R94 (this is exactly the path R110 is repairing for the failure-mode case). This is **working as designed** per R98 — the operator sees an honest "0 of 183 in scope" instead of silent metric drift. Not a defect. R110's fix means that when a future Leader run produces a `tech_filter_empty_after_scope` warning, the resulting `Report_Info` sheet will carry the warning under the canonical `Item / Value / Detail / Generated_At` schema instead of growing a stray fifth `Field` column.
+
+**Known deferrals (intentional non-fixes):**
+- DMG rebuild and packaged smoke deferred. The fix is behavior-preserving on the path that fired in Build 78 (no partial warnings / no failed sheets), so the audit verdict on the actual Build 78 artifacts is unaffected. The next routine rebuild picks up Build 79 transparently.
+- The four audit deferrals above (14 invented_entity rejections, IBM US single-attempt fallback, Premium/upsell KPI helpers, four data-driven absent sheets) are all **noted but not fixed** in R110 — each has either an explicit prior-round deferral marker (R66/B12) or sits within an existing tolerance band (R66/B14 GREEN, R68/A5 baseline) so any one of them would constitute a new round on its own.
+- The R73 source-shape tests intentionally were not extended to cover dynamic-loop branches — that would have meant grepping for `'Field': f'Partial_Data_Warning_` etc., which is the exact pattern R110's negative-control pins now do. The R110 file is the canonical home for dynamic-loop pin coverage.
+
+**Trailer:** Made-with: Cursor
