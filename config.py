@@ -935,7 +935,35 @@ ADOPTIQ_VERSION = "1.0.4"
 # tests across validator, resolver, ``_r83_safe_share_url``,
 # preferences-page source-shape, analyze-card regression guard, and
 # cross-pin against the R35 + R81 fixtures).
-ADOPTIQ_BUILD = "82"  # Round 113 / Build 82
+# Round 114 / Build 83: citation de-clutter + Build 82 acceptance audit.
+# The Build 82 manual acceptance (Leader screenshot) showed
+# ``[Source: AdoptIQ Report Data Sources]`` appended to EVERY numeric
+# cell of EVERY member row in multi-column count matrices (Team Activity
+# Summary, Individual Team Member Performance) -- the read-only audit
+# script ``scripts/r114_audit_reports.py`` measured 1392 per-cell
+# citations in the Leader docx alone (Compact 66, Renewal 35,
+# Comprehensive 11).  Root cause: the Round 57 post-render injector
+# ``report_source_injector.inject_source_citations_into_docx`` cited every
+# data row of every >=3-col matrix even though the quality scorer only
+# needs the TOTAL row backed.  Build 83 replaces per-cell injection on
+# multi-column matrices with ONE compact italic "Sources: ..." caption
+# paragraph inserted directly below the table (aggregating the R82 KPI
+# source taxonomy; degrades to the generic ``AdoptIQ Report Data Sources``
+# when columns do not resolve).  Two-column ``label | value`` rows keep
+# their per-row citation (the R82 two-column contract -- not part of the
+# clutter complaint).  ``report_iteration_loop._extract_docx_metric_claims``
+# now treats a source-caption paragraph immediately after a matrix as
+# backing for that matrix's claims so the diagnostic quality scorer stays
+# green WITHOUT per-cell citations (contract evolution backed by tests,
+# not a weakened check).  The Build 82 acceptance audit otherwise came
+# back clean: 0 mid-string injections, 0 markdown chrome, 0 stub bullets,
+# 0 genuine Snowflake global-config tokens, 0 HTML leakage, 0 duplicate
+# XLSX IDs, 0 risk-score saturation, 0 NaN/Unknown customer rows across
+# all four reports.  Pinned by
+# ``tests/test_round114_citation_caption_below_matrix.py`` (10 tests) +
+# updated ``tests/test_round57_source_citation_injector.py`` count-dict
+# assertions; R82/R52/R53/R76/R90/R112 suites re-run green.
+ADOPTIQ_BUILD = "83"  # Round 114 / Build 83
 # Round 113 / Build 82: Ask AI uplift + Preferences fix-and-polish.
 # Phase A (Ask AI UX): unified conversation history across the sync +
 # stream paths (A1), visible browser-local conversation thread (A2),

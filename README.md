@@ -1,8 +1,12 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 82).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 83).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 83 (Round 114 — Citation de-clutter + Build 82 acceptance audit)
+
+Build 83 cleans up report readability. The Build 82 Leader report appended `[Source: AdoptIQ Report Data Sources]` to **every numeric cell of every member row** in the multi-column count matrices (Team Activity Summary, Individual Team Member Performance) — a read-only acceptance audit measured **1392** per-cell citations in the Leader Word doc alone (Compact 66, Renewal 35, Comprehensive 11). Build 83 replaces that clutter with **one compact italic "Sources: …" caption directly below each matrix**, aggregating the data sources for that table's columns (e.g. "Sources: Action Plans, Adoption Barriers, Customer Pulse — Snowflake CSConsole; TAC Cases — Snowflake CSOne"), and falling back to the generic "AdoptIQ Report Data Sources" line when a column's source can't be resolved — so no table ever loses its citation. The change applies to **all four report types** (Leader, Comprehensive, Compact, Renewal). Simple two-column key/value tables keep their existing single per-row citation (those were never the cluttered ones). The rest of the Build 82 acceptance audit came back **clean** across all four reports: no mid-string citation injection, no markdown `*`/`**` leakage, no "Data unavailable" stub bullets, no genuine Snowflake configuration-error tokens, no HTML leakage, no duplicate spreadsheet IDs, no risk-score scale saturation, and no NaN/Unknown customer rows. Pinned by 10 new R114 tests + updated R57 count assertions; the read-only `scripts/r114_audit_reports.py` is the acceptance-audit artifact. All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **5723 pytest passed (R113 floor was 5713; +10 net)**.
 
 ### What's New in Build 82 (Round 113 — Ask AI uplift + Preferences fix-and-polish)
 

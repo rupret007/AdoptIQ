@@ -11662,3 +11662,50 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - **Gated macOS DMG rebuild + live regen** — deferred to the operator (signing identity + bake-host corpus + >1 GB artifact). All code/tests/docs are landed; the build is the only remaining D-phase step.
 
 **Trailer:** Made-with: Cursor
+
+## Round 114 — handoff 2026-05-28
+
+**What changed (plain English):**
+- Citation de-clutter + a full Build-82 acceptance audit. The Build 82 Leader report appended `[Source: AdoptIQ Report Data Sources]` to EVERY numeric cell of EVERY member row in the multi-column count matrices (Team Activity Summary, Individual Team Member Performance). The read-only audit script measured **1392** per-cell citations in the Leader docx alone (Compact 66, Renewal 35, Comprehensive 11). Root cause: the Round 57 post-render injector `report_source_injector.inject_source_citations_into_docx` cited every data row of every >=3-col matrix even though the quality scorer only needs the TOTAL row backed.
+- **Phase 1 (injector)** — multi-column matrix branch now SKIPS per-cell injection and instead inserts ONE compact italic `"Sources: …"` caption paragraph directly below the table via the new `_insert_source_caption_after_table(table, caption_text)` (python-docx `table._tbl.addnext` XML idiom). The caption text is built by `_build_matrix_source_caption(...)` aggregating the matrix's KPI columns through the existing R82 `_R82_KPI_SOURCE_TAGS` / `_r82_chrome_for_label` taxonomy (e.g. "Sources: Action Plans, Adoption Barriers, Customer Pulse — Snowflake CSConsole; TAC Cases — Snowflake CSOne"), degrading to the generic `_PARAGRAPH_FALLBACK_CITATION` when no column resolves so no matrix ever loses its citation. Idempotent via `_table_has_following_source_caption(table)`. New `table_captions_added` count in the returned dict. Two-column `label | value` rows keep their per-row citation (R82 two-column contract — not part of the clutter complaint).
+- **Phase 2 (gate parity)** — `report_iteration_loop._extract_docx_metric_claims` now treats a `_MATRIX_SOURCE_CAPTION_PREFIX`-marked caption paragraph immediately following a matrix as backing for that matrix's multi-column claims (mirrored `_matrix_has_following_source_caption` helper), so removing in-cell citations does not register `unbacked_metric_claims`. Contract evolution backed by new tests, not a weakened check. (`evaluate_report_quality` is a diagnostic scorer, not a runtime ship gate.)
+- **Phase 4 (audit)** — read-only `scripts/r114_audit_reports.py` scanned all four Build-82 reports against the known-issue checklist. After tightening three over-broad detectors (mid-string regex → alphanumeric-glued-only signature; risk-saturation → exclude `0_100` columns; Snowflake global-config tokens → require section-error context, exclude customer case content like a SIP "Does Not Exist" error narrative and a "Agent Can't Login - Not Authorized" TAC subject), the audit came back CLEAN: `CRITICAL_ISSUES_FOUND=False`. The ONLY confirmed issue was the per-cell clutter, which Phase 1 fixes. NaN/Unknown findings were legitimate "N/A"/"Unknown" placeholders in Date/Sentiment/Key-Issues data columns (NOT customer-name leaks).
+
+**Files touched:**
+- `report_source_injector.py` — Phase 1: `_MATRIX_SOURCE_CAPTION_PREFIX` const, `_build_matrix_source_caption` / `_element_text` / `_table_has_following_source_caption` / `_insert_source_caption_after_table` helpers, multi-column branch rewrite (caption instead of per-cell + skip two-column re-pass), `table_captions_added` count, save-guard + docstring update.
+- `report_iteration_loop.py` — Phase 2: local `_MATRIX_SOURCE_CAPTION_PREFIX` mirror const + `_matrix_has_following_source_caption` helper; `_extract_docx_metric_claims` multi-column source-backed-by-caption branch.
+- `app_simple.py` — `_r57_inject_citations_safe` log line now includes `table_captions_added`.
+- `scripts/r114_audit_reports.py` — new read-only Build-82 acceptance-audit artifact (refined detectors documented inline).
+- `tests/test_round114_citation_caption_below_matrix.py` — new file, 10 tests.
+- `tests/test_round57_source_citation_injector.py` — count-dict assertion updated for `table_captions_added`.
+- `config.py` — `ADOPTIQ_BUILD = "82"` → `"83"` + explanatory block comment.
+- `CLAUDE.md` — pytest floor 5713 → 5723; new Round 114 Critical Rule (caption-below-matrix contract + module-decoupling note).
+- `README.md` — new "What's New in Build 83" section + footer build bump.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — new Round 114 smoke item #9.2 (clean matrix cells + single caption + audit cross-check).
+- `QUALITY_AUDIT.md` — this handoff entry.
+
+**SSoT modules touched:** config (ADOPTIQ_BUILD bump). report_source_injector + report_iteration_loop are the citation/quality-gate modules (not in the SSoT eligible list but both carry the duplicated `_MATRIX_SOURCE_CAPTION_PREFIX` const which MUST stay byte-identical). No edits to canonical_metrics / risk_scoring / report_export_* — the change is purely citation placement.
+
+**Tests added/updated:**
+- `tests/test_round114_citation_caption_below_matrix.py` (10 new): one caption + zero per-cell `[Source]` in matrix data rows; R82 source-system aggregation; idempotency on second pass; two-column tables unchanged (still per-row); `evaluate_report_quality` reports 0 unbacked matrix claims with caption present; generic fallback when KPI columns unresolved; `_build_matrix_source_caption` unit; `_matrix_has_following_source_caption` unit; doc-saved-when-only-caption-added.
+- `tests/test_round57_source_citation_injector.py` — `test_injector_returns_structured_count_dict_on_minimum_shape` now asserts `table_captions_added` in the count dict (value 1 for the multi-column fixture); two-column `table_cells_injected` semantics clarified.
+- Re-ran R82 / R52 / R53 / R76 / R90 / R112 citation + paragraph suites — all green, no contract changes needed.
+
+**Verify status:**
+- `make verify` — PENDING in this session step (run as the `verify` to-do): expected `5723 passed / 4 skipped / 6 deselected` (R113 floor 5713, +10). Narrow citation suites confirmed: 66 passed (R114 10 + R57 12 + R82 44).
+- ruff / bandit / pip-audit: to be confirmed by `make verify`.
+- Audit: `scripts/r114_audit_reports.py` → `CRITICAL_ISSUES_FOUND=False` on all four Build-82 reports.
+- Gated macOS rebuild (`ADOPTIQ_RELEASE_GATE=1 ADOPTIQ_VERSION=1.0.4 ADOPTIQ_BUILD=83 ./build_mac_dmg.sh`) + live regen + re-audit on Build 83: remaining operator step (signing identity + bake-host corpus + >1 GB artifact). Operator must verify `CFBundleVersion=83` + codesign + baked-corpus artifacts, then close the R76 live-acceptance ground-truth loop (0 per-cell clutter + 1 caption per matrix in the regenerated reports).
+
+**Hot spots Claude should audit first:**
+1. `report_source_injector.py` multi-column branch — confirm the two-column path is skipped for tables that already received a matrix caption (no double-citing), and that `_insert_source_caption_after_table` is idempotent (re-running the injector must not add a second caption).
+2. `report_iteration_loop.py` `_matrix_has_following_source_caption` — MUST stay byte-identical in intent to the injector's `_table_has_following_source_caption`; the `_MATRIX_SOURCE_CAPTION_PREFIX` const is duplicated by design (decoupling) and the two values MUST match.
+3. `_build_matrix_source_caption` fallback — when no KPI column resolves through the R82 taxonomy the caption MUST still carry the generic `AdoptIQ Report Data Sources` text so a matrix never loses citation entirely.
+4. `scripts/r114_audit_reports.py` detector tuning — the three refined detectors (mid-string, risk-saturation, global-config context guard) trade some recall for precision on customer-case content; if a future report genuinely surfaces a Snowflake section-error token inside case-like text, the context guard could under-report (documented inline).
+
+**Known deferrals (intentional non-fixes):**
+- **Gated macOS DMG rebuild + live regen on Build 83** — operator step (signing identity + bake-host corpus + >1 GB artifact). All code/tests/docs landed.
+- **PC rebuild** — `adoptiq_pc.spec` needs no change (pure-Python change, python-docx already bundled); the shared `config.py` bump covers the PC version. `build_pc.bat` rebuild is a Windows-host operator step.
+- **NaN/Unknown placeholder cells** — left as-is; they are legitimate "N/A"/"Unknown" values in Date/Sentiment/Key-Issues columns, not customer-name leaks (R66/B9 covers the real customer-NaN case).
+
+**Trailer:** Made-with: Cursor

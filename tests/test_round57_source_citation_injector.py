@@ -105,6 +105,7 @@ def test_injector_returns_structured_count_dict_on_minimum_shape(tmp_path: Path)
     assert set(counts.keys()) == {
         "paragraphs_injected",
         "table_cells_injected",
+        "table_captions_added",  # Round 114 / Build 83
         "skipped_already_cited",
         "skipped_no_numeric",
         "errors",
@@ -115,10 +116,17 @@ def test_injector_returns_structured_count_dict_on_minimum_shape(tmp_path: Path)
         "carry short numeric KPI tokens; got "
         f"{counts['paragraphs_injected']}"
     )
+    # Round 114 / Build 83: the two-column ``Metric | Value`` table still
+    # gets per-row cell citations (2 rows), while the multi-column matrix
+    # is now de-cluttered to a single trailing caption instead of one
+    # citation per numeric cell.
     assert counts["table_cells_injected"] >= 2, (
-        "injector must cite the metric value cells in both the two-column "
-        "and the multi-column KPI tables; got "
-        f"{counts['table_cells_injected']}"
+        "injector must cite the metric value cells in the two-column KPI "
+        f"table; got {counts['table_cells_injected']}"
+    )
+    assert counts["table_captions_added"] == 1, (
+        "the multi-column matrix must receive exactly ONE trailing source "
+        f"caption (not per-cell citations); got {counts['table_captions_added']}"
     )
     assert counts["skipped_already_cited"] >= 1, (
         "the pre-cited 'Total Adoption Barriers: 68 [Source: ...]' paragraph "

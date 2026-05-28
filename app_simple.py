@@ -523,10 +523,11 @@ def _r57_inject_citations_safe(docx_path: Optional[str], scenario_key: str) -> N
         counts = _r57_inject_source_citations(path, scenario_key=scenario_key)
         logger.info(
             "[R57] inject_source_citations(%s): paragraphs=%d cells=%d "
-            "skipped_cited=%d skipped_no_numeric=%d errors=%d",
+            "captions=%d skipped_cited=%d skipped_no_numeric=%d errors=%d",
             scenario_key,
             counts.get("paragraphs_injected", 0),
             counts.get("table_cells_injected", 0),
+            counts.get("table_captions_added", 0),  # Round 114 / Build 83
             counts.get("skipped_already_cited", 0),
             counts.get("skipped_no_numeric", 0),
             counts.get("errors", 0),

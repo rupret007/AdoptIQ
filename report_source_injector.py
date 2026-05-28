@@ -83,6 +83,18 @@ logger = logging.getLogger(__name__)
 # Word document is what the reader scans to confirm provenance.
 _PARAGRAPH_FALLBACK_CITATION = " [Source: AdoptIQ Report Data Sources]"
 
+# Round 114 / Build 83: multi-column count matrices (Leader Team Activity
+# Summary, Individual Team Member Performance, Comprehensive / Compact /
+# Renewal count tables) no longer carry a per-cell ``[Source: ...]``
+# chrome on every numeric cell -- that produced one citation per member
+# per KPI column and cluttered the rendered tables.  Instead the injector
+# now writes ONE compact italic caption directly below each matrix.  The
+# prefix is the stable idempotency + gate-parity marker: the injector
+# skips a matrix whose immediately-following element already starts with
+# this prefix, and the quality scorer treats it as source backing for the
+# matrix's aggregated claims.
+_MATRIX_SOURCE_CAPTION_PREFIX = "Sources:"
+
 
 # Round 82 / Phase B1: per-source-system citation taxonomy.  Pre-R82
 # every citation rendered the SAME generic chrome
@@ -957,6 +969,118 @@ def _multicolumn_header_columns(header_cells: list[str]) -> list[int]:
     ]
 
 
+def _build_matrix_source_caption(header_cells: list[str], numeric_kpi_columns: list[int]) -> str:
+    """Round 114 / Build 83: build ONE compact source caption for a matrix.
+
+    Groups the matrix's numeric KPI columns by their Round 82
+    source-system tag so the caption reads, e.g.::
+
+        Sources: Action Plans, Adoption Barriers, Customer Pulse -
+        Snowflake CSConsole; TAC Cases - Snowflake CSOne
+
+    Only the columns that actually carry numeric values are included
+    (``numeric_kpi_columns``) so a non-metric label column (a member
+    name, a "Team Member" header) never appears in the caption.  Columns
+    that do not resolve through the R82 taxonomy are attributed to the
+    generic ``AdoptIQ Report Data Sources`` so a matrix never loses its
+    citation entirely.  Order is stable (first-seen tag order) for
+    deterministic test fixtures.
+    """
+    from collections import OrderedDict
+
+    by_tag: "OrderedDict[str, list[str]]" = OrderedDict()
+    unresolved: list[str] = []
+    for col_idx in numeric_kpi_columns:
+        label = header_cells[col_idx].strip() if col_idx < len(header_cells) else ""
+        if not label:
+            continue
+        tag = _r82_resolve_source_tag_for_label(label)
+        if tag:
+            by_tag.setdefault(tag, []).append(label)
+        else:
+            unresolved.append(label)
+    parts: list[str] = []
+    for tag, labels in by_tag.items():
+        parts.append(f"{', '.join(labels)} - {tag}")
+    if unresolved:
+        parts.append(f"{', '.join(unresolved)} - AdoptIQ Report Data Sources")
+    if not parts:
+        parts.append("AdoptIQ Report Data Sources")
+    return f"{_MATRIX_SOURCE_CAPTION_PREFIX} " + "; ".join(parts)
+
+
+def _element_text(element: Any) -> str:
+    """Join all ``w:t`` descendant text of an oxml paragraph element."""
+    try:
+        from docx.oxml.ns import qn  # type: ignore[import-not-found]
+
+        return "".join(node.text or "" for node in element.findall(".//" + qn("w:t")))
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _table_has_following_source_caption(table: Any) -> bool:
+    """Round 114 / Build 83: True when a source caption follows ``table``.
+
+    Walks forward from the table's ``w:tbl`` element over any immediately
+    following paragraphs (skipping empties) and returns True when one of
+    them starts with the stable ``Sources:`` caption marker.  Used both
+    for injector idempotency and (mirrored in
+    ``report_iteration_loop._matrix_has_following_source_caption``) for
+    quality-scorer parity.  Never raises.
+    """
+    try:
+        from docx.oxml.ns import qn  # type: ignore[import-not-found]
+
+        nxt = table._tbl.getnext()
+        # Bound the walk so a malformed body can never spin.
+        for _ in range(4):
+            if nxt is None or nxt.tag != qn("w:p"):
+                return False
+            text = _element_text(nxt).strip()
+            if text:
+                return text.lower().startswith(_MATRIX_SOURCE_CAPTION_PREFIX.lower())
+            nxt = nxt.getnext()
+        return False
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _insert_source_caption_after_table(table: Any, caption_text: str) -> bool:
+    """Round 114 / Build 83: insert ONE italic source caption after ``table``.
+
+    Uses the python-docx XML idiom (``table._tbl.addnext`` + a wrapped
+    ``Paragraph``) because python-docx has no public "insert paragraph
+    after table" API.  Idempotent: when the element immediately after the
+    table is already an AdoptIQ source caption, returns False without
+    inserting a duplicate.  Returns True only when a new caption was
+    written.  Never raises into the caller.
+    """
+    if _table_has_following_source_caption(table):
+        return False
+    try:
+        from docx.oxml import OxmlElement  # type: ignore[import-not-found]
+        from docx.text.paragraph import Paragraph  # type: ignore[import-not-found]
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        new_p = OxmlElement("w:p")
+        table._tbl.addnext(new_p)
+        para = Paragraph(new_p, table._parent)
+        run = para.add_run(caption_text)
+        run.italic = True
+        try:
+            from docx.shared import Pt  # type: ignore[import-not-found]
+
+            run.font.size = Pt(8)
+        except Exception:  # noqa: BLE001 - sizing is cosmetic, never fatal
+            pass
+        return True
+    except Exception:  # noqa: BLE001
+        logger.debug("inject_source_citations: caption insert failed", exc_info=False)
+        return False
+
+
 def _scenario_citation(scenario_key: Optional[str]) -> str:
     """Resolve the canonical paragraph-level citation for ``scenario_key``.
 
@@ -980,6 +1104,7 @@ def inject_source_citations_into_docx(
         {
             "paragraphs_injected": int,
             "table_cells_injected": int,
+            "table_captions_added": int,   # Round 114 / Build 83
             "skipped_already_cited": int,
             "skipped_no_numeric": int,
             "errors": int,
@@ -994,6 +1119,7 @@ def inject_source_citations_into_docx(
     counts = {
         "paragraphs_injected": 0,
         "table_cells_injected": 0,
+        "table_captions_added": 0,  # Round 114 / Build 83
         "skipped_already_cited": 0,
         "skipped_no_numeric": 0,
         "errors": 0,
@@ -1155,42 +1281,48 @@ def inject_source_citations_into_docx(
 
         rows_cells_text = [[cell.text.strip() for cell in row.cells] for row in rows]
 
-        # Multi-column header table: header_row + value_rows.
+        # Round 114 / Build 83: multi-column count matrix (>=3 cols,
+        # header + data rows).  Pre-R114 the injector appended a
+        # ``[Source: ...]`` chrome to EVERY numeric cell of EVERY data
+        # row, which produced one citation per member per KPI column and
+        # cluttered the Leader Team Activity Summary / Individual
+        # Performance matrices (and the equivalent count tables in the
+        # other three report types -- the injector is shared).  R114
+        # replaces that with ONE compact italic "Sources: ..." caption
+        # directly below the table, aggregating the numeric KPI columns
+        # through the R82 source taxonomy.
+        #
+        # The matrix is then SKIPPED by the two-column ``label | value``
+        # path below: a member name like "Brandon Doan" in column 0
+        # satisfies ``_row_is_metric_claim`` (short non-metadata label +
+        # numeric column-1 value), so without the skip the two-column
+        # branch would re-introduce per-row column-1 clutter on the very
+        # matrices we just decluttered.
+        handled_as_matrix = False
         if len(rows_cells_text) >= 2 and len(rows_cells_text[0]) >= 3:
             header_cells = rows_cells_text[0]
             kpi_columns = _multicolumn_header_columns(header_cells)
-            if kpi_columns:
-                for value_row_idx in range(1, len(rows)):
-                    value_row_cells = rows[value_row_idx].cells
-                    value_row_text = rows_cells_text[value_row_idx]
-                    for col_idx in kpi_columns:
-                        if col_idx >= len(value_row_text):
-                            continue
-                        cell_text = value_row_text[col_idx]
-                        if not _is_numeric_kpi_value(cell_text):
-                            continue
-                        # Adjacent-cell already-cited check matches the gate.
-                        adj_indices = {col_idx}
-                        if col_idx > 0:
-                            adj_indices.add(col_idx - 1)
-                        if col_idx + 1 < len(value_row_text):
-                            adj_indices.add(col_idx + 1)
-                        adj_text = " ".join(value_row_text[i] for i in adj_indices)
-                        if _SOURCE_TOKEN_RE.search(adj_text):
-                            counts["skipped_already_cited"] += 1
-                            continue
-                        # Round 82 / Phase B3: route per-column header
-                        # through the R82 taxonomy so each numeric
-                        # cell carries the system-specific chrome
-                        # (e.g. ``[Source: Snowflake CSConsole]`` for
-                        # an ``Adoption Barriers`` column).  Misses
-                        # fall back to the generic chrome silently.
-                        col_chrome = _r82_chrome_for_label(
-                            header_cells[col_idx] if col_idx < len(header_cells) else "",
-                            citation,
-                        )
-                        if _inject_into_cell(value_row_cells[col_idx], col_chrome):
-                            counts["table_cells_injected"] += 1
+            numeric_kpi_columns = [
+                col_idx
+                for col_idx in kpi_columns
+                if any(
+                    col_idx < len(rows_cells_text[r])
+                    and _is_numeric_kpi_value(rows_cells_text[r][col_idx])
+                    for r in range(1, len(rows_cells_text))
+                )
+            ]
+            if numeric_kpi_columns:
+                caption_text = _build_matrix_source_caption(header_cells, numeric_kpi_columns)
+                if _insert_source_caption_after_table(table, caption_text):
+                    counts["table_captions_added"] += 1
+                else:
+                    counts["skipped_already_cited"] += 1
+                handled_as_matrix = True
+
+        if handled_as_matrix:
+            # Matrices carry their citation via the trailing caption; do
+            # not run the two-column per-row injector over them.
+            continue
 
         # Two-column ``label | value`` rows.
         for row_idx, row_text in enumerate(rows_cells_text):
@@ -1214,7 +1346,11 @@ def inject_source_citations_into_docx(
             if _inject_into_cell(value_cell, row_chrome):
                 counts["table_cells_injected"] += 1
 
-    if counts["paragraphs_injected"] == 0 and counts["table_cells_injected"] == 0:
+    if (
+        counts["paragraphs_injected"] == 0
+        and counts["table_cells_injected"] == 0
+        and counts["table_captions_added"] == 0  # Round 114 / Build 83
+    ):
         # Nothing changed; skip the save to avoid touching mtime + sha256
         # on idempotent re-invocations.
         return counts

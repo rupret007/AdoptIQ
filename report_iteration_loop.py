@@ -1655,6 +1655,47 @@ def _source_backed_cell(row: list[str], value_idx: int) -> bool:
     return any("[source:" in str(row[idx] or "").lower() for idx in candidates)
 
 
+# Round 114 / Build 83: mirror of
+# ``report_source_injector._MATRIX_SOURCE_CAPTION_PREFIX``.  Kept local
+# (the same "mirror the contract" pattern the injector uses for the gate
+# regexes) so the gate has no hard import dependency on the injector.
+_MATRIX_SOURCE_CAPTION_PREFIX = "Sources:"
+
+
+def _matrix_has_following_source_caption(table: Any) -> bool:
+    """Round 114 / Build 83: True when a source caption follows ``table``.
+
+    The R114 injector no longer cites every numeric cell of a
+    multi-column count matrix; it writes ONE compact ``Sources: ...``
+    caption paragraph immediately below the table instead.  For the
+    quality scorer to stay green (without weakening the check), a caption
+    directly following a matrix is treated as source backing for that
+    table's aggregated multi-column claims.
+
+    Walks forward from the table's ``w:tbl`` element over the immediately
+    following paragraph(s) (skipping empties, bounded) and returns True
+    when one starts with the stable caption marker.  Never raises -- on
+    any introspection failure returns False so the pre-R114 behaviour
+    (claim counted unbacked unless cited in-cell) is preserved.
+    """
+    try:
+        from docx.oxml.ns import qn  # type: ignore[import-not-found]
+
+        nxt = table._tbl.getnext()
+        for _ in range(4):
+            if nxt is None or nxt.tag != qn("w:p"):
+                return False
+            text = "".join(
+                node.text or "" for node in nxt.findall(".//" + qn("w:t"))
+            ).strip()
+            if text:
+                return text.lower().startswith(_MATRIX_SOURCE_CAPTION_PREFIX.lower())
+            nxt = nxt.getnext()
+        return False
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _paragraph_claim_source_backed(text: str, match_idx: int, matches: list[re.Match[str]]) -> bool:
     """Round 53.2: a paragraph source backs only the current metric span."""
 
@@ -1704,6 +1745,10 @@ def _extract_docx_metric_claims(doc: Document) -> list[dict[str, Any]]:
             continue
         if len(rows) >= 2 and len(rows[0]) >= 3:
             header = rows[0]
+            # Round 114 / Build 83: a ``Sources: ...`` caption directly
+            # below a matrix backs the matrix's aggregated multi-column
+            # claims (the injector no longer cites every numeric cell).
+            caption_backed = _matrix_has_following_source_caption(table)
             value_rows = _select_multicolumn_value_rows(rows)
             for value_row in value_rows:
                 row_text = " | ".join(item for item in value_row if item)
@@ -1716,7 +1761,9 @@ def _extract_docx_metric_claims(doc: Document) -> list[dict[str, Any]]:
                                 "label": label,
                                 "canonical": canonical,
                                 "value": _normalize_kpi_value(value),
-                                "source_backed": _source_backed_cell(value_row, col_idx),
+                                "source_backed": (
+                                    _source_backed_cell(value_row, col_idx) or caption_backed
+                                ),
                                 "excerpt": row_text[:240],
                             }
                         )
