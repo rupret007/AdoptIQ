@@ -10312,6 +10312,21 @@ def run_compact_analysis(analysis_id):
                         _r105_incidents = _r105_compact_incidents_for_scoring(
                             _ctx.get('ext_incidents'), _r23_days,
                         )
+                        # Round 111 / Build 80 (B1): pass the canonical
+                        # CSConsole pulse / AP frames AND the unfiltered
+                        # team subs frame as explicit kwargs so Compact
+                        # bypasses ``_r66_b8_classify_extra_frames`` for
+                        # those three slots. Pre-R111 the classifier's
+                        # pulse marker set did not include the live
+                        # ``CUSTOMER_PULSE__C`` column so pulse data was
+                        # silently dropped from per-customer Compact
+                        # scoring while Renewal saw it directly -- the
+                        # source of the +1.0/10 systematic Risk_Score_0_10
+                        # drift on 70% of common customers (Build 79
+                        # audit). The classifier widening above is the
+                        # primary defense; this explicit-kwarg path is
+                        # defense-in-depth so a future schema rename to
+                        # the pulse table cannot re-introduce the gap.
                         risk_scores = calculate_renewal_risk_scores(
                             ab_norm,
                             csone_df,
@@ -10325,6 +10340,11 @@ def run_compact_analysis(analysis_id):
                             # so Compact and Renewal scores converge
                             # for the same customer in the same scope.
                             ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
+                            # Round 111 / Build 80 (B1): explicit
+                            # canonical-frame parity kwargs.
+                            pulse_df=_ctx.get('csconsole_customer_pulse'),
+                            action_plans_df=_ctx.get('csconsole_action_plans'),
+                            subs_df=_ctx.get('team_subs_df_unfiltered'),
                         )
                     except Exception as _ei_rs_err:
                         logger.debug(
@@ -10343,6 +10363,13 @@ def run_compact_analysis(analysis_id):
                             # the parity guarantee holds even when the
                             # extra_frames lookup raises.
                             ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
+                            # Round 111 / Build 80 (B1): pass canonical
+                            # frames even on the fallback path so the
+                            # Compact <-> Renewal score parity holds
+                            # when the extra_frames lookup raised.
+                            pulse_df=_ctx.get('csconsole_customer_pulse'),
+                            action_plans_df=_ctx.get('csconsole_action_plans'),
+                            subs_df=_ctx.get('team_subs_df_unfiltered'),
                         )
                     # Phase 1.2: assert risk row count >= total_customers floor.
                     try:
@@ -10653,6 +10680,11 @@ def run_compact_analysis(analysis_id):
                         _r105_incidents = _r105_compact_incidents_for_scoring(
                             _r104_ext_incidents or _ctx.get('ext_incidents'), _r23_days,
                         )
+                        # Round 111 / Build 80 (B1): same canonical-frame
+                        # parity contract as the Word path above. The
+                        # XLSX ``Risk_Summary`` sheet must agree with
+                        # the Compact docx headline AND with the
+                        # Renewal report's per-customer scores.
                         risk_scores = calculate_renewal_risk_scores(
                             ab_norm,
                             csone_df,
@@ -10668,6 +10700,11 @@ def run_compact_analysis(analysis_id):
                             # with the Compact Word narrative AND with
                             # the Renewal report for the same scope.
                             ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
+                            # Round 111 / Build 80 (B1): explicit
+                            # canonical-frame parity kwargs.
+                            pulse_df=_ctx.get('csconsole_customer_pulse'),
+                            action_plans_df=_ctx.get('csconsole_action_plans'),
+                            subs_df=_ctx.get('team_subs_df_unfiltered'),
                         )
                     except Exception as _xl_rs_err:
                         logger.debug(
@@ -10685,6 +10722,11 @@ def run_compact_analysis(analysis_id):
                             # fallback path too (mirrors the Word path
                             # at L8755).
                             ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
+                            # Round 111 / Build 80 (B1): canonical-frame
+                            # parity on the fallback XLSX path too.
+                            pulse_df=_ctx.get('csconsole_customer_pulse'),
+                            action_plans_df=_ctx.get('csconsole_action_plans'),
+                            subs_df=_ctx.get('team_subs_df_unfiltered'),
                         )
                     logger.info(f"[[CHART]] Risk scores calculated for {len(risk_scores)} customers")
                     # Phase 1.2: floor assertion vs total_customers.

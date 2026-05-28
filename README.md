@@ -1,8 +1,12 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 79).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 80).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 80 (Round 111 — Compact ↔ Renewal score parity)
+
+Build 80 closes a long-standing cross-format drift: the Build 79 acceptance audit measured the same customer scoring ~+1.0 higher on the 0-10 scale in the Renewal report than in the Compact report for ~70% of common customers, violating the R67/B1 cross-format parity contract. Root cause was that the Compact path's frame classifier (`_r66_b8_classify_extra_frames`) didn't recognise the live production `CUSTOMER_PULSE__C` / `CUSTOMER_PULSE_COLOR_IMAGE__C` columns from the CSConsole pulse table, so per-customer pulse data was always dropped on the Compact side even when it was available — shifting the engagement-component score and producing the systematic gap. Build 80 widens the classifier to recognise the live columns AND adds explicit `pulse_df` / `action_plans_df` / `subs_df` keyword arguments so all four `app_simple.py` Compact call sites now thread the canonical CSConsole frames the Renewal path already feeds, bypassing classification entirely. Build 80 also documents two false positives from the Build 79 audit: Compact `Critical_Adoption_Barriers` 73-column shape is the canonical curated schema (not a regression), and Renewal `Risk_Components` is a portfolio-level rollup distinct from Comprehensive's per-customer detail (both shapes intended). Build 80 carries forward all Build 79 fixes (Leader Report_Info schema parity) and Build 78 fixes (bounded runtime dense-vector backfill, jobs-dashboard model label resolution).
 
 ### What's New in Build 79 (Round 110 — Leader Report_Info schema parity)
 

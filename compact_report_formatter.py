@@ -2684,12 +2684,38 @@ def _r66_b8_classify_extra_frames(
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             continue
         cols = set(frame.columns)
-        # Pulse: characteristic marker is the rating/score columns.
-        # CSConsole emits ``PULSE_RATING__C`` and ``SCORE__C``;
-        # legacy fixtures use ``PULSE_RATING``. Round 100 keeps the
-        # curated XLSX export shape wired too (`rating`, `Customer Pulse`).
+        # Round 111 / Build 80 (B1): widen the pulse marker set to
+        # recognise the production CSConsole pulse column shape. Pre-R111
+        # the marker set was ``{PULSE_RATING__C, PULSE_RATING, SCORE__C,
+        # PULSE_SCORE, rating, Customer Pulse}`` which matched legacy
+        # fixtures + curated XLSX export shapes BUT did NOT match the
+        # live ``ESA_C360_CUSTOMER_PULSE__C cp.* + dsm.BU_NAME`` frame
+        # produced by ``adoptiq_backend.fetch_csconsole_customer_pulse``.
+        # The live pulse frame's defining column is ``CUSTOMER_PULSE__C``
+        # (the picklist rating value) and ``CUSTOMER_PULSE_COLOR_IMAGE__C``
+        # (the color image asset). Without these in the marker set, the
+        # classifier returned ``pulse_df=None`` for production data,
+        # so Compact's per-customer pulse slice was always empty even
+        # when the data was available -- shifting engagement scoring
+        # (via ``total_activity = AB + SC + pulse + AP``) and producing
+        # the systematic ~+1.0/10 Renewal-vs-Compact drift on shared
+        # customers (Build 79 audit: 70% of common customers drifted).
+        # The R66/B8 disqualifier set below also widens to keep these
+        # two new markers from triggering the AP fallback path. Pinned
+        # by tests/test_round111_compact_renewal_score_parity_live_data.py.
         if pulse_df is None and (
-            {"PULSE_RATING__C", "PULSE_RATING", "SCORE__C", "PULSE_SCORE", "rating", "Customer Pulse"} & cols
+            {
+                "PULSE_RATING__C",
+                "PULSE_RATING",
+                "SCORE__C",
+                "PULSE_SCORE",
+                "rating",
+                "Customer Pulse",
+                # Round 111 / Build 80 (B1): production live-data markers.
+                "CUSTOMER_PULSE__C",
+                "CUSTOMER_PULSE_COLOR_IMAGE__C",
+            }
+            & cols
         ):
             pulse_df = frame
             continue
@@ -2710,6 +2736,13 @@ def _r66_b8_classify_extra_frames(
             "RENEWAL_RISK_CATEGORY",
             "SEVERITY_C",
             "AB_STATUS_C",
+            # Round 111 / Build 80 (B1): keep the production pulse
+            # markers in the disqualifier set so a pulse frame whose
+            # primary marker fired above does not fall through and
+            # get misclassified as APs even if a future schema change
+            # adds a STATUS column to the pulse table.
+            "CUSTOMER_PULSE__C",
+            "CUSTOMER_PULSE_COLOR_IMAGE__C",
         } & cols)
         if action_plans_df is None and ap_marker and not ap_disqualifier:
             action_plans_df = frame
@@ -2765,6 +2798,21 @@ def calculate_renewal_risk_scores(
     account_to_customer: Optional[Dict[str, str]] = None,
     recent_window_days: int = 30,
     ext_incidents: Optional[List[Dict[str, Any]]] = None,
+    # Round 111 / Build 80 (B1): explicit per-frame kwargs as a
+    # parity-with-Renewal escape hatch from the ``extra_frames`` +
+    # ``_r66_b8_classify_extra_frames`` classification step. When any
+    # of these are provided (non-None), they OVERRIDE the classifier
+    # output for that slot. ``app_simple.py`` callers thread the
+    # canonical ``csconsole_customer_pulse`` / ``csconsole_action_plans``
+    # / ``team_subs_df_unfiltered`` frames here so the Compact path
+    # sees the same per-customer pulse / AP / subs that the Renewal
+    # ``_calculate_simple_renewal_risk`` path sees -- closing the
+    # cross-format ``Risk_Score_0_10`` parity gap (R67/B1 contract).
+    # Defaults to ``None`` so legacy callers continue to use the
+    # classifier and the back-compat behaviour is preserved.
+    pulse_df: Optional[pd.DataFrame] = None,
+    action_plans_df: Optional[pd.DataFrame] = None,
+    subs_df: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Dict]:
     """Calculate renewal risk scores and color categories for each customer.
 
@@ -2806,6 +2854,20 @@ def calculate_renewal_risk_scores(
         # Round 66 / Pass 2 (B8): classify extra_frames once up-front
         # so the per-customer loop below can do simple slicing.
         _r66_b8_pulse, _r66_b8_aps, _r66_b8_subs = _r66_b8_classify_extra_frames(extra_frames)
+        # Round 111 / Build 80 (B1): explicit kwargs override the
+        # classifier output. The override is per-slot so a caller
+        # can mix-and-match (e.g. pass ``pulse_df`` explicitly while
+        # letting the classifier discover ``subs_df`` from the
+        # extra_frames list). When ``pulse_df is None`` AND the
+        # classifier returned None for the same slot, the per-customer
+        # slice will short-circuit to an empty DataFrame (legacy
+        # behaviour preserved).
+        if pulse_df is not None:
+            _r66_b8_pulse = pulse_df
+        if action_plans_df is not None:
+            _r66_b8_aps = action_plans_df
+        if subs_df is not None:
+            _r66_b8_subs = subs_df
 
         # Use the canonical customer-list helper so the renewal table's
         # universe matches the headline ``total_customers``.

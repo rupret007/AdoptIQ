@@ -49,7 +49,8 @@ pip install pyinstaller
 5. Round 104 / Build 73 ships the first live report audit fix. During smoke, confirm `/api/settings/report-model` and `/api/settings/ask-ai-model` both resolve to `gemini-3.1-flash-lite`.
 6. Round 105 / Build 74 ships the follow-up live artifact closeout. Prefer a fresh Compact/Renewal same-scope run when time allows to verify risk-score parity after incident recovery, confirm Compact `Report_Info` carries ACC partial warnings, and spot-check Leader `BE_Priority_Barriers` titles/descriptions are populated instead of all `AMBIGUOUS`.
 7. Round 110 / Build 79 ships a Leader `Report_Info` xlsx schema-parity fix. During smoke, regenerate any Leader scope that produces a `partial_data_warning` (e.g. a tech filter that excludes the entire scope, or a scope known to leave a sheet empty) and confirm the resulting `Report_Info` sheet has exactly four columns `(Item, Value, Detail, Generated_At)` with no stray `Field` column. Pre-Build 79 the partial-warning and failed-sheet rows were keyed on `'Field'` while everything else used `'Item'`, silently producing a 5-column NaN-leaked sheet on any non-trivial run.
-8. Generate bundled secrets:
+8. Round 111 / Build 80 ships a Compact ↔ Renewal `Risk_Score_0_10` parity fix. During smoke, generate Compact + Renewal reports for the same manager + technology + days scope, then read back `Risk_Summary.Overall_Risk_Score` (Compact) and `Renewal_Summary.Overall_Risk_Score` (Renewal) for any customer present in both — they MUST agree to one decimal place per the R67/B1 contract. Pre-Build 80, ~70% of common customers showed Renewal scoring ~+1.0 higher on the 0-10 scale because the Compact path's frame classifier dropped the production CSConsole pulse columns; Build 80 widens the classifier and threads explicit pulse / action-plan / subs frames into the Compact scoring path.
+9. Generate bundled secrets:
 
 ```bash
 python embed_credentials.py
@@ -204,6 +205,20 @@ test ! -f /tmp/adoptiq_dmg/AdoptIQ.app/Contents/Resources/baked_corpus/corpus.se
   `Field` column with NaN on every other row whenever those branches
   fired. `pd.read_excel("Report_Info")[["Item", "Value"]]` must succeed
   cleanly across every report format (the R73/F6 contract).
+- Round 111 Compact ↔ Renewal score parity smoke (Build 80+): generate
+  Compact + Renewal reports for the same manager + technology + days
+  scope (e.g. Brian Frazier, All Contact Center, 90 days) and read back
+  `Risk_Summary.Overall_Risk_Score` (Compact) and
+  `Renewal_Summary.Overall_Risk_Score` (Renewal) for any customer
+  present in both. Per the R67/B1 cross-format parity contract the
+  scores MUST agree to one decimal place; pre-Build 80 ~70% of common
+  customers showed Renewal scoring ~+1.0 higher on the 0-10 scale
+  because `_r66_b8_classify_extra_frames` did not recognise the live
+  production `CUSTOMER_PULSE__C` / `CUSTOMER_PULSE_COLOR_IMAGE__C`
+  columns and Compact's per-customer pulse data was always empty.
+  Build 80 widens the classifier markers AND threads explicit canonical
+  pulse / action-plan / subs frames from `app_simple.py` into the
+  scoring path, bypassing classification.
 
 ### Staging sync (OneDrive)
 

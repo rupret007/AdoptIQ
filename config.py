@@ -935,7 +935,43 @@ ADOPTIQ_VERSION = "1.0.4"
 # tests across validator, resolver, ``_r83_safe_share_url``,
 # preferences-page source-shape, analyze-card regression guard, and
 # cross-pin against the R35 + R81 fixtures).
-ADOPTIQ_BUILD = "79"  # Round 110 / Build 79
+ADOPTIQ_BUILD = "80"  # Round 111 / Build 80
+# Round 111 / Build 80: Compact <-> Renewal Risk_Score_0_10 parity (R67/B1
+# root-cause fix). Build 79 acceptance audit measured 182 of 257 common
+# customers (~70%) with Renewal ``Overall_Risk_Score`` higher than Compact
+# for the same customer + scope, typically by ~+1.0 on the 0-10 scale --
+# violating R67/B1's cross-format parity contract. Root cause:
+# ``compact_report_formatter._r66_b8_classify_extra_frames`` did NOT
+# recognise the live ``CUSTOMER_PULSE__C`` / ``CUSTOMER_PULSE_COLOR_IMAGE__C``
+# columns emitted by ``adoptiq_backend.fetch_csconsole_customer_pulse``, so
+# Compact's per-customer ``pulse_df`` was always None even when the data
+# was available -- shifting ``_score_engagement`` (via
+# ``total_activity = AB + SC + pulse + AP``) and producing the systematic
+# +1.0/10 drift. Renewal's ``_calculate_simple_renewal_risk`` filters
+# ``csconsole_customer_pulse`` by ``BU_NAME`` directly (no classifier), so
+# it was unaffected. Fix is two-pronged: (a) widen the classifier's pulse
+# marker set to include the live production columns, with the same widening
+# in the AP disqualifier set so a future schema rotation cannot re-route
+# the frame; (b) defense-in-depth -- ``calculate_renewal_risk_scores``
+# accepts new keyword-only ``pulse_df`` / ``action_plans_df`` / ``subs_df``
+# kwargs that, when provided, OVERRIDE the classifier output, and all four
+# Compact call sites in ``app_simple.py`` (Word success / Word fallback /
+# XLSX success / XLSX fallback) thread the canonical CSConsole frames the
+# Renewal path already feeds. The Build 79 audit also surfaced two
+# false-positive items: B2 (Compact ``Critical_Adoption_Barriers`` at 73
+# cols matches the canonical ``_CURATED_AB_DETAIL_ALL`` tuple by design --
+# the audit script's "~30 cols" expectation was the
+# ``_CURATED_ACTION_PLANS`` shape) and B3 (Renewal ``Risk_Components`` is
+# a portfolio-level rollup, distinct from Comprehensive's per-customer
+# detail). B3 is documented as a Critical Rule in CLAUDE.md so future
+# audits don't re-flag the design choice. Pinned by
+# ``tests/test_round111_compact_renewal_score_parity_live_data.py`` (12
+# tests covering the widened classifier markers, disqualifier expansion,
+# explicit-kwarg signature + override semantics, per-customer parity with
+# the Renewal path on synthetic data, pulse-not-lost regression,
+# empty-data and subs-only edge cases, legacy classifier back-compat, and
+# the app_simple call-site coverage). Net pytest delta +12.
+#
 # Round 110 / Build 79: Leader Report_Info schema parity (latent-bug fix).
 # Pre-R110 the Leader writer's two dynamic-loop branches in app_simple.py
 # (Partial_Data_Warning_<n> rows and Failed_Sheet rows) appended dicts

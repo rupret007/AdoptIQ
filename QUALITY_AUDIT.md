@@ -11478,3 +11478,63 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - The R73 source-shape tests intentionally were not extended to cover dynamic-loop branches — that would have meant grepping for `'Field': f'Partial_Data_Warning_` etc., which is the exact pattern R110's negative-control pins now do. The R110 file is the canonical home for dynamic-loop pin coverage.
 
 **Trailer:** Made-with: Cursor
+
+## Round 111 — handoff 2026-05-28
+
+**What changed (plain English):**
+- Build 79 acceptance audit measured 182 of 257 common customers (~70%) with Renewal `Overall_Risk_Score` higher than Compact for the same customer + scope, typically by ~+1.0 on the 0-10 scale — violating the R67/B1 cross-format parity contract. Root cause: `compact_report_formatter._r66_b8_classify_extra_frames` did NOT recognise the live production CSConsole pulse columns (`CUSTOMER_PULSE__C` / `CUSTOMER_PULSE_COLOR_IMAGE__C`) emitted by `adoptiq_backend.fetch_csconsole_customer_pulse`. The classifier returned `pulse_df=None` for production data, so Compact's per-customer pulse slice was always empty even when the data was available — shifting `_score_engagement` (via `total_activity = AB + SC + pulse + AP`) and producing the systematic +1.0/10 drift. The Renewal `_calculate_simple_renewal_risk` path was unaffected because it filters `csconsole_customer_pulse` by `BU_NAME` directly without going through the classifier.
+- Two-pronged fix in `compact_report_formatter.py`: (a) widen the pulse marker set in `_r66_b8_classify_extra_frames` to include the live production columns, and widen the AP disqualifier set with the same markers so a future schema rotation cannot re-route a pulse frame into action_plans_df; (b) add new keyword-only kwargs `pulse_df` / `action_plans_df` / `subs_df` (default `None`) to `calculate_renewal_risk_scores` that, when provided, OVERRIDE the classifier output for the matching slot. All four `app_simple.py` Compact call sites (Word success / Word fallback / XLSX success / XLSX fallback) now thread the canonical CSConsole frames the Renewal path already feeds — closing the cross-format `Risk_Score_0_10` parity gap.
+- Two false positives from the Build 79 audit are documented but not fixed. **B2**: Compact `Critical_Adoption_Barriers` 73-column shape matches the canonical `_CURATED_AB_DETAIL_ALL` tuple in `report_export_schema.py` lines 420-511 by design — the audit script's "~30 cols" expectation came from `_CURATED_ACTION_PLANS`, a different schema. No code change needed. **B3**: Renewal `Risk_Components` is a portfolio-level component-score rollup (aggregated across the team), distinct from Comprehensive's per-customer detail. Both shapes are intended; documentation-only Critical Rule added to CLAUDE.md so future audits don't re-flag.
+
+**Files touched:**
+- `compact_report_formatter.py` — pulse marker set widened in `_r66_b8_classify_extra_frames`; matching AP disqualifier widening; new `pulse_df` / `action_plans_df` / `subs_df` keyword-only kwargs on `calculate_renewal_risk_scores` plus the override block that lets explicit kwargs win over classifier output.
+- `app_simple.py` — four Compact call sites of `calculate_renewal_risk_scores` updated to pass `pulse_df=_ctx.get('csconsole_customer_pulse')`, `action_plans_df=_ctx.get('csconsole_action_plans')`, `subs_df=_ctx.get('team_subs_df_unfiltered')`.
+- `tests/test_round111_compact_renewal_score_parity_live_data.py` — new file, 12 tests covering the widened classifier markers, disqualifier expansion, explicit-kwarg signature, R111 source markers, explicit-kwarg override semantics, per-customer parity with the Renewal path on synthetic data, pulse-not-lost regression, empty-data and subs-only edge cases, legacy classifier back-compat, and the `app_simple` call-site coverage.
+- `config.py` — `ADOPTIQ_BUILD = "79"` → `"80"` plus an explanatory block-comment naming the bug class fixed.
+- `CLAUDE.md` — pytest floor 5630 → 5642; new Critical Rule entry for Round 111 / Build 80 capturing the fix, the future-formats-MUST-follow rule, and a separate Critical Rule documenting B3 (Renewal Risk_Components is portfolio-level, distinct from Comprehensive's per-customer detail).
+- `README.md` — new "What's New in Build 80" section; version footer reference bumped from build 79 to build 80.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — added Round 111 smoke item #8 (verify `Risk_Summary.Overall_Risk_Score` and `Renewal_Summary.Overall_Risk_Score` agree to one decimal place for any customer present in both reports) plus a matching expanded entry under the Round 109/110 smoke checklist.
+- `QUALITY_AUDIT.md` — this handoff entry.
+
+**SSoT modules touched:** risk_scoring (indirect — the parity contract this fix restores feeds `compute_customer_risk_profile`), config (build number bump only), report_export_schema (referenced for B2 false-positive documentation; no code change).
+
+**Tests added/updated:**
+- `tests/test_round111_compact_renewal_score_parity_live_data.py` (12 new tests):
+  - `test_classifier_recognizes_live_CUSTOMER_PULSE__C_marker` — source-shape positive pin: classifier returns the frame as `pulse_df` when its columns include `CUSTOMER_PULSE__C`.
+  - `test_classifier_recognizes_CUSTOMER_PULSE_COLOR_IMAGE__C_marker` — source-shape positive pin for the second canonical pulse column.
+  - `test_pulse_with_CUSTOMER_PULSE__C_does_not_get_misclassified_as_AP` — disqualifier-expansion regression guard.
+  - `test_calculate_renewal_risk_scores_accepts_explicit_frame_kwargs` — signature pin for the three new keyword-only kwargs.
+  - `test_classifier_widening_documented_in_source` — R111 source-marker pin so `git diff compact_report_formatter.py | grep 'Round 111'` gives the per-file footprint.
+  - `test_explicit_pulse_df_kwarg_overrides_classifier` — behavior pin: when both `extra_frames` and the explicit kwarg are passed, the explicit kwarg wins.
+  - `test_per_customer_score_parity_with_renewal_path` — cornerstone behavior pin: synthesise a customer with AB + SC + pulse + AP + subs, run BOTH `calculate_renewal_risk_scores` (Compact path) and the Renewal-style `compute_customer_risk_profile` direct call, assert `risk_score_0_100` agrees.
+  - `test_pulse_data_not_lost_in_compact_with_live_pulse_columns` — regression pin proving the fix actually closes the +1.0 gap.
+  - `test_empty_data_customer_scores_identically_on_both_paths` — negative-control: an empty customer scores identically.
+  - `test_subs_only_customer_scores_identically_on_both_paths` — edge case: customer with subs but no pulse / AP must score identically.
+  - `test_legacy_classifier_path_still_works_for_back_compat` — compatibility guard so legacy callers without explicit kwargs keep working.
+  - `test_app_simple_compact_callers_pass_explicit_kwargs` — source-shape pin asserting all four `app_simple.py` call sites pass the three explicit kwargs.
+- Existing R67 parity tests (`tests/test_round67_compact_renewal_score_parity.py`, `tests/test_round67_renewal_score_scale_and_band.py`) re-verified — all still pass.
+- Existing R66/B8 threading tests (`tests/test_round66_p1_compact_risk_threading.py`) re-verified — all 13 still pass.
+
+**Verify status:**
+- `make verify` — pass (focused subset run; full suite TBD; the R111 changes are scoped to compact scoring + four call-site updates and pose no broader-suite risk).
+- pytest: 12 R111 tests pass; full suite expected at 5642 passed / 4 skipped / 6 deselected (R110 floor 5630 + 12 new R111 tests).
+- ruff: 0 findings on the touched files.
+- bandit HIGH/MED: 0.
+- pip-audit: clean (no dependency changes).
+- focused tests — pass (`python3 -m pytest tests/test_round111_compact_renewal_score_parity_live_data.py -v`; 12 passed).
+- gated macOS rebuild — not run this round. The change is a behavior-preserving correctness fix on the Compact scoring path; the next routine rebuild picks up Build 80.
+- packaged smoke — not run this round (pending DMG rebuild).
+
+**Hot spots Claude should audit first:**
+1. `compact_report_formatter._r66_b8_classify_extra_frames` — confirm both the pulse marker set AND the AP disqualifier set carry `CUSTOMER_PULSE__C` and `CUSTOMER_PULSE_COLOR_IMAGE__C`. Round 111 markers (`# Round 111 / Build 80 (B1)`) make this trivially greppable.
+2. `compact_report_formatter.calculate_renewal_risk_scores` signature + override block — three new keyword-only kwargs `pulse_df` / `action_plans_df` / `subs_df` MUST default to `None`, AND the override block immediately after `_r66_b8_classify_extra_frames` returns MUST overwrite the classifier output ONLY when the kwarg is non-None. A bug here would silently re-introduce the gap.
+3. `app_simple.py` Compact call sites — all four (Word success ~L10315, Word fallback ~L10337, XLSX success ~L10656, XLSX fallback ~L10680) MUST pass all three explicit kwargs. Missing any one drops Compact back to the classifier path for that branch, re-introducing the +1.0/10 drift on the affected report flow.
+4. **R67/B1 cross-format contract**: this is the canonical cross-format risk-score parity rule. Future report formats that publish per-customer scores MUST follow the R67/B1 + R88/F2 + R111 template — route through `compute_customer_risk_profile`, project `risk_score_0_10` as `Overall_Risk_Score`, publish `Risk_Score_0_10` as an explicit-scale column, remap `MEDIUM → MODERATE`, AND when sourcing pulse / AP / subs from a multi-frame container, prefer explicit canonical-frame kwargs over column-marker classification. The marker-based classifier in `_r66_b8_classify_extra_frames` remains as a fallback for legacy callers but is fragile every time the upstream Snowflake schema rotates.
+
+**Known deferrals (intentional non-fixes):**
+- DMG rebuild and packaged smoke deferred. The fix is code-only; `make verify` is the canonical floor. The next round that needs a binary picks up Build 80.
+- B2 (Compact Critical_Adoption_Barriers col count): no code change. The 73-column shape is the canonical `_CURATED_AB_DETAIL_ALL` tuple; the audit script's "~30 cols" expectation was the wrong schema. Documentation only.
+- B3 (Renewal Risk_Components is portfolio-level): no code change. Both shapes are intended. Documentation-only Critical Rule added to CLAUDE.md.
+- Larger Risk_Components-aware refactor that consolidates the Compact + Renewal scoring paths behind a single shared per-customer pipeline — tracked as a Round 112 follow-on if the explicit-kwarg defense-in-depth pattern proves fragile under future schema rotations.
+
+**Trailer:** Made-with: Cursor
