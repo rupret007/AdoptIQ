@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sys
 import threading
 import time
@@ -58,25 +59,20 @@ logger = logging.getLogger(__name__)
 
 _BOOT_LOCK = threading.RLock()
 
-# Round 35 / native-corpus + Round 96 / runtime-only corpus: 24h
-# refresh cadence for the daily worker that pulls updates from the
-# authorized local OneDrive mirror. Hour-resolution ticks keep us
-# responsive to user sign-in events without hammering the filesystem.
+# Round 35 / native-corpus + Round 107 / prebaked corpus: 24h refresh
+# cadence for the daily worker that augments the bundled snapshot with
+# generated reports, uploads, and OneDrive files when available.
 _DAILY_REFRESH_INTERVAL_S = 86400.0
 _DAILY_REFRESH_TICK_S = 3600.0
 _DAILY_REFRESH_RETRY_S = 3600.0
 _DAILY_REFRESH_THREAD_NAME = "adoptiq-corpus-daily-refresh"
 
-# Round 53 / Phase 53.4.2 -- accelerated tick while the corpus is in
-# the ``blocked_no_onedrive`` state.  We poll every 30 s so the
-# moment the user signs in to OneDrive (and the OneDrive desktop
-# client mirrors the sentinel into the synced folder) the panel
-# transitions out of "Sign in to OneDrive" into "Active" without
-# the user having to wait up to an hour for the next standard tick.
-# Bounded by ``_DAILY_REFRESH_BLOCKED_MAX_TICKS`` so a user who
-# never signs in does not get a 30-second polling loop that runs
-# forever -- after the cap we fall back to the hourly tick (the
-# loop still re-probes; it just sleeps longer between checks).
+# Round 53 introduced an accelerated tick while OneDrive setup was
+# blocked. Round 108 keeps the bounded faster tick only as optional
+# refresh-source onboarding: Ask AI still has the prebaked/local corpus,
+# but the panel can notice a newly synced OneDrive source quickly.
+# Bounded by ``_DAILY_REFRESH_BLOCKED_MAX_TICKS`` so a user who never
+# connects OneDrive does not get a 30-second polling loop forever.
 _DAILY_REFRESH_TICK_BLOCKED_S = 30.0
 _DAILY_REFRESH_BLOCKED_MAX_TICKS = 240  # 240 * 30 s = 2 h before fallback
 
@@ -115,10 +111,11 @@ class CorpusBootState:
     # Round 35 / native-corpus: how the corpus was first materialized
     # on this install.
     #
-    #   * ``"fresh"``  -- runtime-only path: no corpus data ships in
-    #                     the .app, so the indexer creates or refreshes
-    #                     the encrypted local DB from the user's
-    #                     authorized OneDrive mirror after sync.
+    #   * ``"baked"``  -- app-bundled corpus snapshot was installed.
+    #   * ``"self_healed_baked"`` -- broken local corpus was preserved
+    #                     and replaced by the bundled snapshot.
+    #   * ``"fresh"``  -- runtime index created/refreshed local corpus
+    #                     without needing a bundled install.
     #
     # ``last_successful_refresh_ts`` and ``last_refresh_attempt_ts``
     # back the daily-refresh worker's ``_should_refresh()`` math; both
@@ -181,6 +178,13 @@ class CorpusBootState:
     # fallback path engages without per-query churn.
     embedder_status: Optional[str] = None
     embedder_load_error: Optional[str] = None
+    # Round 108 / Corpus Smoothness: runtime vector-maintenance
+    # diagnostics.  Lexical indexing must remain available even when
+    # dense vectors cannot be updated on the user's machine.
+    dense_retrieval_status: Optional[str] = None
+    dense_vectors_upserted: Optional[int] = None
+    dense_vectors_considered: Optional[int] = None
+    dense_vector_error: Optional[str] = None
 
 
 _STATE: CorpusBootState = CorpusBootState()
@@ -225,6 +229,12 @@ def get_state() -> CorpusBootState:
             onedrive_file_count=_STATE.onedrive_file_count,
             # Round 83
             signed_in_proxy=_STATE.signed_in_proxy,
+            embedder_status=_STATE.embedder_status,
+            embedder_load_error=_STATE.embedder_load_error,
+            dense_retrieval_status=_STATE.dense_retrieval_status,
+            dense_vectors_upserted=_STATE.dense_vectors_upserted,
+            dense_vectors_considered=_STATE.dense_vectors_considered,
+            dense_vector_error=_STATE.dense_vector_error,
         )
 
 
@@ -541,21 +551,23 @@ def _r68_onedrive_sentinel_present() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Round 96 / runtime-only corpus: app-bundled corpus install retired
+# Round 107 / Build 76: app-bundled corpus install
 # ---------------------------------------------------------------------------
 
 
-# Round 96: shipping builds copy no corpus artifacts from the app
-# bundle.  The tuple remains as an explicit empty contract so tests can
-# pin that app-bundled corpus data is retired.  ``corpus.db.salt`` still
-# follows ``corpus_crypto._salt_path_for`` when a runtime corpus is
-# created locally, but the app bundle must not provide either artifact.
+# Round 107: shipping builds copy these three baked artifacts from the
+# app bundle into App Support so Ask AI has corpus data immediately on
+# first launch. ``corpus.db.salt`` follows ``corpus_crypto._salt_path_for``.
 #
 # ``_LEGACY_BAKED_CORPUS_FILES`` retains the historical 4-tuple so
 # reset/preserve loops can rotate broken legacy artifacts that already
 # exist in a user's App Support directory.  Do NOT use it for
 # install-time copying or app-resource discovery.
-_BAKED_CORPUS_FILES: tuple = ()
+_BAKED_CORPUS_FILES: tuple = (
+    "corpus.db.enc",
+    "sentinel.json",
+    "corpus.db.salt",
+)
 _LEGACY_BAKED_CORPUS_FILES: tuple = (
     "corpus.db.enc",
     "sentinel.json",
@@ -565,12 +577,23 @@ _LEGACY_BAKED_CORPUS_FILES: tuple = (
 
 
 def _baked_corpus_dir() -> Optional[Path]:
-    """Round 96: baked corpus lookup is retired.
-
-    Keep the helper as a compatibility stub for older tests/tools, but
-    always return ``None`` so no local development bake directory can be
-    accidentally treated as app-shipped data.
-    """
+    """Return the bundled/prebaked corpus directory when present."""
+    override = os.environ.get("ADOPTIQ_BAKED_CORPUS_DIR")
+    candidates: list[Path] = []
+    if override:
+        candidates.append(Path(override))
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "Resources" / "baked_corpus")
+        candidates.append(Path(meipass) / "baked_corpus")
+    for candidate in candidates:
+        try:
+            if candidate.is_dir() and all(
+                (candidate / fname).is_file() for fname in _BAKED_CORPUS_FILES
+            ):
+                return candidate
+        except OSError:
+            continue
     return None
 
 
@@ -601,16 +624,16 @@ def _probe_existing_corpus_decrypts(user_db: Path) -> bool:
     cannot accidentally be auto-minted as part of the diagnostic; it
     must be a real prior install.
     """
-    onedrive_root = getattr(Config, "CSONE_ONEDRIVE_FOLDER", None)
     handle: Optional[EncryptedCorpusHandle] = None
     try:
         handle = open_corpus_for_user(
-            onedrive_root=onedrive_root,
+            # Round 107: runtime corpus encryption is local-sentinel keyed;
+            # OneDrive is a content source, not a key prerequisite.
+            onedrive_root=None,
             encrypted_path=user_db,
             create_if_missing=False,
-            # Round 106: runtime opens can use the local per-user
-            # sentinel again, so the probe must exercise that same
-            # contract instead of the retired OneDrive-only path.
+            # Round 106/107: runtime opens use the local per-user
+            # sentinel, so the probe must exercise that same contract.
             allow_local_sentinel=True,
         )
     except CorpusCryptoError:
@@ -728,16 +751,59 @@ def _preserve_broken_corpus(user_dir: Path) -> Optional[str]:
 
 
 def _install_baked_corpus_if_present() -> Optional[str]:
-    """Round 96: legacy no-op.
+    """Install the app-bundled corpus into the writable user directory.
 
-    AdoptIQ no longer ships corpus data inside the app bundle.  The
-    runtime corpus is created only after the user's authorized OneDrive
-    sync exposes the corpus folder and sentinel, then the indexer walks
-    that local source.  Keep this symbol temporarily so older tests or
-    support tools that import it fail harmlessly instead of reinstalling
-    stale data from a local development bake directory.
+    Returns ``"baked"`` when a first-launch install happened,
+    ``"self_healed_baked"`` when a broken existing corpus was preserved
+    and replaced, or ``None`` when no bundled corpus exists or the user
+    already has a decryptable corpus.
     """
-    return None
+    baked_dir = _baked_corpus_dir()
+    if baked_dir is None:
+        return None
+
+    user_dir = _user_corpus_dir()
+    user_db = user_dir / "corpus.db.enc"
+    if user_db.exists() and _probe_existing_corpus_decrypts(user_db):
+        return None
+
+    source = "baked"
+    if user_db.exists():
+        preserved = _preserve_broken_corpus(user_dir)
+        if preserved:
+            source = "self_healed_baked"
+            _safe_log_warning(
+                "Round 107 / corpus_bootstrap: preserved broken corpus "
+                "as .broken-%s before installing prebaked corpus",
+                preserved,
+            )
+        elif user_db.exists():
+            return None
+
+    user_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(user_dir, 0o700)
+    except OSError:
+        pass
+
+    for fname in _BAKED_CORPUS_FILES:
+        src = baked_dir / fname
+        dst = user_dir / fname
+        shutil.copy2(src, dst)
+        try:
+            os.chmod(dst, 0o600)
+        except OSError:
+            pass
+
+    with _BOOT_LOCK:
+        _STATE.source = source
+        _STATE.indexed_at = _utc_now_iso()
+    _safe_log_info(
+        "Round 107 / corpus_bootstrap: installed prebaked corpus source=%s dir=%s",
+        source,
+        baked_dir,
+    )
+    return source
 
 
 # ---------------------------------------------------------------------------
@@ -801,26 +867,28 @@ def _daily_refresh_loop() -> None:
     """Body of the daily-refresh daemon.
 
     Wakes once per ``_DAILY_REFRESH_TICK_S`` (1h) by default; while
-    the corpus is in the ``blocked_no_onedrive`` state the tick
-    accelerates to ``_DAILY_REFRESH_TICK_BLOCKED_S`` (30 s) so the
-    panel transitions out of "Sign in to OneDrive" promptly once the
-    user signs in.  After ``_DAILY_REFRESH_BLOCKED_MAX_TICKS`` (240
-    ticks = 2 h) the tick reverts to hourly so an unsynced user does
-    not get a perpetual 30-second polling loop.
+    optional OneDrive refresh setup is incomplete the tick can
+    accelerate to ``_DAILY_REFRESH_TICK_BLOCKED_S`` (30 s) so the
+    panel notices a newly available source promptly.  After
+    ``_DAILY_REFRESH_BLOCKED_MAX_TICKS`` (240 ticks = 2 h) the tick
+    reverts to hourly so an unsynced user does not get a perpetual
+    30-second polling loop.
 
     Triggers an incremental refresh on each tick when:
 
       * the feature flag is on,
       * a successful runtime index or prior refresh has populated
         ``_STATE.last_successful_refresh_ts``, AND
-      * ``_should_refresh()`` says we're past the 24h window, AND
-      * the OneDrive desktop client has the canonical AdoptIQ folder
-        synced to disk (``_check_onedrive_sync_status() == "synced"``).
+      * ``_should_refresh()`` says we're past the 24h window.
 
-    Round 53 also kicks an immediate refresh whenever the loop
-    observes a blocked-to-synced transition -- without this the user
-    who just signed in would have to wait the full 24 h window
-    before the corpus actually unlocks.
+    Round 108: refresh is not gated on OneDrive. It indexes generated
+    reports, Intelligence uploads, and OneDrive files when that folder
+    is available.
+
+    Round 53 also kicked an immediate refresh whenever the loop
+    observed a blocked-to-synced transition. Round 108 preserves the
+    fast reaction for optional OneDrive coverage while the local corpus
+    remains usable.
 
     Round 36 / onedrive-sync-auth: the legacy MSAL refresh-token gate
     has been removed -- we trust the OneDrive desktop client to keep
@@ -1219,6 +1287,30 @@ def _resolve_index_sources() -> list[dict[str, object]]:
     return sources
 
 
+def _r108_update_retrieval_method_for_vector_status(status: str | None) -> None:
+    """Round 108: keep retrieval method aligned with dense vector health."""
+
+    import sys
+
+    live_config = getattr(sys.modules.get("config"), "Config", Config)
+    requested = str(os.environ.get("ASK_AI_RETRIEVAL_METHOD") or "").strip().lower()
+    if status == "stale_or_lexical":
+        Config.ASK_AI_RETRIEVAL_METHOD = "lexical"
+        live_config.ASK_AI_RETRIEVAL_METHOD = "lexical"
+        return
+    if status == "ready" and requested != "lexical":
+        Config.ASK_AI_RETRIEVAL_METHOD = "hybrid"
+        live_config.ASK_AI_RETRIEVAL_METHOD = "hybrid"
+
+
+def _r108_skip_runtime_vectors_under_pytest() -> bool:
+    """Round 108: avoid loading ONNX embeddings in broad pytest runs."""
+
+    return bool(os.environ.get("PYTEST_CURRENT_TEST")) and not bool(
+        os.environ.get("ADOPTIQ_ALLOW_TEST_RUNTIME_VECTORS")
+    )
+
+
 def _run_index_pass(*, rebuild: bool) -> None:
     """Body of the bootstrap thread.  Round 17.1: walks every entry in
     :func:`_resolve_index_sources` (OneDrive + the runtime user's
@@ -1231,10 +1323,18 @@ def _run_index_pass(*, rebuild: bool) -> None:
     onedrive_root = getattr(Config, "CSONE_ONEDRIVE_FOLDER", None)
     encrypted_path = default_db_path().with_suffix(".db.enc")
 
-    # Round 96 / runtime-only corpus: do not install a corpus snapshot
-    # from the app bundle.  The encrypted DB is created or refreshed
-    # only after OneDrive + sentinel checks pass below, using the
-    # authorized local OneDrive mirror as the source of truth.
+    # Round 107 / Build 76: install the app-bundled prebaked corpus
+    # before opening the handle so first launch can serve Ask AI
+    # corpus data without waiting for a runtime index pass.
+    try:
+        installed_source = _install_baked_corpus_if_present()
+    except Exception as install_err:  # noqa: BLE001 - fall back to runtime indexing
+        installed_source = None
+        _safe_log_warning(
+            "Round 107 / corpus_bootstrap: prebaked corpus install failed (%s); "
+            "continuing with runtime index path",
+            type(install_err).__name__,
+        )
 
     # Round 36 / onedrive-sync-auth: probe sync status before the
     # index pass so the panel can render "synced" / "not_synced"
@@ -1259,7 +1359,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
         _STATE.last_error_kind = None
         _STATE.last_sources = None
         if _STATE.source is None:
-            _STATE.source = "fresh"
+            _STATE.source = installed_source or "fresh"
 
     # Round 36 / onedrive-sync-auth: the legacy SharePoint cache pull
     # has been removed -- the OneDrive desktop client mirrors the
@@ -1308,7 +1408,9 @@ def _run_index_pass(*, rebuild: bool) -> None:
     try:
         try:
             handle = open_corpus_for_user(
-                onedrive_root=onedrive_root,
+                # Round 107: OneDrive is only a source directory; the
+                # corpus key comes from the local/bundled sentinel.
+                onedrive_root=None,
                 encrypted_path=encrypted_path,
                 create_if_missing=True,
                 allow_local_sentinel=True,
@@ -1350,7 +1452,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
                 )
                 try:
                     handle = open_corpus_for_user(
-                        onedrive_root=onedrive_root,
+                        onedrive_root=None,
                         encrypted_path=encrypted_path,
                         create_if_missing=True,
                         allow_local_sentinel=True,
@@ -1543,6 +1645,51 @@ def _run_index_pass(*, rebuild: bool) -> None:
             )
             _accumulate_index_stats(aggregate, src_stats)
 
+        # Round 108 / Corpus Smoothness: runtime refreshes keep dense
+        # chunk vectors current when the embedder is available. Missing
+        # fastembed is a quality downgrade, not a corpus-blocking error.
+        vector_result = None
+        try:
+            from ask_ai_vector_store import ChunkVectorUpsertResult, upsert_chunk_vectors  # noqa: PLC0415
+
+            if _r108_skip_runtime_vectors_under_pytest():
+                vector_result = ChunkVectorUpsertResult(
+                    0,
+                    str(getattr(Config, "ASK_AI_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")),
+                    int(getattr(Config, "ASK_AI_EMBEDDING_DIM", 384)),
+                    0,
+                    "skipped_in_tests",
+                    "runtime dense vector update skipped under pytest",
+                )
+            else:
+                vector_result = upsert_chunk_vectors(handle.conn, strict=False)
+            _r108_update_retrieval_method_for_vector_status(vector_result.status)
+            with _BOOT_LOCK:
+                _STATE.dense_retrieval_status = vector_result.status
+                _STATE.dense_vectors_upserted = int(vector_result.rows_written)
+                _STATE.dense_vectors_considered = int(vector_result.rows_considered)
+                _STATE.dense_vector_error = vector_result.error
+                if vector_result.status == "stale_or_lexical":
+                    _STATE.embedder_status = _STATE.embedder_status or "unavailable"
+                    _STATE.embedder_load_error = _STATE.embedder_load_error or vector_result.error
+        except Exception as vector_err:  # noqa: BLE001 - lexical rows still commit
+            try:
+                _r108_update_retrieval_method_for_vector_status("stale_or_lexical")
+            except Exception:  # noqa: BLE001
+                pass
+            with _BOOT_LOCK:
+                _STATE.dense_retrieval_status = "stale_or_lexical"
+                _STATE.dense_vectors_upserted = 0
+                _STATE.dense_vectors_considered = None
+                _STATE.dense_vector_error = type(vector_err).__name__
+                _STATE.embedder_status = _STATE.embedder_status or "unavailable"
+                _STATE.embedder_load_error = _STATE.embedder_load_error or type(vector_err).__name__
+            _safe_log_warning(
+                "Round 108 / corpus_bootstrap: runtime chunk vector update failed (%s); "
+                "committing lexical corpus rows",
+                type(vector_err).__name__,
+            )
+
         try:
             handle.commit_to_disk()
         except CorpusCryptoError as commit_err:
@@ -1568,6 +1715,10 @@ def _run_index_pass(*, rebuild: bool) -> None:
             _STATE.completed = True
             _STATE.last_finished_at = _utc_now_iso()
             _STATE.last_stats = _index_stats_to_dict(aggregate)
+            if vector_result is not None:
+                _STATE.last_stats["dense_vectors_upserted"] = int(vector_result.rows_written)
+                _STATE.last_stats["dense_vectors_considered"] = int(vector_result.rows_considered)
+                _STATE.last_stats["dense_retrieval_status"] = vector_result.status
             _STATE.last_sources = per_source if per_source else None
             # Round 35 / native-corpus: record success so the daily-
             # refresh worker's ``_should_refresh()`` math can advance
@@ -1577,19 +1728,24 @@ def _run_index_pass(*, rebuild: bool) -> None:
             _STATE.last_refresh_error = None
             _STATE.onedrive_status = post_status
             _STATE.onedrive_file_count = post_count
-            # Round 96.1: a successful runtime index supersedes any
-            # prior blocked source label from the same process.  The
-            # JS panel maps ``fresh`` + synced + completed to
-            # ``runtime_synced``.
-            _STATE.source = "fresh"
-            # Round 96: this timestamp now represents the runtime
-            # local-index pass, not a build-time bake.
+            # Round 107: preserve the baked/self-healed source label
+            # when this pass was seeded by the bundled corpus; otherwise
+            # a successful runtime index is the fresh local path.
+            if installed_source:
+                _STATE.source = installed_source
+            elif _STATE.source in ("blocked_no_onedrive", "signed_in_no_corpus"):
+                _STATE.source = "fresh"
+            else:
+                _STATE.source = _STATE.source or "fresh"
             _STATE.indexed_at = _STATE.last_finished_at
         _safe_log_info(
-            "Round 17.1 / corpus_bootstrap: indexed files_parsed=%d chunks=%d sources=%d",
+            "Round 108 / corpus_bootstrap: indexed files_parsed=%d chunks=%d sources=%d "
+            "dense_status=%s dense_vectors=%s",
             int(aggregate.files_parsed),
             int(aggregate.chunks_added),
             len(per_source),
+            getattr(vector_result, "status", None),
+            getattr(vector_result, "rows_written", None),
         )
     except Exception as boot_err:  # noqa: BLE001 - defensive
         with _BOOT_LOCK:

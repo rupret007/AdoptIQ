@@ -6,13 +6,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-# Round 106 / Build 75: shipping builds still do not bake or bundle
-# corpus data into the .app, but runtime indexing no longer requires
-# the OneDrive sentinel.  The app indexes generated AdoptIQ reports,
-# Intelligence uploads, and OneDrive files when that local folder is
-# available. ``scripts/bake_corpus.py`` remains available as an
-# explicit developer validation tool, but the default DMG path skips it
-# and removes stale bake artifacts before PyInstaller.
+# Round 107 / Build 76: shipping builds bake and bundle the local
+# Ask AI corpus again so first launch has corpus data immediately.
+# Runtime refresh remains available for generated reports and operator
+# uploads, but the initial corpus is a build artifact.
 #
 # Round 36: the MSAL/Graph device-code path was removed.  The bake
 # now reads a local directory (the OneDrive desktop client's mirror
@@ -23,21 +20,21 @@ cd "$ROOT_DIR"
 # Both must point at a real local directory containing parseable
 # files; the bake refuses to commit an empty corpus.
 #
-# Optional developer bake controls:
-#   * ADOPTIQ_BAKE_CORPUS=1  (env)
+# Bake controls:
+#   * ADOPTIQ_BAKE_CORPUS=1  (env, default shipping path)
 #   * ADOPTIQ_BAKE_FIXTURE_DIR=<path>
 #
-# Skip-mode controls (default shipping path; emits a marker file and
-# removes stale local bake artifacts):
-#   * ADOPTIQ_BAKE_CORPUS=0  (env, default)
+# Skip-mode controls (developer-only; emits a marker file and removes
+# stale local bake artifacts):
+#   * ADOPTIQ_BAKE_CORPUS=0  (env)
 #   * pass --no-bake on the build command line via
 #     ADOPTIQ_BAKE_EXTRA_ARGS
 echo
 echo "=============================================="
-echo "  Round 96: Runtime-only AdoptIQ Knowledge Corpus"
+echo "  Round 107: Prebaked AdoptIQ Knowledge Corpus"
 echo "=============================================="
 echo
-BAKE_FLAG="${ADOPTIQ_BAKE_CORPUS:-0}"
+BAKE_FLAG="${ADOPTIQ_BAKE_CORPUS:-1}"
 BAKE_EXTRA_ARGS="${ADOPTIQ_BAKE_EXTRA_ARGS:-}"
 # Round 36: ADOPTIQ_BAKE_FIXTURE_DIR overrides the default
 # Config.CSONE_ONEDRIVE_FOLDER source.  Quoted explicitly because the
@@ -63,11 +60,10 @@ if [[ -x ".venv/bin/python" ]]; then
 fi
 BAKE_PYTHON_BIN="$PYTHON_BIN"
 if [[ "$BAKE_FLAG" == "0" || "$BAKE_FLAG" == "false" || "$BAKE_FLAG" == "no" ]]; then
-  echo "ADOPTIQ_BAKE_CORPUS=$BAKE_FLAG -- skipping corpus data bake for runtime-only shipping"
+  echo "ADOPTIQ_BAKE_CORPUS=$BAKE_FLAG -- developer-only skip of prebaked corpus"
   "$BAKE_PYTHON_BIN" scripts/bake_corpus.py --bake-dir bake --no-bake
 else
-  echo "WARNING: ADOPTIQ_BAKE_CORPUS=$BAKE_FLAG is a developer-only validation path."
-  echo "         Release builds must leave it disabled so no corpus data artifacts exist."
+  echo "ADOPTIQ_BAKE_CORPUS=$BAKE_FLAG -- baking corpus for bundled first-launch use."
   if [[ -n "$BAKE_FIXTURE_DIR" ]]; then
     echo "Bake source: $BAKE_FIXTURE_DIR (ADOPTIQ_BAKE_FIXTURE_DIR override)"
     if ! "$BAKE_PYTHON_BIN" scripts/bake_corpus.py \
@@ -75,10 +71,9 @@ else
           --source "$BAKE_FIXTURE_DIR" \
           $BAKE_EXTRA_ARGS; then
       echo
-      echo "ERROR: bake_corpus.py failed.  To skip the bake (the"
-      echo "       runtime daily refresh will repopulate the corpus"
-      echo "       from Config.CSONE_ONEDRIVE_FOLDER on first launch)"
-      echo "       re-run with: ADOPTIQ_BAKE_CORPUS=0 ./build_mac_dmg.sh"
+      echo "ERROR: bake_corpus.py failed.  Build 76 requires a prebaked"
+      echo "       corpus for shipping. Fix the source path or rerun with"
+      echo "       ADOPTIQ_BAKE_CORPUS=0 only for developer iteration."
       exit 1
     fi
   else
@@ -117,7 +112,7 @@ for c in _csone_onedrive_candidates():
       echo "         2. Add the AdoptIQ corpus shortcut to OneDrive on"
       echo "            this build host (right-click the SharePoint"
       echo "            folder, choose 'Add shortcut to OneDrive')."
-      echo "         3. Skip the bake entirely:"
+      echo "         3. Developer-only skip of the bake:"
       echo "            ADOPTIQ_BAKE_CORPUS=0 ./build_mac_dmg.sh"
       exit 1
     fi
@@ -125,34 +120,29 @@ for c in _csone_onedrive_candidates():
 fi
 echo
 
-# Round 96: opt-in release gate.  Shipping builds now hard-fail when
-# local bake data artifacts are present because corpus data must never
-# be embedded in the .app.  The .bake-skipped marker is expected on the
-# default path and proves stale bake artifacts were scrubbed before
-# PyInstaller runs.
+# Round 107: opt-in release gate. Shipping builds now hard-fail when
+# the prebaked corpus artifacts are missing because first-launch Ask AI
+# readiness depends on the bundle carrying a corpus snapshot.
 if [[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" ]]; then
   echo
   echo "=============================================="
-  echo "  Round 96: ADOPTIQ_RELEASE_GATE=1 active"
+  echo "  Round 107: ADOPTIQ_RELEASE_GATE=1 active"
   echo "=============================================="
-  if [[ ! -f "bake/.bake-skipped" ]]; then
+  if [[ -f "bake/.bake-skipped" ]]; then
     echo
-    echo "ERROR: ADOPTIQ_RELEASE_GATE=1 but bake/.bake-skipped is missing."
-    echo "       Shipping builds must skip the corpus data bake so the app"
-    echo "       contains no corpus database or salt."
-    echo "       Re-run with ADOPTIQ_BAKE_CORPUS=0, or clear the release gate"
-    echo "       for a developer-only validation build."
+    echo "ERROR: ADOPTIQ_RELEASE_GATE=1 but bake/.bake-skipped is present."
+    echo "       Shipping builds must bake and bundle the corpus."
+    echo "       Re-run with ADOPTIQ_BAKE_CORPUS=1."
     exit 1
   fi
-  if [[ -f "bake/corpus.db.enc" || -f "bake/corpus.db.salt" ]]; then
+  if [[ ! -f "bake/corpus.db.enc" || ! -f "bake/corpus.db.salt" || ! -f "bake/sentinel.json" ]]; then
     echo
-    echo "ERROR: ADOPTIQ_RELEASE_GATE=1 found bake/corpus.db.enc or"
-    echo "       bake/corpus.db.salt.  Corpus data is runtime-only now and"
-    echo "       must not be present during a shipping build."
+    echo "ERROR: ADOPTIQ_RELEASE_GATE=1 requires bake/corpus.db.enc,"
+    echo "       bake/corpus.db.salt, and bake/sentinel.json."
     echo "       Aborting release."
     exit 1
   fi
-  echo "  No corpus data artifacts present, gate satisfied."
+  echo "  Prebaked corpus artifacts present, gate satisfied."
   echo
 fi
 

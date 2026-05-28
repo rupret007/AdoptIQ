@@ -1783,6 +1783,75 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 
 **Trailer:** Made-with: Cursor
 
+## Round 107 — handoff 2026-05-27
+
+**What changed (plain English):**
+- Restored the macOS build-time Ask AI corpus bake as the shipping default and made the release gate require the prebaked corpus artifacts.
+- Bundled `corpus.db.enc`, `corpus.db.salt`, and `sentinel.json` in the app resources so first launch can open the corpus without OneDrive.
+- Restored startup install/self-heal of the bundled corpus and updated the Intelligence UI/docs to treat OneDrive as optional background refresh context.
+- Bumped the package to Build 76, rebuilt the macOS DMG, and smoked the packaged app against a clean temporary home.
+
+**Files touched:**
+- `build_mac_dmg.sh` — default shipping builds to corpus bake and require prebaked artifacts under `ADOPTIQ_RELEASE_GATE=1`.
+- `adoptiq_mac.spec` — bundle the three prebaked corpus artifacts under `Resources/baked_corpus`.
+- `scripts/bake_corpus.py` — align the bake helper with the Build 76 local-sentinel shipping contract.
+- `corpus_bootstrap.py` — install/use/self-heal the bundled corpus at startup.
+- `config.py` — bump build metadata to Build 76 and document the prebaked corpus contract.
+- `app_simple.py` — surface prebaked corpus provenance for the status/UI path.
+- `static/js/intel_status.js` — render baked/self-healed baked corpus as active local corpus.
+- `templates/analyze.html` — update corpus panel comments for the prebaked model.
+- `templates/preferences.html` — update corpus-share copy to optional refresh context.
+- `README.md` — Build 76 release notes and honest corpus security model.
+- `CLAUDE.md` — Build 76 operating contract and verification floor.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — release-gate/build/smoke guidance for prebaked corpus.
+- `tests/test_round35_bake_script_smoke.py` — pin the three-artifact bake and local-sentinel reopen path.
+- `tests/test_round35_baked_corpus_loaded_on_boot.py` — pin bundled corpus file/install/source behavior.
+- `tests/test_round36_panel_renders_synced_state.py` — pin active UI state for baked sources.
+- `tests/test_round39_self_heal_crypto_failure.py` — pin self-heal from bundled local-sentinel corpus.
+- `tests/test_round53_spec_no_sentinel.py` — replace no-sentinel expectation with Build 76 bundle contract.
+- `tests/test_round54_f5_build30_to_build31_upgrade.py` — update legacy upgrade expectations for bundled replacement.
+- `tests/test_round68_corpus_panel_self_healed_branch.py` — pin self-healed baked UI/source behavior.
+- `tests/test_round87_corpus_security_doc.py` — document the DMG now contains the corpus dataset.
+- `tests/test_round87_release_gate_corpus_bake.py` — pin release gate requiring prebaked corpus artifacts.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_round35_bake_script_smoke.py` — pins Build 76 bake artifacts, modes, local-sentinel reopen, and no-OneDrive bake behavior.
+- `tests/test_round35_baked_corpus_loaded_on_boot.py` — pins bundled artifact contract and first-launch install.
+- `tests/test_round36_panel_renders_synced_state.py` — pins baked source UI classification.
+- `tests/test_round39_self_heal_crypto_failure.py` — pins crypto self-heal via bundled snapshot.
+- `tests/test_round53_spec_no_sentinel.py` — pins PyInstaller prebaked artifact inclusion and lock exclusion.
+- `tests/test_round54_f5_build30_to_build31_upgrade.py` — pins broken/legacy corpus replacement from bake.
+- `tests/test_round68_corpus_panel_self_healed_branch.py` — pins baked/self-healed baked status behavior.
+- `tests/test_round87_corpus_security_doc.py` — pins honest Build 76 security wording.
+- `tests/test_round87_release_gate_corpus_bake.py` — pins release gate inversion from forbid-bake to require-bake.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5590 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- focused tests — pass (updated corpus bake/spec/bootstrap/status/doc test slices)
+- `HF_HUB_DISABLE_XET=1 ADOPTIQ_BAKE_CORPUS=1 ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh` — pass; produced `OUTBOX/AdoptIQ-v1.0.4-build76.dmg`
+- DMG artifact check — pass; mounted DMG contains `corpus.db.enc`, `corpus.db.salt`, `sentinel.json` under `AdoptIQ.app/Contents/Resources/Resources/baked_corpus`, and no `corpus.sentinel.lock.json`
+- packaged clean-home smoke — pass; `/api/corpus/status` returned `available=true`, `source=baked`, `chunks=363757`, `schema_version=2`
+
+**Hot spots Claude should audit first:**
+1. `corpus_bootstrap.py` — confirm `_install_baked_corpus_if_present` preserves healthy user corpora while replacing only missing/broken corpora from the bundled snapshot.
+2. `scripts/bake_corpus.py` — confirm the Build 76 local-sentinel bake is the intended product/security trade-off and still hard-fails vector/reranker failures.
+3. `adoptiq_mac.spec` — confirm only the three intended prebaked corpus files are bundled and `corpus.sentinel.lock.json` remains excluded.
+4. `static/js/intel_status.js` — confirm baked/self-healed baked sources render as active even when OneDrive is absent or only refresh context.
+
+**Known deferrals (intentional non-fixes):**
+- The first gated build attempt failed because the local `fastembed_cache` was incomplete/corrupt; clearing the temp cache and rerunning with `HF_HUB_DISABLE_XET=1` let fastembed recreate the cache and kept the hard-fail bake contract intact.
+- No drag-install into `/Applications` was run; the built `OUTBOX/AdoptIQ.app` and the mounted DMG contents were verified, and the packaged app was smoked from `OUTBOX` with a clean temporary home.
+- No live Snowflake report regeneration was run in this corpus-packaging round.
+
+**Trailer:** Made-with: Cursor
+
 ## Round 106 — handoff 2026-05-27
 
 **What changed (plain English):**
@@ -11239,5 +11308,61 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - No new same-scope live Snowflake four-report regeneration was run after Build 74; this round shipped focused fixes from confirmed artifact defects with full local gate, mac build, and packaged smoke coverage.
 - No drag-install smoke from the DMG into `/Applications` was run; the rebuilt `dist/AdoptIQ.app` smoke passed and the DMG was produced.
 - `README.md` and `CURSOR_MAC_BUILD_INSTRUCTIONS.md` were normalized to LF because `git diff --check` flagged CRLF endings as trailing whitespace in touched hunks.
+
+**Trailer:** Made-with: Cursor
+
+## Round 108 — handoff 2026-05-27
+
+**What changed (plain English):**
+- Shipped Build 77 corpus smoothness: the prebaked corpus is active on first launch, OneDrive is optional refresh coverage, and admin/analyze/preferences copy no longer treats missing OneDrive as a blocker.
+- Added runtime dense-vector maintenance through `ask_ai_vector_store.py`, with rollback on soft failures and hybrid retrieval restored after dense recovery.
+- Added event-triggered refresh requests after generated report sidecars and corpus-source settings changes.
+- Migrated stale persisted `gpt-5-nano` Ask AI/report defaults back to `gemini-3.1-flash-lite` while preserving deliberate post-migration nano choices.
+- Ran parallel artifact audits and fixed the confirmed local issue found in generated artifacts: Leader `Customer_Pulse` now dedups cross-CSSM duplicate IDs like the existing AP/AB sheets.
+- Rebuilt the gated macOS DMG as `OUTBOX/AdoptIQ-v1.0.4-build77.dmg` and smoked clean-home + stale-settings packaged launches.
+
+**Files touched:**
+- `ask_ai_vector_store.py` — new runtime chunk-vector upsert helper.
+- `corpus_bootstrap.py` — optional OneDrive state, refresh/vector diagnostics, runtime vector upsert, pytest vector guard, hybrid restore.
+- `app_simple.py` — event-triggered refresh helper and status/settings copy/comment updates.
+- `enhanced_admin_dashboard_v2.py` — admin corpus refresh/reset no longer blocked by legacy OneDrive states.
+- `adoptiq_settings.py`, `model_resolver.py`, `config.py` — Build 77 metadata and stale nano-to-Gemini migration path.
+- `static/js/intel_status.js`, `static/js/corpus_share_url.js`, `templates/analyze.html`, `templates/preferences.html` — corpus readiness/optional refresh UX copy and controls.
+- `scripts/bake_corpus.py`, `adoptiq_mac.spec`, `build_mac_dmg.sh` — Build 76/77 prebaked corpus release-gate and packaging contract updates.
+- `app_simple.py` — Leader `Customer_Pulse` sheet dedup by `ID`.
+- `README.md`, `CLAUDE.md`, `CURSOR_MAC_BUILD_INSTRUCTIONS.md`, `QUALITY_AUDIT.md` — Build 77 docs, floor, smoke, and handoff.
+- `tests/*round35*`, `tests/*round36*`, `tests/*round39*`, `tests/*round53*`, `tests/*round54*`, `tests/*round66*`, `tests/*round68*`, `tests/*round77*`, `tests/*round78*`, `tests/*round87*`, `tests/test_round103_ux_cleanup.py`, `tests/test_round108_corpus_smoothness.py` — focused regression coverage for the new corpus/model contracts.
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_round108_corpus_smoothness.py` — pins event-triggered refresh behavior and pytest-only vector guard.
+- `tests/test_round66_p5_hybrid_retrieval_shape.py::test_round108_runtime_vector_upsert_*` — pins runtime vector fill, soft fallback, rollback, stale model replacement, and hybrid restore.
+- `tests/test_round103_ux_cleanup.py::test_round108_*` — pins stale nano migration to Gemini and intentional post-migration nano selection.
+- `tests/test_round78_b2_leader_action_plans_dedup.py::test_round108_*` — pins Leader `Customer_Pulse` dedup source shape and behavior.
+- Round 35/36/39/53/54/68/77/87 tests — updated to the Build 77 optional OneDrive/prebaked corpus release model.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5606 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- focused tests — pass (`python3 -m pytest tests/test_round66_p5_hybrid_retrieval_shape.py tests/test_round108_corpus_smoothness.py tests/test_round78_b2_leader_action_plans_dedup.py tests/test_round53_intel_status_panel_blocked.py tests/test_round54_f3_admin_reset_gate.py tests/test_round36_panel_renders_synced_state.py tests/test_round35_intel_status_surfaces_r35_fields.py tests/test_round103_ux_cleanup.py tests/test_round77_default_model_flip.py tests/test_round36_daily_refresh_uses_local.py -v`; 136 passed)
+- gated macOS rebuild — pass (`ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh`; produced `OUTBOX/AdoptIQ-v1.0.4-build77.dmg`)
+- packaged clean-home smoke — pass (`/api/version` build 77, `/api/corpus/status` available with `source=baked`, `dense_retrieval_status=ready`, retrieval method `hybrid`; Ask AI/report model endpoints active Gemini)
+- packaged stale-settings smoke — pass (preseeded stale `gpt-5-nano` settings migrated to persisted/active `gemini-3.1-flash-lite`)
+- packaged post-install refresh smoke — pass (`POST /api/corpus/refresh` with internal token started refresh; local output source parsed 1 file without OneDrive)
+
+**Hot spots Claude should audit first:**
+1. `corpus_bootstrap.py` — confirm the pytest-only dense-vector skip cannot affect packaged/runtime vector updates.
+2. `ask_ai_vector_store.py` — confirm runtime soft failures roll back partial vectors without rolling back lexical corpus rows committed before vector maintenance.
+3. `app_simple.py` — confirm Leader `Customer_Pulse` dedup by `ID` is correct for shared-account cross-CSSM attribution and does not hide genuinely distinct no-ID rows.
+4. `adoptiq_settings.py` / `model_resolver.py` — confirm stale nano migration preserves intentional post-migration nano choices.
+
+**Known deferrals (intentional non-fixes):**
+- The artifact review was performed against reports generated before Build 77; their major LLM fallback issue traced to stale `gpt-5-nano` quota/settings and should be rechecked after installing Build 77 with Gemini active.
+- No drag-install into `/Applications` was run; smoke used the rebuilt packaged `dist/AdoptIQ.app` with clean temporary homes.
+- The post-install refresh smoke verified local-source parsing and non-blocking refresh without OneDrive; the synthetic CSV did not increase chunk count, so a richer generated DOCX/XLSX refresh can be used for the next live acceptance pass.
 
 **Trailer:** Made-with: Cursor

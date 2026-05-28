@@ -42,12 +42,13 @@
 
     var STATUS_URL = '/api/intel/status';
     var REFRESH_URL = '/api/intel/refresh';
-    // Round 39 / corpus crypto self-heal, updated in Round 96 for the
-    // runtime-only corpus model.  Wired up to [data-intel-reset], which
+    // Round 39 / corpus crypto self-heal, updated in Round 107 for the
+    // prebaked corpus model.  Wired up to [data-intel-reset], which
     // the paint() wrapper unhides only when boot.last_error_kind ===
     // 'crypto'. Confirms via a native confirm() prompt before POSTing:
     // the current encrypted DB is preserved as <name>.broken-<utc>,
-    // then the next refresh rebuilds from authorized OneDrive data.
+    // then the next refresh rebuilds from all available local sources
+    // and OneDrive when present.
     var RESET_URL = '/api/intel/reset';
     // Round 32 / Phase 2.E: persistent on/off toggle for AdoptIQ
     // Intelligence.  POSTs JSON {"enabled": bool} to the server,
@@ -90,19 +91,15 @@
         if (!payload) { return 'unknown'; }
         if (payload.enabled === false) { return 'disabled'; }
         if (payload.boot && payload.boot.in_progress) { return 'running'; }
-        // Round 53.3: ``blocked_no_onedrive`` is an actionable
-        // "sign in to OneDrive" state, not a hard failure -- the
-        // corpus panel already classifies it as a warning. The global
-        // navbar badge and analyze banner used to flash red ``Error``
-        // for the same payload because ``last_error`` was non-null,
-        // contradicting the corpus panel sitting just below it.
-        // Map the blocked source to a dedicated state so the badge,
-        // banner, and panel all agree.
+        // Round 108 / Corpus Smoothness: legacy OneDrive source labels
+        // are optional refresh context now, not an Ask AI hard-block.
+        // Keep the global banner calm; the detailed corpus panel can
+        // still explain how to connect the optional OneDrive source.
         if (payload.boot && (
             payload.boot.source === 'blocked_no_onedrive'
             || payload.boot.source === 'signed_in_no_corpus'
         )) {
-            return 'blocked';
+            return payload.available === false ? 'unavailable' : 'idle';
         }
         if (payload.boot && payload.boot.last_error) { return 'error'; }
         if (payload.available === false) { return 'unavailable'; }
@@ -128,7 +125,7 @@
             case 'idle':        return 'Idle';
             case 'error':       return 'Error';
             case 'unavailable': return 'Unavailable';
-            case 'blocked':     return 'Sign in to OneDrive';
+            case 'blocked':     return 'Optional refresh setup';
             case 'disabled':    return 'Disabled';
             default:            return 'Intelligence';
         }
@@ -140,7 +137,7 @@
             return 'Idle — intelligence indexing is disabled.';
         }
         if (state === 'running') {
-            return 'Building the local Ask AI corpus from authorized OneDrive data and generated reports…';
+            return 'Updating the local Ask AI corpus from generated reports, uploads, and OneDrive when available…';
         }
         if (state === 'blocked') {
             // Round 53.3: surface the actionable remediation message
@@ -150,7 +147,7 @@
             // SharePoint shortcut workflow rather than the
             // owner-only "AI Projects/AdoptIQ_CSOne_Reports" path.
             var blockedMsg = (payload.boot && payload.boot.last_error)
-                || 'Add the AdoptIQ corpus SharePoint folder as a OneDrive shortcut to unlock the corpus.';
+                || 'OneDrive is optional; connect it when you want shared-source refresh coverage.';
             return blockedMsg;
         }
         if (state === 'error') {
@@ -402,17 +399,16 @@
         if (!btn) { return; }
         btn.addEventListener('click', function (ev) {
             ev.preventDefault();
-            // Round 53 / Phase 53.4: same gating applies to Reset --
-            // a reset under blocked_no_onedrive would land the same
-            // .enc on disk and we'd be back to "needs OneDrive" so
-            // the click is intentionally a no-op while blocked.
+            // Round 108: reset is shown only for genuine crypto/index
+            // corruption. Missing OneDrive is optional refresh context,
+            // not a reset blocker.
             if (btn.disabled
                 || btn.getAttribute('aria-disabled') === 'true') { return; }
             var ok = window.confirm(
                 'Reset the local corpus?  Your current encrypted '
                 + 'database will be preserved on disk as a .broken '
-                + 'backup, then rebuilt from your authorized OneDrive '
-                + 'corpus folder.  Continue?'
+                + 'backup, then rebuilt from generated reports, uploads, '
+                + 'and OneDrive when available.  Continue?'
             );
             if (!ok) { return; }
             btn.disabled = true;
@@ -626,17 +622,14 @@
     // tests can pin the rendering logic without touching the DOM.
     //
     //   * runtime_synced       -- Active. Corpus indexed locally from
-    //                             authorized OneDrive data.
-    //   * fresh_indexing       -- Indexing OneDrive folder...
-    //   * fresh_not_synced     -- OneDrive sync required.
+    //                             the prebaked bundle and updates.
+    //   * fresh_indexing       -- Building local corpus...
+    //   * fresh_not_synced     -- Local corpus pending.
     //   * refreshing           -- Daily refresh in progress.
     //   * refresh_failed       -- Last refresh raised an error
     //                             (last good local corpus still served).
-    //   * blocked_no_onedrive  -- Round 53 / Phase 53.4: corpus
-    //                             unlock requires the canonical
-    //                             OneDrive sentinel which is not
-    //                             yet synced.  Buttons disabled;
-    //                             clickable deep-link offered.
+    //   * blocked_no_onedrive  -- Legacy source label shown only as
+    //                             optional OneDrive refresh guidance.
     //   * unknown              -- pre-poll / no payload yet.
     function classifyCorpusPanel(payload) {
         var boot = (payload && payload.boot) || null;
@@ -644,34 +637,30 @@
         if (boot.in_progress) { return 'refreshing'; }
         var source = (typeof boot.source === 'string') ? boot.source : '';
         var od = (typeof boot.onedrive_status === 'string') ? boot.onedrive_status : '';
-        // Round 83 / Build 59: signed_in_no_corpus takes precedence
-        // over blocked_no_onedrive.  Both are corpus-open failures,
-        // but they need different panel copy and different bootstrap
-        // CTAs:
+        // Round 83 / Build 59, downgraded in Round 108: these source
+        // labels need different optional refresh copy and CTAs:
         //   * signed_in_no_corpus -- user signed in to Cisco
         //     OneDrive, but the corpus share isn't in their tree.
         //     One-click "Add corpus share" button surfaces here.
         //   * blocked_no_onedrive -- user not signed in to OneDrive
         //     at all (or signed in to a non-Cisco account).  Legacy
-        //     "Sign in to OneDrive" copy.
+        //     state now renders optional refresh copy.
         if (source === 'signed_in_no_corpus') { return 'signed_in_no_corpus'; }
-        // Round 53 / Phase 53.4: blocked_no_onedrive takes precedence
-        // over refresh_failed because a "no OneDrive sentinel" error
-        // is the *cause* of the open failure -- showing
-        // "refresh failed" instead would mislead users into clicking
-        // the (disabled) Re-index button.
+        // Round 108: legacy blocked_no_onedrive is optional refresh
+        // guidance. Keep the dedicated panel copy when old state
+        // snapshots carry the source label.
         if (source === 'blocked_no_onedrive') { return 'blocked_no_onedrive'; }
         if (boot.last_refresh_error) {
             return 'refresh_failed';
         }
-        // Round 96: legacy baked/self-healed source labels are no
-        // longer emitted, but map them defensively so stale in-memory
-        // states don't resurrect baked-snapshot UI copy.
+        // Round 107 / Build 76: baked/self-healed source labels mean
+        // the bundled corpus is already usable; OneDrive status is only
+        // refresh context.
         if ((source === 'self_healed_baked' || source === 'baked') && od === 'synced') {
             return 'runtime_synced';
         }
         if (source === 'self_healed_baked' || source === 'baked') {
-            return 'fresh_not_synced';
+            return 'runtime_synced';
         }
         // Round 106 / Build 75: completed local corpus indexes are active
         // even when OneDrive is absent. OneDrive is now one possible source,
@@ -695,7 +684,7 @@
             // -- the user IS signed in to OneDrive, they just need
             // to add the corpus share to their tree.
             case 'signed_in_no_corpus': return 'Add corpus share to OneDrive';
-            case 'blocked_no_onedrive': return 'Sign in to OneDrive';
+            case 'blocked_no_onedrive': return 'Optional OneDrive refresh';
             default:                    return 'checking\u2026';
         }
     }
@@ -707,13 +696,53 @@
             case 'fresh_not_synced':    return 'bg-warning text-dark';
             case 'refreshing':          return 'bg-primary';
             case 'refresh_failed':      return 'bg-danger';
-            // Round 83 / Build 59: warning pill (same severity as
-            // ``blocked_no_onedrive`` -- corpus is unavailable until
-            // the user takes action) with distinct label + button.
+            // Round 108: warning pill means optional refresh coverage
+            // is incomplete, not that Ask AI is hard-blocked.
             case 'signed_in_no_corpus': return 'bg-warning text-dark';
             case 'blocked_no_onedrive': return 'bg-warning text-dark';
             default:                    return 'bg-secondary';
         }
+    }
+
+    function r108DenseStatus(payload) {
+        var boot = (payload && payload.boot) || {};
+        var method = boot.ask_ai_retrieval_method
+            ? String(boot.ask_ai_retrieval_method) : '';
+        if (boot.dense_retrieval_status === 'stale_or_lexical') {
+            return ' Dense retrieval is degraded; lexical fallback is active'
+                + (method ? ' (' + method + ').' : '.');
+        }
+        if (boot.embedder_status === 'ready' || boot.dense_retrieval_status === 'ready') {
+            return ' Dense retrieval is ready'
+                + (method ? ' (' + method + ').' : '.');
+        }
+        return '';
+    }
+
+    function r108ProgressDetail(payload) {
+        var boot = (payload && payload.boot) || {};
+        var stats = boot.last_stats || {};
+        var pieces = [];
+        if (typeof stats.files_parsed === 'number' || typeof stats.files_seen === 'number') {
+            pieces.push('parsed ' + (stats.files_parsed || 0) + ' of '
+                + (stats.files_seen || 0) + ' files');
+        }
+        if (typeof stats.files_skipped === 'number') {
+            pieces.push('skipped ' + stats.files_skipped);
+        }
+        if (typeof stats.files_failed === 'number' && stats.files_failed > 0) {
+            pieces.push('failed ' + stats.files_failed);
+        }
+        if (typeof stats.chunks_added === 'number') {
+            pieces.push('chunks added ' + stats.chunks_added);
+        }
+        if (typeof boot.dense_vectors_upserted === 'number') {
+            pieces.push('dense vectors updated ' + boot.dense_vectors_upserted);
+        }
+        if (boot.last_successful_update_at) {
+            pieces.push('last update ' + String(boot.last_successful_update_at));
+        }
+        return pieces.length ? ' Update details: ' + pieces.join(', ') + '.' : '';
     }
 
     function corpusPanelDetail(state, payload) {
@@ -725,9 +754,10 @@
                 if (fileCount != null && fileCount > 0) {
                     return 'Corpus indexed locally from available AdoptIQ sources, including OneDrive when present (\u2265 ' + fileCount
                         + ' file' + (fileCount === 1 ? '' : 's')
-                        + ').';
+                        + ').' + r108ProgressDetail(payload) + r108DenseStatus(payload);
                 }
-                return 'Corpus indexed locally from generated AdoptIQ reports and Intelligence uploads. OneDrive sync is optional.';
+                return 'Corpus indexed locally from generated AdoptIQ reports and Intelligence uploads. OneDrive sync is optional.'
+                    + r108ProgressDetail(payload) + r108DenseStatus(payload);
             // Round 80: panel messaging now points users at the
             // canonical SharePoint share + "Add shortcut to OneDrive"
             // workflow. Pre-R80 the message asked them to sync
@@ -740,7 +770,8 @@
             case 'fresh_not_synced':
                 return 'The local corpus will build from generated AdoptIQ reports, Intelligence uploads, and OneDrive data if that folder is available. You can run reports now; Ask AI grounding activates after the first index pass.';
             case 'refreshing':
-                return 'Building the local knowledge corpus from generated AdoptIQ reports, Intelligence uploads, and available OneDrive data. Reports remain safe to run while this finishes.';
+                return 'Building the local knowledge corpus from generated AdoptIQ reports, Intelligence uploads, and available OneDrive data. Reports remain safe to run while this finishes.'
+                    + r108ProgressDetail(payload);
             case 'refresh_failed':
                 var detail = boot.last_refresh_error
                     ? String(boot.last_refresh_error) : 'unknown';
@@ -760,23 +791,16 @@
                     + '\u201CAdd corpus share to my OneDrive\u201D to '
                     + 'open the share in your browser; OneDrive will '
                     + 'mirror it locally and AdoptIQ will pick it up '
-                    + 'on the next refresh.';
-            // Round 80: same SharePoint shortcut workflow as the
-            // other two not-synced branches. The corpus is encrypted
-            // against a key that lives in the synced shortcut folder,
-            // so until the shortcut is added + sync completes
-            // AdoptIQ cannot create or open the local corpus.
+                    + 'on the next refresh. The local corpus remains usable.';
+            // Round 108: legacy blocked state is optional refresh-source
+            // guidance only. The prebaked/local corpus remains available.
             case 'blocked_no_onedrive':
-                return 'AdoptIQ needs you to add the AdoptIQ corpus '
-                    + 'shortcut to OneDrive to unlock the corpus.  '
+                return 'AdoptIQ ships with a prebaked local corpus. Add '
+                    + 'the AdoptIQ corpus shortcut to OneDrive when you '
+                    + 'want background refreshes from the shared source.  '
                     + 'Open the SharePoint folder and click '
                     + '\u201CAdd shortcut to OneDrive\u201D so the '
-                    + 'OneDrive client syncs it to your Mac.  The '
-                    + 'corpus is encrypted against a key that lives '
-                    + 'in that synced folder, so until the shortcut '
-                    + 'is added AdoptIQ cannot build the local index.  '
-                    + 'No corpus data is embedded in the app.  (You '
-                    + 'must be signed in to OneDrive on this device first.)';
+                    + 'OneDrive client syncs it to your Mac.';
             default:
                 return '';
         }
@@ -818,8 +842,7 @@
     // ``data-disabled-when="<state>"`` are hard-disabled (and the
     // corresponding listener short-circuits) while the panel sits in
     // that state.  Used by the analyze-page Re-index / Reset buttons
-    // to prevent click-spam during ``blocked_no_onedrive`` (where the
-    // refresh would just immediately fail again with the same error).
+    // to prevent click-spam while a pass is already running.
     function paintGatedButtons(state) {
         var nodes = document.querySelectorAll('[data-disabled-when]');
         for (var i = 0; i < nodes.length; i += 1) {
@@ -932,22 +955,18 @@
         var acctEl = panel.querySelector(SHAREPOINT_ACCOUNT);
         if (acctEl) {
             var boot = (payload && payload.boot) || {};
-            if (state === 'runtime_synced' && boot.indexed_at) {
-                acctEl.textContent = 'Last local index ' + String(boot.indexed_at);
+            if (state === 'runtime_synced' && (boot.last_successful_update_at || boot.indexed_at)) {
+                acctEl.textContent = 'Last local update '
+                    + String(boot.last_successful_update_at || boot.indexed_at);
             } else {
                 acctEl.textContent = '';
             }
         }
 
         if (detail) {
-            // Round 53 / Phase 53.4: blocked_no_onedrive uses error
-            // styling so the WARN-orange pill + the red feedback
-            // text reinforce that this is an action required by the
-            // user, not a transient hiccup.
-            var feedbackKind = (
-                state === 'refresh_failed'
-                || state === 'blocked_no_onedrive'
-            ) ? 'error' : 'pending';
+            // Round 108: only true refresh failures use error styling;
+            // optional OneDrive setup states use neutral/pending copy.
+            var feedbackKind = (state === 'refresh_failed') ? 'error' : 'pending';
             setSharepointFeedback(feedbackKind, detail);
         } else {
             setSharepointFeedback(null, '');

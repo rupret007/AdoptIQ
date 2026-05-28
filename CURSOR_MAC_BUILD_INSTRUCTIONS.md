@@ -92,12 +92,12 @@ Optional DMG packaging:
 ADOPTIQ_RELEASE_GATE=1 ./build_mac_dmg.sh
 ```
 
-As of Round 96 / Build 69, release builds are runtime-only for corpus data.
-`ADOPTIQ_RELEASE_GATE=1` verifies that the DMG path skipped corpus baking and
-that stale `bake/corpus.db.enc` / `bake/corpus.db.salt` artifacts are absent
-before PyInstaller runs. The app indexes the authorized OneDrive corpus locally
-after launch; no corpus database, salt, sentinel, or `Resources/baked_corpus/`
-payload should ship in the app bundle.
+As of Round 107 / Build 76, release builds require a prebaked corpus.
+`ADOPTIQ_RELEASE_GATE=1` verifies that `bake/corpus.db.enc`,
+`bake/corpus.db.salt`, and `bake/sentinel.json` are present before
+PyInstaller runs, and that `.bake-skipped` is not present. The app installs
+that snapshot into App Support on first launch; OneDrive remains optional
+background refresh context.
 
 If no Mac script exists yet, ask Cursor:
 
@@ -170,13 +170,19 @@ Also verify:
 - App shows the TACTrack-style startup splash, polls `http://localhost:5151/ping`, then redirects to `http://localhost:5151` once Flask is ready.
 - The Dock icon does not keep bouncing after Flask is ready. Round 99 backgrounds `AdoptIQ.bin` from the launcher wrapper and exits the wrapper so Finder/Launch Services can complete the app launch.
 - No missing module errors at startup
-- The app bundle contains no corpus data:
+- The app bundle contains the three prebaked corpus artifacts and no runtime lock:
 
 ```bash
-test ! -e /tmp/adoptiq_dmg/AdoptIQ.app/Contents/Resources/baked_corpus
-find /tmp/adoptiq_dmg/AdoptIQ.app -name 'corpus.db.enc' -o -name 'corpus.db.salt' -o -name 'sentinel.json' -o -name 'corpus.sentinel.lock.json'
-# Expected: no output
+test -f /tmp/adoptiq_dmg/AdoptIQ.app/Contents/Resources/baked_corpus/corpus.db.enc
+test -f /tmp/adoptiq_dmg/AdoptIQ.app/Contents/Resources/baked_corpus/corpus.db.salt
+test -f /tmp/adoptiq_dmg/AdoptIQ.app/Contents/Resources/baked_corpus/sentinel.json
+test ! -f /tmp/adoptiq_dmg/AdoptIQ.app/Contents/Resources/baked_corpus/corpus.sentinel.lock.json
 ```
+- Round 108 corpus smoothness smoke: after launch, `/api/corpus/status`
+  should show an active prebaked/local corpus even when OneDrive is not
+  synced. The Knowledge Corpus panel should frame OneDrive as optional
+  refresh coverage and should expose dense retrieval status (`hybrid ready`
+  or lexical fallback with an error reason).
 
 ### Staging sync (OneDrive)
 

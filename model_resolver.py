@@ -108,7 +108,10 @@ def _read_settings_value(key: str) -> Optional[str]:
     except Exception:  # noqa: BLE001
         return None
     try:
-        _settings.migrate_round103_model_defaults()
+        # Round 108 / Corpus Smoothness: run both R103 and R108 model
+        # default migrations before reading settings so stale nano from
+        # upgraded installs resolves to Gemini once more.
+        _settings.ensure_model_defaults_migrated()
     except Exception:  # noqa: BLE001
         pass
     try:

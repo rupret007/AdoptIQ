@@ -2576,8 +2576,9 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
         <div class="table-container">
             <h3>AdoptIQ Intelligence</h3>
             <p style="color:#6c757d; font-size:0.85em; margin-top:-0.5em;">
-                Indexes CSOne reports synced from OneDrive
-                (and reports uploaded by the user) so Ask AI,
+                Uses the prebaked local corpus immediately, then refreshes
+                from generated reports, Intelligence uploads, and OneDrive
+                when available so Ask AI,
                 Customer 360, and Playbook can ground answers in
                 real case history, resolutions, and customer
                 sentiment.
@@ -2660,8 +2661,9 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                        on Config.CSONE_ONEDRIVE_FOLDER. Values:
                        synced / not_synced / unknown.
 
-                   Surfaced as two separate rows so the operator can
-                   see exactly which gate is blocking daily refresh. #}
+                   Round 108 / Corpus Smoothness: these are refresh-source
+                   diagnostics only. Missing OneDrive no longer blocks Ask AI
+                   when the local/prebaked corpus is available. #}
                 {% set _od_status = corpus_status.boot.onedrive_status %}
                 {% set _od_count  = corpus_status.boot.onedrive_file_count %}
                 {% set _od_signin = corpus_status.boot.signed_in_proxy %}
@@ -2699,7 +2701,7 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                         <code>AdoptIQ_CSOne_Reports</code> shortcut to
                         OneDrive (right-click the SharePoint folder
                         and choose &ldquo;Add shortcut to OneDrive&rdquo;)
-                        to enable daily refresh
+                        to improve shared-source refresh coverage
                     </span>
                     {% endif %}
                 </p>
@@ -2713,44 +2715,55 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                    re-authenticate. #}
                 {% if corpus_status.boot.source == 'signed_in_no_corpus' %}
                 <p style="margin-top: 0.6em; color: #856404; background: #fff3cd; border: 1px solid #ffeeba; padding: 0.6em 0.8em; border-radius: 4px;">
-                    <strong>Add corpus share to OneDrive (Round 83):</strong>
-                    OneDrive is signed in with a Cisco account, but
-                    the AdoptIQ corpus share is not in the user's
-                    OneDrive tree yet.  The user can click
-                    &ldquo;Add corpus share to my OneDrive&rdquo; on
-                    the analyze page to open the SharePoint URL in a
-                    browser; SSO completes automatically (they are
-                    already signed in to OneDrive) and the share lands
-                    as a shortcut.  The next daily refresh tick picks
-                    it up automatically -- no admin intervention
-                    required.
+                    <strong>Optional corpus share not connected:</strong>
+                    The local corpus remains usable. OneDrive is signed in
+                    with a Cisco account, but the AdoptIQ corpus share is not
+                    in the user's OneDrive tree yet. Add it when the operator
+                    wants shared-source updates included in background refresh.
                 </p>
                 {% endif %}
 
                 {# Round 53 / Phase 53.4: dedicated banner for the
                    ``blocked_no_onedrive`` state.  Surfaces the same
                    remediation guidance the analyze-page panel shows
-                   so the admin operator can see why the corpus is
-                   unavailable without bouncing back to the user UI.
-                   The Re-index / Rebuild / Reset buttons below also
-                   honor this state via the ``_corpus_blocked`` flag
-                   so the operator does not retry into the same
-                   error.  Source-shape pinned by
+                   so the admin operator can see optional refresh-source
+                   guidance without bouncing back to the user UI. Round 108
+                   no longer disables refresh/rebuild/reset for this legacy
+                   state because the prebaked/local corpus is the baseline.
+                   Source-shape pinned by
                    ``tests/test_round53_admin_tile_blocked_state.py``. #}
                 {% if corpus_status.boot.source == 'blocked_no_onedrive' %}
                 <p style="margin-top: 0.6em; color: #856404; background: #fff3cd; border: 1px solid #ffeeba; padding: 0.6em 0.8em; border-radius: 4px;">
-                    <strong>Sign in to OneDrive required:</strong>
-                    AdoptIQ ships with no embedded corpus data. It cannot
-                    create or open the local corpus until the canonical
-                    sentinel under
-                    <code>AdoptIQ_CSOne_Reports</code> is synced to
-                    disk by the OneDrive desktop client. The corpus is
-                    encrypted-at-rest against a key that lives in that
-                    share; without OneDrive sync there is no authorized
-                    local index to serve. The
-                    Re-index / Rebuild / Reset buttons below are
-                    disabled while blocked because they would all
-                    immediately fail with the same error.
+                    <strong>Optional OneDrive refresh source missing:</strong>
+                    AdoptIQ ships with a prebaked local corpus and can index
+                    generated reports and Intelligence uploads without
+                    OneDrive. Add the <code>AdoptIQ_CSOne_Reports</code>
+                    shortcut when shared-source refresh coverage is needed.
+                </p>
+                {% endif %}
+
+                {# Round 108 / Corpus Smoothness: dense-retrieval quality
+                   status. Hybrid-ready is preferred; lexical fallback is
+                   acceptable and non-blocking when the embedder cannot load. #}
+                {% if corpus_status.boot.embedder_status or corpus_status.boot.dense_retrieval_status %}
+                <p>
+                    <strong>Dense retrieval:</strong>
+                    {% if corpus_status.boot.dense_retrieval_status == 'stale_or_lexical' %}
+                        <span class="risk-medium">lexical fallback active</span>
+                    {% elif corpus_status.boot.embedder_status == 'ready' or corpus_status.boot.dense_retrieval_status == 'ready' %}
+                        <span class="risk-low">hybrid ready</span>
+                    {% else %}
+                        <span style="color:#6c757d;">{{ corpus_status.boot.embedder_status or corpus_status.boot.dense_retrieval_status }}</span>
+                    {% endif %}
+                    {% if corpus_status.boot.dense_vectors_upserted is not none %}
+                        &middot; {{ corpus_status.boot.dense_vectors_upserted }} vector{{ '' if corpus_status.boot.dense_vectors_upserted == 1 else 's' }} updated
+                    {% endif %}
+                    {% if corpus_status.boot.ask_ai_retrieval_method %}
+                        &middot; method: <code>{{ corpus_status.boot.ask_ai_retrieval_method }}</code>
+                    {% endif %}
+                    {% if corpus_status.boot.embedder_load_error or corpus_status.boot.dense_vector_error %}
+                        &middot; {{ corpus_status.boot.embedder_load_error or corpus_status.boot.dense_vector_error }}
+                    {% endif %}
                 </p>
                 {% endif %}
 
@@ -2893,29 +2906,17 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                admin proxy as a visible operator escape hatch.  It is
                deliberately confirm-gated and disabled while indexing,
                because it preserves and rebuilds the user's local
-               encrypted corpus cache from authorized OneDrive data. #}
+               encrypted corpus cache from all available corpus sources. #}
             {% set _corpus_busy = corpus_status.boot.in_progress %}
-            {# Round 53 / Phase 53.4: gate the Re-index / Rebuild /
-               Reset buttons on ``blocked_no_onedrive`` too -- not
-               just on ``in_progress``.  Without this the admin tile
-               looks like a ready operator action ("click Re-index!")
-               but the request would just hit the same fail-closed
-               gate in ``corpus_bootstrap._run_index_pass`` and 0
-               files would land. #}
-            {# Round 83 / Build 59: signed_in_no_corpus is a corpus-
-               open failure (same as blocked_no_onedrive) -- gate the
-               Re-index / Rebuild / Reset buttons on it too so the
-               operator does not retry into the same error. #}
-            {% set _corpus_blocked = (
-                corpus_status.boot.source == 'blocked_no_onedrive'
-                or corpus_status.boot.source == 'signed_in_no_corpus'
-            ) %}
-            {% set _corpus_disabled = _corpus_busy or _corpus_blocked %}
+            {# Round 108 / Corpus Smoothness: OneDrive states are optional
+               refresh diagnostics. Only an active index pass disables these
+               controls. #}
+            {% set _corpus_disabled = _corpus_busy %}
             <form method="POST" action="/corpus_refresh" style="display:inline;">
                 <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
                 <button type="submit" class="btn btn-primary"
                         {% if _corpus_disabled %}disabled{% endif %}
-                        title="{% if _corpus_busy %}Indexing already in progress{% elif _corpus_blocked %}Sign in to OneDrive to unlock the corpus before re-indexing{% else %}Re-index from OneDrive sync (incremental){% endif %}">
+                        title="{% if _corpus_busy %}Indexing already in progress{% else %}Re-index from generated reports, uploads, and OneDrive when available{% endif %}">
                     Re-index now
                 </button>
             </form>
@@ -2925,16 +2926,16 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 <input type="hidden" name="rebuild" value="1">
                 <button type="submit" class="btn btn-warning"
                         {% if _corpus_disabled %}disabled{% endif %}
-                        title="{% if _corpus_busy %}Indexing already in progress{% elif _corpus_blocked %}Sign in to OneDrive to unlock the corpus before rebuilding{% else %}Discard the encrypted cache and rebuild from scratch{% endif %}">
+                        title="{% if _corpus_busy %}Indexing already in progress{% else %}Discard the encrypted cache and rebuild from all available sources{% endif %}">
                     Rebuild
                 </button>
             </form>
             <form method="POST" action="/corpus_reset" style="display:inline;"
-                  onsubmit="return confirm('Reset the local encrypted corpus cache? This preserves a broken copy for troubleshooting, then rebuilds from authorized OneDrive data.');">
+                  onsubmit="return confirm('Reset the local encrypted corpus cache? This preserves a broken copy for troubleshooting, then rebuilds from all available corpus sources.');">
                 <input type="hidden" name="_admin_csrf" value="{{ admin_csrf_token }}">
                 <button type="submit" class="btn btn-danger"
                         {% if _corpus_disabled %}disabled{% endif %}
-                        title="{% if _corpus_busy %}Indexing already in progress{% elif _corpus_blocked %}Sign in to OneDrive to unlock the corpus before resetting{% else %}Preserve and rebuild the local encrypted corpus cache from OneDrive{% endif %}">
+                        title="{% if _corpus_busy %}Indexing already in progress{% else %}Preserve and rebuild the local encrypted corpus cache{% endif %}">
                     Reset corpus
                 </button>
             </form>
@@ -3658,6 +3659,13 @@ def enhanced_admin_dashboard():
             # renders it as a colored pill.
             "onedrive_status": None,
             "onedrive_file_count": None,
+            "embedder_status": None,
+            "embedder_load_error": None,
+            "dense_retrieval_status": None,
+            "dense_vectors_upserted": None,
+            "dense_vectors_considered": None,
+            "dense_vector_error": None,
+            "ask_ai_retrieval_method": None,
             "last_stats": None,
             # Round 17.1: per-source breakdown rendered in the
             # Corpus tile.  ``None`` means the bootstrap has not
@@ -3733,33 +3741,13 @@ def enhanced_admin_dashboard():
                                 corpus_status_failed=corpus_status_failed)
 
 # Round 54 / F3 -- shared blocked-state probe used by the corpus
-# refresh + reset proxies.  Re-fetches ``/api/corpus/status`` (the
-# same endpoint the dashboard tile uses) and returns True when
-# ``boot.source`` is a corpus-open blocked state.  Round 96.1 extends
-# the original ``blocked_no_onedrive`` check to include
-# ``signed_in_no_corpus`` so the server-side proxy gate matches the
-# template-level button disabling.
+# refresh + reset proxies. Round 108 / Corpus Smoothness turns
+# OneDrive/corpus-share state into optional refresh context, so this
+# helper intentionally no-ops for back-compat with older call sites.
 # Pinned by ``tests/test_round54_f3_admin_reset_gate.py``.
 def _r54_corpus_is_blocked_no_onedrive() -> bool:
-    try:
-        resp = requests.get(
-            f'{_live_main_url()}/api/corpus/status',
-            timeout=2,
-        )
-    except Exception:  # noqa: BLE001 - probe must never bubble
-        return False
-    if resp.status_code != 200:
-        return False
-    try:
-        data = resp.json() or {}
-    except Exception:  # noqa: BLE001 - malformed JSON: don't gate
-        return False
-    if not isinstance(data, dict):
-        return False
-    boot = data.get('boot')
-    if not isinstance(boot, dict):
-        return False
-    return boot.get('source') in {'blocked_no_onedrive', 'signed_in_no_corpus'}
+    """Round 108: legacy OneDrive blocker is optional refresh context."""
+    return False
 
 
 @admin_app.route('/corpus_refresh', methods=['POST'])
@@ -3773,21 +3761,18 @@ def corpus_refresh_route():
     only when the form field is set so the default action is the
     cheaper incremental refresh.
 
-    Round 54 / F3, widened in Round 96.1: short-circuit BEFORE the
-    proxy call when the corpus is in a OneDrive/corpus-share blocked
-    state -- the refresh would just trip the same fail-closed gate
-    inside ``corpus_bootstrap._run_index_pass`` and the operator would
-    see no progress.  Defense in depth on top of the template's
-    disabled state for the case where an operator hits this URL via
-    curl or devtools rather than the dashboard button.
+    Round 108 / Corpus Smoothness: OneDrive/corpus-share state is
+    optional refresh context. The route keeps proxying so local
+    generated reports and uploads can refresh the corpus without
+    OneDrive being present.
     """
     _require_admin_csrf()
     if _r54_corpus_is_blocked_no_onedrive():
         return redirect(url_for(
             'enhanced_admin_dashboard',
             message=(
-                'Corpus refresh: blocked -- sign in to OneDrive and '
-                'add/sync the AdoptIQ corpus share first.'
+                'Corpus refresh: optional OneDrive source missing; '
+                'local refresh remains available.'
             ),
             message_type='warning',
         ))
@@ -3863,20 +3848,17 @@ def corpus_reset_route():
     server-to-server HTTP call with the ``X-AdoptIQ-Internal`` header
     so the main app can authorize without us holding its CSRF token.
 
-    Round 54 / F3, widened in Round 96.1: short-circuit BEFORE the
-    proxy call when the corpus is in a OneDrive/corpus-share blocked
-    state. Runtime-only reset would still immediately re-block without
-    the authorized OneDrive folder/sentinel, wasting the operator's
-    click and producing a confusing "started" banner over a corpus that
-    is still blocked.
+    Round 108 / Corpus Smoothness: OneDrive/corpus-share status is not
+    a reset blocker. Reset rebuilds from generated reports, uploads, and
+    OneDrive when available.
     """
     _require_admin_csrf()
     if _r54_corpus_is_blocked_no_onedrive():
         return redirect(url_for(
             'enhanced_admin_dashboard',
             message=(
-                'Corpus reset: blocked -- sign in to OneDrive and '
-                'add/sync the AdoptIQ corpus share first.'
+                'Corpus reset: optional OneDrive source missing; '
+                'local reset remains available.'
             ),
             message_type='warning',
         ))

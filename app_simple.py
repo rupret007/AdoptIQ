@@ -2500,6 +2500,17 @@ try:
     # ``sharepoint_folder_url`` left over in a legacy ``settings.json``
     # is silently ignored on read because the key is no longer in
     # :data:`adoptiq_settings._SCHEMA`.
+    # Round 108 / Corpus Smoothness: run the stale-model migration at
+    # boot as well as lazily in the resolver/settings endpoints so an
+    # upgraded install cannot start a new report with the old nano
+    # default before the Preferences page is opened.
+    try:
+        _r32_settings.ensure_model_defaults_migrated()
+    except Exception as _r108_model_migration_err:  # noqa: BLE001
+        logging.getLogger(__name__).debug(
+            "Round 108: model-default migration skipped at boot (%s)",
+            _r108_model_migration_err,
+        )
 except Exception as _r32_settings_err:  # noqa: BLE001 - never block boot
     logging.getLogger(__name__).debug(
         "Round 32 / Phase 2.E: settings override skipped (%s)",
@@ -2966,7 +2977,33 @@ def _r92_write_corpus_sidecars(status: dict) -> dict:
     status["corpus_admission_reason"] = (
         "eligible" if admission.get("corpus_eligible") else "; ".join(admission.get("reasons") or ["not_eligible"])
     )
+    if written > 0 and bool(admission.get("corpus_eligible")):
+        _r108_request_corpus_refresh_after_source_update("generated_report_sidecar")
     return admission
+
+
+def _r108_request_corpus_refresh_after_source_update(reason: str) -> bool:
+    """Round 108: best-effort refresh trigger after local source updates."""
+    if app.config.get("TESTING") and os.environ.get("ADOPTIQ_ALLOW_TEST_CORPUS_REFRESH") != "1":
+        return False
+    try:
+        import corpus_bootstrap as _r108_cb
+        if not _r108_cb.is_enabled():
+            return False
+        started = bool(_r108_cb.request_refresh(rebuild=False))
+        logger.info(
+            "Round 108: corpus refresh trigger reason=%s started=%s",
+            reason,
+            started,
+        )
+        return started
+    except Exception as refresh_err:  # noqa: BLE001
+        logger.debug(
+            "Round 108: corpus refresh trigger skipped for %s (%s)",
+            reason,
+            type(refresh_err).__name__,
+        )
+        return False
 
 
 def _r81_outputs_root() -> Path:
@@ -21690,6 +21727,7 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             "source": None,
             "indexed_at": None,
             "last_successful_refresh_ts": None,
+            "last_successful_update_at": None,
             "last_refresh_attempt_ts": None,
             "last_refresh_error": None,
             # Round 36 / onedrive-sync-auth: presence check for the
@@ -21712,6 +21750,15 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             # tree yet) from ``blocked_no_onedrive`` (not signed in to
             # OneDrive at all).
             "signed_in_proxy": None,
+            # Round 108 / Corpus Smoothness: dense retrieval quality
+            # diagnostics are operator-visible, not user blockers.
+            "embedder_status": None,
+            "embedder_load_error": None,
+            "dense_retrieval_status": None,
+            "dense_vectors_upserted": None,
+            "dense_vectors_considered": None,
+            "dense_vector_error": None,
+            "ask_ai_retrieval_method": None,
             # Round 53 / Phase 53.4.1: clickable "Open OneDrive folder"
             # link surfaced on the analyze-page panel when the corpus
             # is in the ``blocked_no_onedrive`` state.  Defaults to
@@ -21739,6 +21786,15 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
         import corpus_bootstrap as _r17_cb
         payload["enabled"] = bool(_r17_cb.is_enabled())
         boot_state = _r17_cb.get_state()
+        _r108_last_successful_update_at = None
+        try:
+            _r108_ts = getattr(boot_state, "last_successful_refresh_ts", None)
+            if _r108_ts is not None:
+                _r108_last_successful_update_at = datetime.fromtimestamp(
+                    float(_r108_ts), tz=timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (TypeError, ValueError, OSError, OverflowError):
+            _r108_last_successful_update_at = None
         payload["boot"] = {
             "started": bool(boot_state.started),
             "in_progress": bool(boot_state.in_progress),
@@ -21752,18 +21808,16 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             "encrypted_path": boot_state.encrypted_path,
             "onedrive_root": boot_state.onedrive_root,
             "sharepoint": boot_state.sharepoint,
-            # Round 96 / runtime-only corpus: surface runtime-index
+            # Round 107 / Build 76: surface prebaked/runtime corpus
             # provenance + daily-refresh timer state so
-            # ``static/js/intel_status.js`` can show that no corpus data
-            # is embedded in the app and that indexing happens only
-            # after OneDrive auth/sync exposes the local corpus folder.
-            # ``source`` remains "fresh" for runtime-created corpora;
-            # ``indexed_at`` is the latest local index timestamp.
+            # ``static/js/intel_status.js`` can distinguish baked,
+            # self-healed baked, and fresh local corpus paths.
             "source": getattr(boot_state, "source", None),
             "indexed_at": getattr(boot_state, "indexed_at", None),
             "last_successful_refresh_ts": getattr(
                 boot_state, "last_successful_refresh_ts", None,
             ),
+            "last_successful_update_at": _r108_last_successful_update_at,
             "last_refresh_attempt_ts": getattr(
                 boot_state, "last_refresh_attempt_ts", None,
             ),
@@ -21785,6 +21839,18 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             # from the legacy ``blocked_no_onedrive`` state (not
             # signed in at all).
             "signed_in_proxy": getattr(boot_state, "signed_in_proxy", None),
+            # Round 108 / Corpus Smoothness: expose embedder/vector
+            # status so the UI/admin can distinguish hybrid-ready from
+            # lexical fallback without reading logs.
+            "embedder_status": getattr(boot_state, "embedder_status", None),
+            "embedder_load_error": getattr(boot_state, "embedder_load_error", None),
+            "dense_retrieval_status": getattr(boot_state, "dense_retrieval_status", None),
+            "dense_vectors_upserted": getattr(boot_state, "dense_vectors_upserted", None),
+            "dense_vectors_considered": getattr(boot_state, "dense_vectors_considered", None),
+            "dense_vector_error": getattr(boot_state, "dense_vector_error", None),
+            "ask_ai_retrieval_method": str(
+                getattr(Config, "ASK_AI_RETRIEVAL_METHOD", "")
+            ).strip() or None,
             # Round 53 / Phase 53.4.1: surface the configured
             # OneDrive deep-link only if the scheme passes the
             # allow-list below.  Done inside the serializer (not at
@@ -21873,10 +21939,10 @@ def _r83_safe_share_url() -> Optional[str]:
 
     When the analyze-page panel sits in the ``signed_in_no_corpus``
     state, this URL is what the "Add corpus share to my OneDrive"
-    button opens. The encryption / sentinel / decrypt path is NOT
-    affected by this URL -- a stolen DMG without OneDrive auth is
-    still useless ciphertext (R83 contract: ``_run_index_pass`` calls
-    ``open_corpus_for_user(..., allow_local_sentinel=False)``).
+    button opens. Round 108: the encryption / sentinel / decrypt path
+    is NOT affected by this URL. The prebaked/local corpus uses the
+    bundled/per-user sentinel path; OneDrive is optional refresh source
+    setup, not the first-launch decryption gate.
 
     Pinned by ``tests/test_round83_signed_in_no_corpus_panel.py`` and
     extended by ``tests/test_round84_corpus_share_url_resolver.py``.
@@ -22628,7 +22694,7 @@ def _r69_handle_model_setting(setting_key: str, env_var: str) -> Any:
             "error": f"resolver_import_failed: {type(imp_err).__name__}",
         }), 500
     try:
-        _settings.migrate_round103_model_defaults()
+        _settings.ensure_model_defaults_migrated()
     except Exception:  # noqa: BLE001
         pass
 
@@ -22756,10 +22822,9 @@ def api_settings_report_model():
 # ``X-AdoptIQ-Internal``). The encryption / sentinel / decrypt path
 # is NOT touched by this endpoint -- the URL only governs which
 # SharePoint share opens in the user's browser when they click the
-# bootstrap button. R83 contract preserved: a stolen DMG without
-# OneDrive auth is still useless ciphertext (per
-# ``corpus_bootstrap._run_index_pass`` calling
-# ``open_corpus_for_user(..., allow_local_sentinel=False)``).
+# bootstrap button. Round 108: the prebaked/local corpus uses the
+# bundled/per-user sentinel path; OneDrive only improves optional
+# shared-source refresh coverage.
 # ---------------------------------------------------------------------------
 
 
@@ -22874,6 +22939,7 @@ def api_settings_corpus_share_url():
         "Round 84 / Build 60: corpus_share_url persisted (source=%s, persisted=%s)",
         source, "(unset)" if not candidate else "(set)",
     )
+    refresh_started = _r108_request_corpus_refresh_after_source_update("corpus_share_url_saved")
     return jsonify({
         "ok": True,
         "share_url": active_url,
@@ -22881,6 +22947,7 @@ def api_settings_corpus_share_url():
         "persisted_value": candidate,
         "env_var": "ADOPTIQ_CORPUS_SHARE_URL",
         "env_value_set": bool(os.environ.get("ADOPTIQ_CORPUS_SHARE_URL")),
+        "refresh_started": refresh_started,
     }), 200
 
 
@@ -23072,6 +23139,7 @@ def api_settings_csone_onedrive_folder():
         "Round 88 / F5: csone_onedrive_folder persisted (source=%s, persisted=%s, exists=%s)",
         source, "(unset)" if not candidate else "(set)", path_exists,
     )
+    refresh_started = _r108_request_corpus_refresh_after_source_update("csone_onedrive_folder_saved")
     return jsonify({
         "ok": True,
         "folder_path": active_path,
@@ -23080,6 +23148,7 @@ def api_settings_csone_onedrive_folder():
         "path_exists": path_exists,
         "env_var": "CSONE_ONEDRIVE_FOLDER",
         "env_value_set": bool(os.environ.get("CSONE_ONEDRIVE_FOLDER")),
+        "refresh_started": refresh_started,
     }), 200
 
 
@@ -23173,7 +23242,11 @@ def api_settings_report_outputs_folder():
         "Round 92: report_outputs_folder persisted (persisted=%s)",
         "(unset)" if not candidate else "(set)",
     )
-    return jsonify(_payload()), 200
+    response_payload = _payload()
+    response_payload["refresh_started"] = _r108_request_corpus_refresh_after_source_update(
+        "report_outputs_folder_saved"
+    )
+    return jsonify(response_payload), 200
 
 
 @app.route('/api/llm/ping', methods=['POST'])
@@ -28607,7 +28680,32 @@ def run_leader_report_generation(analysis_id):
                         )
                 sheets['Adoption_Barriers'] = _r75_ab_combined
             if all_customer_pulse:
-                sheets['Customer_Pulse'] = pd.concat(all_customer_pulse, ignore_index=True)
+                # Round 108 / artifact audit: mirror the AP/AB
+                # cross-CSSM dedup contract for Customer Pulse. Shared
+                # accounts can attribute the same Pulse row to more than
+                # one CSSM, and the manager workbook should carry each
+                # source ID once while keeping no-ID rows for forensics.
+                _r108_cp_combined = pd.concat(all_customer_pulse, ignore_index=True)
+                if 'ID' in _r108_cp_combined.columns:
+                    _r108_cp_before = len(_r108_cp_combined)
+                    _r108_cp_with_id = _r108_cp_combined[
+                        _r108_cp_combined['ID'].notna()
+                    ].drop_duplicates(subset=['ID'], keep='first')
+                    _r108_cp_no_id = _r108_cp_combined[_r108_cp_combined['ID'].isna()]
+                    _r108_cp_combined = pd.concat(
+                        [_r108_cp_with_id, _r108_cp_no_id], ignore_index=True
+                    )
+                    _r108_cp_after = len(_r108_cp_combined)
+                    if _r108_cp_after != _r108_cp_before:
+                        logger.info(
+                            "Round 108: leader Customer_Pulse sheet deduped "
+                            "by ID: %d raw rows -> %d unique (removed %d "
+                            "cross-CSSM duplicates)",
+                            _r108_cp_before,
+                            _r108_cp_after,
+                            _r108_cp_before - _r108_cp_after,
+                        )
+                sheets['Customer_Pulse'] = _r108_cp_combined
 
             # Round 79 / Build 55 (B2/B3): Leader BE-priority sheets.
             # Wires the same orchestrator the Comprehensive flow uses so

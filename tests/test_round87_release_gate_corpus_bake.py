@@ -1,10 +1,4 @@
-"""Round 96 / Build 69: release gate forbids bundled corpus data.
-
-Round 87 made the release gate require a baked corpus. Round 96 inverts
-that contract: release builds must skip the corpus data bake, scrub any
-stale local bake artifacts, and fail if corpus DB/salt files are present
-when ``ADOPTIQ_RELEASE_GATE=1`` is active.
-"""
+"""Round 107 / Build 76: release gate requires bundled corpus data."""
 
 from __future__ import annotations
 
@@ -25,25 +19,24 @@ def _read_bake_script() -> str:
     return BAKE_SCRIPT.read_text(encoding="utf-8")
 
 
-def test_release_gate_block_present_and_inverted() -> None:
+def test_release_gate_block_requires_prebaked_corpus() -> None:
     body = _read_build_script()
     assert 'ADOPTIQ_RELEASE_GATE:-0' in body
-    assert 'Round 96: ADOPTIQ_RELEASE_GATE=1 active' in body
+    assert 'Round 107: ADOPTIQ_RELEASE_GATE=1 active' in body
     assert 'bake/.bake-skipped' in body
-    assert '[[ ! -f "bake/.bake-skipped" ]]' in body, (
-        "release gate must require the skip marker because shipping "
-        "builds must not bake corpus data"
+    assert '[[ -f "bake/.bake-skipped" ]]' in body, (
+        "release gate must reject skip mode for shipping builds"
     )
-    assert '[[ -f "bake/corpus.db.enc" || -f "bake/corpus.db.salt" ]]' in body, (
-        "release gate must fail if stale corpus DB/salt artifacts are present"
+    assert '[[ ! -f "bake/corpus.db.enc" || ! -f "bake/corpus.db.salt" || ! -f "bake/sentinel.json" ]]' in body, (
+        "release gate must fail if prebaked corpus DB/salt/sentinel artifacts are missing"
     )
-    assert "No corpus data artifacts present, gate satisfied." in body
+    assert "Prebaked corpus artifacts present, gate satisfied." in body
 
 
-def test_build_script_defaults_to_skip_corpus_bake() -> None:
+def test_build_script_defaults_to_corpus_bake() -> None:
     body = _read_build_script()
-    assert 'BAKE_FLAG="${ADOPTIQ_BAKE_CORPUS:-0}"' in body
-    assert "runtime-only shipping" in body
+    assert 'BAKE_FLAG="${ADOPTIQ_BAKE_CORPUS:-1}"' in body
+    assert "prebaked corpus" in body.lower()
 
 
 def test_bake_corpus_script_still_emits_and_scrubs_skip_marker() -> None:
@@ -62,7 +55,7 @@ def test_bake_corpus_script_still_emits_and_scrubs_skip_marker() -> None:
         )
 
 
-def test_bake_script_documents_developer_validation_only() -> None:
+def test_bake_script_documents_shipping_bake() -> None:
     body = _read_bake_script()
-    assert "developer validation tool" in body
-    assert "Shipping builds no longer embed" in body
+    assert "Round 107 / Build 76 restores this script as a production DMG input" in body
+    assert "shipping builds pre-bake a corpus snapshot" in body

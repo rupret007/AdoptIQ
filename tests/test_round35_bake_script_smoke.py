@@ -121,10 +121,9 @@ def _seed_onedrive_sentinel(dir_: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def test_bake_local_source_writes_two_artifacts(tmp_path, monkeypatch):
-    """Round 53 / Phase 53.1: the bake now produces TWO artifacts,
-    not four.  ``sentinel.json`` and ``corpus.sentinel.lock.json``
-    MUST NOT exist in the bake dir after a successful bake."""
+def test_bake_local_source_writes_three_artifacts(tmp_path, monkeypatch):
+    """Round 107 / Build 76: the bake produces the DB, salt, and local
+    sentinel needed for first-launch bundled corpus use."""
     bake_dir = tmp_path / "bake"
     fixture_dir = tmp_path / "fixture"
     onedrive_dir = tmp_path / "onedrive"
@@ -140,21 +139,14 @@ def test_bake_local_source_writes_two_artifacts(tmp_path, monkeypatch):
     ])
     assert rc == 0, f"bake_corpus.main returned non-zero exit: {rc}"
 
-    # Round 53: the TWO ship-ready artifacts must exist.
-    for fname in ("corpus.db.enc", "corpus.db.salt"):
+    for fname in ("corpus.db.enc", "corpus.db.salt", "sentinel.json"):
         assert (bake_dir / fname).exists(), (
             f"missing baked artifact {fname}"
         )
 
-    # Round 53 contract: the sidecars MUST NOT be present in the
-    # bake dir after commit -- they're scrubbed by
-    # ``_index_into_encrypted_corpus`` precisely so the PyInstaller
-    # spec cannot bundle them by accident.
-    for legacy in ("sentinel.json", "corpus.sentinel.lock.json"):
+    for legacy in ("corpus.sentinel.lock.json",):
         assert not (bake_dir / legacy).exists(), (
-            f"Round 53 contract violated: {legacy} present in bake "
-            f"dir after commit -- this is the offline-decryption "
-            f"foothold documented in QUALITY_AUDIT.md Round 52.2."
+            f"{legacy} should remain runtime-local and not ship in the app."
         )
 
 
@@ -175,7 +167,7 @@ def test_bake_local_source_artifacts_are_0600(tmp_path):
     # Bake dir 0o700; artifacts 0o600.
     bake_mode = stat.S_IMODE(bake_dir.stat().st_mode)
     assert bake_mode == 0o700, f"bake_dir mode {oct(bake_mode)} != 0o700"
-    for fname in ("corpus.db.enc", "corpus.db.salt"):
+    for fname in ("corpus.db.enc", "corpus.db.salt", "sentinel.json"):
         path = bake_dir / fname
         mode = stat.S_IMODE(path.stat().st_mode)
         assert mode == 0o600, (
@@ -186,8 +178,8 @@ def test_bake_local_source_artifacts_are_0600(tmp_path):
 
 
 def test_bake_local_source_corpus_can_be_reopened(tmp_path):
-    """End-to-end: bake -> open via corpus_crypto with the SAME
-    OneDrive sentinel root + ``allow_local_sentinel=False`` -> assert
+    """End-to-end: bake -> open via corpus_crypto with the bundled
+    local sentinel + ``allow_local_sentinel=True`` -> assert
     SQLite connection is usable.  Catches any drift between the
     bake-time sealing and the runtime open path under the Round 53
     fail-closed contract."""
@@ -207,10 +199,10 @@ def test_bake_local_source_corpus_can_be_reopened(tmp_path):
     from corpus_crypto import open_corpus_for_user
 
     handle = open_corpus_for_user(
-        onedrive_root=onedrive_dir,
+        onedrive_root=None,
         encrypted_path=bake_dir / "corpus.db.enc",
         create_if_missing=False,
-        allow_local_sentinel=False,
+        allow_local_sentinel=True,
     )
     try:
         cur = handle.conn.execute("SELECT COUNT(*) FROM customers")
@@ -228,11 +220,8 @@ def test_bake_local_source_corpus_can_be_reopened(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_bake_fails_closed_when_onedrive_sentinel_missing(tmp_path, monkeypatch):
-    """Round 53 / Phase 53.1: passing a OneDrive root that exists
-    but does NOT contain the canonical sentinel must fail with
-    exit code 3 -- the bake refuses to auto-mint a local sentinel
-    because that's exactly the regression we're closing."""
+def test_bake_succeeds_when_onedrive_sentinel_missing(tmp_path, monkeypatch):
+    """Round 107: OneDrive sentinel presence is no longer required for baking."""
     bake_dir = tmp_path / "bake"
     fixture_dir = tmp_path / "fixture"
     # Empty OneDrive dir -- exists, but no sentinel inside.
@@ -246,25 +235,13 @@ def test_bake_fails_closed_when_onedrive_sentinel_missing(tmp_path, monkeypatch)
         "--source", str(fixture_dir),
         "--onedrive-sentinel-root", str(onedrive_dir),
     ])
-    assert rc == 3, (
-        f"missing OneDrive sentinel must exit 3, got {rc}.  This is "
-        "the Round 53 fail-closed gate -- if it stops returning 3 "
-        "the auto-local-mint regression has reappeared."
-    )
-
-    # Defense: nothing should be left in the bake dir except (maybe)
-    # the bake dir itself.  Specifically the two artifacts MUST NOT
-    # be present.
+    assert rc == 0
     for fname in ("corpus.db.enc", "corpus.db.salt", "sentinel.json"):
-        assert not (bake_dir / fname).exists(), (
-            f"fail-closed bake left a stale {fname} in {bake_dir}"
-        )
+        assert (bake_dir / fname).exists()
 
 
-def test_bake_fails_closed_when_onedrive_root_missing(tmp_path, monkeypatch):
-    """Round 53: passing a OneDrive root path that does not exist
-    on disk also fails fast -- ``_resolve_onedrive_sentinel_root``
-    treats a missing dir as 'no root configured'."""
+def test_bake_succeeds_when_onedrive_root_missing(tmp_path, monkeypatch):
+    """Round 107: a missing OneDrive root does not block local-sentinel bake."""
     bake_dir = tmp_path / "bake"
     fixture_dir = tmp_path / "fixture"
     onedrive_missing = tmp_path / "no_such_dir"
@@ -277,10 +254,9 @@ def test_bake_fails_closed_when_onedrive_root_missing(tmp_path, monkeypatch):
         "--source", str(fixture_dir),
         "--onedrive-sentinel-root", str(onedrive_missing),
     ])
-    # Exit 3 = OneDrive sentinel root missing or sentinel absent.
-    assert rc == 3, (
-        f"missing OneDrive root path must exit 3, got {rc}"
-    )
+    assert rc == 0
+    for fname in ("corpus.db.enc", "corpus.db.salt", "sentinel.json"):
+        assert (bake_dir / fname).exists()
 
 
 # ---------------------------------------------------------------------------

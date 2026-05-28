@@ -184,8 +184,7 @@
                             <button type="button"
                                     class="btn btn-sm btn-outline-primary"
                                     data-intel-run-now
-                                    data-disabled-when="blocked_no_onedrive"
-                                    title="Trigger an incremental indexing pass">
+                                    title="Trigger an incremental indexing pass from local sources and OneDrive when available">
                                 <i class="fas fa-sync-alt me-1" aria-hidden="true"></i>
                                 Run now
                             </button>
@@ -196,28 +195,24 @@
                                so a healthy install never sees a
                                destructive control.  Confirms via a
                                native confirm() prompt before POSTing.
-                               Round 53 / Phase 53.4: also disabled
-                               while the panel sits in
-                               ``blocked_no_onedrive`` -- a reset
-                               under that state would just put the
-                               same .enc on disk and the corpus would
-                               still be unopenable. #}
+                               Round 108 / Corpus Smoothness: OneDrive
+                               state is optional refresh context, so reset
+                               stays hidden unless there is genuine crypto
+                               corruption rather than missing OneDrive. #}
                             <button type="button"
                                     class="btn btn-sm btn-outline-warning"
                                     data-intel-reset
-                                    data-disabled-when="blocked_no_onedrive"
                                     hidden
-                                    title="Preserve and rebuild the local encrypted corpus from authorized OneDrive data">
+                                    title="Preserve and rebuild the local encrypted corpus from all available sources">
                                 <i class="fas fa-undo me-1" aria-hidden="true"></i>
                                 Reset corpus
                             </button>
                         </div>
                     </div>
-                    {# Round 96 / runtime-only corpus: the app ships no
-                       corpus data.  After Cisco OneDrive sync exposes
-                       the authorized folder and sentinel, AdoptIQ
-                       builds the encrypted local corpus from that
-                       source.  The JS-side state machine lives in
+                    {# Round 107 / Build 76: the app ships a prebaked
+                       encrypted corpus so Ask AI has data on first
+                       launch.  OneDrive is optional background refresh
+                       context. The JS-side state machine lives in
                        ``static/js/intel_status.js::classifyCorpusPanel``
                        and distinguishes runtime_synced,
                        fresh_indexing, fresh_not_synced, refreshing,

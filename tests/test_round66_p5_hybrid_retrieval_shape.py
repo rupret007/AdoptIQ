@@ -458,6 +458,10 @@ def test_corpus_bootstrap_state_carries_embedder_fields():
     assert isinstance(state, CorpusBootState)
     assert hasattr(state, "embedder_status")
     assert hasattr(state, "embedder_load_error")
+    assert hasattr(state, "dense_retrieval_status")
+    assert hasattr(state, "dense_vectors_upserted")
+    assert hasattr(state, "dense_vectors_considered")
+    assert hasattr(state, "dense_vector_error")
 
 
 def test_warm_embedder_marks_unavailable_on_import_failure():
@@ -566,3 +570,165 @@ def test_bake_chunk_vectors_writes_rows_when_embedder_available():
         assert rows == 5
     finally:
         conn.close()
+
+
+def test_round108_runtime_vector_upsert_gap_fills_missing_rows():
+    from ask_ai_embeddings import encode_vector
+    from ask_ai_vector_store import upsert_chunk_vectors
+    from knowledge_schema import apply_schema
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        apply_schema(conn)
+        cur = conn.cursor()
+        chunk_ids = []
+        for i in range(3):
+            cur.execute(
+                'INSERT INTO "playbook_chunks" '
+                '("technology", "theme", "customer_id", "text", "tokens_json", '
+                ' "doc_length", "source_file_id", "source_section") '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?);',
+                ("t", "th", None, f"runtime chunk {i}", "[]", 2, None, None),
+            )
+            chunk_ids.append(cur.lastrowid)
+        cur.execute(
+            'INSERT INTO "chunk_vectors" '
+            '("chunk_id", "model_id", "model_dim", "vector") '
+            'VALUES (?, ?, ?, ?);',
+            (chunk_ids[0], "BAAI/bge-small-en-v1.5", 384, encode_vector(np.zeros(384, dtype=np.float32))),
+        )
+        conn.commit()
+
+        fake_vecs = np.ones((2, 384), dtype=np.float32)
+        with patch("ask_ai_embeddings.get_embedder", return_value=object()), \
+             patch("ask_ai_embeddings.embed_texts", return_value=fake_vecs):
+            result = upsert_chunk_vectors(conn, strict=False)
+
+        assert result.status == "ready"
+        assert result.rows_considered == 2
+        assert result.rows_written == 2
+        rows = cur.execute('SELECT count(*) FROM "chunk_vectors";').fetchone()[0]
+        assert rows == 3
+    finally:
+        conn.close()
+
+
+def test_round108_runtime_vector_upsert_soft_fails_without_embedder():
+    from ask_ai_vector_store import upsert_chunk_vectors
+    from knowledge_schema import apply_schema
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        apply_schema(conn)
+        conn.execute(
+            'INSERT INTO "playbook_chunks" '
+            '("technology", "theme", "customer_id", "text", "tokens_json", '
+            ' "doc_length", "source_file_id", "source_section") '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?);',
+            ("t", "th", None, "runtime chunk", "[]", 2, None, None),
+        )
+        conn.commit()
+
+        with patch("ask_ai_embeddings.get_embedder", return_value=None):
+            result = upsert_chunk_vectors(conn, strict=False)
+
+        assert result.status == "stale_or_lexical"
+        assert result.rows_written == 0
+        assert result.rows_considered == 1
+        assert "fastembed embedder unavailable" in (result.error or "")
+    finally:
+        conn.close()
+
+
+def test_round108_runtime_vector_upsert_rolls_back_partial_batch_on_soft_failure():
+    from ask_ai_vector_store import upsert_chunk_vectors
+    from knowledge_schema import apply_schema
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        apply_schema(conn)
+        cur = conn.cursor()
+        for i in range(3):
+            cur.execute(
+                'INSERT INTO "playbook_chunks" '
+                '("technology", "theme", "customer_id", "text", "tokens_json", '
+                ' "doc_length", "source_file_id", "source_section") '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?);',
+                ("t", "th", None, f"runtime partial {i}", "[]", 2, None, None),
+            )
+        conn.commit()
+
+        def _embed_batch(texts):
+            if len(texts) == 2:
+                return np.ones((2, 384), dtype=np.float32)
+            raise RuntimeError("second batch failed")
+
+        with patch("ask_ai_embeddings.get_embedder", return_value=object()), \
+             patch("ask_ai_embeddings.embed_texts", side_effect=_embed_batch):
+            result = upsert_chunk_vectors(conn, strict=False, batch_size=2)
+
+        assert result.status == "stale_or_lexical"
+        assert result.rows_written == 2
+        conn.commit()
+        rows = cur.execute('SELECT count(*) FROM "chunk_vectors";').fetchone()[0]
+        assert rows == 0, "soft-fail path must not persist partial dense vectors"
+    finally:
+        conn.close()
+
+
+def test_round108_vector_upsert_replaces_stale_model_rows():
+    from ask_ai_embeddings import encode_vector
+    from ask_ai_vector_store import upsert_chunk_vectors
+    from knowledge_schema import apply_schema
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        apply_schema(conn)
+        cur = conn.cursor()
+        cur.execute(
+            'INSERT INTO "playbook_chunks" '
+            '("technology", "theme", "customer_id", "text", "tokens_json", '
+            ' "doc_length", "source_file_id", "source_section") '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?);',
+            ("t", "th", None, "runtime chunk", "[]", 2, None, None),
+        )
+        chunk_id = cur.lastrowid
+        cur.execute(
+            'INSERT INTO "chunk_vectors" '
+            '("chunk_id", "model_id", "model_dim", "vector") '
+            'VALUES (?, ?, ?, ?);',
+            (chunk_id, "old-model", 384, encode_vector(np.zeros(384, dtype=np.float32))),
+        )
+        conn.commit()
+
+        with patch("ask_ai_embeddings.get_embedder", return_value=object()), \
+             patch("ask_ai_embeddings.embed_texts", return_value=np.ones((1, 384), dtype=np.float32)):
+            result = upsert_chunk_vectors(conn, strict=False)
+
+        assert result.rows_written == 1
+        model_id = cur.execute(
+            'SELECT "model_id" FROM "chunk_vectors" WHERE "chunk_id" = ?;',
+            (chunk_id,),
+        ).fetchone()[0]
+        assert model_id != "old-model"
+    finally:
+        conn.close()
+
+
+def test_round108_retrieval_method_restores_hybrid_after_dense_recovery(monkeypatch):
+    import corpus_bootstrap as cb
+    from config import Config
+
+    monkeypatch.delenv("ASK_AI_RETRIEVAL_METHOD", raising=False)
+    saved = Config.ASK_AI_RETRIEVAL_METHOD
+    try:
+        Config.ASK_AI_RETRIEVAL_METHOD = "lexical"
+        cb._r108_update_retrieval_method_for_vector_status("ready")
+        assert Config.ASK_AI_RETRIEVAL_METHOD == "hybrid"
+
+        monkeypatch.setenv("ASK_AI_RETRIEVAL_METHOD", "lexical")
+        Config.ASK_AI_RETRIEVAL_METHOD = "lexical"
+        cb._r108_update_retrieval_method_for_vector_status("ready")
+        assert Config.ASK_AI_RETRIEVAL_METHOD == "lexical"
+    finally:
+        Config.ASK_AI_RETRIEVAL_METHOD = saved

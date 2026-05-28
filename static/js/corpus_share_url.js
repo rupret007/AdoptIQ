@@ -11,12 +11,11 @@
  *   POST /api/settings/corpus-share-url -> {url: <https or empty>}
  *
  * Threat model: this URL is NOT a secret. The Cisco-tenant
- * SharePoint ACL gates the share, OneDrive auth gates the corpus
- * decryption (R83 contract preserved by
- * ``corpus_bootstrap._run_index_pass`` calling
- * ``open_corpus_for_user(..., allow_local_sentinel=False)``). The
- * server enforces an https-only + ``*.sharepoint.com`` host
- * allow-list before persistence; this module's role is purely UX.
+ * SharePoint ACL gates the optional shared-source folder; the
+ * prebaked/local corpus uses the bundled/per-user sentinel path and
+ * does not require OneDrive decryption. The server enforces an
+ * https-only + ``*.sharepoint.com`` host allow-list before persistence;
+ * this module's role is purely UX.
  *
  * XSS posture: every value the server echoes back (URL, source
  * label, persisted value, error message) is rendered via

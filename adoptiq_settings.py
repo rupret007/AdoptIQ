@@ -86,12 +86,11 @@ logger = logging.getLogger(__name__)
 # legacy ``settings.json`` on load.  ``corpus_share_url`` ONLY
 # feeds ``corpus_share_url_resolver.get_active_corpus_share_url``
 # which is consumed by ``_r83_safe_share_url`` for the in-browser
-# bootstrap UX.  The encryption / sentinel / decrypt path is
-# UNCHANGED -- a stolen DMG without OneDrive auth is still useless
-# ciphertext (R83 contract preserved by ``_run_index_pass``'s
-# ``allow_local_sentinel=False`` runtime call).  Empty string is
-# the canonical "unset" sentinel and means "fall back to env, then
-# config default".  Validated via ``_is_valid_sharepoint_url`` so a
+# bootstrap UX. Round 108: the encryption / sentinel / decrypt path is
+# not governed by this URL; the prebaked/local corpus uses the
+# bundled/per-user sentinel path and OneDrive is optional refresh source
+# setup. Empty string is the canonical "unset" sentinel and means "fall
+# back to env, then config default".  Validated via ``_is_valid_sharepoint_url`` so a
 # malformed or non-Cisco URL cannot land in the on-disk settings
 # file or be passed to ``window.open``.
 _SCHEMA: Dict[str, tuple] = {
@@ -99,6 +98,7 @@ _SCHEMA: Dict[str, tuple] = {
     "ask_ai_model_name": (str, ""),  # Round 69 / Build 43
     "report_model_name": (str, ""),  # Round 69 / Build 43
     "r103_model_default_migrated": (bool, False),  # Round 103 / Build 71
+    "r108_model_default_migrated": (bool, False),  # Round 108 / Corpus Smoothness
     "corpus_share_url": (str, ""),  # Round 84 / Build 60
     # Round 88 / F5 (P1): OneDrive CSOne folder override.  When the
     # OneDrive desktop client materializes a SHARED folder (someone
@@ -173,6 +173,7 @@ _MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _R103_STALE_DEFAULT_MODEL = "gpt-5-nano"
 _R103_CURRENT_DEFAULT_MODEL = "gemini-3.1-flash-lite"
 _R103_MODEL_MIGRATION_KEY = "r103_model_default_migrated"
+_R108_MODEL_MIGRATION_KEY = "r108_model_default_migrated"
 
 
 def _is_valid_model_name(value: Any) -> bool:
@@ -478,6 +479,55 @@ def migrate_round103_model_defaults() -> bool:
     return changed_model
 
 
+def migrate_round108_model_defaults() -> bool:
+    """Round 108 one-time stale-nano migration for already-migrated installs.
+
+    Some Build 71+ installs have ``r103_model_default_migrated=True`` while
+    still carrying ``gpt-5-nano`` from a pre-Gemini default or bundled env
+    drift.  This build deliberately treats that exact value as stale one more
+    time, then stamps a new marker so a later operator-selected nano remains
+    intentional.
+    """
+    try:
+        current = load_settings()
+    except Exception:  # noqa: BLE001
+        return False
+    if current.get(_R108_MODEL_MIGRATION_KEY) is True:
+        return False
+
+    changed_model = False
+    next_settings = dict(current)
+    for key in ("ask_ai_model_name", "report_model_name"):
+        if _r103_model_value_needs_migration(next_settings.get(key)):
+            next_settings[key] = _R103_CURRENT_DEFAULT_MODEL
+            changed_model = True
+    next_settings[_R108_MODEL_MIGRATION_KEY] = True
+
+    try:
+        save_settings(next_settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "adoptiq_settings: Round 108 model-default migration skipped: %s",
+            exc,
+        )
+        return False
+    return changed_model
+
+
+def ensure_model_defaults_migrated() -> bool:
+    """Run all model-default migrations; never raises to callers."""
+    changed = False
+    try:
+        changed = migrate_round103_model_defaults() or changed
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        changed = migrate_round108_model_defaults() or changed
+    except Exception:  # noqa: BLE001
+        pass
+    return changed
+
+
 def get(key: str, default: Optional[Any] = None) -> Any:
     """Return a single setting value, or ``default`` if unset/unknown."""
     if key not in _SCHEMA:
@@ -550,6 +600,9 @@ __all__ = [
     "SETTINGS_FILENAME",
     "load_settings",
     "save_settings",
+    "migrate_round103_model_defaults",
+    "migrate_round108_model_defaults",
+    "ensure_model_defaults_migrated",
     "get",
     "set",
     "schema_keys",

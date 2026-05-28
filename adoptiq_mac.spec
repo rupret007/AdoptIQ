@@ -21,11 +21,16 @@ def _datas():
     except Exception:
         pass
 
-    # Round 96 / runtime-only corpus: do NOT bundle corpus data in the
-    # app. Each user indexes the authorized OneDrive mirror locally
-    # after Cisco OneDrive sync exposes the corpus folder and sentinel.
-    # This keeps customer data out of the DMG and avoids carrying stale
-    # encrypted snapshots on machines whose operator later leaves Cisco.
+    # Round 107 / Build 76: bundle the pre-baked Ask AI corpus so first
+    # launch has corpus data immediately. The bake step writes the three
+    # artifacts below; the runtime copies them into App Support and opens
+    # them with the bundled local sentinel. Runtime refresh can still add
+    # generated reports and uploads later.
+    baked_dir = os.path.join(root, 'bake')
+    for fname in ('corpus.db.enc', 'corpus.db.salt', 'sentinel.json'):
+        baked_path = os.path.join(baked_dir, fname)
+        if os.path.exists(baked_path):
+            datas.append((baked_path, 'Resources/baked_corpus'))
 
     # Round 66 / Pass 5 - bundle the fastembed model cache produced
     # by ``scripts/bake_corpus.py`` (or pre-staged by the build

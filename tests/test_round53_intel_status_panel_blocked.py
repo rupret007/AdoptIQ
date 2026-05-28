@@ -13,10 +13,10 @@ declarative -- all we need to assert is that:
   and emits the corresponding state.
 * That state takes precedence over ``refresh_failed`` so a stale
   refresh error does not mask the real cause.
-* The label / pill / detail strings render the user-facing message
-  (sign in to OneDrive, sync the canonical folder, etc.).
-* The button-gating helper exists and respects
-  ``data-disabled-when="blocked_no_onedrive"``.
+* The label / pill / detail strings render optional OneDrive refresh
+  context, not a corpus hard-blocker.
+* The button-gating helper still exists for in-progress states, but the
+  analyze buttons no longer gate on ``blocked_no_onedrive``.
 * The deep-link painter exists and gates rendering on
   ``state === 'blocked_no_onedrive'``.
 
@@ -72,8 +72,7 @@ def test_classifier_recognizes_blocked_no_onedrive_source():
 
 def test_classifier_blocked_takes_precedence_over_refresh_failed():
     """A stale ``last_refresh_error`` should NOT hide the
-    blocked_no_onedrive state -- the user needs to see the actionable
-    'Sign in to OneDrive' message, not a generic refresh error."""
+    blocked_no_onedrive legacy state."""
     js = _read_js()
     # Find positions of the two relevant branches.
     blocked_idx = js.find("source === 'blocked_no_onedrive'")
@@ -95,15 +94,10 @@ def test_classifier_blocked_takes_precedence_over_refresh_failed():
 
 
 def test_panel_label_for_blocked_state():
-    """The pill label for the blocked state must be actionable
-    ('Sign in to OneDrive') -- not a generic 'Error' or 'Failed'."""
+    """The pill label should frame OneDrive as optional refresh."""
     js = _read_js()
     assert "case 'blocked_no_onedrive':" in js
-    # The label should encourage signing in to OneDrive.
-    assert "Sign in to OneDrive" in js, (
-        "intel_status.js label for blocked_no_onedrive is missing "
-        "the actionable 'Sign in to OneDrive' text."
-    )
+    assert "Optional OneDrive refresh" in js
 
 
 def test_panel_pill_class_for_blocked_state_is_warning():
@@ -119,14 +113,10 @@ def test_panel_pill_class_for_blocked_state_is_warning():
 
 
 def test_panel_detail_mentions_canonical_share_folder():
-    """The detail copy must name the canonical OneDrive folder so
-    the user knows exactly what to sync."""
+    """The detail copy should explain the optional OneDrive source."""
     js = _read_js()
-    # The detail string lives in the corpusPanelDetail switch.
-    assert "AI Projects/AdoptIQ_CSOne_Reports" in js, (
-        "blocked_no_onedrive detail must name the canonical OneDrive "
-        "folder so the user knows what to sync."
-    )
+    assert "prebaked local corpus" in js
+    assert "shared-source refresh coverage" in js
 
 
 # ---------------------------------------------------------------------------
@@ -165,30 +155,26 @@ def test_paint_gated_buttons_sets_aria_disabled():
 
 
 def test_analyze_template_marks_refresh_button_as_gated():
-    """The Re-index / refresh button on the analyze page must opt
-    into the Round 53 gating via ``data-disabled-when``."""
+    """Round 108: Re-index must not be disabled for missing OneDrive."""
     html = _read_template()
     assert 'data-intel-run-now' in html, (
         "analyze.html missing the Re-index / refresh button selector "
         "(data-intel-run-now)"
     )
-    # Look for the ``data-disabled-when="...blocked_no_onedrive..."``
-    # attribute on a button near data-intel-run-now.
-    assert 'data-disabled-when="blocked_no_onedrive"' in html or \
-           "data-disabled-when='blocked_no_onedrive'" in html, (
-        "analyze.html Refresh button missing "
-        "data-disabled-when='blocked_no_onedrive' -- it would stay "
-        "clickable in the blocked state and trigger an immediate "
-        "re-fail."
-    )
+    refresh_idx = html.find("data-intel-run-now")
+    refresh_button = html[refresh_idx - 200: refresh_idx + 300]
+    assert "data-disabled-when" not in refresh_button
 
 
 def test_analyze_template_marks_reset_button_as_gated():
-    """Same gating contract applies to the Reset corpus button."""
+    """Reset stays hidden for crypto only, not gated on OneDrive."""
     html = _read_template()
     assert 'data-intel-reset' in html, (
         "analyze.html missing the Reset corpus button selector"
     )
+    reset_idx = html.find("data-intel-reset")
+    reset_button = html[reset_idx - 200: reset_idx + 300]
+    assert "data-disabled-when" not in reset_button
 
 
 # ---------------------------------------------------------------------------
@@ -298,9 +284,8 @@ def test_js_safe_deep_link_exposed_for_tests():
 
 def test_round533_global_classifier_recognizes_blocked_state():
     """``classifyState`` must map ``boot.source === 'blocked_no_onedrive'``
-    to the ``'blocked'`` state so the navbar badge / analyze banner do
-    not flash red ``Error`` while the corpus panel says ``Sign in to
-    OneDrive``."""
+    away from red ``Error``. Round 108 maps it to idle/unavailable
+    based on corpus availability."""
 
     js = _read_js()
     assert "function classifyState" in js
@@ -312,11 +297,7 @@ def test_round533_global_classifier_recognizes_blocked_state():
         "blocked_no_onedrive -- the navbar badge would still show "
         "'Error' while the corpus panel shows 'Sign in to OneDrive'."
     )
-    assert "return 'blocked'" in classifier_body or \
-           'return "blocked"' in classifier_body, (
-        "classifyState must return the dedicated 'blocked' state "
-        "for blocked_no_onedrive payloads."
-    )
+    assert "payload.available === false ? 'unavailable' : 'idle'" in classifier_body
 
 
 def test_round533_global_classifier_blocked_takes_precedence_over_error():
@@ -342,16 +323,13 @@ def test_round533_global_classifier_blocked_takes_precedence_over_error():
 
 
 def test_round533_global_state_label_and_pill_are_actionable_warning():
-    """The label / pill class for the global ``blocked`` state must
-    be the same actionable warning used by the corpus panel."""
+    """The legacy global ``blocked`` label is optional setup copy."""
 
     js = _read_js()
     assert "case 'blocked':" in js or 'case "blocked":' in js, (
         "stateToLabel / stateToBadgeClass must include a 'blocked' case."
     )
-    assert "case 'blocked':" in js and "Sign in to OneDrive" in js, (
-        "stateToLabel for 'blocked' must say 'Sign in to OneDrive'."
-    )
+    assert "case 'blocked':" in js and "Optional refresh setup" in js
     assert "case 'blocked':     return 'bg-warning text-dark'" in js, (
         "stateToBadgeClass for 'blocked' must use the same "
         "bg-warning styling as the corpus panel."

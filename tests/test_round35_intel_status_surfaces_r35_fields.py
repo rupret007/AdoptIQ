@@ -61,8 +61,16 @@ def test_default_payload_includes_r35_boot_fields() -> None:
         '"source": None',
         '"indexed_at": None',
         '"last_successful_refresh_ts": None',
+        '"last_successful_update_at": None',
         '"last_refresh_attempt_ts": None',
         '"last_refresh_error": None',
+        '"embedder_status": None',
+        '"embedder_load_error": None',
+        '"dense_retrieval_status": None',
+        '"dense_vectors_upserted": None',
+        '"dense_vectors_considered": None',
+        '"dense_vector_error": None',
+        '"ask_ai_retrieval_method": None',
     ):
         assert key in body, (
             f"default payload missing R35 key {key!r} -- the JS panel will "
@@ -85,6 +93,12 @@ def test_success_branch_threads_r35_boot_fields_via_getattr() -> None:
         'getattr(\n                boot_state, "last_successful_refresh_ts", None,\n            )',
         'getattr(\n                boot_state, "last_refresh_attempt_ts", None,\n            )',
         'getattr(\n                boot_state, "last_refresh_error", None,\n            )',
+        'getattr(boot_state, "embedder_status", None)',
+        'getattr(boot_state, "embedder_load_error", None)',
+        'getattr(boot_state, "dense_retrieval_status", None)',
+        'getattr(boot_state, "dense_vectors_upserted", None)',
+        'getattr(boot_state, "dense_vectors_considered", None)',
+        'getattr(boot_state, "dense_vector_error", None)',
     ):
         assert fragment in body, (
             f"success branch missing getattr for R35 field, expected "
@@ -123,8 +137,16 @@ def test_intel_status_endpoint_returns_r35_keys_at_startup() -> None:
         "source",
         "indexed_at",
         "last_successful_refresh_ts",
+        "last_successful_update_at",
         "last_refresh_attempt_ts",
         "last_refresh_error",
+        "embedder_status",
+        "embedder_load_error",
+        "dense_retrieval_status",
+        "dense_vectors_upserted",
+        "dense_vectors_considered",
+        "dense_vector_error",
+        "ask_ai_retrieval_method",
     ):
         assert key in boot, (
             f"payload['boot'] missing Round 35 field {key!r}; "

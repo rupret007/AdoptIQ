@@ -51,6 +51,7 @@ def test_round103_post_migration_gpt_back_toggle_still_works(monkeypatch, tmp_pa
     monkeypatch.setattr(_s, "_app_support_dir", lambda: tmp_path)
     _s.save_settings({
         "r103_model_default_migrated": True,
+        "r108_model_default_migrated": True,
         "ask_ai_model_name": STALE,
         "report_model_name": STALE,
     })
@@ -60,6 +61,68 @@ def test_round103_post_migration_gpt_back_toggle_still_works(monkeypatch, tmp_pa
     importlib.reload(_mr)
     assert _mr.get_active_ask_ai_model() == STALE
     assert _mr.get_active_report_model() == STALE
+
+
+def test_round108_migrates_stale_nano_even_when_r103_marker_is_set(monkeypatch, tmp_path):
+    import adoptiq_settings as _s
+
+    monkeypatch.setattr(_s, "_app_support_dir", lambda: tmp_path)
+    _s.save_settings({
+        "r103_model_default_migrated": True,
+        "ask_ai_model_name": STALE,
+        "report_model_name": STALE,
+    })
+
+    assert _s.ensure_model_defaults_migrated() is True
+    on_disk = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+    assert on_disk["ask_ai_model_name"] == GEMINI
+    assert on_disk["report_model_name"] == GEMINI
+    assert on_disk["r108_model_default_migrated"] is True
+
+
+def test_round108_post_migration_nano_choice_still_works(monkeypatch, tmp_path):
+    monkeypatch.delenv("CIRCUIT_MODEL_NAME", raising=False)
+    import adoptiq_settings as _s
+
+    monkeypatch.setattr(_s, "_app_support_dir", lambda: tmp_path)
+    _s.save_settings({
+        "r103_model_default_migrated": True,
+        "r108_model_default_migrated": True,
+        "ask_ai_model_name": STALE,
+        "report_model_name": STALE,
+    })
+
+    import model_resolver as _mr
+
+    importlib.reload(_mr)
+    assert _mr.get_active_ask_ai_model() == STALE
+    assert _mr.get_active_report_model() == STALE
+
+
+def test_round108_resolver_runs_all_model_migrations(monkeypatch, tmp_path):
+    monkeypatch.delenv("CIRCUIT_MODEL_NAME", raising=False)
+    import adoptiq_settings as _s
+
+    monkeypatch.setattr(_s, "_app_support_dir", lambda: tmp_path)
+    _s.save_settings({
+        "r103_model_default_migrated": True,
+        "ask_ai_model_name": STALE,
+        "report_model_name": STALE,
+    })
+
+    import model_resolver as _mr
+
+    importlib.reload(_mr)
+    assert _mr.get_active_ask_ai_model() == GEMINI
+    assert _mr.get_active_report_model() == GEMINI
+    on_disk = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+    assert on_disk["r108_model_default_migrated"] is True
+
+
+def test_round108_app_boot_calls_model_migration() -> None:
+    src = _read("app_simple.py")
+    assert "ensure_model_defaults_migrated()" in src
+    assert "Round 108 / Corpus Smoothness" in src
 
 
 def test_round103_jobs_dashboard_splits_current_and_history():

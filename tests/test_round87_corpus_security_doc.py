@@ -10,8 +10,8 @@ disk."
 R87 / Phase 2 adds a "Corpus security model" subsection inside the
 existing CSOne Knowledge Corpus section that documents:
 
-  * AT-REST contract -- AES-256-GCM, 0o600, OneDrive sentinel as the
-    access-gate material backed by Microsoft tenant ACL.
+  * AT-REST contract -- AES-256-GCM, 0o600, and the Build 76 bundled
+    corpus + local sentinel trade-off.
   * RUNTIME EPHEMERAL contract -- the plaintext temp file under
     ``$TMPDIR/adoptiq_corpus/`` (mode 0o600, parent 0o700), why
     SQLite needs it, the best-effort scrub on close, and the
@@ -85,10 +85,10 @@ def test_readme_documents_at_rest_encryption() -> None:
     assert "corpus.db.enc" in body, "missing 'corpus.db.enc' citation in README"
     assert "corpus.db.salt" in body, "missing 'corpus.db.salt' citation in README"
 
-    # The access gate is the Microsoft tenant ACL, not AdoptIQ itself.
-    assert "Microsoft tenant ACL" in body, (
-        "missing 'Microsoft tenant ACL' framing in README; required so "
-        "stakeholders understand the access gate is Microsoft, not AdoptIQ"
+    # Round 107 / Build 76 intentionally ships the corpus plus local sentinel.
+    assert "Treat the DMG as containing the corpus dataset" in body, (
+        "missing Build 76 bundled-corpus trade-off framing in README; "
+        "stakeholders must understand the installer now contains corpus data"
     )
 
 

@@ -114,6 +114,19 @@ def test_leader_ap_xlsx_dedup_block_mirrors_r75_b2_shape():
     )
 
 
+def test_round108_leader_customer_pulse_dedup_block_exists():
+    """Round 108 artifact audit found the same cross-CSSM duplicate
+    pattern on Leader.Customer_Pulse. Pin the writer has an ID dedup
+    block before assigning the sheet."""
+    src = _APP_SIMPLE.read_text(encoding="utf-8")
+    idx = src.find("sheets['Customer_Pulse'] = ")
+    assert idx != -1, "leader XLSX Customer_Pulse writer site missing"
+    block = src[max(0, idx - 2500): idx + 200]
+    assert "Round 108 / artifact audit" in block
+    assert "drop_duplicates(subset=['ID']" in block
+    assert "leader Customer_Pulse sheet deduped" in block
+
+
 # ---------------------------------------------------------------------------
 # Behavioural test: 2-CSSM team with shared AP collapses to 1 row
 # ---------------------------------------------------------------------------
@@ -187,6 +200,26 @@ def test_leader_ap_dedup_collapses_shared_action_plan_to_one_row():
         f"R78/B2: AP001 should keep first CSSM (Alice); got "
         f"{ap001_row['CSSM']}"
     )
+
+
+def test_round108_leader_customer_pulse_dedup_collapses_shared_row_to_one():
+    cssm_alice = pd.DataFrame([
+        {"ID": "CP001", "BU_NAME": "Acme Corp", "Pulse": "Green", "CSSM": "Alice"},
+        {"ID": None, "BU_NAME": "No Id Corp", "Pulse": "Yellow", "CSSM": "Alice"},
+    ])
+    cssm_bob = pd.DataFrame([
+        {"ID": "CP001", "BU_NAME": "Acme Corp", "Pulse": "Green", "CSSM": "Bob"},
+        {"ID": "CP002", "BU_NAME": "Beta Inc", "Pulse": "Red", "CSSM": "Bob"},
+    ])
+
+    combined = pd.concat([cssm_alice, cssm_bob], ignore_index=True)
+    with_id = combined[combined["ID"].notna()].drop_duplicates(subset=["ID"], keep="first")
+    without_id = combined[combined["ID"].isna()]
+    combined = pd.concat([with_id, without_id], ignore_index=True)
+
+    assert sorted(v for v in combined["ID"].dropna().tolist()) == ["CP001", "CP002"]
+    assert len(combined) == 3
+    assert combined.loc[combined["ID"] == "CP001", "CSSM"].iloc[0] == "Alice"
 
 
 def test_leader_ap_xlsx_row_count_equals_canonical_count_open_action_plans():

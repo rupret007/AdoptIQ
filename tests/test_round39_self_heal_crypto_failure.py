@@ -1,8 +1,7 @@
-"""Round 96 / Build 69: bundled self-heal is retired safely.
+"""Round 107 / Build 76: bundled self-heal is restored.
 
-Round 39 could reinstall a bundled baked snapshot after a crypto
-failure. Round 96 removes the bundle data, so the old install helper is
-a no-op and recovery is reset + runtime re-index from OneDrive.
+Build 76 can reinstall a bundled baked snapshot after a crypto failure
+so the user gets an immediately usable corpus without OneDrive setup.
 """
 
 from __future__ import annotations
@@ -22,24 +21,24 @@ _LEGACY_FILES = (
 )
 
 
-def test_install_baked_helper_is_noop_with_local_bake_override(
+def test_install_baked_helper_uses_local_bake_override(
     tmp_path, monkeypatch,
 ) -> None:
     bake_dir = tmp_path / "bake"
     user_dir = tmp_path / "user"
     bake_dir.mkdir()
-    for name in ("corpus.db.enc", "corpus.db.salt"):
+    for name in ("corpus.db.enc", "corpus.db.salt", "sentinel.json"):
         (bake_dir / name).write_bytes(f"stale-{name}".encode("utf-8"))
 
     monkeypatch.setenv("ADOPTIQ_BAKED_CORPUS_DIR", str(bake_dir))
     monkeypatch.setattr(corpus_bootstrap, "_user_corpus_dir", lambda: user_dir)
     corpus_bootstrap.reset_for_tests()
     try:
-        assert corpus_bootstrap._install_baked_corpus_if_present() is None
-        assert not user_dir.exists(), (
-            "legacy baked install helper must not create or copy runtime corpus data"
-        )
-        assert corpus_bootstrap.get_state().source is None
+        assert corpus_bootstrap._install_baked_corpus_if_present() == "baked"
+        assert (user_dir / "corpus.db.enc").exists()
+        assert (user_dir / "corpus.db.salt").exists()
+        assert (user_dir / "sentinel.json").exists()
+        assert corpus_bootstrap.get_state().source == "baked"
     finally:
         corpus_bootstrap.reset_for_tests()
 
@@ -63,10 +62,10 @@ def test_reset_still_preserves_legacy_local_artifacts(tmp_path, monkeypatch) -> 
         corpus_bootstrap.reset_for_tests()
 
 
-def test_no_self_healed_baked_emitter_remains() -> None:
+def test_self_healed_baked_emitter_is_restored() -> None:
     src = Path(corpus_bootstrap.__file__).read_text(encoding="utf-8")
-    assert '_STATE.source = "self_healed_baked"' not in src
-    assert "self-healed baked corpus" not in src
+    assert "self_healed_baked" in src
+    assert "prebaked corpus" in src
 
 
 def test_round99_runtime_crypto_failure_preserves_and_retries(
@@ -127,6 +126,8 @@ def test_round99_runtime_crypto_failure_preserves_and_retries(
         state = corpus_bootstrap.get_state()
 
         assert len(open_calls) == 2
+        assert open_calls[0]["onedrive_root"] is None
+        assert open_calls[1]["onedrive_root"] is None
         assert open_calls[0]["allow_local_sentinel"] is True
         assert open_calls[1]["allow_local_sentinel"] is True
         assert handle.committed is True
@@ -175,6 +176,8 @@ def test_round99_runtime_crypto_retry_failure_stays_loud(
         state = corpus_bootstrap.get_state()
 
         assert len(open_calls) == 2
+        assert open_calls[0]["onedrive_root"] is None
+        assert open_calls[1]["onedrive_root"] is None
         assert state.completed is False
         assert state.last_error_kind == "crypto"
         assert "after stale-artifact preserve" in (state.last_error or "")

@@ -194,7 +194,7 @@
                         The AdoptIQ Knowledge Corpus powers grounded Ask AI answers and
                         report narrative validation.  Disable to skip indexing on launch
                         and to suppress the navbar Intelligence badge.  The full state
-                        machine (idle / indexing / refreshing / errored / blocked) is
+                        machine (idle / indexing / refreshing / errored / optional refresh setup) is
                         surfaced on the
                         <a href="{{ url_for('index') }}#adoptiq-intel-banner">analyze page banner</a>.
                     </p>
@@ -224,11 +224,10 @@
                Same data-* markers + same static/js/corpus_share_url.js
                module so operators can rotate the SharePoint share URL
                from the documented Preferences hub (not just the analyze
-               page).  Threat model unchanged: the URL is NOT a secret;
-               Cisco SharePoint ACL gates the share, OneDrive auth gates
-               corpus decryption (R83 contract preserved by
-               ``corpus_bootstrap._run_index_pass`` calling
-               ``open_corpus_for_user(..., allow_local_sentinel=False)``).
+               page).  Round 108 threat model: the URL is NOT a secret;
+               Cisco SharePoint ACL gates only the optional shared-source
+               folder. The prebaked/local corpus uses the bundled/per-user
+               sentinel path and does not require OneDrive decryption.
                Source-shape pinned by
                ``tests/test_round85_url_refresh_and_preferences_card.py``. #}
             <section id="prefs-corpus-share-url-card"
@@ -249,10 +248,10 @@
                         Operator-rotatable SharePoint share URL used by the
                         <strong>Add corpus share to my OneDrive</strong>
                         button on the Knowledge Corpus panel.  Changing
-                        this value does NOT alter the security contract:
-                        the app ships no corpus data, and indexing starts
-                        only after OneDrive auth/sync exposes the
-                        authorized folder and sentinel.
+                        this value affects optional background refresh only:
+                        the app ships with a prebaked local corpus, and
+                        OneDrive can add refreshed shared-source data after
+                        the folder syncs.
                         Resolution precedence:
                         <code>settings.json</code> (this page) &rarr;
                         <code>ADOPTIQ_CORPUS_SHARE_URL</code> env &rarr;
@@ -335,7 +334,7 @@
                ``AI Projects/AdoptIQ_CSOne_Reports`` shape that the
                R36 / R83 ``_csone_onedrive_candidates`` auto-discovery
                looks for, so AdoptIQ falls through to "no CSOne folder
-               found" and corpus indexing stays blocked.  This card lets
+               found" and optional CSOne source coverage is reduced.  This card lets
                the operator point AdoptIQ at the actual sync path WITHOUT
                a DMG rebuild.  Resolution precedence:
                ``settings.json`` (this card) &rarr;

@@ -141,6 +141,7 @@ def test_round77_gpt_5_nano_resolver_returns_legacy_when_persisted(monkeypatch, 
     monkeypatch.setattr(_s, "_app_support_dir", lambda: tmp_path)
     _s.save_settings({
         "r103_model_default_migrated": True,
+        "r108_model_default_migrated": True,
         "report_model_name": R77_LEGACY_DEFAULT,
     })
     import model_resolver as _mr

@@ -1,34 +1,25 @@
 #!/usr/bin/env python3
 """Round 35 + Round 36 + Round 53 / native-corpus bake helper.
 
-Round 96 changes this script from a production DMG input into an
-explicit developer validation tool. Shipping builds no longer embed
-corpus data in the app; runtime indexing creates the encrypted local
-corpus only after the user's Cisco OneDrive sync exposes the authorized
-folder and sentinel.
+Round 107 / Build 76 restores this script as a production DMG input:
+shipping builds pre-bake a corpus snapshot so Ask AI has data on first
+launch. Runtime indexing remains available for generated reports and
+operator uploads, but it is no longer required for the initial corpus.
 
-Round 53 / Phase 53.1 -- shrink to 2 artifacts (was 4):
+Round 107 / Build 76 -- ship three artifacts:
 
 * ``corpus.db.enc``                -- AES-GCM-encrypted SQLite database
 * ``corpus.db.salt``               -- per-corpus 32-byte salt
                                      (filename pinned by
                                      ``corpus_crypto._salt_path_for``)
+* ``sentinel.json``                -- local build sentinel required to
+                                     decrypt the bundled corpus without
+                                     OneDrive at first launch
 
-The Round 33/Build8 ``sentinel.json`` (local-mint) and the
-Round 34/A1 ``corpus.sentinel.lock.json`` pin sidecar are
-DELIBERATELY NOT bundled.  Pre-Round-53 the .app shipped both, which
-made the encrypted corpus offline-decryptable by anyone who obtained
-the DMG (sentinel + salt + .enc -> derive key -> open; documented in
-QUALITY_AUDIT.md Round 52.2 -- HIGH severity).
-
-Round 53 closes that gap by requiring the build to seal under the
-canonical sentinel that lives in the Cisco-managed shared OneDrive
-folder ``AI Projects/AdoptIQ_CSOne_Reports`` (provisioned once via
-``scripts/mint_corpus_sentinel.py``).  The bake now passes
-``allow_local_sentinel=False`` so the open fails loudly if the
-OneDrive sentinel is missing.  Microsoft's tenant ACL on that share
-is the actual access boundary at runtime: only Cisco-signed-in users
-can sync the sentinel, so only they can derive the AES key.
+Round 107 intentionally re-bundles ``sentinel.json`` with the encrypted
+snapshot. That makes the shipped corpus immediately openable by the app
+without OneDrive setup. ``corpus.sentinel.lock.json`` remains runtime
+local and is not bundled.
 
 Source resolution (Round 36 -- MSAL/Graph removed):
 
@@ -64,15 +55,11 @@ Exit codes:
 
 * 0  -- bake succeeded (artifacts written) or skip-mode confirmed.
 * 1  -- argument / config error (no source dir, source missing).
-* 3  -- OneDrive sentinel missing (Round 53 / Phase 53.1 fail-closed
-        gate; provision via scripts/mint_corpus_sentinel.py).
+* 3  -- reserved for legacy OneDrive-sentinel bake failures.
 * 4  -- index failure (no parseable files, sqlite error).
 * 5  -- decrypt round-trip self-test failed (Round 39); artifacts
         deleted so a malformed bake cannot be bundled.
-* 6  -- Round 53 / Phase 53.1 negative self-test failed: the
-        artifacts decrypted with allow_local_sentinel=True+root=None,
-        which proves the bake is offline-decryptable.  Artifacts
-        deleted so a leaky bake cannot ship.
+* 6  -- reserved for the retired Round 53 negative self-test.
 * 8  -- Round 95 reranker self-test failed; the bake host cannot load
         or score with the configured Ask AI reranker.
 
@@ -143,14 +130,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "OneDrive folder hosting the canonical AdoptIQ corpus "
-            "sentinel (Round 53 / Phase 53.1).  When omitted the script "
-            "falls back to ADOPTIQ_BAKE_SENTINEL_ROOT env var, then "
-            "Config.CSONE_ONEDRIVE_FOLDER.  The sentinel under that "
-            "folder must already exist (provision via "
-            "scripts/mint_corpus_sentinel.py) -- the bake refuses to "
-            "auto-mint a local sentinel because doing so makes the "
-            "encrypted corpus offline-decryptable."
+            "Legacy/diagnostic OneDrive root hint. Build 76 seals the "
+            "bundle with a local bake sentinel, so this path is no longer "
+            "required for first-launch corpus readiness."
         ),
     )
     parser.add_argument(
@@ -444,48 +426,16 @@ def _bake_chunk_vectors(conn) -> tuple[int, str, int]:
     * Idempotent: ``INSERT OR REPLACE`` so re-running the bake does
       not fail on existing rows.
     """
-    from ask_ai_embeddings import (
-        embed_texts,
-        encode_vector,
-        get_embedder,
-    )
-    embedder = get_embedder()
-    if embedder is None:
-        raise RuntimeError("fastembed embedder unavailable on bake host")
-    try:
-        from config import Config  # type: ignore
-        model_id = str(getattr(Config, "ASK_AI_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5"))
-        model_dim = int(getattr(Config, "ASK_AI_EMBEDDING_DIM", 384))
-    except Exception:  # noqa: BLE001
-        model_id = "BAAI/bge-small-en-v1.5"
-        model_dim = 384
-    cur = conn.cursor()
-    rows = cur.execute(
+    # Round 108 / Corpus Smoothness: bake delegates to the shared vector
+    # store helper with strict=True so release builds still fail loud if
+    # dense vectors cannot be produced.
+    from ask_ai_vector_store import upsert_chunk_vectors
+
+    rows = conn.cursor().execute(
         'SELECT "id", "text" FROM "playbook_chunks" ORDER BY "id" ASC;'
     ).fetchall()
-    if not rows:
-        return (0, model_id, model_dim)
-    written = 0
-    batch_size = 64
-    for start in range(0, len(rows), batch_size):
-        batch = rows[start : start + batch_size]
-        texts = [str(r[1] or "") for r in batch]
-        vecs = embed_texts(texts)
-        if vecs is None or vecs.shape[0] != len(batch):
-            raise RuntimeError(
-                f"embed_texts returned unexpected shape for batch starting at {start}"
-            )
-        for (chunk_id, _text), vec in zip(batch, vecs):
-            blob = encode_vector(vec)
-            cur.execute(
-                'INSERT OR REPLACE INTO "chunk_vectors" '
-                '("chunk_id", "model_id", "model_dim", "vector") '
-                'VALUES (?, ?, ?, ?);',
-                (int(chunk_id), model_id, model_dim, blob),
-            )
-            written += 1
-    conn.commit()
-    return (written, model_id, model_dim)
+    result = upsert_chunk_vectors(conn, chunk_rows=rows, strict=True)
+    return (result.rows_written, result.model_id, result.model_dim)
 
 
 def _bake_reranker_self_test() -> tuple[bool, str]:
@@ -504,27 +454,16 @@ def _bake_reranker_self_test() -> tuple[bool, str]:
 def _index_into_encrypted_corpus(
     downloads_dir: Path,
     bake_dir: Path,
-    onedrive_root: Path,
+    onedrive_root: Path | None,
 ) -> int:
     """Open an encrypted corpus rooted in ``bake_dir``, index every
     parseable file under ``downloads_dir``, commit, and close.
 
-    Round 53 / Phase 53.1 -- the bake now opens with
-    ``onedrive_root=<onedrive_root>`` and ``allow_local_sentinel=False``.
-    The sentinel under that OneDrive folder MUST exist (provisioned
-    once via ``scripts/mint_corpus_sentinel.py``); a missing or
-    unreadable sentinel fails the bake with exit code 3 instead of
-    silently auto-minting a local sentinel.
-
-    On success, two target artifacts are written to ``bake_dir``:
-    ``corpus.db.enc`` and ``corpus.db.salt``.  The auto-generated
-    ``corpus.sentinel.lock.json`` sidecar is INTENTIONALLY scrubbed
-    after commit so it never reaches the .app bundle (the lock is
-    re-minted at user runtime against the user's own OneDrive
-    sentinel; pinning it at bake time bricks every install if the
-    sentinel rotates between bake and ship).  The local
-    ``sentinel.json`` is also scrubbed defensively in case a prior
-    dev iteration left one behind.
+    Round 107 / Build 76 -- the bake opens with the local sentinel
+    fallback enabled and intentionally writes ``sentinel.json`` beside
+    ``corpus.db.enc`` / ``corpus.db.salt``.  Those three files are the
+    app-shipped bundle so first launch can decrypt the corpus without
+    OneDrive.
 
     The salt filename is pinned by ``corpus_crypto._salt_path_for``
     which derives ``<encrypted>.with_suffix(".salt")`` -- so for an
@@ -532,12 +471,7 @@ def _index_into_encrypted_corpus(
     ``corpus.db.salt`` (NOT ``salt.bin``).  Renaming the encrypted
     artifact would break this mapping.
     """
-    from corpus_crypto import (
-        CorpusCryptoError,
-        DEFAULT_SENTINEL_NAME,
-        open_corpus_for_user,
-        resolve_sentinel_path,
-    )
+    from corpus_crypto import CorpusCryptoError, open_corpus_for_user
     from corpus_indexer import index_folder
 
     encrypted_path = bake_dir / "corpus.db.enc"
@@ -565,31 +499,20 @@ def _index_into_encrypted_corpus(
         except OSError as err:
             logger.warning("failed to remove stale %s: %s", stale, err)
 
-    # Round 53 / Phase 53.1 -- pre-flight check that the OneDrive
-    # sentinel actually exists before we kick off the indexer.  This
-    # avoids spending minutes indexing only to discover the sentinel
-    # is missing at commit time.
-    sentinel_path = resolve_sentinel_path(onedrive_root)
-    if sentinel_path is None or not sentinel_path.exists():
-        logger.error(
-            "Round 53: canonical OneDrive sentinel %s not found under %s; "
-            "provision it once via scripts/mint_corpus_sentinel.py before "
-            "baking.  The bake refuses to fall back to a local sentinel "
-            "because doing so makes the encrypted corpus offline-decryptable.",
-            DEFAULT_SENTINEL_NAME, onedrive_root,
-        )
-        return 3
-
+    persist_on_close = True
     try:
         handle = open_corpus_for_user(
-            onedrive_root=onedrive_root,
+            # Round 107: seal the bundled corpus with the local build
+            # sentinel, independent of any OneDrive sentinel that may
+            # exist on the build host.
+            onedrive_root=None,
             encrypted_path=encrypted_path,
             create_if_missing=True,
-            allow_local_sentinel=False,
+            allow_local_sentinel=True,
         )
     except CorpusCryptoError as err:
         logger.error(
-            "Round 53: open_corpus_for_user failed (allow_local_sentinel=False): %s",
+            "Round 107: open_corpus_for_user failed (local baked sentinel): %s",
             err,
         )
         return 3
@@ -616,7 +539,7 @@ def _index_into_encrypted_corpus(
         # commit_to_disk so the WAL checkpoint sweeps the vector
         # pages along with the BM25 pages into a single
         # internally-consistent .enc snapshot.  Round 94 restored the
-        # hard-fail contract for this developer validation path: a bake
+        # hard-fail contract for this release bake path: a bake
         # that cannot write dense vectors fails here. Runtime still
         # degrades to lexical when the user's machine cannot load the
         # embedder.
@@ -651,23 +574,17 @@ def _index_into_encrypted_corpus(
         except Exception as close_err:  # noqa: BLE001 - never bubble
             logger.warning("handle.close failed: %s", close_err)
 
-    # Round 53 / Phase 53.1 -- the OneDrive-keyed bake creates a
-    # ``corpus.sentinel.lock.json`` sidecar inside ``bake_dir`` (via
-    # ``open_corpus_for_user``'s post-open mint).  Scrub it BEFORE
-    # the structural verify so the "expected" set never lists it,
-    # and so a bug that bundles the bake/ dir wholesale cannot leak
-    # the lock either.  ``sentinel.json`` is also nuked defensively
-    # in case any code path in the future re-introduces it.
-    for sidecar in (
-        bake_dir / "corpus.sentinel.lock.json",
-        bake_dir / "sentinel.json",
-    ):
+    # The lock is runtime-local and can be re-minted after install.
+    # The sentinel itself is now an intentional Build 76 shipping
+    # artifact because first-launch decryption must not require
+    # OneDrive.
+    for sidecar in (bake_dir / "corpus.sentinel.lock.json",):
         try:
             sidecar.unlink(missing_ok=True)
         except OSError as err:  # pragma: no cover - exotic FS
             logger.warning("failed to scrub %s: %s", sidecar, err)
 
-    # Verify the TWO ship-able artifacts exist with the expected
+    # Verify the THREE ship-able artifacts exist with the expected
     # modes.  ``corpus.db.salt`` follows ``corpus_crypto._salt_path_for``
     # (``<db>.with_suffix(".salt")``); changing this name without
     # updating ``corpus_bootstrap._BAKED_CORPUS_FILES`` and the
@@ -677,6 +594,7 @@ def _index_into_encrypted_corpus(
     expected = (
         encrypted_path,
         bake_dir / "corpus.db.salt",
+        bake_dir / "sentinel.json",
     )
     missing = [p for p in expected if not p.exists()]
     if missing:
@@ -692,25 +610,20 @@ def _index_into_encrypted_corpus(
             logger.warning("chmod 0600 on %s failed: %s", p, err)
     logger.info("bake artifacts written: %s", ", ".join(p.name for p in expected))
 
-    # Round 39 + Round 53 / corpus crypto self-heal -- positive
+    # Round 39 + Round 107 / corpus crypto self-heal -- positive
     # decrypt round-trip self-test.  The structural verify above
     # only confirms the two files exist; it does not prove the
-    # .enc actually decrypts with the OneDrive-supplied sentinel
-    # plus the bundled salt.  A bake regression that ships an
+    # .enc actually decrypts with the bundled local sentinel plus
+    # the bundled salt. A bake regression that ships an
     # internally inconsistent pair would silently brick every user
-    # install (the runtime self-heal cannot save them because they
-    # have no working snapshot to fall back to).  Round 53 also
-    # passes ``allow_local_sentinel=False`` here so the self-test
-    # exercises the SAME fail-closed path the runtime uses --
-    # otherwise a regression that ships a leaky bundle could pass
-    # the self-test by silently falling back to the local sentinel.
+    # install.
     selftest_handle = None
     try:
         selftest_handle = open_corpus_for_user(
-            onedrive_root=onedrive_root,
+            onedrive_root=None,
             encrypted_path=encrypted_path,
             create_if_missing=False,
-            allow_local_sentinel=False,
+            allow_local_sentinel=True,
         )
         cur = selftest_handle.conn.cursor()
         cur.execute("SELECT count(*) FROM sqlite_master")
@@ -754,11 +667,11 @@ def _index_into_encrypted_corpus(
             )
     except Exception as selftest_err:  # noqa: BLE001 - we want fail-loud here
         logger.error(
-            "Round 53 / bake positive decrypt self-test failed "
-            "(onedrive_root=%s, allow_local_sentinel=False): %s -- "
+            "Round 107 / bake positive decrypt self-test failed "
+            "(bundled local sentinel): %s -- "
             "deleting bake artifacts so a malformed bake cannot be "
             "bundled into the .app",
-            onedrive_root, selftest_err,
+            selftest_err,
         )
         if selftest_handle is not None:
             try:
@@ -777,60 +690,10 @@ def _index_into_encrypted_corpus(
         except Exception:  # noqa: BLE001 - cleanup path
             pass
         logger.info(
-            "Round 53 / bake positive decrypt self-test ok (sqlite_master "
+            "Round 107 / bake positive decrypt self-test ok (sqlite_master "
             "readable; bundle is internally consistent under the "
-            "OneDrive sentinel)"
+            "bundled local sentinel)"
         )
-
-    # Round 53 / Phase 53.1 -- NEGATIVE self-test.  The whole point
-    # of the round is "the bundled artifacts must NOT be openable
-    # without OneDrive auth".  We assert that contract here by
-    # opening with ``onedrive_root=None`` and
-    # ``allow_local_sentinel=False`` -- which is exactly the
-    # scenario a malicious party gets when they extract the .app
-    # bundle on a non-Cisco machine.  This MUST raise
-    # ``CorpusCryptoError`` ("CSOne corpus folder is not configured"
-    # or similar).  An open that *succeeds* here is a HIGH-severity
-    # regression and we delete the artifacts + exit 6 so the build
-    # cannot proceed.
-    leak_handle = None
-    try:
-        leak_handle = open_corpus_for_user(
-            onedrive_root=None,
-            encrypted_path=encrypted_path,
-            create_if_missing=False,
-            allow_local_sentinel=False,
-        )
-    except CorpusCryptoError:
-        logger.info(
-            "Round 53 / bake negative self-test ok (open without "
-            "OneDrive root + allow_local_sentinel=False fails closed; "
-            "the bundle is NOT offline-decryptable)"
-        )
-    except Exception as leak_err:  # noqa: BLE001 - any other exception is also "fail-closed"
-        logger.info(
-            "Round 53 / bake negative self-test ok (open without "
-            "OneDrive root raised %s; bundle still not offline-decryptable)",
-            type(leak_err).__name__,
-        )
-    else:
-        try:
-            leak_handle.close(persist=False)
-        except Exception:  # noqa: BLE001 - cleanup path
-            pass
-        logger.error(
-            "Round 53 / bake NEGATIVE self-test FAILED: corpus opened "
-            "with onedrive_root=None and allow_local_sentinel=False.  "
-            "This means the bundle is offline-decryptable -- the "
-            "Round 53 hardening is not in effect.  Deleting bake "
-            "artifacts and exiting non-zero so the build cannot ship.",
-        )
-        for p in expected:
-            try:
-                p.unlink(missing_ok=True)
-            except OSError:
-                pass
-        return 6
 
     # Round 53 / Phase 53.1 -- final scrub.  The positive self-test
     # above calls ``open_corpus_for_user`` which RE-MINTS the
@@ -842,10 +705,7 @@ def _index_into_encrypted_corpus(
     # bake-dir shape, and (b) risk leaking the lock if a future
     # spec change ever bundles the entire ``bake/`` directory
     # wholesale instead of allow-listing the two files explicitly.
-    for sidecar in (
-        bake_dir / "corpus.sentinel.lock.json",
-        bake_dir / "sentinel.json",
-    ):
+    for sidecar in (bake_dir / "corpus.sentinel.lock.json",):
         try:
             sidecar.unlink(missing_ok=True)
         except OSError as err:  # pragma: no cover - exotic FS
@@ -888,22 +748,18 @@ def main(argv: Optional[list] = None) -> int:
         return 1
     logger.info("baking corpus from local source %s", source_dir)
 
-    # Round 53 / Phase 53.1 -- resolve the OneDrive folder that hosts
-    # the canonical sentinel BEFORE staging, so we fail fast when the
-    # sentinel is missing rather than after a multi-minute index.
+    # Round 107: the source directory may still be the local OneDrive
+    # mirror, but the encryption key is the build-local sentinel.  Keep
+    # resolving the old sentinel root only as diagnostic context for
+    # operators who still use the canonical OneDrive folder as input.
     onedrive_root = _resolve_onedrive_sentinel_root(args)
     if onedrive_root is None:
-        logger.error(
-            "Round 53: no OneDrive sentinel root configured (or the "
-            "configured path does not exist).  Pass "
-            "--onedrive-sentinel-root <path>, set "
-            "ADOPTIQ_BAKE_SENTINEL_ROOT, or ensure "
-            "Config.CSONE_ONEDRIVE_FOLDER points at a synced OneDrive "
-            "folder containing adoptiq_corpus_sentinel.json.  Provision "
-            "the sentinel once via scripts/mint_corpus_sentinel.py.",
+        logger.info(
+            "Round 107: no OneDrive sentinel root configured; baking with "
+            "local bundled sentinel only."
         )
-        return 3
-    logger.info("Round 53: OneDrive sentinel root resolved: %s", onedrive_root)
+    else:
+        logger.info("Round 107: source-side OneDrive root resolved: %s", onedrive_root)
 
     # Stage the source files in a temp directory so we never commit
     # raw .docx/.xlsx blobs to the build tree.

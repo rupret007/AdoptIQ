@@ -1,4 +1,4 @@
-"""Round 96 / Build 69: runtime-only corpus panel source-shape pins."""
+"""Round 107 / Build 76: prebaked corpus panel source-shape pins."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def test_panel_state_has_label_branch(state: str) -> None:
         "Building local corpus",
         "Last refresh failed",
         "Add corpus share to OneDrive",
-        "Sign in to OneDrive",
+        "Optional OneDrive refresh",
         "OneDrive sync is optional",
     ],
 )
@@ -70,7 +70,7 @@ def test_panel_label_and_detail_copy(fragment: str) -> None:
     assert fragment in JS_SRC
 
 
-def test_baked_snapshot_copy_is_removed_from_panel() -> None:
+def test_old_snapshot_terms_are_removed_from_panel() -> None:
     forbidden = (
         "baked_synced",
         "baked_not_synced",
@@ -82,7 +82,7 @@ def test_baked_snapshot_copy_is_removed_from_panel() -> None:
         assert needle not in JS_SRC
 
 
-def test_legacy_baked_sources_map_without_baked_ui_copy() -> None:
+def test_baked_sources_map_to_active_local_corpus() -> None:
     classifier_start = JS_SRC.find("function classifyCorpusPanel")
     classifier_end = JS_SRC.find("function corpusPanelLabel", classifier_start)
     assert classifier_start != -1 and classifier_end != -1
@@ -90,4 +90,20 @@ def test_legacy_baked_sources_map_without_baked_ui_copy() -> None:
     assert "source === 'baked'" in classifier
     assert "source === 'self_healed_baked'" in classifier
     assert "return 'runtime_synced'" in classifier
-    assert "return 'fresh_not_synced'" in classifier
+    baked_branch = classifier[classifier.find("source === 'self_healed_baked'"):]
+    assert "return 'fresh_not_synced'" not in baked_branch.split("// Round 106", 1)[0]
+
+
+def test_round108_no_onedrive_hard_blocker_copy_on_active_paths() -> None:
+    """Round 108: OneDrive absence is optional refresh context."""
+    forbidden = (
+        "cannot create or open the local corpus",
+        "no authorized local index to serve",
+        "Sign in to OneDrive required",
+        "OneDrive sync required.",
+        "unlock requires the canonical",
+    )
+    for needle in forbidden:
+        assert needle not in JS_SRC
+    assert "OneDrive sync is optional" in JS_SRC
+    assert "Dense retrieval is degraded; lexical fallback is active" in JS_SRC

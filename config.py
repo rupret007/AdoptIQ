@@ -924,25 +924,25 @@ ADOPTIQ_VERSION = "1.0.4"
 # surface; both cards bind to the same ``[data-corpus-share-url-card]``
 # data marker via the existing ``static/js/corpus_share_url.js`` IIFE
 # module (idempotent single-querySelector init, one card per page).
-# THE R96 RUNTIME-ONLY CORPUS CONTRACT:
-# ``corpus_bootstrap._run_index_pass`` still calls
-# ``open_corpus_for_user(..., allow_local_sentinel=False)``; the
-# bundled DMG ships no corpus database, salt, sentinel, or lock file.
-# Without OneDrive sync to the canonical Cisco-managed share, no local
-# corpus can be opened or indexed.  The URL is not a secret -- Cisco
-# SharePoint ACL gates the share and the local sentinel unlocks the
-# encrypted runtime corpus.
+# THE R107 PREBAKED CORPUS CONTRACT:
+# The bundled DMG ships a prebaked encrypted corpus plus its local
+# sentinel under Resources/baked_corpus, so first launch does not depend
+# on OneDrive. The URL remains useful only for optional background
+# refresh source setup.
 # Pinned by the rewritten ``tests/test_round35_corpus_url_hardcoded.py``
 # + ``tests/test_round81_sharepoint_url_refresh.py`` + a new
 # ``tests/test_round85_url_refresh_and_preferences_card.py`` (~19
 # tests across validator, resolver, ``_r83_safe_share_url``,
 # preferences-page source-shape, analyze-card regression guard, and
 # cross-pin against the R35 + R81 fixtures).
-ADOPTIQ_BUILD = "75"  # Round 106 / Build 75
-# Round 96 / Build 69: externalizes the AdoptIQ Knowledge Corpus from
-# the app bundle. Shipping builds carry no corpus database or salt; the
-# encrypted local corpus is created only after the user's Cisco OneDrive
-# sync exposes the authorized folder and sentinel.
+ADOPTIQ_BUILD = "77"  # Round 108 / Build 77
+# Round 108 / Build 77: corpus smoothness. The prebaked corpus remains
+# the baseline, OneDrive is optional refresh context, runtime refreshes
+# backfill dense vectors when the embedder is available, and stale
+# persisted nano defaults migrate back to Gemini one more time.
+# Round 107 / Build 76: restores the prebaked AdoptIQ Knowledge Corpus
+# in the app bundle so Ask AI has corpus data immediately on first
+# launch.
 # Round 90 / Build 66: hyperfocused fix for the Build-65 acceptance bug
 # where the Compact Risk Summary tile rendered
 # ``"Score 4-6 (Watch, 0-10 [Source: AdoptIQ Report Data Sources] scale): 9"``
@@ -1085,7 +1085,7 @@ ADOPTIQ_BUILD = "75"  # Round 106 / Build 75
 # UI tests were repurposed in Phase 4 to point at preferences.html
 # (the canonical surface post-relocation) so the same source-shape
 # guarantees survive the move.
-# Round 84 / Build 60: operator-configurable corpus share URL.  The hardcoded `Config.ADOPTIQ_CORPUS_SHARE_URL` default is now the LAST tier in a three-tier resolver (`corpus_share_url_resolver.get_active_corpus_share_url`); the active URL resolves settings.json -> env -> config.py default with per-tier validation (`adoptiq_settings._is_valid_sharepoint_url`: HTTPS-only, ``*.sharepoint.com`` host, max 2048 bytes).  A new analyze-page card (`[data-corpus-share-url-card]`) lets the operator paste a new URL, click Test (opens the SAVED URL via `/api/corpus/bootstrap-shortcut` -- never the raw input), Save (POST `/api/settings/corpus-share-url`, CSRF dual-auth + atomic 0o600 write), or Clear override (empty-string POST falls through to env/config).  Lets us rotate the SharePoint share token (`e=...`) without rebuilding the DMG.  THE R83 ENCRYPTION CONTRACT IS UNCHANGED: `corpus_bootstrap._run_index_pass` still calls `open_corpus_for_user(..., allow_local_sentinel=False)`; the bundled DMG still ships only `corpus.db.enc` + `corpus.db.salt` (sentinel still NOT bundled).  Without OneDrive sync to the canonical Cisco-managed share, the corpus is opaque ciphertext.  The URL is not a secret -- Cisco SharePoint ACL gates the share.  Pinned by `tests/test_round84_corpus_share_url_setting.py` (~22 tests) + `test_round84_corpus_share_url_endpoint.py` (~17 tests) + `test_round84_corpus_share_url_resolver.py` (~12 tests) + `test_round84_corpus_share_url_ui_source_shape.py` (~21 tests) covering schema, validator wiring, resolver precedence with no-caching, POST CSRF dual-auth + 0o600 mode + validation rejection, GET source labels, UI marker presence, and textContent XSS guard.
+# Round 84 / Build 60: operator-configurable corpus share URL.  The hardcoded `Config.ADOPTIQ_CORPUS_SHARE_URL` default is now the LAST tier in a three-tier resolver (`corpus_share_url_resolver.get_active_corpus_share_url`); the active URL resolves settings.json -> env -> config.py default with per-tier validation (`adoptiq_settings._is_valid_sharepoint_url`: HTTPS-only, ``*.sharepoint.com`` host, max 2048 bytes).  A new analyze-page card (`[data-corpus-share-url-card]`) lets the operator paste a new URL, click Test (opens the SAVED URL via `/api/corpus/bootstrap-shortcut` -- never the raw input), Save (POST `/api/settings/corpus-share-url`, CSRF dual-auth + atomic 0o600 write), or Clear override (empty-string POST falls through to env/config).  Lets us rotate the SharePoint share token (`e=...`) without rebuilding the DMG.  Round 108 supersedes the old R83 encryption comment: the prebaked/local corpus uses the bundled/per-user sentinel path, and OneDrive is optional shared-source refresh coverage rather than the first-launch decryption gate. The URL is not a secret -- Cisco SharePoint ACL gates only the optional share.  Pinned by `tests/test_round84_corpus_share_url_setting.py` (~22 tests) + `test_round84_corpus_share_url_endpoint.py` (~17 tests) + `test_round84_corpus_share_url_resolver.py` (~12 tests) + `test_round84_corpus_share_url_ui_source_shape.py` (~21 tests) covering schema, validator wiring, resolver precedence with no-caching, POST CSRF dual-auth + 0o600 mode + validation rejection, GET source labels, UI marker presence, and textContent XSS guard.
 # Round 83 / Build 59: OneDrive sign-in proxy + one-click corpus bootstrap. New `signed_in_no_corpus` panel state surfaces when the OneDrive desktop client is signed in to Cisco BUT the corpus shared folder isn't in the user's tree yet - panel renders an "Add corpus share to my OneDrive" CTA that opens the SharePoint share via the new `/api/corpus/bootstrap-shortcut` endpoint (https-only allow-list, 2048-byte cap). Daily refresh worker accelerates polling for the new state alongside the legacy `blocked_no_onedrive` state so the user sees the panel transition out promptly once the share materializes. Owner-style path tier 3-4 fallbacks (~/Library/CloudStorage/OneDrive-Cisco/AI Projects/AdoptIQ_CSOne_Reports) added to `_csone_onedrive_candidates()` so the corpus owner's machine resolves automatically without env-var overrides; bake_corpus.py walks the candidate list explicitly. macOS proxy uses CloudStorage glob (OneDrive-Cisco* as Cisco signal); Windows uses winreg HKCU\Software\Microsoft\OneDrive\Accounts probe.
 # Round 80 / Build 56 ships four user-visible fixes that landed
 # together because they share the same SSoT modules.  (1) Roster

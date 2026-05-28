@@ -1,5 +1,4 @@
-"""Round 54 / F3 -- pin the server-side ``blocked_no_onedrive`` gate
-on the admin ``/corpus_refresh`` and ``/corpus_reset`` proxy routes.
+"""Round 54 / F3, updated Round 108 -- admin corpus refresh/reset routes.
 
 Background
 ----------
@@ -14,19 +13,14 @@ The user-visible result was a confusing "started" / "reset+refresh
 started" status banner over a corpus that never actually moved out of
 the blocked state.
 
-Round 54 / F3 short-circuits BOTH proxy routes BEFORE the proxy call
-when ``corpus_status.boot.source == "blocked_no_onedrive"``.  Defense
-in depth on top of the template gate; surfaces a clear "Sign in to
-OneDrive first" status instead of the misleading success banner.
+Round 108 demotes OneDrive state to optional refresh context.  The
+helper remains for back-compat, but no longer blocks proxying because a
+prebaked/local corpus can refresh from generated reports and uploads.
 
 These tests pin the new server-side gate behavior:
 
-* Both routes redirect with a "blocked" status message when the
-  corpus is in ``blocked_no_onedrive``.
-* Both routes do NOT proxy through to the main app in that state
-  (verified via a spy on ``requests.post``).
-* When NOT in the blocked state, both routes proxy through normally
-  (the gate must not break the happy path).
+* The legacy helper returns False even for old blocked source labels.
+* Both routes proxy through normally in those states.
 * When the status probe itself fails (main app unreachable, malformed
   JSON, etc.), both routes do NOT gate -- the operator can still
   reset / refresh as a corrective action against an unreachable main
@@ -88,18 +82,16 @@ def admin_client(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_probe_returns_true_when_status_payload_says_blocked(monkeypatch):
+def test_probe_returns_false_when_status_payload_says_blocked(monkeypatch):
     fake_get = MagicMock()
     fake_get.return_value.status_code = 200
     fake_get.return_value.json.return_value = _make_status_payload(blocked=True)
     monkeypatch.setattr(adm.requests, "get", fake_get)
-    assert adm._r54_corpus_is_blocked_no_onedrive() is True
+    assert adm._r54_corpus_is_blocked_no_onedrive() is False
 
 
-def test_probe_returns_true_when_status_payload_says_signed_in_no_corpus(monkeypatch):
-    """Round 96.1: server-side admin proxy gate must match the UI's
-    disabled state for users signed in to OneDrive but missing the
-    corpus shortcut/sentinel."""
+def test_probe_returns_false_when_status_payload_says_signed_in_no_corpus(monkeypatch):
+    """Round 108: signed-in/no-corpus is optional refresh context."""
     fake_get = MagicMock()
     fake_get.return_value.status_code = 200
     fake_get.return_value.json.return_value = _make_status_payload(
@@ -107,7 +99,7 @@ def test_probe_returns_true_when_status_payload_says_signed_in_no_corpus(monkeyp
         source="signed_in_no_corpus",
     )
     monkeypatch.setattr(adm.requests, "get", fake_get)
-    assert adm._r54_corpus_is_blocked_no_onedrive() is True
+    assert adm._r54_corpus_is_blocked_no_onedrive() is False
 
 
 def test_probe_returns_false_when_status_payload_says_synced(monkeypatch):
@@ -156,28 +148,24 @@ def test_probe_fail_open_when_boot_missing(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_refresh_short_circuits_when_blocked(admin_client, monkeypatch):
-    """When the status probe reports ``blocked_no_onedrive``, the
-    refresh route must short-circuit and NOT proxy the request to
-    the main app."""
+def test_refresh_proxies_when_legacy_blocked_source_seen(admin_client, monkeypatch):
+    """Round 108: legacy blocked labels must not block local refresh."""
     fake_get = MagicMock()
     fake_get.return_value.status_code = 200
     fake_get.return_value.json.return_value = _make_status_payload(blocked=True)
     monkeypatch.setattr(adm.requests, "get", fake_get)
 
     fake_post = MagicMock()
+    fake_post.return_value.status_code = 200
+    fake_post.return_value.json.return_value = {"refresh_started": True}
     monkeypatch.setattr(adm.requests, "post", fake_post)
 
     resp = admin_client.post("/corpus_refresh", data={})
     assert resp.status_code == 302, "must redirect to dashboard"
-    location = resp.headers.get("Location") or ""
-    assert "blocked" in location.lower(), (
-        f"redirect must carry the 'blocked' status message; got: {location}"
-    )
-    fake_post.assert_not_called()
+    fake_post.assert_called_once()
 
 
-def test_refresh_short_circuits_when_signed_in_no_corpus(admin_client, monkeypatch):
+def test_refresh_proxies_when_signed_in_no_corpus(admin_client, monkeypatch):
     fake_get = MagicMock()
     fake_get.return_value.status_code = 200
     fake_get.return_value.json.return_value = _make_status_payload(
@@ -187,12 +175,13 @@ def test_refresh_short_circuits_when_signed_in_no_corpus(admin_client, monkeypat
     monkeypatch.setattr(adm.requests, "get", fake_get)
 
     fake_post = MagicMock()
+    fake_post.return_value.status_code = 200
+    fake_post.return_value.json.return_value = {"refresh_started": True}
     monkeypatch.setattr(adm.requests, "post", fake_post)
 
     resp = admin_client.post("/corpus_refresh", data={})
     assert resp.status_code == 302
-    assert "blocked" in (resp.headers.get("Location") or "").lower()
-    fake_post.assert_not_called()
+    fake_post.assert_called_once()
 
 
 def test_refresh_proxies_through_when_not_blocked(admin_client, monkeypatch):
@@ -221,28 +210,24 @@ def test_refresh_proxies_through_when_not_blocked(admin_client, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_reset_short_circuits_when_blocked(admin_client, monkeypatch):
-    """When the status probe reports ``blocked_no_onedrive``, the
-    reset route must short-circuit -- otherwise the user wastes a
-    click: reset preserves the bundled snapshot, triggers a refresh,
-    and the refresh immediately re-blocks on the same gate."""
+def test_reset_proxies_when_legacy_blocked_source_seen(admin_client, monkeypatch):
+    """Round 108: reset remains available for real corpus recovery."""
     fake_get = MagicMock()
     fake_get.return_value.status_code = 200
     fake_get.return_value.json.return_value = _make_status_payload(blocked=True)
     monkeypatch.setattr(adm.requests, "get", fake_get)
 
     fake_post = MagicMock()
+    fake_post.return_value.status_code = 200
+    fake_post.return_value.json.return_value = {"ok": True, "refresh_started": True}
     monkeypatch.setattr(adm.requests, "post", fake_post)
 
     resp = admin_client.post("/corpus_reset", data={})
     assert resp.status_code == 302
-    location = resp.headers.get("Location") or ""
-    assert "blocked" in location.lower()
-    assert "OneDrive" in location or "onedrive" in location.lower()
-    fake_post.assert_not_called()
+    fake_post.assert_called_once()
 
 
-def test_reset_short_circuits_when_signed_in_no_corpus(admin_client, monkeypatch):
+def test_reset_proxies_when_signed_in_no_corpus(admin_client, monkeypatch):
     fake_get = MagicMock()
     fake_get.return_value.status_code = 200
     fake_get.return_value.json.return_value = _make_status_payload(
@@ -252,12 +237,13 @@ def test_reset_short_circuits_when_signed_in_no_corpus(admin_client, monkeypatch
     monkeypatch.setattr(adm.requests, "get", fake_get)
 
     fake_post = MagicMock()
+    fake_post.return_value.status_code = 200
+    fake_post.return_value.json.return_value = {"ok": True, "refresh_started": True}
     monkeypatch.setattr(adm.requests, "post", fake_post)
 
     resp = admin_client.post("/corpus_reset", data={})
     assert resp.status_code == 302
-    assert "blocked" in (resp.headers.get("Location") or "").lower()
-    fake_post.assert_not_called()
+    fake_post.assert_called_once()
 
 
 def test_reset_proxies_through_when_not_blocked(admin_client, monkeypatch):
@@ -283,53 +269,25 @@ def test_reset_proxies_through_when_not_blocked(admin_client, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_route_source_calls_blocked_probe_before_proxy():
-    """Pin the call ordering by source-text inspection: both proxy
-    routes must invoke ``_r54_corpus_is_blocked_no_onedrive`` BEFORE
-    issuing the ``requests.post`` proxy call.  Otherwise the gate
-    would leak the proxy request through on a future refactor."""
+def test_route_source_keeps_legacy_probe_noop_for_backcompat():
+    """The helper name remains, but Round 108 makes it a no-op."""
     src = _read_admin_source()
     assert "_r54_corpus_is_blocked_no_onedrive" in src, (
         "Round 54 / F3 helper missing from admin module"
     )
-
-    # Walk the source: for each route handler, the first occurrence
-    # of either symbol must be the probe, not the post.
-    for route_name in ("def corpus_refresh_route", "def corpus_reset_route"):
-        idx = src.find(route_name)
-        assert idx != -1, f"route {route_name!r} missing"
-        body = src[idx:idx + 4000]
-        probe_pos = body.find("_r54_corpus_is_blocked_no_onedrive")
-        post_pos = body.find("requests.post")
-        assert probe_pos != -1, (
-            f"route {route_name!r} must call the probe before the proxy"
-        )
-        if post_pos != -1:
-            assert probe_pos < post_pos, (
-                f"route {route_name!r} probe must come BEFORE the proxy "
-                f"call so the gate can short-circuit; "
-                f"probe@{probe_pos} post@{post_pos}"
-            )
+    body_start = src.find("def _r54_corpus_is_blocked_no_onedrive")
+    body = src[body_start:body_start + 500]
+    assert "return False" in body
+    assert "optional refresh context" in body
 
 
-def test_route_short_circuit_uses_warning_message_type():
-    """The short-circuit redirect must carry ``message_type='warning'``
-    so the dashboard renders a yellow banner, not a green success
-    banner -- otherwise the operator might assume the action
-    succeeded."""
+def test_route_source_no_longer_has_onedrive_blocked_redirects():
+    """Round 108 removes OneDrive hard-block redirect messages."""
     src = _read_admin_source()
-    # Both routes must include the warning + Sign-in OneDrive copy.
     refresh_idx = src.find("def corpus_refresh_route")
     reset_idx = src.find("def corpus_reset_route")
     refresh_body = src[refresh_idx:refresh_idx + 2500]
     reset_body = src[reset_idx:reset_idx + 2500]
     for label, body in (("refresh", refresh_body), ("reset", reset_body)):
-        assert "blocked" in body.lower(), (
-            f"{label} short-circuit message must mention 'blocked'"
-        )
-        assert "OneDrive" in body, (
-            f"{label} short-circuit must mention OneDrive in remediation"
-        )
-        assert "warning" in body, (
-            f"{label} short-circuit must use message_type='warning'"
-        )
+        assert "sign in to onedrive" not in body.lower(), label
+        assert "add/sync the AdoptIQ corpus share first" not in body, label

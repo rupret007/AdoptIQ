@@ -1,11 +1,8 @@
-"""Round 96 / Build 69: macOS spec ships no corpus data.
+"""Round 107 / Build 76: macOS spec ships a prebaked corpus.
 
-Round 53 originally shrank the app bundle from four baked-corpus
-artifacts to two by excluding the sentinel material. Round 96 completes
-the externalization: the app bundle must not include the corpus
-database, salt, sentinel, lock file, or a ``baked_corpus`` resource
-directory at all. Each user builds the encrypted local corpus from
-authorized OneDrive data at runtime.
+The app bundle intentionally includes the encrypted corpus database,
+salt, and local sentinel so Ask AI can use corpus data on first launch
+without OneDrive or startup indexing.
 """
 
 from __future__ import annotations
@@ -29,24 +26,23 @@ def test_spec_file_exists() -> None:
     assert _SPEC_PATH.exists()
 
 
-def test_spec_does_not_bundle_any_corpus_artifacts() -> None:
+def test_spec_bundles_required_corpus_artifacts() -> None:
     src = _spec_source()
-    forbidden = (
+    required = (
         "corpus.db.enc",
         "corpus.db.salt",
         "sentinel.json",
-        "corpus.sentinel.lock.json",
-        "baked_corpus",
+        "Resources/baked_corpus",
     )
-    for needle in forbidden:
-        assert needle not in src, (
-            f"adoptiq_mac.spec contains {needle!r}; Round 96 requires "
-            "the app bundle to ship no corpus data artifacts."
+    for needle in required:
+        assert needle in src, (
+            f"adoptiq_mac.spec is missing {needle!r}; Build 76 requires "
+            "the app bundle to ship the prebaked corpus."
         )
+    assert "corpus.sentinel.lock.json" not in src
 
 
-def test_spec_documents_runtime_only_corpus_posture() -> None:
+def test_spec_documents_prebaked_corpus_posture() -> None:
     src = _spec_source()
-    assert "Round 96 / runtime-only corpus" in src
-    assert "do NOT bundle corpus data" in src
-    assert "OneDrive" in src
+    assert "Round 107 / Build 76" in src
+    assert "first" in src and "launch has corpus data immediately" in src
