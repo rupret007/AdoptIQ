@@ -21758,6 +21758,9 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             "dense_vectors_upserted": None,
             "dense_vectors_considered": None,
             "dense_vector_error": None,
+            # Round 109 / Fix Indexing Hang: bounded-upsert backlog
+            # diagnostic. ``None`` until the first vector pass runs.
+            "dense_rows_remaining": None,
             "ask_ai_retrieval_method": None,
             # Round 53 / Phase 53.4.1: clickable "Open OneDrive folder"
             # link surfaced on the analyze-page panel when the corpus
@@ -21848,6 +21851,12 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             "dense_vectors_upserted": getattr(boot_state, "dense_vectors_upserted", None),
             "dense_vectors_considered": getattr(boot_state, "dense_vectors_considered", None),
             "dense_vector_error": getattr(boot_state, "dense_vector_error", None),
+            # Round 109 / Fix Indexing Hang: bounded backlog so the
+            # panel can render "warming/backfilling N remaining" as a
+            # quality note instead of leaving the user staring at
+            # "Indexing" while the bounded upsert chips through a
+            # 500k-chunk catch-up.
+            "dense_rows_remaining": getattr(boot_state, "dense_rows_remaining", None),
             "ask_ai_retrieval_method": str(
                 getattr(Config, "ASK_AI_RETRIEVAL_METHOD", "")
             ).strip() or None,

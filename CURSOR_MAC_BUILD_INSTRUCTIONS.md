@@ -183,6 +183,14 @@ test ! -f /tmp/adoptiq_dmg/AdoptIQ.app/Contents/Resources/baked_corpus/corpus.se
   synced. The Knowledge Corpus panel should frame OneDrive as optional
   refresh coverage and should expose dense retrieval status (`hybrid ready`
   or lexical fallback with an error reason).
+- Round 109 indexing-hang smoke (Build 78+): on an existing-home install
+  whose corpus already has chunks, the panel must NOT stay on "Indexing".
+  `/api/corpus/status` should return `boot.in_progress=false`,
+  `boot.completed=true`, and `last_finished_at` populated within ~60s of
+  launch even when the dense backfill is still running. If a runtime
+  vector pass leaves a backlog, the panel should render the corpus as
+  "Active" and surface "Dense retrieval is warming • backfilling N chunks"
+  as a quality note (status payload exposes `boot.dense_rows_remaining`).
 
 ### Staging sync (OneDrive)
 

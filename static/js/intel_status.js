@@ -625,16 +625,41 @@
     //                             the prebaked bundle and updates.
     //   * fresh_indexing       -- Building local corpus...
     //   * fresh_not_synced     -- Local corpus pending.
-    //   * refreshing           -- Daily refresh in progress.
+    //   * refreshing           -- Daily refresh in progress AND no
+    //                             prior corpus is yet usable.  Round
+    //                             109 promotes the "in_progress over
+    //                             an already-available corpus" path
+    //                             to ``runtime_synced`` so users do
+    //                             not see "Indexing" while Ask AI is
+    //                             actually serving lexical answers.
     //   * refresh_failed       -- Last refresh raised an error
     //                             (last good local corpus still served).
     //   * blocked_no_onedrive  -- Legacy source label shown only as
     //                             optional OneDrive refresh guidance.
     //   * unknown              -- pre-poll / no payload yet.
+    //
+    // Round 109 / Fix Indexing Hang: the boot pass is bounded by
+    // ``ask_ai_vector_store._runtime_max_chunks_default`` so the
+    // ``in_progress`` window is short.  Even when it does run, an
+    // already-available corpus (``payload.available=true`` with
+    // chunks > 0) keeps serving lexical answers, so we promote that
+    // case to ``runtime_synced`` and surface dense backfill as a
+    // separate quality note via ``r108DenseStatus``.
     function classifyCorpusPanel(payload) {
         var boot = (payload && payload.boot) || null;
         if (!boot) { return 'unknown'; }
-        if (boot.in_progress) { return 'refreshing'; }
+        var available = !!(payload && payload.available);
+        var corpus = (payload && payload.corpus) || {};
+        var hasChunks = false;
+        try {
+            hasChunks = (typeof corpus.chunks === 'number')
+                ? corpus.chunks > 0
+                : false;
+        } catch (e) { hasChunks = false; }
+        var inProgress = !!boot.in_progress;
+        if (inProgress && !(available && hasChunks)) {
+            return 'refreshing';
+        }
         var source = (typeof boot.source === 'string') ? boot.source : '';
         var od = (typeof boot.onedrive_status === 'string') ? boot.onedrive_status : '';
         // Round 83 / Build 59, downgraded in Round 108: these source
@@ -710,6 +735,21 @@
             ? String(boot.ask_ai_retrieval_method) : '';
         if (boot.dense_retrieval_status === 'stale_or_lexical') {
             return ' Dense retrieval is degraded; lexical fallback is active'
+                + (method ? ' (' + method + ').' : '.');
+        }
+        // Round 109 / Fix Indexing Hang: when the bounded runtime
+        // upsert has more chunks to backfill, surface that as a
+        // quality note instead of leaving the panel implying a hang.
+        if (boot.dense_retrieval_status === 'partial') {
+            var remaining = (typeof boot.dense_rows_remaining === 'number')
+                ? boot.dense_rows_remaining
+                : null;
+            if (remaining && remaining > 0) {
+                return ' Dense retrieval is warming \u2022 backfilling '
+                    + String(remaining) + ' chunks'
+                    + (method ? ' (' + method + ').' : '.');
+            }
+            return ' Dense retrieval is warming'
                 + (method ? ' (' + method + ').' : '.');
         }
         if (boot.embedder_status === 'ready' || boot.dense_retrieval_status === 'ready') {

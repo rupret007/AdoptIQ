@@ -935,7 +935,20 @@ ADOPTIQ_VERSION = "1.0.4"
 # tests across validator, resolver, ``_r83_safe_share_url``,
 # preferences-page source-shape, analyze-card regression guard, and
 # cross-pin against the R35 + R81 fixtures).
-ADOPTIQ_BUILD = "77"  # Round 108 / Build 77
+ADOPTIQ_BUILD = "78"  # Round 109 / Build 78
+# Round 109 / Build 78: fix indexing hang. Runtime dense-vector upsert
+# is bounded by ``ask_ai_vector_store._runtime_max_chunks_default``
+# (default 2,000, env-overridable via
+# ``ADOPTIQ_RUNTIME_VECTOR_MAX_CHUNKS``) so a 500k+ chunk corpus cannot
+# keep the boot panel stuck on "Indexing"; bake-time/strict callers
+# remain unbounded so release DMGs still ship with full dense vectors.
+# The corpus panel renders an already-serving corpus as "Active" and
+# surfaces "Dense retrieval is warming • backfilling N chunks" as a
+# quality note. The analyze-page "Active report model" label resolves
+# from active jobs only and falls back to the server-rendered Gemini
+# default so historical ``gpt-5-nano`` snapshots cannot pin a stale
+# label across sessions.
+#
 # Round 108 / Build 77: corpus smoothness. The prebaked corpus remains
 # the baseline, OneDrive is optional refresh context, runtime refreshes
 # backfill dense vectors when the embedder is available, and stale

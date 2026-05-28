@@ -1,8 +1,12 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 77).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 78).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 78 (Round 109 — Fix Indexing Hang)
+
+Build 78 fixes the post-install "stuck on Indexing" symptom users saw on top of Build 77. Runtime dense-vector maintenance now runs in bounded batches (default 2,000 chunks per refresh tick, env-overridable via `ADOPTIQ_RUNTIME_VECTOR_MAX_CHUNKS`) so a 500k-chunk corpus can never block the corpus boot finalize. The corpus panel now reports an already-serving corpus as "Active" even when a background dense backfill is still running, and surfaces "Dense retrieval is warming • backfilling N chunks" as a quality note instead of "Indexing". Bake builds remain unbounded so release DMGs continue to ship with full dense vectors. Separately, the analyze page's "Active report model" label no longer drifts back to historical `gpt-5-nano` snapshots: it reads from currently active jobs only and falls back to the server-resolved Gemini default when no jobs are running.
 
 ### What's New in Build 77 (Round 108 — Corpus Smoothness)
 

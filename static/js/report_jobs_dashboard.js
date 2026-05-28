@@ -266,8 +266,27 @@
             var model = panel.querySelector('[data-report-model-current]');
             if (count) { count.textContent = String(activeCount); }
             if (model) {
-                var firstModel = jobs.map(modelLabel).filter(function (v) { return v && v !== 'n/a'; })[0];
-                model.textContent = firstModel || model.getAttribute('data-default-model') || 'n/a';
+                // Round 109 / Fix Indexing Hang: pre-R109 the panel
+                // picked the FIRST model label from the merged
+                // active+history list, which made historical
+                // "gpt-5-nano" runs from before the R108 default flip
+                // override the live "gemini-3.1-flash-lite" default
+                // for the rest of the user's session. The fix:
+                //   1. only consider ACTIVE jobs (currently running)
+                //      so completed historical snapshots cannot pin a
+                //      stale label.
+                //   2. when no active jobs exist, fall back to the
+                //      server-resolved ``data-default-model``
+                //      attribute (Jinja-injected from
+                //      ``model_resolver.get_active_report_model()``)
+                //      so the label always reflects the current
+                //      preference, not yesterday's run.
+                var activeModelLabel = activeJobs
+                    .map(modelLabel)
+                    .filter(function (v) { return v && v !== 'n/a'; })[0];
+                model.textContent = activeModelLabel
+                    || model.getAttribute('data-default-model')
+                    || 'n/a';
             }
             if (!body) { return; }
             body.textContent = '';

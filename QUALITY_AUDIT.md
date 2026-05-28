@@ -11366,3 +11366,64 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - The post-install refresh smoke verified local-source parsing and non-blocking refresh without OneDrive; the synthetic CSV did not increase chunk count, so a richer generated DOCX/XLSX refresh can be used for the next live acceptance pass.
 
 **Trailer:** Made-with: Cursor
+
+## Round 109 — handoff 2026-05-28
+
+**What changed (plain English):**
+- Build 78 fixes the post-install "stuck on Indexing" symptom. Runtime dense-vector refresh now runs in bounded batches so a 500k-chunk corpus cannot block the corpus boot finalize, and the panel surfaces an already-serving corpus as "Active" with a "warming/backfilling N chunks" quality note instead of "Indexing".
+- The analyze-page "Active report model" label no longer drifts back to historical `gpt-5-nano` snapshots: it reads from currently active jobs only and falls back to the server-resolved Gemini default when no jobs are running.
+- New diagnostic field `dense_rows_remaining` is plumbed end-to-end (vector store result → `CorpusBootState` → `last_stats` → `/api/intel/status` → JS panel) so admins can see the bounded-backfill progress without scraping logs.
+- Bake-time dense-vector embedding remains unbounded (release builds still ship full dense vectors).
+
+**Files touched:**
+- `ask_ai_vector_store.py` — bounded runtime upsert (`_DEFAULT_RUNTIME_MAX_CHUNKS=2000`, env-overridable via `ADOPTIQ_RUNTIME_VECTOR_MAX_CHUNKS`); `_rows_missing_vectors(..., limit=...)` SQL-layer cap; new `_count_rows_missing_vectors`; `ChunkVectorUpsertResult.rows_remaining`; `status="partial"` branch.
+- `corpus_bootstrap.py` — `CorpusBootState.dense_rows_remaining`; `_run_index_pass` records remaining backlog onto `_STATE` and `last_stats`; `_r108_update_retrieval_method_for_vector_status` treats `partial` as healthy and flips back to hybrid (unless operator pinned lexical).
+- `app_simple.py` — `/api/intel/status` (and `/api/corpus/status`) payload exposes `dense_rows_remaining`.
+- `static/js/intel_status.js` — `classifyCorpusPanel` short-circuits `boot.in_progress` to `runtime_synced` when corpus is already serving (`available && corpus.chunks > 0`); `r108DenseStatus` renders "Dense retrieval is warming • backfilling N chunks" for `partial` status.
+- `static/js/report_jobs_dashboard.js` — model label resolves from `activeJobs` only, falls back to `data-default-model`.
+- `tests/test_round109_fix_indexing_hang.py` — new regression suite (18 tests).
+- `README.md` — added "What's New in Build 78" section.
+- `CLAUDE.md` — added Round 109 / Build 78 critical-rule entry; floor bumped to 5624.
+
+**SSoT modules touched:** structured_logging (via `_logging_helpers` already imported), config (no new keys; reads `ASK_AI_RETRIEVAL_METHOD` only).
+
+**Tests added/updated:**
+- `tests/test_round109_fix_indexing_hang.py::test_round109_runtime_max_chunks_default_present` — module-level cap exists.
+- `tests/test_round109_fix_indexing_hang.py::test_round109_runtime_max_chunks_default_value` — env override + bad-value fallback.
+- `tests/test_round109_fix_indexing_hang.py::test_round109_runtime_upsert_caps_large_backlog` — 25-row backlog with cap=8 returns partial + rows_remaining=17.
+- `tests/test_round109_fix_indexing_hang.py::test_round109_runtime_upsert_returns_ready_when_caught_up` — no backlog returns ready.
+- `tests/test_round109_fix_indexing_hang.py::test_round109_strict_bake_path_stays_unbounded` — strict + chunk_rows ignores the runtime cap.
+- `tests/test_round109_fix_indexing_hang.py::test_round109_partial_status_keeps_hybrid_retrieval` — partial flips lexical→hybrid.
+- `tests/test_round109_fix_indexing_hang.py::test_round109_partial_status_respects_operator_lexical_pin` — env-pinned lexical is preserved.
+- `tests/test_round109_fix_indexing_hang.py::test_round109_boot_state_carries_dense_rows_remaining` — source-shape pin.
+- `tests/test_round109_fix_indexing_hang.py::test_round109_status_endpoint_exposes_dense_rows_remaining` — payload pin (success + default branches).
+- `tests/test_round109_fix_indexing_hang.py::test_round109_run_index_pass_records_rows_remaining` — `_STATE` + `last_stats` pin.
+- `tests/test_round109_fix_indexing_hang.py::test_round109_intel_panel_renders_warming_for_partial_status` — JS source-shape pin (partial + warming + dense_rows_remaining).
+- `tests/test_round109_fix_indexing_hang.py::test_round109_intel_panel_classify_promotes_in_progress_with_chunks` — JS classifier branch order pin.
+- `tests/test_round109_fix_indexing_hang.py::test_round109_jobs_dashboard_uses_active_jobs_for_model_label` — fix source-shape pin.
+- `tests/test_round109_fix_indexing_hang.py::test_round109_jobs_dashboard_no_activeJobs_falls_back_to_default` — fallback chain pin.
+- `tests/test_round109_fix_indexing_hang.py::test_round109_bounded_upsert_does_not_hang_on_large_backlog` — 2000-row backlog with cap=16 completes immediately.
+- `tests/test_round109_fix_indexing_hang.py::test_round109_chunk_vector_upsert_result_carries_rows_remaining` — parametrized field default + override (3 cases).
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 5624 passed / 4 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- focused tests — pass (`python3 -m pytest tests/test_round109_fix_indexing_hang.py tests/test_round66_p5_hybrid_retrieval_shape.py tests/test_round108_corpus_smoothness.py tests/test_round53_intel_status_panel_blocked.py tests/test_round53_bootstrap_blocked_no_onedrive.py tests/test_round54_f3_admin_reset_gate.py tests/test_round91_jobs_workflow_and_accuracy.py tests/test_round103_ux_cleanup.py tests/test_round77_default_model_flip.py tests/test_round69_model_preferences.py -v`; 175 passed)
+- gated macOS rebuild — not run this round (code-only changes; the next operator should rebuild via `ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh` to produce `OUTBOX/AdoptIQ-v1.0.4-build78.dmg` and run a packaged clean-home smoke).
+- packaged smoke — not run this round (pending DMG rebuild).
+
+**Hot spots Claude should audit first:**
+1. `ask_ai_vector_store.py::upsert_chunk_vectors` — confirm the cap-vs-strict logic does not silently truncate bake calls (pinned by `test_round109_strict_bake_path_stays_unbounded`, but please re-read the `if max_chunks is None and not strict and chunk_rows is None` branch carefully).
+2. `corpus_bootstrap.py::_r108_update_retrieval_method_for_vector_status` — confirm `partial` is correctly treated as healthy in production (not just under tests). The contract: any operator who pinned lexical via env stays lexical; everyone else flips back to hybrid because partially-written rows are usable through RRF.
+3. `static/js/intel_status.js::classifyCorpusPanel` — confirm the `inProgress && !(available && hasChunks)` short-circuit is correct for the "first-launch with no prebaked artifacts" path, where `available=false` should still surface as `refreshing`.
+4. `static/js/report_jobs_dashboard.js` — confirm the model-label fallback chain works when `data-default-model` is absent (it falls through to `'n/a'`).
+
+**Known deferrals (intentional non-fixes):**
+- DMG rebuild and packaged smoke are deferred to the operator who can run them on a frozen macOS build host. The code-only verification (full pytest, lint, bandit, audit) was completed locally.
+- `_count_rows_missing_vectors` runs only when the cap looks saturated, so a small backlog does not pay the extra round-trip; if a future operator wants `rows_remaining` reported for every call (even `ready`), they should remove the saturation guard.
+- The 2000-row default cap is intentionally conservative; operators with fast hosts can raise it via `ADOPTIQ_RUNTIME_VECTOR_MAX_CHUNKS` without rebuilding.
+
+**Trailer:** Made-with: Cursor

@@ -185,6 +185,11 @@ class CorpusBootState:
     dense_vectors_upserted: Optional[int] = None
     dense_vectors_considered: Optional[int] = None
     dense_vector_error: Optional[str] = None
+    # Round 109 / Fix Indexing Hang: surfaced backlog from the bounded
+    # runtime upsert so the UI/admin can show "warming/backfilling N
+    # remaining" without inferring it from log lines.  None when the
+    # last pass was bake-time / strict / before any vector pass ran.
+    dense_rows_remaining: Optional[int] = None
 
 
 _STATE: CorpusBootState = CorpusBootState()
@@ -235,6 +240,7 @@ def get_state() -> CorpusBootState:
             dense_vectors_upserted=_STATE.dense_vectors_upserted,
             dense_vectors_considered=_STATE.dense_vectors_considered,
             dense_vector_error=_STATE.dense_vector_error,
+            dense_rows_remaining=_STATE.dense_rows_remaining,
         )
 
 
@@ -1288,7 +1294,18 @@ def _resolve_index_sources() -> list[dict[str, object]]:
 
 
 def _r108_update_retrieval_method_for_vector_status(status: str | None) -> None:
-    """Round 108: keep retrieval method aligned with dense vector health."""
+    """Round 108 / Round 109: keep retrieval method aligned with dense
+    vector health.
+
+    * ``ready`` flips back to hybrid (unless the operator pinned
+      lexical via ``ASK_AI_RETRIEVAL_METHOD=lexical``).
+    * ``partial`` (Round 109) means the bounded runtime upsert wrote
+      some chunks and left a backlog; hybrid is correct because the
+      backfilled chunks already work and the missing chunks fall
+      through the lexical channel of the RRF fuser.
+    * ``stale_or_lexical`` flips to lexical so the per-query fallback
+      doesn't churn re-detecting the missing embedder.
+    """
 
     import sys
 
@@ -1298,7 +1315,7 @@ def _r108_update_retrieval_method_for_vector_status(status: str | None) -> None:
         Config.ASK_AI_RETRIEVAL_METHOD = "lexical"
         live_config.ASK_AI_RETRIEVAL_METHOD = "lexical"
         return
-    if status == "ready" and requested != "lexical":
+    if status in ("ready", "partial") and requested != "lexical":
         Config.ASK_AI_RETRIEVAL_METHOD = "hybrid"
         live_config.ASK_AI_RETRIEVAL_METHOD = "hybrid"
 
@@ -1648,6 +1665,13 @@ def _run_index_pass(*, rebuild: bool) -> None:
         # Round 108 / Corpus Smoothness: runtime refreshes keep dense
         # chunk vectors current when the embedder is available. Missing
         # fastembed is a quality downgrade, not a corpus-blocking error.
+        #
+        # Round 109 / Fix Indexing Hang: dense maintenance runs INSIDE
+        # the index pass but is now bounded by the
+        # ``ask_ai_vector_store`` per-call cap so a 500k-chunk corpus
+        # cannot keep ``in_progress=True`` for the whole catch-up. Any
+        # remaining backlog flows out via ``rows_remaining`` and the
+        # daily refresh worker picks it up next tick.
         vector_result = None
         try:
             from ask_ai_vector_store import ChunkVectorUpsertResult, upsert_chunk_vectors  # noqa: PLC0415
@@ -1660,6 +1684,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
                     0,
                     "skipped_in_tests",
                     "runtime dense vector update skipped under pytest",
+                    rows_remaining=0,
                 )
             else:
                 vector_result = upsert_chunk_vectors(handle.conn, strict=False)
@@ -1669,6 +1694,9 @@ def _run_index_pass(*, rebuild: bool) -> None:
                 _STATE.dense_vectors_upserted = int(vector_result.rows_written)
                 _STATE.dense_vectors_considered = int(vector_result.rows_considered)
                 _STATE.dense_vector_error = vector_result.error
+                _STATE.dense_rows_remaining = int(
+                    getattr(vector_result, "rows_remaining", 0) or 0
+                )
                 if vector_result.status == "stale_or_lexical":
                     _STATE.embedder_status = _STATE.embedder_status or "unavailable"
                     _STATE.embedder_load_error = _STATE.embedder_load_error or vector_result.error
@@ -1682,6 +1710,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
                 _STATE.dense_vectors_upserted = 0
                 _STATE.dense_vectors_considered = None
                 _STATE.dense_vector_error = type(vector_err).__name__
+                _STATE.dense_rows_remaining = None
                 _STATE.embedder_status = _STATE.embedder_status or "unavailable"
                 _STATE.embedder_load_error = _STATE.embedder_load_error or type(vector_err).__name__
             _safe_log_warning(
@@ -1719,6 +1748,12 @@ def _run_index_pass(*, rebuild: bool) -> None:
                 _STATE.last_stats["dense_vectors_upserted"] = int(vector_result.rows_written)
                 _STATE.last_stats["dense_vectors_considered"] = int(vector_result.rows_considered)
                 _STATE.last_stats["dense_retrieval_status"] = vector_result.status
+                # Round 109 / Fix Indexing Hang: surface the bounded
+                # backlog so the admin tile can show "warming/backfilling
+                # N remaining" without inferring from logs.
+                _STATE.last_stats["dense_rows_remaining"] = int(
+                    getattr(vector_result, "rows_remaining", 0) or 0
+                )
             _STATE.last_sources = per_source if per_source else None
             # Round 35 / native-corpus: record success so the daily-
             # refresh worker's ``_should_refresh()`` math can advance
