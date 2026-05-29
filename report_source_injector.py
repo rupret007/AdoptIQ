@@ -1009,6 +1009,56 @@ def _build_matrix_source_caption(header_cells: list[str], numeric_kpi_columns: l
     return f"{_MATRIX_SOURCE_CAPTION_PREFIX} " + "; ".join(parts)
 
 
+def _build_two_column_source_caption(
+    rows_cells_text: list[list[str]], cited_row_indices: list[int]
+) -> str:
+    """Round 115 / Build 84: build ONE source caption for a 2-column card.
+
+    The 2-column ``label | value`` KPI cards (e.g. the Leader per-CSSM
+    "Metric | Value" tiles) used to carry a per-row in-cell ``[Source: ...]``
+    citation via the R82 Phase B3 path -- one citation per cited row, which
+    cluttered the cells (Build 83 live audit found 125 in the Leader DOCX).
+    R115 replaces those in-cell citations with ONE compact ``Sources: ...``
+    caption directly below the table (mirrors the R114 matrix declutter),
+    preserving the R82 per-source taxonomy by grouping the cited rows'
+    column-0 labels by their source-system tag::
+
+        Sources: Action Plans, Adoption Barriers - Snowflake CSConsole;
+        Total Support Cases - Snowflake CSOne
+
+    Only the rows that were actually cited (``cited_row_indices`` -- rows
+    that are metric claims and were not already cited in-cell by a prior
+    build) contribute.  Labels that do not resolve through the R82 taxonomy
+    are attributed to the generic ``AdoptIQ Report Data Sources`` so a card
+    never loses its citation entirely.  Order is stable (first-seen tag
+    order) for deterministic test fixtures.
+    """
+    from collections import OrderedDict
+
+    by_tag: "OrderedDict[str, list[str]]" = OrderedDict()
+    unresolved: list[str] = []
+    for row_idx in cited_row_indices:
+        if row_idx >= len(rows_cells_text):
+            continue
+        row = rows_cells_text[row_idx]
+        label = (row[0].strip() if row else "")
+        if not label:
+            continue
+        tag = _r82_resolve_source_tag_for_label(label)
+        if tag:
+            by_tag.setdefault(tag, []).append(label)
+        else:
+            unresolved.append(label)
+    parts: list[str] = []
+    for tag, labels in by_tag.items():
+        parts.append(f"{', '.join(labels)} - {tag}")
+    if unresolved:
+        parts.append(f"{', '.join(unresolved)} - AdoptIQ Report Data Sources")
+    if not parts:
+        parts.append("AdoptIQ Report Data Sources")
+    return f"{_MATRIX_SOURCE_CAPTION_PREFIX} " + "; ".join(parts)
+
+
 def _element_text(element: Any) -> str:
     """Join all ``w:t`` descendant text of an oxml paragraph element."""
     try:
@@ -1325,6 +1375,23 @@ def inject_source_citations_into_docx(
             continue
 
         # Two-column ``label | value`` rows.
+        #
+        # Round 82 / Phase B3 + Round 115 / Build 84: these KPI cards (e.g.
+        # the Leader per-CSSM "Metric | Value" tiles) used to carry a per-row
+        # IN-CELL ``[Source: ...]`` citation via the R82 Phase B3 path -- one
+        # citation per cited row, which cluttered the cells (Build 83 live
+        # audit found 125 such citations in the Leader DOCX).  R115 replaces
+        # the in-cell citations with ONE aggregated ``Sources: ...`` caption
+        # directly below the table (mirrors the R114 matrix declutter),
+        # preserving the R82 per-source taxonomy by grouping the cited rows'
+        # column-0 labels by source system in
+        # ``_build_two_column_source_caption``.  The cells stay clean.
+        #
+        # Rows already cited in-cell by an OLDER build (``_SOURCE_TOKEN_RE``
+        # hit) are counted as skipped and excluded from the caption so a
+        # legacy report keeps its prior placement instead of acquiring a
+        # duplicate caption.
+        cited_row_indices: list[int] = []
         for row_idx, row_text in enumerate(rows_cells_text):
             if not _row_is_metric_claim(row_text):
                 continue
@@ -1335,16 +1402,15 @@ def inject_source_citations_into_docx(
             if _SOURCE_TOKEN_RE.search(adj_text):
                 counts["skipped_already_cited"] += 1
                 continue
-            value_cell = rows[row_idx].cells[1]
-            # Round 82 / Phase B3: row label drives per-source chrome
-            # for two-column tables.  ``Customer Pulse | 87`` resolves
-            # to ``[Source: Snowflake CSConsole]``; ``Total Customers
-            # | 39`` resolves to ``[Source: Snowflake EDW Sales
-            # subscriptions]``.  Misses fall back to generic.
-            row_label = row_text[0] if row_text else ""
-            row_chrome = _r82_chrome_for_label(row_label, citation)
-            if _inject_into_cell(value_cell, row_chrome):
-                counts["table_cells_injected"] += 1
+            cited_row_indices.append(row_idx)
+        if cited_row_indices:
+            caption_text = _build_two_column_source_caption(
+                rows_cells_text, cited_row_indices
+            )
+            if _insert_source_caption_after_table(table, caption_text):
+                counts["table_captions_added"] += 1
+            else:
+                counts["skipped_already_cited"] += 1
 
     if (
         counts["paragraphs_injected"] == 0

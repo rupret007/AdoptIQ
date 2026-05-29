@@ -1743,12 +1743,15 @@ def _extract_docx_metric_claims(doc: Document) -> list[dict[str, Any]]:
         rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
         if not rows:
             continue
+        # Round 114 / Build 83 + Round 115 / Build 84: a ``Sources: ...``
+        # caption directly below a table backs that table's aggregated
+        # claims.  R114 introduced this for multi-column matrices; R115
+        # extends the same treatment to two-column ``label | value`` KPI
+        # cards (the injector no longer cites every numeric cell / row).
+        table_caption_backed = _matrix_has_following_source_caption(table)
         if len(rows) >= 2 and len(rows[0]) >= 3:
             header = rows[0]
-            # Round 114 / Build 83: a ``Sources: ...`` caption directly
-            # below a matrix backs the matrix's aggregated multi-column
-            # claims (the injector no longer cites every numeric cell).
-            caption_backed = _matrix_has_following_source_caption(table)
+            caption_backed = table_caption_backed
             value_rows = _select_multicolumn_value_rows(rows)
             for value_row in value_rows:
                 row_text = " | ".join(item for item in value_row if item)
@@ -1779,7 +1782,11 @@ def _extract_docx_metric_claims(doc: Document) -> list[dict[str, Any]]:
                         "label": row[0],
                         "canonical": canonical,
                         "value": _normalize_kpi_value(row[1]),
-                        "source_backed": _source_backed_cell(row, 1),
+                        # Round 115 / Build 84: a two-column KPI card is
+                        # source-backed by an in-cell citation OR by the
+                        # aggregated ``Sources: ...`` caption below it.
+                        "source_backed": _source_backed_cell(row, 1)
+                        or table_caption_backed,
                         "excerpt": row_text[:240],
                     }
                 )

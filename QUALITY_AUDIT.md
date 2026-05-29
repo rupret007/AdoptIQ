@@ -11712,3 +11712,55 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - **NaN/Unknown placeholder cells** — left as-is; they are legitimate "N/A"/"Unknown" values in Date/Sentiment/Key-Issues columns, not customer-name leaks (R66/B9 covers the real customer-NaN case). The Build-83 Leader regen reconfirmed: 24 nanish cells, all in Date/Sentiment/Key-Issues columns, no customer-name leaks.
 
 **Trailer:** Made-with: Cursor
+
+## Round 115 — handoff 2026-05-28
+
+**What changed (plain English):**
+- Two items closed: (A) report narratives flipped back to the shipped `gemini-3.1-flash-lite` default after a stale `gpt-5-nano` override was found surviving DMG upgrades in App-Support `settings.json`; (B) the R114 "one caption below the table" citation de-clutter was extended to the 2-column "Metric | Value" KPI cards (the R114 live audit flagged 125 in-cell `[Source: …]` citations remaining in the Leader per-CSSM cards — the documented R114 Build-84 candidate). Plus a generalized acceptance-audit script + a clean deep-dive sweep of the latest existing reports.
+- **Part A (model re-flip)** — root cause: `~/Library/Application Support/AdoptIQ/settings.json` carried `"report_model_name": "gpt-5-nano"` (highest-precedence layer in `model_resolver`). Both `r103_model_default_migrated` and `r108_model_default_migrated` markers were already `true`, so the R103/R108 stale-nano migrations early-returned and treated the value as deliberate. New `adoptiq_settings.migrate_round115_model_defaults()` adds an `r115_model_default_migrated` marker and re-stomps the exact stale `gpt-5-nano` value once more (via existing `_r103_model_value_needs_migration`) → `gemini-3.1-flash-lite`, wired into `ensure_model_defaults_migrated()` so it auto-corrects on next launch with no manual edit. A deliberate post-R115 nano selection survives via the new marker (same precedent as R108). The live dev-box override was also cleared.
+- **Part B (2-column caption)** — `report_source_injector.py` 2-column `label | value` branch now collects each cited row's R82 source tag (`_r82_chrome_for_label` on the column-0 label) and inserts ONE aggregated `Sources: …` caption below the card via the existing `_insert_source_caption_after_table` (new helper `_build_two_column_source_caption`, analogous to `_build_matrix_source_caption`), grouping cited labels by source system so the R82 per-source taxonomy is preserved — placement inverted, cells go clean. Idempotent via the shared `_table_has_following_source_caption`. Rows that already carry a legacy in-cell `[Source]` (older docx re-fed through the injector) are excluded from the caption and left untouched. `table_captions_added` now counts these; `table_cells_injected` is `0` for 2-column cards.
+- **Gate parity** — `report_iteration_loop.py` 2-column metric-claim `source_backed` now accepts EITHER `_source_backed_cell(row, 1)` OR `_matrix_has_following_source_caption(table)` so strict mode stays green with caption-backing.
+- **Part C (audit)** — `scripts/r114_audit_reports.py` gained `--auto` (latest-of-each-type discovery via mtime + filename classifier) + `--target NAME=BASE` + `--reports-root`; back-compat `TARGETS` default preserved. The `--auto` sweep of the latest existing reports returned `CRITICAL_ISSUES_FOUND=False`. Deep-dive cross-check (narrative vs XLSX canonical): the `Unknown`/`N/A` case-Status/Type, Sentiment, and CP-Date cells trace to genuinely-null Snowflake source fields (`Case Status (Normalized)='Unknown'`, `case_type_class='unknown'`) — honest empty-source fallbacks, NOT bugs; inferring `Closed` from a `closed_date` would fabricate a status the source doesn't carry (violates the Tier-2 "don't pretend zero is real data" contract). A title-page "Total Customers: 101" vs Portfolio-Overview "Total Customers: 46" was observed in a stale, LLM-rate-limited (429, degraded-fallback) pre-R115 Comprehensive — the 46/14-ABs is the technology-scoped universe vs the broader 101; flagged as a watch-item for the operator's live Build-84 regen rather than blind-patched (would risk the ~dozens of pinned R47/R64/R93 "Total Customers" coherence tests).
+
+**Files touched:**
+- `adoptiq_settings.py` — `_R115_MODEL_MIGRATION_KEY` const, `_SCHEMA` entry, `migrate_round115_model_defaults()`, wired into `ensure_model_defaults_migrated()`, `__all__` export.
+- `model_resolver.py` — comment updated (R103+R108+R115 migrations run before reading settings).
+- `report_source_injector.py` — `_build_two_column_source_caption(...)` helper; 2-column branch rewrite (aggregated caption instead of per-row in-cell; skip already-cited rows; `table_captions_added` count).
+- `report_iteration_loop.py` — 2-column `source_backed` accepts caption-backing via `_matrix_has_following_source_caption(table)`; `table_caption_backed` init adjusted.
+- `scripts/r114_audit_reports.py` — `argparse` CLI: `--auto` + `--target` + `--reports-root`; `_classify_report_type` / `discover_latest_targets` / `_resolve_targets` helpers.
+- `config.py` — `ADOPTIQ_BUILD = "83"` → `"84"` + R115 block comment.
+- `CLAUDE.md` — pytest floor 5723 → 5740; two new Round 115 Critical Rules (2-column caption contract + model re-migration).
+- `README.md` — new "What's New in Build 84" section + footer build bump.
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — new Round 115 smoke item #9.3 (gemini model resolve + clean 2-column cards + `--auto` audit + nanish-is-honest note).
+- `tests/test_round115_model_remigration.py` (new, 8), `tests/test_round115_two_column_caption.py` (new, 9).
+- `tests/test_round82_per_source_citation_taxonomy.py`, `tests/test_round114_citation_caption_below_matrix.py`, `tests/test_round57_source_citation_injector.py`, `tests/test_round77_default_model_flip.py`, `tests/test_round103_ux_cleanup.py` — updated for caption-based 2-column provenance + the R115 marker.
+- `QUALITY_AUDIT.md` — this handoff entry.
+
+**SSoT modules touched:** config (ADOPTIQ_BUILD bump). adoptiq_settings / model_resolver (model-selection seam — not in the SSoT eligible list). report_source_injector + report_iteration_loop carry the duplicated `_MATRIX_SOURCE_CAPTION_PREFIX` const which MUST stay byte-identical. No edits to canonical_metrics / risk_scoring / report_export_* — the change is purely citation placement + a settings migration.
+
+**Tests added/updated:**
+- `tests/test_round115_model_remigration.py` (8 new) — nano flips to gemini; empty/other values untouched; marker idempotent; deliberate post-R115 nano survives (marker set); resolver integration; schema + `__all__` presence.
+- `tests/test_round115_two_column_caption.py` (9 new) — caption present + 0 in-cell citations in 2-column cards; single-source + mixed-source aggregation; idempotency; gate accepts caption-backing; legacy in-cell rows excluded from caption + left untouched.
+- `tests/test_round82_per_source_citation_taxonomy.py` — `test_inject_two_column_table_per_row_chrome` now asserts clean cells + ONE aggregated caption naming the R82 source systems (taxonomy preserved, placement inverted).
+- `tests/test_round114_citation_caption_below_matrix.py` — `test_two_column_table_keeps_per_row_citation` → `test_two_column_table_now_gets_caption_not_per_row_citation` (R115 inversion).
+- `tests/test_round57_source_citation_injector.py` — count-dict now `table_cells_injected == 0` + `table_captions_added == 2` (2-column card + multi-column matrix).
+- `tests/test_round77_default_model_flip.py` + `tests/test_round103_ux_cleanup.py` — saved settings now include `r115_model_default_migrated: True` to represent a deliberate post-R115 selection.
+
+**Verify status:**
+- `make verify` — **green**: `5740 passed / 4 skipped / 6 deselected` (R114 floor 5723; +17 net). ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities.
+- R115 declutter proven end-to-end on a synthetic full-report-shaped DOCX through the production injector: 1 paragraph citation + 0 in-cell table citations + 3 captions (1 matrix + 2 two-column cards), idempotent on second pass.
+- `scripts/r114_audit_reports.py --auto` on the latest existing reports: `CRITICAL_ISSUES_FOUND=False` (the 125/11/8/2 per-cell counts are PRE-R115 clutter — they zero out once a Build-84 report is generated through the new injector).
+
+**Hot spots Claude should audit first:**
+1. `adoptiq_settings.migrate_round115_model_defaults` — confirm it ONLY re-stomps the exact stale `gpt-5-nano` value (via `_r103_model_value_needs_migration`), leaves empty / other / already-gemini values untouched, is idempotent (early-returns once the marker is set), and that the marker is added to `_SCHEMA` so `save_settings` doesn't drop it.
+2. `report_source_injector._build_two_column_source_caption` — confirm distinct-source aggregation order is deterministic and the generic fallback fires when no row label resolves; confirm the already-in-cell-cited rows are excluded so a re-fed legacy docx isn't double-cited.
+3. `report_iteration_loop` 2-column `source_backed` — confirm caption-backing keeps strict mode green AND that an in-cell-cited 2-column table (legacy) is still counted as backed.
+4. The `Total Customers` 101-vs-46 watch-item — needs a live Build-84 regen to confirm whether current code surfaces two same-labeled customer universes in one Comprehensive; if real, it's a labeling/clarity fix (distinct labels for full-portfolio vs technology-scoped) gated by the R47/R64/R93 coherence test suite.
+
+**Known deferrals (intentional non-fixes):**
+- **Live Build-84 gemini regen of all four report types** — deferred to the operator (Snowflake/Keeper needs VPN + Keeper config absent in the dev tree; the password is fetched from Keeper at runtime). All code/tests/docs are landed; the synthetic injector proof + the existing-report `--auto` audit substitute for the in-session live regen, and the live regen becomes the post-build acceptance step (smoke item #9.3).
+- **`Total Customers` 101-vs-46 narrative label collision** — observed in a stale, degraded (LLM-429-fallback) pre-R115 Comprehensive; flagged as a watch-item for the operator's live Build-84 regen rather than blind-patched (the two values are legitimately different universes — full portfolio vs technology-scoped — and a labeling change risks the pinned R47/R64/R93 "Total Customers" coherence tests).
+- **NaN/Unknown placeholder cells** — left as-is; honest empty-source fallbacks (raw Snowflake field null), not customer-name leaks. Inferring values would violate the data-honesty contract.
+- **Gated macOS DMG rebuild** — deferred to the operator (signing identity + bake-host corpus + >1 GB artifact). Build is the only remaining D-phase step; `adoptiq_pc.spec` needs no change (pure-Python; python-docx already bundled).
+
+**Trailer:** Made-with: Cursor

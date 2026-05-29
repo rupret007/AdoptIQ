@@ -9,6 +9,7 @@ risk-score saturation).  Pure read-only; mutates nothing.  Made-with: Cursor.
 """
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -24,6 +25,49 @@ TARGETS = {
     "Compact": REPORTS / "All_Managers/Compact/AdoptIQ_Report_Compact_All_Managers_All_Contact_Center_90d_20260528_154646",
     "Renewal": REPORTS / "All_Managers/Renewal/AdoptIQ_Report_Renewal_Portfolio_All_Managers_All_Contact_Center_90d_20260528_154629",
 }
+
+# Round 115 / Build 84: filename-token -> report-type classifier for the
+# ``--auto`` discovery mode so the audit always targets the most-recent
+# artifact of each type without a hand-edited TARGETS map.
+_AUTO_TYPE_MATCHERS = (
+    ("Leader", re.compile(r"AdoptIQ_Report_Leader_", re.IGNORECASE)),
+    ("Compact", re.compile(r"AdoptIQ_Report_Compact_", re.IGNORECASE)),
+    ("Renewal", re.compile(r"AdoptIQ_Report_Renewal_", re.IGNORECASE)),
+    # Comprehensive has no explicit token; it's the AdoptIQ_Report_<Manager>
+    # shape that is NOT Leader/Compact/Renewal.  Matched last as the default.
+    ("Comprehensive", re.compile(r"AdoptIQ_Report_", re.IGNORECASE)),
+)
+
+
+def _classify_report_type(stem: str) -> str | None:
+    for name, rx in _AUTO_TYPE_MATCHERS:
+        if rx.search(stem):
+            return name
+    return None
+
+
+def discover_latest_targets(root: Path = REPORTS) -> dict[str, Path]:
+    """Round 115: find the most-recent ``.docx`` of each report type under
+    ``root`` (by mtime) and return ``{type: base_path_without_ext}``.
+
+    Pairs a ``.docx`` with its sibling ``.xlsx`` via the shared stem so the
+    audit can cross-check narrative + workbook.  Never raises; missing types
+    are simply absent from the returned map.
+    """
+    latest: dict[str, tuple[float, Path]] = {}
+    if not root.is_dir():
+        return {}
+    for docx in root.rglob("*.docx"):
+        try:
+            mtime = docx.stat().st_mtime
+        except OSError:
+            continue
+        rtype = _classify_report_type(docx.stem)
+        if not rtype:
+            continue
+        if rtype not in latest or mtime > latest[rtype][0]:
+            latest[rtype] = (mtime, docx.with_suffix(""))
+    return {name: base for name, (_, base) in latest.items()}
 
 # Citation chrome immediately GLUED to an alphanumeric word with no
 # separator -> the true mid-string injection signature (R64/B4, R66/B1,
@@ -173,9 +217,54 @@ def audit_xlsx(path: Path) -> dict:
     return findings
 
 
-def main() -> int:
+def _resolve_targets(args: argparse.Namespace) -> dict[str, Path]:
+    """Round 115 / Build 84: resolve the audit target map from CLI args.
+
+    Precedence: explicit ``--target NAME=BASE`` overrides win; otherwise
+    ``--auto`` discovers the latest of each type; otherwise the hard-coded
+    ``TARGETS`` map is used (back-compat with the Build-83 invocation).
+    """
+    if args.target:
+        out: dict[str, Path] = {}
+        for spec in args.target:
+            if "=" not in spec:
+                print(f"  (ignoring malformed --target {spec!r}; expected NAME=BASE)")
+                continue
+            name, base = spec.split("=", 1)
+            # Strip a trailing .docx/.xlsx so callers can paste a full path.
+            base_path = Path(base)
+            if base_path.suffix.lower() in (".docx", ".xlsx"):
+                base_path = base_path.with_suffix("")
+            out[name.strip()] = base_path
+        return out
+    if args.auto:
+        root = Path(args.reports_root) if args.reports_root else REPORTS
+        discovered = discover_latest_targets(root)
+        if not discovered:
+            print(f"  (--auto found no AdoptIQ reports under {root})")
+        return discovered
+    return dict(TARGETS)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="AdoptIQ report acceptance audit (R114/R115).")
+    parser.add_argument(
+        "--auto", action="store_true",
+        help="Discover the latest .docx of each report type under the reports root.",
+    )
+    parser.add_argument(
+        "--target", action="append", metavar="NAME=BASE",
+        help="Explicit target: report type name = base path (no extension). Repeatable.",
+    )
+    parser.add_argument(
+        "--reports-root", default=None,
+        help=f"Override the reports root for --auto (default: {REPORTS}).",
+    )
+    args = parser.parse_args(argv)
+    targets = _resolve_targets(args)
+
     any_critical = False
-    for name, base in TARGETS.items():
+    for name, base in targets.items():
         docx = Path(str(base) + ".docx")
         xlsx = Path(str(base) + ".xlsx")
         print(f"\n{'='*70}\n{name}\n{'='*70}")
@@ -214,4 +303,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

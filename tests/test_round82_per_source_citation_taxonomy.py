@@ -355,8 +355,15 @@ def test_inject_multi_match_mixed_sources_uses_generic_chrome(tmp_path: Path) ->
     assert "[Source: Snowflake CSOne]" not in full_text, full_text
 
 
-def test_inject_two_column_table_per_row_chrome(tmp_path: Path) -> None:
-    """Two-column ``label | value`` table: each row carries its own per-source chrome."""
+def test_inject_two_column_table_caption_preserves_per_source_taxonomy(
+    tmp_path: Path,
+) -> None:
+    """Round 115 / Build 84: two-column ``label | value`` cards now carry ONE
+    aggregated ``Sources: ...`` caption below the table (the R114 matrix
+    declutter, extended to KPI cards).  The value cells stay CLEAN; the R82
+    per-source taxonomy is preserved IN THE CAPTION -- each cited row's label
+    is attributed to its specific source system, not the generic placeholder.
+    """
     pytest.importorskip("docx")
     from docx import Document  # type: ignore[import-not-found]
 
@@ -370,17 +377,28 @@ def test_inject_two_column_table_per_row_chrome(tmp_path: Path) -> None:
     doc.save(str(docx))
 
     counts = inject_source_citations_into_docx(docx)
-    assert counts["table_cells_injected"] == 2, counts
+    # R115: one caption per card, cells untouched.
+    assert counts["table_captions_added"] == 1, counts
+    assert counts.get("table_cells_injected", 0) == 0, counts
 
     doc2 = Document(str(docx))
     table2 = doc2.tables[0]
+    # Cells must be clean -- no in-cell citation chrome.
     ab_cell = table2.cell(0, 1).text
     cases_cell = table2.cell(1, 1).text
-    assert "Snowflake CSConsole" in ab_cell, ab_cell
-    assert "Snowflake CSOne" in cases_cell, cases_cell
-    # Critical: rows must NOT swap source-system tags.
-    assert "Snowflake CSOne" not in ab_cell, ab_cell
-    assert "Snowflake CSConsole" not in cases_cell, cases_cell
+    assert "[Source:" not in ab_cell, ab_cell
+    assert "[Source:" not in cases_cell, cases_cell
+
+    # The caption below the table preserves the R82 per-source taxonomy:
+    # Adoption Barriers -> CSConsole, Total Support Cases -> CSOne.
+    captions = [p.text for p in doc2.paragraphs if p.text.strip().startswith("Sources:")]
+    assert len(captions) == 1, captions
+    caption = captions[0]
+    assert "Snowflake CSConsole" in caption, caption
+    assert "Snowflake CSOne" in caption, caption
+    # Critical: each label sits with its OWN source system in the caption.
+    assert re.search(r"Adoption Barriers[^;]*Snowflake CSConsole", caption), caption
+    assert re.search(r"Total Support Cases[^;]*Snowflake CSOne", caption), caption
 
 
 # ---------------------------------------------------------------------------

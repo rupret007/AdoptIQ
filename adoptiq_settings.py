@@ -99,6 +99,7 @@ _SCHEMA: Dict[str, tuple] = {
     "report_model_name": (str, ""),  # Round 69 / Build 43
     "r103_model_default_migrated": (bool, False),  # Round 103 / Build 71
     "r108_model_default_migrated": (bool, False),  # Round 108 / Corpus Smoothness
+    "r115_model_default_migrated": (bool, False),  # Round 115 / Build 84
     "corpus_share_url": (str, ""),  # Round 84 / Build 60
     # Round 88 / F5 (P1): OneDrive CSOne folder override.  When the
     # OneDrive desktop client materializes a SHARED folder (someone
@@ -190,6 +191,7 @@ _R103_STALE_DEFAULT_MODEL = "gpt-5-nano"
 _R103_CURRENT_DEFAULT_MODEL = "gemini-3.1-flash-lite"
 _R103_MODEL_MIGRATION_KEY = "r103_model_default_migrated"
 _R108_MODEL_MIGRATION_KEY = "r108_model_default_migrated"
+_R115_MODEL_MIGRATION_KEY = "r115_model_default_migrated"  # Round 115 / Build 84
 
 
 def _is_valid_model_name(value: Any) -> bool:
@@ -574,6 +576,45 @@ def migrate_round108_model_defaults() -> bool:
     return changed_model
 
 
+def migrate_round115_model_defaults() -> bool:
+    """Round 115 one-time stale-nano migration for upgraded installs.
+
+    Build 82/83 acceptance found installs carrying ``report_model_name=
+    gpt-5-nano`` while ``r103_model_default_migrated`` AND
+    ``r108_model_default_migrated`` were both already ``True`` -- so the
+    earlier migrations early-return and treat the stale value as a
+    deliberate operator selection, leaving report narratives on nano
+    across DMG upgrades (App Support is never wiped).  Build 84 deliberately
+    treats that exact value as stale ONE more time, then stamps a new
+    marker so a later operator-selected nano (chosen AFTER this build)
+    remains intentional.  Mirrors ``migrate_round108_model_defaults``.
+    """
+    try:
+        current = load_settings()
+    except Exception:  # noqa: BLE001
+        return False
+    if current.get(_R115_MODEL_MIGRATION_KEY) is True:
+        return False
+
+    changed_model = False
+    next_settings = dict(current)
+    for key in ("ask_ai_model_name", "report_model_name"):
+        if _r103_model_value_needs_migration(next_settings.get(key)):
+            next_settings[key] = _R103_CURRENT_DEFAULT_MODEL
+            changed_model = True
+    next_settings[_R115_MODEL_MIGRATION_KEY] = True
+
+    try:
+        save_settings(next_settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "adoptiq_settings: Round 115 model-default migration skipped: %s",
+            exc,
+        )
+        return False
+    return changed_model
+
+
 def ensure_model_defaults_migrated() -> bool:
     """Run all model-default migrations; never raises to callers."""
     changed = False
@@ -583,6 +624,10 @@ def ensure_model_defaults_migrated() -> bool:
         pass
     try:
         changed = migrate_round108_model_defaults() or changed
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        changed = migrate_round115_model_defaults() or changed
     except Exception:  # noqa: BLE001
         pass
     return changed
@@ -672,6 +717,7 @@ __all__ = [
     "save_settings",
     "migrate_round103_model_defaults",
     "migrate_round108_model_defaults",
+    "migrate_round115_model_defaults",
     "ensure_model_defaults_migrated",
     "get",
     "set",

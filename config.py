@@ -963,7 +963,35 @@ ADOPTIQ_VERSION = "1.0.4"
 # ``tests/test_round114_citation_caption_below_matrix.py`` (10 tests) +
 # updated ``tests/test_round57_source_citation_injector.py`` count-dict
 # assertions; R82/R52/R53/R76/R90/R112 suites re-run green.
-ADOPTIQ_BUILD = "83"  # Round 114 / Build 83
+# Round 115 / Build 84: report-model re-flip to gemini + 2-column citation
+# de-clutter.  Part A: an upgraded install carried a stale
+# ``report_model_name: gpt-5-nano`` override in App-Support ``settings.json``
+# (highest-precedence layer in ``model_resolver``); the R103/R108 stale-nano
+# migrations had already stamped their markers, so they early-returned and
+# treated the value as deliberate.  ``adoptiq_settings.migrate_round115_model_
+# defaults`` adds a new ``r115_model_default_migrated`` marker that re-stomps
+# the exact stale ``gpt-5-nano`` value back to ``gemini-3.1-flash-lite`` once
+# more for upgraded installs (a deliberate post-R115 nano selection still
+# survives via the new marker).  Part B extends the Build-83 caption-below-
+# table de-clutter to the 2-column ``Metric | Value`` KPI cards: the R82
+# Phase B3 per-row IN-CELL ``[Source: ...]`` citation (Build 83 live audit
+# found 125 of them in the Leader docx) is replaced with ONE aggregated
+# ``Sources: ...`` caption directly below each card via
+# ``report_source_injector._build_two_column_source_caption`` (R82 per-source
+# taxonomy preserved -- placement inverted, cells stay clean).  The quality
+# gate (``report_iteration_loop``) now treats a 2-column KPI card as source-
+# backed by EITHER an in-cell citation OR the following ``Sources:`` caption
+# so strict mode stays green without per-cell clutter.  Pinned by
+# ``tests/test_round115_model_remigration.py`` (8 tests) +
+# ``tests/test_round115_two_column_caption.py`` (9 tests) + updated
+# ``tests/test_round82_per_source_citation_taxonomy.py`` (caption-based
+# provenance for 2-column cards) + updated R114/R57/R103/R51 suites.  The
+# read-only ``scripts/r114_audit_reports.py`` gained ``--auto`` discovery +
+# ``--target NAME=BASE`` so the acceptance audit always targets the latest
+# artifact of each type; the existing-report sweep came back clean (0
+# mid-string, 0 markdown, 0 stub, 0 global-config, 0 HTML, 0 dup IDs, 0
+# saturation; nanish cells are honest empty-source fallbacks, NOT bugs).
+ADOPTIQ_BUILD = "84"  # Round 115 / Build 84
 # Round 113 / Build 82: Ask AI uplift + Preferences fix-and-polish.
 # Phase A (Ask AI UX): unified conversation history across the sync +
 # stream paths (A1), visible browser-local conversation thread (A2),

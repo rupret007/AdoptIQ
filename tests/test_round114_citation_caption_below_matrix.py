@@ -15,8 +15,11 @@ through the R82 source taxonomy.  These tests pin:
 2. The caption aggregates the columns by their R82 source system.
 3. The injector is idempotent on the matrix path (second pass adds no
    second caption and leaves the document byte-stable).
-4. Two-column ``label | value`` tables keep their per-row citation
-   (they were never the clutter complaint; preserves the R82 contract).
+4. Two-column ``label | value`` tables: Round 114 left them with per-row
+   in-cell citations; Round 115 / Build 84 INVERTED this so they now get a
+   single ``Sources:`` caption too (the 125 in-cell citations in the Build 83
+   Leader report were the user's clutter complaint).  The R82 per-source
+   taxonomy is preserved IN THE CAPTION.
 5. The quality scorer (``evaluate_report_quality``) reports ZERO unbacked
    matrix claims when the caption is present -- the caption backs the
    matrix's aggregated multi-column claims (contract evolution, not a
@@ -158,22 +161,30 @@ def test_caption_idempotent_on_second_pass(tmp_path: Path) -> None:
     assert first_mtime == second_mtime, "idempotent re-run must not re-save the document"
 
 
-def test_two_column_table_keeps_per_row_citation(tmp_path: Path) -> None:
+def test_two_column_table_now_gets_caption_not_per_row_citation(tmp_path: Path) -> None:
+    """Round 115 / Build 84: the matrix declutter is extended to two-column
+    ``label | value`` KPI cards.  They now receive ONE aggregated ``Sources:``
+    caption (like matrices) instead of a per-row in-cell citation -- this
+    inverts the R114 contract that deliberately left two-column tables alone.
+    """
     docx = tmp_path / "twocol.docx"
     _build_two_column_docx(docx)
 
     counts = inject_source_citations_into_docx(docx)
 
-    assert counts["table_cells_injected"] >= 2, (
-        "two-column label|value rows must keep their per-row cell citation"
+    assert counts["table_captions_added"] == 1, (
+        "R115: a two-column KPI card must now receive exactly ONE caption"
     )
-    assert counts["table_captions_added"] == 0, (
-        "a two-column table is not a matrix and must NOT receive a caption"
+    assert counts["table_cells_injected"] == 0, (
+        "R115: two-column value cells must stay clean (no in-cell citation)"
     )
-    assert _caption_paragraphs(docx) == []
-    # The value cells DO carry inline citations (unchanged behaviour).
+    captions = _caption_paragraphs(docx)
+    assert len(captions) == 1, captions
+    # Total Customers -> EDW Sales subscriptions; Adoption Barriers -> CSConsole.
+    assert "Snowflake CSConsole" in captions[0], captions[0]
+    # No data cell may carry an inline citation anymore.
     joined = "\n".join(_matrix_data_cell_texts(docx))
-    assert "[source:" in joined.lower()
+    assert "[source:" not in joined.lower(), joined
 
 
 def test_quality_gate_zero_unbacked_matrix_claims_with_caption(tmp_path: Path) -> None:

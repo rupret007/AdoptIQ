@@ -1,8 +1,12 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 83).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 84).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 84 (Round 115 — Report model re-flip to Gemini + 2-column citation de-clutter)
+
+Build 84 finishes two readability + correctness items. **(1) Report narratives are back on the shipped `gemini-3.1-flash-lite` model.** An upgraded install could carry a stale `gpt-5-nano` report-model override in its saved settings — the highest-precedence layer — which survived DMG upgrades and which the earlier (Round 103/108) auto-corrections treated as a deliberate choice. Build 84 adds a one-time re-migration that flips that stale `gpt-5-nano` back to `gemini-3.1-flash-lite` on the next launch, with no manual settings edit; a deliberate post-Build-84 nano selection still sticks. **(2) The Build-83 "one caption below the table" citation de-clutter now also covers the 2-column "Metric | Value" KPI cards** (the Leader per-CSSM tiles). The Build-83 audit found **125** per-cell `[Source: …]` citations in those cards in the Leader Word doc; Build 84 replaces them with **one aggregated "Sources: …" caption per card**, grouping each card's metrics by their data source (e.g. "Sources: Adoption Barriers, Action Plans, Customer Pulse — Snowflake CSConsole; Support Cases — Snowflake CSOne") — the same per-source provenance, just below the table instead of crammed into every cell. The acceptance-audit script (`scripts/r114_audit_reports.py`) gained an `--auto` mode that always targets the newest report of each type; the existing-report sweep came back **clean** (no mid-string injection, no markdown leakage, no stub bullets, no Snowflake config-error tokens, no HTML leakage, no duplicate spreadsheet IDs, no risk-score saturation; the remaining `Unknown`/`N/A` cells are honest empty-source fallbacks, not bugs). Pinned by 17 new R115 tests (8 model re-migration + 9 two-column caption) plus updated R82/R114/R57/R77/R103/R51 suites. All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **5740 pytest passed (R114 floor was 5723; +17 net)**.
 
 ### What's New in Build 83 (Round 114 — Citation de-clutter + Build 82 acceptance audit)
 
