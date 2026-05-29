@@ -100,9 +100,18 @@ class TestF1LLMErrorSanitizerLeak:
         assert "f\"[LLM error] {str(llm_error).strip()}\"" not in text, (
             "Round 112 / F1: pre-R112 raw-emit pattern detected"
         )
-        # The sanitizer must be invoked in the fallback path.
-        assert "[LLM error] {_r69_sanitize_llm_error(llm_error" in text, (
-            "Round 112 / F1: sanitizer not wired into fallback path"
+        # Round 120 / F3: the fallback path now routes the error through
+        # ``_r120_humanize_fallback_reason`` (which calls
+        # ``_r69_sanitize_llm_error`` FIRST -- see the helper body), so the
+        # sanitizer is still wired; the R112 ``[LLM error] {_r69_sanitize...``
+        # inline form was replaced by the humanizer call site.  Pin both
+        # halves: the fallback path calls the humanizer, AND the humanizer
+        # calls the sanitizer.
+        assert "_r120_reason = _r120_humanize_fallback_reason(llm_error)" in text, (
+            "Round 120 / F3: humanizer not wired into fallback path"
+        )
+        assert "sanitized = _r69_sanitize_llm_error(llm_error" in text, (
+            "Round 112/R120: sanitizer must still run first inside the humanizer"
         )
 
 

@@ -5648,6 +5648,92 @@ def _has_customer_activity_for_deep_dive(
             return True
     return False
 
+def _r120_humanize_fallback_reason(llm_error: Any) -> str:
+    """Round 120 / F3: turn a raw LLM error into a customer-readable reason
+    for the Compact / Comprehensive non-AI fallback prose.
+
+    The Build 88 Compact "Non-AI fallback summary" leaked the technical
+    ``[LLM error] ERROR: llm.rate_limit_429: ...`` marker straight into
+    customer-facing prose.  This helper:
+
+      1. Runs the error through ``_r69_sanitize_llm_error`` FIRST so the
+         R112 credential redaction + R118/F3 envelope collapse still apply
+         (no secrets, no machine JSON/dict braces ever reach this point).
+      2. Classifies the sanitized text into a small set of provider
+         failure modes and renders a plain-English ``Reason: ...`` line.
+      3. Never emits the ``[LLM error]`` marker or a bare ``ERROR:`` token
+         into the customer body -- the technical detail stays in the logs.
+
+    Returns ``""`` when there is no error so the caller can skip the line.
+    """
+    if not llm_error:
+        return ""
+    sanitized = _r69_sanitize_llm_error(llm_error, max_len=400)
+    low = sanitized.lower()
+    # Ordered most-specific-first so e.g. a 429 rate-limit is not
+    # mis-classified as a generic server error.
+    if any(tok in low for tok in ("rate_limit", "rate limit", "429", "too many request", "throughput")):
+        reason = "the AI provider is rate limiting requests right now"
+    elif any(tok in low for tok in ("timeout", "timed out", "deadline")):
+        reason = "the AI provider did not respond in time"
+    elif any(tok in low for tok in ("content_filter", "content filter", "content policy", "blocked by")):
+        reason = "the AI provider blocked the request via its content filter"
+    elif any(tok in low for tok in ("credential", "unauthor", "forbidden", "401", "403", "invalid api", "api_key", "auth")):
+        reason = "the AI provider rejected the request credentials"
+    elif any(tok in low for tok in ("network", "connection", "unreachable", "dns", "ssl", "tls", "proxy")):
+        reason = "a network error prevented reaching the AI provider"
+    elif any(tok in low for tok in ("server_error", "internal server", "500", "502", "503", "bad gateway", "service unavailable")):
+        reason = "the AI provider returned a server error"
+    elif any(tok in low for tok in ("empty", "no usable", "no response", "short response")):
+        reason = "the AI provider returned an empty response"
+    else:
+        reason = "the AI provider was temporarily unavailable"
+    return f"Reason: {reason}."
+
+
+# Round 120 / F4: sentinel tokens that a normalized Status / Type field
+# collapses to when the source value was missing.  The data_normalization
+# root defaults emit ``Unknown`` (status) / ``unknown`` (type); ``_na`` emits
+# ``N/A``.  These are NOT facts about the case -- rendering them in the
+# customer-facing detail bracket produced a 232x ``Status: Unknown,
+# Type: unknown`` flood in the Build 88 Renewal artifact.
+_R120_UNKNOWN_TOKENS = frozenset({"", "n/a", "na", "unknown", "none", "nan", "null", "--", "-"})
+
+
+def _r120_kpi_detail_bracket(pairs, *, age_str: str = "") -> str:
+    """Round 120 / F4: build a `` [Label: value, ...]`` detail bracket from
+    only the KNOWN fields.
+
+    The Build 88 Renewal "All Support Cases" list rendered
+    ``[Severity: P3, Status: Unknown, Type: unknown]`` 232 times because the
+    bracket emitted every field unconditionally even when the source value
+    normalized to a sentinel (``Unknown`` / ``unknown`` / ``N/A``).  This
+    helper drops any pair whose value is a sentinel (case-insensitive, see
+    ``_R120_UNKNOWN_TOKENS``) so the bracket carries only fields we actually
+    know.
+
+    ``age_str`` is already prefixed with ``", "`` by the caller (the existing
+    ``f", {', '.join(lifecycle)}"`` shape).  It is appended after the known
+    pairs; when no known pairs exist its leading separator is stripped so the
+    bracket reads ``[opened 2026-..., 5 days open]`` rather than ``[, opened
+    ...]``.  Returns ``""`` when nothing is known so the caller omits the
+    bracket entirely.  Presentation-only -- does NOT touch SSoT counts.
+    """
+    known = [
+        f"{label}: {value}"
+        for label, value in pairs
+        if value is not None and str(value).strip().lower() not in _R120_UNKNOWN_TOKENS
+    ]
+    body = ", ".join(known)
+    if body and age_str:
+        return f" [{body}{age_str}]"
+    if body:
+        return f" [{body}]"
+    if age_str:
+        return f" [{age_str.lstrip(', ')}]"
+    return ""
+
+
 def _generate_comprehensive_fallback_insights(
     ab_norm,
     csone_df,
@@ -5812,19 +5898,18 @@ def _generate_comprehensive_fallback_insights(
         "from the canonical metrics (no model inference)."
     ]
     if llm_error:
-        # Round 112 / Build 81: route the LLM error through the R69/R71
-        # sanitizer before embedding it in the user-facing fallback
-        # narrative.  Pre-R112 ``str(llm_error).strip()`` echoed the raw
-        # CircuIT 429 body verbatim -- and the body carries a
-        # ``'user': '{"appkey": "...", "session_id": "..."}'`` blob that
-        # an attacker could use for session-replay against the upstream
-        # API.  R112 widened the sanitizer to redact appkey/session_id/
-        # the full user-blob too; using a 400-char cap (vs the default
-        # 200) so the operator still sees enough context to root-cause
-        # without leaking auth identifiers.
-        header_lines.append(
-            f"[LLM error] {_r69_sanitize_llm_error(llm_error, max_len=400)}"
-        )
+        # Round 112 / Build 81: the LLM error is still routed through the
+        # R69/R71 sanitizer (credential redaction) + R118/F3 envelope
+        # collapse -- ``_r120_humanize_fallback_reason`` calls
+        # ``_r69_sanitize_llm_error`` first so those contracts are
+        # preserved.  Round 120 / F3: humanize the sanitized error into a
+        # plain-English ``Reason: ...`` line and keep the technical
+        # ``[LLM error] ERROR: llm.rate_limit_429: ...`` marker OUT of the
+        # customer-facing prose (Build 88 Compact P26 leaked it).  The raw
+        # technical detail remains available to operators via the logs.
+        _r120_reason = _r120_humanize_fallback_reason(llm_error)
+        if _r120_reason:
+            header_lines.append(_r120_reason)
     return " ".join(header_lines + [""] + insights)
 
 def _parse_markdown_for_fallback(doc, ai_text: str):
@@ -7787,7 +7872,12 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             bems_cases = pd.DataFrame()
 
         # Header row - expanded to include software defects
-        headers = ['Total Customers', 'Support Cases', 'Critical (P1)', 'High (P2)', 'BEMS Escalations', 'Software Defects', 'Security Vulnerabilities']
+        # Round 120 / F1: the first tile renders ``total_customers_canonical_narrow``
+        # (the AB/cases/pulse-engaged subset), which R116 made strictly
+        # smaller than the title-page ``Customers in portfolio`` headline.
+        # Label it as the engaged subset so the dashboard never contradicts
+        # the headline ("Total Customers: 33" title vs a "13" tile here).
+        headers = ['Customers (AB/Cases/Pulse)', 'Support Cases', 'Critical (P1)', 'High (P2)', 'BEMS Escalations', 'Software Defects', 'Security Vulnerabilities']
         for i, header in enumerate(headers):
             cell = metrics_table.rows[0].cells[i]
             cell.text = header
@@ -7798,9 +7888,11 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         # Values row - expanded to include software defects and vulnerabilities
-        # Round 47 / R47-COMP-CUSTCOUNT-PARITY: this Word dashboard tile uses
-        # the canonical-narrow customer count so it matches the Excel
-        # ``Summary`` sheet's ``Customers in portfolio`` cell exactly.
+        # Round 120 / F1: this tile renders ``total_customers_canonical_narrow``
+        # (the AB/cases/pulse-engaged subset).  Its header is now
+        # ``Customers (AB/Cases/Pulse)`` so the value is honestly labeled as
+        # the engaged subset rather than colliding with the wider
+        # title-page ``Customers in portfolio`` headline.
         values = [str(total_customers_canonical_narrow), str(total_cases), str(p1_count), str(p2_count), str(bems_count), str(defect_count), str(vuln_count)]
         colors = [
             None,
@@ -7951,10 +8043,21 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
         # No need to recalculate - ensures consistency with dashboard
         total_cases = len(csone_df) if not csone_df.empty else 0
 
-        # Round 47 / R47-COMP-CUSTCOUNT-PARITY: render the canonical-
-        # narrow count in the Word Executive Summary so the Word
-        # headline equals Excel Summary's ``Customers in portfolio``.
-        overview_para.add_run(f'• Total Customers: {total_customers_canonical_narrow}\n')
+        # Round 120 / F1: ``total_customers_canonical_narrow`` is the
+        # plain ``count_customers(ab, csone, pulse)`` universe -- the
+        # subset of customers that actually carry adoption barriers,
+        # support cases, or pulse activity.  R116 widened the title-page /
+        # Excel ``Customers in portfolio`` headline to the team
+        # Contact-Center subscription roster (a strictly larger set), so
+        # this narrow value is legitimately smaller than the headline.
+        # Label it as the engaged subset so it never reads as a
+        # contradiction with the portfolio headline (the audited Build 88
+        # showed ``Total Customers: 33`` on the title page alongside
+        # ``Total Customers: 13`` here -- same label, two numbers).
+        overview_para.add_run(
+            f'• Customers with adoption barriers, support cases, or pulse activity: '
+            f'{total_customers_canonical_narrow}\n'
+        )
         overview_para.add_run(f'• Total Support Cases: {total_cases}\n')
 
         # Round 3: derive P1/P2 directly from canonical helpers without
@@ -13295,7 +13398,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             if cust_label:
                 p.add_run(cust_label).bold = True
             p.add_run(str(subject))
-            p.add_run(f' [Severity: {severity}, Status: {status}]').font.size = Pt(9)
+            # Round 120 / F4: omit sentinel Severity/Status so the bracket
+            # never reads ``[Severity: N/A, Status: Unknown]`` for a barrier
+            # whose source fields were missing.
+            _ab_bracket = _r120_kpi_detail_bracket([("Severity", severity), ("Status", status)])
+            if _ab_bracket:
+                p.add_run(_ab_bracket).font.size = Pt(9)
     else:
         doc.add_paragraph('No adoption barriers identified - this is a positive indicator.')
 
@@ -13364,7 +13472,16 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             # rendered ``**Classic Calabrio***delete old report -
             # Calabrio WFO# 00179474`` with the asterisks intact.
             p.add_run(_r44_strip_markdown_chrome(title_text) or str(title_text))
-            p.add_run(f' [Severity: {severity}, Status: {status}, Type: {case_type}{age_str}]').font.size = Pt(9)
+            # Round 120 / F4: build the detail bracket from only the KNOWN
+            # fields so a normalized ``Status: Unknown`` / ``Type: unknown``
+            # sentinel never reaches the customer prose (Build 88 Renewal
+            # rendered it 232x).  Severity, lifecycle/age preserved when present.
+            _tac_bracket = _r120_kpi_detail_bracket(
+                [("Severity", severity), ("Status", status), ("Type", case_type)],
+                age_str=age_str,
+            )
+            if _tac_bracket:
+                p.add_run(_tac_bracket).font.size = Pt(9)
     else:
         doc.add_paragraph('No support cases in the analysis period - this is a positive indicator.')
 

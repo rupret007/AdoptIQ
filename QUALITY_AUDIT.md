@@ -11953,3 +11953,49 @@ The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this
 - Code-signing the Windows EXE (Authenticode stays a soft/documented check until the EXE is signed; flip `_PC_REQUIRE_SIGNATURE` then).
 
 **Trailer:** Made-with: Cursor
+
+## Round 120 — handoff 2026-05-29
+
+**What changed (plain English):**
+- Report-accuracy sweep (F1-F7) over the four Build 88 reports. All seven are presentation-only — NO SSoT count/score logic changed. The R47-COMP-CUSTCOUNT-PARITY narrow-vs-wide split is preserved (F1 only relabels the narrow value).
+- F1: Comprehensive Portfolio Overview narrow count relabeled so `Total Customers: 13` (engaged subset) no longer collides with the title page's `Total Customers: 33` (wide scored roster). Overview paragraph → "Customers with adoption barriers, support cases, or pulse activity"; dashboard tile header → "Customers (AB/Cases/Pulse)". `app_simple.py` ~7790, ~7957.
+- F2: Compact Risk Summary `|`-separated tile citation no longer jams the pipe — `report_source_injector._rewrite_paragraph_with_inline_citations` pure-punctuation branch advances `cursor = value_end` (not `m.end()`), preserving the original whitespace before ` | `.
+- F3: Compact non-AI fallback humanized — new `app_simple._r120_humanize_fallback_reason(llm_error)` calls `_r69_sanitize_llm_error` first (R112 redaction preserved) then maps `ERROR: <kind>` → `"Reason: …"`; the raw `[LLM error]` marker no longer reaches customer prose.
+- F4: Renewal TAC + AB detail brackets built via new `app_simple._r120_kpi_detail_bracket(pairs, age_str=…)` which omits any field normalizing into `_R120_UNKNOWN_TOKENS` — kills the 232× `Status: Unknown, Type: unknown` flood.
+- F5: Leader portfolio-overview count nouns pluralized via new `leader_report_generator._r120_pluralize`.
+- F6: Leader team-totals row Sentiment column (`totals_cells[6]`) set to em-dash `"—"` instead of the mislabeled `"Team Avg"`.
+- F7: Leader `_compute_customer_health` drops sentinel customer rows via new `_r120_is_customer_sentinel` / `_R120_CUSTOMER_SENTINELS`.
+
+**Files touched:**
+- `app_simple.py` — F1 relabel (overview para + dashboard header); F3 `_r120_humanize_fallback_reason` + fallback wiring; F4 `_r120_kpi_detail_bracket` + `_R120_UNKNOWN_TOKENS` + TAC/AB bracket call sites.
+- `report_source_injector.py` — F2 cursor-advance fix in the pure-punctuation boundary branch.
+- `leader_report_generator.py` — F5 `_r120_pluralize` + overview wiring; F6 em-dash; F7 `_r120_is_customer_sentinel` + `_R120_CUSTOMER_SENTINELS` + health-table filter.
+- `config.py` — `ADOPTIQ_BUILD` 88 → 89 + Round 120 comment.
+- `README.md` — What's New in Build 89. `CLAUDE.md` — critical rule + floor bump (5893 → 5924).
+- Tests: `tests/test_round120_report_accuracy_sweep.py` (NEW); `tests/test_round112_build80_acceptance_fixes.py` (F3 wiring assertion updated).
+
+**SSoT modules touched:** config (build bump only). No canonical_metrics / risk_scoring / report_export_schema / data_normalization change.
+
+**Tests added/updated:**
+- `tests/test_round120_report_accuracy_sweep.py` — F1 narrow-relabel (overview phrase + tile header), F2 pipe-separated citation keeps the space, F3 humanized reason + sanitizer-runs-first, F4 `_r120_kpi_detail_bracket` omits unknown tokens / keeps known, F5 singular/plural, F6 TOTAL-row em-dash, F7 sentinel-row suppression (31 tests).
+- `tests/test_round112_build80_acceptance_fixes.py` — `test_fallback_insights_call_site_uses_sanitizer` updated to assert the humanizer wraps the sanitizer (sanitizer still runs first; R112 contract preserved).
+
+**Verify status:**
+- `make verify` — PASS (`PY=/Library/Frameworks/Python.framework/Versions/3.11/bin/python3`): ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities.
+- pytest: 5924 passed / 4 skipped / 6 deselected (Build 88 floor 5893; +31 Round 120 suite).
+
+**Hot spots Claude should audit first:**
+1. `app_simple._r120_humanize_fallback_reason` — confirm `_r69_sanitize_llm_error` runs FIRST so secrets are redacted before the `ERROR:`-kind mapping; confirm no raw `[LLM error]` marker can survive into the returned reason string.
+2. `report_source_injector._rewrite_paragraph_with_inline_citations` F2 branch — confirm `cursor = value_end` does not drop or duplicate any characters between matches in the multi-match loop (regression risk against R57/R66/R76/R90).
+3. `app_simple._r120_kpi_detail_bracket` — confirm a bracket with ALL fields unknown returns `""` (no empty `[]`), and a partially-known bracket renders only known fields with correct comma joins.
+4. `leader_report_generator._compute_customer_health` F7 filter — confirm a legitimately-named customer is never dropped (sentinel set is exact-match, case-insensitive, after strip).
+
+**Build + smoke:** PENDING — release-gated DMG rebuild (`OUTBOX/AdoptIQ-v1.0.4-build89.dmg`) + packaged smoke (plist build = 89, latest.json emitted build 89 to OUTBOX + OneDrive mirror with correct sha, corpus+salt bundled, codesign OK, frozen `/api/update/status` clean). PC build operator-run on Windows; validated by source-shape this round.
+
+**LIVE GATE (blocks push to main):** operator regenerates the four reports on VPN with a working LLM and confirms: Comprehensive count coherent/clearly-labeled (33 headline, narrow relabeled), Compact 0 mid-string `]|` citations + no raw `[LLM error]` in prose, Renewal `Unknown` sentinel noise gone, Leader grammar + `Team Avg` corrected + no bare-Unknown rows, per-customer LLM fallback ~0. Push HELD until confirmation (operator may override per prior rounds).
+
+**Known deferrals (intentional non-fixes):**
+- F1 deliberately does NOT renumber (preserves R47 parity); label-disambiguation only.
+- The 100% per-customer LLM fallback in the audited Build 88 Comprehensive is environmental (LLM blackout at generation time), not a code defect — cleared by the live re-acceptance run.
+
+**Trailer:** Made-with: Cursor

@@ -906,9 +906,23 @@ def _rewrite_paragraph_with_inline_citations(
                 out_parts.append(f" {citation_chrome} ")
                 cursor = next_label_start
             else:
+                # Round 120 / F2: pure-punctuation boundary (R57
+                # sentence-style placement).  The value regex's trailing
+                # ``\s*%?`` consumes the space that precedes a `` | ``
+                # separator, so resuming the cursor at ``m.end()`` would
+                # drop that space -- the next chunk then starts flush at
+                # ``|`` and the Compact Risk Summary tile renders
+                # ``"Overall Risk Score: 1.2 [Source: ...]| High Risk
+                # Customers: 3"`` (citation jammed against the pipe).
+                # Resume from ``value_end`` instead so the original
+                # boundary whitespace is preserved by the next chunk and
+                # the tile reads ``"... 1.2 [Source: ...] | High Risk
+                # Customers: 3"``.  For punctuation-adjacent values (``52.``
+                # / ``9,``) ``value_end == m.end()`` so this is a no-op --
+                # the fix is scoped to space-before-separator boundaries.
                 out_parts.append(line[cursor:value_end])
                 out_parts.append(f" {citation_chrome}")
-                cursor = m.end()
+                cursor = value_end
         out_lines.append("".join(out_parts))
     return "\n".join(out_lines)
 

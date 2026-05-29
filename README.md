@@ -1,8 +1,16 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 88).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 89).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 89 (Round 120 — Report-accuracy sweep)
+
+Build 89 is a polish pass over the four report types, closing seven model-independent accuracy/grammar issues an audit found in the Build 88 reports. (1) The **Comprehensive report no longer shows two different "Total Customers" numbers** — the title page's portfolio headline (the full scored team roster) and the executive-summary tile (the subset with adoption barriers, support cases, or pulse activity) are now clearly labeled as the different things they are, instead of both reading "Total Customers". (2) In the **Compact Risk Summary tile, citations no longer jam against the `|` separator** (`…1.2 [Source: …]| High Risk…` → `…1.2 [Source: …] | High Risk…`). (3) When the AI provider is unavailable, the **Compact non-AI fallback now prints a plain-English reason** ("Reason: the AI provider is rate limiting requests right now.") instead of leaking the raw `[LLM error] ERROR: …` marker. (4) **Renewal support-case detail brackets only show fields we actually know** — the 232× `Status: Unknown, Type: unknown` noise is gone. (5) **Leader grammar** is correct for single-item portfolios ("1 adoption barrier", not "1 adoption barriers"). (6) The **Leader team-totals row no longer mislabels** the Sentiment column "Team Avg" (the true average is reported in Key Insights). (7) **Leader Customer-Health tables suppress bare "Unknown" rows** that came from missing customer names.
+
+No risk-scoring or count logic changed — these are presentation-only fixes that preserve the documented Word↔Excel customer-count parity contract.
+
+All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **5924 pytest passed (Build 88 floor was 5893; +31 = the Round 120 F1-F7 regression suite)**.
 
 ### What's New in Build 88 (Round 119 — Automatic updates)
 

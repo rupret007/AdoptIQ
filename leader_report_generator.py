@@ -75,6 +75,44 @@ except Exception:  # pragma: no cover - defensive
     _R12_LRG_MED_HEX = 'ff7f0e'
     _R12_LRG_LOW_HEX = '2ca02c'
 
+# Round 120 / F7: a customer key that collapsed to one of these tokens is a
+# missing-data sentinel (the AB/CP groupbys ``fillna('Unknown')`` and the
+# ``.get('BU_NAME', 'Unknown')`` fallbacks all emit ``Unknown``).  Such a row
+# is noise in the DERIVED Customer Health Signals table, not a real account --
+# the Build 88 Leader rendered a bare ``Unknown | <CP min/max/last>`` row.  We
+# only suppress these in the aggregated health table; raw case/BEMS tables keep
+# their rows so a real case with an unresolved customer is never hidden.
+_R120_CUSTOMER_SENTINELS = frozenset({"", "unknown", "n/a", "na", "none", "nan", "null", "—", "-"})
+
+
+def _r120_is_customer_sentinel(name: Any) -> bool:
+    """Round 120 / F7: True when ``name`` is a bare missing-data sentinel."""
+    try:
+        return str(name).strip().lower() in _R120_CUSTOMER_SENTINELS
+    except Exception:
+        return True
+
+
+def _r120_pluralize(n: Any, singular: str, plural: str = None) -> str:
+    """Round 120 / F5: render ``"{n} {noun}"`` with correct pluralization.
+
+    The Build 88 Leader portfolio overview rendered
+    ``"Portfolio shows 1 adoption barriers, 1 action plans, and 1 TAC
+    cases"`` -- every noun was hard-coded plural regardless of count.  This
+    helper appends an ``s`` (or uses an explicit irregular ``plural``) only
+    when ``n != 1`` so a single-item portfolio reads grammatically.  Counts
+    that fail int coercion fall back to plural (safer for the common
+    multi-item case).  Presentation-only.
+    """
+    try:
+        count = int(n)
+    except (TypeError, ValueError):
+        count = 0
+    if count == 1:
+        return f"{n} {singular}"
+    return f"{n} {plural if plural is not None else singular + 's'}"
+
+
 def _r13_safe_doc_text(value: Any, max_len: int = 200) -> str:
     """Round 13 / Phase 9.7: sanitize a string before docx ``add_run``
     / cell.text assignment.
@@ -3008,8 +3046,19 @@ class LeaderReportGenerator:
         # Start with portfolio overview and sentiment context
         sentiment_context = f" with {sentiment_summary.lower()} customer sentiment"
 
-        summary_text = f"{cssm_name} manages {total_customers} customer accounts{sentiment_context}. "
-        summary_text += f"Portfolio shows {total_barriers} adoption barriers, {total_action_plans} action plans, and {total_tac_cases} TAC cases recorded over the last {days} days. "
+        # Round 120 / F5: pluralize each count noun so a single-item
+        # portfolio reads "1 customer account" / "1 adoption barrier" rather
+        # than the Build 88 ungrammatical "1 customer accounts" / "1 adoption
+        # barriers".
+        summary_text = (
+            f"{cssm_name} manages {_r120_pluralize(total_customers, 'customer account')}"
+            f"{sentiment_context}. "
+        )
+        summary_text += (
+            f"Portfolio shows {_r120_pluralize(total_barriers, 'adoption barrier')}, "
+            f"{_r120_pluralize(total_action_plans, 'action plan')}, and "
+            f"{_r120_pluralize(total_tac_cases, 'TAC case')} recorded over the last {days} days. "
+        )
 
         # Round 39 / Phase 1.3: re-ground the health assessment with
         # per-customer rates AND absolute-volume floors so portfolios
@@ -3486,7 +3535,14 @@ class LeaderReportGenerator:
         totals_cells[3].text = str(total_cps)
         totals_cells[4].text = str(total_tac)
         totals_cells[5].text = str(total_bems)
-        totals_cells[6].text = "Team Avg"
+        # Round 120 / F6: column 6 is the Sentiment column, not an
+        # activities column.  Build 88 stamped "Team Avg" here while col 7
+        # (Total Activities) correctly held the grand SUM -- a mislabel,
+        # since "Team Avg" implied col 7 was an average.  Blank the
+        # Sentiment cell with an em-dash; the true per-member average is
+        # already reported honestly in the Key Insights block below
+        # ("Average activities per team member: N").
+        totals_cells[6].text = "—"
         totals_cells[7].text = str(_grand_total)
 
         # Bold totals row
@@ -4162,6 +4218,12 @@ class LeaderReportGenerator:
 
         out: List[Dict[str, Any]] = []
         for name, entry in rows.items():
+            # Round 120 / F7: drop the synthetic ``Unknown`` bucket (and other
+            # missing-data sentinels) so the derived Customer Health Signals
+            # table never shows a bare ``Unknown | ...`` row.  Real per-case
+            # tables elsewhere keep their unresolved-customer rows.
+            if _r120_is_customer_sentinel(name) or _r120_is_customer_sentinel(entry.get('customer')):
+                continue
             entry['risk'] = _risk(entry)
             out.append(entry)
         out.sort(key=lambda e: ({'High': 0, 'Medium': 1, 'Low': 2}.get(e['risk'], 3), -(e.get('oldest_open_ab_days') or 0), e['customer']))
