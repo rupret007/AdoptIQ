@@ -2582,12 +2582,29 @@ def inject_version():
         _adoptiq_footer_year = str(datetime.now(timezone.utc).year)
     except Exception:
         _adoptiq_footer_year = '2025'
+    # Round 116 / Build 85 (C): the navbar "Admin Console" link was a
+    # hardcoded ``http://127.0.0.1:5152/``.  When the operator overrode
+    # ``ADOPTIQ_ADMIN_PORT`` (or a port collision pushed the admin daemon
+    # elsewhere) the link 404'd / hit the wrong service.  Resolve the
+    # live admin port via ``enhanced_admin_dashboard_v2._resolve_admin_port``
+    # (the SSoT the admin daemon itself binds to) so the link always
+    # tracks the running admin app -- mirrors the Round 80 ``_live_main_url``
+    # pattern.  Defensive: any import / resolve failure falls back to the
+    # historical default so the navbar link is never broken.
+    try:
+        from enhanced_admin_dashboard_v2 import _resolve_admin_port as _r116_resolve_admin_port  # noqa: PLC0415
+        _r116_admin_port = int(_r116_resolve_admin_port())
+    except Exception:  # noqa: BLE001
+        _r116_admin_port = 5152
     return {
         'adoptiq_version': ADOPTIQ_VERSION,
         'adoptiq_build': ADOPTIQ_BUILD,
         'adoptiq_version_string': version_string(),
         'csone_shared_folder_url': app.config.get('CSONE_SHARED_FOLDER_URL', ''),
         'adoptiq_footer_year': _adoptiq_footer_year,
+        # Round 116 / Build 85 (C): port-aware Admin Console URL.
+        'admin_console_url': f'http://127.0.0.1:{_r116_admin_port}/',
+        'admin_console_port': _r116_admin_port,
     }
 
 # Import Document and Inches for Word report generation
@@ -16973,6 +16990,47 @@ def run_comprehensive_analysis(analysis_id):
         _cs_norm = add_case_lifecycle_fields(_cs)
         _, canonical_bems_count = detect_bems_escalations(_cs_norm)
 
+        # Round 116 / Build 85 (B): "All Contact Center" customer-count
+        # regression fix.  R93 strict ACC scoping drops AB rows for
+        # customers whose AB carries no contact-center tech evidence
+        # (adoptiq_backend._apply_scope_filter_ab); those customers can
+        # then vanish from the narrow AB ∪ CSOne ∪ Pulse headline
+        # universe even though they ARE in the manager's Contact-Center
+        # subscription roster -- the Brian Frazier / All Contact Center
+        # 90d run surfaced "24" where the team carries ~37-49 CC
+        # customers.  Anchor the ACC headline universe on the team
+        # subscription set so a CC-subscription customer is never
+        # dropped, while keeping the AB_Detail_All sheet strictly scoped
+        # (R93 contract preserved) and surfacing R93 exclusions as
+        # ``tech_filter_scope_excluded`` warnings (already wired).  Gated
+        # to "All Contact Center" ONLY -- named-tech comprehensive runs
+        # keep the pre-R116 activity-narrow universe so the R47/R49/R50/
+        # R64 parity + title-page-coherence contracts are untouched.
+        _r116_acc_count = status.get('tech') == 'All Contact Center'
+        _r116_acc_subs_df = (
+            team_subs_for_customer_counting
+            if (
+                _r116_acc_count
+                and isinstance(team_subs_for_customer_counting, pd.DataFrame)
+                and not team_subs_for_customer_counting.empty
+            )
+            else None
+        )
+        try:
+            _r116_subs_n = (
+                0 if _r116_acc_subs_df is None else len(_r116_acc_subs_df)
+            )
+            logger.info(
+                "[[CUSTOMER_COUNT]] Round 116 / B: ACC count provenance -- "
+                "tech=%r acc_gate=%s wide_universe=%d subs_rows_for_count=%d",
+                status.get('tech'),
+                _r116_acc_count,
+                len(all_customers_comprehensive),
+                _r116_subs_n,
+            )
+        except Exception:  # noqa: BLE001 - provenance log must never break the run
+            pass
+
         def _slice_customer(df: pd.DataFrame, customer: str, customer_cols: List[str]) -> pd.DataFrame:
             if df is None or df.empty:
                 return pd.DataFrame()
@@ -17035,6 +17093,7 @@ def run_comprehensive_analysis(analysis_id):
                 ab_df=_ab,
                 csone_df=_cs_norm,
                 pulse_df=csconsole_customer_pulse if csconsole_customer_pulse is not None else pd.DataFrame(),
+                subs_df=_r116_acc_subs_df,  # Round 116 / Build 85 (B): ACC widens to CC subs
             )
             _r64_narrow_customer_set = {
                 _r64_norm_cust(name) for name in _r64_narrow_customer_list
@@ -17101,6 +17160,7 @@ def run_comprehensive_analysis(analysis_id):
                 ab_df=_ab,
                 csone_df=_cs_norm,
                 pulse_df=csconsole_customer_pulse if csconsole_customer_pulse is not None else pd.DataFrame(),
+                subs_df=_r116_acc_subs_df,  # Round 116 / Build 85 (B): ACC widens to CC subs
             )
         except Exception as _r47_cust_narrow_err:  # noqa: BLE001
             logger.debug(
@@ -17207,6 +17267,7 @@ def run_comprehensive_analysis(analysis_id):
             factual_claims=factual_claims,
             customer_universe=all_customers_comprehensive,
             customer_pulse_df=csconsole_customer_pulse,  # Round 50
+            subscriptions_df=_r116_acc_subs_df,  # Round 116 / Build 85 (B): ACC parity
             max_other_unknown_ratio=consistency_unknown_threshold,
             strict_mode=False,  # we enforce below so we can produce a uniform error
         )
@@ -19114,7 +19175,8 @@ def run_comprehensive_analysis(analysis_id):
                 'customer_pulse': filtered_customer_pulse,
                 'success_priorities': filtered_success_priorities,
                 'adoption_barriers': filtered_adoption_barriers
-            }, status['manager'], status['tech'], status['days'], partial_data_warnings=partial_data_warnings)  # Round 94
+            }, status['manager'], status['tech'], status['days'], partial_data_warnings=partial_data_warnings,
+                subscriptions_df=_r116_acc_subs_df)  # Round 94 + Round 116 / Build 85 (B): ACC Excel parity
             logger.info(f"[[OK]] Excel file written successfully: {xlsx_path}")
             status['progress'] = 97
             status['message'] = ' Excel workbook completed successfully!'
@@ -23008,6 +23070,15 @@ def _r69_handle_model_setting(setting_key: str, env_var: str) -> Any:
     try:
         merged = dict(_settings.load_settings() or {})
         merged[setting_key] = candidate
+        # Round 116 / Build 85: record whether the operator deliberately
+        # picked a model (non-empty candidate => user_set True) so the
+        # robust resolver heal never coerces a deliberate post-Build-85
+        # nano choice, while still healing a leftover / wedged value.
+        # Clearing the override (empty candidate) resets the flag so a
+        # later stale nano can heal to the Gemini default again.
+        flag_key = _settings._R116_MODEL_USER_SET_KEYS.get(setting_key)
+        if flag_key is not None:
+            merged[flag_key] = bool(candidate)
         _settings.save_settings(merged)
     except Exception as save_err:  # noqa: BLE001
         logger.exception("Round 69 / Build 43: settings.json write failed for %s", setting_key)

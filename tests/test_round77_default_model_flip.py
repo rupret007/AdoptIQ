@@ -131,11 +131,11 @@ def test_round77_gpt_5_nano_resolver_returns_legacy_when_persisted(monkeypatch, 
     resolver MUST return that value (not the new R77 hardcoded
     default) -- the override is what makes the UI flip honest.
 
-    Round 103/108/115 migrate pre-existing stale settings once each, so
-    this test marks all three migrations as complete before simulating a
-    deliberate post-migration UI back-toggle.  (Round 115 re-stomps a
-    stale ``gpt-5-nano`` once more for upgraded installs; a deliberate
-    post-R115 selection survives only when its ``r115`` marker is set.)
+    Round 116 / Build 85: a deliberate post-migration nano pick is now
+    keyed on the ``report_model_user_set`` flag (set by the POST handler),
+    NOT the one-time markers.  The migration markers are set here for
+    realism, but the flag is what makes the resolver honor the override
+    instead of healing it to the Gemini default.
     """
     monkeypatch.delenv("CIRCUIT_MODEL_NAME", raising=False)
     monkeypatch.delenv("CIRCUIT_MODEL_NAME_REPORT", raising=False)
@@ -146,6 +146,7 @@ def test_round77_gpt_5_nano_resolver_returns_legacy_when_persisted(monkeypatch, 
         "r108_model_default_migrated": True,
         "r115_model_default_migrated": True,
         "report_model_name": R77_LEGACY_DEFAULT,
+        "report_model_user_set": True,  # Round 116: deliberate operator pick
     })
     import model_resolver as _mr
     importlib.reload(_mr)

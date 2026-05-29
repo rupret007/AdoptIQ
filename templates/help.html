@@ -9,191 +9,280 @@
             <!-- Header -->
             <div class="text-center mb-5">
                 <h1 class="display-4 fw-bold text-primary mb-3 bounce-in">
-                    <i class="fas fa-question-circle me-3 text-gradient"></i>Help & Documentation
+                    <i class="fas fa-question-circle me-3 text-gradient"></i>AdoptIQ Operator Guide
                 </h1>
                 <p class="lead text-muted slide-in-left" style="animation-delay: 0.2s; font-size: 1.125rem;">
-                    Everything you need to know about using AdoptIQ effectively.
+                    How to run AdoptIQ, choose the right report, configure the app, and fix common issues.
                 </p>
             </div>
 
-            <!-- Getting Started -->
-            <div class="card mb-4 fade-in shadow-cisco">
+            <!-- Quick Start -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="quick-start">
                 <div class="card-header">
                     <h5 class="mb-0">
-                        <i class="fas fa-rocket me-2"></i>Getting Started
+                        <i class="fas fa-rocket me-2"></i>Quick Start (60 seconds)
                     </h5>
                 </div>
                 <div class="card-body">
-                    <h6 class="fw-bold text-primary mb-3">1. Install Dependencies</h6>
-                    <p>Make sure you have all required packages installed:</p>
-                    <div class="bg-light p-3 rounded hover-lift">
-                        <code class="text-primary">pip install -r requirements.txt</code>
-                    </div>
-                    
-                    <h6 class="mt-4 fw-bold text-success mb-3">2. Configure Credentials</h6>
-                    <p>Create a <code>.env</code> file with your Cisco credentials:</p>
-                    <div class="bg-light p-3 rounded hover-lift">
-                        <pre><code>KEEPER_ROLE_ID=your_role_id
-KEEPER_SECRET_ID=your_secret_id
-CIRCUIT_CLIENT_ID=your_client_id
-CIRCUIT_CLIENT_SECRET=your_client_secret</code></pre>
-                    </div>
-                    
-                    <h6 class="mt-4 fw-bold text-info mb-3">3. Start the Application</h6>
-                    <p>Run the web application:</p>
-                    <div class="bg-light p-3 rounded hover-lift">
-                        <code class="text-primary">python app_simple.py</code>
-                    </div>
-                    
-                    <h6 class="mt-4 fw-bold text-warning mb-3">4. Open Your Browser</h6>
-                    <p>Navigate to <code class="text-primary">http://localhost:5151</code></p>
-                </div>
-            </div>
-
-            <!-- Analysis Guide -->
-            <div class="card mb-4 fade-in shadow-cisco" style="animation-delay: 0.1s;">
-                <div class="card-header">
-                    <h5 class="mb-0">
-                        <i class="fas fa-play me-2"></i>Running Analysis
-                    </h5>
-                </div>
-                <div class="card-body">
-                    <h6 class="fw-bold text-primary mb-3">Step-by-Step Process</h6>
+                    <p class="text-muted">AdoptIQ is a desktop app. You launch it, it opens in your browser, you run a report, and you find the file. That's the whole loop.</p>
                     <div class="row g-3">
                         <div class="col-md-6">
                             <div class="d-flex align-items-start hover-lift">
-                                <div class="flex-shrink-0 me-3">
-                                    <div class="bg-primary bg-opacity-10 p-2 rounded-circle">
-                                        <span class="text-primary fw-bold">1</span>
-                                    </div>
-                                </div>
-                                <div>
-                                    <strong>Select Manager Team:</strong> Choose the manager whose portfolio you want to analyze
-                                </div>
+                                <div class="flex-shrink-0 me-3"><div class="bg-primary bg-opacity-10 p-2 rounded-circle"><span class="text-primary fw-bold">1</span></div></div>
+                                <div><strong>Connect to the Cisco VPN.</strong> AdoptIQ reads from Snowflake and Cisco internal services. Without VPN, data fetches fail.</div>
                             </div>
                         </div>
                         <div class="col-md-6">
                             <div class="d-flex align-items-start hover-lift">
-                                <div class="flex-shrink-0 me-3">
-                                    <div class="bg-success bg-opacity-10 p-2 rounded-circle">
-                                        <span class="text-success fw-bold">2</span>
-                                    </div>
-                                </div>
-                                <div>
-                                    <strong>Choose Technology:</strong> Focus on specific areas or analyze all technologies
-                                </div>
+                                <div class="flex-shrink-0 me-3"><div class="bg-success bg-opacity-10 p-2 rounded-circle"><span class="text-success fw-bold">2</span></div></div>
+                                <div><strong>Launch AdoptIQ.</strong> Double-click the app icon. It opens <code>http://localhost:5151</code> in your default browser automatically.</div>
                             </div>
                         </div>
                         <div class="col-md-6">
                             <div class="d-flex align-items-start hover-lift">
-                                <div class="flex-shrink-0 me-3">
-                                    <div class="bg-info bg-opacity-10 p-2 rounded-circle">
-                                        <span class="text-info fw-bold">3</span>
-                                    </div>
-                                </div>
-                                <div>
-                                    <strong>Set Time Range:</strong> Specify how many days back to analyze (1-365)
-                                </div>
+                                <div class="flex-shrink-0 me-3"><div class="bg-info bg-opacity-10 p-2 rounded-circle"><span class="text-info fw-bold">3</span></div></div>
+                                <div><strong>Pick a manager, a technology, and a time window</strong>, then choose a report type and click run. Progress shows live.</div>
                             </div>
                         </div>
                         <div class="col-md-6">
                             <div class="d-flex align-items-start hover-lift">
-                                <div class="flex-shrink-0 me-3">
-                                    <div class="bg-warning bg-opacity-10 p-2 rounded-circle">
-                                        <span class="text-warning fw-bold">4</span>
-                                    </div>
-                                </div>
-                                <div>
-                                    <strong>CSOne Data:</strong> Access latest AdoptIQ Export from CSOne via link, or run your own report and browse to select
-                                </div>
+                                <div class="flex-shrink-0 me-3"><div class="bg-warning bg-opacity-10 p-2 rounded-circle"><span class="text-warning fw-bold">4</span></div></div>
+                                <div><strong>Download the Word + Excel files</strong> from the results page, or find them later under <strong>History</strong> / <strong>Previous Reports</strong>.</div>
                             </div>
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-md-12">
                             <div class="d-flex align-items-start hover-lift">
-                                <div class="flex-shrink-0 me-3">
-                                    <div class="bg-danger bg-opacity-10 p-2 rounded-circle">
-                                        <span class="text-danger fw-bold">5</span>
-                                    </div>
-                                </div>
-                                <div>
-                                    <strong>Run Analysis:</strong> Click the button and wait for completion
-                                </div>
+                                <div class="flex-shrink-0 me-3"><div class="bg-danger bg-opacity-10 p-2 rounded-circle"><span class="text-danger fw-bold">5</span></div></div>
+                                <div><strong>Quit cleanly</strong> with the red <strong>Quit</strong> button in the navbar when you're done. This stops the local server and releases the port.</div>
                             </div>
                         </div>
                     </div>
-                    
-                    <h6 class="mt-4 fw-bold text-primary mb-3">Recommended Settings</h6>
-                    <div class="row g-3">
-                        <div class="col-md-6">
-                            <div class="bg-light p-3 rounded hover-lift">
-                                <strong class="text-success">Quick Review:</strong> 30-60 days
-                            </div>
-                        </div>
-                        <div class="col-md-6">
-                            <div class="bg-light p-3 rounded hover-lift">
-                                <strong class="text-primary">Standard Analysis:</strong> 90 days
-                            </div>
-                        </div>
-                        <div class="col-md-6">
-                            <div class="bg-light p-3 rounded hover-lift">
-                                <strong class="text-info">Deep Dive:</strong> 180 days
-                            </div>
-                        </div>
-                        <div class="col-md-6">
-                            <div class="bg-light p-3 rounded hover-lift">
-                                <strong class="text-warning">Trend Analysis:</strong> Start with "All Technologies"
-                            </div>
-                        </div>
+                    <div class="alert alert-info mt-3 mb-0 hover-lift">
+                        <i class="fas fa-info-circle me-2"></i><strong>No setup required.</strong> Credentials are bundled into the app at build time. You do not edit any <code>.env</code> file or install packages — just connect to VPN and launch.
                     </div>
                 </div>
             </div>
 
-            <!-- Understanding Outputs -->
-            <div class="card mb-4 fade-in shadow-cisco" style="animation-delay: 0.2s;">
+            <!-- Report Chooser -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="report-chooser">
                 <div class="card-header">
                     <h5 class="mb-0">
-                        <i class="fas fa-file-alt me-2"></i>Understanding Outputs
+                        <i class="fas fa-list-check me-2"></i>Which Report Should I Run?
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">Every report takes the same three inputs — <strong>Manager</strong>, <strong>Technology</strong> (or "All Contact Center" / "All Technologies"), and a <strong>time window</strong> in days (1–365). They differ in scope and audience.</p>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="border border-primary rounded p-3 h-100 hover-lift">
+                                <h6 class="fw-bold text-primary"><i class="fas fa-layer-group me-2"></i>Comprehensive</h6>
+                                <p class="small mb-0">The full portfolio deep-dive: per-customer storyboards, risk components, adoption barriers, action plans, BE-priority focus areas. Best for a complete account review. Word + multi-sheet Excel.</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="border border-success rounded p-3 h-100 hover-lift">
+                                <h6 class="fw-bold text-success"><i class="fas fa-compress me-2"></i>Compact</h6>
+                                <p class="small mb-0">An executive-length summary of the same portfolio: top customers, risk scores, key barriers. Best for a leadership readout when you don't need every customer's detail.</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="border border-info rounded p-3 h-100 hover-lift">
+                                <h6 class="fw-bold text-info"><i class="fas fa-rotate me-2"></i>Renewal Risk</h6>
+                                <p class="small mb-0">Focuses on renewal exposure and per-customer risk scoring (0–10). Available for a <strong>single customer</strong> (search a subscription) or a whole <strong>portfolio</strong>. Best when the question is "what's at risk this renewal?"</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="border border-warning rounded p-3 h-100 hover-lift">
+                                <h6 class="fw-bold text-warning"><i class="fas fa-users-gear me-2"></i>Leader</h6>
+                                <p class="small mb-0">Scoped by CSSM ownership across a manager's direct reports: action plans, barriers, pulse, TAC cases per CSSM. Best for a people-manager reviewing their team's book of work.</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="alert alert-secondary mt-3 mb-0 small hover-lift">
+                        <strong>Time window guidance:</strong> 30–60 days for a quick review, <strong>90 days</strong> for a standard analysis, 180 days for a deep trend dive. Start broad ("All Contact Center" / "All Technologies") and drill into a named technology if you need to.
+                    </div>
+                </div>
+            </div>
+
+            <!-- CSOne / OneDrive data sources -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="data-sources">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-database me-2"></i>Where the Data Comes From (CSOne &amp; OneDrive)
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">AdoptIQ blends live Snowflake data with a <strong>CSOne adoption-barrier export</strong> (an <code>.xlsx</code> from CSConsole). There are three ways AdoptIQ finds that CSOne file, in priority order:</p>
+                    <ol>
+                        <li><strong>Manual upload.</strong> On the analyze page, browse and select your latest CSOne <code>.xlsx</code> (<code>.xlsx</code>/<code>.xls</code>, under 50&nbsp;MB). This always wins when you provide it.</li>
+                        <li><strong>OneDrive autodiscovery.</strong> If you don't upload one, AdoptIQ looks in your synced OneDrive corpus folder and picks the most recent AdoptIQ CSOne export automatically. Zero-byte "Files-On-Demand" placeholders are skipped (they aren't really on disk yet).</li>
+                        <li><strong>Preferences folder override.</strong> If your local sync path doesn't match the canonical shape, set an explicit folder in <strong>Preferences → CSOne OneDrive folder</strong> and AdoptIQ uses that path directly.</li>
+                    </ol>
+                    <div class="alert alert-warning mb-0 hover-lift">
+                        <i class="fas fa-triangle-exclamation me-2"></i>If AdoptIQ can't find a CSOne file at all, adoption-barrier sheets will be empty and the report will carry a <strong>partial-data warning</strong>. Upload a file or fix your OneDrive sync to resolve it.
+                    </div>
+                </div>
+            </div>
+
+            <!-- Preferences hub -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="preferences">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-sliders me-2"></i>Preferences Hub
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">The <strong>Preferences</strong> page is where you tune AdoptIQ. Every setting persists to a private <code>settings.json</code> (mode <code>0600</code>, never committed) and takes effect on the very next run — no restart needed.</p>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded h-100 hover-lift">
+                                <strong class="text-primary"><i class="fas fa-robot me-2"></i>Report model</strong>
+                                <p class="small mb-0 mt-2">The LLM used for report narratives. Defaults to <code>gemini-3.1-flash-lite</code>. You can switch to <code>gpt-5-nano</code> from the dropdown. <strong>Test-before-Save:</strong> the Save button stays disabled until you click <em>Test</em> and the model responds OK.</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded h-100 hover-lift">
+                                <strong class="text-info"><i class="fas fa-comments me-2"></i>Ask AI model</strong>
+                                <p class="small mb-0 mt-2">The LLM used by the Ask AI feature, independent of the report model. Same default (<code>gemini-3.1-flash-lite</code>) and the same Test-before-Save gate.</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded h-100 hover-lift">
+                                <strong class="text-success"><i class="fas fa-link me-2"></i>Corpus share URL</strong>
+                                <p class="small mb-0 mt-2">The SharePoint share link AdoptIQ points operators at to add the knowledge-corpus folder to their OneDrive. Paste, Test, Save, or Clear to fall back to the built-in default.</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded h-100 hover-lift">
+                                <strong class="text-warning"><i class="fas fa-folder-open me-2"></i>CSOne OneDrive folder</strong>
+                                <p class="small mb-0 mt-2">An explicit local path to your synced CSOne folder, for when autodiscovery can't match your sharer-prefixed sync path. Overrides autodiscovery when set.</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded h-100 hover-lift">
+                                <strong class="text-danger"><i class="fas fa-file-export me-2"></i>Output folder</strong>
+                                <p class="small mb-0 mt-2">Where generated reports are written. Defaults to <code>~/Documents/AdoptIQ Reports</code> on packaged builds. Reports are grouped by <code>&lt;manager&gt;/&lt;report type&gt;/</code>.</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded h-100 hover-lift">
+                                <strong class="text-secondary"><i class="fas fa-crosshairs me-2"></i>Default scope</strong>
+                                <p class="small mb-0 mt-2">Pre-select your usual manager / technology / days so the analyze form opens ready to run. Plus the <strong>Intelligence</strong> on/off toggle (see next section).</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AdoptIQ Intelligence -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="intelligence">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-brain me-2"></i>AdoptIQ Intelligence &amp; Knowledge Corpus
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">AdoptIQ Intelligence powers the <strong>Ask AI</strong> feature and historical-context grounding by indexing prior AdoptIQ reports into an encrypted local knowledge corpus.</p>
+                    <h6 class="fw-bold text-primary mb-2">Pre-baked corpus</h6>
+                    <p>Every release ships with a <strong>pre-baked, encrypted corpus</strong> bundled into the app. On first launch it installs to your Application Support folder, so Ask AI works out of the box without waiting for an index pass.</p>
+                    <h6 class="fw-bold text-primary mt-3 mb-2">"Add shortcut to OneDrive" workflow</h6>
+                    <p>To get <strong>daily refreshes</strong> of the corpus from the latest team reports, you add the shared corpus folder to your own OneDrive:</p>
+                    <ol class="small">
+                        <li>Open the AdoptIQ corpus folder in SharePoint (use the deep link on the Intelligence panel / Preferences).</li>
+                        <li>Click <strong>"Add shortcut to OneDrive."</strong></li>
+                        <li>Let the OneDrive desktop client sync it. AdoptIQ detects the synced folder and unblocks daily refresh.</li>
+                    </ol>
+                    <div class="alert alert-info mb-0 hover-lift">
+                        <i class="fas fa-lock me-2"></i><strong>Security:</strong> the corpus is encrypted at rest (AES-256-GCM). The encryption key is derived from a sentinel in your synced OneDrive folder, so only authorized Cisco users with the shared folder can decrypt it. The share URL is not a secret — OneDrive/SharePoint access is the gate. While running, AdoptIQ holds a single-user plaintext copy in a temp file that is scrubbed on clean Quit.
+                    </div>
+                </div>
+            </div>
+
+            <!-- Ask AI -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="ask-ai">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-comment-dots me-2"></i>Ask AI
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">Ask AI answers natural-language questions about a manager's portfolio, grounded in retrieved evidence so it cites its sources instead of guessing.</p>
+                    <ul>
+                        <li><strong>Context:</strong> pick a manager/scope; Ask AI retrieves the most relevant evidence (hybrid BM25 + dense retrieval) and builds the answer from it.</li>
+                        <li><strong>Citations:</strong> answers carry <code>[Source: ID]</code> badges. Click a badge to see the snippet, source type, customer, and timestamp behind the claim.</li>
+                        <li><strong>Conversation mode:</strong> follow-up questions keep the prior context so you can drill in without re-stating the portfolio each time.</li>
+                        <li><strong>Limitations:</strong> Ask AI only knows what's in the corpus + the live portfolio briefing. For portfolios over 500 customers it streams a bounded sample and flags that per-customer metrics are unavailable for that run. It never fabricates numbers — ungrounded figures are rejected by the narrative validator.</li>
+                    </ul>
+                    <div class="alert alert-secondary mb-0 small hover-lift">
+                        Tip: if Ask AI says data is unavailable, check that VPN is up and the Intelligence panel shows the corpus as <em>Active</em>.
+                    </div>
+                </div>
+            </div>
+
+            <!-- External Intelligence -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="external-intel">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-satellite-dish me-2"></i>External Intelligence
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">The External Intelligence page layers in public service-health context: Webex status incidents, maintenance windows, and known bugs from <code>status.webex.com</code> / <code>help.webex.com</code>.</p>
+                    <ul class="small mb-0">
+                        <li><strong>Refresh</strong> pulls the latest incidents/bugs/maintenances into the local store.</li>
+                        <li><strong>Ask / query</strong> the stored intel to correlate an outage with a customer's reported barriers.</li>
+                        <li><strong>Export / Import</strong> the intel store to share a snapshot with a teammate offline.</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Finding reports -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="finding-reports">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-folder-tree me-2"></i>Finding Your Reports
                     </h5>
                 </div>
                 <div class="card-body">
                     <div class="row g-4">
                         <div class="col-md-6">
                             <div class="border border-primary rounded p-3 h-100 hover-lift">
-                                <div class="text-center mb-3">
-                                    <i class="fas fa-file-word text-primary fa-2x"></i>
-                                </div>
-                                <h6 class="fw-bold text-primary mb-3">Word Document (.docx)</h6>
-                                <p class="small text-muted mb-3">The Word report contains:</p>
-                                <ul class="small">
-                                    <li><strong>Portfolio Health Score:</strong> Overall grade (A-F) with justification</li>
-                                    <li><strong>Executive Summary:</strong> High-level insights and strategic implications</li>
-                                    <li><strong>Top Customers:</strong> Most engaged customers by activity volume</li>
-                                    <li><strong>Cross-Cutting Themes:</strong> Issues affecting multiple customers</li>
-                                    <li><strong>Customer Deep Dives:</strong> Individual customer analysis with recommendations</li>
-                                </ul>
+                                <h6 class="fw-bold text-primary"><i class="fas fa-file-word me-2"></i>On disk</h6>
+                                <p class="small mb-0">Reports land in your output folder, grouped as <code>&lt;Output&gt;/&lt;Manager&gt;/&lt;Report Type&gt;/</code>. Per-customer reports go under <code>&lt;Manager&gt;/Customer/&lt;Customer&gt;/</code>. Default output root is <code>~/Documents/AdoptIQ Reports</code>.</p>
                             </div>
                         </div>
                         <div class="col-md-6">
                             <div class="border border-success rounded p-3 h-100 hover-lift">
-                                <div class="text-center mb-3">
-                                    <i class="fas fa-file-excel text-success fa-2x"></i>
-                                </div>
-                                <h6 class="fw-bold text-success mb-3">Excel Spreadsheet (.xlsx)</h6>
-                                <p class="small text-muted mb-3">The Excel file contains multiple sheets:</p>
-                                <ul class="small">
-                                    <li><strong>AB_Detail_All:</strong> All adoption barriers with categorization</li>
-                                    <li><strong>CSOne_Detail_All:</strong> TAC case details and references</li>
-                                    <li><strong>External_Bugs:</strong> Public bug references from help.webex.com</li>
-                                    <li><strong>External_Incidents:</strong> Service status and maintenance information</li>
-                                </ul>
+                                <h6 class="fw-bold text-success"><i class="fas fa-clock-rotate-left me-2"></i>In the app</h6>
+                                <p class="small mb-0">Use <strong>History</strong> and <strong>Previous Reports</strong> in the navbar to browse and re-download past runs without hunting through the filesystem.</p>
                             </div>
                         </div>
+                    </div>
+                    <div class="alert alert-info mt-3 mb-0 small hover-lift">
+                        Every report carries a <strong>Build Label</strong> (Word footer / Excel <code>Report_Info</code> sheet) with <code>App_Version</code>, <code>App_Build</code>, and UTC timestamps so you can prove exactly which build produced a file.
                     </div>
                 </div>
             </div>
 
+            <!-- Admin Console -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="admin-console">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-shield-halved me-2"></i>Admin Console &amp; Diagnostics
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">The <strong>Admin Console</strong> link in the navbar opens a separate monitoring dashboard (loopback only) in a new tab. It is a plain link — <strong>it never shuts the server down</strong>. Only the red <strong>Quit</strong> button stops AdoptIQ.</p>
+                    <ul class="small mb-0">
+                        <li>Watch currently-running reports, phase timings, and grounding-rejection rates.</li>
+                        <li>Inspect connection telemetry, error logs, audits, and analytics.</li>
+                        <li>Run the same connectivity self-test available below.</li>
+                    </ul>
+                </div>
+            </div>
+
             <!-- Troubleshooting -->
-            <div class="card mb-4 fade-in shadow-cisco" style="animation-delay: 0.3s;">
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="troubleshooting" style="animation-delay: 0.3s;">
                 <div class="card-header">
                     <h5 class="mb-0">
                         <i class="fas fa-tools me-2"></i>Troubleshooting
@@ -201,17 +290,17 @@ CIRCUIT_CLIENT_SECRET=your_client_secret</code></pre>
                 </div>
                 <div class="card-body">
                     <h6 class="fw-bold text-primary mb-3">Common Issues & Solutions</h6>
-                    
+
                     <div class="alert alert-warning hover-lift">
-                        <h6 class="fw-bold"><i class="fas fa-exclamation-triangle me-2"></i>Import Errors</h6>
-                        <p class="mb-2"><strong>Symptom:</strong> "ModuleNotFoundError" or similar</p>
-                        <p class="mb-0"><strong>Solution:</strong> Run <code>pip install -r requirements.txt</code></p>
+                        <h6 class="fw-bold"><i class="fas fa-plug-circle-xmark me-2"></i>VPN not connected</h6>
+                        <p class="mb-2"><strong>Symptom:</strong> Data fetches time out, "Connection failed", or reports come back empty.</p>
+                        <p class="mb-0"><strong>Solution:</strong> Connect to the Cisco VPN before running anything. AdoptIQ reads from Snowflake and Cisco internal services that are only reachable on the corporate network. Re-run after the VPN is up.</p>
                     </div>
-                    
+
                     <div class="alert alert-warning hover-lift">
                         <h6 class="fw-bold"><i class="fas fa-exclamation-triangle me-2"></i>Database Connection Issues</h6>
                         <p class="mb-2"><strong>Symptom:</strong> "Connection failed", "Keeper Connection Error", or timeout errors</p>
-                        <p class="mb-2"><strong>Solution:</strong> Verify Keeper credentials and network connectivity</p>
+                        <p class="mb-2"><strong>Solution:</strong> Confirm VPN is up, then run the connectivity self-test below to pinpoint which step (DNS, TLS, AppRole, secret-read, Snowflake) is failing.</p>
                         {# Round 6 / Phase 2.14: removed inline ``onclick=`` so the
                            strict CSP from base.html (Phase 2.10) does not need
                            ``script-src 'unsafe-inline'`` for handlers.  The click
@@ -353,9 +442,33 @@ CIRCUIT_CLIENT_SECRET=your_client_secret</code></pre>
                     </div>
                     
                     <div class="alert alert-warning hover-lift">
+                        <h6 class="fw-bold"><i class="fas fa-cloud me-2"></i>OneDrive not synced</h6>
+                        <p class="mb-2"><strong>Symptom:</strong> The Intelligence panel shows "not synced", or CSOne autodiscovery finds nothing.</p>
+                        <p class="mb-0"><strong>Solution:</strong> Add the corpus folder to your OneDrive ("Add shortcut to OneDrive") and let the desktop client finish syncing. If your local path is non-standard, set it explicitly in <strong>Preferences → CSOne OneDrive folder</strong>.</p>
+                    </div>
+
+                    <div class="alert alert-warning hover-lift">
+                        <h6 class="fw-bold"><i class="fas fa-circle-half-stroke me-2"></i>Partial-data warnings</h6>
+                        <p class="mb-2"><strong>Symptom:</strong> A report banner / <code>Report_Info</code> sheet notes missing CSOne, empty scope, or excluded rows.</p>
+                        <p class="mb-0"><strong>Solution:</strong> This is honest disclosure, not a crash — the report was still produced. Upload a fresh CSOne export, widen the scope (e.g. "All Contact Center"), or accept the noted gap. Excluded-row counts tell you exactly what was dropped.</p>
+                    </div>
+
+                    <div class="alert alert-warning hover-lift">
+                        <h6 class="fw-bold"><i class="fas fa-arrows-rotate me-2"></i>Restart-required banner</h6>
+                        <p class="mb-2"><strong>Symptom:</strong> A yellow banner says a newer AdoptIQ build is on disk than the running process.</p>
+                        <p class="mb-0"><strong>Solution:</strong> Click the red <strong>Quit</strong> button, then relaunch the app. Reports generated after the restart carry the new <code>App_Build</code> in their Build Label.</p>
+                    </div>
+
+                    <div class="alert alert-warning hover-lift">
+                        <h6 class="fw-bold"><i class="fas fa-stop-circle me-2"></i>Quit &amp; Force-quit</h6>
+                        <p class="mb-2"><strong>Symptom:</strong> Clicking <strong>Quit</strong> while an analysis is running shows a confirmation prompt instead of stopping.</p>
+                        <p class="mb-0"><strong>Solution:</strong> That's the safety gate — it refuses to kill in-flight work unless you confirm with <strong>Force quit</strong>. The clean-quit path also flushes your run history and scrubs the in-memory corpus, so always prefer Quit over force-closing the app.</p>
+                    </div>
+
+                    <div class="alert alert-warning hover-lift">
                         <h6 class="fw-bold"><i class="fas fa-exclamation-triangle me-2"></i>Analysis Failures</h6>
                         <p class="mb-2"><strong>Symptom:</strong> Analysis stops or produces errors</p>
-                        <p class="mb-0"><strong>Solution:</strong> Check error logs in outputs/ directory</p>
+                        <p class="mb-0"><strong>Solution:</strong> Open the <strong>Admin Console</strong> to read error logs and per-run diagnostics. Most failures trace back to VPN, OneDrive sync, or a stale CSOne file.</p>
                     </div>
                 </div>
             </div>

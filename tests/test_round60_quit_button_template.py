@@ -27,10 +27,15 @@ import enhanced_admin_dashboard_v2 as admin_mod
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _BASE_TEMPLATE_PATH = _PROJECT_ROOT / "templates" / "base.html"
+_QUIT_JS_PATH = _PROJECT_ROOT / "static" / "js" / "quit_adoptiq.js"
 
 
 def _read_base_html() -> str:
     return _BASE_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+
+def _read_quit_js() -> str:
+    return _QUIT_JS_PATH.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +129,113 @@ def test_main_template_csrf_meta_tag_present():
         "<meta name=\"csrf-token\"> tag; without it /api/shutdown "
         "would 403 every browser-initiated Quit click."
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 116 / Build 85 (C): Admin Console link vs Quit separation
+# ---------------------------------------------------------------------------
+
+
+def test_r116_quit_button_has_visible_label():
+    """Round 116: the Quit button must carry a visible 'Quit' text label
+    (not an icon-only glyph) so it is never mistaken for a nav control.
+
+    Build-83 acceptance: users clicking near the Admin Console link
+    mis-clicked the bare power-glyph Quit button and reported 'Admin
+    Console tries to shut down'."""
+    html = _read_base_html()
+    btn_idx = html.find('id="adoptiq-quit-btn"')
+    assert btn_idx > 0
+    window = html[btn_idx: btn_idx + 400]
+    assert "quit-btn-label" in window and ">Quit<" in window, (
+        "Round 116 / Build 85 (C): #adoptiq-quit-btn must render a visible "
+        "'Quit' text label so it reads as a distinct destructive control."
+    )
+
+
+def test_r116_quit_button_has_separator_divider():
+    """A vertical divider must physically separate Quit from the nav
+    links so a near-miss click lands on empty space, not Quit."""
+    html = _read_base_html()
+    assert "adoptiq-quit-divider" in html, (
+        "Round 116 / Build 85 (C): a visual divider must separate the "
+        "destructive Quit control from the navigation links."
+    )
+
+
+def test_r116_admin_console_link_is_port_aware_not_hardcoded():
+    """The Admin Console href must come from the ``admin_console_url``
+    context value (resolved via _resolve_admin_port), NOT a hardcoded
+    ``http://127.0.0.1:5152/`` literal in the anchor."""
+    html = _read_base_html()
+    assert "admin_console_url" in html, (
+        "Round 116 / Build 85 (C): the Admin Console link must use the "
+        "port-aware admin_console_url context value."
+    )
+    # The anchor itself must carry the data hook and must NOT have a
+    # raw hardcoded :5152 href as its primary value.
+    link_idx = html.find("data-admin-console-link")
+    assert link_idx > 0, "Admin Console anchor must carry data-admin-console-link"
+    window = html[max(0, link_idx - 200): link_idx + 100]
+    assert "admin_console_url" in window
+
+
+def test_r116_admin_console_link_is_never_shutdown_endpoint():
+    """The Admin Console link must be a plain navigation anchor -- it
+    must NEVER point at /api/shutdown or /admin_quit (the mis-click that
+    triggered the 'Admin Console tries to shut down' report)."""
+    html = _read_base_html()
+    link_idx = html.find("data-admin-console-link")
+    assert link_idx > 0
+    # Inspect the whole anchor element.
+    anchor_open = html.rfind("<a", 0, link_idx)
+    anchor_close = html.find("</a>", link_idx)
+    anchor = html[anchor_open: anchor_close]
+    assert "/api/shutdown" not in anchor, (
+        "Round 116: the Admin Console anchor must never reference "
+        "/api/shutdown."
+    )
+    assert "/admin_quit" not in anchor, (
+        "Round 116: the Admin Console anchor must never reference "
+        "/admin_quit."
+    )
+
+
+def test_r116_context_processor_resolves_admin_port():
+    """The inject_version context processor must resolve the admin port
+    via enhanced_admin_dashboard_v2._resolve_admin_port so the link
+    tracks the live port (mirrors the Round 80 _live_main_url pattern)."""
+    app_src = (_PROJECT_ROOT / "app_simple.py").read_text(encoding="utf-8")
+    assert "_resolve_admin_port" in app_src, (
+        "Round 116: app_simple must resolve the admin port via "
+        "_resolve_admin_port for the port-aware Admin Console link."
+    )
+    assert "'admin_console_url'" in app_src
+
+
+def test_r116_shutdown_js_binds_only_quit_button_not_nav_links():
+    """The shutdown click handler must bind ONLY to #adoptiq-quit-btn --
+    never to a .nav-link or the admin anchor.  This is the source-level
+    guarantee that navigating the navbar can never trigger a shutdown."""
+    js = _read_quit_js()
+    assert "adoptiq-quit-btn" in js
+    # No selector that would grab nav links or the admin anchor.
+    assert ".nav-link" not in js, (
+        "Round 116: the Quit JS must not bind shutdown to .nav-link "
+        "elements -- that would make navigation links destructive."
+    )
+    assert "data-admin-console-link" not in js, (
+        "Round 116: the Quit JS must not bind shutdown to the Admin "
+        "Console anchor."
+    )
+
+
+def test_r116_resolve_admin_port_returns_int():
+    """The resolver used by the context processor must return a usable
+    integer port (smoke-level behavioral check)."""
+    port = admin_mod._resolve_admin_port()
+    assert isinstance(port, int)
+    assert 1 <= port <= 65535
 
 
 # ---------------------------------------------------------------------------

@@ -97,6 +97,21 @@ _SCHEMA: Dict[str, tuple] = {
     "corpus_knowledge_enabled": (bool, False),
     "ask_ai_model_name": (str, ""),  # Round 69 / Build 43
     "report_model_name": (str, ""),  # Round 69 / Build 43
+    # Round 116 / Build 85: explicit "the operator deliberately picked
+    # this model in the Preferences dropdown" flags.  Set True ONLY by
+    # the ``/api/settings/{ask-ai,report}-model`` POST handler after a
+    # successful ``/api/llm/ping`` (and reset False when the override is
+    # cleared to empty).  When False (the default), a stale
+    # ``gpt-5-nano`` value in settings.json is treated as leftover /
+    # wedged from an upgraded install and is coerced to the Gemini
+    # default by ``model_resolver`` at read time AND self-healed on disk
+    # by ``migrate_round116_model_user_set``.  This is the ROBUST heal
+    # that retires the fragile per-round one-time migration markers
+    # (R103/R108/R115) below — those early-return once their marker is
+    # stamped and so could never un-wedge an install that was already
+    # pinned to nano with all three markers True.
+    "ask_ai_model_user_set": (bool, False),  # Round 116 / Build 85
+    "report_model_user_set": (bool, False),  # Round 116 / Build 85
     "r103_model_default_migrated": (bool, False),  # Round 103 / Build 71
     "r108_model_default_migrated": (bool, False),  # Round 108 / Corpus Smoothness
     "r115_model_default_migrated": (bool, False),  # Round 115 / Build 84
@@ -193,6 +208,15 @@ _R103_MODEL_MIGRATION_KEY = "r103_model_default_migrated"
 _R108_MODEL_MIGRATION_KEY = "r108_model_default_migrated"
 _R115_MODEL_MIGRATION_KEY = "r115_model_default_migrated"  # Round 115 / Build 84
 
+# Round 116 / Build 85: map each model setting key to its companion
+# "operator deliberately picked this" flag.  Used by ``is_user_set`` and
+# by every migration / coercion path so a deliberate post-Build-85 nano
+# selection is never un-done by the self-heal.
+_R116_MODEL_USER_SET_KEYS = {
+    "ask_ai_model_name": "ask_ai_model_user_set",
+    "report_model_name": "report_model_user_set",
+}
+
 
 def _is_valid_model_name(value: Any) -> bool:
     """Return True if ``value`` is empty (= unset) or matches the
@@ -214,6 +238,26 @@ def _is_valid_model_name(value: Any) -> bool:
 def _r103_model_value_needs_migration(value: Any) -> bool:
     """Return True for the exact stale model default retired in R103."""
     return isinstance(value, str) and value.strip() == _R103_STALE_DEFAULT_MODEL
+
+
+def is_user_set(model_key: str) -> bool:
+    """Round 116 / Build 85: return True when the operator explicitly picked
+    this model via the Preferences dropdown.
+
+    ``model_key`` is one of ``"report_model_name"`` / ``"ask_ai_model_name"``.
+    A True result means the persisted value is a deliberate operator choice
+    and MUST NOT be coerced/healed by ``model_resolver`` or the R116
+    self-heal — even if it is the stale ``gpt-5-nano`` default.  Defaults
+    to False (and on any error) so a leftover / wedged value heals to the
+    Gemini default rather than silently sticking on nano.
+    """
+    flag_key = _R116_MODEL_USER_SET_KEYS.get(model_key)
+    if flag_key is None:
+        return False
+    try:
+        return load_settings().get(flag_key) is True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # Round 88 / F5 (P1): OneDrive CSOne folder path validator.
@@ -525,7 +569,9 @@ def migrate_round103_model_defaults() -> bool:
     changed_model = False
     next_settings = dict(current)
     for key in ("ask_ai_model_name", "report_model_name"):
-        if _r103_model_value_needs_migration(next_settings.get(key)):
+        if _r103_model_value_needs_migration(next_settings.get(key)) and (
+            next_settings.get(_R116_MODEL_USER_SET_KEYS[key]) is not True
+        ):
             next_settings[key] = _R103_CURRENT_DEFAULT_MODEL
             changed_model = True
     next_settings[_R103_MODEL_MIGRATION_KEY] = True
@@ -560,7 +606,9 @@ def migrate_round108_model_defaults() -> bool:
     changed_model = False
     next_settings = dict(current)
     for key in ("ask_ai_model_name", "report_model_name"):
-        if _r103_model_value_needs_migration(next_settings.get(key)):
+        if _r103_model_value_needs_migration(next_settings.get(key)) and (
+            next_settings.get(_R116_MODEL_USER_SET_KEYS[key]) is not True
+        ):
             next_settings[key] = _R103_CURRENT_DEFAULT_MODEL
             changed_model = True
     next_settings[_R108_MODEL_MIGRATION_KEY] = True
@@ -599,7 +647,9 @@ def migrate_round115_model_defaults() -> bool:
     changed_model = False
     next_settings = dict(current)
     for key in ("ask_ai_model_name", "report_model_name"):
-        if _r103_model_value_needs_migration(next_settings.get(key)):
+        if _r103_model_value_needs_migration(next_settings.get(key)) and (
+            next_settings.get(_R116_MODEL_USER_SET_KEYS[key]) is not True
+        ):
             next_settings[key] = _R103_CURRENT_DEFAULT_MODEL
             changed_model = True
     next_settings[_R115_MODEL_MIGRATION_KEY] = True
@@ -615,6 +665,55 @@ def migrate_round115_model_defaults() -> bool:
     return changed_model
 
 
+def migrate_round116_model_user_set() -> bool:
+    """Round 116 / Build 85: condition-driven self-heal for stale gpt-5-nano.
+
+    Unlike the per-round marker migrations (R103/R108/R115), which each
+    early-return once their one-time marker is stamped, this heal runs on
+    EVERY startup and is gated purely on state — so a wedged install whose
+    three markers are all already ``True`` (the exact Build 84 acceptance
+    bug: ``report_model_name=gpt-5-nano`` with R103+R108+R115 markers True,
+    which no marker migration could ever un-stick) still heals.
+
+    A stale ``gpt-5-nano`` value is cleared to the empty sentinel (the
+    resolver then falls through to the Gemini default) UNLESS the matching
+    ``*_user_set`` flag is True (a deliberate post-Build-85 dropdown pick).
+    Idempotent: after healing, the value is no longer the stale default so
+    subsequent runs no-op (and never re-save).  Returns True iff it changed
+    something.  Never raises to callers.
+    """
+    try:
+        current = load_settings()
+    except Exception:  # noqa: BLE001
+        return False
+    changed = False
+    next_settings = dict(current)
+    for model_key, flag_key in _R116_MODEL_USER_SET_KEYS.items():
+        if (
+            _r103_model_value_needs_migration(next_settings.get(model_key))
+            and next_settings.get(flag_key) is not True
+        ):
+            # Heal to the unset sentinel so the resolver picks the Gemini
+            # default; the operator can still re-select nano deliberately.
+            next_settings[model_key] = ""
+            changed = True
+    if not changed:
+        return False
+    try:
+        save_settings(next_settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "adoptiq_settings: Round 116 model self-heal skipped: %s",
+            exc,
+        )
+        return False
+    logger.info(
+        "adoptiq_settings: Round 116 healed stale gpt-5-nano model "
+        "default(s) to the Gemini fallback (no operator user_set flag)",
+    )
+    return True
+
+
 def ensure_model_defaults_migrated() -> bool:
     """Run all model-default migrations; never raises to callers."""
     changed = False
@@ -628,6 +727,12 @@ def ensure_model_defaults_migrated() -> bool:
         pass
     try:
         changed = migrate_round115_model_defaults() or changed
+    except Exception:  # noqa: BLE001
+        pass
+    # Round 116 / Build 85: condition-driven heal runs LAST so it catches
+    # any stale nano the marker migrations early-returned past.
+    try:
+        changed = migrate_round116_model_user_set() or changed
     except Exception:  # noqa: BLE001
         pass
     return changed
@@ -718,7 +823,9 @@ __all__ = [
     "migrate_round103_model_defaults",
     "migrate_round108_model_defaults",
     "migrate_round115_model_defaults",
+    "migrate_round116_model_user_set",  # Round 116 / Build 85
     "ensure_model_defaults_migrated",
+    "is_user_set",  # Round 116 / Build 85
     "get",
     "set",
     "schema_keys",

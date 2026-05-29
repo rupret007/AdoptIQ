@@ -991,7 +991,38 @@ ADOPTIQ_VERSION = "1.0.4"
 # artifact of each type; the existing-report sweep came back clean (0
 # mid-string, 0 markdown, 0 stub, 0 global-config, 0 HTML, 0 dup IDs, 0
 # saturation; nanish cells are honest empty-source fallbacks, NOT bugs).
-ADOPTIQ_BUILD = "84"  # Round 115 / Build 84
+#
+# Round 116 / Build 85 -- model heal + ACC count fix + admin/help/audit sweep.
+# (A) Robust model resolution: Gemini is the default and a wedged/leftover
+# ``gpt-5-nano`` in settings.json now ALWAYS heals back to Gemini at runtime
+# unless the operator explicitly picked nano from the Preferences dropdown
+# (tracked by new ``report_model_user_set`` / ``ask_ai_model_user_set`` flags;
+# ``model_resolver`` coerces stale nano when the flag is not True).  Retires
+# reliance on per-round migration markers for coercion.  (B) Comprehensive
+# "All Contact Center" customer-count regression: R93 strict ACC scoping drops
+# AB rows with no Contact-Center tech evidence, so customers present only via
+# those rows vanished from the narrow AB-CSOne-Pulse headline universe (Brian
+# Frazier / All Contact Center 90d showed "15"/"24" where the team carries
+# ~37-49 CC customers).  The ACC headline universe is now anchored on the team
+# Contact-Center SUBSCRIPTION roster as well, threaded coherently through the
+# Word headline, risk-band buckets, the consistency validator, AND the Excel
+# Summary so all four agree by construction; the AB_Detail_All sheet stays
+# strictly scoped (R93 contract preserved) and exclusions surface as
+# ``tech_filter_scope_excluded`` warnings.  Gated to "All Contact Center" ONLY
+# -- named-tech / Compact / Renewal / Leader keep the pre-R116 universe.
+# (C) Admin/Quit UX hardening: the navbar Quit control now carries a visible
+# "Quit" label + a divider separating it from the nav links (the icon-only
+# button mis-click that read as "Admin Console tries to shut down"); the Admin
+# Console link is now port-aware via ``_resolve_admin_port`` instead of a
+# hardcoded ``:5152``.  (D) Help page fully rewritten operator-first.  (E)
+# Settings test-isolation: an autouse conftest fixture redirects
+# ``adoptiq_settings._app_support_dir`` to a per-test tmp_path so no test can
+# touch the real settings.json (the corruption that wedged the live file).
+# Pinned by tests/test_round116_model_heal_robust.py,
+# tests/test_round116_acc_customer_count_floor.py,
+# tests/test_round116_help_page_content.py, and the extended
+# tests/test_round60_quit_button_template.py.
+ADOPTIQ_BUILD = "85"  # Round 116 / Build 85
 # Round 113 / Build 82: Ask AI uplift + Preferences fix-and-polish.
 # Phase A (Ask AI UX): unified conversation history across the sync +
 # stream paths (A1), visible browser-local conversation thread (A2),

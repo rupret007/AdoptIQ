@@ -15,6 +15,35 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_adoptiq_settings(monkeypatch, tmp_path):
+    """Round 116 / Build 85: redirect ``adoptiq_settings`` to a per-test tmp
+    directory so NO test (or CLI invocation triggered during a test) can read
+    or write the real ``~/Library/Application Support/AdoptIQ/settings.json``.
+
+    This closes the test-isolation hazard that was the root cause of the
+    Build-84 "wedged nano" state: a settings-writing test or dev CLI run hit
+    the real file and could persist a migration marker (``r115=true``) without
+    the matching model value, leaving the live install pinned to a stale model
+    no one-time migration could heal.  It also protects every developer running
+    ``make verify`` from clobbering their own preferences.
+
+    Tests that need a specific settings directory may still call
+    ``monkeypatch.setattr(adoptiq_settings, "_app_support_dir", ...)``
+    themselves -- that later override wins, since it runs after this autouse
+    fixture during the test body.
+    """
+    try:
+        import adoptiq_settings as _settings
+    except Exception:  # noqa: BLE001 - never block collection on import error
+        return
+    settings_dir = tmp_path / "adoptiq_settings_home"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        _settings, "_app_support_dir", lambda: settings_dir, raising=False
+    )
+
+
 @pytest.fixture
 def app():
     """Create a Flask test application."""

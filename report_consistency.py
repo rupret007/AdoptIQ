@@ -77,6 +77,7 @@ def validate_report_consistency(
     extra_frames: Optional[list] = None,
     account_to_customer: Optional[Dict[str, str]] = None,
     pulse_df: Optional[pd.DataFrame] = None,
+    subscriptions_df: Optional[pd.DataFrame] = None,  # Round 116 / Build 85 (B)
 ) -> ConsistencyResultContract:
     """
     Validate cross-report consistency and produce actionable diagnostics.
@@ -160,10 +161,22 @@ def validate_report_consistency(
     # need the wider iteration roster (defect-customer coverage, per-
     # customer narrative pass, etc.).
     _pulse_for_count = pulse_df if pulse_df is not None else customer_pulse_df
+    # Round 116 / Build 85 (B): the comprehensive "All Contact Center"
+    # caller threads the team Contact-Center subscription roster as
+    # ``subscriptions_df`` so the validator's narrow ``total_customers``
+    # agrees BY CONSTRUCTION with the Word headline + Excel Summary,
+    # which now also widen the ACC universe to the CC subscription set ∪
+    # scoped AB ∪ CSOne ∪ Pulse (a CC-subscription customer whose AB rows
+    # were dropped by R93 strict ACC scoping is no longer silently lost).
+    # ``subscriptions_df`` defaults to ``None`` for every other caller
+    # (renewal / compact / leader / named-tech comprehensive), so this
+    # count is byte-identical to the pre-R116 (ab, csone, pulse) shape
+    # there and the R47/R49/R50 parity contracts are preserved.
     metrics["total_customers"] = _cm.count_customers(
         ab_df=ab_df,
         csone_df=csone_df,
         pulse_df=_pulse_for_count,
+        subs_df=subscriptions_df,
     )
 
     if customer_universe is not None:

@@ -738,6 +738,7 @@ def build_summary_rows(
     tech: Optional[str] = None,
     days: Optional[Any] = None,
     generated_at_utc_iso_z: Optional[str] = None,
+    subscriptions_df: Optional[Any] = None,  # Round 116 / Build 85 (B)
 ) -> list[tuple[str, str]]:
     """Build the (label, value) rows for the Summary sheet.
 
@@ -805,11 +806,24 @@ def build_summary_rows(
         # also widening the Compact Word headline -- the cross-format
         # parity invariant in
         # ``report_consistency.validate_report_consistency`` will fail.
+        # Round 116 / Build 85 (B): when an "All Contact Center"
+        # comprehensive run passes ``subscriptions_df``, the displayed
+        # customer universe is anchored on the team's Contact-Center
+        # subscription roster ∪ scoped AB ∪ CSOne ∪ Pulse so a
+        # CC-subscription customer whose AB rows were dropped by R93
+        # strict ACC scoping is still counted in "Customers in
+        # portfolio".  ``subscriptions_df`` defaults to ``None`` for
+        # every other caller, so ``count_customers`` receives
+        # ``subs_df=None`` and the pre-R116 (ab, csone, pulse) universe
+        # is byte-identical for named-tech / Compact / Renewal / Leader.
+        # The AB_Detail_All sheet itself stays strictly scoped (R93
+        # contract preserved); only the headline universe widens.
         customers = _safe_canonical_call(
             cm.count_customers,
             ab_df=ab_df,
             csone_df=csone_df,
             pulse_df=cs_pulse,
+            subs_df=subscriptions_df,
         )
         total_barriers = _safe_canonical_call(cm.count_total_barriers, ab_df)
         critical_barriers = _safe_canonical_call(cm.count_critical_barriers, ab_df)
@@ -921,6 +935,7 @@ def write_summary_sheet(
     days: Optional[Any] = None,
     generated_at_utc_iso_z: Optional[str] = None,
     sheet_name: str = "Summary",
+    subscriptions_df: Optional[Any] = None,  # Round 116 / Build 85 (B)
 ) -> bool:
     """Write the Round-15 Summary sheet as the *first* tab.
 
@@ -940,6 +955,7 @@ def write_summary_sheet(
             tech=tech,
             days=days,
             generated_at_utc_iso_z=generated_at_utc_iso_z,
+            subscriptions_df=subscriptions_df,  # Round 116 / Build 85 (B)
         )
     except Exception as err:  # pragma: no cover - defensive only
         logger.debug("Round 15 summary build failed: %s", err)

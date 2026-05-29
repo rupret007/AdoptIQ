@@ -49,15 +49,19 @@ def test_round103_post_migration_gpt_back_toggle_still_works(monkeypatch, tmp_pa
     import adoptiq_settings as _s
 
     monkeypatch.setattr(_s, "_app_support_dir", lambda: tmp_path)
-    # Round 115 / Build 84: a deliberate nano choice is one made AFTER the
-    # R115 re-migration, so the r115 marker must be present for the choice
-    # to survive (otherwise R115 re-stomps the stale value to Gemini).
+    # Round 116 / Build 85: a deliberate nano choice is now expressed by the
+    # per-model ``*_user_set`` flags (set when the operator saves nano from
+    # the Preferences dropdown), NOT by the presence of migration markers.
+    # The migration markers no longer gate coercion; only ``user_set``
+    # protects a stale-looking nano from healing back to Gemini.
     _s.save_settings({
         "r103_model_default_migrated": True,
         "r108_model_default_migrated": True,
         "r115_model_default_migrated": True,
         "ask_ai_model_name": STALE,
         "report_model_name": STALE,
+        "ask_ai_model_user_set": True,
+        "report_model_user_set": True,
     })
 
     import model_resolver as _mr
@@ -89,14 +93,17 @@ def test_round108_post_migration_nano_choice_still_works(monkeypatch, tmp_path):
     import adoptiq_settings as _s
 
     monkeypatch.setattr(_s, "_app_support_dir", lambda: tmp_path)
-    # Round 115 / Build 84: deliberate nano survives only when the r115
-    # marker is also present (post-R115 selection).
+    # Round 116 / Build 85: deliberate nano survives only when the per-model
+    # ``*_user_set`` flags are present (set on a successful Preferences save).
+    # The migration markers no longer gate coercion.
     _s.save_settings({
         "r103_model_default_migrated": True,
         "r108_model_default_migrated": True,
         "r115_model_default_migrated": True,
         "ask_ai_model_name": STALE,
         "report_model_name": STALE,
+        "ask_ai_model_user_set": True,
+        "report_model_user_set": True,
     })
 
     import model_resolver as _mr

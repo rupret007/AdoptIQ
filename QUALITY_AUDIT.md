@@ -11764,3 +11764,49 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - **Gated macOS DMG rebuild** — deferred to the operator (signing identity + bake-host corpus + >1 GB artifact). Build is the only remaining D-phase step; `adoptiq_pc.spec` needs no change (pure-Python; python-docx already bundled).
 
 **Trailer:** Made-with: Cursor
+
+## Round 116 — handoff 2026-05-28
+
+**What changed (plain English):**
+- (A) Robust model resolution: a wedged `settings.json` at `report_model_name: gpt-5-nano` (all three R103/R108/R115 markers `True`, no way for a one-time migration to heal it) now heals to Gemini at *resolve* time. Added `report_model_user_set` / `ask_ai_model_user_set` schema flags + `is_user_set()` helper (`adoptiq_settings.py`); the `/api/settings/model` handler sets the flag on a successful test-before-save and clears it on empty; `model_resolver` coerces stale nano to `_HARDCODED_DEFAULT` UNLESS `user_set is True`. Coercion is now runtime+state-gated, not marker-gated.
+- (B) Comprehensive "All Contact Center" headline customer-count was under-counting (~15/24 where the team carries ~37-49 CC customers) because R93 strict ACC AB scoping dropped unknown-tech AB rows and those customers fell out of the narrow `AB∪CSOne∪Pulse` universe. For `tech == 'All Contact Center'` ONLY, the headline universe is now anchored on the team CC subscription roster (`_r116_acc_subs_df`) threaded into all four count sites (Word headline `count_customers`, R64 narrow `list_customers` band buckets, R47 consistency narrow count, Excel `Summary`). AB sheet stays strict (R93); exclusions surface as `tech_filter_scope_excluded`.
+- (C) Admin/Quit UX: navbar Quit now has a visible "Quit" label + a divider; Admin Console link is port-aware via `_resolve_admin_port()` (was hardcoded `:5152`). Shutdown JS still binds only `#adoptiq-quit-btn`.
+- (D) `templates/help.html` rewritten operator-first (10 `data-help-section` blocks); in-page search + connectivity self-test preserved.
+- (E) `tests/conftest.py` autouse fixture redirects `adoptiq_settings._app_support_dir` to per-test `tmp_path` so no test can touch the real `settings.json` (the corruption channel that wedged the live file).
+
+**Files touched:**
+- `adoptiq_settings.py` — user_set schema keys + `is_user_set` helper + `_MODEL_USER_SET_KEYS`.
+- `model_resolver.py` — `_r116_coerce_settings_value` gating coercion on the user_set flag.
+- `app_simple.py` — `_r69_handle_model_setting` persists user_set; `inject_version` resolves port-aware admin URL; comprehensive ACC count anchored on CC subs across the four count sites + provenance log.
+- `templates/base.html` — Quit label + divider; port-aware Admin Console href.
+- `templates/help.html` — full operator-first rewrite.
+- `tests/conftest.py` — autouse settings-isolation fixture.
+- `scripts/r114_audit_reports.py` — surfaces `customers_in_portfolio` + low-count flag for contact_center reports.
+- `config.py` — `ADOPTIQ_BUILD` 84 → 85 + Round 116 comment.
+- Tests: `tests/test_round116_model_heal_robust.py`, `tests/test_round116_acc_customer_count_floor.py`, `tests/test_round116_help_page_content.py`; extended `tests/test_round60_quit_button_template.py`; updated `tests/test_round77_default_model_flip.py`, `tests/test_round103_ux_cleanup.py`, `tests/test_round115_model_remigration.py`.
+
+**SSoT modules touched:** config, canonical_metrics (read-only via threaded `subs_df`/`subscriptions_df` kwargs — no signature change), report_consistency (read-only).
+
+**Tests added/updated:**
+- `tests/test_round116_model_heal_robust.py` (13) — wedged nano heals to Gemini; user_set nano stays; cleared override heals; POST sets the flag.
+- `tests/test_round116_acc_customer_count_floor.py` (11) — CC-subscription customer with only unknown-tech AB + no scoped CSOne/Pulse is still counted; AB sheet stays strict.
+- `tests/test_round116_help_page_content.py` (20) — section blocks present, operator-first, search + self-test preserved.
+- `tests/test_round60_quit_button_template.py` (extended) — visible label, divider, port-aware admin href, admin href != shutdown, JS binds only quit id, `_resolve_admin_port` returns int.
+- Updated R77 / R103 / R115 deliberate-nano tests to key on `*_user_set` instead of markers.
+
+**Verify status:**
+- `make verify` — pending operator run (pytest green locally).
+- pytest: 5791 passed / 4 skipped / 6 deselected (R115 floor 5740; +51).
+- ruff / bandit / pip-audit: to be confirmed under `make verify` (no new deps; no new top-level modules).
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py` ACC count gate (`status.get('tech') == 'All Contact Center'`) — confirm the exact-string gate doesn't miss a legitimate ACC alias and doesn't widen named-tech runs.
+2. `model_resolver._r116_coerce_settings_value` — confirm it only coerces the EXACT stale nano string and respects a deliberate `user_set` nano.
+3. `app_simple.inject_version` admin-port resolution — confirm the `5152` fallback on resolve error and that it never points at a shutdown route.
+
+**Known deferrals (intentional non-fixes):**
+- Live VPN-gated Gemini regen of all four reports (incl. Brian/ACC floor confirmation ~37-49) — operator post-build smoke step (#9.4); the synthetic floor test pins the over-exclusion behavior.
+- Gated macOS DMG rebuild — operator step (signing identity + bake-host corpus). `adoptiq_pc.spec` needs no change (pure-Python; no new import edge).
+- Per-round migration markers retained for back-compat (no new ones added); heal is now the user_set gate.
+
+**Trailer:** Made-with: Cursor

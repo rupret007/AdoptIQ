@@ -179,13 +179,58 @@ def audit_docx(path: Path) -> dict:
     return findings
 
 
+def _extract_customers_in_portfolio(rows: list) -> int | None:
+    """Round 116 / Build 85 (B): pull the 'Customers in portfolio' count
+    from a Summary-style ``(Item, Value)`` sheet so the audit can surface
+    the headline customer-count for the ACC count-floor regression check.
+
+    Returns ``None`` when the sheet is not an Item/Value summary or the
+    row is absent.  Never raises.
+    """
+    if not rows:
+        return None
+    header = [str(h).strip().lower() if h is not None else "" for h in rows[0]]
+    # Item/Value (Report_Info) OR Metric/Value (Summary) sheet shape.
+    if "value" not in header:
+        return None
+    if "item" in header:
+        item_idx = header.index("item")
+    elif "metric" in header:
+        item_idx = header.index("metric")
+    else:
+        return None
+    val_idx = header.index("value")
+    for r in rows[1:]:
+        if item_idx >= len(r) or val_idx >= len(r):
+            continue
+        label = str(r[item_idx] or "").strip().lower()
+        if "customers in portfolio" in label:
+            try:
+                return int(str(r[val_idx]).strip().split()[0])
+            except (ValueError, IndexError, AttributeError):
+                return None
+    return None
+
+
 def audit_xlsx(path: Path) -> dict:
     wb = load_workbook(str(path), read_only=True, data_only=True)
-    findings = {"dup_ids": {}, "risk_saturation": {}, "html_cells": 0, "sheets": wb.sheetnames}
+    findings = {
+        "dup_ids": {},
+        "risk_saturation": {},
+        "html_cells": 0,
+        "sheets": wb.sheetnames,
+        "customers_in_portfolio": None,
+    }
     for ws in wb.worksheets:
         rows = list(ws.iter_rows(values_only=True))
         if not rows:
             continue
+        # Round 116 / B: surface the headline customer count from the
+        # Summary sheet so the ACC count-floor regression is auditable.
+        if findings["customers_in_portfolio"] is None:
+            _cust = _extract_customers_in_portfolio(rows)
+            if _cust is not None:
+                findings["customers_in_portfolio"] = _cust
         header = [str(h).strip() if h is not None else "" for h in rows[0]]
         lower = [h.lower() for h in header]
         # Duplicate IDs.
@@ -294,6 +339,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  dup_ids: {x['dup_ids'] or 'none'}")
             print(f"  risk_saturation: {x['risk_saturation'] or 'none'}")
             print(f"  html_cells: {x['html_cells']}")
+            # Round 116 / B: ACC count-floor visibility.  A Comprehensive /
+            # Compact "All Contact Center" run that shows a suspiciously low
+            # headline (the Build-83 "24" regression) is now surfaced here.
+            _cust = x.get("customers_in_portfolio")
+            if _cust is not None:
+                _low = "  <-- LOW? confirm against team CC roster" if (
+                    "contact_center" in xlsx.name.lower() and _cust < 30
+                ) else ""
+                print(f"  customers_in_portfolio: {_cust}{_low}")
             if x["dup_ids"] or x["risk_saturation"] or x["html_cells"]:
                 any_critical = True
         else:

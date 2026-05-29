@@ -16,6 +16,11 @@ Resolution order, highest precedence first:
 1. ``settings.json`` value managed by ``adoptiq_settings`` (UI-set
    override; takes effect on next request -- this module intentionally
    does NOT cache so the operator does not have to restart the .app).
+   Round 116 / Build 85: a settings value of the stale ``gpt-5-nano``
+   default is healed to the Gemini default at read time UNLESS the
+   matching ``*_user_set`` flag is True (a deliberate Preferences
+   dropdown pick).  This robustly un-wedges installs that the one-time
+   R103/R108/R115 marker migrations could never reach.
 2. ``CIRCUIT_MODEL_NAME_ASK_AI`` / ``CIRCUIT_MODEL_NAME_REPORT`` env
    var (per-site env override; surfaced via ``CIRCUIT_CONFIG``).
 3. ``CIRCUIT_MODEL_NAME`` env var (single-model legacy default;
@@ -156,6 +161,38 @@ def _r103_coerce_stale_default(raw: str, source: str) -> str:
     return raw
 
 
+def _r116_coerce_settings_value(raw: str, model_key: str) -> str:
+    """Round 116 / Build 85: heal a stale ``gpt-5-nano`` settings value to the
+    Gemini default at read time UNLESS the operator explicitly picked it via
+    the Preferences dropdown (the ``*_user_set`` flag in settings.json).
+
+    This is the AUTHORITATIVE runtime heal.  It covers the exact Build 84
+    acceptance wedge — an install pinned to ``gpt-5-nano`` with all three
+    one-time migration markers (R103/R108/R115) already ``True``, where no
+    marker migration can act — and any case where the on-disk self-heal
+    (``adoptiq_settings.migrate_round116_model_user_set``) could not persist
+    (read-only FS, etc.).  ``model_key`` is ``"report_model_name"`` or
+    ``"ask_ai_model_name"``.
+    """
+    if raw != _R103_STALE_DEFAULT_MODEL:
+        return raw
+    try:
+        import adoptiq_settings as _settings
+        if _settings.is_user_set(model_key) is True:
+            # Deliberate post-Build-85 nano pick — honor it.
+            return raw
+    except Exception:  # noqa: BLE001
+        # adoptiq_settings unimportable in this fixture: default to the
+        # safe heal (Gemini) rather than propagating stale nano.
+        pass
+    logger.info(
+        "model_resolver: Round 116 healed stale settings %s=%s to %s "
+        "(no operator user_set flag)",
+        model_key, _R103_STALE_DEFAULT_MODEL, _HARDCODED_DEFAULT,
+    )
+    return _HARDCODED_DEFAULT
+
+
 def _read_env_value(env_var: str) -> Optional[str]:
     """Return ``os.environ[env_var]`` if set AND allow-list-clean."""
     raw = os.environ.get(env_var)
@@ -213,7 +250,7 @@ def get_active_ask_ai_model() -> str:
     """
     candidate = _read_settings_value("ask_ai_model_name")
     if candidate:
-        return candidate
+        return _r116_coerce_settings_value(candidate, "ask_ai_model_name")
     candidate = _read_env_value("CIRCUIT_MODEL_NAME_ASK_AI")
     if candidate:
         return candidate
@@ -232,7 +269,7 @@ def get_active_report_model() -> str:
     """
     candidate = _read_settings_value("report_model_name")
     if candidate:
-        return candidate
+        return _r116_coerce_settings_value(candidate, "report_model_name")
     candidate = _read_env_value("CIRCUIT_MODEL_NAME_REPORT")
     if candidate:
         return candidate

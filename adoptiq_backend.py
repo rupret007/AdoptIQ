@@ -8793,8 +8793,18 @@ def write_excel_workbook(
     technology: str = "Technology Analysis",
     days: int = 90,
     partial_data_warnings: list | None = None,  # Round 94
+    subscriptions_df=None,  # Round 116 / Build 85 (B)
 ):
-    """Enhanced Excel workbook writer with professional formatting"""
+    """Enhanced Excel workbook writer with professional formatting
+
+    Round 116 / Build 85 (B): ``subscriptions_df`` (default ``None``) lets
+    the comprehensive "All Contact Center" caller anchor the Summary
+    sheet's "Customers in portfolio" universe on the team Contact-Center
+    subscription roster so a CC-subscription customer whose AB rows were
+    dropped by R93 strict ACC scoping is still counted.  When ``None``
+    (every other caller) the Summary universe stays the pre-R116
+    (AB ∪ CSOne ∪ Pulse) shape -- byte-identical behaviour.
+    """
 
     # Handle different parameter combinations for backward compatibility
     if isinstance(sheets_or_path, pd.DataFrame) and isinstance(title_or_sheets, str):
@@ -8896,6 +8906,7 @@ def write_excel_workbook(
                 tech=technology,
                 days=days,
                 generated_at_utc_iso_z=_r15_summary_ts,
+                subscriptions_df=subscriptions_df,  # Round 116 / Build 85 (B)
             )
         except Exception as _summary_err:
             logger.debug("Round 15 summary sheet skipped: %s", _summary_err)

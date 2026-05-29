@@ -418,7 +418,7 @@
             border: 2px solid rgba(255, 255, 255, 0.2);
             color: rgba(255, 255, 255, 0.9);
             border-radius: 0.5rem;
-            padding: 0.5rem 0.75rem;
+            padding: 0.5rem 0.85rem;
             margin-left: 0.5rem;
             font-size: 1rem;
             line-height: 1;
@@ -427,7 +427,26 @@
             display: inline-flex;
             align-items: center;
             justify-content: center;
+            gap: 0.4rem;
             min-width: 2.5rem;
+        }
+        /* Round 116 / Build 85 (C): visible "Quit" text label so the
+         * destructive control is never mistaken for an icon-only nav
+         * button (the Build-83 mis-click that read as "Admin Console
+         * tries to shut down"). */
+        .quit-btn-label {
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }
+        /* Round 116 / Build 85 (C): vertical divider that physically
+         * separates the destructive Quit control from the navigation
+         * links so a near-miss click lands on empty space, not Quit. */
+        .adoptiq-quit-divider {
+            display: inline-block;
+            width: 1px;
+            height: 1.6rem;
+            margin: 0 0.35rem 0 0.6rem;
+            background: rgba(255, 255, 255, 0.25);
         }
         .quit-btn:hover {
             color: #fff;
@@ -1300,17 +1319,27 @@
                         </a>
                     </li>
                     {# Round 32 / Phase 2.D: link to the in-process Admin
-                       Console (Flask app on 127.0.0.1:5152, started by
+                       Console (Flask app started by
                        app_simple._start_admin_server_in_thread()).
                        target=_blank with rel=noopener noreferrer keeps
                        the link from leaking the originating tab to the
-                       cross-port admin app. #}
+                       cross-port admin app.
+                       Round 116 / Build 85 (C): the href is now
+                       port-aware -- ``admin_console_url`` comes from the
+                       ``inject_version`` context processor, which resolves
+                       the live admin port via
+                       ``enhanced_admin_dashboard_v2._resolve_admin_port``
+                       instead of hardcoding ``:5152``.  This is a plain
+                       navigation anchor: it opens the admin UI in a new
+                       tab and NEVER triggers a shutdown (shutdown is bound
+                       only to ``#adoptiq-quit-btn`` below). #}
                     <li class="nav-item">
                         <a class="nav-link"
-                           href="http://127.0.0.1:5152/"
+                           href="{{ admin_console_url|default('http://127.0.0.1:5152/', true) }}"
+                           data-admin-console-link
                            target="_blank"
                            rel="noopener noreferrer"
-                           title="Open the AdoptIQ Admin Console in a new tab">
+                           title="Open the AdoptIQ Admin Console in a new tab (does not stop the server)">
                             <i class="fas fa-shield-alt me-1"></i>Admin Console
                         </a>
                     </li>
@@ -1372,14 +1401,29 @@
                        find the PID and kill it manually -- the .app
                        has no native window so closing the browser tab
                        leaves the process running until reboot.
-                       JS handler is in static/js/quit_adoptiq.js. #}
+                       JS handler is in static/js/quit_adoptiq.js.
+                       Round 116 / Build 85 (C): the pre-R116 button was
+                       icon-ONLY (a bare power glyph) sitting flush against
+                       the Admin Console / theme-toggle controls, so users
+                       clicking near the admin link mis-clicked Quit and
+                       reported "Admin Console tries to shut down".  Add a
+                       visible "Quit" text label, a vertical divider that
+                       physically separates it from the nav links, and a
+                       distinct danger styling so it reads as a destructive
+                       action.  The shutdown handler still binds ONLY to
+                       ``#adoptiq-quit-btn`` -- never to a ``.nav-link`` or
+                       the admin anchor. #}
+                    <li class="nav-item d-flex align-items-center" aria-hidden="true">
+                        <span class="adoptiq-quit-divider" role="presentation"></span>
+                    </li>
                     <li class="nav-item d-flex align-items-center">
                         <button type="button"
                                 id="adoptiq-quit-btn"
                                 class="quit-btn"
                                 aria-label="Quit AdoptIQ and shut down the local server"
-                                title="Quit AdoptIQ">
+                                title="Quit AdoptIQ (stops the local server)">
                             <span aria-hidden="true">&#9211;</span>
+                            <span class="quit-btn-label">Quit</span>
                         </button>
                     </li>
                 </ul>

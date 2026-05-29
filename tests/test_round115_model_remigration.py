@@ -75,7 +75,11 @@ def test_r115_leaves_non_stale_values_untouched(monkeypatch, tmp_path):
 
 
 def test_r115_deliberate_nano_after_migration_survives(monkeypatch, tmp_path):
-    """A nano pick made AFTER R115 (marker already set) must persist."""
+    """A DELIBERATE nano pick survives — but under the Round 116 contract a
+    deliberate pick is keyed on the ``report_model_user_set`` flag, NOT the
+    one-time marker.  Without ``user_set`` the value is treated as leftover
+    and heals to Gemini (covered by the R116 suite); WITH it, nano persists.
+    """
     monkeypatch.delenv("CIRCUIT_MODEL_NAME", raising=False)
     monkeypatch.delenv("CIRCUIT_MODEL_NAME_ASK_AI", raising=False)
     monkeypatch.delenv("CIRCUIT_MODEL_NAME_REPORT", raising=False)
@@ -87,6 +91,7 @@ def test_r115_deliberate_nano_after_migration_survives(monkeypatch, tmp_path):
         "r108_model_default_migrated": True,
         "r115_model_default_migrated": True,
         "report_model_name": STALE,
+        "report_model_user_set": True,  # Round 116: deliberate operator pick
     })
 
     import model_resolver as _mr
