@@ -275,6 +275,31 @@ BUILD_INFO_PATH="OUTBOX/build_info.txt"
 echo "Wrote build info: $BUILD_INFO_PATH"
 
 # ---------------------------------------------------------------------------
+# Round 119 / Build 88: emit the machine-readable auto-update manifest.
+#
+# The cross-platform auto-updater (auto_updater.py) reads
+# ``AI Projects/OUTBOX/latest.json`` to decide whether a newer build is
+# available.  ``artifact`` is stored RELATIVE to the OUTBOX root
+# (``AdoptIQ/<dmg>``) so the consumer can join it onto whatever local
+# OneDrive mount they have.  scripts/write_release_manifest.py is
+# merge-aware so writing the mac slot here never clobbers the pc slot
+# that build_pc.bat writes from the Windows build host.
+# ---------------------------------------------------------------------------
+DMG_SHA256="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
+DMG_SIZE_BYTES="$(stat -f%z "$DMG_PATH" 2>/dev/null || echo 0)"
+LATEST_JSON_LOCAL="OUTBOX/latest.json"
+echo "Computing release manifest (sha256=${DMG_SHA256})"
+"$PYTHON_BIN" scripts/write_release_manifest.py \
+  --manifest "$LATEST_JSON_LOCAL" \
+  --platform mac \
+  --version "$VERSION" \
+  --build "$BUILD" \
+  --artifact "AdoptIQ/$(basename "$DMG_PATH")" \
+  --sha256 "$DMG_SHA256" \
+  --size "$DMG_SIZE_BYTES"
+echo "Wrote release manifest: $LATEST_JSON_LOCAL"
+
+# ---------------------------------------------------------------------------
 # Mirror release artifacts to OneDrive.
 #
 # Two destinations, two whitelists:
@@ -436,6 +461,27 @@ else
   echo
   echo "Syncing release payload to OUTBOX mirror:"
   echo "  $MAC_OUTBOX_DIR"
+
+  # Round 119 / Build 88: write the auto-update manifest to the OUTBOX
+  # *root* (one level above the AdoptIQ/ subfolder).  Run the merge-aware
+  # writer directly against the root manifest so an existing pc slot
+  # (written by build_pc.bat from the Windows host) is preserved, then
+  # copy the merged result back to the local OUTBOX/latest.json so the
+  # local record matches what consumers will read.
+  LATEST_JSON_ROOT="$MAC_OUTBOX_PARENT/latest.json"
+  if "$PYTHON_BIN" scripts/write_release_manifest.py \
+        --manifest "$LATEST_JSON_ROOT" \
+        --platform mac \
+        --version "$VERSION" \
+        --build "$BUILD" \
+        --artifact "AdoptIQ/$DMG_NAME" \
+        --sha256 "$DMG_SHA256" \
+        --size "$DMG_SIZE_BYTES"; then
+    echo "  - latest.json (merged) -> $LATEST_JSON_ROOT"
+    cp -f "$LATEST_JSON_ROOT" "$LATEST_JSON_LOCAL" 2>/dev/null || true
+  else
+    echo "WARNING: failed to write $LATEST_JSON_ROOT; auto-update manifest not refreshed at the Releases root."
+  fi
 
   while IFS= read -r -d '' staged_entry; do
     name="$(basename "$staged_entry")"

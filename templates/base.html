@@ -1453,6 +1453,26 @@
         <span class="d-block small mt-1" id="r68-restart-required-detail"></span>
     </div>
 
+    {# Round 119 / Build 88: auto-update banner.  Hidden by default;
+       unhidden by static/js/r68_restart_banner.js after polling
+       /api/update/status.  In ``auto`` mode it reads "updating…"; in
+       ``notify`` mode it offers an "Install now" button.  The install
+       button POSTs to /api/update/apply with the CSRF header. #}
+    <div id="r119-update-available-banner"
+         class="alert alert-info text-center mb-0 rounded-0"
+         role="alert"
+         hidden
+         data-r119-build>
+        <strong id="r119-update-available-headline">A newer AdoptIQ build is available.</strong>
+        <span class="d-block small mt-1" id="r119-update-available-detail"></span>
+        <button type="button"
+                id="r119-update-install-btn"
+                class="btn btn-sm btn-primary mt-2 d-none">
+            Install update now
+        </button>
+        <span class="d-block small mt-1" id="r119-update-feedback"></span>
+    </div>
+
     <!-- Flash Messages -->
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}

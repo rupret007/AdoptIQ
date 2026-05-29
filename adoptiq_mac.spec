@@ -65,6 +65,8 @@ hidden_imports = [
     '_bundled_secrets',
     'error_classifier', 'connectivity_diagnostics',
     'ai_narrative_validator',
+    # Round 119 / Build 88: cross-platform auto-update engine (Tier C).
+    'auto_updater',
     # Round 59 / Build32: pin Round 57 modules so the post-render Word
     # source-citation injector ships in the frozen build.
     # ``report_source_injector`` is statically imported by

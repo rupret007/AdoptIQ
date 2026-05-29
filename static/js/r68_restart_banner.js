@@ -88,9 +88,132 @@
         } catch (_err) { /* silent */ }
     }
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', check, { once: true });
-    } else {
+    // -----------------------------------------------------------------
+    // Round 119 / Build 88: auto-update banner.
+    //
+    // Polls /api/update/status once per page load.  When a newer build is
+    // available it unhides #r119-update-available-banner.  In ``auto``
+    // mode the worker applies the update on its own (banner reads
+    // "updating…"); in ``notify`` mode an "Install now" button POSTs to
+    // /api/update/apply with the CSRF header.  All rendering is
+    // textContent-only; failures are silent (never break the page).
+    // -----------------------------------------------------------------
+    function getCsrfToken() {
+        try {
+            var meta = document.querySelector('meta[name="csrf-token"]');
+            if (meta && meta.getAttribute) {
+                return meta.getAttribute('content') || '';
+            }
+            var input = document.querySelector('input[name="csrf_token"]');
+            if (input && input.value) { return input.value; }
+        } catch (_e) { /* fall through */ }
+        return '';
+    }
+
+    function setUpdateFeedback(msg) {
+        var el = document.getElementById('r119-update-feedback');
+        if (el) { el.textContent = msg || ''; }
+    }
+
+    function installUpdate(btn) {
+        if (btn) { btn.disabled = true; }
+        setUpdateFeedback('Starting update\u2026');
+        try {
+            fetch('/api/update/apply', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCsrfToken(),
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: '{}'
+            })
+                .then(function (resp) {
+                    return resp.json().then(function (data) {
+                        return { status: resp.status, ok: resp.ok, data: data };
+                    });
+                })
+                .then(function (res) {
+                    var data = res.data || {};
+                    if (res.status === 409 || data.needs_force) {
+                        setUpdateFeedback('An analysis is running; update deferred until idle.');
+                        if (btn) { btn.disabled = false; }
+                        return;
+                    }
+                    if (res.ok && (data.ok || data.would_update || data.state === 'applying')) {
+                        setUpdateFeedback('Update starting; the app will relaunch.');
+                    } else {
+                        setUpdateFeedback('Update could not start; try again later.');
+                        if (btn) { btn.disabled = false; }
+                    }
+                })
+                .catch(function () {
+                    setUpdateFeedback('Network error starting update.');
+                    if (btn) { btn.disabled = false; }
+                });
+        } catch (_e) {
+            if (btn) { btn.disabled = false; }
+        }
+    }
+
+    function showUpdateBanner(status) {
+        var banner = document.getElementById('r119-update-available-banner');
+        if (!banner) { return; }
+        var mode = status && status.update_mode ? String(status.update_mode) : 'auto';
+        var headline = document.getElementById('r119-update-available-headline');
+        var detail = document.getElementById('r119-update-available-detail');
+        var btn = document.getElementById('r119-update-install-btn');
+        var v = (status && status.latest_version) ? ('v' + status.latest_version) : '';
+        var b = (status && status.latest_build !== null && status.latest_build !== undefined)
+            ? ('build ' + status.latest_build) : '';
+        if (banner.dataset) {
+            banner.dataset.r119Build = (status && status.latest_build) || '';
+        }
+        if (headline) {
+            headline.textContent = ('A newer AdoptIQ build is available: ' + v + ' ' + b + '.').replace(/\s+/g, ' ').trim();
+        }
+        if (mode === 'auto') {
+            if (detail) {
+                detail.textContent = 'It will install automatically when no analysis is running, then relaunch.';
+            }
+            if (btn) { btn.classList.add('d-none'); }
+        } else {
+            if (detail) {
+                detail.textContent = 'Click to download, verify, and install it now.';
+            }
+            if (btn) {
+                btn.classList.remove('d-none');
+                btn.addEventListener('click', function () { installUpdate(btn); }, { once: false });
+            }
+        }
+        banner.removeAttribute('hidden');
+    }
+
+    function checkUpdate() {
+        try {
+            fetch('/api/update/status', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+                .then(function (resp) {
+                    if (!resp || !resp.ok) { return null; }
+                    return resp.json();
+                })
+                .then(function (data) {
+                    if (data && data.update_available === true && data.update_mode !== 'off') {
+                        showUpdateBanner(data);
+                    }
+                })
+                .catch(function () { /* silent */ });
+        } catch (_err) { /* silent */ }
+    }
+
+    function runChecks() {
         check();
+        checkUpdate();
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', runChecks, { once: true });
+    } else {
+        runChecks();
     }
 })();

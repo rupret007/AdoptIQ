@@ -1022,7 +1022,24 @@ ADOPTIQ_VERSION = "1.0.4"
 # tests/test_round116_acc_customer_count_floor.py,
 # tests/test_round116_help_page_content.py, and the extended
 # tests/test_round60_quit_button_template.py.
-ADOPTIQ_BUILD = "86"  # Round 117 / Build 86
+# Round 118 / Build 87: ACC customer-count secondary-attribution fix.
+# R116 (Build 80) anchored the "All Contact Center" headline universe on the
+# team Contact-Center SUBSCRIPTION roster -- but that roster was itself short
+# because ``adoptiq_backend.get_subscriptions_for_team`` matched ONLY the
+# primary DSM owner column (``PRIMARY_DSM_EMAIL``).  The LIVE DSM table
+# (CX_DB.CX_SWSSBST_BR.dsm_assignment_data) attributes secondary owners via
+# FIVE numbered slots ``DSM_EMAIL1``..``DSM_EMAIL5`` (none of which were in
+# ``_R82_SECONDARY_DSM_EMAIL_CANDIDATES``), so a Brian Frazier CSSM who owned
+# an account through slot 2-5 was silently dropped -- the live ACC
+# Comprehensive count stuck at 24 (Build 86) with
+# ``team_subs_diag.secondary_rows == 0``.  R118 names the five live slots in
+# the R82 secondary candidate tuple so the UNION fans out to them, and widens
+# ``introspect_dsm_columns``'s ``all_email_like_columns`` escape-hatch filter
+# (the pre-R118 ``*_EMAIL`` suffix match skipped the digit-suffixed slots --
+# which is precisely why this gap survived R82).  Secondary columns were
+# live-discovered via ``scripts/r118_dump_dsm_columns.py`` on VPN.  Pinned by
+# tests/test_round118_acc_secondary_dsm_slots.py.
+ADOPTIQ_BUILD = "88"  # Round 119 / Build 88 (cross-platform auto-update)
 # Round 113 / Build 82: Ask AI uplift + Preferences fix-and-polish.
 # Phase A (Ask AI UX): unified conversation history across the sync +
 # stream paths (A1), visible browser-local conversation thread (A2),
@@ -1641,6 +1658,84 @@ def _resolve_csone_onedrive_folder() -> str:
     return _csone_onedrive_candidates()[0]
 
 
+# Round 119 / Build 88: cross-platform auto-update Releases folder.
+# The consumer-visible Releases root is the EXISTING synced OneDrive
+# folder ``AI Projects/OUTBOX`` (not a new share). ``latest.json`` lives
+# at this root and covers both platforms; the per-platform artifacts
+# live in the ``AdoptIQ/`` (Mac DMG) and ``AdoptIQ_PC/`` (Windows EXE)
+# subfolders. The Mac build already mirrors into this exact tree via
+# ``MAC_OUTBOX_DIR``; the only operator step for a consumer is adding the
+# OUTBOX shortcut to their OneDrive (same model as the corpus share).
+_R119_RELEASES_LEAF = os.path.join('AI Projects', 'OUTBOX')
+
+
+def _releases_candidates() -> list[str]:
+    """Round 119: priority-ordered list of candidate Releases-root paths.
+
+    Highest precedence first:
+
+      1. Modern macOS Cloud-Storage path
+         (``~/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX``).
+      2. Pre-Big-Sur macOS / Windows path
+         (``~/OneDrive - Cisco/AI Projects/OUTBOX``).
+
+    Mirrors the ``_csone_onedrive_candidates`` shape so the same
+    "Add shortcut to OneDrive" workflow applies. The ``ADOPTIQ_RELEASES_FOLDER``
+    env override (handled in ``_resolve_releases_folder``) wins over both.
+    """
+    home = os.path.expanduser('~')
+    return [
+        os.path.join(home, 'Library', 'CloudStorage', 'OneDrive-Cisco',
+                     _R119_RELEASES_LEAF),
+        os.path.join(home, 'OneDrive - Cisco', _R119_RELEASES_LEAF),
+    ]
+
+
+def _resolve_releases_folder() -> str:
+    """Round 119: return the active auto-update Releases-root path.
+
+    Resolution order, highest precedence first:
+
+    1. ``settings.json['releases_folder']`` -- operator-set via the
+       Preferences hub (re-vetted through
+       ``adoptiq_settings.is_valid_csone_folder_path`` since it is the
+       same "absolute local directory" shape). Empty string falls
+       through.
+    2. ``ADOPTIQ_RELEASES_FOLDER`` env override -- verbatim.
+    3. ``_releases_candidates()`` auto-discovery -- first existing wins.
+    4. First candidate as the fallback so messaging still points at the
+       expected location when nothing is synced.
+
+    Wrapped defensively because this runs at ``Config`` import time and a
+    partial install MUST NOT break boot.
+    """
+    try:
+        import adoptiq_settings as _settings  # noqa: PLC0415
+        try:
+            persisted = _settings.get("releases_folder", "")
+        except Exception:  # noqa: BLE001 - resolver MUST NOT raise
+            persisted = ""
+        if isinstance(persisted, str) and persisted.strip():
+            try:
+                if _settings.is_valid_csone_folder_path(persisted):
+                    return os.path.expanduser(persisted.strip())
+            except Exception:  # noqa: BLE001
+                pass  # noqa: PIE790
+    except Exception:  # noqa: BLE001 - settings module unavailable in some test fixtures
+        pass  # noqa: PIE790
+
+    override = os.environ.get('ADOPTIQ_RELEASES_FOLDER')
+    if override:
+        return override
+    for candidate in _releases_candidates():
+        try:
+            if os.path.isdir(candidate):
+                return candidate
+        except Exception:
+            continue
+    return _releases_candidates()[0]
+
+
 def enforce_production_safety() -> None:
     """Round 9 / Phase 1.4: hard-fail boot when production+DEBUG/TESTING.
 
@@ -1689,6 +1784,21 @@ class Config:
     # See ``_csone_onedrive_candidates`` / ``_resolve_csone_onedrive_folder``
     # for the priority list; the first existing directory wins.
     CSONE_ONEDRIVE_FOLDER = _resolve_csone_onedrive_folder()
+
+    # Round 119 / Build 88: cross-platform auto-update Releases folder.
+    # Resolved (settings.json -> env -> shared-folder leaf) by
+    # ``_resolve_releases_folder``. ``latest.json`` lives at this root;
+    # per-platform artifacts live in ``AdoptIQ/`` (Mac DMG) and
+    # ``AdoptIQ_PC/`` (Windows EXE) subfolders. auto_updater.py joins the
+    # manifest's relative artifact path onto this root.
+    ADOPTIQ_RELEASES_FOLDER = _resolve_releases_folder()
+    # Optional https-only SharePoint URL for the notify-fallback banner's
+    # "open Releases folder" link. Validated through the same
+    # ``_r83_safe_share_url`` helper as the corpus share URL.
+    ADOPTIQ_RELEASES_SHARE_URL = (
+        os.environ.get('ADOPTIQ_RELEASES_SHARE_URL')
+        or 'https://cisco-my.sharepoint.com/:f:/r/personal/jestory_cisco_com/Documents/AI%20Projects/OUTBOX'
+    )
 
     # Round 102: the deprecated Downloads corpus source is fully retired.
     # Even if an old environment or bundled secret still sets

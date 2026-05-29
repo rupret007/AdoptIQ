@@ -159,6 +159,15 @@ _SCHEMA: Dict[str, tuple] = {
     "default_days": (int, 0),
     "default_manager": (str, ""),
     "default_technology": (str, ""),
+    # Round 119 / Build 88: cross-platform auto-update mode.  Per-machine
+    # kill switch for the Tier-C silent self-replace updater:
+    #   * ``auto``   -- check + verify + silently self-replace when idle
+    #                   (the chosen default tier).
+    #   * ``notify`` -- check only; surface a banner so the operator
+    #                   installs on their schedule (no automatic swap).
+    #   * ``off``    -- no update checks at all.
+    # Validated via ``_is_valid_auto_update_mode``.  Default ``auto``.
+    "auto_update_mode": (str, "auto"),
 }
 
 SETTINGS_FILENAME = "settings.json"
@@ -335,6 +344,21 @@ def _is_valid_default_scope_str(value: Any) -> bool:
     return not bool(_DEFAULT_SCOPE_FORBIDDEN_CHARS_RE.search(candidate))
 
 
+# Round 119 / Build 88: auto-update mode allow-list.
+_AUTO_UPDATE_MODES = ("off", "notify", "auto")
+
+
+def _is_valid_auto_update_mode(value: Any) -> bool:
+    """Return True only for one of ``off`` / ``notify`` / ``auto``.
+
+    Unlike the empty-string-sentinel keys, ``auto_update_mode`` has a
+    concrete default (``auto``) and a closed value set -- an empty or
+    unknown value is rejected so a hand-edited / corrupt settings.json
+    can never disable the kill switch's allow-list.
+    """
+    return isinstance(value, str) and value.strip().lower() in _AUTO_UPDATE_MODES
+
+
 def _is_valid_csone_folder_path(value: Any) -> bool:
     """Return True if ``value`` is empty (= unset) OR a syntactically
     valid absolute / tilde-prefixed path with no shell-injection
@@ -398,6 +422,7 @@ _VALIDATORS: Dict[str, Callable[[Any], bool]] = {
     "default_days": _is_valid_default_days,  # Round 113 / C3
     "default_manager": _is_valid_default_scope_str,  # Round 113 / C3
     "default_technology": _is_valid_default_scope_str,  # Round 113 / C3
+    "auto_update_mode": _is_valid_auto_update_mode,  # Round 119 / Build 88
 }
 
 
@@ -816,6 +841,16 @@ def is_valid_default_scope_str(value: Any) -> bool:
     return _is_valid_default_scope_str(value)
 
 
+def is_valid_auto_update_mode(value: Any) -> bool:
+    """Round 119 / Build 88: public alias for the auto-update-mode gate.
+
+    Used by ``app_simple.py``'s ``POST /api/settings/auto-update-mode``
+    handler to vet operator input BEFORE it reaches ``save_settings``
+    AND by the update worker to defensively re-vet the persisted value.
+    """
+    return _is_valid_auto_update_mode(value)
+
+
 __all__ = [
     "SETTINGS_FILENAME",
     "load_settings",
@@ -835,4 +870,5 @@ __all__ = [
     "is_valid_report_outputs_folder",  # Round 92
     "is_valid_default_days",  # Round 113 / C3
     "is_valid_default_scope_str",  # Round 113 / C3
+    "is_valid_auto_update_mode",  # Round 119 / Build 88
 ]

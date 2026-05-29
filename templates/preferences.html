@@ -641,6 +641,85 @@
                 </div>
             </section>
 
+            {# ----- Section: Automatic updates (Round 119 / Build 88) - #}
+            {# Round 119 / Build 88: per-machine kill switch for the
+               cross-platform Tier-C auto-updater.  ``auto`` silently
+               self-replaces when idle + verified; ``notify`` only shows
+               a banner so the operator installs on their schedule;
+               ``off`` disables update checks entirely.  The mode persists
+               to settings.json via POST /api/settings/auto-update-mode.
+               The status line reads GET /api/update/status.  IIFE module,
+               textContent-only rendering (no innerHTML / eval).  Source-
+               shape pinned by tests/test_round119_auto_update_*.py. #}
+            <section id="prefs-auto-update-card"
+                     class="card shadow-cisco fade-in mb-4"
+                     data-auto-update-card
+                     style="animation-delay: 0.295s;"
+                     aria-labelledby="prefs-auto-update-heading"
+                     aria-live="polite"
+                     aria-atomic="true">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-auto-update-heading">
+                        <i class="fas fa-cloud-download-alt me-2" aria-hidden="true"></i>
+                        Automatic updates
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-3">
+                        AdoptIQ checks the synced OneDrive
+                        <code>AI Projects/OUTBOX</code> Releases folder for a
+                        newer build.  Choose how updates are applied on this
+                        machine:
+                    </p>
+                    <ul class="small text-muted mb-3">
+                        <li><strong>Automatic</strong> &mdash; download, verify
+                            (SHA-256 + code signature), and silently replace the
+                            app when no analysis is running, then relaunch.</li>
+                        <li><strong>Notify only</strong> &mdash; show a banner when
+                            a new build is available; you click to install.</li>
+                        <li><strong>Off</strong> &mdash; never check for updates.</li>
+                    </ul>
+                    <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
+                        <span class="badge rounded-pill bg-secondary"
+                              data-auto-update-status-pill
+                              title="Current update status">
+                            <span data-auto-update-status-text>checking&hellip;</span>
+                        </span>
+                    </div>
+                    <div class="mb-3" style="max-width: 22rem;">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-auto-update-mode">Update mode</label>
+                        <select class="form-select form-select-sm"
+                                id="prefs-auto-update-mode"
+                                data-auto-update-mode-select
+                                aria-label="Automatic update mode">
+                            <option value="auto">Automatic (silent self-replace)</option>
+                            <option value="notify">Notify only</option>
+                            <option value="off">Off</option>
+                        </select>
+                    </div>
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        <button type="button"
+                                class="btn btn-sm btn-primary"
+                                data-auto-update-mode-save
+                                title="Persist the update mode to settings.json">
+                            <i class="fas fa-save me-1" aria-hidden="true"></i>
+                            Save
+                        </button>
+                        <button type="button"
+                                class="btn btn-sm btn-outline-primary d-none"
+                                data-auto-update-install-now
+                                title="Stage, verify, and install the available build now">
+                            <i class="fas fa-download me-1" aria-hidden="true"></i>
+                            Install update now
+                        </button>
+                        <span class="small ms-2"
+                              data-auto-update-feedback
+                              aria-live="polite"></span>
+                    </div>
+                </div>
+            </section>
+
             {# ----- Section: Theme (informational) ------------------- #}
             <section class="card shadow-cisco fade-in mb-4"
                      style="animation-delay: 0.3s;"
@@ -725,4 +804,10 @@
    reads GET /api/settings/report-defaults to paint, POSTs on Save.
    Option values are server-rendered + matched by value, so no XSS sink. #}
 <script src="{{ url_for('static', filename='js/r113_report_defaults.js') }}"></script>
+{# Round 119 / Build 88: automatic-update mode card.  IIFE module that
+   reads GET /api/update/status to paint the status pill + select, and
+   POSTs /api/settings/auto-update-mode on Save (CSRF header).  The
+   "Install update now" button POSTs /api/update/apply.  textContent-only
+   rendering; no innerHTML / eval. #}
+<script src="{{ url_for('static', filename='js/r119_auto_update.js') }}"></script>
 {% endblock %}

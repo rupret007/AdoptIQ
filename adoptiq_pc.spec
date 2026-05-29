@@ -67,6 +67,8 @@ hidden_imports = [
     '_bundled_secrets',
     'error_classifier', 'connectivity_diagnostics',
     'ai_narrative_validator',
+    # Round 119 / Build 88: cross-platform auto-update engine (Tier C).
+    'auto_updater',
     # Round 59 / Build32 + Round 71 / Phase 7 #34 parity with mac spec --
     # see adoptiq_mac.spec for the multi-line rationale.  Pinning these
     # avoids the silent-noop degradation in frozen builds.

@@ -22718,6 +22718,348 @@ def api_shutdown():
     }), 202
 
 
+# ---------------------------------------------------------------------------
+# Round 119 / Build 88: cross-platform auto-update (Tier C silent self-replace).
+#
+# The update engine lives in the decoupled ``auto_updater`` module (stdlib +
+# config only) so it stays free of this module's import cycle and is fully
+# offline-testable.  This section wires the engine to the app: a per-machine
+# update-mode kill switch, two HTTP endpoints (status + apply), and a daemon
+# worker that checks the synced OneDrive Releases folder on a slow cadence.
+#
+# Safety contract (mirrored in CLAUDE.md):
+#   * Never swap an unverified artifact (sha256 + macOS codesign mandatory).
+#   * Never auto-update mid-analysis (idle gate; defer to notify when busy).
+#   * Any failure degrades to the notify banner; never a half-installed app.
+#   * ``auto_update_mode`` (off|notify|auto) is the per-machine kill switch.
+# ---------------------------------------------------------------------------
+
+# Hours between background update checks.  Slow on purpose -- a new build
+# lands at most a few times a day and the check touches the local OneDrive
+# mirror only (no network).  Override via ``ADOPTIQ_UPDATE_CHECK_HOURS``.
+try:
+    _R119_UPDATE_CHECK_HOURS = float(os.environ.get('ADOPTIQ_UPDATE_CHECK_HOURS', '6') or '6')
+except (TypeError, ValueError):
+    _R119_UPDATE_CHECK_HOURS = 6.0
+if _R119_UPDATE_CHECK_HOURS <= 0:
+    _R119_UPDATE_CHECK_HOURS = 6.0
+
+# In-memory snapshot of the last update check, surfaced by /api/update/status.
+# Lock-protected because the worker thread writes it and request threads read.
+_r119_update_lock = threading.Lock()
+_r119_update_state: Dict[str, Any] = {
+    'update_available': False,
+    'latest_build': None,
+    'latest_version': None,
+    'artifact': None,
+    'releases_folder_found': False,
+    'last_error': None,
+    'last_checked_at_utc': None,
+    # Builds we have already attempted to auto-apply, so a transient failure
+    # does not re-trigger the swapper on every tick (backoff per build).
+    'attempted_builds': set(),
+}
+
+
+def _r119_get_auto_update_mode() -> str:
+    """Return the per-machine update mode (``off``/``notify``/``auto``).
+
+    Resolution: ``settings.json[auto_update_mode]`` (re-vetted) ->
+    ``ADOPTIQ_AUTO_UPDATE_MODE`` env -> default ``auto``.  Any failure
+    falls back to ``auto`` so the kill switch never wedges to a value
+    outside the allow-list.
+    """
+    try:
+        import adoptiq_settings as _settings  # noqa: PLC0415
+        persisted = _settings.get('auto_update_mode', '') or ''
+        if _settings.is_valid_auto_update_mode(persisted):
+            return str(persisted).strip().lower()
+    except Exception:  # noqa: BLE001 - settings unavailable in some fixtures
+        pass  # noqa: PIE790
+    env_mode = (os.environ.get('ADOPTIQ_AUTO_UPDATE_MODE') or '').strip().lower()
+    if env_mode in ('off', 'notify', 'auto'):
+        return env_mode
+    return 'auto'
+
+
+def _r119_current_build() -> Optional[int]:
+    """Return the running ``ADOPTIQ_BUILD`` as an int, or ``None``."""
+    try:
+        return int(ADOPTIQ_BUILD)
+    except (TypeError, ValueError):
+        return None
+
+
+def _r119_update_is_busy() -> bool:
+    """Reuse the /api/shutdown idle gate: True when an analysis is running.
+
+    A failure to read the status map returns ``True`` (busy) so we never
+    auto-swap when we cannot prove the app is idle.
+    """
+    try:
+        with analysis_status_lock:
+            for status_dict in analysis_status.values():
+                if isinstance(status_dict, dict) and \
+                        str(status_dict.get('status', '')).lower() == 'running':
+                    return True
+        return False
+    except Exception:  # noqa: BLE001 - cannot prove idle -> treat as busy
+        return True
+
+
+def _r119_refresh_update_state() -> Dict[str, Any]:
+    """Read the manifest, recompute availability, update the snapshot.
+
+    Never raises -- a corrupt/missing manifest records ``last_error`` /
+    ``releases_folder_found`` and returns the snapshot so the status
+    endpoint and worker can both consume it.
+    """
+    import auto_updater  # noqa: PLC0415
+    available = False
+    latest_build = None
+    latest_version = None
+    artifact = None
+    last_error = None
+    releases_found = False
+    try:
+        folder = getattr(Config, 'ADOPTIQ_RELEASES_FOLDER', None)
+        releases_found = bool(folder and os.path.isdir(folder))
+    except Exception:  # noqa: BLE001
+        releases_found = False
+    try:
+        manifest = auto_updater.read_latest_manifest()
+        key = auto_updater.platform_key()
+        if manifest is not None and key is not None:
+            slot = manifest.get(key) if isinstance(manifest, dict) else None
+            if isinstance(slot, dict):
+                latest_build = auto_updater._slot_build(manifest, key)
+                latest_version = slot.get('version') or manifest.get('version')
+                artifact = slot.get('artifact')
+            available = auto_updater.is_update_available(
+                manifest, current_build=_r119_current_build(), key=key,
+            )
+    except auto_updater.UpdateError as exc:
+        last_error = exc.error_kind
+    except Exception as exc:  # noqa: BLE001 - status read must never raise
+        last_error = type(exc).__name__
+    with _r119_update_lock:
+        _r119_update_state['update_available'] = bool(available)
+        _r119_update_state['latest_build'] = latest_build
+        _r119_update_state['latest_version'] = latest_version
+        _r119_update_state['artifact'] = artifact
+        _r119_update_state['releases_folder_found'] = releases_found
+        _r119_update_state['last_error'] = last_error
+        _r119_update_state['last_checked_at_utc'] = datetime.now(timezone.utc).strftime(
+            '%Y-%m-%dT%H:%M:%SZ'
+        )
+        snapshot = {k: v for k, v in _r119_update_state.items() if k != 'attempted_builds'}
+    return snapshot
+
+
+@app.route('/api/update/status', methods=['GET'])
+def api_update_status():
+    """Round 119 / Build 88: read-only auto-update status.
+
+    Returns the last-checked update snapshot plus the per-machine mode
+    and the running build.  Loopback-safe -- no secrets, no PII, no
+    filesystem paths beyond the manifest's relative artifact name.
+    """
+    snapshot = _r119_refresh_update_state()
+    snapshot['update_mode'] = _r119_get_auto_update_mode()
+    snapshot['current_build'] = _r119_current_build()
+    snapshot['ok'] = True
+    return jsonify(snapshot), 200
+
+
+@app.route('/api/update/apply', methods=['POST'])
+def api_update_apply():
+    """Round 119 / Build 88: trigger a verified self-replace.
+
+    Auth: same dual-path as ``/api/shutdown`` (CSRF token OR
+    ``X-AdoptIQ-Internal``).  Idle-gated: returns 409 ``needs_force``
+    when an analysis is running.  TESTING short-circuits via the
+    engine's ``testing=True`` path so pytest can never trigger a real
+    swap.  Any engine failure returns 200 with ``state='notify'`` so
+    the client degrades to the banner instead of treating it as fatal.
+    """
+    auth_failure = _r17_2_authorize_corpus_admin()
+    if auth_failure is not None:
+        body, status_code = auth_failure
+        return jsonify(body), status_code
+
+    # Idle gate -- mirror the /api/shutdown 409 contract.
+    if _r119_update_is_busy():
+        return jsonify({
+            'ok': False,
+            'needs_force': True,
+            'state': 'busy',
+            'error': 'Analysis running; update deferred until idle.',
+        }), 409
+
+    flask_testing = bool(app.config.get('TESTING'))
+    env_testing = os.environ.get('ADOPTIQ_TESTING') == '1'
+    is_frozen = bool(getattr(sys, 'frozen', False))
+    if env_testing and is_frozen:
+        env_testing = False
+    in_testing_mode = flask_testing or env_testing
+
+    try:
+        import auto_updater  # noqa: PLC0415
+        result = auto_updater.apply_update(
+            releases_folder=getattr(Config, 'ADOPTIQ_RELEASES_FOLDER', None),
+            app_support_dir=str(_APP_SUPPORT),
+            current_build=_r119_current_build(),
+            is_busy=_r119_update_is_busy,
+            trigger_shutdown=lambda: threading.Timer(0.5, _trigger_shutdown_sigterm).start(),
+            testing=in_testing_mode,
+        )
+    except Exception as exc:  # noqa: BLE001 - engine should not raise, but be safe
+        logger.warning("Round 119 / api_update_apply: engine raised %s", type(exc).__name__)
+        return jsonify({'ok': False, 'state': 'notify', 'error_kind': 'unexpected'}), 200
+
+    # Record the attempt so the worker does not re-trigger the same build.
+    try:
+        lb = result.get('latest_build')
+        if lb is not None:
+            with _r119_update_lock:
+                _r119_update_state['attempted_builds'].add(int(lb))
+    except Exception:  # noqa: BLE001
+        pass  # noqa: PIE790
+
+    status_code = 200 if result.get('ok') else 200
+    if result.get('state') == 'busy':
+        status_code = 409
+    return jsonify(result), status_code
+
+
+@app.route('/api/settings/auto-update-mode', methods=['GET', 'POST'])
+def api_settings_auto_update_mode():
+    """Round 119 / Build 88: GET (read) / POST (persist) the update mode.
+
+    GET is read-only (no auth; loopback-only; no PII).  POST requires
+    the same dual-auth as ``/api/shutdown`` and validates the value
+    against ``adoptiq_settings.is_valid_auto_update_mode`` before
+    persisting to ``settings.json``.
+    """
+    try:
+        import adoptiq_settings as _settings  # noqa: PLC0415
+    except Exception as imp_err:  # noqa: BLE001
+        logger.exception("Round 119: settings import failed for auto-update-mode")
+        return jsonify({'ok': False, 'error': f'settings_import_failed: {type(imp_err).__name__}'}), 500
+
+    if request.method == 'GET':
+        return jsonify({
+            'ok': True,
+            'mode': _r119_get_auto_update_mode(),
+            'persisted_value': _settings.get('auto_update_mode', '') or '',
+            'env_value_set': bool(os.environ.get('ADOPTIQ_AUTO_UPDATE_MODE')),
+        }), 200
+
+    auth_failure = _r17_2_authorize_corpus_admin()
+    if auth_failure is not None:
+        body, status_code = auth_failure
+        return jsonify(body), status_code
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({'ok': False, 'error': 'invalid_json_payload'}), 400
+    mode = payload.get('mode')
+    if not isinstance(mode, str) or not _settings.is_valid_auto_update_mode(mode):
+        return jsonify({
+            'ok': False,
+            'error': 'invalid_mode',
+            'detail': 'mode must be one of: off, notify, auto',
+        }), 400
+    mode = mode.strip().lower()
+    try:
+        merged = dict(_settings.load_settings() or {})
+        merged['auto_update_mode'] = mode
+        _settings.save_settings(merged)
+    except Exception as save_err:  # noqa: BLE001
+        logger.exception("Round 119: settings.json write failed for auto_update_mode")
+        return jsonify({'ok': False, 'error': f'settings_write_failed: {type(save_err).__name__}'}), 500
+    logger.info("Round 119 / Build 88: auto_update_mode persisted (mode=%s)", mode)
+    return jsonify({'ok': True, 'mode': mode}), 200
+
+
+def _r119_update_check_tick() -> None:
+    """One pass of the update worker: refresh status, maybe auto-apply.
+
+    Honors the per-machine mode: ``off`` skips entirely; ``notify`` only
+    refreshes the snapshot (the banner surfaces it); ``auto`` additionally
+    applies the update when frozen + idle + not already attempted.  Never
+    raises -- a failure is logged and the next tick retries.
+    """
+    try:
+        mode = _r119_get_auto_update_mode()
+        if mode == 'off':
+            return
+        snapshot = _r119_refresh_update_state()
+        if mode != 'auto':
+            return
+        if not snapshot.get('update_available'):
+            return
+        if not getattr(sys, 'frozen', False):
+            return  # dev mode: nothing to swap
+        latest_build = snapshot.get('latest_build')
+        with _r119_update_lock:
+            already = latest_build in _r119_update_state['attempted_builds']
+            if latest_build is not None:
+                _r119_update_state['attempted_builds'].add(int(latest_build))
+        if already:
+            return
+        if _r119_update_is_busy():
+            return  # defer; next tick (or the notify banner) handles it
+        import auto_updater  # noqa: PLC0415
+        result = auto_updater.apply_update(
+            releases_folder=getattr(Config, 'ADOPTIQ_RELEASES_FOLDER', None),
+            app_support_dir=str(_APP_SUPPORT),
+            current_build=_r119_current_build(),
+            is_busy=_r119_update_is_busy,
+            trigger_shutdown=lambda: threading.Timer(0.5, _trigger_shutdown_sigterm).start(),
+        )
+        logger.info(
+            "Round 119 / update worker: auto-apply build %s -> state=%s",
+            latest_build, result.get('state'),
+        )
+    except Exception as exc:  # noqa: BLE001 - worker must never crash the app
+        logger.warning("Round 119 / update worker tick failed: %s", type(exc).__name__)
+
+
+def start_update_check_worker() -> None:
+    """Round 119 / Build 88: spawn the daemon that polls for updates.
+
+    Idempotent (guarded by ``sys._adoptiq_update_worker_started``) and a
+    no-op under pytest so the test runner never spawns a swapper.  Runs an
+    immediate first tick, then sleeps ``_R119_UPDATE_CHECK_HOURS`` between
+    passes.  Mirrors the ``corpus_bootstrap`` daemon-thread pattern.
+    """
+    if getattr(sys, '_adoptiq_update_worker_started', False):
+        return
+    under_pytest = (
+        os.environ.get('PYTEST_CURRENT_TEST')
+        or os.environ.get('ADOPTIQ_TESTING') == '1'
+        or 'pytest' in sys.modules
+    )
+    if under_pytest:
+        return
+    sys._adoptiq_update_worker_started = True  # type: ignore[attr-defined]
+
+    def _loop() -> None:
+        # Small initial delay so the first tick does not race app boot.
+        time.sleep(15)
+        while True:
+            _r119_update_check_tick()
+            time.sleep(max(60.0, _R119_UPDATE_CHECK_HOURS * 3600.0))
+
+    t = threading.Thread(target=_loop, name='adoptiq-update-check', daemon=True)
+    t.start()
+    logger.info(
+        "Round 119 / Build 88: update-check worker started (every %.1fh, mode=%s)",
+        _R119_UPDATE_CHECK_HOURS, _r119_get_auto_update_mode(),
+    )
+
+
 # Round 36 / onedrive-sync-auth: the legacy MSAL/Graph SharePoint
 # routes (signin / signout / refresh) have been removed.  The OneDrive
 # desktop client handles auth/MFA/admin-consent and mirrors the
@@ -22975,6 +23317,25 @@ def _r69_sanitize_llm_error(raw: Any, *, max_len: int = 200) -> str:
     s = _re69.sub(r"(?i)['\"]?appkey['\"]?\s*[:=]\s*['\"]?[^'\",\s}]+['\"]?", "appkey=<redacted>", s)
     s = _re69.sub(r"(?i)['\"]?session[_-]?id['\"]?\s*[:=]\s*['\"]?[^'\",\s}]+['\"]?", "session_id=<redacted>", s)
     s = _re69.sub(r"(?i)['\"]user['\"]\s*:\s*['\"]\{[^{}]*\}['\"]", "'user': '<redacted>'", s)
+    # Round 118 / Build 87: humanize provider error envelopes.  R112 stripped
+    # SECRETS from the upstream 429 body but left the machine JSON/dict
+    # structure intact, so the Build 86 Compact "Non-AI fallback summary"
+    # (P26) still dumped the raw
+    # ``Error code: 429 - {'error': {'message': '...'}}`` envelope into
+    # customer-facing prose.  When a JSON/dict envelope is still present
+    # AND it carries a human ``message`` field, collapse the braces and
+    # keep only the leading kind prefix + the inner message.  Gated on the
+    # ``{`` being present so plain-prose errors (no envelope) pass through
+    # untouched -- preserving the R112 ``test_sanitizer_preserves_non_credential_text``
+    # contract (``rate_limit_429`` + ``monthly throughput`` survive) and the
+    # ``<redacted>`` blob markers (those have no ``{`` after redaction).
+    _brace = s.find("{")
+    if _brace != -1:
+        _msg_m = _re69.search(r"(?i)['\"]message['\"]\s*:\s*['\"]([^'\"]{1,300})['\"]", s)
+        if _msg_m:
+            _prefix = s[:_brace].rstrip().rstrip("-").rstrip().rstrip(":").rstrip()
+            _msg = _msg_m.group(1).strip()
+            s = f"{_prefix}: {_msg}" if _prefix else _msg
     if len(s) > max_len:
         s = s[: max_len - 3].rstrip() + "..."
     return s
@@ -31021,6 +31382,13 @@ if __name__ == '__main__':
     except Exception:
         logger.exception("Round 32 / Phase 2.D: admin auto-start raised; "
                          "main app continuing")
+    # Round 119 / Build 88: spawn the cross-platform auto-update worker.
+    # No-op under pytest; idempotent; degrades to notify on any failure.
+    try:
+        start_update_check_worker()
+    except Exception:
+        logger.exception("Round 119 / Build 88: update-check worker start "
+                         "raised; main app continuing")
     # Round 101: explicit threaded server so slow report downloads or browser
     # keep-alive sockets cannot starve /status and /ping during live soaks.
     app.run(debug=False, host=_bind_host, port=PORT, use_reloader=False, threaded=True)

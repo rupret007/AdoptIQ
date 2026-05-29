@@ -11851,3 +11851,105 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - Subagent-flagged latent items (case-variant per-CSSM dedup, ACC empty-subs silent fallback, R64 exception-only path incoherence) — pre-existing/documented trade-offs and exception-only paths; not in R117 scope.
 
 **Trailer:** Made-with: Cursor
+
+## Round 118 — handoff 2026-05-29
+
+**What changed (plain English):**
+- (A) ROOT CAUSE of the ACC=24 customer-count regression. R116 (Build 85) anchored the "All Contact Center" headline universe on the team Contact-Center SUBSCRIPTION roster — but the roster was short because `adoptiq_backend.get_subscriptions_for_team` matched ONLY the primary DSM owner column. A VPN-gated diagnostic (`scripts/r118_dump_dsm_columns.py`, calls `introspect_dsm_columns` directly so it bypasses the CSRF-gated `/api/diag/dsm-columns` endpoint) dumped the LIVE DSM schema (`CX_DB.CX_SWSSBST_BR.dsm_assignment_data`): it carries FIVE secondary owner-email slots `DSM_EMAIL1`..`DSM_EMAIL5` (paired with `DSM_ASSIGNED_1..5` / `DSM_ID1..5`), NONE of which were in `_R82_SECONDARY_DSM_EMAIL_CANDIDATES`. A Brian CSSM owning an account via slot 2-5 (but not the denormalized `PRIMARY_DSM_EMAIL`) was silently dropped → live `team_subs_diag.secondary_rows == 0`.
+- (B) Fix: named `DSM_EMAIL1`..`DSM_EMAIL5` in `_R82_SECONDARY_DSM_EMAIL_CANDIDATES` so the R82 UNION fans out to them and de-dupes on `(SUBSCRIPTION_ID, ACCOUNT_ID_C, BU_NAME, CSSM_EMAIL)`. The fetch is the single centralized helper, so Comprehensive (L16436), Leader (L26164/L28578), and Renewal (L14415) all inherit the corrected fan-out automatically. `NEXT_ACTION_OWNER_EMAIL` is deliberately EXCLUDED (next-action owner, not an ownership attribution).
+- (C) Diagnostic widening: `introspect_dsm_columns`'s `all_email_like_columns` escape-hatch filter went from a `*_EMAIL` suffix match (which MISSED the digit-suffixed `DSM_EMAILn` slots — exactly why this gap survived R82) to any column containing `EMAIL`. Visibility-only; does NOT widen the WHERE clause (still gated by the conservative allow-list).
+
+**Files touched:**
+- `adoptiq_backend.py` — extend `_R82_SECONDARY_DSM_EMAIL_CANDIDATES` (+5 live slots, Round 118 comment); widen `introspect_dsm_columns` `all_email_like_columns` filter.
+- `config.py` — `ADOPTIQ_BUILD` 86 → 87 + Round 118 comment.
+- `scripts/r118_dump_dsm_columns.py` — new VPN-gated DSM schema dumper (read-only, no PII, never writes).
+- `README.md` — What's New in Build 87.
+- Tests: `tests/test_round118_acc_secondary_dsm_slots.py` (9).
+
+**SSoT modules touched:** none of canonical_metrics / risk_scoring / report_export_schema. The DSM owner-column allow-list (`_R82_*` in `adoptiq_backend`) remains the SSoT for "who owns which subscription"; R118 only extends its membership.
+
+**Tests added/updated:**
+- `tests/test_round118_acc_secondary_dsm_slots.py` (9) — candidate tuple includes all 5 live slots + disjoint from primary + `NEXT_ACTION_OWNER_EMAIL` excluded + R82 legacy candidates preserved; runtime: a secondary-only customer (DSM_EMAIL2) IS counted and `secondary_rows > 0`; all 5 present slots queried with `%s` params (no injection); diagnostic surfaces digit-suffixed slots; secondary-candidates-present classification matches; Round 118 source markers.
+- Regression confirmed green: `test_round82_secondary_cssm_attribution.py` (22), `test_round116_acc_customer_count_floor.py` (11), `test_round88_cssm_subscriptions_union.py` (6).
+
+**Verify status:**
+- `make verify` — PASS (`PY=/Library/Frameworks/Python.framework/Versions/3.11/bin/python3`): ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities.
+- pytest: 5828 passed / 4 skipped / 6 deselected (Build 86 floor 5805; +9 ACC `test_round118_acc_secondary_dsm_slots.py` + 14 Compact fold-in `test_round118_compact_prose_fixes.py` = +23).
+
+**Hot spots Claude should audit first:**
+1. `adoptiq_backend._R82_SECONDARY_DSM_EMAIL_CANDIDATES` — confirm `DSM_EMAIL1` inclusion cannot double-count (it shares the dedup key with primary; verify the `drop_duplicates` subset still covers CSSM_EMAIL).
+2. `introspect_dsm_columns` widened filter — confirm `"EMAIL" in c` doesn't over-include a non-owner column into the WHERE clause path (it must not — the WHERE clause reads only the candidate allow-list, not `all_email_like_columns`).
+3. `scripts/r118_dump_dsm_columns.py` — confirm it never writes, prints no PII (schema metadata only), and the credential-load order (bundled secrets → secrets.env) precedes the `config`/`adoptiq_backend` import.
+
+**Build + smoke:** PENDING — release-gated DMG rebuild (`OUTBOX/AdoptIQ-v1.0.4-build87.dmg`) + packaged smoke is the next step. `adoptiq_pc.spec` confirmed unchanged (no new top-level module; `adoptiq_backend` + `config` already in `hiddenimports`; pure-Python edits).
+
+**LIVE GATE (blocks push to main):** the operator must regenerate Brian Frazier "All Contact Center" Comprehensive on VPN with Build 87 and confirm `Customers in portfolio > 24` (target ~37-49) AND the Risk_Components sheet widens AND `team_subs_diag.secondary_rows > 0`. Push to `origin main` is HELD until that confirmation — the R116 lesson (synthetic-fixture pass ≠ live fix) is the explicit reason for the gate.
+
+**Build 87 fold-in — Compact prose-quality fixes (post-audit):**
+Parallel read-only DOCX audits of the Build 86 reports surfaced three model-independent Compact regressions, folded into Build 87:
+- (F1) Band-label parity: the lone "Medium Risk (band)" line in the executive dashboard (`executive_intelligence_formatter.add_executive_dashboard`) disagreed with the canonical MODERATE vocabulary the rest of the Compact narrative + Renewal already render → corrected to "Moderate Risk (band)" (R67/B1). Canonical key `medium_risk_customers` unchanged; only the user-facing word.
+- (F2) TAC Lifecycle triplication: the R40 per-customer TAC→subscription join fans a single case out to one row per matched subscription, so case `700840277` (WINTRUST) rendered 3× AND `canonical_metrics.count_total_tac` (a `_safe_len`) over-counted the "Total Support Cases" KPI. New `_r118_dedup_tac_cases(df)` collapses on the first present case-id column (`Case #`/`SR Number`/`CaseNumber`/`case_id`/`CASE_NUMBER`) with `keep='first'` (mirrors R78/B2 Leader Action_Plans dedup-by-ID), applied at BOTH `csone_norm` ingestion points so count + table agree.
+- (F3) 429 envelope leak: R112 stripped SECRETS from the upstream 429 body but left the raw machine JSON/dict (`Error code: 429 - {'error': {'message': ...}}`) intact, so the Compact "Non-AI fallback summary" (P26) dumped the envelope into prose. `_r69_sanitize_llm_error` now humanizes the envelope down to its inner `message` (gated on a residual `{` so plain-prose 429s pass through untouched — preserves the R112 `test_sanitizer_preserves_non_credential_text` + `<redacted>`-blob contracts). Redaction still runs FIRST so secrets never survive the collapse.
+
+**Compact fold-in tests:** `tests/test_round118_compact_prose_fixes.py` (14) — MODERATE source-shape pin + dedup behavior (triplicate collapse, keep-first determinism, count-parity, no-op without id col / empty / None, SR-Number fallback, both-ingestion-points wiring) + sanitizer behavior (429-envelope collapse, plain-prose R112 preservation, `<redacted>`-blob preservation, secret-survives-humanize redaction). R112 sanitizer suite (22) re-confirmed green.
+
+**Comprehensive 24-vs-12 customer-count contradiction — investigation conclusion (NOT a new code fix):**
+The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this is the documented **R47-COMP-CUSTCOUNT-PARITY** narrow-vs-wide split (`app_simple.py` ~7700-7733) — the Word headline tile + Executive Summary overview line render `total_customers_canonical_narrow` (the `cm.count_customers` AB∪CSOne∪Pulse universe) while `total_customers` stays the wider downstream subscription universe used for per-customer iteration. The specific 24 vs 12 numbers are ALSO confounded by the Build 86 run's LLM `rate_limit_429` blackout (the portfolio narrative path fell to the R68/A4 deterministic builder). Both numbers will shift once the R118 secondary-DSM fix restores the subscription universe AND the 429 clears on the clean VPN regen. Deliberately NO speculative change to the heavily-pinned R47/R64/B1 narrow-vs-wide contract before a gated ship — the LIVE GATE below now also checks count coherence on the Build 87 regen.
+
+**Known deferrals (intentional non-fixes):**
+- Optional `unknown`/`Unknown` sentinel-casing normalization in Compact/Leader case cells — cosmetic; deferred.
+- Comprehensive narrow-vs-wide headline split (24 vs 12) — BY DESIGN (R47-COMP-CUSTCOUNT-PARITY); a prose-clarity label distinguishing the two universes is a candidate Round 119 follow-on, not a Build 87 blocker.
+- Leader cosmetic nits from the audit (singular/plural "1 high-priority adoption barriers", `Unknown` sentiment/heading sentinels, unsuppressed internal AdoptIQ filenames in Historical Context, "Team Avg = 748" mislabel) — deferred to Round 119; none are correctness blockers.
+
+**Trailer:** Made-with: Cursor
+
+## Round 119 — handoff 2026-05-29
+
+**What changed (plain English):**
+- Cross-platform auto-update (Tier C: full silent self-replace) for both macOS and Windows. The app reads a machine-readable `latest.json` manifest from the synced OneDrive Releases root `AI Projects/OUTBOX`, compares the per-platform `build` to `ADOPTIQ_BUILD`, and on a newer verified build (when idle) stages the artifact, sha256+codesign-verifies it, spawns a detached swapper that replaces the running bundle/exe and relaunches. **Any failure on the auto path falls back to a notify banner — never a half-installed app.**
+- New decoupled engine `auto_updater.py` (stdlib + `config` only, no `app_simple` import) — fully offline-testable.
+- New merge-aware manifest writer `scripts/write_release_manifest.py` — each build host writes ONLY its own platform slot (`mac`/`pc`), recomputes the informational top-level `build` as the max, atomic write. Wired into `build_mac_dmg.sh` (shasum + writer + OneDrive mirror) and `build_pc.bat` (certutil sha + versioned EXE + writer + mirror).
+- Releases discovery in `config.py` (`_releases_candidates()`/`_resolve_releases_folder()` mirroring the `_csone_onedrive_candidates` pattern) → `Config.ADOPTIQ_RELEASES_FOLDER` (+ `ADOPTIQ_RELEASES_SHARE_URL`).
+- Per-machine kill switch `adoptiq_settings.auto_update_mode` (allow-listed `off`/`notify`/`auto`, default `auto`), surfaced on the Preferences hub.
+- Endpoints + worker + banner in `app_simple.py`: `GET /api/update/status`, `POST /api/update/apply` (CSRF dual-auth, 409 `needs_force` when busy, TESTING short-circuit), `GET/POST /api/settings/auto-update-mode`, and a `start_update_check_worker` daemon (no-op under pytest). Banner via `static/js/r68_restart_banner.js` + `r119_auto_update.js`.
+
+**Files touched:**
+- `auto_updater.py` — NEW: read_latest_manifest / is_update_available / current_install_root / stage_and_verify (sha256 + codesign/authenticode + quarantine strip) / write_swapper_macos|windows / apply_update (idle-gate + detached spawn + clean shutdown; degrades to notify on any failure; TESTING short-circuit).
+- `scripts/write_release_manifest.py` — NEW: merge-aware atomic latest.json writer.
+- `config.py` — releases discovery + `ADOPTIQ_RELEASES_FOLDER`/`ADOPTIQ_RELEASES_SHARE_URL`; `ADOPTIQ_BUILD` 87 → 88 + Round 119 comment.
+- `adoptiq_settings.py` — allow-listed `auto_update_mode` + `is_valid_auto_update_mode`.
+- `app_simple.py` — status/apply/mode endpoints + `start_update_check_worker` daemon + worker tick.
+- `build_mac_dmg.sh`, `build_pc.bat` — manifest emission + versioned artifact + OneDrive mirror.
+- `templates/preferences.html`, `templates/base.html`, `static/js/r119_auto_update.js`, `static/js/r68_restart_banner.js` — Preferences card + update banner.
+- `adoptiq_mac.spec`, `adoptiq_pc.spec` — `auto_updater` hidden import.
+- `README.md` — What's New in Build 88. `CLAUDE.md` — critical rule + floor bump.
+- Tests: `tests/test_round119_auto_update_manifest.py`, `_engine.py`, `_endpoints.py`, `_build_and_ui.py`.
+
+**SSoT modules touched:** config (new releases constants + build bump). No canonical_metrics / risk_scoring / report_export_schema change.
+
+**Tests added/updated:**
+- `tests/test_round119_auto_update_manifest.py` — manifest parse/merge/bad-schema, atomic round-trip, build comparison, top-level=max.
+- `tests/test_round119_auto_update_engine.py` — sha256 pass/fail, codesign gate, artifact-path safety, swapper source-shape (mac + windows: wait-for-pid / ditto|copy / relaunch / self-delete / keep-.old / outside bundle), apply_update TESTING short-circuit + idle gate + notify fallback on every failure.
+- `tests/test_round119_auto_update_endpoints.py` — `/api/update/status` shape + no secrets, `/api/update/apply` CSRF dual-auth + 409 busy + TESTING `would_update`, `auto_update_mode` validation/persist.
+- `tests/test_round119_auto_update_build_and_ui.py` — build-script source-shape, spec hidden-import, config discovery, Preferences card, DOM-safe JS, banner polling.
+
+**Verify status:**
+- `make verify` — PASS (`PY=/Library/Frameworks/Python.framework/Versions/3.11/bin/python3`): ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities.
+- pytest: 5893 passed / 4 skipped / 6 deselected (Build 87 floor 5828; +65 auto-update suite).
+
+**Hot spots Claude should audit first:**
+1. `auto_updater.apply_update` — confirm EVERY exception path returns a notify state (never raises, never spawns a swapper after a failed verify); confirm the idle gate treats an unprovable-idle / raising `is_busy` as busy (defer), never as idle.
+2. `auto_updater.stage_and_verify` — confirm sha256 is mandatory AND macOS codesign is mandatory (Windows soft-check documented); confirm artifact path is constrained under the Releases root (no `..` traversal to copy an arbitrary file into place).
+3. `scripts/write_release_manifest.py` — confirm a Mac-only write never clobbers the `pc` slot and vice-versa; confirm non-integer `build` is rejected.
+4. `app_simple` `/api/update/apply` — confirm TESTING short-circuit cannot be bypassed and that the busy → 409 path matches `/api/shutdown` semantics.
+
+**Build + smoke:** PENDING — release-gated DMG rebuild (`OUTBOX/AdoptIQ-v1.0.4-build88.dmg`) + packaged smoke (plist build = 88, latest.json emitted to OUTBOX + OneDrive mirror with correct sha, corpus+salt bundled, codesign OK). PC build is operator-run on Windows; validated by source-shape this round.
+
+**LIVE GATE (still blocks push to main):** the pre-existing Build 87 ACC live-verify gate stands — the operator must regenerate Brian Frazier "All Contact Center" Comprehensive on VPN and confirm `Customers in portfolio > 24` AND `team_subs_diag.secondary_rows > 0` before `origin main`. Push is HELD until that confirmation per the prior round's blocking decision.
+
+**Known deferrals (intentional non-fixes):**
+- Delta/binary-diff updates (full artifact only).
+- Automatic rollback on unhealthy new-build boot (keep `.old`; manual restore this round).
+- Code-signing the Windows EXE (Authenticode stays a soft/documented check until the EXE is signed; flip `_PC_REQUIRE_SIGNATURE` then).
+
+**Trailer:** Made-with: Cursor

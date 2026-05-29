@@ -1,8 +1,24 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 86).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 88).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 88 (Round 119 — Automatic updates)
+
+Build 88 adds **automatic updates** so you stay on the latest build without manually re-downloading the DMG/EXE. AdoptIQ watches the shared OneDrive Releases folder (`AI Projects/OUTBOX`) for a newer build and, when one is published, **verifies it (SHA-256 + macOS code signature) and installs it silently in the background** — then relaunches into the new version. Updates only happen when no report is running, and **any problem along the way (folder not synced, download incomplete, signature mismatch) safely falls back to a "new build available" banner** instead of touching your installed app, so you're never left with a broken install. The old version is kept aside for one launch as a manual rollback.
+
+You can control this on the **Preferences** page under "Automatic updates": **Automatic** (install silently — the default), **Notify only** (show a banner with an "Install now" button), or **Off**. To receive updates, add the `AI Projects/OUTBOX` folder as a shortcut to your OneDrive — the same one-time step as the knowledge corpus share. Windows installs follow the same flow (code-signature verification on Windows is a soft check until the EXE is signed).
+
+All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **5893 pytest passed (Build 87 floor was 5828; +65 = the offline auto-update suite)**.
+
+### What's New in Build 87 (Round 118 — "All Contact Center" customer-count fix)
+
+Build 87 fixes the confirmed regression where Brian Frazier's "All Contact Center" Comprehensive report showed only **24 customers in portfolio** when the team actually carries roughly 37-49. Build 85 (Round 116) anchored the All-Contact-Center headline count on the team's Contact-Center subscription roster — but that roster was itself short. The underlying subscription fetch only matched the *primary* owner on each account in the source data, so any account a Brian CSSM owns through a *secondary* assignment slot was silently dropped. We confirmed against the live data source that accounts carry up to five owner slots, taught the fetch to consult all of them (de-duplicated so nothing double-counts), and widened the built-in diagnostic so this class of gap surfaces before a build next time. Net effect: secondary-owned Contact-Center customers now flow back into the headline count, the risk-band buckets, and the Excel Risk_Components sheet. The named-technology, Compact, Renewal, and Leader paths inherit the same corrected fetch automatically.
+
+A post-fix read-only audit of the four Build 86 reports also folded **three Compact prose fixes** into Build 87: (1) the executive-dashboard Risk Summary now says **"Moderate Risk (band)"** to match the canonical MODERATE vocabulary used everywhere else in the Compact and Renewal narratives; (2) the **TAC Lifecycle Snapshot no longer repeats a case** — a support case touching multiple subscriptions used to render (and count) two or three times, so it's now de-duplicated on the case number before both the count and the table; (3) when the AI provider is rate-limited, the **fallback summary no longer dumps the raw machine error envelope** into customer-facing prose — it's collapsed to the human-readable reason (secrets were already redacted; this removes the leftover JSON braces too).
+
+All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **5828 pytest passed (Build 86 floor was 5805; +23 net = 9 ACC + 14 Compact)**. This build is shipped behind a live-verification gate: the customer count is confirmed above 24 on a VPN-connected run before release.
 
 ### What's New in Build 86 (Round 117 — Form reset after each run + CSOne export instructions)
 

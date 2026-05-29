@@ -13,6 +13,10 @@ if not defined ADOPTIQ_VERSION set ADOPTIQ_VERSION=
 if not defined ADOPTIQ_BUILD set ADOPTIQ_BUILD=
 set STAGING_DIR=C:\Users\jestory\OneDrive - Cisco\AI Projects\Staging\AdoptIQ_PC
 set MAC_OUTBOX_STAGING_DIR=C:\Users\jestory\OneDrive - Cisco\AI Projects\Staging\AdoptIQ_MAC\OUTBOX
+REM Round 119 / Build 88: consumer-visible Releases tree the auto-updater reads.
+REM latest.json lives at the OUTBOX root; the versioned EXE lives in AdoptIQ_PC\.
+set RELEASES_ROOT=C:\Users\jestory\OneDrive - Cisco\AI Projects\OUTBOX
+set PC_OUTBOX_DIR=C:\Users\jestory\OneDrive - Cisco\AI Projects\OUTBOX\AdoptIQ_PC
 
 echo ==============================================
 echo   AdoptIQ - Build Windows .exe
@@ -62,6 +66,8 @@ REM values regardless of whether the operator passed env-var overrides.
 for /f %%i in ('"%PYTHON%" -c "from config import ADOPTIQ_VERSION; print(ADOPTIQ_VERSION)"') do set ADOPTIQ_VERSION=%%i
 for /f %%i in ('"%PYTHON%" -c "from config import ADOPTIQ_BUILD; print(ADOPTIQ_BUILD)"') do set ADOPTIQ_BUILD=%%i
 echo   -^> Version %ADOPTIQ_VERSION% (Build %ADOPTIQ_BUILD%)
+REM Round 119 / Build 88: versioned EXE name the auto-update manifest points at.
+set VERSIONED_EXE=AdoptIQ-v%ADOPTIQ_VERSION%-build%ADOPTIQ_BUILD%.exe
 
 echo.
 echo Running PyInstaller (this may take a few minutes)...
@@ -87,8 +93,10 @@ echo Creating OUTBOX...
 if not exist OUTBOX mkdir OUTBOX
 
 REM Keep OUTBOX deterministic: exactly the user-facing release payload.
+REM Round 119 / Build 88: also preserve the versioned EXE + latest.json so the
+REM auto-update artifacts survive the prune.
 for %%F in (OUTBOX\*) do (
-    if /I not "%%~nxF"=="AdoptIQ.exe" if /I not "%%~nxF"=="Run_AdoptIQ.bat" if /I not "%%~nxF"=="Unblock_AdoptIQ.bat" if /I not "%%~nxF"=="READ_ME_FIRST.txt" if /I not "%%~nxF"=="README.md" if /I not "%%~nxF"=="build_info.txt" del /Q "%%~fF" >nul 2>nul
+    if /I not "%%~nxF"=="AdoptIQ.exe" if /I not "%%~nxF"=="Run_AdoptIQ.bat" if /I not "%%~nxF"=="Unblock_AdoptIQ.bat" if /I not "%%~nxF"=="READ_ME_FIRST.txt" if /I not "%%~nxF"=="README.md" if /I not "%%~nxF"=="build_info.txt" if /I not "%%~nxF"=="%VERSIONED_EXE%" if /I not "%%~nxF"=="latest.json" del /Q "%%~fF" >nul 2>nul
 )
 
 copy /Y dist\AdoptIQ.exe "OUTBOX\AdoptIQ.exe" >nul 2>nul
@@ -124,6 +132,50 @@ if %ERRORLEVEL% neq 0 (
 )
 echo AdoptIQ v%ADOPTIQ_VERSION% build %ADOPTIQ_BUILD% > OUTBOX\build_info.txt
 echo Built: %date% %time% >> OUTBOX\build_info.txt
+
+REM ---------------------------------------------------------------------------
+REM Round 119 / Build 88: auto-update artifacts.
+REM
+REM Produce a versioned EXE alongside the generic AdoptIQ.exe, compute its
+REM SHA256 + size, and emit the merge-aware latest.json to the consumer
+REM Releases root (AI Projects\OUTBOX\latest.json).  The versioned EXE is
+REM mirrored into AI Projects\OUTBOX\AdoptIQ_PC\ so the manifest's relative
+REM artifact path (AdoptIQ_PC/<exe>) resolves for every consumer.
+REM ---------------------------------------------------------------------------
+echo.
+echo Creating versioned EXE + auto-update manifest...
+copy /Y dist\AdoptIQ.exe "OUTBOX\%VERSIONED_EXE%" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to create versioned EXE OUTBOX\%VERSIONED_EXE%.
+    pause
+    exit /b 1
+)
+
+REM Get-FileHash / Get-Item are more parser-friendly than certutil's multi-line
+REM output.  EXE_SHA is the hex digest; EXE_SIZE is the byte length.
+set EXE_SHA=
+for /f %%H in ('powershell -NoProfile -Command "(Get-FileHash 'OUTBOX\%VERSIONED_EXE%' -Algorithm SHA256).Hash"') do set EXE_SHA=%%H
+set EXE_SIZE=0
+for /f %%Z in ('powershell -NoProfile -Command "(Get-Item 'OUTBOX\%VERSIONED_EXE%').Length"') do set EXE_SIZE=%%Z
+echo   -^> %VERSIONED_EXE% sha256=%EXE_SHA% size=%EXE_SIZE%
+
+REM Local OUTBOX\latest.json (record of this build host's view).  Uses || at
+REM runtime instead of nested %ERRORLEVEL% reads so it works without delayed
+REM expansion.
+"%PYTHON%" scripts\write_release_manifest.py --manifest "OUTBOX\latest.json" --platform pc --version %ADOPTIQ_VERSION% --build %ADOPTIQ_BUILD% --artifact "AdoptIQ_PC/%VERSIONED_EXE%" --sha256 %EXE_SHA% --size %EXE_SIZE% || echo WARNING: Failed to write OUTBOX\latest.json (local manifest).
+
+REM Consumer Releases root: merge the pc slot into the shared manifest so the
+REM mac slot (written from the Mac build host) is preserved.
+if not exist "%RELEASES_ROOT%" goto :skip_releases_mirror
+if not exist "%PC_OUTBOX_DIR%" mkdir "%PC_OUTBOX_DIR%"
+"%PYTHON%" scripts\write_release_manifest.py --manifest "%RELEASES_ROOT%\latest.json" --platform pc --version %ADOPTIQ_VERSION% --build %ADOPTIQ_BUILD% --artifact "AdoptIQ_PC/%VERSIONED_EXE%" --sha256 %EXE_SHA% --size %EXE_SIZE% && echo   -^> latest.json merged into "%RELEASES_ROOT%\latest.json" || echo WARNING: Failed to write "%RELEASES_ROOT%\latest.json" (Releases manifest).
+copy /Y "OUTBOX\%VERSIONED_EXE%" "%PC_OUTBOX_DIR%\%VERSIONED_EXE%" >nul 2>nul && echo   -^> %VERSIONED_EXE% mirrored into "%PC_OUTBOX_DIR%" || echo WARNING: Failed to mirror %VERSIONED_EXE% into "%PC_OUTBOX_DIR%".
+goto :after_releases_mirror
+:skip_releases_mirror
+echo WARNING: Releases root not found, skipping consumer mirror:
+echo          %RELEASES_ROOT%
+echo          Add the OUTBOX shortcut to OneDrive to enable auto-update publishing.
+:after_releases_mirror
 
 REM Mirror release payload to staging folder with the same file contract.
 echo Syncing staging folder...
