@@ -1268,6 +1268,26 @@ _R82_SECONDARY_DSM_EMAIL_CANDIDATES: Tuple[str, ...] = (
     "OWNER_EMAIL_BACKUP",
     "CSSM_EMAIL_2",
     "DSM_EMAIL_2",
+    # Round 118 / Build 87: the LIVE DSM table
+    # (CX_DB.CX_SWSSBST_BR.dsm_assignment_data) attributes secondary owners
+    # via FIVE numbered slots -- DSM_EMAIL1..DSM_EMAIL5 (paired with
+    # DSM_ASSIGNED_1..5 / DSM_ID1..5). Only PRIMARY_DSM_EMAIL was in the
+    # primary set, so a Brian Frazier CSSM who owned an account via slot 2-5
+    # was silently dropped: the live ACC Comprehensive count regressed to 24
+    # (Build 86) with team_subs_diag.secondary_rows=0. The R82 SSoT contract
+    # is "consult primary + every PRESENT secondary candidate", so naming the
+    # real slots here restores those accounts. DSM_EMAIL1 is included for
+    # completeness (it dedups against PRIMARY_DSM_EMAIL on
+    # (SUBSCRIPTION_ID, ACCOUNT_ID_C, BU_NAME, CSSM_EMAIL), so listing it
+    # cannot double-count -- but it DOES catch accounts whose denormalized
+    # PRIMARY_DSM_EMAIL points elsewhere while a roster member sits in slot 1).
+    # NEXT_ACTION_OWNER_EMAIL is deliberately EXCLUDED: it is the next-action
+    # owner, not an ownership attribution, so matching it would over-attribute.
+    "DSM_EMAIL1",
+    "DSM_EMAIL2",
+    "DSM_EMAIL3",
+    "DSM_EMAIL4",
+    "DSM_EMAIL5",
 )
 
 # Cache stores (columns, fetched_at_monotonic). TTL bounds staleness so that
@@ -2355,9 +2375,16 @@ def introspect_dsm_columns(ctx) -> Dict[str, Any]:
         payload["secondary_email_candidates_present"] = [
             col for col in _R82_SECONDARY_DSM_EMAIL_CANDIDATES if col in available_columns
         ]
-        payload["all_email_like_columns"] = [
-            c for c in sorted_cols if c.endswith("_EMAIL") or c.endswith("_EMAIL_2") or c.endswith("_EMAIL_BACKUP")
-        ]
+        # Round 118 / Build 87: widen the operator escape-hatch filter. The
+        # pre-R118 suffix match (*_EMAIL / *_EMAIL_2 / *_EMAIL_BACKUP) MISSED
+        # the live secondary slots DSM_EMAIL1..DSM_EMAIL5 because they end in a
+        # DIGIT, not "_EMAIL" -- which is exactly why the secondary-attribution
+        # gap survived R82. Match any column whose name contains "EMAIL"
+        # (case-insensitive) so digit-suffixed and prefixed variants both
+        # surface for the operator. This is visibility-only (it does NOT widen
+        # the WHERE clause -- that stays gated by the conservative
+        # _R82_SECONDARY_DSM_EMAIL_CANDIDATES allow-list).
+        payload["all_email_like_columns"] = [c for c in sorted_cols if "EMAIL" in c]
         payload["ok"] = True
         return payload
     except Exception as err:

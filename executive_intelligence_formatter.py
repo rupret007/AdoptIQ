@@ -176,6 +176,54 @@ def _ensure_inline_source_claim(
     return f"{claim} {format_inline_source(metric_name, fields=fields or [])}"
 
 
+# Round 118 / Build 87: dedup TAC/CSOne case rows by case identifier.
+#
+# The Build 86 Compact acceptance audit found case # 700840277 (WINTRUST
+# FINANCIAL CORPORATION US) rendered THREE byte-identical times in the
+# TAC Lifecycle Snapshot table -- and ``canonical_metrics.count_total_tac``
+# is ``_safe_len(csone_df)``, so the inflated row set also over-counted
+# the "Total Support Cases" KPI.  Root cause: the R40 per-customer
+# TAC -> subscription join fans a single case out to one row per matched
+# subscription, so a case tied to N subscriptions appears N times.  A
+# TAC ``Case #`` is the unique support-case identifier, so collapsing on
+# it with ``keep='first'`` is the canonical de-fan (mirrors the R78/B2
+# Leader Action_Plans dedup-by-ID contract).  Applied at BOTH
+# ``csone_norm`` ingestion points so the count KPI and the rendered
+# table agree.  No-op when no case-id column is present (the frame keeps
+# its original rows) so non-TAC callers are unaffected.
+_R118_TAC_CASE_ID_CANDIDATES = ("Case #", "SR Number", "CaseNumber", "case_id", "CASE_NUMBER")
+
+
+def _r118_dedup_tac_cases(df: Any) -> Any:
+    """Collapse duplicate TAC case rows on the first present case-id
+    column with ``keep='first'``.  Returns the frame unchanged when it is
+    None / empty / carries no recognised case-id column."""
+    try:
+        if df is None or getattr(df, "empty", True):
+            return df
+        id_col = next((c for c in _R118_TAC_CASE_ID_CANDIDATES if c in df.columns), None)
+        if id_col is None:
+            return df
+        before = len(df)
+        # ``keep='first'`` preserves the earliest row for each case so the
+        # snapshot is deterministic against the upstream walk order.
+        deduped = df.drop_duplicates(subset=[id_col], keep="first")
+        after = len(deduped)
+        if after != before:
+            logger.info(
+                "Round 118 / Build 87: TAC case data deduped by %s: "
+                "%d raw rows -> %d unique (removed %d cross-subscription duplicates)",
+                id_col,
+                before,
+                after,
+                before - after,
+            )
+        return deduped
+    except Exception:  # noqa: BLE001 - dedup must never block report generation
+        logger.debug("Round 118 / Build 87: TAC dedup skipped (non-fatal)", exc_info=False)
+        return df
+
+
 # Round 44 / Phase 1: NaN-safe Days Open renderer for the compact TAC
 # lifecycle table.  Pre-Round-44 the table did
 # ``str(row.get('open_age_days', 'N/A'))`` -- when ``open_age_days``
@@ -482,6 +530,9 @@ class ExecutiveIntelligenceFormatter:
                 ],
             )
         csone_norm = add_case_lifecycle_fields(csone_data if csone_data is not None else pd.DataFrame())
+        # Round 118 / Build 87: de-fan cross-subscription duplicate case
+        # rows BEFORE counting so the KPI matches the rendered table.
+        csone_norm = _r118_dedup_tac_cases(csone_norm)
         total_cases = cm.count_total_tac(csone_norm)
 
         # Canonical priority and BEMS counts shared with Compact / Leader.
@@ -607,8 +658,17 @@ class ExecutiveIntelligenceFormatter:
             # ties out with the executive donut.
             _medium_band = risk_summary.get('medium_risk_customers')
             if _medium_band is not None:
+                # Round 118 / Build 87: the canonical band vocabulary is
+                # MODERATE (not MEDIUM) per the R67/B1 cross-format parity
+                # contract -- the rest of the Compact narrative + the
+                # Renewal report already render "MODERATE".  Pre-R118 this
+                # lone Risk Summary line still said "Medium Risk (band)",
+                # so the same customer's band was spelled two different ways
+                # in one report.  The underlying canonical key stays
+                # ``medium_risk_customers`` (the 35-55 / 0-100 band); only
+                # the user-facing word is corrected to MODERATE.
                 risk_para.add_run(
-                    f"Medium Risk (band): {format_number(_medium_band, decimals=0)}"
+                    f"Moderate Risk (band): {format_number(_medium_band, decimals=0)}"
                 )
                 _watch = risk_summary.get('moderate_risk_customers')
                 if _watch is not None and _watch != _medium_band:
@@ -914,6 +974,10 @@ class ExecutiveIntelligenceFormatter:
 
         if csone_data is not None and not csone_data.empty:
             csone_norm = add_case_lifecycle_fields(csone_data)
+            # Round 118 / Build 87: de-fan cross-subscription duplicate
+            # case rows so the TAC Lifecycle Snapshot never repeats a Case #
+            # (Build 86 audit: WINTRUST 700840277 appeared 3x).
+            csone_norm = _r118_dedup_tac_cases(csone_norm)
             bems_mask = detect_bems_mask(csone_norm)
             bems_cases = csone_norm[bems_mask]
             total_bems = len(bems_cases)
