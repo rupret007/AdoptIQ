@@ -11842,9 +11842,12 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 2. `analyze.html` `#csone_file` selector pin — confirm preview/validation/reset all reference `elements.fileInput` (no residual bare `querySelector('input[type=file]')`).
 3. `executive_intelligence_formatter._r117_is_stub_bullet` — confirm the lazy import + fallback can't raise and that substantive "Data unavailable. <more text>" bullets are preserved.
 
+**Build + smoke:**
+- Release-gated DMG built this session: `OUTBOX/AdoptIQ-v1.0.4-build86.dmg` (1.2 GB). Bake self-tests green (chunk_vectors dim=384, reranker, R107 decrypt round-trip); RELEASE GATE passed (corpus.db.enc + .salt present, no `.bake-skipped`). Packaged smoke PASS on `dist/AdoptIQ.app`: `/ping`, `/`, `/api/version` (valid build JSON), `/api/status/all`, `/api/corpus/status` all OK; port 5151 free after quit.
+- `adoptiq_pc.spec` confirmed unchanged (no new top-level module; pure-Python UI/config/formatter edits).
+
 **Known deferrals (intentional non-fixes):**
-- Live VPN-gated regen of all four reports (incl. the Build-86 form-reset + collapse smoke and the ACC floor re-confirmation) — operator post-build smoke step (#9.5); the static `--auto` audit was clean (`CRITICAL_ISSUES_FOUND=False`) on existing artifacts.
-- Gated macOS DMG rebuild — operator step (signing identity + bake-host corpus + ports 5151/5152 must be free). `adoptiq_pc.spec` needs no change (no new top-level module; pure-Python UI/config/formatter edits).
+- Live VPN-gated regen of all four reports (the Build-86 form-reset + collapse UX smoke and the ACC floor re-confirmation) — operator post-build smoke step (#9.5); the static `--auto` audit was clean (`CRITICAL_ISSUES_FOUND=False`) on existing artifacts.
 - Subagent-flagged latent items (case-variant per-CSSM dedup, ACC empty-subs silent fallback, R64 exception-only path incoherence) — pre-existing/documented trade-offs and exception-only paths; not in R117 scope.
 
 **Trailer:** Made-with: Cursor
