@@ -41,6 +41,34 @@ from report_word_styling import add_banded_top_n_table as _r16_add_banded_top_n_
 
 logger = logging.getLogger(__name__)
 
+
+# Round 117 / Build 86: local fallback mirroring adoptiq_backend._R78_STUB_RE
+# (the SSoT). Used only if the lazy import below fails so a broken import edge
+# can never block Compact report generation -- the canonical regex still wins.
+_R117_STUB_RE_FALLBACK = re.compile(
+    r'^\*{0,2}[A-Z][\w &/\-]+\*{0,2}\s*:\s*\*{0,2}\s*[Dd]ata\s+[Uu]navailable'
+    r'\s*\*{0,2}\.?\s*\*{0,2}\s*$',
+)
+
+
+def _r117_is_stub_bullet(bullet_text: str) -> bool:
+    """True when the ENTIRE bullet is a "<Category>: Data unavailable." stub.
+
+    Parity with the Comprehensive path (R78/B1). Prefers the SSoT regex from
+    ``adoptiq_backend`` and falls back to the local copy on any import failure.
+    """
+    if not bullet_text:
+        return False
+    try:
+        from adoptiq_backend import _R78_STUB_RE as _stub_re  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        _stub_re = _R117_STUB_RE_FALLBACK
+    try:
+        return bool(_stub_re.match(bullet_text.strip()))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # Professional color palette
 CISCO_BLUE = RGBColor(0x00, 0x7B, 0xC7)
 CISCO_DARK_BLUE = RGBColor(0x00, 0x4F, 0x8B)
@@ -722,6 +750,17 @@ class ExecutiveIntelligenceFormatter:
                 # Bullet points
                 elif line.startswith(('•', '-', '*')):
                     bullet_text = line.lstrip('•-* ')
+                    # Round 117 / Build 86: parity with the Comprehensive
+                    # path (R78/B1) -- drop pure "<Category>: Data unavailable."
+                    # acknowledgement stubs so the Compact executive summary
+                    # never ships an empty bullet. The Comprehensive narrative
+                    # uses adoptiq_backend.append_to_word_report which already
+                    # filters these; Compact uses THIS formatter, which was the
+                    # lone holdout. SSoT regex is adoptiq_backend._R78_STUB_RE;
+                    # lazy-import with a local fallback so a broken import edge
+                    # never blocks report generation.
+                    if _r117_is_stub_bullet(bullet_text):
+                        continue
                     para = self.doc.add_paragraph(style='List Bullet')
                     run = para.add_run(
                         _ensure_inline_source_claim(

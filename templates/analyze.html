@@ -629,6 +629,36 @@
                                 Run your own CSOne report and browse above to select your file.
                                 {% endif %}
                             </div>
+                            {# Round 117 / Build 86: CSP-safe collapsible explaining how an
+                               operator generates the CSOne export themselves. No inline
+                               onclick -- uses Bootstrap data-bs-toggle="collapse". #}
+                            <div class="mt-2">
+                                <button class="btn btn-link btn-sm p-0 text-decoration-none" type="button"
+                                        data-bs-toggle="collapse" data-bs-target="#csoneHowToCollapse"
+                                        aria-expanded="false" aria-controls="csoneHowToCollapse">
+                                    <i class="fas fa-circle-question me-1" aria-hidden="true"></i>How do I generate this report?
+                                </button>
+                                <div class="collapse mt-2" id="csoneHowToCollapse">
+                                    <div class="alert alert-light border small mb-0">
+                                        <ol class="mb-0 ps-3">
+                                            <li>
+                                                {% if csone_report_url %}
+                                                Open the CSOne report:
+                                                <a href="{{ csone_report_url }}" target="_blank" rel="noopener noreferrer"
+                                                   class="fw-semibold">AdoptIQ Export (CSOne)
+                                                   <i class="fas fa-external-link-alt ms-1" aria-hidden="true"></i></a>
+                                                {% else %}
+                                                Open the CSOne <strong>AdoptIQ Export</strong> report.
+                                                {% endif %}
+                                            </li>
+                                            <li>Click the dropdown (&#9662;) at the top-right of the report.</li>
+                                            <li>Click <strong>Export</strong>.</li>
+                                            <li>Choose <strong>Standard</strong> &rarr; Excel (<code>.xlsx</code>).</li>
+                                            <li>Come back here and <strong>browse</strong> to upload the downloaded <code>.xlsx</code>.</li>
+                                        </ol>
+                                    </div>
+                                </div>
+                            </div>
                             <div class="file-upload-preview mt-2" style="display: none;" role="status" aria-live="polite">
                                 <div class="alert alert-info d-flex align-items-center">
                                     <i class="fas fa-file-excel me-2" aria-hidden="true"></i>
@@ -991,7 +1021,14 @@ const AnalysisFormManager = (() => {
         try {
             elements.form = document.getElementById('analysisForm');
             elements.submitBtn = document.getElementById('submitBtn');
-            elements.fileInput = document.querySelector('input[type="file"]');
+            // Round 117 / Build 86: pin the CSOne file input by id. A generic
+            // ``input[type="file"]`` selector grabbed the FIRST file input on
+            // the page, which is the intel-upload field (#adoptiq-intel-upload-file,
+            // rendered above the form when ``intel_upload_enabled``) -- so file
+            // preview / validation / reset silently wired to the wrong input and
+            // never touched the actual CSOne field. Scope to the form as a fallback.
+            elements.fileInput = document.getElementById('csone_file')
+                || (elements.form ? elements.form.querySelector('input[type="file"]') : null);
             elements.filePreview = document.querySelector('.file-upload-preview');
             elements.notificationArea = document.getElementById('notification-area');
 
@@ -1211,6 +1248,54 @@ const AnalysisFormManager = (() => {
         elements.filePreview.style.display = 'none';
         if (elements.fileInput) {
             elements.fileInput.value = '';
+        }
+    };
+
+    /**
+     * Round 117 / Build 86: full form reset after a job successfully starts.
+     *
+     * The Round 91 single-window flow stays on the analyze page after submit
+     * (records the job in Report Jobs, no redirect). This clears the form back
+     * to a fresh-page-load state so the operator can immediately queue the next
+     * report without stale values lingering. Best-effort -- a reset failure must
+     * never break the success path.
+     */
+    const resetAnalysisFormAfterSubmit = () => {
+        try {
+            // Native reset restores manager / technology / days <select>/inputs to
+            // their server-rendered (R113) defaults and clears the csone_file input.
+            if (elements.form) {
+                elements.form.reset();
+            }
+            // The file-preview div is separate from the input -- hide it + clear value.
+            hideFilePreview();
+            // Custom subscription / customer filter widgets are untouched by form.reset().
+            const subIdEl = document.getElementById('subscription_id');
+            if (subIdEl) subIdEl.value = '';
+            const searchEl = document.getElementById('subscription-search');
+            if (searchEl) searchEl.value = '';
+            const customerNameEl = document.getElementById('customer_name');
+            if (customerNameEl) customerNameEl.value = '';
+            const selectedSub = document.getElementById('selected-subscription');
+            if (selectedSub) selectedSub.style.display = 'none';
+            const selectedSubDetails = document.getElementById('selected-subscription-details');
+            if (selectedSubDetails) selectedSubDetails.textContent = '';
+            // Report-type radios live OUTSIDE #analysisForm, so form.reset() does not
+            // touch them. Return to Comprehensive to match fresh-load state.
+            const comprehensiveRadio = document.getElementById('comprehensive');
+            if (comprehensiveRadio) comprehensiveRadio.checked = true;
+            // Restore manager-vs-customer visibility + re-enable manager/technology.
+            syncReportTypeRequirements();
+            checkSubscriptionFieldStates();
+            // Strip validation chrome.
+            if (elements.formControls) {
+                elements.formControls.forEach((control) => {
+                    control.classList.remove('is-valid', 'is-invalid');
+                    control.removeAttribute('aria-invalid');
+                });
+            }
+        } catch (err) {
+            console.warn('Form reset after submit skipped:', err);
         }
     };
 
@@ -1575,6 +1660,10 @@ const AnalysisFormManager = (() => {
                 elements.submitBtn.disabled = false;
                 elements.submitBtn.removeAttribute('aria-busy');
                 isSubmitting = false;
+                // Round 117 / Build 86: clear the form back to fresh-load state so
+                // the next report can be queued cleanly. R91 contract preserved --
+                // we already recorded the job above and we still do not redirect.
+                resetAnalysisFormAfterSubmit();
                 return;
             } else {
                 throw new Error(data.error || 'Unknown error occurred');

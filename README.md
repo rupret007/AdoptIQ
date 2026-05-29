@@ -1,8 +1,12 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 85).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 86).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 86 (Round 117 — Form reset after each run + CSOne export instructions)
+
+Build 86 is two small operator-UX wins on top of Build 85. **(1) The report form now resets after each job starts.** Previously the manager, technology, days, uploaded file, and report-type selection all lingered after you kicked off a report — easy to accidentally re-submit with stale values. Now, the moment a job is accepted, the form clears back to its fresh-page-load defaults (technology back to the default, report type back to Comprehensive, the uploaded file and any subscription/customer filters cleared) so the next report queues from a clean state. The single-window flow is unchanged — you still stay on the page and the new job appears in the live jobs list immediately. **(2) Clear instructions for generating the CSOne export.** If you upload the CSOne report manually, both report forms and the Help page now carry a collapsible "How do I generate this report?" walkthrough with a direct link to the CSOne report: open it, use the top-right dropdown → Export → Standard to download the Excel file, then browse to upload it here. The report link is configurable via `CSONE_REPORT_URL` (a sensible shared-report default ships baked in). A small correctness fix also pins the upload field's preview/validation/reset to the CSOne file input specifically, so they never bind to the wrong field when the optional intel-upload feature is enabled. Under the hood, the Compact executive summary now also suppresses empty "Data unavailable." acknowledgement bullets (matching the Comprehensive report). All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **5805 pytest passed (R116 floor was 5791; +14 net)**.
 
 ### What's New in Build 85 (Round 116 — Model heal + "All Contact Center" count fix + admin/help/audit sweep)
 

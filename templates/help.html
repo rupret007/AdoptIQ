@@ -118,9 +118,28 @@
                         <li><strong>OneDrive autodiscovery.</strong> If you don't upload one, AdoptIQ looks in your synced OneDrive corpus folder and picks the most recent AdoptIQ CSOne export automatically. Zero-byte "Files-On-Demand" placeholders are skipped (they aren't really on disk yet).</li>
                         <li><strong>Preferences folder override.</strong> If your local sync path doesn't match the canonical shape, set an explicit folder in <strong>Preferences → CSOne OneDrive folder</strong> and AdoptIQ uses that path directly.</li>
                     </ol>
-                    <div class="alert alert-warning mb-0 hover-lift">
+                    <div class="alert alert-warning hover-lift">
                         <i class="fas fa-triangle-exclamation me-2"></i>If AdoptIQ can't find a CSOne file at all, adoption-barrier sheets will be empty and the report will carry a <strong>partial-data warning</strong>. Upload a file or fix your OneDrive sync to resolve it.
                     </div>
+
+                    {# Round 117 / Build 86: step-by-step for operators who want to run the CSOne export themselves. #}
+                    <h6 class="fw-semibold mt-3">Generate the CSOne export yourself</h6>
+                    <p class="text-muted mb-2">If the shared export is stale or you want fresh data, generate the <code>.xlsx</code> directly from CSOne:</p>
+                    <ol class="mb-0">
+                        <li>
+                            {% if csone_report_url %}
+                            Open the CSOne report:
+                            <a href="{{ csone_report_url }}" target="_blank" rel="noopener noreferrer" class="fw-semibold">AdoptIQ Export (CSOne)
+                                <i class="fas fa-external-link-alt ms-1" aria-hidden="true"></i></a>
+                            {% else %}
+                            Open the CSOne <strong>AdoptIQ Export</strong> report.
+                            {% endif %}
+                        </li>
+                        <li>Click the dropdown (&#9662;) at the top-right of the report.</li>
+                        <li>Click <strong>Export</strong>.</li>
+                        <li>Choose <strong>Standard</strong> &rarr; Excel (<code>.xlsx</code>).</li>
+                        <li>Return to the analyze (or leader report) page and <strong>browse</strong> to upload the downloaded <code>.xlsx</code>.</li>
+                    </ol>
                 </div>
             </div>
 

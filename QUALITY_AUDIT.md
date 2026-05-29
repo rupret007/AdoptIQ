@@ -11810,3 +11810,41 @@ The R84 changes are scoped to the corpus-bootstrap configuration surface (`adopt
 - Per-round migration markers retained for back-compat (no new ones added); heal is now the user_set gate.
 
 **Trailer:** Made-with: Cursor
+
+## Round 117 — handoff 2026-05-29
+
+**What changed (plain English):**
+- (A) Both report forms now full-reset after a job successfully starts, preserving the R91 single-window flow (still `recordStartedJob`, still NO `/progress/` redirect). `templates/analyze.html` adds `resetAnalysisFormAfterSubmit()` (called in the `handleFormSubmission` success branch): `form.reset()` + `hideFilePreview()` + clears the custom subscription filter (`subscription-search` / hidden `subscription_id` / `#selected-subscription` UI) + clears `customer_name` + re-checks `#comprehensive` + `syncReportTypeRequirements()` + `checkSubscriptionFieldStates()` + strips `is-valid`/`is-invalid`. `templates/leader_report_form.html` adds `form.reset()` + clears `#csone_file` + strips validation in its success branch.
+- (B) Correctness: `analyze.html` pins `elements.fileInput` to `#csone_file` (fallback to the form's generic file input) so preview/validation/reset never bind to the intel-upload `<input type=file>` when that feature is enabled.
+- (C) CSOne export instructions: new `Config.CSONE_REPORT_URL` (env-overridable, baked default = shared report `00OfX000001Nnh2UAC`) wired through `app.config` + the `inject_version` context processor as `csone_report_url`. Both forms + the Help `data-sources` section render a CSP-safe Bootstrap-collapse 5-step "How do I generate this report?" walkthrough linking to it (guarded by `{% if csone_report_url %}`).
+- (D) Audit follow-up: `executive_intelligence_formatter.py` (Compact executive Word — the lone holdout) now drops pure `"<Category>: Data unavailable."` stub bullets via `_r117_is_stub_bullet` (lazy-imports the SSoT `adoptiq_backend._R78_STUB_RE`, local fallback). Parity with the Comprehensive R78/B1 filter.
+
+**Files touched:**
+- `templates/analyze.html` — `resetAnalysisFormAfterSubmit()` + success-branch call + `#csone_file` selector pin + CSOne collapse.
+- `templates/leader_report_form.html` — success-branch reset + CSOne collapse.
+- `templates/help.html` — "Generate the CSOne export yourself" numbered subsection in the data-sources card.
+- `config.py` — `CSONE_REPORT_URL`; `ADOPTIQ_BUILD` 85 → 86 + Round 117 comment.
+- `app_simple.py` — `app.config['CSONE_REPORT_URL']` + `inject_version` `csone_report_url`.
+- `executive_intelligence_formatter.py` — `_r117_is_stub_bullet` + bullet-branch filter.
+- Tests: `tests/test_round117_form_reset_and_csone_instructions.py` (14).
+
+**SSoT modules touched:** config (added `CSONE_REPORT_URL`). No change to canonical_metrics / risk_scoring / report_export_schema. The R78 stub regex stays SSoT in `adoptiq_backend` (lazy-imported, not duplicated).
+
+**Tests added/updated:**
+- `tests/test_round117_form_reset_and_csone_instructions.py` (14) — post-success reset present + R91 contract preserved on both forms; `#csone_file` selector pin; CSOne instructions + `csone_report_url` rendered on both forms + Help; `Config.CSONE_REPORT_URL` default + env-override; context processor exposes `csone_report_url`; end-to-end link on the rendered analyze page; Compact stub-bullet helper + parse-skip + backend-SSoT source-shape.
+
+**Verify status:**
+- `make verify` — PASS (`PY=/Library/Frameworks/Python.framework/Versions/3.11/bin/python3`): ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities.
+- pytest: 5805 passed / 4 skipped / 6 deselected (R116 floor 5791; +14 = the new R117 test file).
+
+**Hot spots Claude should audit first:**
+1. `analyze.html resetAnalysisFormAfterSubmit()` — confirm it's called ONLY in the success branch (after `recordStartedJob`, before `return`), never on the validation-fail or network-error path, and that the R91 no-redirect contract holds.
+2. `analyze.html` `#csone_file` selector pin — confirm preview/validation/reset all reference `elements.fileInput` (no residual bare `querySelector('input[type=file]')`).
+3. `executive_intelligence_formatter._r117_is_stub_bullet` — confirm the lazy import + fallback can't raise and that substantive "Data unavailable. <more text>" bullets are preserved.
+
+**Known deferrals (intentional non-fixes):**
+- Live VPN-gated regen of all four reports (incl. the Build-86 form-reset + collapse smoke and the ACC floor re-confirmation) — operator post-build smoke step (#9.5); the static `--auto` audit was clean (`CRITICAL_ISSUES_FOUND=False`) on existing artifacts.
+- Gated macOS DMG rebuild — operator step (signing identity + bake-host corpus + ports 5151/5152 must be free). `adoptiq_pc.spec` needs no change (no new top-level module; pure-Python UI/config/formatter edits).
+- Subagent-flagged latent items (case-variant per-CSSM dedup, ACC empty-subs silent fallback, R64 exception-only path incoherence) — pre-existing/documented trade-offs and exception-only paths; not in R117 scope.
+
+**Trailer:** Made-with: Cursor

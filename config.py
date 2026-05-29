@@ -1022,7 +1022,7 @@ ADOPTIQ_VERSION = "1.0.4"
 # tests/test_round116_acc_customer_count_floor.py,
 # tests/test_round116_help_page_content.py, and the extended
 # tests/test_round60_quit_button_template.py.
-ADOPTIQ_BUILD = "85"  # Round 116 / Build 85
+ADOPTIQ_BUILD = "86"  # Round 117 / Build 86
 # Round 113 / Build 82: Ask AI uplift + Preferences fix-and-polish.
 # Phase A (Ask AI UX): unified conversation history across the sync +
 # stream paths (A1), visible browser-local conversation thread (A2),
@@ -1936,6 +1936,19 @@ class Config:
     # deployment and broke for anyone else.  No baked-in default now --
     # callers should treat ``None`` as "no shared folder configured".
     CSONE_SHARED_FOLDER_URL = os.environ.get('CSONE_SHARED_FOLDER_URL') or None
+
+    # Round 117 / Build 86: direct link to the shared CSOne "AdoptIQ Export"
+    # report so operators can generate the .xlsx themselves (open report ->
+    # top-right dropdown -> Export -> Standard -> upload here). Unlike the
+    # personal-SharePoint share URL above, this is a SHARED CSOne report ID
+    # (not operator-specific), so a baked default is safe and makes the
+    # "How do I generate this report?" link work out of the box. Still
+    # env-overridable via ``CSONE_REPORT_URL``.
+    CSONE_REPORT_URL = (
+        os.environ.get('CSONE_REPORT_URL')
+        or 'https://csone.lightning.force.com/lightning/r/Report/'
+           '00OfX000001Nnh2UAC/view?queryScope=userFolders'
+    )
 
     # Round 7 / Phase 3.18: production-readiness gate is derived from the
     # environment instead of hard-coded ``True``.  Operators opt in

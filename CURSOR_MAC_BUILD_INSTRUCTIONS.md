@@ -62,6 +62,12 @@ pip install pyinstaller
    - **(c) Admin/Quit UX (C)** — confirm the navbar shows a visible **Quit** label with a divider before it, and that clicking **Admin Console** opens `http://127.0.0.1:<resolved-admin-port>/` in a NEW tab WITHOUT stopping the server (the running app stays up). Only the Quit button stops the server.
    - **(d) Help page (D)** — open `/help` and confirm the operator-first sections render (Quick Start, Report Chooser, Data Sources, Preferences, Intelligence, Ask AI, External Intelligence, Finding Reports, Admin Console, Troubleshooting), the in-page search works, and the connectivity self-test button still runs.
 
+9.5. Round 117 / Build 86 ships the post-run form reset + CSOne export instructions. During smoke:
+   - **(a) Form reset (A)** — on the main analyze page, fill in a manager/technology/days, optionally pick a non-Comprehensive report type and a subscription/customer, then start a report. Confirm the page STAYS (single-window R91 flow — no redirect to `/progress/`), the new job appears in the live jobs list, AND the form clears back to fresh-page-load defaults: technology back to default, report type back to **Comprehensive**, the uploaded file + subscription/customer filters cleared, no lingering red/green validation borders. Repeat on the **Leader** form (`/leader_report_form`) — manager back to default, days back to 90, file cleared.
+   - **(b) CSOne export instructions + link (C)** — under the CSOne upload field on BOTH forms, click **"How do I generate this report?"** and confirm the 5-step collapsible expands (open report → top-right dropdown → Export → Standard → upload) with a working link to the CSOne report (`CSONE_REPORT_URL`). Open `/help` → Data Sources and confirm the same numbered "Generate the CSOne export yourself" workflow + link is present.
+   - **(c) File-input pin (B)** — with the optional intel-upload feature on, confirm choosing a `.xlsx` in the CSOne field still shows the file preview / validation against the CSOne field (NOT the intel-upload input).
+   - **(d) Report audit (D)** — run `python3 scripts/r114_audit_reports.py --auto`; confirm `CRITICAL_ISSUES_FOUND=False` and (on a freshly regenerated All-Contact-Center Comprehensive) the customer count is not flagged LOW. Open the Compact docx and confirm there are no empty `"<Category>: Data unavailable."` bullets.
+
 10. Generate bundled secrets:
 
 ```bash

@@ -2530,6 +2530,9 @@ except Exception:
     pass
 app.config['CSONE_ONEDRIVE_FOLDER'] = Config.CSONE_ONEDRIVE_FOLDER
 app.config['CSONE_SHARED_FOLDER_URL'] = Config.CSONE_SHARED_FOLDER_URL
+# Round 117 / Build 86: link to the CSOne report so operators can generate
+# the .xlsx export themselves (surfaced on the analyze + leader forms and Help).
+app.config['CSONE_REPORT_URL'] = Config.CSONE_REPORT_URL
 
 # Round 17.2: emit a one-shot startup banner surfacing the paths we
 # resolved (active log file, corpus sources) so operators can verify
@@ -2601,6 +2604,8 @@ def inject_version():
         'adoptiq_build': ADOPTIQ_BUILD,
         'adoptiq_version_string': version_string(),
         'csone_shared_folder_url': app.config.get('CSONE_SHARED_FOLDER_URL', ''),
+        # Round 117 / Build 86: CSOne report link for the "generate it yourself" UX.
+        'csone_report_url': app.config.get('CSONE_REPORT_URL', ''),
         'adoptiq_footer_year': _adoptiq_footer_year,
         # Round 116 / Build 85 (C): port-aware Admin Console URL.
         'admin_console_url': f'http://127.0.0.1:{_r116_admin_port}/',

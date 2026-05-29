@@ -148,6 +148,35 @@
                                 Run your own CSOne report and browse above to select your file.
                                 {% endif %}
                             </div>
+                            {# Round 117 / Build 86: CSP-safe collapsible -- how to generate
+                               the CSOne export yourself. No inline onclick. #}
+                            <div class="mt-2">
+                                <button class="btn btn-link btn-sm p-0 text-decoration-none" type="button"
+                                        data-bs-toggle="collapse" data-bs-target="#csoneHowToCollapseLeader"
+                                        aria-expanded="false" aria-controls="csoneHowToCollapseLeader">
+                                    <i class="fas fa-circle-question me-1" aria-hidden="true"></i>How do I generate this report?
+                                </button>
+                                <div class="collapse mt-2" id="csoneHowToCollapseLeader">
+                                    <div class="alert alert-light border small mb-0">
+                                        <ol class="mb-0 ps-3">
+                                            <li>
+                                                {% if csone_report_url %}
+                                                Open the CSOne report:
+                                                <a href="{{ csone_report_url }}" target="_blank" rel="noopener noreferrer"
+                                                   class="fw-semibold">AdoptIQ Export (CSOne)
+                                                   <i class="fas fa-external-link-alt ms-1" aria-hidden="true"></i></a>
+                                                {% else %}
+                                                Open the CSOne <strong>AdoptIQ Export</strong> report.
+                                                {% endif %}
+                                            </li>
+                                            <li>Click the dropdown (&#9662;) at the top-right of the report.</li>
+                                            <li>Click <strong>Export</strong>.</li>
+                                            <li>Choose <strong>Standard</strong> &rarr; Excel (<code>.xlsx</code>).</li>
+                                            <li>Come back here and <strong>browse</strong> to upload the downloaded <code>.xlsx</code>.</li>
+                                        </ol>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
 
                         <!-- Report Sections Info -->
@@ -444,6 +473,20 @@ document.addEventListener('DOMContentLoaded', function() {
                 );
                 submitBtn.disabled = false;
                 submitBtn.innerHTML = '<i class="fas fa-rocket me-2"></i>Generate Leader Report';
+                // Round 117 / Build 86: full form reset after a job successfully
+                // starts so the next leader report can be queued cleanly. R91
+                // contract preserved -- the job was recorded above, no redirect.
+                try {
+                    if (form) { form.reset(); }
+                    const _csone = document.getElementById('csone_file');
+                    if (_csone) { _csone.value = ''; }
+                    form.querySelectorAll('.form-control, .form-select').forEach(function (control) {
+                        control.classList.remove('is-valid', 'is-invalid');
+                        control.removeAttribute('aria-invalid');
+                    });
+                } catch (_resetErr) {
+                    console.warn('Leader form reset after submit skipped:', _resetErr);
+                }
             } else {
                 // Show error
                 showLeaderNotification('Error: ' + (result.error || 'Unknown error occurred'), 'error');
