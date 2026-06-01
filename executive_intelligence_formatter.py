@@ -305,6 +305,33 @@ def _format_open_age_days(row: Any) -> str:
     return "\u2014"
 
 
+# Round 121 / G4b: support-case Type display relabel.
+_R121_TYPE_SENTINELS = frozenset({"", "unknown", "nan", "none", "n/a", "na"})
+
+
+def _r121_display_case_type(value: Any) -> str:
+    """Round 121 / G4b: render the support-case ``Type`` cell display-friendly.
+
+    ``data_normalization.classify_case_type`` returns the literal
+    ``"unknown"`` sentinel when a case cannot be classified.  Pre-R121 the TAC
+    lifecycle table rendered that bare sentinel in the ``Type`` column.  This
+    helper relabels ONLY the bare sentinel tokens to ``"Unclassified"`` (the
+    same friendly wording G3 uses for BE Focus Areas) -- genuine classified
+    types like ``"break_fix_technical"`` are passed through unchanged.  The
+    underlying ``case_type_class`` value is NOT mutated; this is display-only.
+    """
+
+    text = "" if value is None else str(value).strip()
+    try:
+        if pd.isna(value):  # type: ignore[arg-type]
+            text = ""
+    except (TypeError, ValueError):
+        pass
+    if text.lower() in _R121_TYPE_SENTINELS:
+        return "Unclassified"
+    return text
+
+
 class ExecutiveIntelligenceFormatter:
     """
     Executive Intelligence Formatter for compact, insight-driven reports.
@@ -1114,7 +1141,12 @@ class ExecutiveIntelligenceFormatter:
                 # literal string "nan" when ``open_age_days`` is
                 # missing/NaN.  Backfills from open/closed dates.
                 lifecycle_table.rows[ridx].cells[5].text = _format_open_age_days(row)
-                lifecycle_table.rows[ridx].cells[6].text = str(row.get('case_type_class', 'unknown'))
+                # Round 121 / G4b: relabel the bare "unknown" sentinel to
+                # "Unclassified" at the display layer (underlying
+                # case_type_class is untouched).
+                lifecycle_table.rows[ridx].cells[6].text = _r121_display_case_type(
+                    row.get('case_type_class', 'unknown')
+                )
             # Truncation disclosure: tell the reader when only a sample is shown
             # so the table never silently under-reports lifecycle coverage.
             if _total_for_lifecycle > _LIFECYCLE_SAMPLE_LIMIT:

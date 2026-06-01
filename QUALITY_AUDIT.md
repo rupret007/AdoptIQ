@@ -11999,3 +11999,51 @@ The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this
 - The 100% per-customer LLM fallback in the audited Build 88 Comprehensive is environmental (LLM blackout at generation time), not a code defect — cleared by the live re-acceptance run.
 
 **Trailer:** Made-with: Cursor
+
+## Round 121 — handoff 2026-06-01
+
+**What changed (plain English):**
+- Report-accuracy residual sweep (G1-G4) over the four Build 89 live-re-acceptance reports (Jun 1, generated with a working LLM). The audit confirmed Round 120 mostly held (count coherence 33/33/33, Compact `]|` jam gone, `[LLM error]` gone, Leader `Team Avg` fixed, 0 mid-string citations, 0 markdown) but found three F-fixes that landed on one render path and missed a sibling, plus one real status-display accuracy bug. ALL fixes are presentation/normalization-display only — NO SSoT count/score logic changed.
+- G1 (F4 sibling): Renewal BEMS escalation list no longer emits `(Type: unknown)` (77× in Build 89) — the `(Type: …)` run is now guarded by `_R120_UNKNOWN_TOKENS`, mirroring the F4 TAC-bracket contract. `app_simple.py` ~13549.
+- G2 (F5 sibling): Leader portfolio-overview follow-on sentences ("requires immediate attention", "elevated activity", mixed-health, "high-priority adoption barriers") now route count nouns through `_r120_pluralize` so "1 adoption barriers" reads "1 adoption barrier". Build 89 only fixed the opening "Portfolio shows N…" line. `leader_report_generator.py` ~3146-3183.
+- G3 (F7 mis-target): BE Focus Areas / BE Priority Barriers bare `Unknown`/`Other/Unknown` theme/technology relabeled to "Other / Unclassified" at the display layer via new SSoT helper `be_priority_scorer.relabel_unclassified`. Grouping/scoring keys UNTOUCHED — row + counts preserved. Build 89's F7 edit was to a different table (`_compute_customer_health`); left intact (harmless + correct for that table).
+- G4a (real accuracy bug): `data_normalization.add_case_lifecycle_fields` now also sets `case_status_norm = "Closed"` for the `closed_date present AND status == "Unknown"` mask (pre-R121 it only flipped the `is_closed`/`is_open` booleans, leaving the displayed Status "Unknown" on a case with Opened+Closed timestamps). Source-of-truth normalizer → all consumers inherit; counts unaffected.
+- G4b (consistency polish): support-case `Type` table cells render `unknown` → "Unclassified" via new display helper `executive_intelligence_formatter._r121_display_case_type`; underlying `case_type_class` untouched.
+
+**Files touched:**
+- `app_simple.py` — G1 `(Type: …)` guard on `_R120_UNKNOWN_TOKENS`.
+- `leader_report_generator.py` — G2 `_r120_pluralize` wiring on three follow-on branches + the high-priority sentence.
+- `be_priority_scorer.py` — G3 `relabel_unclassified` helper + applied at focus-rollup `Technology`/`Theme`.
+- `be_priority_pipeline.py` — G3 `bes.relabel_unclassified` applied at barriers-df `Technology`/`Sub_Technology`.
+- `data_normalization.py` — G4a `case_status_norm = "Closed"` on the closed-but-unknown mask.
+- `executive_intelligence_formatter.py` — G4b `_r121_display_case_type` helper + lifecycle-table Type cell wiring.
+- `config.py` — `ADOPTIQ_BUILD` 89 → 90 + Round 121 comment.
+- `README.md` — What's New in Build 90. `CLAUDE.md` — critical rule + floor bump (5924 → 5938).
+- Tests: `tests/test_round121_report_residual_sweep.py` (NEW, 14); `tests/test_round8_data_normalization_behaviour.py` (G4a assertion); `tests/test_round79_b3_be_focus_areas_rollup.py` (G3 display relabel, 2 assertions).
+
+**SSoT modules touched:** config (build bump only), data_normalization (G4a display-label only — `is_closed`/`is_open` booleans + counts unchanged). No canonical_metrics / risk_scoring / report_export_schema change.
+
+**Tests added/updated:**
+- `tests/test_round121_report_residual_sweep.py` — G1 BEMS-bracket guard source-shape + `_R120_UNKNOWN_TOKENS` membership; G2 `_r120_pluralize` singular/plural + follow-on-sentence source-shape; G3 `relabel_unclassified` token semantics + focus-areas no-bare-Unknown-with-counts-preserved + pipeline/scorer source-shape; G4a Unknown+close→Closed, Unknown+no-close→Unknown, genuine Open/Closed untouched, source-shape; G4b display helper + lifecycle-cell source-shape (14 tests).
+- `tests/test_round8_data_normalization_behaviour.py` — `test_add_case_lifecycle_fields_marks_closed_when_close_date_present_but_status_unknown` now asserts displayed status `"Closed"` (was `"Unknown"`).
+- `tests/test_round79_b3_be_focus_areas_rollup.py` — two assertions updated from bare `"Unknown"` to `"Other / Unclassified"` display label.
+
+**Verify status:**
+- `make verify` — PASS (`PY=/Library/Frameworks/Python.framework/Versions/3.11/bin/python3`): ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities.
+- pytest: 5938 passed / 4 skipped / 6 deselected (Build 89 floor 5924; +14 Round 121 suite). NOTE: the full-suite run exits 139 (SIGSEGV) AFTER the `5938 passed` summary — a known native-lib (onnxruntime/fastembed) interpreter-teardown crash, not a test failure; the Round 121 file runs exit-0 in isolation.
+
+**Hot spots Claude should audit first:**
+1. `be_priority_scorer.relabel_unclassified` — confirm the token set is exact-match (case/whitespace-insensitive) so genuine labels containing "unknown" as a substring (e.g. "Unknown Protocol") survive, and confirm grouping keys (the groupby on `sub_technology`/`ab_category_final`) are NOT perturbed — only the displayed `Technology`/`Theme` columns are relabeled.
+2. `data_normalization.add_case_lifecycle_fields` G4a — confirm the mask `closed_date.notna() & case_status_norm.eq("Unknown")` only relabels the displayed status and does not change `is_closed`/`is_open` (already True/False) or any count; confirm genuine Open / genuine Closed rows are untouched.
+3. `app_simple` G1 guard — confirm the `str(case_type).strip().lower() not in _R120_UNKNOWN_TOKENS` check matches the F4 contract and that a genuine `case_type` still renders the bracket.
+4. `executive_intelligence_formatter._r121_display_case_type` — confirm only bare sentinels map to "Unclassified" and real classified types (`break_fix_technical`, `provisioning_request`) pass through unchanged; underlying `case_type_class` not mutated.
+
+**Build + smoke:** PENDING — release-gated DMG rebuild (`OUTBOX/AdoptIQ-v1.0.4-build90.dmg`) + packaged smoke (plist build = 90, latest.json emitted build 90 to OUTBOX + OneDrive mirror with correct sha, corpus+salt bundled, codesign OK, frozen `/api/version` build = 90 + `/api/update/status` clean). PC build operator-run on Windows; validated by source-shape this round.
+
+**LIVE GATE (blocks push to main):** operator regenerates the four reports on VPN with a working LLM and confirms: Renewal `(Type: unknown)` gone, Leader grammar correct (`1 adoption barrier`), BE Focus Areas shows "Other / Unclassified" (no bare `Unknown` row), support-case Status accurate (closed cases say Closed), Type cells show "Unclassified". Push HELD until confirmation (operator may override per prior rounds, as in Build 87/88/89).
+
+**Known deferrals (intentional non-fixes):**
+- The Comprehensive "Partial Data Warning" text is the correct R93 scope-exclusion disclosure, not a bug.
+- Build 89's F7 edit to `_compute_customer_health` (Customer-Health table) is left in place — it is harmless and correct for that table; G3 targets the separate BE Focus Areas table.
+
+**Trailer:** Made-with: Cursor

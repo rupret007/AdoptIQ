@@ -320,15 +320,16 @@ def test_missing_columns_handled_gracefully():
         {"ID": "AB-2", "be_priority_score": 60.0, "title": "t2"},
     ])
     out = bes.compute_be_focus_areas(df, min_cluster_score=0.0)
-    # Should still produce a row (even if Technology / Theme defaulted to Unknown)
+    # Should still produce a row (even if Technology / Theme defaulted).
     assert len(out) >= 1
     if "_adoptiq_provenance_row" not in out.columns:
-        # Real cluster row -- Technology defaulted
-        assert "Unknown" in out["Technology"].tolist()
+        # Round 121 / G3: the bare "Unknown" sentinel is now relabeled to
+        # "Other / Unclassified" at the display layer (grouping key unchanged).
+        assert "Other / Unclassified" in out["Technology"].tolist()
 
 
 def test_nan_technology_collapses_to_unknown():
-    """Rows with NaN sub_technology are bucketed under 'Unknown'."""
+    """Rows with NaN sub_technology bucket under the unclassified label."""
     df = pd.DataFrame([
         {"ID": "AB-1", "title": "t1", "description": "d1",
          "sub_technology": None, "ab_category_final": "Theme",
@@ -340,5 +341,6 @@ def test_nan_technology_collapses_to_unknown():
     df["be_llm_class"] = "UNCLASSIFIED"
     out = bes.compute_be_focus_areas(df, min_cluster_score=0.0)
     if "_adoptiq_provenance_row" not in out.columns:
+        # Round 121 / G3: displayed Technology relabeled from "Unknown".
         techs = out["Technology"].unique().tolist()
-        assert techs == ["Unknown"]
+        assert techs == ["Other / Unclassified"]

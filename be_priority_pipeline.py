@@ -271,12 +271,19 @@ def _build_barriers_dataframe(
                     _column_pick(row, "customer_name", "Customer", "BU_NAME"),
                     max_len=200,
                 ),
-                "Technology": _safe_str(
-                    _column_pick(row, "technology", "Technology"), max_len=120
+                # Round 121 / G3: relabel bare Unknown/blank sentinels to
+                # "Other / Unclassified" at the display layer (shared helper
+                # in be_priority_scorer) so the BE_Priority_Barriers sheet
+                # matches the BE_Focus_Areas relabel. Display-only -- the
+                # underlying scoring/grouping keys are untouched.
+                "Technology": bes.relabel_unclassified(
+                    _safe_str(_column_pick(row, "technology", "Technology"), max_len=120)
                 ),
-                "Sub_Technology": _safe_str(
-                    _column_pick(row, "sub_technology", "Sub_Technology"),
-                    max_len=120,
+                "Sub_Technology": bes.relabel_unclassified(
+                    _safe_str(
+                        _column_pick(row, "sub_technology", "Sub_Technology"),
+                        max_len=120,
+                    )
                 ),
                 "AB_ID": ab_id,
                 "CSConsole_Severity": _safe_str(

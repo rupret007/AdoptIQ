@@ -662,8 +662,17 @@ def add_case_lifecycle_fields(
     use["is_open"] = use["case_status_norm"].eq("Open")
     use["is_closed"] = use["case_status_norm"].eq("Closed")
     # If status is unknown but close date exists, treat as closed.
-    use.loc[use["closed_date"].notna() & use["case_status_norm"].eq("Unknown"), "is_closed"] = True
-    use.loc[use["closed_date"].notna() & use["case_status_norm"].eq("Unknown"), "is_open"] = False
+    # Round 121 / G4a: ALSO update the displayed ``case_status_norm`` to
+    # "Closed" for this mask.  Pre-R121 the code flipped the is_closed /
+    # is_open booleans but left ``case_status_norm == "Unknown"``, so a case
+    # carrying both Opened + Closed timestamps still rendered "Status: Unknown"
+    # in the Compact / Renewal support-case tables.  This is the source-of-truth
+    # normalizer, so every consumer (Compact, Renewal, Leader, XLSX) inherits
+    # the accurate label.  Counts are unaffected -- is_closed was already True.
+    _r121_closed_unknown = use["closed_date"].notna() & use["case_status_norm"].eq("Unknown")
+    use.loc[_r121_closed_unknown, "is_closed"] = True
+    use.loc[_r121_closed_unknown, "is_open"] = False
+    use.loc[_r121_closed_unknown, "case_status_norm"] = "Closed"
 
     # Round 6 / Phase 4.15: align both date columns onto the same
     # tz-aware UTC basis as ``now`` before subtraction so pandas

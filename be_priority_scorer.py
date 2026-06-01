@@ -70,6 +70,48 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Round 121 / G3: bare-sentinel display relabel for BE Focus Areas.
+# ---------------------------------------------------------------------------
+#
+# ``compute_be_focus_areas`` normalises blank / NaN ``sub_technology`` and
+# ``ab_category_final`` to the literal ``"Unknown"`` so the groupby key is
+# stable.  That sentinel then surfaces verbatim in the user-facing tables --
+# e.g. the Leader BE Focus Areas row ``Unknown | 482.6 | ...`` and the
+# Comprehensive ``Other/Unknown`` technology heading.  ``relabel_unclassified``
+# maps ONLY the exact bare-sentinel tokens (not substrings) to the friendlier
+# ``"Other / Unclassified"`` label at the DISPLAY layer -- the grouping /
+# scoring keys are untouched so row counts and ordering are preserved.
+_R121_UNCLASSIFIED_TOKENS = frozenset(
+    {
+        "",
+        "unknown",
+        "other/unknown",
+        "other / unknown",
+        "nan",
+        "none",
+        "n/a",
+        "na",
+        "unclassified",
+    }
+)
+_R121_UNCLASSIFIED_LABEL = "Other / Unclassified"
+
+
+def relabel_unclassified(value: Any) -> str:
+    """Round 121 / G3: map a bare sentinel to ``"Other / Unclassified"``.
+
+    Conservative -- only an exact (case/whitespace-insensitive) match against
+    a known sentinel token is relabeled, so genuine labels that merely
+    *contain* the word "unknown" (e.g. ``"Unknown Protocol"``) are preserved.
+    """
+
+    text = "" if value is None else str(value).strip()
+    if text.lower() in _R121_UNCLASSIFIED_TOKENS:
+        return _R121_UNCLASSIFIED_LABEL
+    return text
+
+
+# ---------------------------------------------------------------------------
 # Round 79 / B1: tunable signal weights.  Sum is exactly 1.0 so the final
 # ``score = sum(signal * weight) * 100`` is bounded to [0, 100].
 # ---------------------------------------------------------------------------
@@ -714,8 +756,11 @@ def compute_be_focus_areas(
         top_customers = ", ".join(cust_set[:5])
 
         rows.append({
-            "Technology": tech,
-            "Theme": theme,
+            # Round 121 / G3: relabel bare sentinel at the display layer only.
+            # The groupby keys (tech, theme) are untouched so row counts and
+            # ordering are preserved.
+            "Technology": relabel_unclassified(tech),
+            "Theme": relabel_unclassified(theme),
             "Customers_Affected": customers_affected,
             "Open_Barriers": open_count,
             "Avg_BE_Priority": round(avg_be, 1),

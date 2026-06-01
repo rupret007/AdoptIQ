@@ -1,8 +1,16 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 89).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 90).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 90 (Round 121 — Report-accuracy residual sweep)
+
+Build 90 is a follow-on polish pass that closes four residuals an audit of the Build 89 reports surfaced — three cases where a Build 89 fix landed on one render path but missed a sibling, plus one real status-display bug. (1) The **Renewal BEMS escalation list no longer prints `(Type: unknown)`** when a TAC case's type can't be classified — the parenthetical is simply omitted, matching the Build 89 fix already applied to the main support-case brackets. (2) **Leader narrative grammar is now correct for single-item portfolios** — sentences like "requires immediate attention: 1 adoption barriers" now read "1 adoption barrier" (Build 89 only fixed the opening "Portfolio shows…" line; this extends the same pluralization to the follow-on sentences). (3) **BE Focus Areas tables no longer show a bare `Unknown` theme/technology row** — uncategorized barriers are now labeled "Other / Unclassified" (the row and its counts are preserved; only the displayed label changes). (4) **Support-case Status is now accurate for closed cases** — a case carrying both an Opened and a Closed date that arrived with an ambiguous status string previously rendered "Status: Unknown"; it now correctly reads "Closed", and unclassifiable case **Type** cells read "Unclassified" instead of the bare `unknown` sentinel.
+
+No risk-scoring or count logic changed — every fix is presentation/normalization-display only, and the status relabel matches the already-correct internal closed/open flags so counts are unaffected.
+
+All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **5938 pytest passed (Build 89 floor was 5924; +14 = the Round 121 G1-G4 regression suite)**.
 
 ### What's New in Build 89 (Round 120 — Report-accuracy sweep)
 

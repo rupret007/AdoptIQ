@@ -312,7 +312,10 @@ def test_add_case_lifecycle_fields_marks_closed_when_close_date_present_but_stat
         "Date/Time Closed": closed_3d,
     }])
     out = add_case_lifecycle_fields(df)
-    assert out.loc[0, "case_status_norm"] == "Unknown"
+    # Round 121 / G4a: an Unknown status paired with a real close date is now
+    # relabeled "Closed" so the displayed Status matches the (already-correct)
+    # is_closed boolean.  Pre-R121 the displayed Status stayed "Unknown".
+    assert out.loc[0, "case_status_norm"] == "Closed"
     # Unknown status + close date => still treated as closed.
     assert bool(out.loc[0, "is_closed"]) is True
     assert bool(out.loc[0, "is_open"]) is False

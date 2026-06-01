@@ -3143,11 +3143,17 @@ class LeaderReportGenerator:
             (total_barriers >= 15 and ab_per_customer >= 3.0)
             or (total_tac_cases >= 30 and tac_per_customer >= 5.0)
         ):
+            # Round 121 / G2: pluralize count nouns (F5 sibling). Build 89
+            # only fixed the "Portfolio shows N..." sentence; these follow-on
+            # narrative branches still hard-coded plural nouns ("1 adoption
+            # barriers").
             summary_text += (
-                f"The portfolio requires immediate attention: {total_barriers} "
-                f"adoption barriers ({ab_per_customer:.1f}/customer) and "
-                f"{total_tac_cases} TAC cases ({tac_per_customer:.1f}/customer) "
-                f"across {total_customers} accounts indicate sustained pressure. "
+                f"The portfolio requires immediate attention: "
+                f"{_r120_pluralize(total_barriers, 'adoption barrier')} "
+                f"({ab_per_customer:.1f}/customer) and "
+                f"{_r120_pluralize(total_tac_cases, 'TAC case')} "
+                f"({tac_per_customer:.1f}/customer) "
+                f"across {_r120_pluralize(total_customers, 'account')} indicate sustained pressure. "
             )
         elif (
             # Round 41 / Phase 3: NEW "elevated activity" middle tier.
@@ -3160,17 +3166,22 @@ class LeaderReportGenerator:
             (total_barriers >= 5 and ab_per_customer > 0.5)
             or (total_tac_cases >= 10 and tac_per_customer > 0.5)
         ):
+            # Round 121 / G2: pluralize count nouns (F5 sibling).
             summary_text += (
-                f"The portfolio shows elevated activity: {total_barriers} "
-                f"adoption barriers ({ab_per_customer:.1f}/customer) and "
-                f"{total_tac_cases} TAC cases ({tac_per_customer:.1f}/customer) "
-                f"across {total_customers} accounts warrant close monitoring. "
+                f"The portfolio shows elevated activity: "
+                f"{_r120_pluralize(total_barriers, 'adoption barrier')} "
+                f"({ab_per_customer:.1f}/customer) and "
+                f"{_r120_pluralize(total_tac_cases, 'TAC case')} "
+                f"({tac_per_customer:.1f}/customer) "
+                f"across {_r120_pluralize(total_customers, 'account')} warrant close monitoring. "
             )
         else:
+            # Round 121 / G2: pluralize count nouns (F5 sibling).
             summary_text += (
-                f"The portfolio shows mixed health -- {total_barriers} barriers "
-                f"and {total_tac_cases} TAC cases across {total_customers} "
-                f"customers point to a few accounts needing focused intervention. "
+                f"The portfolio shows mixed health -- {_r120_pluralize(total_barriers, 'barrier')} "
+                f"and {_r120_pluralize(total_tac_cases, 'TAC case')} across "
+                f"{_r120_pluralize(total_customers, 'customer')} "
+                f"point to a few accounts needing focused intervention. "
             )
             if sentiment_summary == "Negative":
                 summary_text += (
@@ -3180,7 +3191,8 @@ class LeaderReportGenerator:
 
         # Add specific insights
         if high_priority_barriers > 0:
-            summary_text += f"Critical attention is needed for {high_priority_barriers} high-priority adoption barriers that may impact customer satisfaction and retention. "
+            # Round 121 / G2: pluralize count noun (F5 sibling).
+            summary_text += f"Critical attention is needed for {_r120_pluralize(high_priority_barriers, 'high-priority adoption barrier')} that may impact customer satisfaction and retention. "
 
         if top_barrier_categories:
             # FIXED: Show ALL barrier categories

@@ -13546,7 +13546,14 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                     tid_run = p.add_run(f'BEMS: {trans_id}')
                     tid_run.font.color.rgb = RGBColor(180, 0, 0)
                     tid_run.bold = True
-                    p.add_run(f" (Type: {case_type})").italic = True
+                    # Round 121 / G1: only render the "(Type: ...)" bracket
+                    # when ``case_type`` is a KNOWN value.  The sibling TAC
+                    # severity bracket was de-sentinelled in R120/F4, but this
+                    # BEMS-escalation bracket still emitted "(Type: unknown)"
+                    # unconditionally -- 77x in the Build 89 Renewal artifact.
+                    # Reuse the same _R120_UNKNOWN_TOKENS frozenset.
+                    if str(case_type).strip().lower() not in _R120_UNKNOWN_TOKENS:
+                        p.add_run(f" (Type: {case_type})").italic = True
     else:
         doc.add_heading('BEMS Escalation Analysis', level=1)
         no_bems = doc.add_paragraph()
